@@ -77,9 +77,13 @@ async def execute_monthly_refresh(job: Job, db: AsyncSession) -> None:
     await execute_generate_profile(job, db)
 
 
-async def process_job(job: Job, session_factory: async_sessionmaker) -> None:
+async def process_job(job_id: uuid.UUID, job_type: str, job_attempts: int, job_max_attempts: int, session_factory: async_sessionmaker) -> None:
     """Process a single job. Handles errors and updates job status."""
     async with session_factory() as db:
+        # Re-fetch the job in this session so SQLAlchemy tracks changes
+        result = await db.execute(select(Job).where(Job.id == job_id))
+        job = result.scalar_one()
+
         try:
             if job.type == "generate_profile":
                 await execute_generate_profile(job, db)
@@ -124,7 +128,7 @@ async def run_worker():
 
             if job:
                 logger.info("Processing job %s (type=%s)", job.id, job.type)
-                await process_job(job, session_factory)
+                await process_job(job.id, job.type, job.attempts, job.max_attempts, session_factory)
             else:
                 # No jobs, sleep before polling again
                 await asyncio.sleep(settings.worker_poll_interval)
