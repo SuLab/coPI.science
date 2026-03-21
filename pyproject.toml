@@ -1,6 +1,6 @@
 [build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
 
 [project]
 name = "copi"
@@ -36,8 +36,9 @@ dev = [
 [project.scripts]
 copi = "src.cli:app"
 
-[tool.hatch.build.targets.wheel]
-packages = ["src"]
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
 
 [tool.ruff]
 line-length = 100
