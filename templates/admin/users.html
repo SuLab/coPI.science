@@ -1,0 +1,125 @@
+{% extends "base.html" %}
+{% block title %}Admin — Users — CoPI{% endblock %}
+
+{% block content %}
+<div class="flex items-center justify-between mb-6">
+    <h1 class="text-2xl font-bold text-gray-900">Users</h1>
+    <span class="text-sm text-gray-500">{{ user_data | length }} users</span>
+</div>
+
+<!-- Impersonation widget -->
+<div class="bg-amber-50 border border-amber-200 rounded-lg p-4 mb-6">
+    <p class="text-sm font-medium text-amber-800 mb-2">Impersonate User</p>
+    <form method="POST" action="/api/admin/impersonate" class="flex gap-2">
+        <input type="text" name="orcid" placeholder="ORCID (0000-0000-0000-0000)"
+               class="flex-1 border border-amber-300 rounded px-3 py-2 text-sm focus:ring-2 focus:ring-amber-400">
+        <button type="submit" class="bg-amber-600 text-white px-4 py-2 rounded text-sm hover:bg-amber-700">
+            Impersonate
+        </button>
+    </form>
+</div>
+
+<!-- Filters -->
+<div class="bg-white rounded-lg border border-gray-200 p-4 mb-4 flex flex-wrap gap-4">
+    <div>
+        <label class="text-xs font-medium text-gray-600 block mb-1">Profile Status</label>
+        <select onchange="applyFilter()" id="status-filter"
+                class="border border-gray-300 rounded px-2 py-1 text-sm">
+            <option value="">All</option>
+            <option value="no_profile" {% if status_filter == 'no_profile' %}selected{% endif %}>No Profile</option>
+            <option value="generating" {% if status_filter == 'generating' %}selected{% endif %}>Generating</option>
+            <option value="complete" {% if status_filter == 'complete' %}selected{% endif %}>Complete</option>
+            <option value="pending_update" {% if status_filter == 'pending_update' %}selected{% endif %}>Pending Update</option>
+        </select>
+    </div>
+    <div>
+        <label class="text-xs font-medium text-gray-600 block mb-1">Claimed</label>
+        <select onchange="applyFilter()" id="claimed-filter"
+                class="border border-gray-300 rounded px-2 py-1 text-sm">
+            <option value="">All</option>
+            <option value="claimed" {% if claimed_filter == 'claimed' %}selected{% endif %}>Claimed</option>
+            <option value="unclaimed" {% if claimed_filter == 'unclaimed' %}selected{% endif %}>Unclaimed</option>
+        </select>
+    </div>
+</div>
+
+<!-- Users table -->
+<div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+    <table class="min-w-full divide-y divide-gray-200">
+        <thead class="bg-gray-50">
+            <tr>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Name</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase hidden md:table-cell">Institution</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase hidden lg:table-cell">ORCID</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase hidden md:table-cell">Pubs</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase hidden lg:table-cell">Version</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase hidden lg:table-cell">Claimed</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase hidden md:table-cell">Joined</th>
+            </tr>
+        </thead>
+        <tbody class="divide-y divide-gray-100">
+            {% for item in user_data %}
+            <tr class="hover:bg-gray-50 cursor-pointer"
+                onclick="location.href='/admin/users/{{ item.user.id }}'">
+                <td class="px-4 py-3">
+                    <div class="text-sm font-medium text-gray-900">{{ item.user.name }}</div>
+                    {% if item.user.department %}
+                    <div class="text-xs text-gray-500">{{ item.user.department }}</div>
+                    {% endif %}
+                </td>
+                <td class="px-4 py-3 text-sm text-gray-600 hidden md:table-cell">
+                    {{ item.user.institution or '—' }}
+                </td>
+                <td class="px-4 py-3 hidden lg:table-cell">
+                    <a href="https://orcid.org/{{ item.user.orcid }}" target="_blank"
+                       onclick="event.stopPropagation()"
+                       class="text-xs text-green-600 hover:underline">{{ item.user.orcid }}</a>
+                </td>
+                <td class="px-4 py-3">
+                    {% set status_colors = {
+                        'no_profile': 'bg-gray-100 text-gray-600',
+                        'generating': 'bg-blue-100 text-blue-700',
+                        'complete': 'bg-green-100 text-green-700',
+                        'pending_update': 'bg-amber-100 text-amber-700'
+                    } %}
+                    <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium
+                        {{ status_colors.get(item.profile_status, 'bg-gray-100 text-gray-600') }}">
+                        {{ item.profile_status | replace('_', ' ') | title }}
+                    </span>
+                </td>
+                <td class="px-4 py-3 text-sm text-gray-600 hidden md:table-cell">{{ item.pub_count }}</td>
+                <td class="px-4 py-3 text-sm text-gray-600 hidden lg:table-cell">
+                    {{ (item.profile.profile_version or '—') if item.profile else '—' }}
+                </td>
+                <td class="px-4 py-3 hidden lg:table-cell">
+                    {% if item.user.claimed_at %}
+                    <span class="text-xs text-green-600">✓ {{ item.user.claimed_at.strftime('%b %d') }}</span>
+                    {% else %}
+                    <span class="text-xs text-gray-400">No</span>
+                    {% endif %}
+                </td>
+                <td class="px-4 py-3 text-xs text-gray-500 hidden md:table-cell">
+                    {{ item.user.created_at.strftime('%b %d, %Y') }}
+                </td>
+            </tr>
+            {% else %}
+            <tr>
+                <td colspan="8" class="px-4 py-8 text-center text-gray-400 text-sm">No users found</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<script>
+function applyFilter() {
+    const status = document.getElementById('status-filter').value;
+    const claimed = document.getElementById('claimed-filter').value;
+    const params = new URLSearchParams();
+    if (status) params.set('status_filter', status);
+    if (claimed) params.set('claimed_filter', claimed);
+    location.href = '/admin/users?' + params.toString();
+}
+</script>
+{% endblock %}

@@ -1,0 +1,131 @@
+{% extends "base.html" %}
+{% block title %}Admin — Simulation Run — CoPI{% endblock %}
+
+{% block content %}
+<div class="max-w-5xl mx-auto">
+    <div class="flex items-center justify-between mb-6">
+        <div>
+            <a href="/admin/activity" class="text-sm text-gray-500 hover:text-gray-700">← Activity</a>
+            <h1 class="text-2xl font-bold text-gray-900 mt-1">Simulation Run</h1>
+        </div>
+        <div class="text-right">
+            <p class="text-sm text-gray-500">{{ run.started_at.strftime('%b %d, %Y %H:%M') }}</p>
+            {% set sc = {'running': 'text-blue-600', 'completed': 'text-green-600', 'stopped': 'text-gray-500'} %}
+            <span class="text-sm font-medium {{ sc.get(run.status, '') }}">{{ run.status | capitalize }}</span>
+        </div>
+    </div>
+
+    <!-- Run summary -->
+    <div class="grid grid-cols-3 gap-4 mb-6">
+        <div class="bg-white border rounded-lg p-4 text-center">
+            <div class="text-2xl font-bold text-gray-800">{{ run.total_messages }}</div>
+            <div class="text-xs text-gray-500">Messages</div>
+        </div>
+        <div class="bg-white border rounded-lg p-4 text-center">
+            <div class="text-2xl font-bold text-gray-800">{{ run.total_api_calls }}</div>
+            <div class="text-xs text-gray-500">API Calls</div>
+        </div>
+        <div class="bg-white border rounded-lg p-4 text-center">
+            <div class="text-2xl font-bold text-gray-800">{{ channels | length }}</div>
+            <div class="text-xs text-gray-500">Channels Created</div>
+        </div>
+    </div>
+
+    <!-- Messages by agent -->
+    {% if agent_stats %}
+    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
+        <h2 class="font-semibold text-gray-800 mb-4">Messages by Agent</h2>
+        <table class="min-w-full text-sm">
+            <thead class="text-xs text-gray-500 uppercase">
+                <tr>
+                    <th class="text-left pb-2">Agent</th>
+                    <th class="text-left pb-2">Messages</th>
+                    <th class="text-left pb-2">Avg Length</th>
+                </tr>
+            </thead>
+            <tbody class="divide-y divide-gray-100">
+                {% for agent_id, stats in agent_stats | dictsort(by='value', attribute='count', reverse=True) %}
+                <tr>
+                    <td class="py-2 font-medium">{{ agent_id | capitalize }}Bot</td>
+                    <td class="py-2">{{ stats.count }}</td>
+                    <td class="py-2 text-gray-500">{{ stats.avg_length }} chars</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% endif %}
+
+    <!-- Messages by channel -->
+    {% if channel_stats %}
+    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
+        <h2 class="font-semibold text-gray-800 mb-4">Messages by Channel</h2>
+        <table class="min-w-full text-sm">
+            <thead class="text-xs text-gray-500 uppercase">
+                <tr>
+                    <th class="text-left pb-2">Channel</th>
+                    <th class="text-left pb-2">Messages</th>
+                    <th class="text-left pb-2">Agents</th>
+                </tr>
+            </thead>
+            <tbody class="divide-y divide-gray-100">
+                {% for channel_name, stats in channel_stats | dictsort %}
+                <tr>
+                    <td class="py-2">#{{ channel_name }}</td>
+                    <td class="py-2">{{ stats.count }}</td>
+                    <td class="py-2 text-gray-500">{{ stats.agents | sort | join(', ') }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% endif %}
+
+    <!-- Channels created -->
+    {% if channels %}
+    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
+        <h2 class="font-semibold text-gray-800 mb-4">Channels Created</h2>
+        <table class="min-w-full text-sm">
+            <thead class="text-xs text-gray-500 uppercase">
+                <tr>
+                    <th class="text-left pb-2">Channel</th>
+                    <th class="text-left pb-2">Type</th>
+                    <th class="text-left pb-2">Created By</th>
+                    <th class="text-left pb-2">Archived</th>
+                </tr>
+            </thead>
+            <tbody class="divide-y divide-gray-100">
+                {% for ch in channels %}
+                <tr>
+                    <td class="py-2">#{{ ch.channel_name }}</td>
+                    <td class="py-2 capitalize">{{ ch.channel_type }}</td>
+                    <td class="py-2">{{ ch.created_by_agent }}Bot</td>
+                    <td class="py-2">{{ ch.archived_at.strftime('%b %d') if ch.archived_at else '—' }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% endif %}
+
+    <!-- Message timeline -->
+    {% if messages %}
+    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+        <h2 class="font-semibold text-gray-800 mb-4">Message Timeline ({{ messages | length }})</h2>
+        <div class="space-y-2 max-h-96 overflow-y-auto">
+            {% for msg in messages %}
+            <div class="text-sm border-b border-gray-100 pb-2">
+                <div class="flex items-center gap-2 text-xs text-gray-500 mb-0.5">
+                    <span class="font-medium text-gray-700">{{ msg.agent_id }}Bot</span>
+                    <span>#{{ msg.channel_name }}</span>
+                    <span>{{ msg.created_at.strftime('%H:%M:%S') }}</span>
+                    <span class="text-gray-400">({{ msg.phase }})</span>
+                </div>
+                <p class="text-gray-600 text-xs">{{ msg.message_length }} chars</p>
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}

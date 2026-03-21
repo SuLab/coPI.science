@@ -1,0 +1,160 @@
+{% extends "base.html" %}
+{% block title %}Admin — {{ target_user.name }} — CoPI{% endblock %}
+
+{% block content %}
+<div class="max-w-4xl mx-auto">
+    <div class="flex items-center justify-between mb-6">
+        <div>
+            <a href="/admin/users" class="text-sm text-gray-500 hover:text-gray-700">← All Users</a>
+            <h1 class="text-2xl font-bold text-gray-900 mt-1">{{ target_user.name }}</h1>
+        </div>
+    </div>
+
+    <!-- Account info -->
+    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
+        <h2 class="font-semibold text-gray-800 mb-4">Account</h2>
+        <dl class="grid grid-cols-2 gap-3 text-sm">
+            <div>
+                <dt class="text-gray-500">Email</dt>
+                <dd class="font-medium">{{ target_user.email or '—' }}</dd>
+            </div>
+            <div>
+                <dt class="text-gray-500">ORCID</dt>
+                <dd>
+                    <a href="https://orcid.org/{{ target_user.orcid }}" target="_blank"
+                       class="text-green-600 hover:underline font-medium">{{ target_user.orcid }}</a>
+                </dd>
+            </div>
+            <div>
+                <dt class="text-gray-500">Institution</dt>
+                <dd class="font-medium">{{ target_user.institution or '—' }}</dd>
+            </div>
+            <div>
+                <dt class="text-gray-500">Department</dt>
+                <dd class="font-medium">{{ target_user.department or '—' }}</dd>
+            </div>
+            <div>
+                <dt class="text-gray-500">Admin</dt>
+                <dd class="font-medium">{{ 'Yes' if target_user.is_admin else 'No' }}</dd>
+            </div>
+            <div>
+                <dt class="text-gray-500">Onboarding Complete</dt>
+                <dd class="font-medium">{{ 'Yes' if target_user.onboarding_complete else 'No' }}</dd>
+            </div>
+            <div>
+                <dt class="text-gray-500">Claimed At</dt>
+                <dd class="font-medium">{{ target_user.claimed_at.strftime('%b %d, %Y %H:%M') if target_user.claimed_at else 'Unclaimed' }}</dd>
+            </div>
+            <div>
+                <dt class="text-gray-500">Joined</dt>
+                <dd class="font-medium">{{ target_user.created_at.strftime('%b %d, %Y') }}</dd>
+            </div>
+        </dl>
+    </div>
+
+    {% if profile %}
+    <!-- Profile -->
+    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
+        <div class="flex items-center justify-between mb-4">
+            <h2 class="font-semibold text-gray-800">Research Profile</h2>
+            <span class="text-xs text-gray-400">Version {{ profile.profile_version }}</span>
+        </div>
+        {% if profile.research_summary %}
+        <p class="text-sm text-gray-700 mb-4">{{ profile.research_summary }}</p>
+        {% endif %}
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
+            {% if profile.techniques %}
+            <div>
+                <p class="text-xs font-medium text-gray-500 uppercase mb-1">Techniques</p>
+                <p class="text-gray-700">{{ profile.techniques | join(', ') }}</p>
+            </div>
+            {% endif %}
+            {% if profile.disease_areas %}
+            <div>
+                <p class="text-xs font-medium text-gray-500 uppercase mb-1">Disease Areas</p>
+                <p class="text-gray-700">{{ profile.disease_areas | join(', ') }}</p>
+            </div>
+            {% endif %}
+            {% if profile.experimental_models %}
+            <div>
+                <p class="text-xs font-medium text-gray-500 uppercase mb-1">Model Systems</p>
+                <p class="text-gray-700">{{ profile.experimental_models | join(', ') }}</p>
+            </div>
+            {% endif %}
+            {% if profile.key_targets %}
+            <div>
+                <p class="text-xs font-medium text-gray-500 uppercase mb-1">Key Targets</p>
+                <p class="text-gray-700">{{ profile.key_targets | join(', ') }}</p>
+            </div>
+            {% endif %}
+        </div>
+    </div>
+    {% endif %}
+
+    <!-- Publications -->
+    {% if publications %}
+    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
+        <h2 class="font-semibold text-gray-800 mb-4">Publications ({{ publications | length }})</h2>
+        <div class="space-y-3">
+            {% for pub in publications %}
+            <div class="border-b border-gray-100 pb-3 last:border-0 text-sm">
+                <p class="font-medium text-gray-800">{{ pub.title }}</p>
+                <p class="text-gray-500 text-xs mt-0.5">
+                    {{ pub.journal }}{% if pub.year %} · {{ pub.year }}{% endif %}
+                    {% if pub.author_position %} · {{ pub.author_position | capitalize }} author{% endif %}
+                    · {% if pub.methods_text %}Methods ✓{% else %}No methods{% endif %}
+                </p>
+                <div class="flex gap-2 mt-1">
+                    {% if pub.pmid %}
+                    <a href="https://pubmed.ncbi.nlm.nih.gov/{{ pub.pmid }}" target="_blank"
+                       class="text-xs text-blue-500 hover:underline">PubMed</a>
+                    {% endif %}
+                    {% if pub.pmcid %}<span class="text-xs text-gray-400">PMC: {{ pub.pmcid }}</span>{% endif %}
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+    {% endif %}
+
+    <!-- Jobs -->
+    {% if jobs %}
+    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+        <h2 class="font-semibold text-gray-800 mb-4">Jobs</h2>
+        <table class="min-w-full text-sm">
+            <thead>
+                <tr class="text-xs text-gray-500 uppercase">
+                    <th class="text-left pb-2">Type</th>
+                    <th class="text-left pb-2">Status</th>
+                    <th class="text-left pb-2">Attempts</th>
+                    <th class="text-left pb-2">Enqueued</th>
+                    <th class="text-left pb-2">Completed</th>
+                </tr>
+            </thead>
+            <tbody class="divide-y divide-gray-100">
+                {% for job in jobs %}
+                <tr>
+                    <td class="py-2 text-gray-700">{{ job.type | replace('_', ' ') | title }}</td>
+                    <td class="py-2">
+                        {% set sc = {'pending': 'text-yellow-600', 'processing': 'text-blue-600',
+                            'completed': 'text-green-600', 'failed': 'text-red-600', 'dead': 'text-gray-400'} %}
+                        <span class="{{ sc.get(job.status, '') }} font-medium">{{ job.status | capitalize }}</span>
+                    </td>
+                    <td class="py-2 text-gray-500">{{ job.attempts }}/{{ job.max_attempts }}</td>
+                    <td class="py-2 text-gray-500">{{ job.enqueued_at.strftime('%b %d %H:%M') }}</td>
+                    <td class="py-2 text-gray-500">{{ job.completed_at.strftime('%b %d %H:%M') if job.completed_at else '—' }}</td>
+                </tr>
+                {% if job.last_error %}
+                <tr>
+                    <td colspan="5" class="pb-2">
+                        <p class="text-xs text-red-600 bg-red-50 rounded p-2">{{ job.last_error[:200] }}</p>
+                    </td>
+                </tr>
+                {% endif %}
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}
