@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% block title %}Sign in — CoPI{% endblock %}
+
+{% block content %}
+<div class="min-h-[60vh] flex flex-col justify-center items-center">
+    <div class="max-w-md w-full">
+        <!-- Logo / Header -->
+        <div class="text-center mb-10">
+            <h1 class="text-4xl font-bold text-indigo-600 mb-2">CoPI</h1>
+            <p class="text-gray-600 text-lg">Research Collaboration Platform</p>
+            <p class="text-gray-500 mt-2 text-sm">Connect, collaborate, and discover synergies across Scripps Research</p>
+        </div>
+
+        <!-- Login Card -->
+        <div class="bg-white rounded-xl shadow-md border border-gray-200 p-8">
+            <h2 class="text-xl font-semibold text-gray-800 mb-2">Sign in with ORCID</h2>
+            <p class="text-gray-500 text-sm mb-6">
+                We use ORCID to securely identify you as a researcher. Your ORCID profile helps us
+                automatically generate your research profile.
+            </p>
+
+            {% if error %}
+            <div class="bg-red-50 border border-red-200 rounded-md p-3 mb-4 text-sm text-red-700">
+                {% if error == 'oauth_error' %}Authentication was cancelled or failed. Please try again.
+                {% elif error == 'no_code' %}No authorization code received. Please try again.
+                {% elif error == 'state_mismatch' %}Security check failed. Please try again.
+                {% elif error == 'token_error' %}Could not complete authentication. Please try again.
+                {% else %}Sign in failed. Please try again.{% endif %}
+            </div>
+            {% endif %}
+
+            <a href="/login"
+               class="flex items-center justify-center w-full bg-green-600 hover:bg-green-700 text-white font-medium py-3 px-6 rounded-lg transition-colors duration-200">
+                <svg class="w-5 h-5 mr-3" viewBox="0 0 32 32" fill="currentColor">
+                    <path d="M16 0C7.163 0 0 7.163 0 16s7.163 16 16 16 16-7.163 16-16S24.837 0 16 0zm0 4.516c2.032 0 3.677 1.646 3.677 3.677S18.032 11.87 16 11.87s-3.677-1.646-3.677-3.677S13.968 4.516 16 4.516zm0 22.968c-4.516 0-8.516-2.258-10.968-5.677 0-3.677 7.291-5.677 10.968-5.677 3.677 0 10.968 2 10.968 5.677C24.516 25.226 20.516 27.484 16 27.484z"/>
+                </svg>
+                Sign in with ORCID
+            </a>
+
+            <p class="text-center text-xs text-gray-400 mt-4">
+                Don't have an ORCID? <a href="https://orcid.org/register" target="_blank" class="text-indigo-500 hover:underline">Create one for free</a>
+            </p>
+        </div>
+
+        <!-- Info box -->
+        <div class="mt-6 bg-indigo-50 rounded-lg p-4 text-sm text-indigo-700">
+            <p class="font-medium mb-1">How it works</p>
+            <ol class="list-decimal list-inside space-y-1 text-indigo-600">
+                <li>Sign in with your ORCID account</li>
+                <li>We automatically generate your research profile from your publications</li>
+                <li>Review and edit your profile</li>
+                <li>Discover collaboration opportunities with other Scripps researchers</li>
+            </ol>
+        </div>
+    </div>
+</div>
+{% endblock %}
