@@ -24,6 +24,7 @@ def _template_context(request: Request, user: User, **kwargs) -> dict:
     ctx = {
         "request": request,
         "current_user": real_admin if impersonated else user,
+        "user": user,
         "impersonation_banner": user if impersonated else None,
         "active_page": "profile",
     }
