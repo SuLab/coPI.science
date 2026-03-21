@@ -63,7 +63,6 @@ async def profile_view(
         _template_context(
             request,
             current_user,
-            user=current_user,
             profile=profile,
             publications=publications,
             pending_profile=profile.pending_profile if profile else None,
@@ -85,7 +84,7 @@ async def profile_edit(
 
     return templates.TemplateResponse(
         "profile/edit.html",
-        _template_context(request, current_user, user=current_user, profile=profile),
+        _template_context(request, current_user, profile=profile),
     )
 
 
@@ -171,7 +170,7 @@ async def add_text_page(
 
     return templates.TemplateResponse(
         "profile/add_text.html",
-        _template_context(request, current_user, user=current_user, profile=profile),
+        _template_context(request, current_user, profile=profile),
     )
 
 
@@ -251,7 +250,7 @@ async def delete_account_confirm(
     """Account deletion confirmation page."""
     return templates.TemplateResponse(
         "profile/delete_account.html",
-        _template_context(request, current_user, user=current_user),
+        _template_context(request, current_user),
     )
 
 
