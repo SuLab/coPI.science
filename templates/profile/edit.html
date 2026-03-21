@@ -1,0 +1,132 @@
+{% extends "base.html" %}
+{% block title %}Edit Profile — CoPI{% endblock %}
+
+{% block content %}
+<div class="max-w-3xl mx-auto">
+    <div class="flex items-center justify-between mb-6">
+        <h1 class="text-2xl font-bold text-gray-900">Edit Profile</h1>
+        <a href="/profile" class="text-gray-500 hover:text-gray-700 text-sm">← Back to Profile</a>
+    </div>
+
+    <form method="POST" action="/profile/save">
+
+        <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
+            <h2 class="text-lg font-semibold text-gray-800 mb-4">Basic Information</h2>
+            <div class="grid grid-cols-1 gap-4">
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Display Name</label>
+                    <input type="text" name="name" value="{{ user.name }}"
+                           class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500">
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Institution</label>
+                    <input type="text" name="institution" value="{{ user.institution or '' }}"
+                           class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500">
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Department</label>
+                    <input type="text" name="department" value="{{ user.department or '' }}"
+                           class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500">
+                </div>
+            </div>
+        </div>
+
+        {% if profile %}
+        <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
+            <h2 class="text-lg font-semibold text-gray-800 mb-4">Research Profile</h2>
+
+            <div class="mb-5">
+                <label class="block text-sm font-medium text-gray-700 mb-1">Research Summary</label>
+                <textarea name="research_summary" rows="7"
+                          class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500">{{ profile.research_summary or '' }}</textarea>
+                <p class="text-xs text-gray-400 mt-1">150-250 word narrative connecting your research themes.</p>
+            </div>
+
+            <div class="mb-5">
+                <label class="block text-sm font-medium text-gray-700 mb-1">Techniques & Methods</label>
+                <input type="text" name="techniques" value="{{ (profile.techniques or []) | join(', ') }}"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500">
+                <p class="text-xs text-gray-400 mt-1">Comma-separated.</p>
+            </div>
+
+            <div class="mb-5">
+                <label class="block text-sm font-medium text-gray-700 mb-1">Model Systems</label>
+                <input type="text" name="experimental_models" value="{{ (profile.experimental_models or []) | join(', ') }}"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500">
+                <p class="text-xs text-gray-400 mt-1">Cell lines, model organisms, databases. Comma-separated.</p>
+            </div>
+
+            <div class="mb-5">
+                <label class="block text-sm font-medium text-gray-700 mb-1">Disease Areas</label>
+                <input type="text" name="disease_areas" value="{{ (profile.disease_areas or []) | join(', ') }}"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500">
+                <p class="text-xs text-gray-400 mt-1">Comma-separated.</p>
+            </div>
+
+            <div class="mb-5">
+                <label class="block text-sm font-medium text-gray-700 mb-1">Key Molecular Targets</label>
+                <input type="text" name="key_targets" value="{{ (profile.key_targets or []) | join(', ') }}"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500">
+                <p class="text-xs text-gray-400 mt-1">Comma-separated.</p>
+            </div>
+
+            <div class="mb-5">
+                <label class="block text-sm font-medium text-gray-700 mb-1">Keywords</label>
+                <input type="text" name="keywords" value="{{ (profile.keywords or []) | join(', ') }}"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500">
+                <p class="text-xs text-gray-400 mt-1">Comma-separated.</p>
+            </div>
+        </div>
+        {% endif %}
+
+        <!-- User-submitted texts -->
+        <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
+            <h2 class="text-lg font-semibold text-gray-800 mb-2">Supplementary Information</h2>
+            <p class="text-sm text-gray-500 mb-4">
+                Add up to 5 text blocks (grant aims, equipment access, current interests).
+                These inform your profile synthesis but are never shown to others.
+            </p>
+
+            {% if profile and profile.user_submitted_texts %}
+            {% for text_entry in profile.user_submitted_texts %}
+            <div class="border border-gray-200 rounded-lg p-4 mb-3">
+                <div class="flex items-center justify-between mb-2">
+                    <span class="text-sm font-medium text-gray-700">{{ text_entry.label }}</span>
+                    <a href="/profile/delete-text/{{ loop.index0 }}" class="text-xs text-red-500 hover:text-red-700">Remove</a>
+                </div>
+                <p class="text-xs text-gray-600 line-clamp-3">{{ text_entry.content[:200] }}{% if text_entry.content | length > 200 %}...{% endif %}</p>
+            </div>
+            {% endfor %}
+            {% endif %}
+
+            {% if not profile or not profile.user_submitted_texts or profile.user_submitted_texts | length < 5 %}
+            <a href="/profile/add-text" class="text-sm text-indigo-600 hover:text-indigo-700">
+                + Add supplementary text
+            </a>
+            {% endif %}
+        </div>
+
+        <div class="flex gap-3">
+            <button type="submit"
+                    class="bg-indigo-600 text-white px-6 py-2 rounded-lg hover:bg-indigo-700 font-medium">
+                Save Changes
+            </button>
+            <a href="/profile"
+               class="text-gray-600 px-6 py-2 rounded-lg border border-gray-300 hover:bg-gray-50">
+                Cancel
+            </a>
+        </div>
+    </form>
+
+    <!-- Danger zone -->
+    <div class="mt-12 border border-red-200 rounded-xl p-6">
+        <h2 class="text-lg font-semibold text-red-700 mb-2">Danger Zone</h2>
+        <p class="text-sm text-gray-600 mb-4">
+            Deleting your account removes your profile, publications, and all submitted texts permanently.
+        </p>
+        <a href="/profile/delete-account" class="text-sm text-red-600 hover:text-red-700 font-medium">
+            Delete Account
+        </a>
+    </div>
+</div>
+{% endblock %}

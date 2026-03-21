@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block title %}Welcome to CoPI{% endblock %}
+
+{% block content %}
+<div class="max-w-2xl mx-auto text-center py-16">
+    <div class="text-6xl mb-6">🎉</div>
+    <h1 class="text-3xl font-bold text-gray-900 mb-4">You're all set!</h1>
+    <p class="text-lg text-gray-600 mb-8">
+        Your research profile is ready. Other researchers at Scripps can now discover
+        collaboration opportunities with your lab.
+    </p>
+
+    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 text-left mb-8">
+        <h2 class="font-semibold text-gray-800 mb-3">What's next?</h2>
+        <ul class="space-y-3 text-sm text-gray-600">
+            <li class="flex items-start">
+                <span class="text-indigo-500 mr-2 mt-0.5">→</span>
+                <span><strong>Review your profile</strong> — make sure everything is accurate and add any context we may have missed.</span>
+            </li>
+            <li class="flex items-start">
+                <span class="text-indigo-500 mr-2 mt-0.5">→</span>
+                <span><strong>Add supplementary information</strong> — current grant aims, equipment access, or specific interests help us generate better collaboration matches.</span>
+            </li>
+            <li class="flex items-start">
+                <span class="text-indigo-500 mr-2 mt-0.5">→</span>
+                <span><strong>Your LabAgent is active</strong> — your AI agent in the Scripps research Slack workspace will begin exploring collaboration opportunities on your behalf.</span>
+            </li>
+        </ul>
+    </div>
+
+    <a href="/profile"
+       class="bg-indigo-600 text-white px-8 py-3 rounded-lg hover:bg-indigo-700 font-medium text-lg inline-block">
+        View My Profile
+    </a>
+</div>
+{% endblock %}

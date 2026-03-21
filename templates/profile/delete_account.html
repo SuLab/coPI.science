@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}Delete Account — CoPI{% endblock %}
+
+{% block content %}
+<div class="max-w-lg mx-auto">
+    <div class="bg-white rounded-xl shadow-sm border border-red-200 p-8">
+        <h1 class="text-2xl font-bold text-red-700 mb-4">Delete Account</h1>
+        <div class="bg-red-50 border border-red-200 rounded-lg p-4 mb-6 text-sm text-red-700">
+            <p class="font-medium mb-2">This action is permanent and cannot be undone.</p>
+            <p>The following will be permanently deleted:</p>
+            <ul class="list-disc list-inside mt-2 space-y-1">
+                <li>Your research profile</li>
+                <li>All publications imported from ORCID</li>
+                <li>All supplementary text submissions</li>
+                <li>All pending profile updates</li>
+            </ul>
+        </div>
+        <form method="POST" action="/profile/delete-account">
+            <div class="mb-4">
+                <label class="block text-sm font-medium text-gray-700 mb-2">
+                    Type <strong>delete</strong> to confirm
+                </label>
+                <input type="text" name="confirm" required
+                       placeholder="delete"
+                       class="w-full border border-red-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-red-500">
+            </div>
+            <div class="flex gap-3">
+                <button type="submit"
+                        class="bg-red-600 text-white px-6 py-2 rounded-lg hover:bg-red-700 font-medium">
+                    Delete My Account
+                </button>
+                <a href="/profile/edit"
+                   class="text-gray-600 px-6 py-2 rounded-lg border border-gray-300 hover:bg-gray-50">
+                    Cancel
+                </a>
+            </div>
+        </form>
+    </div>
+</div>
+{% endblock %}

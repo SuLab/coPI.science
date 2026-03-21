@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}Add Supplementary Text — CoPI{% endblock %}
+
+{% block content %}
+<div class="max-w-2xl mx-auto">
+    <div class="flex items-center justify-between mb-6">
+        <h1 class="text-2xl font-bold text-gray-900">Add Supplementary Text</h1>
+        <a href="/profile/edit" class="text-sm text-gray-500 hover:text-gray-700">← Back</a>
+    </div>
+
+    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+        <p class="text-sm text-gray-500 mb-6">
+            This information is private and will never be shown to other users.
+            It informs the synthesis of your public research profile.
+        </p>
+        <form method="POST" action="/profile/add-text">
+            <div class="mb-4">
+                <label class="block text-sm font-medium text-gray-700 mb-1">Label</label>
+                <input type="text" name="label" required
+                       placeholder="e.g., Current R01 aims, Equipment access, Research interests"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500">
+            </div>
+            <div class="mb-4">
+                <label class="block text-sm font-medium text-gray-700 mb-1">Content</label>
+                <textarea name="content" rows="10" required
+                          class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500"
+                          placeholder="Paste your content here (max 2,000 words)..."></textarea>
+            </div>
+            <div class="flex gap-3">
+                <button type="submit" class="bg-indigo-600 text-white px-6 py-2 rounded-lg hover:bg-indigo-700">
+                    Save
+                </button>
+                <a href="/profile/edit" class="text-gray-600 px-6 py-2 rounded-lg border border-gray-300 hover:bg-gray-50">
+                    Cancel
+                </a>
+            </div>
+        </form>
+    </div>
+</div>
+{% endblock %}

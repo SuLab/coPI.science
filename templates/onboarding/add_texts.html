@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+{% block title %}Add Supplementary Information — CoPI{% endblock %}
+
+{% block content %}
+<div class="max-w-3xl mx-auto">
+    <div class="mb-8">
+        <div class="flex items-center justify-between mb-2">
+            <h1 class="text-2xl font-bold text-gray-900">Add Supplementary Information</h1>
+            <span class="text-sm text-gray-500">Step 4 of 4</span>
+        </div>
+        <div class="w-full bg-gray-200 rounded-full h-2">
+            <div class="bg-indigo-600 h-2 rounded-full" style="width: 95%"></div>
+        </div>
+    </div>
+
+    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
+        <h2 class="text-lg font-semibold text-gray-800 mb-2">Supplementary Text Blocks</h2>
+        <p class="text-sm text-gray-500 mb-6">
+            You can add up to 5 text blocks — grant aims, equipment access, current research priorities,
+            or anything else that would help us generate a more accurate profile. These are
+            <strong>completely private</strong> and are never shown to other users or agents.
+        </p>
+
+        {% if profile and profile.user_submitted_texts %}
+        <div class="mb-6 space-y-3">
+            {% for entry in profile.user_submitted_texts %}
+            <div class="border border-gray-200 rounded-lg p-4 flex items-start justify-between">
+                <div>
+                    <p class="text-sm font-medium text-gray-800">{{ entry.label }}</p>
+                    <p class="text-xs text-gray-500 mt-1">{{ entry.content[:150] }}{% if entry.content | length > 150 %}...{% endif %}</p>
+                </div>
+                <a href="/profile/delete-text/{{ loop.index0 }}"
+                   class="text-xs text-red-500 hover:text-red-700 ml-4 whitespace-nowrap">Remove</a>
+            </div>
+            {% endfor %}
+        </div>
+        {% endif %}
+
+        {% if not profile or not profile.user_submitted_texts or profile.user_submitted_texts | length < 5 %}
+        <form method="POST" action="/profile/add-text">
+            <div class="mb-4">
+                <label class="block text-sm font-medium text-gray-700 mb-1">Label</label>
+                <input type="text" name="label" required
+                       placeholder="e.g., Current R01 aims, Equipment access, Research interests"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500">
+                <p class="text-xs text-gray-400 mt-1">A short label to identify this text block.</p>
+            </div>
+            <div class="mb-4">
+                <label class="block text-sm font-medium text-gray-700 mb-1">Content</label>
+                <textarea name="content" rows="6" required
+                          placeholder="Paste your grant aims, describe your current research focus, list your equipment..."
+                          class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500"></textarea>
+                <p class="text-xs text-gray-400 mt-1">Maximum 2,000 words.</p>
+            </div>
+            <button type="submit" class="bg-indigo-600 text-white px-4 py-2 rounded-lg hover:bg-indigo-700 text-sm">
+                Add Text Block
+            </button>
+        </form>
+        {% else %}
+        <p class="text-sm text-gray-500">You've added the maximum of 5 text blocks.</p>
+        {% endif %}
+    </div>
+
+    <form method="POST" action="/onboarding/complete">
+        <div class="flex gap-3">
+            <button type="submit" class="bg-indigo-600 text-white px-6 py-3 rounded-lg hover:bg-indigo-700 font-medium">
+                Complete Onboarding
+            </button>
+            <a href="/onboarding/done"
+               class="text-gray-600 px-6 py-3 rounded-lg border border-gray-300 hover:bg-gray-50">
+                Skip
+            </a>
+        </div>
+    </form>
+</div>
+{% endblock %}

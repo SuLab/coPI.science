@@ -1,0 +1,185 @@
+{% extends "base.html" %}
+{% block title %}{{ user.name }} — Profile — CoPI{% endblock %}
+
+{% block content %}
+<div class="max-w-4xl mx-auto">
+    <!-- Header -->
+    <div class="flex items-start justify-between mb-6">
+        <div>
+            <h1 class="text-2xl font-bold text-gray-900">{{ user.name }}</h1>
+            {% if user.institution %}
+            <p class="text-gray-600">{{ user.institution }}{% if user.department %} · {{ user.department }}{% endif %}</p>
+            {% endif %}
+            <a href="https://orcid.org/{{ user.orcid }}" target="_blank"
+               class="text-sm text-green-600 hover:text-green-700 mt-1 inline-block">
+                ORCID: {{ user.orcid }}
+            </a>
+        </div>
+        <div class="flex gap-3">
+            <a href="/profile/edit"
+               class="bg-white border border-gray-300 text-gray-700 px-4 py-2 rounded-lg hover:bg-gray-50 text-sm font-medium">
+                Edit Profile
+            </a>
+            <form method="POST" action="/profile/refresh" class="inline">
+                <button type="submit"
+                        class="bg-indigo-600 text-white px-4 py-2 rounded-lg hover:bg-indigo-700 text-sm font-medium">
+                    Refresh Profile
+                </button>
+            </form>
+        </div>
+    </div>
+
+    {% if pending_profile %}
+    <!-- Pending profile update -->
+    <div class="bg-amber-50 border border-amber-200 rounded-xl p-4 mb-6">
+        <div class="flex items-start justify-between">
+            <div>
+                <h3 class="font-semibold text-amber-800">Updated Profile Available</h3>
+                <p class="text-sm text-amber-700 mt-1">
+                    We found new publications and generated an updated profile. Review the changes below.
+                </p>
+            </div>
+            <a href="/profile/review-update"
+               class="bg-amber-600 text-white px-4 py-2 rounded-lg hover:bg-amber-700 text-sm whitespace-nowrap ml-4">
+                Review Update
+            </a>
+        </div>
+    </div>
+    {% endif %}
+
+    {% if not profile %}
+    <!-- No profile yet -->
+    <div class="bg-white rounded-xl shadow-sm border border-yellow-200 p-8 text-center">
+        <h2 class="text-xl font-semibold text-gray-800 mb-2">Profile Generating</h2>
+        <p class="text-gray-600">Your research profile is being generated. Check back in a few minutes.</p>
+    </div>
+    {% else %}
+
+    <!-- Profile content -->
+    <div class="grid grid-cols-1 gap-6">
+
+        <!-- Research Summary -->
+        <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+            <h2 class="text-lg font-semibold text-gray-800 mb-3">Research Summary</h2>
+            <p class="text-gray-700 leading-relaxed">{{ profile.research_summary or 'No summary yet.' }}</p>
+            {% if profile.profile_generated_at %}
+            <p class="text-xs text-gray-400 mt-3">
+                Version {{ profile.profile_version }} · Generated {{ profile.profile_generated_at.strftime('%b %d, %Y') }}
+            </p>
+            {% endif %}
+        </div>
+
+        <!-- Profile fields grid -->
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+
+            <!-- Techniques -->
+            <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+                <h3 class="text-sm font-semibold text-gray-700 uppercase tracking-wide mb-3">Techniques & Methods</h3>
+                {% if profile.techniques %}
+                <div class="flex flex-wrap gap-2">
+                    {% for t in profile.techniques %}
+                    <span class="bg-indigo-50 text-indigo-700 text-xs px-2 py-1 rounded-full">{{ t }}</span>
+                    {% endfor %}
+                </div>
+                {% else %}
+                <p class="text-gray-400 text-sm">None specified</p>
+                {% endif %}
+            </div>
+
+            <!-- Experimental Models -->
+            <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+                <h3 class="text-sm font-semibold text-gray-700 uppercase tracking-wide mb-3">Model Systems</h3>
+                {% if profile.experimental_models %}
+                <div class="flex flex-wrap gap-2">
+                    {% for m in profile.experimental_models %}
+                    <span class="bg-green-50 text-green-700 text-xs px-2 py-1 rounded-full">{{ m }}</span>
+                    {% endfor %}
+                </div>
+                {% else %}
+                <p class="text-gray-400 text-sm">None specified</p>
+                {% endif %}
+            </div>
+
+            <!-- Disease Areas -->
+            <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+                <h3 class="text-sm font-semibold text-gray-700 uppercase tracking-wide mb-3">Disease Areas</h3>
+                {% if profile.disease_areas %}
+                <div class="flex flex-wrap gap-2">
+                    {% for d in profile.disease_areas %}
+                    <span class="bg-red-50 text-red-700 text-xs px-2 py-1 rounded-full">{{ d }}</span>
+                    {% endfor %}
+                </div>
+                {% else %}
+                <p class="text-gray-400 text-sm">None specified</p>
+                {% endif %}
+            </div>
+
+            <!-- Key Targets -->
+            <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+                <h3 class="text-sm font-semibold text-gray-700 uppercase tracking-wide mb-3">Key Targets</h3>
+                {% if profile.key_targets %}
+                <div class="flex flex-wrap gap-2">
+                    {% for k in profile.key_targets %}
+                    <span class="bg-purple-50 text-purple-700 text-xs px-2 py-1 rounded-full">{{ k }}</span>
+                    {% endfor %}
+                </div>
+                {% else %}
+                <p class="text-gray-400 text-sm">None specified</p>
+                {% endif %}
+            </div>
+        </div>
+
+        {% if profile.grant_titles %}
+        <!-- Grants -->
+        <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+            <h3 class="text-sm font-semibold text-gray-700 uppercase tracking-wide mb-3">Active Grants</h3>
+            <ul class="space-y-2">
+                {% for title in profile.grant_titles %}
+                <li class="text-sm text-gray-700 flex items-start">
+                    <span class="text-gray-400 mr-2 mt-0.5">·</span>
+                    {{ title }}
+                </li>
+                {% endfor %}
+            </ul>
+        </div>
+        {% endif %}
+
+        <!-- Publications -->
+        {% if publications %}
+        <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+            <h3 class="text-sm font-semibold text-gray-700 uppercase tracking-wide mb-4">
+                Publications ({{ publications | length }})
+            </h3>
+            <div class="space-y-4">
+                {% for pub in publications[:10] %}
+                <div class="border-b border-gray-100 pb-3 last:border-0">
+                    <p class="text-sm font-medium text-gray-800">{{ pub.title }}</p>
+                    <p class="text-xs text-gray-500 mt-1">
+                        {{ pub.journal }}{% if pub.year %} · {{ pub.year }}{% endif %}
+                        {% if pub.author_position %}
+                        · <span class="text-indigo-600 capitalize">{{ pub.author_position }} author</span>
+                        {% endif %}
+                    </p>
+                    <div class="flex gap-2 mt-1">
+                        {% if pub.pmid %}
+                        <a href="https://pubmed.ncbi.nlm.nih.gov/{{ pub.pmid }}" target="_blank"
+                           class="text-xs text-blue-500 hover:underline">PubMed</a>
+                        {% endif %}
+                        {% if pub.doi %}
+                        <a href="https://doi.org/{{ pub.doi }}" target="_blank"
+                           class="text-xs text-blue-500 hover:underline">DOI</a>
+                        {% endif %}
+                    </div>
+                </div>
+                {% endfor %}
+                {% if publications | length > 10 %}
+                <p class="text-xs text-gray-400">... and {{ (publications | length) - 10 }} more</p>
+                {% endif %}
+            </div>
+        </div>
+        {% endif %}
+
+    </div>
+    {% endif %}
+</div>
+{% endblock %}
