@@ -9,10 +9,14 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from fastapi.templating import Jinja2Templates
+
 from src.config import get_settings
 from src.database import get_db
 from src.models import Job, User
 from src.services.orcid import fetch_orcid_profile
+
+templates = Jinja2Templates(directory="templates")
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -34,12 +38,18 @@ def _get_oauth_client() -> AsyncOAuth2Client:
 
 @router.get("/login", response_class=HTMLResponse)
 async def login(request: Request):
-    """Redirect to ORCID OAuth authorization page."""
-    # If already logged in, redirect to home
+    """Show the login landing page."""
     if request.session.get("user_id"):
         return RedirectResponse(url="/", status_code=302)
+    error = request.query_params.get("error")
+    return templates.TemplateResponse("login.html", {"request": request, "error": error})
 
-    settings = get_settings()
+
+@router.get("/login/start")
+async def login_start(request: Request):
+    """Initiate ORCID OAuth redirect."""
+    if request.session.get("user_id"):
+        return RedirectResponse(url="/", status_code=302)
     client = _get_oauth_client()
     authorization_url, state = client.create_authorization_url(ORCID_AUTH_URL)
     request.session["oauth_state"] = state
