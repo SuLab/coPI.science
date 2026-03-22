@@ -137,7 +137,7 @@ async def complete_onboarding(
     """Mark onboarding as complete."""
     current_user.onboarding_complete = True
     await db.commit()
-    return RedirectResponse(url="/onboarding/done", status_code=302)
+    return RedirectResponse(url="/profile?onboarding_complete=1", status_code=302)
 
 
 @router.get("/done", response_class=HTMLResponse)

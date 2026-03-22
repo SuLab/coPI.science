@@ -39,6 +39,7 @@ def _parse_list(val: str) -> list[str]:
 @router.get("", response_class=HTMLResponse)
 async def profile_view(
     request: Request,
+    onboarding_complete: bool = False,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -67,6 +68,7 @@ async def profile_view(
             profile=profile,
             publications=publications,
             pending_profile=profile.pending_profile if profile else None,
+            just_completed_onboarding=onboarding_complete,
         ),
     )
 

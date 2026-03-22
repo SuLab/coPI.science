@@ -29,6 +29,15 @@
         </div>
     </div>
 
+    {% if just_completed_onboarding %}
+    <div class="bg-indigo-50 border border-indigo-200 rounded-xl p-4 mb-6">
+        <h3 class="font-semibold text-indigo-800">Welcome to CoPI!</h3>
+        <p class="text-sm text-indigo-700 mt-1">
+            Your profile is ready. You can edit any field below or add supplementary information to improve your profile.
+        </p>
+    </div>
+    {% endif %}
+
     {% if pending_profile %}
     <!-- Pending profile update -->
     <div class="bg-amber-50 border border-amber-200 rounded-xl p-4 mb-6">
