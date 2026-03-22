@@ -52,7 +52,7 @@
                 </tr>
             </thead>
             <tbody class="divide-y divide-gray-100">
-                {% for agent_id, stats in agent_stats | dictsort(by='value', attribute='count', reverse=True) %}
+                {% for agent_id, stats in agent_stats.items() | sort(attribute='1.count', reverse=True) %}
                 <tr>
                     <td class="py-2 font-medium">{{ agent_id | capitalize }}Bot</td>
                     <td class="py-2">{{ stats.count }}</td>

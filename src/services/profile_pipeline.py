@@ -315,9 +315,15 @@ async def run_profile_pipeline(
 
     await db.flush()
 
-    # Export to markdown for agent consumption
+    # Export to markdown for agent consumption (include publications)
+    from sqlalchemy import select as sa_select
+    from src.models import Publication
     from src.services.profile_export import export_profile_to_markdown
-    export_profile_to_markdown(user, profile)
+    pub_result = await db.execute(
+        sa_select(Publication).where(Publication.user_id == user.id)
+    )
+    user_pubs = pub_result.scalars().all()
+    export_profile_to_markdown(user, profile, publications=user_pubs)
 
     update_progress("complete", "Profile generation complete.")
     return profile

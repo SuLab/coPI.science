@@ -88,6 +88,9 @@ class SimulationEngine:
             self.budget_cap,
         )
 
+        # Build lab directory (other labs' recent publications) for each agent
+        self._build_lab_directories()
+
         # Register LLM call log callback
         set_call_log_callback(self._on_llm_call)
 
@@ -117,6 +120,49 @@ class SimulationEngine:
         set_call_log_callback(None)
         await self._flush_llm_logs()
         logger.info("Simulation stopping...")
+
+    def _build_lab_directories(self) -> None:
+        """Build a condensed publications directory for each agent (excluding their own lab)."""
+        import re
+        from pathlib import Path
+
+        # Parse publications from each agent's profile
+        lab_pubs: dict[str, list[str]] = {}
+        for agent in self.agents.values():
+            profile_text = agent.public_profile
+            # Extract the "Recent Publications" section
+            match = re.search(
+                r"## Recent Publications\n(.*?)(?=\n## |\Z)",
+                profile_text,
+                re.DOTALL,
+            )
+            if match:
+                pubs = [
+                    line.strip()
+                    for line in match.group(1).strip().split("\n")
+                    if line.strip().startswith("- ")
+                ]
+                if pubs:
+                    lab_pubs[agent.agent_id] = pubs[:5]  # Top 5 per lab
+
+        # For each agent, build directory of OTHER labs' papers
+        for agent in self.agents.values():
+            sections = []
+            for other_id, pubs in sorted(lab_pubs.items()):
+                if other_id == agent.agent_id:
+                    continue
+                other_agent = self.agents[other_id]
+                sections.append(f"### {other_agent.pi_name} Lab")
+                sections.extend(pubs)
+                sections.append("")
+            agent._lab_directory = "\n".join(sections) if sections else None
+
+        pub_count = sum(len(p) for p in lab_pubs.values())
+        logger.info(
+            "Built lab directories: %d labs with %d total publications",
+            len(lab_pubs),
+            pub_count,
+        )
 
     def _on_llm_call(self, data: dict) -> None:
         """Callback fired after each LLM API call. Buffers for batch DB write."""

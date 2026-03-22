@@ -3,7 +3,7 @@
 import logging
 from pathlib import Path
 
-from src.models import ResearcherProfile, User
+from src.models import Publication, ResearcherProfile, User
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +24,11 @@ ORCID_TO_AGENT_ID = {
 }
 
 
-def export_profile_to_markdown(user: User, profile: ResearcherProfile) -> Path | None:
+def export_profile_to_markdown(
+    user: User,
+    profile: ResearcherProfile,
+    publications: list[Publication] | None = None,
+) -> Path | None:
     """Export a database profile to profiles/public/{agent_id}.md.
 
     Returns the path written, or None if the user isn't a pilot lab.
@@ -81,6 +85,33 @@ def export_profile_to_markdown(user: User, profile: ResearcherProfile) -> Path |
         lines.append("## Keywords\n")
         lines.append(", ".join(profile.keywords))
         lines.append("")
+
+    # Recent Publications (up to 20, most recent first)
+    if publications:
+        sorted_pubs = sorted(
+            [p for p in publications if p.title],
+            key=lambda p: p.year or 0,
+            reverse=True,
+        )[:20]
+        if sorted_pubs:
+            lines.append("## Recent Publications\n")
+            for pub in sorted_pubs:
+                # Build citation line with link
+                parts = []
+                if pub.title:
+                    parts.append(pub.title.rstrip("."))
+                if pub.journal:
+                    parts.append(f"*{pub.journal}*")
+                if pub.year:
+                    parts.append(f"({pub.year})")
+                citation = ". ".join(parts) + "."
+                # Add link
+                if pub.doi:
+                    citation += f" https://doi.org/{pub.doi}"
+                elif pub.pmid:
+                    citation += f" https://pubmed.ncbi.nlm.nih.gov/{pub.pmid}/"
+                lines.append(f"- {citation}")
+            lines.append("")
 
     # Grants
     if profile.grant_titles:

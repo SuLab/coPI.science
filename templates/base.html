@@ -63,6 +63,19 @@
     </div>
 </nav>
 
+<!-- Admin sub-navigation -->
+{% if active_page == 'admin' and current_user and current_user.is_admin %}
+<div class="bg-gray-50 border-b border-gray-200">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+        <div class="flex space-x-6 h-10 items-center text-sm">
+            <a href="/admin/users" class="{% if active_admin == 'users' %}text-indigo-600 font-semibold{% else %}text-gray-500 hover:text-gray-700{% endif %}">Users</a>
+            <a href="/admin/jobs" class="{% if active_admin == 'jobs' %}text-indigo-600 font-semibold{% else %}text-gray-500 hover:text-gray-700{% endif %}">Jobs</a>
+            <a href="/admin/activity" class="{% if active_admin == 'activity' %}text-indigo-600 font-semibold{% else %}text-gray-500 hover:text-gray-700{% endif %}">Activity</a>
+        </div>
+    </div>
+</div>
+{% endif %}
+
 <!-- Flash messages -->
 {% if flash_message %}
 <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 mt-4">

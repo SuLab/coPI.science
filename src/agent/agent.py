@@ -3,6 +3,7 @@
 import logging
 import os
 from pathlib import Path
+from typing import Any
 
 from src.services.llm import generate_agent_response, make_decision
 
@@ -26,6 +27,7 @@ class Agent:
         self._private_profile: str | None = None
         self._base_system_prompt: str | None = None
         self._decision_prompt: str | None = None
+        self._lab_directory: str | None = None  # Shared across agents
         self.api_call_count: int = 0
         self.message_count: int = 0
 
@@ -72,6 +74,13 @@ class Agent:
 
     def build_system_prompt(self, channel_name: str, channel_description: str = "") -> str:
         """Build the full system prompt for an agent in a given channel."""
+        lab_directory_section = ""
+        if self._lab_directory:
+            lab_directory_section = f"""
+## Other Labs' Recent Publications
+Use these to reference other labs' work in conversations. Include links when citing.
+{self._lab_directory}
+"""
         return f"""{self.base_system_prompt}
 
 ## Your Identity
@@ -83,7 +92,7 @@ Your agent ID is "{self.agent_id}". When communicating, represent your lab profe
 
 ## Your Private Instructions
 {self.private_profile}
-
+{lab_directory_section}
 ## Current Context
 Channel: #{channel_name}
 {f"Channel description: {channel_description}" if channel_description else ""}

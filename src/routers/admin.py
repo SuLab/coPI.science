@@ -30,11 +30,14 @@ router = APIRouter()
 templates = Jinja2Templates(directory="templates")
 
 
-def _template_context(request: Request, current_user: User, **kwargs) -> dict:
+def _template_context(
+    request: Request, current_user: User, active_admin: str = "", **kwargs
+) -> dict:
     ctx = {
         "request": request,
         "current_user": current_user,
         "active_page": "admin",
+        "active_admin": active_admin,
     }
     ctx.update(kwargs)
     return ctx
@@ -102,6 +105,7 @@ async def admin_users(
         _template_context(
             request,
             current_user,
+            active_admin="users",
             user_data=user_data,
             status_filter=status_filter,
             institution_filter=institution_filter,
@@ -139,6 +143,7 @@ async def admin_user_detail(
         _template_context(
             request,
             current_user,
+            active_admin="users",
             target_user=user,
             profile=user.profile,
             publications=publications,
@@ -179,6 +184,7 @@ async def admin_jobs(
         _template_context(
             request,
             current_user,
+            active_admin="jobs",
             jobs=jobs,
             counts=counts,
             status_filter=status_filter,
@@ -224,6 +230,7 @@ async def admin_activity(
         _template_context(
             request,
             current_user,
+            active_admin="activity",
             runs=runs,
             total_runs=len(runs),
             total_messages=total_messages,
@@ -289,6 +296,7 @@ async def admin_activity_detail(
         _template_context(
             request,
             current_user,
+            active_admin="activity",
             run=run,
             messages=messages,
             channels=channels,
@@ -381,6 +389,7 @@ async def admin_llm_calls(
         _template_context(
             request,
             current_user,
+            active_admin="activity",
             run=run,
             logs=logs,
             total_count=total_count,
