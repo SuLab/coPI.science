@@ -4,46 +4,62 @@
 
 ## Research Summary
 
-The Grotjahn lab investigates the molecular mechanisms underlying mitochondrial dynamics and quality control using cutting-edge cryo-electron tomography (cryo-ET) and integrative structural biology approaches. A central focus of the lab is understanding how mitochondria undergo fission, fusion, and morphological remodeling in both healthy and disease-relevant cellular contexts. By leveraging in situ cryo-ET, the lab visualizes mitochondrial ultrastructure and the macromolecular complexes that govern mitochondrial membrane architecture at near-molecular resolution within intact cells. Recent work has provided unprecedented structural insights into mitochondrial fission machinery, including the roles of dynamin-related GTPases such as DRP1 and mitofusins (MFN1/MFN2) in shaping mitochondrial membranes. The lab combines cryo-focused ion beam (cryo-FIB) milling with cryo-ET to capture snapshots of mitochondrial remodeling events in cellulo, complemented by correlative light and electron microscopy (CLEM) to link dynamic cellular events to high-resolution structural data. Computational approaches including subtomogram averaging and neural network-based segmentation are integral to the lab's workflow. The Grotjahn lab is now extending these approaches to investigate how defects in mitochondrial dynamics contribute to neurodegeneration and other diseases, bridging the gap between structural cell biology and human pathology.
+The Grotjahn lab investigates the structural and functional organization of cellular organelles, with a primary focus on mitochondrial dynamics and membrane architecture, using cryo-electron tomography (cryo-ET) as a central imaging platform. The lab has developed and refined the Surface Morphometrics pipeline, an open-source computational framework for quantifying organellar membrane ultrastructure—including curvature, spacing, and thickness—from cryo-ET data. Recent work has revealed how cytoplasmic ribosomes cluster on the outer mitochondrial membrane at sites of local constriction to facilitate co-translational protein import in Saccharomyces cerevisiae, establishing the first subtomogram average of a ribosome at the mitochondrial surface in its native cellular context. The lab also investigates stress-responsive signaling pathways that regulate mitochondrial morphology, demonstrating that pharmacologic activation of integrated stress response (ISR) kinases HRI and GCN2 can prevent pathologic mitochondrial fragmentation in patient-derived fibroblasts harboring disease-associated MFN2 variants. Complementary work has uncovered mechanisms linking mitochondrial DNA replication stress to innate immune activation via an endosomal nucleoid disposal pathway involving cGAS-STING signaling. Additional collaborative projects span flavivirus replication organelle architecture, polyphosphate-DNA condensate biophysics, and deep learning-based segmentation and foundation models for biological image and transcriptomic analysis. Together, this research program bridges structural cell biology, organelle quality control, and computational image analysis.
 
 ## Key Methods and Technologies
 
-- cryo-electron tomography (cryo-ET)
-- cryo-focused ion beam (cryo-FIB) milling
-- subtomogram averaging
-- correlative light and electron microscopy (CLEM)
-- cryo-electron microscopy (cryo-EM) single particle analysis
-- neural network-based tomogram segmentation
-- 3D reconstruction and visualization of cellular ultrastructure
-- fluorescence microscopy for mitochondrial dynamics
-- integrative structural modeling
-- cell culture and sample vitrification for cryo-ET
+- Cellular cryo-electron tomography (cryo-ET)
+- Subtomogram averaging and alignment (RELION-based)
+- Surface morphometrics pipeline for membrane ultrastructure quantification
+- Deep learning-based segmentation of cryo-ET data
+- Cryo-fluorescence microscopy (cryo-CLEM)
+- Surface mesh reconstruction and geometric analysis of membranes
+- Membrane thickness measurement from cryo-ET bilayer head group distances
+- Template matching for particle localization in tomograms
+- Tomogram reconstruction (SART-based)
+- Fluorescence microscopy for mitochondrial network morphology assessment
+- Patient fibroblast culture and pharmacologic perturbation assays
+- Exome sequencing and bioinformatic variant analysis
+- Whole blood and tissue DNA extraction and sequencing
+- Single-cell RNA-seq foundation model development (scLong)
 
 ## Model Systems
 
-- mammalian cell lines (e.g., HeLa, COS-7, HEK293)
-- MFN2-deficient and DRP1-knockout cell lines
-- in vitro reconstituted membrane systems
-- primary neuronal cultures
-- cryo-ET-compatible thin cellular specimens
+- Saccharomyces cerevisiae (for in situ cryo-ET of mitochondrial ribosome interactions)
+- Mammalian cell lines (cryo-ET of mitochondrial dynamics and constriction)
+- Patient-derived fibroblasts expressing MFN2 D414V pathogenic variant
+- TFAM-depleted cells (mtDNA replication stress model)
+- Human neuroblastoma SK-N-SH cells (flavivirus infection model)
+- HeLa and U2OS cells (mitochondrial dynamics and ER stress studies)
+- Mouse brain tissue (cryo-ET of flavivirus replication)
+- In vitro reconstituted polyphosphate-Mg2+-DNA condensate systems
+- Purified Escherichia coli 70S ribosomes (EMPIAR-10304 dataset)
+- Zebrafish embryos (hecate/grip2a axis induction studies)
 
 ## Disease Areas / Biological Processes
 
-- mitochondrial dynamics and morphology
-- neurodegeneration
-- Charcot-Marie-Tooth disease type 2A (CMT2A)
-- mitochondrial quality control and mitophagy
-- cellular stress responses
+- Neurodegenerative disorders associated with mitochondrial fragmentation
+- MFN2-related neurological disease (ataxia, optic atrophy, sensorineural hearing loss)
+- Mitochondrial dysfunction and quality control
+- Innate immune activation and sterile inflammation (cGAS-STING pathway)
+- ER stress-related pathology
+- Tick-borne encephalitis virus (flavivirus) infection
+- Herpes simplex virus-1 infection and mtDNA-mediated immune signaling
 
 ## Key Molecular Targets
 
-- DRP1 (dynamin-related protein 1)
-- MFN1 (mitofusin 1)
-- MFN2 (mitofusin 2)
-- OPA1 (optic atrophy protein 1)
-- mitochondrial outer membrane complexes
-- mitochondrial cristae junction complexes (MICOS)
+- MFN2 (mitofusin 2, pro-fusion mitochondrial GTPase)
+- PERK (eIF2α kinase, UPR signaling)
+- HRI (eIF2α kinase, integrated stress response)
+- GCN2 (eIF2α kinase, integrated stress response)
+- TFAM (transcription factor A, mitochondrial)
+- PRELID1 (intramitochondrial phosphatidic acid transporter)
+- YME1L (mitochondrial i-AAA protease)
+- cGAS-STING (innate immune DNA sensing pathway)
+- Phosphatidic acid (outer mitochondrial membrane lipid regulating fission)
+- Actin and septin filaments (mitochondrial constriction factors)
+- eIF2α (integrated stress response effector)
 
 ## Keywords
 
-in situ structural biology, mitochondrial fission, mitochondrial fusion, cryo-electron tomography, membrane remodeling, organelle dynamics, structural cell biology, dynamin superfamily GTPases, cellular cryo-ET workflows
+cryo-electron tomography, mitochondrial dynamics, membrane ultrastructure, surface morphometrics, subtomogram averaging, organellar membrane curvature, mitochondrial fission and fusion, co-translational protein import, integrated stress response, unfolded protein response, deep learning segmentation, mitochondrial DNA replication stress, nucleoid dynamics, phospholipid remodeling, cryo-CLEM, membrane thickness quantification

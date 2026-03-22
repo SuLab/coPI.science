@@ -6,53 +6,70 @@
 
 ## Research Summary
 
-The Su lab at The Scripps Research Institute develops computational infrastructure and knowledge integration platforms to accelerate biomedical discovery. A central theme is the creation of scalable, open-access tools for aggregating and harmonizing heterogeneous biomedical data, exemplified by the BioThings SDK for building high-performance annotation APIs (MyGene.info, MyVariant.info, MyChem.info) and the BioThings Explorer for federated knowledge graph queries across biomedical APIs. The lab has been a major contributor to the NCATS Biomedical Data Translator Consortium, developing standards such as the Biolink Model for knowledge graph interoperability and building question-answering systems for translational research. Community-driven curation is another key focus, with projects leveraging Wikidata as a FAIR-compliant knowledge graph for life sciences and tools like WikiGenomes and Gene Wiki for crowdsourced gene annotation. During the COVID-19 pandemic, the lab created outbreak.info, a platform for real-time genomic surveillance of SARS-CoV-2 variants and a standardized research library for COVID-19 resources. Additional work includes drug repurposing using knowledge graphs and insurance claims data, particularly for Alzheimer's disease, and contributions to the NIAID Data Ecosystem Discovery Portal for infectious disease dataset discoverability. The lab also maintains collaborations in metaproteomics, extracellular RNA analysis, and immune-mediated disease genomics.
+The Su lab at The Scripps Research Institute develops and applies computational infrastructure for biomedical knowledge integration, with a focus on knowledge graphs, biomedical APIs, and data-driven drug repositioning. A central contribution is the BioThings ecosystem, including the BioThings SDK for building high-performance biomedical data APIs and BioThings Explorer, a federated knowledge graph query engine that chains over sixty biomedical web services to enable multi-step reasoning without centralized data storage. The lab has applied these tools to drug repurposing through knowledge graph completion methods, culminating in resources such as DrugMechDB, a curated database of drug mechanism paths, and MechRepoNet, a heterogeneous knowledge graph designed to capture mechanistic drug-disease relationships. Recent work integrates large language models with federated knowledge retrieval (BTE-RAG), substantially improving factual accuracy in biomedical question answering. The lab has been a core contributor to the NCATS Biomedical Data Translator Consortium and the Biolink Model for standardizing knowledge graph schemas. During the COVID-19 pandemic, the lab developed Outbreak.info for real-time genomic surveillance and research resource discovery. Additional efforts include promoting FAIR data practices through Schema.org-based metadata standards, crowdsourced biomedical curation via Wikidata and the Gene Wiki project, and citizen science approaches to relationship extraction from biomedical literature. The lab also contributes to the NIAID Data Ecosystem Discovery Portal and the Consortium for Viral Systems Biology.
 
 ## Key Methods and Technologies
 
 - Knowledge graph construction and querying
-- Biomedical API development using BioThings SDK
-- Federated knowledge graph integration (BioThings Explorer)
-- Schema.org-based metadata harmonization and crawling
-- FAIR data standardization and metadata schema development
-- Crowdsourced curation via Wikidata and wiki-based platforms
-- Drug repurposing using knowledge graphs and claims data analysis
-- SARS-CoV-2 genomic surveillance and lineage tracking pipelines
-- Open innovation competitions for algorithm development
-- Computational deconvolution of extracellular RNA profiles
-- Insurance claims data mining for pharmacoepidemiological associations
-- RNA sequencing data analysis and integration
+- Graph neural networks for link prediction and drug repositioning (e.g., DBR-X)
+- Knowledge graph embedding methods for drug-disease association prediction
+- Retrieval-augmented generation (RAG) with large language models
+- Federated API query chaining via BioThings Explorer
+- High-performance biomedical API development using BioThings SDK
+- Schema.org-based metadata standardization and harmonization
+- Biomedical natural language processing and text mining
+- Citizen science-based relationship extraction from biomedical abstracts (Mark2Cure)
+- SARS-CoV-2 genomic surveillance and lineage tracking (Outbreak.info)
+- Maximum likelihood phylogenetic inference (IQ-TREE, MAFFT alignment)
+- Automated Wikidata bot development for knowledge synchronization
+- Shape Expressions for entity schema modeling
+- Insurance claims data mining for drug-disease association studies
+- Crowdsourced biomedical ontology curation
 
 ## Model Systems
 
-- Wikidata knowledge graph
-- BioThings APIs (MyGene.info
-- MyVariant.info
-- MyChem.info)
-- GISAID SARS-CoV-2 genome database
-- NCATS Biomedical Data Translator system
+- BioThings Explorer federated knowledge graph
+- DrugMechDB curated drug mechanism database
+- MechRepoNet heterogeneous biomedical knowledge graph
+- Biolink Model standardized knowledge graph schema
+- Wikidata as a biomedical knowledge graph
+- GISAID SARS-CoV-2 genomic sequence database
+- Outbreak.info COVID-19 research library and genomic reports platform
 - NIAID Data Ecosystem Discovery Portal
-- exRNA Atlas (extracellular RNA profiling resource)
-- Google Dataset Search and Schema.org metadata ecosystem
-- PubMed biomedical literature corpus
-- Genotype-Tissue Expression (GTEx) database
-- CIViC knowledgebase for clinical interpretation of cancer variants
-- outbreak.info platform (genomic reports and research library)
+- Schema Playground and Data Discovery Engine
+- BioGPS gene annotation portal
+- Gene Wiki / Wikipedia-based gene annotation system
+- Blue Cross-Blue Shield Axis commercial insurance claims database
+- TCGA (The Cancer Genome Atlas) gene expression and survival datasets
+- GTEx (Genotype-Tissue Expression) RNA-seq database
 
 ## Disease Areas / Biological Processes
 
+- Drug repositioning and repurposing
+- Alzheimer's disease
 - COVID-19 and SARS-CoV-2 genomic epidemiology
-- Alzheimer's disease (drug repurposing)
 - Infectious and immune-mediated diseases
 - Type 1 diabetes
-- Osteoarthritis
-- Inflammatory bowel disease
-- Cancer precision medicine (variant interpretation)
+- Ulcerative colitis
 - Rare diseases
+- Osteoarthritis
+- Cancer (pan-cancer genomic and transcriptomic analysis)
+- Fanconi anemia
+- Drug-induced liver injury
+
+## Key Molecular Targets
+
+- DrugMechDB drug mechanism paths
+- Biolink Model predicates and categories
+- Aminoacyl-tRNA synthetases (aaRSs) in cancer
+- Mohawk (MKX) transcription factor in meniscus
+- Serine-type endopeptidases in gut microbiome
+- SARS-CoV-2 proteome and genome
+- Insulin-reactive CD4 T cells in type 1 diabetes
 
 ## Keywords
 
-FAIR data principles, open science, knowledge graphs, biomedical data integration, crowdsourced curation, drug repurposing, application programming interfaces, Schema.org, Biomedical Data Translator Consortium, Consortium for Viral Systems Biology, data harmonization, translational bioinformatics
+FAIR data principles, Biomedical Data Translator Consortium, Consortium for Viral Systems Biology (CViSB), Knowledge graph completion, Federated knowledge integration, Open science, Crowdsourcing, Metadata harmonization, Schema.org, Gene annotation, API federation, Computational drug repositioning, Explainable AI in biomedicine, Genomic surveillance, Biomedical ontologies
 
 ## Active Grants
 

@@ -6,40 +6,41 @@
 
 ## Research Summary
 
-The Lotz laboratory at The Scripps Research Institute investigates the molecular mechanisms underlying joint aging, osteoarthritis (OA) pathogenesis, and cartilage biology, with a particular emphasis on transcription factor networks that govern tissue homeostasis and degeneration. A central theme of the lab's work is the role of FoxO transcription factors in joint aging and osteoarthritis, extending this framework to intervertebral disc aging and degeneration. Complementary studies examine KLF4 as a regulator of joint degradation and regeneration, providing insight into transcriptional programs that balance catabolic and anabolic processes in cartilage and related tissues. Recent efforts have embraced high-resolution and integrative approaches, including 3D mapping of cellular heterogeneity within mineralized tissues and integrative multi-omics analysis of human cartilage across aging and OA progression. These studies aim to define the molecular taxonomy of chondrocyte subpopulations and identify disease-driving cell states. A newer research direction involves mapping the joint-nerve interactome of the knee, reflecting an interest in neuro-articular crosstalk that may underlie OA-associated pain and joint dysfunction. Collectively, this research program integrates transcriptomics, spatial biology, and molecular genetics to elucidate fundamental mechanisms of joint homeostasis and disease, with translational implications for developing targeted therapies for osteoarthritis and age-related musculoskeletal disorders.
+The Lotz laboratory at The Scripps Research Institute investigates the molecular and cellular mechanisms underlying joint aging, osteoarthritis (OA), and intervertebral disc degeneration. A central theme of the lab's research is understanding how transcription factors—particularly the FoxO family and KLF4—regulate cartilage homeostasis, joint degradation, and regenerative processes. The lab has established that FoxO transcription factors serve as critical regulators of both joint aging and OA pathogenesis, and has extended this work to intervertebral disc biology, where FoxO signaling influences age-related disc degeneration. Complementing these mechanistic studies, the lab employs integrative multi-omics approaches to characterize human cartilage changes during aging and OA progression, leveraging transcriptomic, proteomic, and epigenomic datasets to define molecular signatures of disease. Recent efforts include high-resolution three-dimensional mapping of cellular heterogeneity within mineralized tissues, providing spatial context for understanding how distinct cell populations contribute to tissue remodeling and degeneration. Additionally, the lab is pioneering work on the joint-nerve interactome of the knee, mapping the complex interactions between articular tissues and peripheral innervation that drive pain and joint dysfunction. Together, these research programs integrate molecular biology, advanced imaging, spatial omics, and computational analysis to develop a comprehensive understanding of joint biology and identify novel therapeutic targets for degenerative joint diseases.
 
 ## Key Methods and Technologies
 
-- Integrative multi-omics analysis (transcriptomics, proteomics, metabolomics)
-- Single-cell RNA sequencing (scRNA-seq) of cartilage and joint tissues
-- High-resolution 3D imaging and spatial mapping of mineralized tissues
-- Conditional and tissue-specific gene knockout mouse models
-- Histological and immunohistochemical analysis of joint tissues
-- Bulk RNA-seq and gene expression profiling
+- Integrative multi-omics analysis (transcriptomics, proteomics, epigenomics)
+- High-resolution 3D tissue mapping of mineralized tissues
+- Single-cell RNA sequencing (scRNA-seq) for cellular heterogeneity profiling
+- Spatial transcriptomics
+- Immunohistochemistry and histomorphometry of joint tissues
+- Conditional and tissue-specific knockout mouse models
+- Gene expression profiling of cartilage and intervertebral disc
+- Confocal and advanced fluorescence imaging of joint tissues
 - Interactome mapping of joint-nerve signaling networks
-- Chromatin and transcription factor binding analyses
-- In vitro chondrocyte culture and functional assays
-- Bioinformatic integration of multi-omics datasets
+- Computational integration of multi-omics datasets
 
 ## Model Systems
 
 - Human articular cartilage explants (aging and OA specimens)
 - Human intervertebral disc tissue
-- FoxO conditional knockout mice (joint and disc-specific)
-- KLF4 knockout and transgenic mouse models
-- Murine models of osteoarthritis (surgical and aging models)
+- FoxO conditional knockout mice
+- KLF4 conditional knockout and overexpression mouse models
+- Murine models of osteoarthritis (surgical destabilization, aging)
 - Primary human chondrocytes
-- Murine knee joint tissues for neuro-articular interactome studies
-- Mineralized tissue specimens for 3D cellular heterogeneity mapping
+- Murine knee joint tissues for nerve-joint interactome studies
+- Mineralized tissue specimens (bone, calcified cartilage)
 
 ## Disease Areas / Biological Processes
 
 - Osteoarthritis
 - Joint aging
 - Intervertebral disc degeneration
-- Cartilage degradation and repair
-- Age-related musculoskeletal disorders
-- OA-associated pain and neuro-articular dysfunction
+- Cartilage degeneration and repair
+- Joint pain and peripheral innervation
+- Degenerative joint disease
+- Musculoskeletal aging
 
 ## Key Molecular Targets
 
@@ -48,12 +49,12 @@ The Lotz laboratory at The Scripps Research Institute investigates the molecular
 - Cartilage extracellular matrix components (aggrecan, type II collagen)
 - Matrix metalloproteinases (MMPs)
 - ADAMTS family proteases
-- Joint-nerve interactome signaling molecules
-- Autophagy and cellular senescence pathways in chondrocytes
+- Joint-nerve signaling mediators
+- Autophagy and cell survival pathways in chondrocytes
 
 ## Keywords
 
-Chondrocyte heterogeneity, Joint homeostasis, Cartilage aging, Transcriptional regulation in musculoskeletal tissues, Spatial transcriptomics, Mineralized tissue biology, Neuro-articular crosstalk, Regenerative joint biology, Multi-omics integration, Age-related cartilage degeneration
+Cartilage biology, Joint homeostasis, Chondrocyte senescence, Tissue mineralization, Cellular heterogeneity, 3D tissue architecture, Knee joint innervation, Transcription factor regulation, Age-related musculoskeletal disease, Regenerative medicine
 
 ## Active Grants
 

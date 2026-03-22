@@ -6,42 +6,62 @@
 
 ## Research Summary
 
-The Ken lab at Scripps Research Institute investigates the structural and functional principles governing RNA biology, with a particular emphasis on understanding how complex RNA structures are selectively recognized by small molecules and how viral RNA behavior can be predicted through computational modeling. The lab operates at the interface of structural biology, computational chemistry, and RNA biology, developing predictive frameworks that connect RNA three-dimensional structure to its cellular function and druggability. A central thrust of the research program involves deciphering the molecular determinants that enable selective small molecule binding to structured RNAs, which has significant implications for expanding the druggable genome beyond traditional protein targets. Complementary efforts focus on modeling viral RNA cellular behavior, integrating structural and computational approaches to understand how viral RNA elements fold, interact with host factors, and regulate viral life cycles. By combining integrative structural methods with computational modeling, the lab aims to establish general principles for RNA-targeted therapeutic design and to advance fundamental understanding of RNA structure-function relationships in both viral and cellular contexts. This work bridges basic RNA biology with translational drug discovery efforts targeting RNA.
+The Ken lab at Scripps Research Institute investigates the relationship between RNA structural dynamics and cellular function, with a particular emphasis on developing predictive models that bridge in vitro RNA ensemble characterization to in vivo biological activity. Central to the lab's research program is the concept that RNAs exist as dynamic ensembles of conformational states, including low-abundance excited states, and that the relative populations of these states determine functional outcomes in cells. Using a combination of NMR spectroscopy, molecular dynamics simulations, and cell-based functional assays, the lab has demonstrated that RNA conformational propensities measured in vitro can predict cellular activity, as exemplified by landmark studies on HIV-1 TAR and RRE regulatory elements. A major translational thrust involves RNA-targeted drug discovery, where the lab pioneers ensemble-based virtual screening approaches that leverage high-resolution dynamic RNA structures to identify small molecules that selectively bind specific RNA conformations. Recent work extends these strategies to SARS-CoV-2 RNA elements, integrating computational structural modeling with NMR-based screening. The lab also addresses critical challenges in RNA drug discovery, including understanding and minimizing nonspecific small molecule-RNA interactions. Complementary computational efforts include optimizing crosslink-ligation sequencing data analysis and coarse-grained RNA simulations, advancing both experimental and computational methodologies for characterizing RNA structure and dynamics.
 
 ## Key Methods and Technologies
 
-- Predictive computational modeling of RNA structure
-- Small molecule-RNA docking and binding prediction
-- Integrative structural biology approaches for RNA
-- Structure-based drug design targeting RNA
-- Molecular dynamics simulations of RNA-ligand interactions
-- RNA structure prediction and modeling
-- Cheminformatics for RNA-targeted small molecule libraries
-- High-throughput screening for RNA-binding small molecules
+- NMR spectroscopy for RNA structure determination and chemical shift mapping
+- Molecular dynamics simulations of RNA ensembles
+- Ensemble-based virtual screening for RNA-targeted drug discovery
+- In vitro transcription and denaturing PAGE purification of RNA
+- Cryo-electron microscopy of RNA constructs
+- FARFAR2 (Fragment Assembly of RNA with Full-Atom Refinement 2) computational RNA structure prediction
+- High-throughput screening of small molecule libraries against RNA targets
+- NMR-based fragment screening for RNA-binding compounds
+- Temperature replica exchange Langevin dynamics simulations
+- Coarse-grained RNA simulations (TOPRNA model)
+- Cell-based functional assays for RNA activity (TAR-dependent transactivation, RRE-dependent viral export)
+- Crosslink-ligation sequencing data analysis with optimized STAR mapping
+- Chemical mapping of RNA structure
+- Anion-exchange chromatography for RNA purification
+- Isotopic labeling of RNA (13C/15N) for NMR studies
 
 ## Model Systems
 
-- Viral RNA structural elements
-- Complex structured RNAs
-- Small molecule-RNA complexes
-- In vitro reconstituted RNA systems
+- HIV-1 transactivation response element (TAR) RNA
+- HIV-1 Rev response element stem IIB (RREIIB) RNA
+- SARS-CoV-2 frameshift stimulation element (FSE) RNA
+- SARS-CoV-2 5' UTR RNA elements
+- Fluoride riboswitch aptamer and mutants
+- Mitochondrial tRNA-Ser (mt-tRNA Ser) wild-type and mutants
+- Canonical stem-loop RNA constructs for nonspecific binding studies
+- HEK293 cells (crosslink-ligation sequencing datasets)
+- Mouse embryonic stem cells (mES, sequencing datasets)
+- PDB structural database (RNA-small molecule and RNA-Mg2+ complexes)
+- In vitro reconstituted RNA-small molecule complexes
 
 ## Disease Areas / Biological Processes
 
-- Viral infections
+- HIV-1 infection
+- SARS-CoV-2 / COVID-19
 - RNA-targeted drug discovery
-- RNA structure-function relationships
+- RNA conformational dynamics and gene regulation
+- Viral RNA biology
 
 ## Key Molecular Targets
 
-- Viral RNA regulatory elements
-- Structured non-coding RNAs
-- RNA small molecule binding sites
-- Complex RNA tertiary structures
+- HIV-1 TAR RNA
+- HIV-1 RRE RNA
+- SARS-CoV-2 frameshift stimulation element
+- RNA excited conformational states
+- Tat-TAR protein-RNA interaction
+- Rev-RRE protein-RNA interaction
+- Fluoride riboswitch
+- Small molecule-RNA binding interfaces
 
 ## Keywords
 
-RNA druggability, RNA-small molecule interactions, Viral RNA biology, Selective RNA recognition, Integrative structural biology, Computational RNA biology, RNA therapeutics, Structure-based RNA targeting
+RNA ensembles, RNA conformational equilibria, RNA structural dynamics, structure-based drug design, virtual screening, RNA excited states, NMR chemical shift perturbation, RNA free energy landscapes, nonspecific RNA binding, RNA secondary structure remodeling, coarse-grained modeling, RNA-small molecule interactions, conformational selection
 
 ## Active Grants
 

@@ -6,44 +6,51 @@
 
 ## Research Summary
 
-The Racki lab investigates the molecular mechanisms underlying chromatin remodeling and bacterial stress responses, with a particular focus on how ATP-dependent enzymes reorganize nucleosome structure and how bacteria adapt to starvation conditions. Early independent work characterized the dimeric motor mechanism of the chromatin remodeling complex ACF, demonstrating that two ATPase subunits cooperate to achieve processive bidirectional nucleosome sliding — a mechanism distinct from classical dimeric motors like kinesin. Complementary structural and biophysical studies revealed how the histone H4 tail regulates ATPase activity by promoting closure of the ATP-binding pocket in the SNF2h remodeling enzyme, providing insight into how substrate recognition is coupled to catalytic activation. More recently, the lab has shifted focus toward understanding polyphosphate granule biogenesis in bacteria, using quantitative high-resolution microscopy to demonstrate that granule formation is temporally and functionally linked to cell cycle exit during starvation. This work connects fundamental questions about bacterial quiescence and stress resistance to the ancient and conserved polyphosphate metabolism pathway. Across these research areas, the lab employs a combination of quantitative imaging, electron microscopy, electron paramagnetic resonance spectroscopy, and biochemical reconstitution to address mechanistic questions about macromolecular dynamics and cellular adaptation.
+The Racki lab investigates the biophysical and cellular functions of polyphosphate (polyP), an ancient inorganic biopolymer found across all domains of life, with a focus on its role in bacterial chromatin organization and stress responses. Using the opportunistic pathogen Pseudomonas aeruginosa as a primary model, the lab has revealed that polyP granule biogenesis is temporally coupled to cell cycle exit during nitrogen starvation and that the histone H1-like protein AlgP facilitates the even spacing of polyP granules along the cell axis. More recent work has uncovered how polyP condensates interact with DNA through magnesium-mediated reentrant phase behavior, forming DNA shells that tune condensate size—establishing a minimal physical framework for understanding polyP-nucleoid interactions. The lab has also demonstrated that polyP affects global cytoplasmic dynamics and chromosomal organization under starvation conditions, suggesting that this simple polyanion exerts broad biophysical effects on the bacterial cell. Prior to establishing an independent program, Dr. Racki contributed to the mechanistic understanding of ATP-dependent chromatin remodeling, elucidating how the ISWI-class remodeler ACF functions as a dimeric motor to establish nucleosome spacing and how the histone H4 tail regulates ATPase activity. The lab integrates quantitative fluorescence microscopy, biophysical reconstitution, and genetic approaches to bridge molecular mechanisms with cellular-scale organization.
 
 ## Key Methods and Technologies
 
-- electron paramagnetic resonance (EPR) spectroscopy with spin-labeled nucleotide analogs
-- single-particle electron microscopy and 3D reconstruction
-- quantitative fluorescence microscopy at high spatial and temporal resolution
-- nucleosome reconstitution and chromatin assembly in vitro
-- site-specific installation of methyl-lysine analogs into recombinant histones
-- ATPase activity assays for chromatin remodeling enzymes
-- chemical protein modification and spin labeling
-- time-resolved imaging of bacterial granule biogenesis
+- Quantitative fluorescence microscopy of live bacterial cells
+- Phase contrast and epifluorescence imaging with Nikon Ti2-E microscope
+- Polyphosphate granule enrichment and proteomic screening
+- Bacterial genetics including targetron mutagenesis and gene deletions
+- In vitro reconstitution of polyP-DNA-Mg²⁺ condensate systems
+- Reentrant phase behavior and condensate characterization
+- Electron paramagnetic resonance (EPR) spectroscopy with spin-labeled nucleotide analogs
+- Single-particle electron microscopy and 3D reconstruction
+- Rhamnose- and arabinose-inducible expression systems in bacteria
+- Agarose pad live-cell imaging under defined starvation conditions
+- Recombinant histone purification and chemical installation of methyl-lysine analogs
+- Nucleosome remodeling assays (in vitro ATPase and translocation assays)
 
 ## Model Systems
 
-- Reconstituted nucleosomes with recombinant histones
-- ACF and SNF2h chromatin remodeling complexes
-- Pseudomonas syringae-infected Arabidopsis thaliana
-- Bacterial starvation and quiescence models
-- Rabbit skeletal muscle actin and myosin preparations
-- Drosophila indirect flight muscle fibers
+- Pseudomonas aeruginosa (wild-type and polyP-deficient mutants)
+- Pseudomonas aeruginosa AlgP deletion and truncation mutants
+- Escherichia coli HMS174(DE3) and derivative ppk/ppx/relA mutants
+- Escherichia coli Keio deletion collection strains
+- In vitro reconstituted polyP-Mg²⁺-DNA condensate systems
+- Recombinant nucleosome substrates with methyl-lysine analogs
+- Reconstituted ACF chromatin remodeling complexes with mononucleosomes
 
 ## Disease Areas / Biological Processes
 
-- Chromatin regulation and gene silencing
-- Bacterial stress responses and quiescence
+- Bacterial stress and starvation responses
+- Pseudomonas aeruginosa pathogenesis
+- Bacterial chromatin organization and nucleoid biology
+- Biomolecular condensate biology
 - Polyphosphate metabolism
-- Epigenetic regulation of chromatin structure
 
 ## Key Molecular Targets
 
-- SNF2h (SMARCA5) ATPase
-- ACF (ATP-dependent chromatin assembly factor) complex
-- ISWI-class chromatin remodeling enzymes
+- Polyphosphate (polyP)
+- Polyphosphate kinase (Ppk)
+- AlgP (histone H1-like protein in P. aeruginosa)
+- Ppk2B
+- SNF2h/ISWI chromatin remodeling ATPase
+- ACF (ATP-dependent chromatin assembly factor)
 - Histone H4 N-terminal tail
-- Polyphosphate kinase and polyphosphate granules
-- Methyl-lysine histone modifications (H3K4me, H3K9me, H3K27me)
 
 ## Keywords
 
-nucleosome spacing, ATP-dependent chromatin remodeling, dimeric motor mechanism, polyphosphate granule biogenesis, bacterial starvation response, histone posttranslational modifications, DExx box helicase superfamily, substrate-coupled ATPase activation, biophysical spectroscopy
+polyphosphate granules, bacterial nucleoid, phase separation, reentrant condensation, magnesium-mediated interactions, nitrogen starvation, cell cycle exit, nucleosome spacing, chromatin remodeling, biopolymer condensates, subcellular organization, cytoplasmic dynamics
