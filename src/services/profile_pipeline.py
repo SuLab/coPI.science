@@ -26,6 +26,7 @@ from src.models import Job, Publication, ResearcherProfile, User
 from src.services.llm import synthesize_profile
 from src.services.orcid import fetch_orcid_grants, fetch_orcid_profile, fetch_orcid_works
 from src.services.pubmed import (
+    convert_dois_to_pmids,
     convert_pmids_to_pmcids,
     fetch_pmc_methods,
     fetch_pubmed_records,
@@ -106,6 +107,37 @@ async def run_profile_pipeline(
 
     # Extract PMIDs for works that have them
     pmids = [w["pmid"] for w in orcid_works if w.get("pmid")]
+
+    # Resolve DOIs → PMIDs for works that only have DOIs
+    doi_only_works = [w for w in orcid_works if not w.get("pmid") and w.get("doi")]
+    if doi_only_works:
+        # Deduplicate DOIs (ORCID often lists the same work multiple times)
+        seen_dois: set[str] = set()
+        unique_doi_works: list[dict] = []
+        for w in doi_only_works:
+            if w["doi"] not in seen_dois:
+                seen_dois.add(w["doi"])
+                unique_doi_works.append(w)
+        doi_only_works = unique_doi_works
+
+        update_progress(
+            "doi_resolve",
+            f"Resolving {len(doi_only_works)} DOIs to PMIDs...",
+        )
+        try:
+            dois = [w["doi"] for w in doi_only_works]
+            doi_to_pmid = await convert_dois_to_pmids(dois)
+            for w in doi_only_works:
+                resolved_pmid = doi_to_pmid.get(w["doi"])
+                if resolved_pmid:
+                    w["pmid"] = resolved_pmid
+                    pmids.append(resolved_pmid)
+            logger.info(
+                "DOI→PMID resolution: %d/%d resolved",
+                len(doi_to_pmid), len(doi_only_works),
+            )
+        except Exception as exc:
+            logger.warning("DOI→PMID resolution failed: %s", exc)
 
     if len(pmids) < 5:
         update_progress(

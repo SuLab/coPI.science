@@ -181,5 +181,32 @@ def list_users():
     _run(_list())
 
 
+@app.command(name="regenerate-profiles")
+def regenerate_profiles():
+    """Enqueue profile regeneration jobs for all users with an ORCID."""
+    async def _regenerate():
+        from sqlalchemy import select
+        from src.models import Job, User
+        engine, factory = await _get_db()
+        async with factory() as db:
+            result = await db.execute(select(User).where(User.orcid.isnot(None)))
+            users = result.scalars().all()
+            count = 0
+            for user in users:
+                job = Job(
+                    type="generate_profile",
+                    user_id=user.id,
+                    payload={"user_id": str(user.id), "orcid": user.orcid},
+                )
+                db.add(job)
+                count += 1
+                console.print(f"[green]Enqueued regeneration for {user.name} ({user.orcid})[/green]")
+            await db.commit()
+            console.print(f"\n[bold green]Enqueued {count} profile regeneration jobs.[/bold green]")
+        await engine.dispose()
+
+    _run(_regenerate())
+
+
 if __name__ == "__main__":
     app()

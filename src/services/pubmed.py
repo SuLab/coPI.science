@@ -12,7 +12,7 @@ from src.config import get_settings
 logger = logging.getLogger(__name__)
 
 EUTILS_BASE = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
-IDCONV_BASE = "https://www.ncbi.nlm.nih.gov/pmc/utils/idconv/v1.0"
+IDCONV_BASE = "https://pmc.ncbi.nlm.nih.gov/tools/idconv/api/v1/articles"
 
 # Rate limiting: with API key 10/s, without 3/s
 _request_semaphore = asyncio.Semaphore(8)  # Conservative limit
@@ -24,7 +24,7 @@ async def _ncbi_get(url: str, params: dict[str, Any]) -> httpx.Response:
     if settings.ncbi_api_key:
         params["api_key"] = settings.ncbi_api_key
     async with _request_semaphore:
-        async with httpx.AsyncClient(timeout=60) as client:
+        async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
             resp = await client.get(url, params=params)
             resp.raise_for_status()
             await asyncio.sleep(0.12)  # ~8 req/s
@@ -131,6 +131,56 @@ def _parse_pubmed_xml(xml_text: str) -> list[dict[str, Any]]:
     return results
 
 
+async def convert_dois_to_pmids(dois: list[str]) -> dict[str, str]:
+    """
+    Convert DOIs to PMIDs. First tries NCBI ID converter (batch, but PMC-only),
+    then falls back to PubMed ESearch for unresolved DOIs.
+    Returns dict of {doi: pmid}.
+    """
+    if not dois:
+        return {}
+
+    mapping = {}
+
+    # Phase 1: NCBI ID converter (batch — only finds PMC-indexed papers)
+    for i in range(0, len(dois), 200):
+        batch = dois[i : i + 200]
+        try:
+            params = {"ids": ",".join(batch), "format": "json"}
+            resp = await _ncbi_get(IDCONV_BASE, params)
+            data = resp.json()
+            for record in data.get("records", []):
+                if record.get("status") == "error":
+                    continue
+                doi = record.get("doi")
+                pmid = record.get("pmid")
+                if doi and pmid:
+                    mapping[doi] = str(pmid)
+        except Exception as exc:
+            logger.warning("Failed batch DOI→PMID via ID converter: %s", exc)
+
+    # Phase 2: PubMed ESearch for remaining DOIs
+    remaining = [d for d in dois if d not in mapping]
+    if remaining:
+        logger.info("Resolving %d remaining DOIs via PubMed ESearch", len(remaining))
+        for doi in remaining:
+            try:
+                params = {
+                    "db": "pubmed",
+                    "term": f"{doi}[doi]",
+                    "retmode": "json",
+                }
+                resp = await _ncbi_get(f"{EUTILS_BASE}/esearch.fcgi", params)
+                data = resp.json()
+                id_list = data.get("esearchresult", {}).get("idlist", [])
+                if id_list:
+                    mapping[doi] = id_list[0]
+            except Exception as exc:
+                logger.debug("ESearch DOI lookup failed for %s: %s", doi, exc)
+
+    return mapping
+
+
 async def convert_pmids_to_pmcids(pmids: list[str]) -> dict[str, str]:
     """
     Convert PMIDs to PMCIDs using NCBI ID converter.
@@ -147,10 +197,12 @@ async def convert_pmids_to_pmcids(pmids: list[str]) -> dict[str, str]:
             resp = await _ncbi_get(IDCONV_BASE, params)
             data = resp.json()
             for record in data.get("records", []):
+                if record.get("status") == "error":
+                    continue
                 pmid = record.get("pmid")
                 pmcid = record.get("pmcid")
                 if pmid and pmcid:
-                    mapping[pmid] = pmcid
+                    mapping[str(pmid)] = pmcid
         except Exception as exc:
             logger.warning("Failed to convert PMIDs to PMCIDs: %s", exc)
     return mapping
