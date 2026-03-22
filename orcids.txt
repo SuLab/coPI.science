@@ -1,0 +1,18 @@
+# Pilot lab ORCIDs — Scripps Research
+# Verified 2026-03-21
+# Andrew Su
+0000-0002-9859-4104
+# Luke Wiseman
+0000-0001-9287-6840
+# Martin Lotz
+0000-0002-6299-8799
+# Benjamin Cravatt
+0000-0001-5330-3492
+# Danielle Grotjahn
+0000-0001-5908-7882
+# Michael Petrascheck
+0000-0002-1010-145X
+# Megan Ken
+0000-0001-8336-9935
+# Lisa Racki
+0000-0003-2209-7301

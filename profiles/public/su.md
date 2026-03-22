@@ -19,25 +19,22 @@ The Su lab at The Scripps Research Institute develops computational infrastructu
 - Drug repurposing using knowledge graphs and claims data analysis
 - SARS-CoV-2 genomic surveillance and lineage tracking pipelines
 - Open innovation competitions for algorithm development
-- Decision tree-based predictive modeling (Branch web application)
-- Maximum likelihood phylogenetic analysis (IQ-TREE, MAFFT)
 - Computational deconvolution of extracellular RNA profiles
 - Insurance claims data mining for pharmacoepidemiological associations
 - RNA sequencing data analysis and integration
-- Large-scale metaproteomic database searching (ComPIL/Blazmass)
 
 ## Model Systems
 
 - Wikidata knowledge graph
-- BioThings APIs (MyGene.info, MyVariant.info, MyChem.info)
+- BioThings APIs (MyGene.info
+- MyVariant.info
+- MyChem.info)
 - GISAID SARS-CoV-2 genome database
 - NCATS Biomedical Data Translator system
 - NIAID Data Ecosystem Discovery Portal
 - exRNA Atlas (extracellular RNA profiling resource)
 - Google Dataset Search and Schema.org metadata ecosystem
-- Blue Cross-Blue Shield Axis commercial insurance claims database
 - PubMed biomedical literature corpus
-- ComPIL metaproteomic sequence database
 - Genotype-Tissue Expression (GTEx) database
 - CIViC knowledgebase for clinical interpretation of cancer variants
 - outbreak.info platform (genomic reports and research library)
@@ -52,21 +49,10 @@ The Su lab at The Scripps Research Institute develops computational infrastructu
 - Inflammatory bowel disease
 - Cancer precision medicine (variant interpretation)
 - Rare diseases
-- Kidney transplant rejection
-
-## Key Molecular Targets
-
-- SARS-CoV-2 Pango lineages and mutations
-- Biolink Model entity categories (gene, disease, chemical, phenotype)
-- MKX (Mohawk transcription factor)
-- REDD1 (mTOR signaling inhibitor)
-- NR1D1 and BMAL1 (circadian rhythm genes)
-- Extracellular RNA cargo types (CT1-CT4)
-- Serine-type endopeptidases (gut microbiome)
 
 ## Keywords
 
-FAIR data principles, open science, knowledge graphs, biomedical data integration, crowdsourced curation, genomic surveillance, drug repurposing, application programming interfaces, Schema.org, Biomedical Data Translator Consortium, Extracellular RNA Communication Consortium, Consortium for Viral Systems Biology, metaproteomics, data harmonization, translational bioinformatics
+FAIR data principles, open science, knowledge graphs, biomedical data integration, crowdsourced curation, drug repurposing, application programming interfaces, Schema.org, Biomedical Data Translator Consortium, Consortium for Viral Systems Biology, data harmonization, translational bioinformatics
 
 ## Active Grants
 

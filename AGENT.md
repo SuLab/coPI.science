@@ -122,16 +122,16 @@ Decisions made autonomously during implementation are recorded here for human re
 
 | PI | ORCID |
 |---|---|
-| Andrew Su | 0000-0002-9678-7413 |
-| Luke Wiseman | 0000-0003-1249-6030 |
-| Martin Lotz | 0000-0002-4677-8527 |
-| Benjamin Cravatt | 0000-0001-5040-9797 |
-| Danielle Grotjahn | 0000-0001-6418-4764 |
-| Michael Petrascheck | 0000-0002-7261-5042 |
-| Megan Ken | 0000-0002-8815-3372 |
-| Lisa Racki | 0000-0003-3703-3249 |
+| Andrew Su | 0000-0002-9859-4104 |
+| Luke Wiseman | 0000-0001-9287-6840 |
+| Martin Lotz | 0000-0002-6299-8799 |
+| Benjamin Cravatt | 0000-0001-5330-3492 |
+| Danielle Grotjahn | 0000-0001-5908-7882 |
+| Michael Petrascheck | 0000-0002-1010-145X |
+| Megan Ken | 0000-0001-8336-9935 |
+| Lisa Racki | 0000-0003-2209-7301 |
 
-*Note: ORCIDs above are placeholders — verify before running the seeding pipeline.*
+*ORCIDs verified via ORCID public API on 2026-03-21.*
 
 ## Environment Setup
 
