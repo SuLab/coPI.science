@@ -68,6 +68,29 @@ The Petrascheck lab investigates the molecular mechanisms of aging and age-relat
 
 geroprotectors, geroneuroprotectors, polypharmacology, dietary restriction mimetics, lifespan extension, chemical biology of aging, phenotypic drug screening, proteostasis, mRNA translation regulation, energy balance, endocannabinoid signaling, lysosphingolipid metabolism, reverse fasting, sensory perception modulation, autophagy activation, metabolic memory of obesity
 
+## Recent Publications
+
+- Activity-dependent synthesis of Emerin gates neuronal plasticity by regulating proteostasis. *Cell reports*. (2025). https://doi.org/10.1093/nar/gkac1000
+- TargetSeeker-MS: A Bayesian Inference Approach for Drug-Target Discovery Using Protein Fractionation Coupled to Mass Spectrometry. *Journal of the American Society for Mass Spectrometry*. (2025). https://doi.org/10.1093/bioinformatics/btn250
+- PIEZO channels link mechanical forces to uterine contractions in parturition. *Science (New York, N.Y.)*. (2025). https://doi.org/10.5281/zenodo.16699930
+- AI-Driven Identification of Exceptionally Efficacious Polypharmacological Compounds That Extend the Lifespan of Caenorhabditis elegans. *Aging cell*. (2025). https://doi.org/10.1038/s41392-024-01803-6
+- Uncoupling overeating and fat storage by modulation of different serotonergic receptors. *bioRxiv : the preprint server for biology*. (2025). https://doi.org/10.3791/2496
+- Autophagy activator AA-20 improves proteostasis and extends . *Proceedings of the National Academy of Sciences of the United States of America*. (2025). https://doi.org/10.1038/nature05991
+- Quantifying Food Intake in Caenorhabditis elegans by Measuring Bacterial Clearance. *Journal of visualized experiments : JoVE*. (2024). https://doi.org/10.3791/66422
+- Multiple Targets, One Goal: Compounding life-extending effects through Polypharmacology. *bioRxiv : the preprint server for biology*. (2024). https://doi.org/10.3389/fgene.2017.00092
+- Activity-dependent synthesis of Emerin gates neuronal plasticity by regulating proteostasis. *bioRxiv : the preprint server for biology*. (2024). https://doi.org/10.1101/2024.06.30.600712
+- Proteostasis is differentially modulated by inhibition of translation initiation or elongation. *eLife*. (2023). https://doi.org/10.1016/j.cell.2014.09.026
+- Targeting Clic1 for the treatment of obesity: A novel therapeutic strategy to reduce food intake and body weight. *Molecular metabolism*. (2023). https://doi.org/10.1016/j.molmet.2023.101794
+- Adipocytes control food intake and weight regain via Vacuolar-type H. *Nature communications*. (2022). https://doi.org/10.1152/ajpregu.00137.2012
+- A chemical biology approach to identifying molecular pathways associated with aging. *GeroScience*. (2021). https://doi.org/10.1016/j.ebiom.2018.09.015
+- Rapamycin-mediated mouse lifespan extension: Late-life dosage regimes with sex-specific effects. *Aging cell*. (2020). https://doi.org/10.17912/micropub.biology.000207
+- Design and Analysis of Pharmacological Studies in Aging. *Methods in molecular biology (Clifton, N.J.)*. (2020). https://doi.org/10.1007/978-1-0716-0592-9_7
+- The aging transcriptome: read between the lines. *Current opinion in neurobiology*. (2020). https://doi.org/10.1016/j.conb.2020.05.001
+- Loss of genomic integrity induced by lysosphingolipid imbalance drives ageing in the heart. *EMBO reports*. (2019). https://doi.org/10.15252/embr.201847407
+- Elevating acetyl-CoA levels reduces aspects of brain aging. *eLife*. (2019). https://doi.org/10.1113/JP270541
+- Pharmacological convergence reveals a lipid pathway that regulates C. elegans lifespan. *Nature chemical biology*. (2019). https://doi.org/10.1002/1615-9861(200109)1:9<1067::AID-PROT1067>3.0.CO;2-4
+- Pharmacological convergence reveals a lipid pathway that regulates C. elegans lifespan. *Nature chemical biology*. (2019). https://doi.org/10.1002/1615-9861(200109)1:9<1067::AID-PROT1067>3.0.CO;2-4
+
 ## Active Grants
 
 - Developing dietary restriction mimetics

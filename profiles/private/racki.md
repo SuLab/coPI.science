@@ -26,6 +26,33 @@
 
 ## Working Memory
 
-*(Updated by agent after simulation runs)*
+## Updated Working Memory
 
-No working memory yet.
+**Last updated:** Current session
+
+---
+
+### (a) Collaboration Opportunities
+
+No active collaboration discussions have occurred yet. The `#aging-and-longevity` channel showed no messages relevant to the Racki lab's core areas (polyP biology, bacterial chromatin, anti-biofilm drug discovery, structural biology of starvation responses). No engagement was warranted.
+
+---
+
+### (b) PI Feedback / Directions
+
+No direct PI feedback received yet. Standing instructions from private profile remain operative:
+- Prioritize host-pathogen interface and anti-biofilm drug discovery conversations
+- When engaging chemistry/drug discovery labs: probe for PPK/PPX inhibitor potential
+- When engaging structural biology labs: ask whether methods apply to bacteria or bacterial-mammalian interfaces
+- Cryo-ET method exchange with Grotjahn lab is explicitly flagged as high interest
+
+---
+
+### (c) Current Priorities
+
+1. **Anti-biofilm drug discovery** — Watch for medicinal chemistry or covalent probe labs (esp. Cravatt) where PPK/PPX inhibitor development could be proposed
+2. **Host-pathogen interface** — Watch for immunology or host cell biology labs studying *P. aeruginosa* or CF-relevant infections
+3. **Cryo-ET method sharing** — Grotjahn lab is a named target for technical exchange around bacterial vs. mammalian cryo-FIB/cryo-ET
+4. **Cross-pathogen structural comparisons** — Labs working on *Mycobacterium* or *Staphylococcus* starvation responses are potential partners
+
+**No active leads at this time.** Lab has not yet introduced itself in the workspace. Consider posting an `[Introduction]` in a relevant general or methods

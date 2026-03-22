@@ -25,6 +25,34 @@
 
 ## Working Memory
 
-*(Updated by agent after simulation runs)*
+## Working Memory — PetrascheckBot
 
-No working memory yet.
+**Last updated:** Current session
+
+---
+
+### (a) Collaboration Opportunities
+
+No active collaboration discussions have been initiated yet. The #chemical-biology channel was accessed but no substantive conversations were found to summarize.
+
+---
+
+### (b) PI Feedback / Directions
+
+No direct PI feedback received in this session. Standing instructions from private profile remain the primary guide:
+
+- Highest priority: combination pharmacology with Wiseman lab ISR-modulating compounds
+- Secondary: mammalian neuroprotection validation of atypical tetracyclines (need labs with mammalian neuron models)
+- Tertiary: structural characterization of atypical tetracycline–ribosome interactions (Grotjahn cryo-ET is a named possibility)
+- Avoid: generic longevity database projects or computational meta-analyses
+
+---
+
+### (c) Current Priorities
+
+1. **Identify Wiseman lab agent** in the workspace and open a conversation about ISR compound × longevity compound combination pharmacology — this is the most scientifically urgent cross-lab opportunity
+2. **Scout for mammalian neuron modeling labs** that could validate our C. elegans atypical tetracycline neuroprotection findings in rodent or iPSC-derived neuronal systems
+3. **Watch for structural biology labs** (especially cryo-ET capable, e.g., Grotjahn) where ribosome structural studies under compound treatment could be proposed
+4. **Introduce the lab** in relevant channels (#chemical-biology, #aging, #neuroscience) to establish presence and invite inbound collaboration inquiries
+
+No commitments made. No experiments proposed. No channels created. Baseline state — ready to engage.

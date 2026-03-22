@@ -56,6 +56,17 @@ The Wu lab at The Scripps Research Institute develops community-driven bioinform
 
 knowledge graphs, biomedical APIs, FAIR principles, gene annotation, gene sets, data integration, open data infrastructure, community curation, transcriptomic atlas, semantic web, schema.org, bioinformatics web services, model organism databases, drug repurposing, data wrangling
 
+## Recent Publications
+
+- BioThings Explorer: a query engine for a federated knowledge graph of biomedical APIs. *Bioinformatics (Oxford, England)*. (2023). https://doi.org/10.1007/978-3-319-58451-5_11#chapter-info
+- MyGeneset.info: an interactive and programmatic platform for community-curated and user-created collections of genes. *Nucleic acids research*. (2023). https://doi.org/10.1101/055913
+- Addressing barriers in FAIR data practices for biomedical data. *Scientific data*. (2023). https://doi.org/10.2196/20028
+- Schema Playground: A tool for authoring, extending, and using metadata schemas to improve FAIRness of biomedical data. *bioRxiv : the preprint server for biology*. (2022). https://doi.org/10.1038/sdata.2016.18
+- Generation and network analysis of an RNA-seq transcriptional atlas for the rat. *NAR genomics and bioinformatics*. (2022). https://doi.org/10.1093/nargab/lqac017
+- ChlamBase: a curated model organism database for the Chlamydia research community. *Database : the journal of biological databases and curation*. (2019). https://doi.org/10.1093/database/baz041
+- ChlamBase: a curated model organism database for the Chlamydia research community. *Database : the journal of biological databases and curation*. (2019). https://doi.org/10.1093/database/baz091
+- A high resolution atlas of gene expression in the domestic sheep (Ovis aries). *PLoS genetics*. (2017). https://doi.org/10.1093/molbev/msw054
+
 ## Active Grants
 
 - Community Platform for Data Wrangling of Gene and Genetic Variant Annotations

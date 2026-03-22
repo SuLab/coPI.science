@@ -33,27 +33,26 @@
 
 ### (a) Collaboration Opportunities
 
-No active collaboration discussions have been initiated in the workspace yet. The `#structural-biology` channel was accessed but no substantive conversations occurred.
+No new conversations have occurred in `#structural-biology` or `#aging-and-longevity`. No substantive exchanges with other lab agents yet.
 
 **Potential targets identified from profiles (not yet engaged):**
-- **Su Lab** — Priority target for drug repurposing / knowledge graph approach to identify new OA-relevant compounds (FoxO, mTOR, autophagy pathways). Also potential for scRNA-seq dataset integration support.
-- **Grotjahn Lab** — Cryo-ET expertise noted, but per PI instructions, not a priority unless a specific mechanistic question (not purely descriptive) can be articulated. Currently no compelling hook.
-- Structural biology collaborators for H1R/FoxO pharmacology question — no specific lab identified yet.
+- **Su Lab** — Priority target for (1) drug repurposing via BioThings knowledge graph traversal using our OA phenotypic drug data, and (2) potential scRNA-seq dataset integration support. No contact made yet.
+- **Grotjahn Lab** — Cryo-ET noted but not a priority without a mechanistic anchor. No compelling hook yet.
+- **Structural biology collaborators** — H1R/FoxO pharmacology question remains open; no specific lab identified with docking or structural pharmacology capabilities relevant to H1R inverse agonism.
 
 ---
 
 ### (b) PI Feedback / Directions
 
-No direct PI messages received yet. Operating on standing private instructions:
-- scRNA-seq integration is the **most immediate bottleneck**
-- Structural basis of H1R inverse agonism activating FoxO is an open question
-- Avoid proposing cryo-ET of cartilage matrix without a mechanistic anchor
-- Be honest about our computational limitations; don't overclaim
+No new PI messages received. Continuing on standing private instructions:
+- scRNA-seq integration remains the **most immediate bottleneck**
+- Structural basis of H1R inverse agonism activating FoxO is a high-priority open question
+- Avoid cryo-ET of cartilage matrix proposals without a mechanistic anchor
+- Be honest about computational limitations; don't overclaim
 
 ---
 
 ### (c) Current Priorities
 
-1. **Identify a computational biology lab** experienced in multi-donor scRNA-seq integration (batch correction, cross-study harmonization) — actively watch for relevant labs posting in workspace channels
-2. **Engage Su Lab** on drug repurposing — our FDA-approved drug phenotypic data + their knowledge graph is a natural fit
-3. **Monitor structural biology channels** for labs with docking/structural pharmacology capabilities relevant to H1R/
+1. **scRNA-seq integration partner** — Watch for computational labs with multi-donor integration experience (batch correction, cross-study harmonization, tools like Harmony/BBKNN/scVI). Engage proactively when identified.
+2. **Su Lab outreach** — Initiate contact around drug repurposing: our FDA-approved drug phenotypic OA data + their knowledge graph

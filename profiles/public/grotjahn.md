@@ -63,3 +63,25 @@ The Grotjahn lab investigates the structural and functional organization of cell
 ## Keywords
 
 cryo-electron tomography, mitochondrial dynamics, membrane ultrastructure, surface morphometrics, subtomogram averaging, organellar membrane curvature, mitochondrial fission and fusion, co-translational protein import, integrated stress response, unfolded protein response, deep learning segmentation, mitochondrial DNA replication stress, nucleoid dynamics, phospholipid remodeling, cryo-CLEM, membrane thickness quantification
+
+## Recent Publications
+
+- Surface Morphometrics reveals local membrane thickness variation in organellar subcompartments. *The Journal of cell biology*. (2026). https://doi.org/10.7554/eLife.83724
+- scLong: a billion-parameter foundation model for capturing long-range gene context in single-cell transcriptomics. *Nature communications*. (2026). https://doi.org/10.3390/genes10070531
+- Segmenting cryo-electron tomography data: Extracting models from cellular landscapes. *Current opinion in structural biology*. (2025). https://doi.org/10.1016/j.sbi.2025.103114
+- Pharmacologic activation of integrated stress response kinases inhibits pathologic mitochondrial fragmentation. *eLife*. (2025). https://doi.org/10.1126/science.aar5129
+- Surface morphometrics reveals local membrane thickness variation in organellar subcompartments. *bioRxiv : the preprint server for biology*. (2025). https://doi.org/10.5281/ZENODO.14984805
+- Cytoplasmic ribosomes on mitochondria alter the local membrane environment for protein import. *The Journal of cell biology*. (2025). https://doi.org/10.7554/eLife.83724
+- Secreted antigen A peptidoglycan hydrolase is essential for . *eLife*. (2024). https://doi.org/10.1038/nmeth.4193
+- Mitochondrial DNA replication stress triggers a pro-inflammatory endosomal pathway of nucleoid disposal. *Nature cell biology*. (2024). https://doi.org/10.1109/ISBI.2016.7493463
+- Secreted antigen A peptidoglycan hydrolase is essential for . *bioRxiv : the preprint server for biology*. (2024). https://doi.org/10.1002/pro.3235
+- Reentrant DNA shells tune polyphosphate condensate size. *Nature communications*. (2024). https://doi.org/10.1093/nar/gkx753
+- Cryo-electron tomography reveals coupled flavivirus replication, budding and maturation. *bioRxiv : the preprint server for biology*. (2024). https://doi.org/10.1016/j.jsb.2021.107763
+- Cytoplasmic ribosomes on mitochondria alter the local membrane environment for protein import. *bioRxiv : the preprint server for biology*. (2024). https://doi.org/10.1101/2024.07.17.604013
+- Pharmacologic Activation of Integrated Stress Response Kinases Inhibits Pathologic Mitochondrial Fragmentation. *bioRxiv : the preprint server for biology*. (2024). https://doi.org/10.1074/jbc.M101414200
+- Reentrant DNA shells tune polyphosphate condensate size. *bioRxiv : the preprint server for biology*. (2023). https://doi.org/10.3791/64435
+- Nanoscale details of mitochondrial constriction revealed by cryoelectron tomography. *Biophysical journal*. (2023). https://doi.org/10.1128/MCB.06388-11
+- PERK signaling promotes mitochondrial elongation by remodeling membrane phosphatidic acid. *The EMBO journal*. (2023). https://doi.org/10.15252/embj.2023113908
+- Quantifying organellar ultrastructure in cryo-electron tomography using a surface morphometrics pipeline. *The Journal of cell biology*. (2023). https://doi.org/10.1101/2020.04.09.034025
+- Setting the dynein motor in motion: New insights from electron tomography. *The Journal of biological chemistry*. (2019). https://doi.org/10.1002/cm.21483
+- Hecate/Grip2a acts to reorganize the cytoskeleton in the symmetry-breaking event of embryonic axis induction. *PLoS genetics*. (2014). https://doi.org/10.1371/journal.pgen.1004422

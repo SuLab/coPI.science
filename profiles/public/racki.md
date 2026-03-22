@@ -54,3 +54,17 @@ The Racki lab investigates the biophysical and cellular functions of polyphospha
 ## Keywords
 
 polyphosphate granules, bacterial nucleoid, phase separation, reentrant condensation, magnesium-mediated interactions, nitrogen starvation, cell cycle exit, nucleosome spacing, chromatin remodeling, biopolymer condensates, subcellular organization, cytoplasmic dynamics
+
+## Recent Publications
+
+- Polyphosphate: The "Dark Matter" of Bacterial Chromatin Structure. *Molecular microbiology*. (2025). https://doi.org/10.1073/pnas.2016017118
+- Reentrant DNA shells tune polyphosphate condensate size. *Nature communications*. (2024). https://doi.org/10.1093/nar/gkx753
+- Polyphosphate affects cytoplasmic and chromosomal dynamics in nitrogen-starved . *Proceedings of the National Academy of Sciences of the United States of America*. (2024). https://doi.org/10.5281/zenodo.5772215
+- Reentrant DNA shells tune polyphosphate condensate size. *bioRxiv : the preprint server for biology*. (2023). https://doi.org/10.3791/64435
+- The Histone H1-Like Protein AlgP Facilitates Even Spacing of Polyphosphate Granules in Pseudomonas aeruginosa. *mBio*. (2022). https://doi.org/10.21105/joss.03021
+- Polyphosphate granule biogenesis is temporally and functionally tied to cell cycle exit during starvation in . *Proceedings of the National Academy of Sciences of the United States of America*. (2017). https://doi.org/10.1073/pnas.1615575114
+- The histone H4 tail regulates the conformation of the ATP-binding pocket in the SNF2h chromatin remodeling enzyme. *Journal of molecular biology*. (2014). https://doi.org/10.1016/j.jmb.2014.02.021
+- The chromatin remodeller ACF acts as a dimeric motor to space nucleosomes. *Nature*. (2009). https://doi.org/10.1038/nature08621
+- ATP-dependent chromatin remodeling enzymes: two heads are not better, just different. *Current opinion in genetics & development*. (2008). https://doi.org/10.1016/j.gde.2008.01.007
+- The site-specific installation of methyl-lysine analogs into recombinant histones. *Cell*. (2007). https://doi.org/10.1016/j.cell.2006.12.041
+- Signals involved in Arabidopsis resistance to Trichoplusia ni caterpillars induced by virulent and avirulent strains of the phytopathogen Pseudomonas syringae. *Plant physiology*. (2002). https://doi.org/10.1104/pp.010815

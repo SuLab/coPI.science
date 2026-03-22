@@ -77,6 +77,29 @@ The Wiseman lab at The Scripps Research Institute investigates how stress-respon
 
 unfolded protein response, integrated stress response, ER proteostasis, extracellular proteostasis, secretory pathway quality control, amyloidogenesis, pharmacologic UPR activation, mitochondria-associated membranes (MAMs), stress-induced mitochondrial hyperfusion (SIMH), mitochondrial inner membrane proteases, proteostasis-based therapeutics, small molecule stress-pathway activators, protein aggregation, ER chaperone networks, aging and proteostasis
 
+## Recent Publications
+
+- Pharmacological targeting of RIG-I can selectively activate the integrated stress response. *Science advances*. (2025). https://doi.org/10.1101/2024.06.10.598126
+- ATF6 Activation Reduces Amyloidogenic Transthyretin Secretion through Increased Interactions with Endoplasmic Reticulum Proteostasis Factors. *Cells*. (2022). https://doi.org/10.1038/sj.cdd.4402276
+- Multiexon deletion alleles of ATF6 linked to achromatopsia. *JCI insight*. (2020). https://doi.org/10.1021/acschembio.9b00134
+- Defining the Functional Targets of Cap'n'collar Transcription Factors NRF1, NRF2, and NRF3. *Antioxidants (Basel, Switzerland)*. (2020). https://doi.org/10.1073/pnas.1019209108
+- Premature Activation of Immune Transcription Programs in Autoimmune-Predisposed Mouse Embryonic Stem Cells and Blastocysts. *International journal of molecular sciences*. (2020). https://doi.org/10.1186/gb-2012-13-10-r85
+- Non-canonical function of IRE1α determines mitochondria-associated endoplasmic reticulum composition to control calcium transfer and bioenergetics. *Nature cell biology*. (2019). https://doi.org/10.1038/s41556-019-0329-y
+- Quantitative Interactome Proteomics Reveals a Molecular Basis for ATF6-Dependent Regulation of a Destabilized Amyloidogenic Protein. *Cell chemical biology*. (2019). https://doi.org/10.1016/j.chembiol.2019.04.001
+- Proteostasis and Beyond: ATF6 in Ischemic Disease. *Trends in molecular medicine*. (2019). https://doi.org/10.1016/j.molmed.2019.03.005
+- Lining up for quality control: linear ubiquitin and proteotoxicity. *The EMBO journal*. (2019). https://doi.org/10.15252/embj.2019101985
+- PERK Signaling Regulates Extracellular Proteostasis of an Amyloidogenic Protein During Endoplasmic Reticulum Stress. *Scientific reports*. (2019). https://doi.org/10.1016/j.cell.2005.01.018
+- Unique Structural Features of the Mitochondrial AAA+ Protease AFG3L2 Reveal the Molecular Basis for Activity in Health and Disease. *Molecular cell*. (2019). https://doi.org/10.1016/j.molcel.2019.06.016
+- Deconvoluting Stress-Responsive Proteostasis Signaling Pathways for Pharmacologic Activation Using Targeted RNA Sequencing. *ACS chemical biology*. (2019). https://doi.org/10.1021/acschembio.9b00134
+- Pharmacologic ATF6 activation confers global protection in widespread disease models by reprograming cellular proteostasis. *Nature communications*. (2019). https://doi.org/10.1074/jbc.M605827200
+- Publisher Correction: Non-canonical function of IRE1α determines mitochondria-associated endoplasmic reticulum composition to control calcium transfer and bioenergetics. *Nature cell biology*. (2019). https://doi.org/10.1038/s41556-019-0355-9
+- A library of ATTR amyloidosis patient-specific induced pluripotent stem cells for disease modelling and in vitro testing of novel therapeutics. *Amyloid : the international journal of experimental and clinical investigation : the official journal of the International Society of Amyloidosis*. (2018). https://doi.org/10.1155/2012/379569
+- Characterization of an A-Site Selective Protein Disulfide Isomerase A1 Inhibitor. *Biochemistry*. (2018). https://doi.org/10.1021/acs.biochem.8b00178
+- Coordinating Mitochondrial Biology Through the Stress-Responsive Regulation of Mitochondrial Proteases. *International review of cell and molecular biology*. (2018). https://doi.org/10.1016/bs.ircmb.2018.05.003
+- Pharmacologic ATF6 activating compounds are metabolically activated to selectively modify endoplasmic reticulum proteins. *eLife*. (2018). https://doi.org/10.1016/S1097-2765(00)00133-7
+- The PERK Arm of the Unfolded Protein Response Regulates Mitochondrial Morphology during Acute Endoplasmic Reticulum Stress. *Cell reports*. (2018). https://doi.org/10.1016/j.celrep.2018.02.055
+- Regulating Secretory Proteostasis through the Unfolded Protein Response: From Function to Therapy. *Trends in cell biology*. (2017). https://doi.org/10.1016/j.tcb.2017.05.006
+
 ## Active Grants
 
 - Elucidate age-related alterations in the proteomes from global or tissue-specific C. elegans mitochondria

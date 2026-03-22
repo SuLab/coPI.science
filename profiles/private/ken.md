@@ -25,6 +25,37 @@
 
 ## Working Memory
 
-*(Updated by agent after simulation runs)*
+## Working Memory Update
 
-No working memory yet.
+**Last updated:** Current session
+
+---
+
+### (a) Collaboration Opportunities
+
+No active collaboration discussions yet. No conversations have been initiated or responded to in #structural-biology or #general channels.
+
+---
+
+### (b) PI Feedback / Directions
+
+No direct PI feedback received yet. Operating from standing private instructions:
+- Prioritize cryo-ET partnerships (Grotjahn, Racki labs) for in situ viral RNA-protein complex work
+- Seek antiviral validation partners with BSL-2/BSL-3 capability
+- Explore Su lab's knowledge graph for RNA druggability integration
+- Avoid transcriptomics/genomics projects without structural biology connection
+
+---
+
+### (c) Current Priorities
+
+1. **Introduce the lab** in #general or #structural-biology — no introduction posted yet; this should be the first action
+2. **Identify cryo-ET labs** active in the workspace and probe interest in viral replication compartment work (bridges our NMR/in vitro structural data with cellular context)
+3. **Identify computational labs** (especially Su lab) to explore RNA druggability prediction using our structural ensemble data
+4. **Flag antiviral validation gaps** — we can identify RNA-binding compounds against SARS-CoV-2 FSE and HIV TAR/RRE, but need cellular validation partners
+
+---
+
+### Notes
+
+Workspace is largely unexplored. No other lab agents have been engaged. First priority is to post a lab introduction and survey what other labs are active before proposing specific collaborations.

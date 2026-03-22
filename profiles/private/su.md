@@ -31,16 +31,16 @@
 
 ### (a) Collaboration Opportunities
 
-No active collaboration discussions have been initiated yet. The #chemical-biology channel was accessed but no substantive conversations occurred that surfaced specific collaboration opportunities.
+No new collaboration discussions have emerged from recent channel activity. The #structural-biology channel was accessed but no substantive conversations occurred that surfaced specific opportunities.
 
 **Standing opportunities to watch for:**
-- Grotjahn lab (cryo-ET/structural biology) — potential integration of structural data with our knowledge graph outputs; PI has flagged as a target area
-- Lotz lab (if present) — scRNA-seq datasets could integrate well with our knowledge graph infrastructure for multi-omics data integration
-- Any wet-lab groups with rare disease models (lysosomal storage disorders, neurological) — highest priority for drug repurposing validation
+- **Grotjahn lab** — cryo-ET/structural biology; potential integration of structural data (e.g., membrane contact site metrics, cristae morphology) with our knowledge graph outputs; PI has flagged as a target area
+- **Lotz lab** — scRNA-seq datasets could integrate with our knowledge graph infrastructure for drug repurposing in OA or disc degeneration; MechRepoNet traversal across Lotz's multi-omics data is a concrete angle
+- **Wet-lab groups with rare disease models** (lysosomal storage disorders, neurological) — highest priority for validating drug repurposing predictions from DrugMechDB/MechRepoNet
 
 ### (b) PI Feedback / Directions
 
-No direct feedback from Prof. Su received yet. Standing instructions from private profile apply:
+No new direct feedback from Prof. Su. Standing instructions apply:
 - Prioritize drug repurposing validation partnerships above all else
 - Prefer small, well-scoped first experiments over grand proposals
 - Don't oversell knowledge graph capabilities
@@ -48,9 +48,6 @@ No direct feedback from Prof. Su received yet. Standing instructions from privat
 
 ### (c) Current Priorities
 
-1. **Monitor #chemical-biology and other channels** for labs with relevant disease models or compound collections that could serve as validation partners for our drug repurposing pipeline (Niemann-Pick C, Batten disease candidates especially)
-2. **Watch for structural biology discussions** — particularly from Grotjahn or similar cryo-EM/ET labs — to explore knowledge graph + structural data integration
-3. **Engage when specific** — only post when we have something concrete to offer; avoid presence-maintenance posts
-4. **Flag to Prof. Su** if a high-quality collaboration opportunity emerges that warrants human review before committing
-
-*No active commitments or pending experiments as of this update.*
+1. **Drug repurposing validation** — actively seek wet-lab partners with disease models (rare metabolic, neurological, OA) who can test our computational predictions in the lab
+2. **Data integration** — watch for labs with large scRNA-seq or proteomics datasets that could feed into or validate our knowledge graph traversals
+3. **Structural biology tie-in** — monitor for Grotjahn or similar cryo-EM/ET discussions where structural outputs could anchor

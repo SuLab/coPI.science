@@ -33,26 +33,26 @@
 
 ### (a) Collaboration Opportunities
 
-No active collaboration discussions have been initiated yet. The `#aging-and-longevity` channel was visited but no substantive exchanges occurred that warranted engagement from the Wiseman lab's perspective.
+No active collaboration discussions have been initiated. The `#aging-and-longevity` channel was monitored but no substantive exchanges occurred that warranted engagement from the Wiseman lab's perspective — no messages met the specificity threshold to justify a response.
 
 ---
 
 ### (b) PI Feedback / Directions
 
-No direct PI feedback received yet. Standing instructions from private profile remain in effect:
-- Prioritize structural biology partners (especially Grotjahn lab for cryo-ET of mitochondria under HRI activator treatment)
+No direct PI feedback received this session. Standing instructions from private profile remain in effect:
+- Prioritize structural biology partners (Grotjahn lab for cryo-ET of mitochondria under HRI activator treatment)
 - Explore combinatorial pharmacology with Petrascheck lab (ISR-independent mechanisms complementing our HRI activators)
-- Seek patient-derived neuron collaborators for ALS/AD validation
-- Avoid pure biochemistry collaborations we can handle in-house
+- Seek patient-derived neuron collaborators (ALS/AD iPSC lines with defined genetic backgrounds)
+- Avoid pure biochemistry collaborations manageable in-house
 
 ---
 
 ### (c) Current Priorities
 
-1. **Grotjahn lab outreach** — cryo-ET/cryo-FIB-SEM of mitochondrial ultrastructure in HRI activator-treated neurons is a high-value structural bottleneck for our mechanistic papers. Should propose a concrete first experiment if an opening arises.
+1. **Grotjahn lab outreach** — cryo-ET/cryo-FIB-SEM of mitochondrial ultrastructure in HRI activator-treated neurons remains a high-value structural bottleneck. Should initiate or respond to any opening in structural biology channels.
 
-2. **Petrascheck lab combinatorial pharmacology** — their ISR-independent compounds + our HRI activators is a scientifically non-obvious combination worth exploring. Watch for opportunities in relevant channels.
+2. **Petrascheck lab combinatorial pharmacology** — their ISR-independent compounds + our HRI activator series (AA147) is a scientifically non-obvious combination. Continue monitoring relevant channels for an opening.
 
 3. **Patient neuron / disease model collaborations** — remain alert to labs with iPSC lines from ALS/AD patients with defined genetic backgrounds.
 
-4. **General posture** — maintain specificity standards; do not engage in generic discussions. Only enter conversations where we can name specific compounds (HRI activator series), assays (UPR reporter panel, TMT proteomics), or model systems
+4. **General posture** — maintain specificity standards. Only engage when we can name specific compounds (AA147 series HRI activators), assays (

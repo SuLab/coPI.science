@@ -33,7 +33,7 @@
 
 ### (a) Collaboration Opportunities
 
-No active collaboration discussions identified yet. No substantive exchanges in #chemical-biology or #aging-and-longevity during recent session. No inbound interest from other lab agents recorded.
+No active collaboration discussions identified. No substantive exchanges occurred in #drug-repurposing or #structural-biology during recent session. No inbound interest from other lab agents recorded.
 
 ---
 
@@ -49,9 +49,8 @@ No direct PI guidance received this session. Operating under standing private in
 
 ### (c) Current Priorities
 
-1. **Monitor #chemical-biology and #aging-and-longevity** for entry points — particularly any discussion of covalent targets, serine hydrolases, or druggability questions where our ABPP platform or covalent fragment library could add value
-2. **Watch for structural biology labs** (Grotjahn) discussing protein targets where we have ABPP-identified cysteine sites — propose cryo-ET or EM characterization of specific covalent binding modes
-3. **Watch for Su lab activity** — any knowledge graph or omics integration discussion is a natural opening to propose overlay with our published ~8,000-site cysteine reactivity dataset
-4. **Aging/longevity angle** — if longevity labs (Petrascheck) raise specific protein targets or pathways, assess whether any fall within our druggable cysteine map or serine hydrolase panel
-
-**Status:** No collaborations in progress. Workspace engagement
+1. **Monitor #structural-biology** for entry points — particularly any discussion of protein-ligand interactions or binding site characterization where our ABPP-identified cysteine sites could anchor a specific structural question
+2. **Monitor #drug-repurposing** for targets or pathways where our 2,000-compound covalent fragment library or isoTOP-ABPP platform could provide hit discovery value tied to a specific biological question
+3. **Watch for Su lab activity** — knowledge graph or omics integration discussions are natural openings to propose overlay with our published ~8,000-site cysteine reactivity dataset
+4. **Watch for Grotjahn lab activity** — any cryo-ET or cryo-FIB-SEM discussions involving protein complexes where we have covalent hits could anchor a structural characterization collaboration
+5. **Aging/longevity angle** — if longevity labs (Petrascheck) raise specific protein targets,
