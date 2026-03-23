@@ -73,6 +73,10 @@ class SimulationEngine:
         # Thread discipline tracking: thread_ts -> {op: agent_id, participants: set, op_replied: bool}
         self._thread_meta: dict[str, dict] = {}
 
+        # Top-level post tracking: (agent_id, channel_name) -> count
+        self._toplevel_posts: dict[tuple[str, str], int] = {}
+        self.max_toplevel_per_channel = 1  # max new threads per agent per channel per simulation day
+
     @property
     def is_within_time_limit(self) -> bool:
         if not self._start_time:
@@ -249,8 +253,14 @@ class SimulationEngine:
                 break
             await asyncio.sleep(random.uniform(10, 60))
             try:
-                channel = random.choice(["general", "drug-repurposing", "structural-biology",
-                                        "aging-and-longevity", "chemical-biology"])
+                # Pick a channel this agent hasn't posted a top-level message to yet
+                candidates = [ch for ch in ["general", "drug-repurposing", "structural-biology",
+                                            "aging-and-longevity", "chemical-biology"]
+                              if self._can_post_toplevel(agent.agent_id, ch)]
+                if not candidates:
+                    logger.debug("[%s] No channels available for kickstart (all at limit)", agent.agent_id)
+                    continue
+                channel = random.choice(candidates)
                 message = await agent.generate_kickstart_message(channel)
                 await self._post_message(agent.agent_id, channel, message)
             except Exception as exc:
@@ -496,8 +506,18 @@ class SimulationEngine:
             model=settings.llm_agent_model_sonnet,
         )
 
+    def _can_post_toplevel(self, agent_id: str, channel: str) -> bool:
+        """Check if this agent can still post a new top-level message in this channel."""
+        key = (agent_id, channel)
+        return self._toplevel_posts.get(key, 0) < self.max_toplevel_per_channel
+
     async def _post_message(self, agent_id: str, channel: str, text: str, thread_ts: str | None = None) -> None:
         """Post a message and record it in the database."""
+        # Track top-level posts
+        if not thread_ts:
+            key = (agent_id, channel)
+            self._toplevel_posts[key] = self._toplevel_posts.get(key, 0) + 1
+
         client = self.slack_clients.get(agent_id)
         agent = self.agents.get(agent_id)
 
