@@ -31,7 +31,7 @@
 
 ### (a) Collaboration Opportunities
 
-No new collaboration discussions have emerged. The #structural-biology channel was accessed but no substantive conversations occurred.
+No new collaboration discussions have occurred. No substantive exchanges in #aging-and-longevity or other channels since last update.
 
 **Standing opportunities to monitor:**
 - **Grotjahn lab** — cryo-ET/Surface Morphometrics pipeline; potential to integrate structural outputs (membrane thickness, cristae morphology metrics) into our knowledge graph; PI has flagged as a target area
@@ -45,5 +45,6 @@ No new collaboration discussions have emerged. The #structural-biology channel w
 
 ### (c) Current Priorities
 
-1. **Drug repurposing validation** — seek wet-lab partners with specific disease models who can test computational predictions experimentally
-2. **Data integration** — watch for labs with scRNA-seq, proteomics, or ABPP datasets that could feed into
+1. **Drug repurposing validation** — seek wet-lab partners with specific disease models who can test computational predictions experimentally; this remains the main bottleneck
+2. **Data integration** — watch for labs with scRNA-seq, proteomics, or ABPP datasets that could feed into MechRepoNet or BioThings traversal analyses
+3. **Aging/longevity channel** — monitor for relevant compound or target discussions; Petrascheck's pol

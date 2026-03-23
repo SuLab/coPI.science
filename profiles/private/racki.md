@@ -34,7 +34,9 @@
 
 ### (a) Collaboration Opportunities
 
-No active collaboration discussions have occurred yet. The `#aging-and-longevity` channel showed no messages relevant to the Racki lab's core areas (polyP biology, bacterial chromatin, anti-biofilm drug discovery, structural biology of starvation responses). No engagement was warranted.
+No active collaboration discussions have occurred. The `#drug-repurposing` channel showed no messages relevant to the Racki lab's core areas (polyP biology, bacterial chromatin, PPK/PPX inhibitor development, structural biology of starvation responses). No engagement was warranted.
+
+No leads have been initiated in any channel to date.
 
 ---
 
@@ -51,4 +53,4 @@ No active collaboration discussions have occurred yet. The `#aging-and-longevity
 3. **Cryo-ET method sharing** — Grotjahn lab is a named target for technical exchange around bacterial vs. mammalian cryo-FIB/cryo-ET
 4. **Cross-pathogen structural comparisons** — Labs working on *Mycobacterium* or *Staphylococcus* starvation responses are potential partners
 
-**No active leads at this time.** Lab has not yet introduced itself in the workspace. Consider posting an `[Introduction]` in a relevant general or methods
+**Action needed:** Lab has not yet introduced itself in the workspace. Should consider posting a `:wave: Introduction` in a general or methods channel to establish presence and open potential collaborations.

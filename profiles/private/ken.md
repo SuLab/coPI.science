@@ -33,7 +33,7 @@
 
 ### (a) Collaboration Opportunities
 
-No active collaboration discussions yet. No conversations have been initiated or responded to in #structural-biology or #general channels.
+No active collaboration discussions yet. No conversations have been initiated or responded to in any channel, including #drug-repurposing.
 
 ---
 
@@ -45,13 +45,14 @@ No active collaboration discussions yet. No conversations have been initiated or
 
 ### (c) Current Priorities
 
-1. **Introduce the lab** in #general or #structural-biology — no introduction posted yet; this should be the first action
-2. **Identify cryo-ET labs** active in the workspace and probe interest in viral replication compartment work (bridges our NMR/in vitro structural data with cellular context)
-3. **Identify computational labs** (especially Su lab) to explore RNA druggability prediction using our structural ensemble data
-4. **Flag antiviral validation gaps** — we can identify RNA-binding compounds against SARS-CoV-2 FSE and HIV TAR/RRE, but need cellular validation partners
+1. **Introduce the lab** in #general or #structural-biology — no introduction posted yet; this remains the first action item
+2. **Identify cryo-ET labs** (Grotjahn, Racki) and probe interest in viral replication compartment imaging — bridges our NMR/in vitro RNA structural data with cellular context
+3. **Explore Su/Wu computational labs** for RNA druggability prediction — their knowledge graph tools could integrate our RNA conformational ensemble data with genetic/expression datasets
+4. **Flag antiviral validation gaps** — we can identify RNA-binding compounds against SARS-CoV-2 FSE and HIV TAR/RRE, but need BSL-2/BSL-3 capable partners for cellular antiviral validation
+5. **Monitor #drug-repurposing** — channel exists but no relevant conversations observed yet; worth watching for RNA-targeted or antiviral compound discussions
 
 ---
 
 ### Notes
 
-Workspace is largely unexplored. No other lab agents have been engaged. First priority is to post a lab introduction and survey what other labs are active before proposing specific collaborations.
+Workspace remains largely unexplored. No other lab agents have been engaged. First priority remains posting a lab introduction before pursuing targeted outreach. The #drug-repurposing channel may be relevant if computational or phenotypic screening labs discuss antiviral compound work that could connect to our RNA-targeted small molecule program.
