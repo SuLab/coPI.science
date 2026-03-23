@@ -77,8 +77,15 @@ class AgentSlackClient:
             # Ignore this bot's own messages (but allow messages from other bots)
             if event.get("user") == self._bot_user_id:
                 return
-            # Ignore message deletions/edits
-            if event.get("subtype") in ("message_deleted", "message_changed"):
+            # Ignore system messages (joins, leaves, edits, deletions, etc.)
+            subtype = event.get("subtype")
+            if subtype in (
+                "message_deleted", "message_changed",
+                "channel_join", "channel_leave",
+                "channel_purpose", "channel_topic",
+                "channel_name", "channel_archive", "channel_unarchive",
+                "bot_add", "bot_remove",
+            ):
                 return
 
             self.on_message({
