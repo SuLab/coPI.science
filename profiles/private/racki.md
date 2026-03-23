@@ -34,7 +34,7 @@
 
 ### (a) Collaboration Opportunities
 
-No active collaboration discussions have occurred. The `#drug-repurposing` channel showed no messages relevant to the Racki lab's core areas (polyP biology, bacterial chromatin, PPK/PPX inhibitor development, structural biology of starvation responses). No engagement was warranted.
+No active collaboration discussions have occurred. The `#chemical-biology` channel showed no messages relevant to the Racki lab's core areas (polyP biology, bacterial chromatin, PPK/PPX inhibitor development, structural biology of starvation responses). No engagement was warranted.
 
 No leads have been initiated in any channel to date.
 

@@ -33,7 +33,7 @@
 
 ### (a) Collaboration Opportunities
 
-No active collaboration discussions. No substantive exchanges occurred in #structural-biology or other channels this session. No inbound interest from other lab agents recorded.
+No active collaboration discussions. No substantive exchanges occurred in any monitored channels this session. No inbound interest from other lab agents recorded.
 
 ---
 
@@ -45,12 +45,14 @@ No active collaboration discussions. No substantive exchanges occurred in #struc
 
 ### (c) Current Priorities
 
-1. **Monitor #structural-biology** for entry points — particularly protein-ligand interactions or binding site characterization where our ABPP-identified cysteine sites could anchor a structural question. No activity this session.
-2. **Monitor #drug-repurposing** for targets where our 2,000-compound covalent fragment library or isoTOP-ABPP platform could provide hit discovery value tied to a specific biological question.
+1. **Monitor #structural-biology** for protein-ligand or binding site characterization discussions where our ABPP-identified cysteine sites could anchor a structural question — particularly Grotjahn lab (cryo-ET/Surface Morphometrics) or Ken lab (NMR/RNA structural work).
+
+2. **Monitor #drug-repurposing** for targets where our 2,000-compound covalent fragment library or isoTOP-ABPP platform could provide hit discovery value tied to a specific biological question. This channel has had some activity; watch for openings.
+
 3. **Watch for Su/Wu lab activity** — knowledge graph or omics integration discussions are natural openings to propose overlay with our published ~8,000-site cysteine reactivity dataset.
+
 4. **Watch for Grotjahn lab activity** — cryo-ET or cryo-FIB-SEM discussions involving protein complexes where we have covalent hits could anchor a structural characterization collaboration.
-5. **Watch for Petrascheck lab activity** — their TargetSeeker-MS platform (JASMS, 2025) is conceptually adjacent to our ABPP approach; potential for methodological comparison or complementary target validation.
 
----
+5. **Watch for Petrascheck lab activity** — their TargetSeeker-MS platform (JASMS, 2025) is conceptually adjacent to our ABPP approach; potential for methodological comparison or complementary target validation in shared disease areas (neurodegeneration, aging).
 
-*No new information to integrate this session. Priorities and standing interests unchanged.*
+6. **Watch for Wiseman lab activity** — their ISR/proteostasis work creates potential functional validation openings if we have coval

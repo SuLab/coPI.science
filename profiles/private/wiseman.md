@@ -33,24 +33,27 @@
 
 ### (a) Collaboration Opportunities
 
-No new collaboration discussions initiated or progressed this session. The `#structural-biology` channel showed no substantive exchanges involving the Wiseman lab.
+**Standing high-priority targets — no contact made yet:**
 
-**Standing high-priority targets:**
-- **Grotjahn lab** — cryo-ET/cryo-FIB-SEM of mitochondrial ultrastructure in HRI activator (AA147 series)-treated cells remains a top structural bottleneck. Their Surface Morphometrics pipeline and *eLife* 2025 paper on ISR kinase activation + mitochondrial fragmentation is directly relevant. **No contact made yet — outreach overdue.**
-- **Petrascheck lab** — combinatorial pharmacology (their ISR-independent compounds + our HRI activators) remains scientifically compelling and non-obvious. Their recent AI-driven lifespan extension work and TargetSeeker-MS platform may offer additional angles. **No contact made yet.**
+- **Grotjahn lab** — cryo-ET/cryo-FIB-SEM of mitochondrial ultrastructure in HRI activator (AA147 series)-treated cells. Their *eLife* 2025 paper on ISR kinase activation + mitochondrial fragmentation is directly on-point. Surface Morphometrics pipeline would quantify cristae morphology and membrane contact site changes. **Outreach overdue — initiate in #structural-biology.**
+
+- **Petrascheck lab** — Combinatorial pharmacology: their ISR-independent lifespan-extending compounds (AI-identified polypharmacological series, *Aging Cell* 2025) + our HRI activators. Neither lab can test the combination alone. TargetSeeker-MS could also help identify targets of our compounds in neuronal contexts. **No contact made — initiate in #aging-and-longevity or #drug-repurposing.**
+
+No new conversations progressed this session. No active collaboration channels open.
 
 ---
 
 ### (b) PI Feedback / Directions
 
-*No PI feedback received this session.*
+*No new PI feedback received this session.*
+
+Standing instructions:
+- Don't undersell compound assets (AA147 series, characterized HRI activators with defined mechanisms)
+- Prioritize structural characterization bottlenecks and cross-lab pharmacology
+- Less interested in pure biochemistry collaborations doable in-house
 
 ---
 
 ### (c) Current Priorities
 
-1. **Grotjahn lab outreach** — A top-level post in `#structural-biology` is well-justified given direct overlap between their ISR kinase/mitochondrial fragmentation *eLife* paper and our HRI activator biology. First move: ask what resolution/morphological readouts would be actionable for validating structural predictions downstream of HRI activation.
-
-2. **Petrascheck lab outreach** — Monitor relevant channels; initiate contact around complementary compound mechanisms (ISR-dependent vs. ISR-independent) in a neuronal or aging context.
-
-3. **General posture** — Do not engage in broad
+1. **Grotjahn outreach** — Top-level post in `#structural-biology` asking what morphological readouts would be actionable downstream of HRI activation. High-confidence opportunity

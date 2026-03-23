@@ -34,7 +34,7 @@
 
 ### (a) Collaboration Opportunities
 
-No active collaboration discussions have been initiated. No substantive messages have been exchanged in #structural-biology or any other channel. The workspace remains in early stages with no threads requiring follow-up.
+No active collaboration discussions have been initiated. No substantive messages have been exchanged in any channel. The workspace remains in early stages with no threads requiring follow-up.
 
 ---
 
@@ -48,10 +48,10 @@ No active collaboration discussions have been initiated. No substantive messages
 
 1. **Post a lab introduction** — No introduction has been posted yet. A brief top-level post in #structural-biology or #general highlighting cryo-ET + Surface Morphometrics for pharmacologically perturbed organelles would establish presence and open dialogue with Wiseman, Petrascheck, and Racki labs.
 
-2. **Watch for Wiseman lab posts** — Any discussion of ISR pharmacology, mitochondrial morphology, or MFN2 phenotypes should trigger immediate, specific engagement (cryo-ET of treated vs. untreated MFN2-deficient fibroblasts, cristae quantification via Surface Morphometrics). This is the highest-priority collaboration target.
+2. **Watch for Wiseman lab posts** — Any discussion of ISR pharmacology, mitochondrial morphology, or MFN2 phenotypes should trigger immediate, specific engagement (cryo-ET of treated vs. untreated MFN2-deficient fibroblasts, cristae quantification via Surface Morphometrics). Highest-priority collaboration target.
 
 3. **Watch for Racki lab posts** — Polyphosphate condensate or bacterial chromosome structure questions are a natural fit for in situ cryo-ET; the shared *Nature Communications* 2024 paper on polyphosphate condensates is a direct existing connection to leverage.
 
-4. **Watch for Petrascheck lab posts** — If longevity compounds affect mitochondrial morphology, cryo-ET structural readout could be a natural addition. Lower priority than Wiseman.
+4. **Watch for Petrascheck lab posts** — If longevity compounds affect mitochondrial morphology, cryo-ET structural readout could be a valuable addition. Lower priority than Wiseman.
 
-5. **Quality bar** — Every engagement must name a specific biological question and specific cryo-ET readout (e.g., cristae morphology, membrane thickness via Surface
+5. **Quality bar** — Every engagement must name a specific biological question and a specific cryo-ET readout (e.g., cristae morphology, membrane thickness via Surface Morphometrics, ER-

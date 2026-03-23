@@ -30,6 +30,8 @@ PILOT_LABS = [
     {"id": "racki", "name": "RackiBot", "pi": "Lisa Racki"},
     {"id": "saez", "name": "SaezBot", "pi": "Enrique Saez"},
     {"id": "wu", "name": "WuBot", "pi": "Chunlei Wu"},
+    {"id": "ward", "name": "WardBot", "pi": "Andrew Ward"},
+    {"id": "briney", "name": "BrineyBot", "pi": "Bryan Briney"},
 ]
 
 
@@ -67,6 +69,9 @@ class SimulationEngine:
         # LLM call log buffer
         self._llm_log_buffer: list[dict] = []
         self._llm_log_flush_size = 10
+
+        # Thread discipline tracking: thread_ts -> {op: agent_id, participants: set, op_replied: bool}
+        self._thread_meta: dict[str, dict] = {}
 
     @property
     def is_within_time_limit(self) -> bool:
@@ -195,6 +200,7 @@ class SimulationEngine:
                         input_tokens=entry.get("input_tokens", 0),
                         output_tokens=entry.get("output_tokens", 0),
                         latency_ms=entry.get("latency_ms", 0.0),
+                        created_at=entry.get("completed_at"),
                     )
                     db.add(record)
                 await db.commit()
@@ -276,6 +282,72 @@ class SimulationEngine:
                     if self._message_queue.empty():
                         break
 
+    def _update_thread_meta(self, msg: dict) -> None:
+        """Track thread participants and OP reply status for thread discipline."""
+        thread_ts = msg.get("thread_ts")
+        msg_ts = msg.get("ts")
+        sender_name = msg.get("sender", "")
+        sender_id = self._infer_sender_agent(sender_name) or sender_name.lower()
+
+        if not thread_ts:
+            # Top-level message — register as potential thread OP
+            if msg_ts:
+                self._thread_meta[msg_ts] = {
+                    "op": sender_id,
+                    "participants": {sender_id},
+                    "op_replied": False,
+                    "reply_count": 0,
+                }
+            return
+
+        # Thread reply — update the thread's metadata
+        meta = self._thread_meta.get(thread_ts)
+        if not meta:
+            # Thread we don't have metadata for (started before simulation)
+            self._thread_meta[thread_ts] = {
+                "op": None,
+                "participants": {sender_id},
+                "op_replied": True,  # assume mature if we missed the start
+                "reply_count": 1,
+            }
+            return
+
+        meta["participants"].add(sender_id)
+        meta["reply_count"] += 1
+        if sender_id == meta["op"]:
+            meta["op_replied"] = True
+
+    def _is_thread_open_for(self, msg: dict, agent_id: str) -> bool:
+        """Check whether thread discipline allows this agent to respond.
+
+        Returns True if:
+        - This is a top-level message (not a thread reply) — anyone can respond
+        - The agent is already a participant in the thread
+        - The OP has replied at least once (thread is "mature")
+        - The thread has fewer than 3 participants
+        """
+        thread_ts = msg.get("thread_ts") or msg.get("ts")
+        if not thread_ts:
+            return True
+
+        meta = self._thread_meta.get(thread_ts)
+        if not meta:
+            return True  # no tracking data, allow
+
+        # Always allow the OP and existing participants
+        if agent_id in meta["participants"]:
+            return True
+
+        # Block if OP hasn't replied yet (thread too young)
+        if not meta["op_replied"]:
+            return False
+
+        # Block if already 3+ participants
+        if len(meta["participants"]) >= 3:
+            return False
+
+        return True
+
     async def _handle_channel_message(self, msg: dict) -> None:
         """Process a single incoming Slack message across all relevant agents."""
         channel_name = msg.get("channel_name", "unknown")
@@ -289,6 +361,9 @@ class SimulationEngine:
             "content": msg.get("content", ""),
             "ts": msg.get("ts"),
         })
+
+        # Track thread participants for thread discipline
+        self._update_thread_meta(msg)
 
         # Don't respond if time limit or budget exceeded
         if not self.is_within_time_limit:
@@ -304,6 +379,13 @@ class SimulationEngine:
             if agent.bot_name.lower() in sender_name.lower():
                 continue
             if not self._agent_within_budget(agent):
+                continue
+            # Thread discipline: don't even let agents decide if the thread is too young
+            if not self._is_thread_open_for(msg, agent.agent_id):
+                logger.debug(
+                    "[%s] Skipped — thread discipline (OP hasn't replied or 3+ participants)",
+                    agent.agent_id,
+                )
                 continue
             responding_agents.append(agent)
 
@@ -334,9 +416,11 @@ class SimulationEngine:
         if not responders:
             return
 
-        # Phase 2: Stagger responses
+        # Phase 2: Stagger responses — only allow ONE new participant per round
         shuffle_responders = list(responders)
         random.shuffle(shuffle_responders)
+
+        thread_ts = msg.get("thread_ts") or msg.get("ts")
 
         for agent, decision in shuffle_responders:
             delay = random.uniform(5, 30)
@@ -344,6 +428,14 @@ class SimulationEngine:
 
             # Re-check budget and time
             if not self.is_within_time_limit or not self._agent_within_budget(agent):
+                continue
+
+            # Re-check thread discipline (may have changed during staggered delays)
+            if not self._is_thread_open_for(msg, agent.agent_id):
+                logger.debug(
+                    "[%s] Skipped at Phase 2 — thread discipline",
+                    agent.agent_id,
+                )
                 continue
 
             # Get updated channel history
@@ -362,8 +454,15 @@ class SimulationEngine:
                     )
                     # Reply in thread — use the original message's thread_ts if it's
                     # already in a thread, otherwise use its ts to start a new thread.
-                    thread_ts = msg.get("thread_ts") or msg.get("ts")
-                    await self._post_message(agent.agent_id, channel_name, response_text, thread_ts=thread_ts)
+                    reply_thread_ts = msg.get("thread_ts") or msg.get("ts")
+                    await self._post_message(agent.agent_id, channel_name, response_text, thread_ts=reply_thread_ts)
+
+                    # Update thread meta with this new participant
+                    if reply_thread_ts:
+                        meta = self._thread_meta.get(reply_thread_ts)
+                        if meta:
+                            meta["participants"].add(agent.agent_id)
+                            meta["reply_count"] += 1
 
                 elif action == "create_channel":
                     # Create a collaboration channel

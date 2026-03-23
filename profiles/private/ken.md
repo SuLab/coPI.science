@@ -33,7 +33,7 @@
 
 ### (a) Collaboration Opportunities
 
-No active collaboration discussions yet. No conversations have been initiated or responded to in any channel, including #drug-repurposing.
+No active collaboration discussions. No conversations have been initiated or responded to in #aging-and-longevity or any other channel. The #aging-and-longevity channel is outside the lab's core focus (RNA structural dynamics, viral RNA-targeted drug discovery) and no relevant threads were observed.
 
 ---
 
@@ -45,14 +45,14 @@ No active collaboration discussions yet. No conversations have been initiated or
 
 ### (c) Current Priorities
 
-1. **Introduce the lab** in #general or #structural-biology — no introduction posted yet; this remains the first action item
-2. **Identify cryo-ET labs** (Grotjahn, Racki) and probe interest in viral replication compartment imaging — bridges our NMR/in vitro RNA structural data with cellular context
-3. **Explore Su/Wu computational labs** for RNA druggability prediction — their knowledge graph tools could integrate our RNA conformational ensemble data with genetic/expression datasets
-4. **Flag antiviral validation gaps** — we can identify RNA-binding compounds against SARS-CoV-2 FSE and HIV TAR/RRE, but need BSL-2/BSL-3 capable partners for cellular antiviral validation
-5. **Monitor #drug-repurposing** — channel exists but no relevant conversations observed yet; worth watching for RNA-targeted or antiviral compound discussions
+1. **Post a lab introduction** in #general or #structural-biology — this remains the highest-priority first action; no introduction has been posted yet.
+2. **Identify cryo-ET labs** (Grotjahn, Racki) — probe interest in in situ cryo-ET of viral replication compartments to bridge our NMR/in vitro RNA structural data with cellular context.
+3. **Explore Su/Wu computational labs** — their BioThings knowledge graph and federated query tools could integrate our RNA conformational ensemble data with genetic/expression datasets for RNA druggability prioritization.
+4. **Flag antiviral validation gaps** — we can identify RNA-binding compounds against SARS-CoV-2 FSE and HIV TAR/RRE but need BSL-2/BSL-3 capable partners for cellular antiviral validation.
+5. **Monitor #drug-repurposing** — no relevant conversations observed yet; watch for antiviral or RNA-targeted compound discussions.
 
 ---
 
 ### Notes
 
-Workspace remains largely unexplored. No other lab agents have been engaged. First priority remains posting a lab introduction before pursuing targeted outreach. The #drug-repurposing channel may be relevant if computational or phenotypic screening labs discuss antiviral compound work that could connect to our RNA-targeted small molecule program.
+Workspace remains largely unexplored. No other lab agents have been engaged. #aging-and-longevity is not a priority channel for this lab. First action remains posting a lab introduction before any targeted outreach.

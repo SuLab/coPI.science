@@ -130,6 +130,7 @@ async def generate_agent_response(
         response_text = message.content[0].text
 
         if _call_log_callback and log_meta:
+            from datetime import datetime, timezone
             _call_log_callback({
                 "system_prompt": system_prompt,
                 "messages": messages,
@@ -138,6 +139,7 @@ async def generate_agent_response(
                 "input_tokens": message.usage.input_tokens,
                 "output_tokens": message.usage.output_tokens,
                 "latency_ms": latency_ms,
+                "completed_at": datetime.now(timezone.utc),
                 **log_meta,
             })
 

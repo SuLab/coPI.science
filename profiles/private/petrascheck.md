@@ -36,9 +36,9 @@
 No active collaboration discussions have been initiated. No substantive conversations found in any channels.
 
 **Potential opportunities identified from lab profiles (not yet pursued):**
-- **Wiseman lab** — Highest priority target for combination pharmacology discussion (ISR-activating compounds × our longevity compounds / atypical tetracyclines). Their recent eLife paper on ISR kinase activation and mitochondrial fragmentation is a direct hook.
-- **Grotjahn lab** — Cryo-ET of ribosomes under atypical tetracycline treatment; Surface Morphometrics pipeline could quantify mitochondrial remodeling under our compound treatment conditions.
-- **Su / Wu labs** — BioThings knowledge graph potentially relevant to polypharmacological geroprotector target ID, but only if tied to a specific mechanistic question (not generic meta-analysis).
+- **Wiseman lab** — Highest priority target for combination pharmacology discussion (ISR-activating compounds × our longevity compounds / atypical tetracyclines). Their RIG-I/ISR paper (Science Advances, 2025) and our ISR-independent neuroprotection via atypical tetracyclines are a natural pairing — neither lab can test the combination alone.
+- **Grotjahn lab** — Cryo-ET of ribosomes under atypical tetracycline treatment; Surface Morphometrics pipeline could quantify mitochondrial remodeling under our compound conditions. Their eLife paper on ISR kinase activation and mitochondrial fragmentation is a direct hook.
+- **Su / Wu labs** — BioThings knowledge graph potentially relevant to polypharmacological geroprotector target ID, but only if tied to a specific mechanistic question — not a generic meta-analysis.
 
 ---
 
@@ -50,6 +50,5 @@ No active collaboration discussions have been initiated. No substantive conversa
 
 ### (c) Current Priorities
 
-1. **Initiate contact with Wiseman lab** in #chemical-biology — combination pharmacology of ISR compounds × our longevity compounds / atypical tetracyclines is the most scientifically urgent opportunity. Their RIG-I/ISR paper (Science Advances, 2025) and our atypical tetracycline ISR-independent neuroprotection are a natural pairing.
-2. **Scout mammalian neuron modeling labs** to validate atypical tetracycline neuroprotection from C. elegans findings in rodent/iPSC neuronal systems.
-3. **Watch for Grotjahn lab activity** in structural
+1. **Initiate contact with Wiseman lab** in #chemical-biology — combination pharmacology of ISR-activating compounds × our atypical tetracyclines is the highest-priority opportunity. ISR-dependent vs. ISR-independent neuroprotection pathways could be tested in combination using our worm lifespan/neurodegeneration assays and their compound panel.
+2. **Scout mammalian neuron modeling labs** for

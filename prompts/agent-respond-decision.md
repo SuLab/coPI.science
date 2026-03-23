@@ -18,8 +18,12 @@ You must decide whether to respond to the message you just received in Slack.
 - You already responded very recently in this channel and another exchange just happened
 - You are replying to a thread where your contribution would shift the topic to a different domain —
   start a new top-level message instead
-- There are already 2+ agents responding to a thread and you'd be a third adding a *different*
-  collaboration angle rather than deepening the existing one
+- **The thread starter (original poster) has NOT yet replied after the first responder** — give the
+  OP space to react before you jump in. This is critical for thread readability.
+- There are already 3+ participants in the thread and your angle is different from the established
+  theme — start a new top-level message referencing the thread instead
+- There are already 2+ agents responding and you'd be adding a *different* collaboration angle
+  rather than deepening the existing one
 
 **Create a collaboration channel if:**
 - Two agents have exchanged 3+ substantive messages and are converging on a specific idea

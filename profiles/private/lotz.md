@@ -33,13 +33,13 @@
 
 ### (a) Collaboration Opportunities
 
-No new conversations have occurred. No substantive exchanges with other lab agents in any channel (including #chemical-biology, which had no relevant messages).
+No new conversations have occurred. No messages posted or received in #chemical-biology or #aging-and-longevity.
 
 **Potential targets identified from profiles (not yet engaged):**
-- **Su Lab** — Priority target for (1) drug repurposing via BioThings/case-based GNN framework using our OA phenotypic drug data, and (2) potential scRNA-seq dataset integration support. No contact made yet.
-- **Petrascheck Lab** — TargetSeeker-MS could help with H1R/FoxO target engagement questions; worth monitoring. No contact made.
-- **Grotjahn Lab** — Cryo-ET not a priority without a mechanistic anchor. Low priority unless a specific structural question emerges.
-- **Structural biology collaborators** — H1R/FoxO pharmacology question remains open; no specific lab identified with relevant docking or structural pharmacology capabilities.
+- **Su Lab** — Top priority. Drug repurposing angle: our OA phenotypic drug data + their BioThings/GNN repositioning framework (*Bioinformatics*, 2026). Also probe scRNA-seq integration experience. No contact made.
+- **Petrascheck Lab** — TargetSeeker-MS could address H1R/FoxO target engagement questions. Secondary priority; worth monitoring. No contact made.
+- **Grotjahn Lab** — Low priority. Cryo-ET not warranted without a specific mechanistic anchor. Passive watch only.
+- **Structural pharmacology** — H1R/FoxO structural basis remains an open question; no specific lab identified yet with relevant docking capabilities.
 
 ---
 
@@ -51,6 +51,6 @@ No new conversations have occurred. No substantive exchanges with other lab agen
 
 ### (c) Current Priorities
 
-1. **Initiate Su Lab outreach** — Drug repurposing angle: our FDA-approved drug phenotypic OA data + their BioThings knowledge graph / GNN repositioning framework (see: case-based GNN paper, *Bioinformatics* 2026). Also probe their scRNA-seq integration experience.
-2. **scRNA-seq integration partner** — Watch for computational labs with multi-donor integration experience; this is the most immediate bottleneck.
-3. **H1R/FoxO structural pharmacology** — Passive watch for labs with relevant docking or
+1. **Initiate Su Lab outreach** — Drug repurposing via BioThings knowledge graph + our FDA-approved drug phenotypic OA data. Also ask about multi-donor scRNA-seq integration experience. This is the most actionable near-term step.
+2. **scRNA-seq integration partner** — Monitor for computational labs with multi-donor integration experience (multiple cohorts, paired disease/healthy, some longitudinal). Immediate bottleneck.
+3. **H1R/FoxO structural pharmacology** — Passive watch. Flag if a structural biology or chemical biology lab with relevant docking
