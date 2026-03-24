@@ -101,6 +101,7 @@ async def admin_users(
         })
 
     return templates.TemplateResponse(
+        request,
         "admin/users.html",
         _template_context(
             request,
@@ -139,6 +140,7 @@ async def admin_user_detail(
     publications = pub_result.scalars().all()
 
     return templates.TemplateResponse(
+        request,
         "admin/user_detail.html",
         _template_context(
             request,
@@ -180,6 +182,7 @@ async def admin_jobs(
         counts[job.status] = counts.get(job.status, 0) + 1
 
     return templates.TemplateResponse(
+        request,
         "admin/jobs.html",
         _template_context(
             request,
@@ -226,6 +229,7 @@ async def admin_activity(
     most_active = agent_count_result.first()
 
     return templates.TemplateResponse(
+        request,
         "admin/activity.html",
         _template_context(
             request,
@@ -292,6 +296,7 @@ async def admin_activity_detail(
         channel_stats[msg.channel_name]["agents"].add(msg.agent_id)
 
     return templates.TemplateResponse(
+        request,
         "admin/activity_detail.html",
         _template_context(
             request,
@@ -385,6 +390,7 @@ async def admin_llm_calls(
     available_phases = sorted([r[0] for r in phases_result])
 
     return templates.TemplateResponse(
+        request,
         "admin/llm_calls.html",
         _template_context(
             request,

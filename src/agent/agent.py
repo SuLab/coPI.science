@@ -117,6 +117,7 @@ Channel: #{channel_name}
         channel_name: str,
         channel_history: list[dict],
         new_message: dict,
+        thread_context: str = "",
         model: str | None = None,
     ) -> dict:
         """
@@ -129,13 +130,17 @@ Channel: #{channel_name}
         history_text = _format_history(channel_history)
         new_msg_text = _format_message(new_message)
 
+        thread_section = ""
+        if thread_context:
+            thread_section = f"\nThread state:\n{thread_context}\n"
+
         messages = [
             {
                 "role": "user",
                 "content": f"""You just received this message in #{channel_name}:
 
 {new_msg_text}
-
+{thread_section}
 Recent channel history:
 {history_text}
 

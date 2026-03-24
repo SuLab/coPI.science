@@ -42,7 +42,7 @@ async def login(request: Request):
     if request.session.get("user_id"):
         return RedirectResponse(url="/", status_code=302)
     error = request.query_params.get("error")
-    return templates.TemplateResponse("login.html", {"request": request, "error": error})
+    return templates.TemplateResponse(request, "login.html", {"error": error})
 
 
 @router.get("/login/start")

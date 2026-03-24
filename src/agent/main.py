@@ -138,6 +138,8 @@ async def _run_simulation(
             len(agents), max_runtime, budget,
         )
         await engine.start()
+    except Exception:
+        logger.exception("Simulation engine raised an exception")
     finally:
         # Update simulation run status
         if session_factory and simulation_run_id:

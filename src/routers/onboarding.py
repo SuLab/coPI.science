@@ -58,6 +58,7 @@ async def onboarding_start(
     progress = (job.payload or {}).get("progress", []) if job else []
 
     return templates.TemplateResponse(
+        request,
         "onboarding/profile_review.html",
         _template_context(
             request,
@@ -128,6 +129,7 @@ async def add_texts(
     profile = profile_result.scalar_one_or_none()
 
     return templates.TemplateResponse(
+        request,
         "onboarding/add_texts.html",
         _template_context(request, current_user, profile=profile),
     )
@@ -151,6 +153,7 @@ async def onboarding_done(
     current_user: User = Depends(get_current_user),
 ):
     return templates.TemplateResponse(
+        request,
         "onboarding/complete.html",
         _template_context(request, current_user),
     )

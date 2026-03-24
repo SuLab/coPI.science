@@ -88,6 +88,14 @@ class AgentSlackClient:
             ):
                 return
 
+            # Log raw event fields relevant to threading
+            logger.info(
+                "[%s] Raw event: ts=%s thread_ts=%s subtype=%s user=%s text=%.40s",
+                self.agent_id, event.get("ts"), event.get("thread_ts"),
+                event.get("subtype"), event.get("user"),
+                (event.get("text") or "")[:40],
+            )
+
             self.on_message({
                 "agent_id": self.agent_id,
                 "channel": event.get("channel"),

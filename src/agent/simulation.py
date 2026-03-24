@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from src.agent.agent import Agent
-from src.agent.channels import SEEDED_CHANNELS, make_collaboration_channel_name
+from src.agent.channels import SEEDED_CHANNELS
 from src.config import get_settings
 from src.models import AgentMessage, LlmCallLog, SimulationRun
 from src.services.llm import set_call_log_callback
@@ -16,7 +16,7 @@ from src.services.llm import set_call_log_callback
 logger = logging.getLogger(__name__)
 
 # response_type values that route to Opus
-OPUS_RESPONSE_TYPES = {"collaboration", "experiment", "help_wanted"}
+OPUS_RESPONSE_TYPES = {"collaboration", "experiment", "help_wanted", "summary"}
 
 # Pilot lab configurations
 PILOT_LABS = [
@@ -80,6 +80,9 @@ class SimulationEngine:
         # Track which channels each agent joined: agent_id -> set of channel names
         self._agent_channels: dict[str, set[str]] = {}
 
+        # Deduplication: track message timestamps already processed
+        self._seen_message_ts: set[str] = set()
+
     @property
     def is_within_time_limit(self) -> bool:
         if not self._start_time:
@@ -112,16 +115,23 @@ class SimulationEngine:
         # Register message handlers — capture the event loop now since Slack Bolt
         # handlers run in thread pool threads that don't have an event loop.
         loop = asyncio.get_running_loop()
+        handler_count = 0
         for agent_id, client in self.slack_clients.items():
             if hasattr(client, "on_message"):
                 def make_handler(aid):
                     def handler(msg):
+                        logger.debug(
+                            "Event from %s bot: sender=%s channel=%s",
+                            aid, msg.get("sender", "?"), msg.get("channel_name", "?"),
+                        )
                         asyncio.run_coroutine_threadsafe(
                             self._message_queue.put(msg),
                             loop,
                         )
                     return handler
                 client.on_message = make_handler(agent_id)
+                handler_count += 1
+        logger.info("Registered message handlers for %d agents", handler_count)
 
         # Run kickstart and message processing concurrently
         await asyncio.gather(
@@ -240,6 +250,10 @@ class SimulationEngine:
         """Post scripted and generated kickstart messages to initiate conversation."""
         kickstart_config = self._load_kickstart_config()
 
+        # Handle nested YAML structure (kickstart: { scripted: [...] })
+        if "kickstart" in kickstart_config and "scripted" not in kickstart_config:
+            kickstart_config = kickstart_config["kickstart"]
+
         # Shuffle scripted openers so the same bot doesn't always go first
         scripted = list(kickstart_config.get("scripted", []))
         random.shuffle(scripted)
@@ -277,6 +291,8 @@ class SimulationEngine:
                 await self._post_message(agent.agent_id, channel, message)
             except Exception as exc:
                 logger.error("[%s] Kickstart failed: %s", agent.agent_id, exc)
+        logger.info("Kickstart phase complete. %d scripted, %d generated openers posted.",
+                     len(scripted), len(remaining_agents))
 
     def _load_kickstart_config(self) -> dict:
         """Load kickstart configuration from prompts/agent-kickstart.md."""
@@ -296,16 +312,29 @@ class SimulationEngine:
 
     async def _process_messages(self) -> None:
         """Process incoming messages from the queue."""
+        logger.info("Message processing loop started")
         while self._running or not self._message_queue.empty():
             try:
                 msg = await asyncio.wait_for(self._message_queue.get(), timeout=1.0)
-                await self._handle_channel_message(msg)
+                logger.info(
+                    "Queue recv: sender=%s channel=%s ts=%s thread_ts=%s content=%.80s",
+                    msg.get("sender", "?"), msg.get("channel_name", "?"),
+                    msg.get("ts", "?"), msg.get("thread_ts", "None"),
+                    msg.get("content", "")[:80],
+                )
+                try:
+                    await self._handle_channel_message(msg)
+                except Exception:
+                    logger.exception("Error handling message from %s in %s",
+                                     msg.get("sender", "?"), msg.get("channel_name", "?"))
                 self._message_queue.task_done()
             except asyncio.TimeoutError:
                 if not self.is_within_time_limit:
                     logger.info("Time limit reached, waiting for queue to drain...")
                     if self._message_queue.empty():
                         break
+        logger.info("Message processing loop exited (_running=%s, queue_empty=%s)",
+                     self._running, self._message_queue.empty())
 
     def _update_thread_meta(self, msg: dict) -> None:
         """Track thread participants and OP reply status for thread discipline."""
@@ -345,15 +374,29 @@ class SimulationEngine:
     def _is_thread_open_for(self, msg: dict, agent_id: str) -> bool:
         """Check whether thread discipline allows this agent to respond.
 
-        Returns True if:
-        - This is a top-level message (not a thread reply) — anyone can respond
-        - The agent is already a participant in the thread
-        - The OP has replied at least once (thread is "mature")
-        - The thread has fewer than 3 participants
+        Hard gates:
+        - Top-level messages with no thread yet: anyone can respond
+        - Existing participants always allowed
+        - Hard cap at 2 participants per thread (OP + one responder)
         """
-        thread_ts = msg.get("thread_ts") or msg.get("ts")
+        thread_ts = msg.get("thread_ts")
         if not thread_ts:
-            return True
+            # Top-level message — but check if it has acquired a thread
+            # (an earlier agent in the sequential loop may have replied)
+            msg_ts = msg.get("ts")
+            if msg_ts:
+                meta = self._thread_meta.get(msg_ts)
+                if meta and meta["reply_count"] > 0:
+                    # This top-level message now has a thread; apply thread gates
+                    logger.info(
+                        "Thread discipline: top-level msg ts=%s now has thread (%d replies), applying gates",
+                        msg_ts, meta["reply_count"],
+                    )
+                    thread_ts = msg_ts
+                else:
+                    return True  # genuinely no thread yet
+            else:
+                return True
 
         meta = self._thread_meta.get(thread_ts)
         if not meta:
@@ -363,18 +406,22 @@ class SimulationEngine:
         if agent_id in meta["participants"]:
             return True
 
-        # Block if OP hasn't replied yet (thread too young)
-        if not meta["op_replied"]:
-            return False
-
-        # Block if already 3+ participants
-        if len(meta["participants"]) >= 3:
+        # Hard cap: 2 participants max per thread (OP + one responder)
+        if len(meta["participants"]) >= 2:
             return False
 
         return True
 
     async def _handle_channel_message(self, msg: dict) -> None:
         """Process a single incoming Slack message across all relevant agents."""
+        # Deduplicate: each Slack message arrives N times (once per bot in the channel).
+        # Only process the first copy.
+        msg_ts = msg.get("ts")
+        if msg_ts:
+            if msg_ts in self._seen_message_ts:
+                return
+            self._seen_message_ts.add(msg_ts)
+
         channel_name = msg.get("channel_name", "unknown")
         sender_agent_id = msg.get("agent_id")  # Which agent received this event
 
@@ -398,59 +445,49 @@ class SimulationEngine:
         # (all agents in the channel, excluding the sender)
         sender_name = msg.get("sender", "")
         responding_agents = []
+        skip_reasons: dict[str, str] = {}
 
         for agent in self.agents.values():
             # Skip if this agent sent the message
             if agent.bot_name.lower() in sender_name.lower():
+                skip_reasons[agent.agent_id] = "is_sender"
                 continue
             # Skip if agent isn't in this channel
             if channel_name not in self._agent_channels.get(agent.agent_id, set()):
+                skip_reasons[agent.agent_id] = f"not_in_channel({channel_name})"
                 continue
             if not self._agent_within_budget(agent):
+                skip_reasons[agent.agent_id] = "over_budget"
                 continue
             # Thread discipline: don't even let agents decide if the thread is too young
             if not self._is_thread_open_for(msg, agent.agent_id):
-                logger.debug(
-                    "[%s] Skipped — thread discipline (OP hasn't replied or 3+ participants)",
-                    agent.agent_id,
-                )
+                skip_reasons[agent.agent_id] = "thread_discipline"
                 continue
             responding_agents.append(agent)
 
         if not responding_agents:
+            logger.info(
+                "No responding agents for msg in #%s from '%s'. Skips: %s",
+                channel_name, sender_name, skip_reasons,
+            )
             return
+
+        logger.info(
+            "%d agents evaluating msg in #%s from '%s': %s",
+            len(responding_agents), channel_name, sender_name,
+            [a.agent_id for a in responding_agents],
+        )
 
         # Randomize decision order so no agent consistently evaluates first
         random.shuffle(responding_agents)
 
-        # Phase 1: All agents decide in parallel
-        decisions = await asyncio.gather(
-            *[
-                self._agent_decide(agent, channel_name, msg)
-                for agent in responding_agents
-            ],
-            return_exceptions=True,
-        )
+        # Sequential decide-then-respond: each agent decides one at a time so
+        # later agents see earlier replies before making their decision.  The
+        # agent's decide prompt receives thread metadata (participant count,
+        # reply count, whether OP has replied) so it can judge whether to join
+        # the thread, wait, or start a new top-level message.
 
-        # Collect agents that want to respond
-        responders = []
-        for agent, decision in zip(responding_agents, decisions):
-            if isinstance(decision, Exception):
-                logger.warning("[%s] Decision error: %s", agent.agent_id, decision)
-                continue
-            if decision.get("should_respond"):
-                responders.append((agent, decision))
-
-        if not responders:
-            return
-
-        # Phase 2: Stagger responses — only allow ONE new participant per round
-        shuffle_responders = list(responders)
-        random.shuffle(shuffle_responders)
-
-        thread_ts = msg.get("thread_ts") or msg.get("ts")
-
-        for agent, decision in shuffle_responders:
+        for agent in responding_agents:
             delay = random.uniform(5, 30)
             await asyncio.sleep(delay)
 
@@ -458,15 +495,25 @@ class SimulationEngine:
             if not self.is_within_time_limit or not self._agent_within_budget(agent):
                 continue
 
-            # Re-check thread discipline (may have changed during staggered delays)
+            # Re-check thread discipline (may have changed since earlier agent responded)
             if not self._is_thread_open_for(msg, agent.agent_id):
                 logger.debug(
-                    "[%s] Skipped at Phase 2 — thread discipline",
+                    "[%s] Skipped — thread discipline (after earlier responses)",
                     agent.agent_id,
                 )
                 continue
 
-            # Get updated channel history
+            # Decide (with current channel history that includes earlier replies)
+            try:
+                decision = await self._agent_decide(agent, channel_name, msg)
+            except Exception as exc:
+                logger.warning("[%s] Decision error: %s", agent.agent_id, exc)
+                continue
+
+            if not decision.get("should_respond"):
+                continue
+
+            # Get updated channel history (includes any replies posted since we started)
             history = self._channel_history.get(channel_name, [])
 
             try:
@@ -492,20 +539,26 @@ class SimulationEngine:
                             meta["participants"].add(agent.agent_id)
                             meta["reply_count"] += 1
 
-                elif action == "create_channel":
-                    # Create a collaboration channel
-                    sender_agent = self._infer_sender_agent(sender_name)
-                    if sender_agent:
-                        new_channel_name = make_collaboration_channel_name(
-                            [agent.agent_id, sender_agent],
-                            topic=decision.get("reason", "collab")[:20],
-                        )
-                        reply_thread_ts = msg.get("thread_ts") or msg.get("ts")
-                        await self._create_and_notify_channel(
-                            agent.agent_id, new_channel_name,
-                            source_channel=channel_name,
-                            source_thread_ts=reply_thread_ts,
-                        )
+                elif action == "new_thread":
+                    # Agent wants to start a new top-level message referencing the original
+                    response_model = self._select_response_model(decision)
+                    # Provide context so the agent knows to reference the original post
+                    original_sender = msg.get("sender", "someone")
+                    action_context = (
+                        f"You are starting a NEW top-level message in #{channel_name}, inspired by "
+                        f"{original_sender}'s post. Reference their post but take a different angle. "
+                        f"Original context: {decision.get('reason', '')}"
+                    )
+                    response_text = await agent.respond(
+                        channel_name=channel_name,
+                        channel_history=history,
+                        new_message=msg,
+                        action_context=action_context,
+                        model=response_model,
+                    )
+                    # Post as top-level (no thread_ts)
+                    if self._can_post_toplevel(agent.agent_id, channel_name):
+                        await self._post_message(agent.agent_id, channel_name, response_text)
 
             except Exception as exc:
                 logger.error("[%s] Response failed: %s", agent.agent_id, exc)
@@ -514,14 +567,64 @@ class SimulationEngine:
         if self._llm_log_buffer:
             await self._flush_llm_logs()
 
+    def _build_thread_context(self, msg: dict) -> str:
+        """Build a human-readable summary of thread state for the decide prompt."""
+        thread_ts = msg.get("thread_ts")
+        if not thread_ts:
+            # This is a top-level message, but it may have acquired replies since
+            # it was posted (e.g., an earlier agent in the sequential loop replied).
+            # Check if this message's ts has become a thread root.
+            msg_ts = msg.get("ts")
+            if msg_ts:
+                meta = self._thread_meta.get(msg_ts)
+                if meta and meta["reply_count"] > 0:
+                    logger.info(
+                        "Thread context: top-level msg ts=%s now has %d replies, %d participants",
+                        msg_ts, meta["reply_count"], len(meta["participants"]),
+                    )
+                    participants = sorted(meta["participants"])
+                    parts = [
+                        f"This post already has a thread with {len(participants)} participants: {', '.join(participants)}.",
+                        f"Replies so far: {meta['reply_count']}.",
+                        f"RULE: Threads are limited to 2 participants. If you are not already a participant, "
+                        f"you MUST NOT join this thread. Use action \"new_thread\" to start a separate "
+                        f"top-level message referencing this post instead.",
+                    ]
+                    return "\n".join(parts)
+            return "This is a top-level message (no thread yet). You may respond to start a 1-on-1 discussion."
+
+        meta = self._thread_meta.get(thread_ts)
+        if not meta:
+            return "This is a thread reply (no metadata available)."
+
+        participants = sorted(meta["participants"])
+        parts = [
+            f"Thread participants: {', '.join(participants)} ({len(participants)} total).",
+            f"Replies so far: {meta['reply_count']}.",
+        ]
+        if len(participants) >= 2:
+            parts.append(
+                "RULE: This thread already has 2 participants. No new participants may join. "
+                "If you are not one of the participants listed above, use action \"new_thread\"."
+            )
+        if meta["reply_count"] >= 4:
+            parts.append(
+                "This thread has had several exchanges. You should be working toward a conclusion: "
+                "either a :memo: Summary with a strong collaboration proposal, or a graceful close "
+                "acknowledging insufficient overlap."
+            )
+        return "\n".join(parts)
+
     async def _agent_decide(self, agent: Agent, channel_name: str, msg: dict) -> dict:
         """Run Phase 1 decision for an agent. Always uses Sonnet."""
         settings = get_settings()
         history = self._channel_history.get(channel_name, [])
+        thread_context = self._build_thread_context(msg)
         return await agent.decide(
             channel_name=channel_name,
             channel_history=history[:-1],
             new_message=msg,
+            thread_context=thread_context,
             model=settings.llm_agent_model_sonnet,
         )
 
@@ -684,33 +787,6 @@ class SimulationEngine:
                 if ch_id:
                     client.join_channel(ch_id)
             logger.info("[%s] Joined channels: %s", agent_id, ", ".join(sorted(channels_to_join)))
-
-    async def _create_and_notify_channel(
-        self,
-        creator_agent_id: str,
-        channel_name: str,
-        source_channel: str | None = None,
-        source_thread_ts: str | None = None,
-    ) -> None:
-        """Create a collaboration channel and post a notice in the source thread."""
-        client = self.slack_clients.get(creator_agent_id)
-        if client:
-            channel_data = client.create_channel(channel_name)
-            if channel_data:
-                channel_id = channel_data.get("id", channel_name)
-                # Join all relevant agents
-                for agent_id, ac in self.slack_clients.items():
-                    ac.join_channel(channel_id)
-                logger.info(
-                    "[%s] Created collaboration channel #%s", creator_agent_id, channel_name
-                )
-                # Post a notice in the original thread
-                if source_channel:
-                    notice = f"Let's continue this discussion in #{channel_name}"
-                    await self._post_message(
-                        creator_agent_id, source_channel, notice,
-                        thread_ts=source_thread_ts,
-                    )
 
     def _infer_sender_agent(self, sender_name: str) -> str | None:
         """Try to infer which agent sent a message from their bot name."""

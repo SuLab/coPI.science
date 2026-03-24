@@ -61,6 +61,7 @@ async def profile_view(
     publications = pub_result.scalars().all()
 
     return templates.TemplateResponse(
+        request,
         "profile/view.html",
         _template_context(
             request,
@@ -86,6 +87,7 @@ async def profile_edit(
     profile = profile_result.scalar_one_or_none()
 
     return templates.TemplateResponse(
+        request,
         "profile/edit.html",
         _template_context(request, current_user, profile=profile),
     )
@@ -171,6 +173,7 @@ async def add_text_page(
     profile = profile_result.scalar_one_or_none()
 
     return templates.TemplateResponse(
+        request,
         "profile/add_text.html",
         _template_context(request, current_user, profile=profile),
     )
@@ -251,6 +254,7 @@ async def delete_account_confirm(
 ):
     """Account deletion confirmation page."""
     return templates.TemplateResponse(
+        request,
         "profile/delete_account.html",
         _template_context(request, current_user),
     )
