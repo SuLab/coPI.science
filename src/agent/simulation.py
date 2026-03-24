@@ -427,10 +427,6 @@ class SimulationEngine:
             if not self._agent_within_budget(agent):
                 skip_reasons[agent.agent_id] = "over_budget"
                 continue
-            # Thread discipline: don't even let agents decide if the thread is too young
-            if not self._is_thread_open_for(msg, agent.agent_id):
-                skip_reasons[agent.agent_id] = "thread_discipline"
-                continue
             responding_agents.append(agent)
 
         if not responding_agents:
@@ -463,15 +459,9 @@ class SimulationEngine:
             if not self.is_within_time_limit or not self._agent_within_budget(agent):
                 continue
 
-            # Re-check thread discipline (may have changed since earlier agent responded)
-            if not self._is_thread_open_for(msg, agent.agent_id):
-                logger.debug(
-                    "[%s] Skipped — thread discipline (after earlier responses)",
-                    agent.agent_id,
-                )
-                continue
-
-            # Decide (with current channel history that includes earlier replies)
+            # Decide (with current channel history that includes earlier replies).
+            # The thread context tells the agent whether the thread is full, so it
+            # can choose "new_thread" instead of "respond".
             try:
                 decision = await self._agent_decide(agent, channel_name, msg)
             except Exception as exc:
@@ -487,6 +477,13 @@ class SimulationEngine:
             try:
                 action = decision.get("action", "respond")
                 if action == "respond":
+                    # Enforce thread discipline: block "respond" if agent can't join thread
+                    if not self._is_thread_open_for(msg, agent.agent_id):
+                        logger.info(
+                            "[%s] Blocked respond — thread full, should use new_thread",
+                            agent.agent_id,
+                        )
+                        continue
                     response_model = self._select_response_model(decision)
                     response_text = await agent.respond(
                         channel_name=channel_name,
