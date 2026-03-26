@@ -1183,38 +1183,50 @@ Keep it concise — under 300 words.""",
 def _strip_llm_preamble(text: str) -> str:
     """Remove LLM internal reasoning that leaks before the actual Slack message.
 
-    Detects patterns like internal commentary followed by a --- separator,
-    or lines that look like self-talk about tool results.
+    Strategy: split into paragraphs, identify the first paragraph that looks like
+    an actual Slack message (not meta-commentary), and discard everything before it.
     """
     # If there's a --- separator, take everything after the last one
     if "\n---\n" in text:
         parts = text.split("\n---\n")
-        # Use the last part (the actual message)
         candidate = parts[-1].strip()
         if candidate:
             text = candidate
 
-    # Strip lines at the start that look like internal reasoning
-    preamble_patterns = [
-        r"^(These|The|Let me|I('ll| should| need| couldn't| didn't| can't| wasn't)|"
-        r"My |Based on|After |Since |Looking at|It seems|Ok,|Okay,|Hmm)",
-    ]
-    lines = text.split("\n")
-    # Only strip leading lines that match preamble patterns AND are followed
-    # by a blank line (paragraph break) before the real message
-    for i, line in enumerate(lines):
-        stripped = line.strip()
-        if not stripped:
-            # Blank line — check if remaining lines look like a real message
-            rest = "\n".join(lines[i + 1:]).strip()
-            if rest:
-                # Check if everything before this blank line was preamble
-                preamble_section = "\n".join(lines[:i]).strip()
-                if preamble_section and re.match(
-                    preamble_patterns[0], preamble_section, re.IGNORECASE
-                ):
-                    logger.debug("Stripped preamble: %.100s", preamble_section)
-                    return rest
+    # Split into paragraphs (separated by blank lines)
+    paragraphs = re.split(r"\n\s*\n", text.strip())
+    if len(paragraphs) <= 1:
+        return text
+
+    # Patterns that indicate internal reasoning / meta-commentary
+    _PREAMBLE_RE = re.compile(
+        r"^("
+        r"(That('s| is) (not|exactly|interesting))"
+        r"|Let me"
+        r"|I('ll| should| need| couldn't| didn't| can't| wasn't| don't| have| want)"
+        r"|Now I (have|can|know|need|should)"
+        r"|These |The (search|result|profile|paper|abstract|tool|API|PubMed|query)"
+        r"|My (search|query|tool|approach)"
+        r"|Based on|After (review|search|look)|Since (the|I|my)"
+        r"|Looking at|It seems|Ok[,.]|Okay[,.]|Hmm"
+        r"|This (is|gives|shows|confirms|doesn't|isn't)"
+        r"|None of|No (relevant|useful|results)"
+        r"|Unfortunately"
+        r")",
+        re.IGNORECASE,
+    )
+
+    # Find the first non-preamble paragraph
+    for i, para in enumerate(paragraphs):
+        first_line = para.strip().split("\n")[0]
+        if not _PREAMBLE_RE.match(first_line):
+            if i > 0:
+                stripped = "\n\n".join(paragraphs[i:]).strip()
+                logger.info(
+                    "Stripped %d preamble paragraph(s): %.120s",
+                    i, " | ".join(p.strip()[:50] for p in paragraphs[:i]),
+                )
+                return stripped
             break
 
     return text
