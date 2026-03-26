@@ -170,6 +170,125 @@ async def make_decision(
     return _extract_json(response_text)
 
 
+async def generate_with_tools(
+    system_prompt: str,
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]],
+    tool_executor: Any,  # async callable(tool_name, tool_input) -> str
+    model: str | None = None,
+    max_tokens: int = 1000,
+    max_tool_rounds: int = 5,
+    log_meta: dict[str, str] | None = None,
+) -> str:
+    """
+    Generate a response with Anthropic tool-use API.
+
+    Loops: call API -> if tool_use blocks, execute tools, append results,
+    re-call until we get a final text response or hit max_tool_rounds.
+
+    Returns the final text response.
+    """
+    settings = get_settings()
+    model = model or settings.llm_agent_model
+    client = get_anthropic_client()
+
+    # Work with a mutable copy of messages
+    conversation = list(messages)
+    total_input_tokens = 0
+    total_output_tokens = 0
+
+    for round_num in range(max_tool_rounds + 1):
+        t0 = time.monotonic()
+        message = client.messages.create(
+            model=model,
+            max_tokens=max_tokens,
+            system=system_prompt,
+            messages=conversation,
+            tools=tools,
+        )
+        latency_ms = (time.monotonic() - t0) * 1000
+        total_input_tokens += message.usage.input_tokens
+        total_output_tokens += message.usage.output_tokens
+
+        # Check if the response contains tool use
+        tool_use_blocks = [b for b in message.content if b.type == "tool_use"]
+        text_blocks = [b for b in message.content if b.type == "text"]
+
+        if not tool_use_blocks:
+            # Final text response — no more tool calls
+            response_text = text_blocks[0].text if text_blocks else ""
+
+            if _call_log_callback and log_meta:
+                from datetime import datetime, timezone
+                _call_log_callback({
+                    "system_prompt": system_prompt,
+                    "messages": conversation,
+                    "response_text": response_text,
+                    "model": model,
+                    "input_tokens": total_input_tokens,
+                    "output_tokens": total_output_tokens,
+                    "latency_ms": latency_ms,
+                    "completed_at": datetime.now(timezone.utc),
+                    **log_meta,
+                })
+
+            return response_text
+
+        # Append the assistant message with tool_use blocks
+        conversation.append({
+            "role": "assistant",
+            "content": [b.model_dump() for b in message.content],
+        })
+
+        # Execute each tool call and build tool_result blocks
+        tool_results = []
+        for tool_block in tool_use_blocks:
+            result_text = await tool_executor(tool_block.name, tool_block.input)
+            tool_results.append({
+                "type": "tool_result",
+                "tool_use_id": tool_block.id,
+                "content": result_text,
+            })
+
+        conversation.append({"role": "user", "content": tool_results})
+
+        logger.debug(
+            "Tool-use round %d: %d tool calls",
+            round_num + 1,
+            len(tool_use_blocks),
+        )
+
+    # Exhausted max rounds — force a final call without tools
+    logger.warning("Max tool rounds (%d) reached, forcing final response", max_tool_rounds)
+    t0 = time.monotonic()
+    message = client.messages.create(
+        model=model,
+        max_tokens=max_tokens,
+        system=system_prompt,
+        messages=conversation,
+    )
+    latency_ms = (time.monotonic() - t0) * 1000
+    total_input_tokens += message.usage.input_tokens
+    total_output_tokens += message.usage.output_tokens
+    response_text = message.content[0].text if message.content else ""
+
+    if _call_log_callback and log_meta:
+        from datetime import datetime, timezone
+        _call_log_callback({
+            "system_prompt": system_prompt,
+            "messages": conversation,
+            "response_text": response_text,
+            "model": model,
+            "input_tokens": total_input_tokens,
+            "output_tokens": total_output_tokens,
+            "latency_ms": latency_ms,
+            "completed_at": datetime.now(timezone.utc),
+            **log_meta,
+        })
+
+    return response_text
+
+
 def _default_synthesis_prompt() -> str:
     return """You are a scientific profile synthesizer. Given information about a researcher's publications, grants, and submitted texts, generate a structured JSON profile.
 

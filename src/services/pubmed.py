@@ -280,3 +280,71 @@ def _extract_text(element) -> str:
         if child.tail:
             parts.append(child.tail)
     return " ".join(p.strip() for p in parts if p.strip())
+
+
+# ---------------------------------------------------------------------------
+# High-level functions for agent tool use
+# ---------------------------------------------------------------------------
+
+
+async def fetch_abstract(pmid_or_doi: str) -> dict[str, Any]:
+    """
+    Fetch a paper's abstract given a PMID or DOI.
+
+    Returns dict with: pmid, title, abstract, journal, year (or error key).
+    """
+    pmid = pmid_or_doi.strip()
+
+    # If it looks like a DOI, resolve to PMID first
+    if "/" in pmid or pmid.startswith("10."):
+        mapping = await convert_dois_to_pmids([pmid])
+        resolved = mapping.get(pmid)
+        if not resolved:
+            return {"error": f"Could not resolve DOI {pmid} to a PMID"}
+        pmid = resolved
+
+    records = await fetch_pubmed_records([pmid])
+    if not records:
+        return {"error": f"No PubMed record found for {pmid}"}
+
+    rec = records[0]
+    return {
+        "pmid": rec.get("pmid", pmid),
+        "title": rec.get("title", ""),
+        "abstract": rec.get("abstract", ""),
+        "journal": rec.get("journal", ""),
+        "year": rec.get("year"),
+    }
+
+
+async def fetch_full_text(pmid_or_doi: str) -> dict[str, Any]:
+    """
+    Fetch full text (methods section) for a paper given a PMID or DOI.
+
+    Returns dict with: pmid, pmcid, title, abstract, methods (or error key).
+    """
+    # First get the abstract / metadata
+    abstract_data = await fetch_abstract(pmid_or_doi)
+    if "error" in abstract_data:
+        return abstract_data
+
+    pmid = abstract_data["pmid"]
+
+    # Resolve PMID to PMCID
+    pmcid_map = await convert_pmids_to_pmcids([pmid])
+    pmcid = pmcid_map.get(pmid)
+    if not pmcid:
+        return {
+            **abstract_data,
+            "pmcid": None,
+            "methods": None,
+            "note": "Paper not available in PubMed Central (no free full text)",
+        }
+
+    # Fetch methods section
+    methods = await fetch_pmc_methods(pmcid)
+    return {
+        **abstract_data,
+        "pmcid": pmcid,
+        "methods": methods,
+    }

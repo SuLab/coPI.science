@@ -60,9 +60,8 @@ class AgentMessage(Base):
     channel_name: Mapped[str] = mapped_column(String(100), nullable=False)
     message_ts: Mapped[str | None] = mapped_column(String(50), nullable=True)
     message_length: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    phase: Mapped[str] = mapped_column(
-        Enum("decide", "respond", name="agent_message_phase_enum"), nullable=False
-    )
+    thread_ts: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    phase: Mapped[str] = mapped_column(String(30), nullable=False)  # scan, prune, thread_reply, new_post, etc.
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -139,3 +138,31 @@ class LlmCallLog(Base):
 
     def __repr__(self) -> str:
         return f"<LlmCallLog id={self.id} agent={self.agent_id} phase={self.phase} model={self.model}>"
+
+
+class ThreadDecision(Base):
+    __tablename__ = "thread_decisions"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    simulation_run_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("simulation_runs.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    thread_id: Mapped[str] = mapped_column(String(50), nullable=False)
+    channel: Mapped[str] = mapped_column(String(100), nullable=False)
+    agent_a: Mapped[str] = mapped_column(String(50), nullable=False)
+    agent_b: Mapped[str] = mapped_column(String(50), nullable=False)
+    outcome: Mapped[str] = mapped_column(
+        Enum("proposal", "no_proposal", "timeout", name="thread_outcome_enum"),
+        nullable=False,
+    )
+    summary_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    decided_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    def __repr__(self) -> str:
+        return f"<ThreadDecision thread={self.thread_id} outcome={self.outcome}>"

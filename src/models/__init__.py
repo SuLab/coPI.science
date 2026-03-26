@@ -3,7 +3,7 @@
 Import all models here so Alembic can detect them.
 """
 
-from src.models.agent_activity import AgentChannel, AgentMessage, LlmCallLog, SimulationRun
+from src.models.agent_activity import AgentChannel, AgentMessage, LlmCallLog, SimulationRun, ThreadDecision
 from src.models.job import Job
 from src.models.profile import ResearcherProfile
 from src.models.publication import Publication
@@ -18,4 +18,5 @@ __all__ = [
     "AgentMessage",
     "AgentChannel",
     "LlmCallLog",
+    "ThreadDecision",
 ]

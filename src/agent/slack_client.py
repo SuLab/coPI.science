@@ -1,218 +1,229 @@
-"""Slack client per agent — manages connection via Socket Mode."""
+"""Slack client per agent — Web API only (no Socket Mode).
 
-import asyncio
+Uses conversations.history and conversations.replies for polling,
+chat.postMessage for posting.
+"""
+
 import logging
-import threading
-from typing import Any, Callable
+from typing import Any
 
-from slack_bolt import App
-from slack_bolt.adapter.socket_mode import SocketModeHandler
+from slack_sdk import WebClient
+from slack_sdk.errors import SlackApiError
 
 logger = logging.getLogger(__name__)
 
 
 class AgentSlackClient:
     """
-    Manages a Slack Bolt app for a single agent.
-    Listens for messages via Socket Mode.
+    Manages a Slack Web API client for a single agent.
+    No Socket Mode — the simulation engine polls for new messages.
     """
 
-    def __init__(
-        self,
-        agent_id: str,
-        bot_token: str,
-        app_token: str,
-        on_message: Callable[[dict[str, Any]], None],
-    ):
+    def __init__(self, agent_id: str, bot_token: str):
         self.agent_id = agent_id
         self.bot_token = bot_token
-        self.app_token = app_token
-        self.on_message = on_message
-        self._app: App | None = None
-        self._handler: SocketModeHandler | None = None
-        self._thread: threading.Thread | None = None
+        self._client: WebClient | None = None
         self._bot_user_id: str | None = None
         self._channel_name_to_id: dict[str, str] = {}  # name -> ID cache
 
-    def start(self) -> None:
-        """Start the Slack Socket Mode connection in a background thread."""
+    def connect(self) -> bool:
+        """Authenticate and cache bot user ID. Returns True on success."""
         if not self.bot_token or self.bot_token.startswith("xoxb-placeholder"):
-            logger.warning("[%s] No valid Slack tokens — running in mock mode", self.agent_id)
-            return
+            logger.warning("[%s] No valid Slack token — running in mock mode", self.agent_id)
+            return False
 
-        self._app = App(token=self.bot_token)
-        self._setup_handlers()
-
+        self._client = WebClient(token=self.bot_token)
         try:
-            auth_result = self._app.client.auth_test()
-            self._bot_user_id = auth_result["user_id"]
-            logger.info("[%s] Connected as %s (%s)", self.agent_id, auth_result["user"], self._bot_user_id)
-        except Exception as exc:
-            logger.error("[%s] Slack auth failed: %s", self.agent_id, exc)
-            return
-
-        self._handler = SocketModeHandler(self._app, self.app_token)
-        self._thread = threading.Thread(
-            target=self._handler.start,
-            daemon=True,
-            name=f"slack-{self.agent_id}",
-        )
-        self._thread.start()
-        logger.info("[%s] Socket Mode handler started", self.agent_id)
-
-    def stop(self) -> None:
-        """Stop the Slack connection."""
-        if self._handler:
-            try:
-                self._handler.close()
-            except Exception as exc:
-                logger.warning("[%s] Error stopping handler: %s", self.agent_id, exc)
-
-    def _setup_handlers(self) -> None:
-        """Register Slack event handlers."""
-        app = self._app
-
-        @app.event("message")
-        def handle_message(event: dict, say, client) -> None:
-            # Ignore this bot's own messages (but allow messages from other bots)
-            if event.get("user") == self._bot_user_id:
-                return
-            # Ignore system messages (joins, leaves, edits, deletions, etc.)
-            subtype = event.get("subtype")
-            if subtype in (
-                "message_deleted", "message_changed",
-                "channel_join", "channel_leave",
-                "channel_purpose", "channel_topic",
-                "channel_name", "channel_archive", "channel_unarchive",
-                "bot_add", "bot_remove",
-            ):
-                return
-
-            # Log raw event fields relevant to threading
+            auth = self._client.auth_test()
+            self._bot_user_id = auth["user_id"]
             logger.info(
-                "[%s] Raw event: ts=%s thread_ts=%s subtype=%s user=%s text=%.40s",
-                self.agent_id, event.get("ts"), event.get("thread_ts"),
-                event.get("subtype"), event.get("user"),
-                (event.get("text") or "")[:40],
+                "[%s] Connected as %s (%s)",
+                self.agent_id, auth["user"], self._bot_user_id,
             )
+            return True
+        except SlackApiError as exc:
+            logger.error("[%s] Slack auth failed: %s", self.agent_id, exc)
+            return False
 
-            self.on_message({
-                "agent_id": self.agent_id,
-                "channel": event.get("channel"),
-                "channel_name": self._resolve_channel_name(client, event.get("channel", "")),
-                "sender": self._resolve_user_name(client, event.get("user", "")),
-                "sender_id": event.get("user"),
-                "content": event.get("text", ""),
-                "ts": event.get("ts"),
-                "thread_ts": event.get("thread_ts"),
-            })
+    @property
+    def is_connected(self) -> bool:
+        return self._client is not None
 
-    def _resolve_channel_name(self, client, channel_id: str) -> str:
-        if not channel_id:
-            return "unknown"
+    @property
+    def bot_user_id(self) -> str | None:
+        return self._bot_user_id
+
+    # ------------------------------------------------------------------
+    # Polling
+    # ------------------------------------------------------------------
+
+    def poll_channel_messages(
+        self,
+        channel_id: str,
+        oldest: str = "0",
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """
+        Fetch messages from a channel newer than `oldest` timestamp.
+        Returns list of raw Slack message dicts, oldest first.
+        """
+        if not self._client:
+            return []
         try:
-            info = client.conversations_info(channel=channel_id)
-            return info["channel"].get("name", channel_id)
-        except Exception:
-            return channel_id
+            result = self._client.conversations_history(
+                channel=channel_id, oldest=oldest, limit=limit, inclusive=False,
+            )
+            messages = result.get("messages", [])
+            # Filter out system subtypes
+            messages = [
+                m for m in messages
+                if m.get("subtype") not in (
+                    "message_deleted", "message_changed",
+                    "channel_join", "channel_leave",
+                    "channel_purpose", "channel_topic",
+                    "channel_name", "channel_archive", "channel_unarchive",
+                    "bot_add", "bot_remove",
+                )
+            ]
+            return list(reversed(messages))  # oldest first
+        except SlackApiError as exc:
+            logger.error("[%s] Failed to poll channel %s: %s", self.agent_id, channel_id, exc)
+            return []
 
-    def _resolve_user_name(self, client, user_id: str) -> str:
-        if not user_id:
-            return "unknown"
+    def get_thread_replies(
+        self,
+        channel_id: str,
+        thread_ts: str,
+        oldest: str = "0",
+    ) -> list[dict[str, Any]]:
+        """
+        Fetch replies in a thread newer than `oldest`.
+        Returns list of raw Slack message dicts, oldest first.
+        """
+        if not self._client:
+            return []
         try:
-            info = client.users_info(user=user_id)
+            result = self._client.conversations_replies(
+                channel=channel_id, ts=thread_ts, oldest=oldest, inclusive=False,
+            )
+            messages = result.get("messages", [])
+            # First message is always the parent — skip if we only want replies
+            return messages
+        except SlackApiError as exc:
+            logger.error("[%s] Failed to get thread replies: %s", self.agent_id, exc)
+            return []
+
+    # ------------------------------------------------------------------
+    # User resolution
+    # ------------------------------------------------------------------
+
+    def resolve_user_name(self, user_id: str) -> str:
+        """Resolve a Slack user ID to display name."""
+        if not user_id or not self._client:
+            return user_id or "unknown"
+        try:
+            info = self._client.users_info(user=user_id)
             user = info.get("user", {})
             return user.get("display_name") or user.get("real_name") or user_id
-        except Exception:
+        except SlackApiError:
             return user_id
 
-    def _resolve_channel_id(self, channel: str) -> str:
-        """Resolve a channel name to its ID. Returns the input if already an ID or lookup fails."""
-        if channel.startswith("C") or channel.startswith("G"):
-            return channel  # Already an ID
-        if channel in self._channel_name_to_id:
-            return self._channel_name_to_id[channel]
-        if not self._app:
-            return channel
+    def is_bot_user(self, user_id: str) -> bool:
+        """Check if a user ID corresponds to a bot."""
+        if not self._client:
+            return False
         try:
-            result = self._app.client.conversations_list(types="public_channel,private_channel")
-            for ch in result.get("channels", []):
-                self._channel_name_to_id[ch["name"]] = ch["id"]
-            if channel in self._channel_name_to_id:
-                return self._channel_name_to_id[channel]
-        except Exception as exc:
-            logger.warning("[%s] Failed to resolve channel name '%s': %s", self.agent_id, channel, exc)
-        return channel
+            info = self._client.users_info(user=user_id)
+            user = info.get("user", {})
+            return user.get("is_bot", False)
+        except SlackApiError:
+            return False
 
-    def post_message(self, channel: str, text: str, thread_ts: str | None = None) -> dict | None:
-        """Post a message to a Slack channel (accepts name or ID). Uses thread_ts to reply in a thread."""
-        if not self._app:
+    # ------------------------------------------------------------------
+    # Posting
+    # ------------------------------------------------------------------
+
+    def post_message(
+        self,
+        channel: str,
+        text: str,
+        thread_ts: str | None = None,
+    ) -> dict | None:
+        """Post a message to a Slack channel (accepts name or ID)."""
+        if not self._client:
             logger.info("[%s] MOCK post to #%s: %s", self.agent_id, channel, text[:80])
             return {"ts": "mock_ts", "channel": channel}
+
         channel_id = self._resolve_channel_id(channel)
+        # Ensure bot is in the channel
         try:
-            self._app.client.conversations_join(channel=channel_id)
-        except Exception:
+            self._client.conversations_join(channel=channel_id)
+        except SlackApiError:
             pass
+
         try:
-            kwargs = {"channel": channel_id, "text": text}
+            kwargs: dict[str, Any] = {"channel": channel_id, "text": text}
             if thread_ts:
                 kwargs["thread_ts"] = thread_ts
-            result = self._app.client.chat_postMessage(**kwargs)
+            result = self._client.chat_postMessage(**kwargs)
             return result.data
-        except Exception as exc:
-            logger.error("[%s] Failed to post message to #%s: %s", self.agent_id, channel, exc)
+        except SlackApiError as exc:
+            logger.error("[%s] Failed to post to #%s: %s", self.agent_id, channel, exc)
             return None
+
+    # ------------------------------------------------------------------
+    # Channel operations
+    # ------------------------------------------------------------------
 
     def create_channel(self, name: str) -> dict | None:
         """Create a new Slack channel."""
-        if not self._app:
+        if not self._client:
             logger.info("[%s] MOCK create channel: #%s", self.agent_id, name)
             return {"id": f"mock_{name}", "name": name}
         try:
-            result = self._app.client.conversations_create(name=name)
-            return result["channel"]
-        except Exception as exc:
+            result = self._client.conversations_create(name=name)
+            ch = result["channel"]
+            self._channel_name_to_id[ch["name"]] = ch["id"]
+            return ch
+        except SlackApiError as exc:
             logger.error("[%s] Failed to create channel %s: %s", self.agent_id, name, exc)
             return None
 
     def join_channel(self, channel_id: str) -> None:
-        """Join a Slack channel."""
-        if not self._app:
+        """Join a Slack channel by ID."""
+        if not self._client:
             return
         try:
-            self._app.client.conversations_join(channel=channel_id)
-        except Exception as exc:
+            self._client.conversations_join(channel=channel_id)
+        except SlackApiError as exc:
             logger.warning("[%s] Failed to join channel %s: %s", self.agent_id, channel_id, exc)
 
-    def archive_channel(self, channel_id: str) -> bool:
-        """Archive a Slack channel."""
-        if not self._app:
-            logger.info("[%s] MOCK archive channel: %s", self.agent_id, channel_id)
-            return True
+    def list_channels(self) -> dict[str, str]:
+        """List all public channels. Returns {name: id} dict."""
+        if not self._client:
+            return {}
         try:
-            self._app.client.conversations_archive(channel=channel_id)
-            return True
-        except Exception as exc:
-            logger.error("[%s] Failed to archive channel %s: %s", self.agent_id, channel_id, exc)
-            return False
+            result = self._client.conversations_list(types="public_channel", limit=200)
+            mapping = {ch["name"]: ch["id"] for ch in result.get("channels", [])}
+            self._channel_name_to_id.update(mapping)
+            return mapping
+        except SlackApiError as exc:
+            logger.warning("[%s] Failed to list channels: %s", self.agent_id, exc)
+            return {}
 
-    def get_channel_history(self, channel_id: str, limit: int = 20) -> list[dict]:
-        """Get recent messages from a channel."""
-        if not self._app:
-            return []
-        try:
-            result = self._app.client.conversations_history(channel=channel_id, limit=limit)
-            messages = result.get("messages", [])
-            return [
-                {
-                    "sender": m.get("username") or m.get("user") or "bot",
-                    "content": m.get("text", ""),
-                    "ts": m.get("ts"),
-                }
-                for m in reversed(messages)
-                if not m.get("subtype")
-            ]
-        except Exception as exc:
-            logger.error("[%s] Failed to get channel history: %s", self.agent_id, exc)
-            return []
+    def _resolve_channel_id(self, channel: str) -> str:
+        """Resolve a channel name to its ID."""
+        if channel.startswith("C") or channel.startswith("G"):
+            return channel
+        if channel in self._channel_name_to_id:
+            return self._channel_name_to_id[channel]
+        # Refresh cache
+        self.list_channels()
+        return self._channel_name_to_id.get(channel, channel)
+
+    def get_channel_id(self, channel_name: str) -> str | None:
+        """Get channel ID for a channel name, or None."""
+        if channel_name in self._channel_name_to_id:
+            return self._channel_name_to_id[channel_name]
+        self.list_channels()
+        return self._channel_name_to_id.get(channel_name)

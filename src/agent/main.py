@@ -8,13 +8,11 @@ import asyncio
 import logging
 import signal
 import sys
-import uuid
 from datetime import datetime, timezone
 
 import typer
 
 from src.agent.agent import Agent
-from src.agent.channels import SEEDED_CHANNELS
 from src.agent.simulation import PILOT_LABS, SimulationEngine
 from src.config import get_settings
 
@@ -34,7 +32,7 @@ def main(
     mock: bool = typer.Option(False, "--mock", help="Run in mock mode without real Slack tokens"),
     no_db: bool = typer.Option(False, "--no-db", help="Skip database logging"),
 ):
-    """Run the agent simulation."""
+    """Run the turn-based agent simulation."""
     asyncio.run(_run_simulation(max_runtime, budget, mock, no_db))
 
 
@@ -52,7 +50,7 @@ async def _run_simulation(
         for lab in PILOT_LABS
     ]
 
-    # Set up Slack clients
+    # Set up Slack clients (Web API only, no Socket Mode)
     slack_clients = {}
     if not mock:
         from src.agent.slack_client import AgentSlackClient
@@ -60,18 +58,17 @@ async def _run_simulation(
         for agent in agents:
             tokens = slack_tokens.get(agent.agent_id, {})
             bot_token = tokens.get("bot", "")
-            app_token = tokens.get("app", "")
             if bot_token and not bot_token.startswith("xoxb-placeholder"):
                 client = AgentSlackClient(
                     agent_id=agent.agent_id,
                     bot_token=bot_token,
-                    app_token=app_token,
-                    on_message=lambda msg: None,  # Will be replaced by simulation engine
                 )
-                slack_clients[agent.agent_id] = client
-                client.start()
+                if client.connect():
+                    slack_clients[agent.agent_id] = client
+                else:
+                    logger.warning("[%s] Slack connection failed — skipping", agent.agent_id)
             else:
-                logger.warning("[%s] No valid Slack token — skipping Slack connection", agent.agent_id)
+                logger.warning("[%s] No valid Slack token — skipping", agent.agent_id)
 
     # Set up database session factory
     session_factory = None
@@ -92,6 +89,8 @@ async def _run_simulation(
                     "budget_cap": budget,
                     "mock": mock,
                     "agent_count": len(agents),
+                    "active_thread_threshold": settings.active_thread_threshold,
+                    "max_thread_messages": settings.max_thread_messages,
                 },
             )
             db.add(run)
@@ -99,21 +98,8 @@ async def _run_simulation(
             simulation_run_id = run.id
             logger.info("Created simulation run %s", simulation_run_id)
 
-    # Build channel name→ID map from the first connected client and share across all
-    if slack_clients:
-        first_client = next(iter(slack_clients.values()))
-        if first_client._app:
-            try:
-                result = first_client._app.client.conversations_list(types="public_channel")
-                channel_map = {ch["name"]: ch["id"] for ch in result.get("channels", [])}
-                logger.info("Resolved %d channel IDs: %s", len(channel_map), list(channel_map.keys()))
-                for client in slack_clients.values():
-                    client._channel_name_to_id = dict(channel_map)
-            except Exception as exc:
-                logger.warning("Failed to build channel map: %s", exc)
-
     # Create simulation engine
-    engine = SimulationEngine(
+    sim_engine = SimulationEngine(
         agents=agents,
         slack_clients=slack_clients,
         max_runtime_minutes=max_runtime,
@@ -127,7 +113,7 @@ async def _run_simulation(
 
     def shutdown():
         logger.info("Received shutdown signal")
-        asyncio.ensure_future(engine.stop())
+        asyncio.ensure_future(sim_engine.stop())
 
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, shutdown)
@@ -137,7 +123,7 @@ async def _run_simulation(
             "Starting simulation: %d agents, %dm max runtime, %d budget/agent",
             len(agents), max_runtime, budget,
         )
-        await engine.start()
+        await sim_engine.start()
     except Exception:
         logger.exception("Simulation engine raised an exception")
     finally:
@@ -156,14 +142,10 @@ async def _run_simulation(
                     run.total_api_calls = sum(a.api_call_count for a in agents)
                     await db.commit()
 
-        # Stop Slack clients
-        for client in slack_clients.values():
-            client.stop()
-
         # Update working memories
         if session_factory and simulation_run_id:
             logger.info("Updating agent working memories...")
-            await engine.update_all_working_memories()
+            await sim_engine.update_all_working_memories()
 
         logger.info("Simulation complete.")
         logger.info(

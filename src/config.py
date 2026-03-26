@@ -64,6 +64,15 @@ class Settings(BaseSettings):
     # Worker
     worker_poll_interval: int = 5  # seconds
 
+    # Simulation parameters
+    active_thread_threshold: int = 3        # per-agent max active threads
+    max_thread_messages: int = 12           # system-enforced thread close
+    interesting_posts_cap: int = 20         # triggers prune
+    turn_delay_seconds: float = 0.0         # pause between turns
+    phase5_skip_probability: float = 0.0    # chance agent skips new post
+    max_abstracts_other_per_thread: int = 10
+    max_full_text_per_thread: int = 2
+
     def get_slack_tokens(self) -> dict[str, dict[str, str]]:
         """Return slack tokens keyed by agent_id."""
         return {

@@ -1,22 +1,29 @@
-"""Simulation engine — coordinates all agents across all channels."""
+"""Turn-based simulation engine — coordinates all agents across all channels."""
 
 import asyncio
+import json
 import logging
 import random
+import re
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any
 
 from src.agent.agent import Agent
 from src.agent.channels import SEEDED_CHANNELS
+from src.agent.message_log import LogEntry, MessageLog
+from src.agent.state import PostRef, ProposalRef, ThreadState
+from src.agent.tools import TOOL_DEFINITIONS, execute_tool
 from src.config import get_settings
-from src.models import AgentMessage, LlmCallLog, SimulationRun
-from src.services.llm import set_call_log_callback
+from src.models import AgentMessage, LlmCallLog, SimulationRun, ThreadDecision
+from src.services.llm import (
+    generate_agent_response,
+    generate_with_tools,
+    set_call_log_callback,
+)
 
 logger = logging.getLogger(__name__)
-
-# response_type values that route to Opus
-OPUS_RESPONSE_TYPES = {"collaboration", "experiment", "help_wanted", "summary"}
 
 # Pilot lab configurations
 PILOT_LABS = [
@@ -34,11 +41,37 @@ PILOT_LABS = [
     {"id": "briney", "name": "BrineyBot", "pi": "Bryan Briney"},
 ]
 
+# Keywords for channel-profile matching
+_CHANNEL_KEYWORDS: dict[str, list[str]] = {
+    "drug-repurposing": [
+        "drug", "repurpos", "pharmacolog", "therapeutic", "compound",
+        "small molecule", "target", "ligand", "polypharmacol",
+    ],
+    "structural-biology": [
+        "structur", "cryo", "crystallograph", "x-ray", "microscop",
+        "tomograph", "molecular visualization", "conformation",
+    ],
+    "aging-and-longevity": [
+        "aging", "longevity", "lifespan", "neurodegenerat", "age-related",
+        "senescen", "alzheimer", "parkinson",
+    ],
+    "single-cell-omics": [
+        "single-cell", "single cell", "scrna", "transcriptom", "genomic",
+        "multiom", "sequencing", "omics",
+    ],
+    "chemical-biology": [
+        "chemical biolog", "proteomics", "chemoproteom", "covalent",
+        "activity-based", "abpp", "chemical probe", "mass spectrom",
+    ],
+}
+_UNIVERSAL_CHANNELS = {"general", "funding-opportunities"}
+
 
 class SimulationEngine:
     """
-    Coordinates all agents across Slack channels.
-    Manages timing, budget, kickstart, and response sequencing.
+    Turn-based simulation engine.
+
+    Main loop: poll Slack for PI messages, select agent, run 5-phase turn.
     """
 
     def __init__(
@@ -59,29 +92,26 @@ class SimulationEngine:
 
         self._start_time: datetime | None = None
         self._running = False
-        self._message_queue: asyncio.Queue = asyncio.Queue()
+        self.message_log = MessageLog()
 
-        # Channel history cache: channel_name -> list of messages
-        self._channel_history: dict[str, list[dict]] = {}
-        # Channel ID to name mapping
-        self._channel_id_map: dict[str, str] = {}
+        # Agent name lookups
+        self._bot_name_to_id: dict[str, str] = {
+            a.bot_name.lower(): a.agent_id for a in agents
+        }
 
         # LLM call log buffer
         self._llm_log_buffer: list[dict] = []
         self._llm_log_flush_size = 10
 
-        # Thread discipline tracking: thread_ts -> {op: agent_id, participants: set, op_replied: bool}
-        self._thread_meta: dict[str, dict] = {}
+        # Channel ID map (populated during setup)
+        self._channel_id_map: dict[str, str] = {}  # name -> id
 
-        # Top-level post tracking: (agent_id, channel_name) -> count
-        self._toplevel_posts: dict[tuple[str, str], int] = {}
-        self.max_toplevel_per_channel = 1  # max new threads per agent per channel per simulation day
+        # Slack poll cursor: channel_id -> latest ts seen
+        self._poll_cursors: dict[str, str] = {}
 
-        # Track which channels each agent joined: agent_id -> set of channel names
-        self._agent_channels: dict[str, set[str]] = {}
-
-        # Deduplication: track message timestamps already processed
-        self._seen_message_ts: set[str] = set()
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
 
     @property
     def is_within_time_limit(self) -> bool:
@@ -94,50 +124,55 @@ class SimulationEngine:
         return agent.api_call_count < self.budget_cap
 
     async def start(self) -> None:
-        """Start the simulation."""
+        """Run the full simulation."""
         self._start_time = datetime.now(timezone.utc)
         self._running = True
+        settings = get_settings()
+
         logger.info(
             "Simulation started. Max runtime: %dm, Budget: %d calls/agent",
-            self.max_runtime_minutes,
-            self.budget_cap,
+            self.max_runtime_minutes, self.budget_cap,
         )
 
-        # Ensure all seeded channels exist
+        # Setup
         self._ensure_seeded_channels()
-
-        # Build lab directory (other labs' recent publications) for each agent
         self._build_lab_directories()
-
-        # Register LLM call log callback
         set_call_log_callback(self._on_llm_call)
 
-        # Register message handlers — capture the event loop now since Slack Bolt
-        # handlers run in thread pool threads that don't have an event loop.
-        loop = asyncio.get_running_loop()
-        handler_count = 0
-        for agent_id, client in self.slack_clients.items():
-            if hasattr(client, "on_message"):
-                def make_handler(aid):
-                    def handler(msg):
-                        logger.debug(
-                            "Event from %s bot: sender=%s channel=%s",
-                            aid, msg.get("sender", "?"), msg.get("channel_name", "?"),
-                        )
-                        asyncio.run_coroutine_threadsafe(
-                            self._message_queue.put(msg),
-                            loop,
-                        )
-                    return handler
-                client.on_message = make_handler(agent_id)
-                handler_count += 1
-        logger.info("Registered message handlers for %d agents", handler_count)
+        # Main loop
+        turn_count = 0
+        while self._running and self.is_within_time_limit:
+            # Poll Slack for PI messages
+            await self._poll_slack_for_pi_messages()
 
-        # Run kickstart and message processing concurrently
-        await asyncio.gather(
-            self._run_kickstart(),
-            self._process_messages(),
-        )
+            # Select agent
+            agent = self._select_agent()
+            if not agent or not self._agent_within_budget(agent):
+                # All agents over budget
+                logger.info("All agents over budget or no agent selected. Stopping.")
+                break
+
+            logger.info("=== Turn %d: %s ===", turn_count + 1, agent.agent_id)
+
+            # Run 5-phase turn
+            try:
+                await self._run_turn(agent)
+            except Exception:
+                logger.exception("Error during turn for %s", agent.agent_id)
+
+            # Update last_selected
+            agent.state.last_selected = time.time()
+            turn_count += 1
+
+            # Optional delay
+            if settings.turn_delay_seconds > 0:
+                await asyncio.sleep(settings.turn_delay_seconds)
+
+            # Flush LLM logs periodically
+            if self._llm_log_buffer:
+                await self._flush_llm_logs()
+
+        logger.info("Main loop exited after %d turns", turn_count)
 
     async def stop(self) -> None:
         """Stop the simulation gracefully."""
@@ -146,16 +181,713 @@ class SimulationEngine:
         await self._flush_llm_logs()
         logger.info("Simulation stopping...")
 
+    # ------------------------------------------------------------------
+    # Agent selection (weighted random)
+    # ------------------------------------------------------------------
+
+    def _select_agent(self) -> Agent | None:
+        """Weighted random selection: P(agent) ∝ (now - agent.last_selected)."""
+        now = time.time()
+        candidates = [
+            a for a in self.agents.values()
+            if self._agent_within_budget(a)
+        ]
+        if not candidates:
+            return None
+
+        weights = [max(now - a.state.last_selected, 1.0) for a in candidates]
+        return random.choices(candidates, weights=weights, k=1)[0]
+
+    # ------------------------------------------------------------------
+    # Turn execution (5 phases)
+    # ------------------------------------------------------------------
+
+    async def _run_turn(self, agent: Agent) -> None:
+        """Run all 5 phases for a single agent turn."""
+        # Phase 1: Channel discovery
+        self._phase1_channel_discovery(agent)
+
+        # Phase 2: Scan & filter new posts
+        await self._phase2_scan_filter(agent)
+
+        # Phase 3: Activate threads from tags and replies
+        self._phase3_activate_threads(agent)
+
+        # Phase 4: Reply to active threads (parallel)
+        await self._phase4_reply_threads(agent)
+
+        # Phase 5: Start new thread (conditional)
+        await self._phase5_new_post(agent)
+
+        # Update cursor
+        agent.state.last_seen_cursor = time.time()
+
+    # ------------------------------------------------------------------
+    # Phase 1: Channel Discovery
+    # ------------------------------------------------------------------
+
+    def _phase1_channel_discovery(self, agent: Agent) -> None:
+        """Join new channels based on profile keyword matching."""
+        profile_text = agent.public_profile.lower()
+        channels_to_join = set(_UNIVERSAL_CHANNELS)
+
+        for channel_name, keywords in _CHANNEL_KEYWORDS.items():
+            if any(kw in profile_text for kw in keywords):
+                channels_to_join.add(channel_name)
+
+        new_channels = channels_to_join - agent.state.subscribed_channels
+        if new_channels:
+            for ch_name in new_channels:
+                ch_id = self._channel_id_map.get(ch_name)
+                if ch_id:
+                    client = self.slack_clients.get(agent.agent_id)
+                    if client:
+                        client.join_channel(ch_id)
+            agent.state.subscribed_channels.update(new_channels)
+            logger.info("[%s] Phase 1: Joined channels: %s", agent.agent_id, new_channels)
+
+    # ------------------------------------------------------------------
+    # Phase 2: Scan & Filter
+    # ------------------------------------------------------------------
+
+    async def _phase2_scan_filter(self, agent: Agent) -> None:
+        """Scan new top-level posts and decide which to add to interesting_posts."""
+        settings = get_settings()
+
+        # Get new top-level posts since agent's last turn
+        new_posts = self.message_log.get_new_top_level_posts(
+            since=agent.state.last_seen_cursor,
+            channels=agent.state.subscribed_channels,
+            exclude_agent_id=agent.agent_id,
+        )
+
+        # Exclude posts already in interesting_posts or active_threads
+        known_ids = {p.post_id for p in agent.state.interesting_posts}
+        known_ids.update(agent.state.active_threads.keys())
+        new_posts = [p for p in new_posts if p.ts not in known_ids]
+
+        if not new_posts:
+            logger.debug("[%s] Phase 2: No new posts to evaluate", agent.agent_id)
+            return
+
+        # Build post data for LLM
+        post_dicts = [
+            {
+                "post_id": p.ts,
+                "channel": p.channel,
+                "sender": p.sender_name,
+                "content_snippet": p.content[:200],
+            }
+            for p in new_posts
+        ]
+
+        system_prompt, messages = agent.build_phase2_scan_prompt(post_dicts)
+
+        agent.api_call_count += 1
+        try:
+            response = await generate_agent_response(
+                system_prompt=system_prompt,
+                messages=messages,
+                max_tokens=500,
+                log_meta={"agent_id": agent.agent_id, "phase": "scan"},
+            )
+            result = _extract_json(response)
+            selected_ids = set(result.get("selected_post_ids", []))
+
+            # Add selected posts to interesting_posts
+            for post in new_posts:
+                if post.ts in selected_ids:
+                    agent.state.interesting_posts.append(PostRef(
+                        post_id=post.ts,
+                        channel=post.channel,
+                        sender_agent_id=post.sender_agent_id or post.sender_name,
+                        content_snippet=post.content[:200],
+                        posted_at=post.posted_at,
+                    ))
+
+            logger.info(
+                "[%s] Phase 2: Evaluated %d posts, added %d to interesting",
+                agent.agent_id, len(new_posts), len(selected_ids),
+            )
+        except Exception as exc:
+            logger.error("[%s] Phase 2 scan failed: %s", agent.agent_id, exc)
+
+        # Prune if over cap
+        if len(agent.state.interesting_posts) > settings.interesting_posts_cap:
+            await self._phase2_prune(agent)
+
+    async def _phase2_prune(self, agent: Agent) -> None:
+        """Prune interesting_posts to ≤ cap."""
+        system_prompt, messages = agent.build_phase2_prune_prompt()
+
+        agent.api_call_count += 1
+        try:
+            response = await generate_agent_response(
+                system_prompt=system_prompt,
+                messages=messages,
+                max_tokens=500,
+                log_meta={"agent_id": agent.agent_id, "phase": "prune"},
+            )
+            result = _extract_json(response)
+            keep_ids = set(result.get("keep_post_ids", []))
+
+            before = len(agent.state.interesting_posts)
+            agent.state.interesting_posts = [
+                p for p in agent.state.interesting_posts if p.post_id in keep_ids
+            ]
+            logger.info(
+                "[%s] Phase 2 prune: %d → %d",
+                agent.agent_id, before, len(agent.state.interesting_posts),
+            )
+        except Exception as exc:
+            logger.error("[%s] Phase 2 prune failed: %s", agent.agent_id, exc)
+
+    # ------------------------------------------------------------------
+    # Phase 3: Activate Threads from Tags
+    # ------------------------------------------------------------------
+
+    def _phase3_activate_threads(self, agent: Agent) -> None:
+        """
+        Auto-activate threads where this agent was tagged or
+        where someone replied to this agent's top-level posts.
+        """
+        settings = get_settings()
+        cursor = agent.state.last_seen_cursor
+
+        # Check for tags
+        tagged_entries = self.message_log.get_tags_for_agent(agent.bot_name, cursor)
+        for entry in tagged_entries:
+            thread_id = entry.thread_ts or entry.ts
+            if thread_id in agent.state.active_threads:
+                continue
+            if len(agent.state.active_threads) >= settings.active_thread_threshold:
+                break
+            # Determine the other agent
+            other_id = self._infer_agent_id(entry.sender_name) or entry.sender_agent_id
+            if other_id and other_id != agent.agent_id:
+                agent.state.active_threads[thread_id] = ThreadState(
+                    thread_id=thread_id,
+                    channel=entry.channel,
+                    other_agent_id=other_id,
+                    message_count=self.message_log.get_thread_message_count(thread_id),
+                    has_pending_reply=True,
+                )
+                logger.info(
+                    "[%s] Phase 3: Activated thread %s (tagged by %s)",
+                    agent.agent_id, thread_id, other_id,
+                )
+
+        # Check for replies to agent's own top-level posts
+        reply_entries = self.message_log.get_replies_to_agent_posts(agent.agent_id, cursor)
+        for entry in reply_entries:
+            thread_id = entry.thread_ts
+            if not thread_id or thread_id in agent.state.active_threads:
+                continue
+            if len(agent.state.active_threads) >= settings.active_thread_threshold:
+                break
+            other_id = self._infer_agent_id(entry.sender_name) or entry.sender_agent_id
+            if other_id and other_id != agent.agent_id:
+                agent.state.active_threads[thread_id] = ThreadState(
+                    thread_id=thread_id,
+                    channel=entry.channel,
+                    other_agent_id=other_id,
+                    message_count=self.message_log.get_thread_message_count(thread_id),
+                    has_pending_reply=True,
+                )
+                logger.info(
+                    "[%s] Phase 3: Activated thread %s (reply from %s)",
+                    agent.agent_id, thread_id, other_id,
+                )
+
+    # ------------------------------------------------------------------
+    # Phase 4: Reply to Active Threads (parallel)
+    # ------------------------------------------------------------------
+
+    async def _phase4_reply_threads(self, agent: Agent) -> None:
+        """Reply to all active threads that have a pending reply from the other agent."""
+        settings = get_settings()
+
+        # Identify threads needing a reply
+        threads_to_reply: list[ThreadState] = []
+        for thread in agent.state.active_threads.values():
+            if thread.status != "active":
+                continue
+            # Check if there's a new reply from the other agent
+            has_new = self.message_log.has_new_reply_from_other(
+                thread.thread_id, agent.agent_id, agent.state.last_seen_cursor,
+            )
+            if has_new or thread.has_pending_reply:
+                threads_to_reply.append(thread)
+
+        if not threads_to_reply:
+            logger.debug("[%s] Phase 4: No threads needing reply", agent.agent_id)
+            return
+
+        logger.info(
+            "[%s] Phase 4: Replying to %d threads",
+            agent.agent_id, len(threads_to_reply),
+        )
+
+        # Run replies in parallel
+        tasks = [
+            self._reply_to_thread(agent, thread)
+            for thread in threads_to_reply
+        ]
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _reply_to_thread(self, agent: Agent, thread: ThreadState) -> None:
+        """Compose and post a reply to a single thread."""
+        settings = get_settings()
+
+        # Get thread history from message log
+        history_entries = self.message_log.get_thread_history(thread.thread_id)
+        thread_history = [
+            {"sender": e.sender_name, "content": e.content}
+            for e in history_entries
+        ]
+
+        # Update message count
+        thread.message_count = len(history_entries)
+
+        # Check for system-enforced close
+        if thread.message_count >= settings.max_thread_messages:
+            logger.info(
+                "[%s] Thread %s reached max messages, closing",
+                agent.agent_id, thread.thread_id,
+            )
+            await self._close_thread(agent, thread, "timeout")
+            return
+
+        # Get other agent info
+        other_agent = self.agents.get(thread.other_agent_id)
+        other_name = other_agent.bot_name if other_agent else thread.other_agent_id
+        other_lab = other_agent.pi_name if other_agent else "Unknown"
+
+        # Build prompt
+        system_prompt, messages = agent.build_phase4_prompt(
+            thread=thread,
+            thread_history=thread_history,
+            other_agent_name=other_name,
+            other_agent_lab=other_lab,
+        )
+
+        # Create tool executor bound to this thread's state
+        async def tool_executor(tool_name: str, tool_input: dict) -> str:
+            return await execute_tool(tool_name, tool_input, agent.agent_id, thread)
+
+        agent.api_call_count += 1
+        try:
+            response_text = await generate_with_tools(
+                system_prompt=system_prompt,
+                messages=messages,
+                tools=TOOL_DEFINITIONS,
+                tool_executor=tool_executor,
+                max_tokens=800,
+                log_meta={
+                    "agent_id": agent.agent_id,
+                    "phase": "thread_reply",
+                    "channel": thread.channel,
+                },
+            )
+
+            # Post the reply
+            await self._post_message(
+                agent.agent_id, thread.channel, response_text,
+                thread_ts=thread.thread_id,
+            )
+            agent.message_count += 1
+            thread.has_pending_reply = False
+
+            # Check for thread outcome
+            await self._check_thread_outcome(agent, thread, response_text)
+
+        except Exception as exc:
+            logger.error(
+                "[%s] Phase 4 reply to thread %s failed: %s",
+                agent.agent_id, thread.thread_id, exc,
+            )
+
+    async def _check_thread_outcome(
+        self,
+        agent: Agent,
+        thread: ThreadState,
+        latest_reply: str,
+    ) -> None:
+        """Check if a thread should be closed based on the latest reply."""
+        # Check for ✅ confirmation of a :memo: Summary
+        if "✅" in latest_reply:
+            # Look back in thread history for a :memo: Summary from the other agent
+            history = self.message_log.get_thread_history(thread.thread_id)
+            for entry in history:
+                if entry.sender_agent_id == thread.other_agent_id and ":memo:" in entry.content:
+                    # Proposal confirmed!
+                    logger.info(
+                        "[%s] Thread %s: proposal confirmed with ✅",
+                        agent.agent_id, thread.thread_id,
+                    )
+                    summary_text = entry.content
+                    agent.state.pending_proposals.append(ProposalRef(
+                        thread_id=thread.thread_id,
+                        channel=thread.channel,
+                        other_agent_id=thread.other_agent_id,
+                        summary_text=summary_text,
+                        proposed_at=time.time(),
+                    ))
+                    await self._close_thread(agent, thread, "proposal", summary_text)
+                    return
+
+        # Check if this agent posted a :memo: Summary
+        if ":memo:" in latest_reply:
+            # The other agent needs to confirm — thread stays active
+            thread.status = "active"
+            logger.info(
+                "[%s] Thread %s: posted :memo: Summary, waiting for ✅",
+                agent.agent_id, thread.thread_id,
+            )
+            return
+
+        # Check for graceful close indicators
+        close_phrases = [
+            "not enough overlap",
+            "insufficient overlap",
+            "don't see a concrete",
+            "no clear first experiment",
+            "too parallel",
+            "wishing you",
+            "best of luck",
+        ]
+        if any(phrase in latest_reply.lower() for phrase in close_phrases):
+            logger.info(
+                "[%s] Thread %s: graceful close detected",
+                agent.agent_id, thread.thread_id,
+            )
+            await self._close_thread(agent, thread, "no_proposal")
+
+    async def _close_thread(
+        self,
+        agent: Agent,
+        thread: ThreadState,
+        outcome: str,
+        summary_text: str | None = None,
+    ) -> None:
+        """Close a thread and log the decision."""
+        thread.status = "closed"
+        # Remove from active threads
+        agent.state.active_threads.pop(thread.thread_id, None)
+
+        # Also close for the other agent if they have this thread active
+        other_agent = self.agents.get(thread.other_agent_id)
+        if other_agent and thread.thread_id in other_agent.state.active_threads:
+            other_agent.state.active_threads[thread.thread_id].status = "closed"
+            other_agent.state.active_threads.pop(thread.thread_id, None)
+            # If proposal, add to other agent's pending_proposals too
+            if outcome == "proposal" and summary_text:
+                other_agent.state.pending_proposals.append(ProposalRef(
+                    thread_id=thread.thread_id,
+                    channel=thread.channel,
+                    other_agent_id=agent.agent_id,
+                    summary_text=summary_text,
+                    proposed_at=time.time(),
+                ))
+
+        # Log to DB
+        if self.session_factory and self.simulation_run_id:
+            try:
+                async with self.session_factory() as db:
+                    decision = ThreadDecision(
+                        simulation_run_id=self.simulation_run_id,
+                        thread_id=thread.thread_id,
+                        channel=thread.channel,
+                        agent_a=agent.agent_id,
+                        agent_b=thread.other_agent_id,
+                        outcome=outcome,
+                        summary_text=summary_text,
+                    )
+                    db.add(decision)
+                    await db.commit()
+            except Exception as exc:
+                logger.warning("Failed to log thread decision: %s", exc)
+
+        logger.info(
+            "[%s] Thread %s closed: %s",
+            agent.agent_id, thread.thread_id, outcome,
+        )
+
+    # ------------------------------------------------------------------
+    # Phase 5: New Post (conditional)
+    # ------------------------------------------------------------------
+
+    async def _phase5_new_post(self, agent: Agent) -> None:
+        """Optionally start a new thread or reply to an interesting post."""
+        settings = get_settings()
+
+        # Check preconditions
+        if len(agent.state.active_threads) >= settings.active_thread_threshold:
+            logger.debug("[%s] Phase 5: Skipped (at thread threshold)", agent.agent_id)
+            return
+
+        if any(not p.reviewed for p in agent.state.pending_proposals):
+            logger.debug("[%s] Phase 5: Skipped (pending proposal)", agent.agent_id)
+            return
+
+        if random.random() < settings.phase5_skip_probability:
+            logger.debug("[%s] Phase 5: Skipped (random)", agent.agent_id)
+            return
+
+        # Build prompt
+        system_prompt, messages = agent.build_phase5_prompt()
+
+        agent.api_call_count += 1
+        try:
+            response = await generate_agent_response(
+                system_prompt=system_prompt,
+                messages=messages,
+                max_tokens=600,
+                log_meta={"agent_id": agent.agent_id, "phase": "new_post"},
+            )
+
+            # Parse the JSON + message from the response
+            action_data, message_text = self._parse_phase5_response(response)
+            if not action_data or not message_text:
+                logger.warning("[%s] Phase 5: Could not parse response", agent.agent_id)
+                return
+
+            action = action_data.get("action", "new_post")
+            channel = action_data.get("channel", "general")
+            target_post_id = action_data.get("target_post_id")
+
+            if action == "reply" and target_post_id:
+                # Reply to an interesting post → creates a new thread
+                await self._post_message(
+                    agent.agent_id, channel, message_text,
+                    thread_ts=target_post_id,
+                )
+                agent.message_count += 1
+
+                # Move from interesting_posts to active_threads
+                agent.state.interesting_posts = [
+                    p for p in agent.state.interesting_posts
+                    if p.post_id != target_post_id
+                ]
+                # Determine the other agent from the original post
+                original_entry = self.message_log.get_entry(target_post_id)
+                other_id = original_entry.sender_agent_id if original_entry else None
+                if other_id:
+                    agent.state.active_threads[target_post_id] = ThreadState(
+                        thread_id=target_post_id,
+                        channel=channel,
+                        other_agent_id=other_id,
+                        message_count=2,  # original + this reply
+                    )
+
+                logger.info(
+                    "[%s] Phase 5: Replied to post %s in #%s",
+                    agent.agent_id, target_post_id, channel,
+                )
+
+            else:
+                # New top-level post
+                await self._post_message(agent.agent_id, channel, message_text)
+                agent.message_count += 1
+
+                # Check if it tags another agent
+                tagged_agent = action_data.get("tagged_agent")
+                if tagged_agent:
+                    logger.info(
+                        "[%s] Phase 5: New post in #%s tagging @%s",
+                        agent.agent_id, channel, tagged_agent,
+                    )
+                else:
+                    logger.info(
+                        "[%s] Phase 5: New post in #%s",
+                        agent.agent_id, channel,
+                    )
+
+        except Exception as exc:
+            logger.error("[%s] Phase 5 failed: %s", agent.agent_id, exc)
+
+    def _parse_phase5_response(self, response: str) -> tuple[dict | None, str | None]:
+        """Parse Phase 5 response into (json_data, message_text)."""
+        try:
+            # Find JSON block
+            json_match = re.search(r"```json\s*\n(.*?)\n```", response, re.DOTALL)
+            if json_match:
+                json_str = json_match.group(1)
+                data = json.loads(json_str)
+                # Message text is everything after the JSON block
+                rest = response[json_match.end():].strip()
+                return data, rest
+
+            # Try finding raw JSON at the start
+            json_start = response.find("{")
+            json_end = response.find("}", json_start) + 1 if json_start >= 0 else -1
+            if json_start >= 0 and json_end > json_start:
+                data = json.loads(response[json_start:json_end])
+                rest = response[json_end:].strip()
+                return data, rest
+
+        except (json.JSONDecodeError, ValueError) as exc:
+            logger.warning("Failed to parse Phase 5 JSON: %s", exc)
+
+        return None, None
+
+    # ------------------------------------------------------------------
+    # Slack Polling (PI messages)
+    # ------------------------------------------------------------------
+
+    async def _poll_slack_for_pi_messages(self) -> None:
+        """
+        Poll all channels for new human (non-bot) messages.
+        Add them to the message log.
+        """
+        if not self.slack_clients:
+            return
+
+        # Use first available client to poll
+        client = next(iter(self.slack_clients.values()), None)
+        if not client or not client.is_connected:
+            return
+
+        for ch_name, ch_id in self._channel_id_map.items():
+            oldest = self._poll_cursors.get(ch_id, "0")
+            try:
+                messages = client.poll_channel_messages(ch_id, oldest=oldest)
+                for msg in messages:
+                    ts = msg.get("ts", "")
+                    user_id = msg.get("user", "")
+
+                    # Skip bot messages — we only want human PI messages here
+                    if msg.get("bot_id") or msg.get("subtype") == "bot_message":
+                        continue
+
+                    # Check if this user is a bot
+                    if user_id and client.is_bot_user(user_id):
+                        continue
+
+                    # Human message — add to log
+                    sender_name = client.resolve_user_name(user_id)
+                    entry = LogEntry(
+                        ts=ts,
+                        channel=ch_name,
+                        sender_agent_id=None,
+                        sender_name=sender_name,
+                        content=msg.get("text", ""),
+                        thread_ts=msg.get("thread_ts"),
+                        posted_at=float(ts) if ts else 0.0,
+                        is_bot=False,
+                    )
+                    self.message_log.append(entry)
+                    logger.info(
+                        "PI message in #%s from %s: %.60s",
+                        ch_name, sender_name, msg.get("text", "")[:60],
+                    )
+
+                    # Check if PI message references a proposal (clears pending block)
+                    self._check_pi_proposal_review(entry)
+
+                    # Update cursor
+                    if ts:
+                        self._poll_cursors[ch_id] = ts
+
+            except Exception as exc:
+                logger.debug("Polling error for #%s: %s", ch_name, exc)
+
+    def _check_pi_proposal_review(self, entry: LogEntry) -> None:
+        """Check if a PI message clears a pending proposal for any agent."""
+        thread_ts = entry.thread_ts
+        if not thread_ts:
+            return
+
+        for agent in self.agents.values():
+            for proposal in agent.state.pending_proposals:
+                if proposal.thread_id == thread_ts and not proposal.reviewed:
+                    proposal.reviewed = True
+                    logger.info(
+                        "[%s] Proposal in thread %s reviewed by PI",
+                        agent.agent_id, thread_ts,
+                    )
+
+    # ------------------------------------------------------------------
+    # Message posting
+    # ------------------------------------------------------------------
+
+    async def _post_message(
+        self,
+        agent_id: str,
+        channel: str,
+        text: str,
+        thread_ts: str | None = None,
+    ) -> None:
+        """Post a message to Slack and record it in the message log + DB."""
+        client = self.slack_clients.get(agent_id)
+        agent = self.agents.get(agent_id)
+
+        result = None
+        if client and client.is_connected:
+            result = client.post_message(channel, text, thread_ts=thread_ts)
+        else:
+            logger.info("[%s] MOCK post to #%s: %s...", agent_id, channel, text[:60])
+
+        ts = result.get("ts", str(time.time())) if result else str(time.time())
+
+        # Add to message log
+        entry = LogEntry(
+            ts=ts,
+            channel=channel,
+            sender_agent_id=agent_id,
+            sender_name=agent.bot_name if agent else f"{agent_id}Bot",
+            content=text,
+            thread_ts=thread_ts,
+            posted_at=float(ts) if ts else time.time(),
+            is_bot=True,
+        )
+        self.message_log.append(entry)
+
+        # Log to database
+        if self.session_factory and self.simulation_run_id:
+            await self._log_message(
+                agent_id=agent_id,
+                channel_id=result.get("channel", channel) if result else channel,
+                channel_name=channel,
+                message_ts=ts,
+                thread_ts=thread_ts,
+                message_length=len(text),
+                phase="thread_reply" if thread_ts else "new_post",
+            )
+
+    # ------------------------------------------------------------------
+    # Setup helpers
+    # ------------------------------------------------------------------
+
+    def _ensure_seeded_channels(self) -> None:
+        """Create any missing seeded channels and join relevant bots."""
+        client = next(iter(self.slack_clients.values()), None)
+        if not client or not client.is_connected:
+            # Mock mode — populate channel map with fake IDs
+            self._channel_id_map = {ch: f"mock_{ch}" for ch in SEEDED_CHANNELS}
+            return
+
+        existing = client.list_channels()
+
+        # Create missing seeded channels
+        for ch_name in SEEDED_CHANNELS:
+            if ch_name not in existing:
+                logger.info("Creating seeded channel #%s", ch_name)
+                ch_data = client.create_channel(ch_name)
+                if ch_data:
+                    existing[ch_name] = ch_data.get("id", "")
+
+        self._channel_id_map = dict(existing)
+
+        # Share channel map across all clients
+        for c in self.slack_clients.values():
+            c._channel_name_to_id.update(existing)
+
     def _build_lab_directories(self) -> None:
         """Build a condensed publications directory for each agent (excluding their own lab)."""
-        import re
-        from pathlib import Path
-
-        # Parse publications from each agent's profile
         lab_pubs: dict[str, list[str]] = {}
         for agent in self.agents.values():
             profile_text = agent.public_profile
-            # Extract the "Recent Publications" section
             match = re.search(
                 r"## Recent Publications\n(.*?)(?=\n## |\Z)",
                 profile_text,
@@ -168,9 +900,8 @@ class SimulationEngine:
                     if line.strip().startswith("- ")
                 ]
                 if pubs:
-                    lab_pubs[agent.agent_id] = pubs[:5]  # Top 5 per lab
+                    lab_pubs[agent.agent_id] = pubs[:5]
 
-        # For each agent, build directory of OTHER labs' papers
         for agent in self.agents.values():
             sections = []
             for other_id, pubs in sorted(lab_pubs.items()):
@@ -185,28 +916,40 @@ class SimulationEngine:
         pub_count = sum(len(p) for p in lab_pubs.values())
         logger.info(
             "Built lab directories: %d labs with %d total publications",
-            len(lab_pubs),
-            pub_count,
+            len(lab_pubs), pub_count,
         )
 
+    def _infer_agent_id(self, name: str) -> str | None:
+        """Try to infer agent_id from a bot name or display name."""
+        name_lower = name.lower()
+        # Direct lookup
+        if name_lower in self._bot_name_to_id:
+            return self._bot_name_to_id[name_lower]
+        # Partial match
+        for bot_name, agent_id in self._bot_name_to_id.items():
+            if agent_id in name_lower or bot_name in name_lower:
+                return agent_id
+        return None
+
+    # ------------------------------------------------------------------
+    # LLM call logging
+    # ------------------------------------------------------------------
+
     def _on_llm_call(self, data: dict) -> None:
-        """Callback fired after each LLM API call. Buffers for batch DB write."""
+        """Callback fired after each LLM API call."""
         self._llm_log_buffer.append(data)
         if len(self._llm_log_buffer) >= self._llm_log_flush_size:
-            # Schedule flush without blocking the caller
             try:
                 loop = asyncio.get_running_loop()
                 task = loop.create_task(self._flush_llm_logs())
                 task.add_done_callback(self._on_flush_done)
             except RuntimeError:
-                pass  # No event loop — will flush on stop()
+                pass
 
     @staticmethod
     def _on_flush_done(task: asyncio.Task) -> None:
-        """Log any exceptions from flush tasks."""
         if task.exception():
             logger.error("LLM log flush failed: %s", task.exception())
-
 
     async def _flush_llm_logs(self) -> None:
         """Write buffered LLM call logs to the database."""
@@ -237,410 +980,13 @@ class SimulationEngine:
         except Exception as exc:
             logger.warning("Failed to flush LLM call logs: %s", exc)
 
-    @staticmethod
-    def _select_response_model(decision: dict) -> str:
-        """Select Opus or Sonnet based on the decision's response_type."""
-        settings = get_settings()
-        response_type = decision.get("response_type", "follow_up")
-        if response_type in OPUS_RESPONSE_TYPES:
-            return settings.llm_agent_model_opus
-        return settings.llm_agent_model_sonnet
-
-    async def _run_kickstart(self) -> None:
-        """Have each agent generate and post an opening message to a relevant channel."""
-        agents = list(self.agents.values())
-        random.shuffle(agents)
-
-        topic_channels = [
-            "general", "drug-repurposing", "structural-biology",
-            "aging-and-longevity", "chemical-biology", "single-cell-omics",
-        ]
-
-        posted = 0
-        for agent in agents:
-            if not self.is_within_time_limit:
-                break
-            await asyncio.sleep(random.uniform(5, 45))
-            try:
-                # Pick a channel this agent is in and hasn't posted a top-level message to yet
-                agent_channels = self._agent_channels.get(agent.agent_id, set())
-                candidates = [ch for ch in topic_channels
-                              if ch in agent_channels
-                              and self._can_post_toplevel(agent.agent_id, ch)]
-                if not candidates:
-                    logger.debug("[%s] No channels available for kickstart", agent.agent_id)
-                    continue
-                channel = random.choice(candidates)
-                message = await agent.generate_kickstart_message(channel)
-                await self._post_message(agent.agent_id, channel, message)
-                posted += 1
-            except Exception as exc:
-                logger.error("[%s] Kickstart failed: %s", agent.agent_id, exc)
-        logger.info("Kickstart phase complete. %d openers posted.", posted)
-
-    async def _process_messages(self) -> None:
-        """Process incoming messages from the queue."""
-        logger.info("Message processing loop started")
-        while self._running or not self._message_queue.empty():
-            try:
-                msg = await asyncio.wait_for(self._message_queue.get(), timeout=1.0)
-                logger.info(
-                    "Queue recv: sender=%s channel=%s ts=%s thread_ts=%s content=%.80s",
-                    msg.get("sender", "?"), msg.get("channel_name", "?"),
-                    msg.get("ts", "?"), msg.get("thread_ts", "None"),
-                    msg.get("content", "")[:80],
-                )
-                try:
-                    await self._handle_channel_message(msg)
-                except Exception:
-                    logger.exception("Error handling message from %s in %s",
-                                     msg.get("sender", "?"), msg.get("channel_name", "?"))
-                self._message_queue.task_done()
-            except asyncio.TimeoutError:
-                if not self.is_within_time_limit:
-                    logger.info("Time limit reached, waiting for queue to drain...")
-                    if self._message_queue.empty():
-                        break
-        logger.info("Message processing loop exited (_running=%s, queue_empty=%s)",
-                     self._running, self._message_queue.empty())
-
-    def _update_thread_meta(self, msg: dict) -> None:
-        """Track thread participants and OP reply status for thread discipline."""
-        thread_ts = msg.get("thread_ts")
-        msg_ts = msg.get("ts")
-        sender_name = msg.get("sender", "")
-        sender_id = self._infer_sender_agent(sender_name) or sender_name.lower()
-
-        if not thread_ts:
-            # Top-level message — register as potential thread OP
-            if msg_ts:
-                self._thread_meta[msg_ts] = {
-                    "op": sender_id,
-                    "participants": {sender_id},
-                    "op_replied": False,
-                    "reply_count": 0,
-                }
-            return
-
-        # Thread reply — update the thread's metadata
-        meta = self._thread_meta.get(thread_ts)
-        if not meta:
-            # Thread we don't have metadata for (started before simulation)
-            self._thread_meta[thread_ts] = {
-                "op": None,
-                "participants": {sender_id},
-                "op_replied": True,  # assume mature if we missed the start
-                "reply_count": 1,
-            }
-            return
-
-        meta["participants"].add(sender_id)
-        meta["reply_count"] += 1
-        if sender_id == meta["op"]:
-            meta["op_replied"] = True
-
-    def _is_thread_open_for(self, msg: dict, agent_id: str) -> bool:
-        """Check whether thread discipline allows this agent to respond.
-
-        Hard gates:
-        - Top-level messages with no thread yet: anyone can respond
-        - Existing participants always allowed
-        - Hard cap at 2 participants per thread (OP + one responder)
-        """
-        thread_ts = msg.get("thread_ts")
-        if not thread_ts:
-            # Top-level message — but check if it has acquired a thread
-            # (an earlier agent in the sequential loop may have replied)
-            msg_ts = msg.get("ts")
-            if msg_ts:
-                meta = self._thread_meta.get(msg_ts)
-                if meta and meta["reply_count"] > 0:
-                    # This top-level message now has a thread; apply thread gates
-                    logger.info(
-                        "Thread discipline: top-level msg ts=%s now has thread (%d replies), applying gates",
-                        msg_ts, meta["reply_count"],
-                    )
-                    thread_ts = msg_ts
-                else:
-                    return True  # genuinely no thread yet
-            else:
-                return True
-
-        meta = self._thread_meta.get(thread_ts)
-        if not meta:
-            return True  # no tracking data, allow
-
-        # Always allow the OP and existing participants
-        if agent_id in meta["participants"]:
-            return True
-
-        # Hard cap: 2 participants max per thread (OP + one responder)
-        if len(meta["participants"]) >= 2:
-            return False
-
-        return True
-
-    async def _handle_channel_message(self, msg: dict) -> None:
-        """Process a single incoming Slack message across all relevant agents."""
-        # Deduplicate: each Slack message arrives N times (once per bot in the channel).
-        # Only process the first copy.
-        msg_ts = msg.get("ts")
-        if msg_ts:
-            if msg_ts in self._seen_message_ts:
-                return
-            self._seen_message_ts.add(msg_ts)
-
-        channel_name = msg.get("channel_name", "unknown")
-        sender_agent_id = msg.get("agent_id")  # Which agent received this event
-
-        # Update channel history
-        if channel_name not in self._channel_history:
-            self._channel_history[channel_name] = []
-        self._channel_history[channel_name].append({
-            "sender": msg.get("sender", "unknown"),
-            "content": msg.get("content", ""),
-            "ts": msg.get("ts"),
-        })
-
-        # Track thread participants for thread discipline
-        self._update_thread_meta(msg)
-
-        # Don't respond if time limit or budget exceeded
-        if not self.is_within_time_limit:
-            return
-
-        # Determine which agents should evaluate this message
-        # (all agents in the channel, excluding the sender)
-        sender_name = msg.get("sender", "")
-        responding_agents = []
-        skip_reasons: dict[str, str] = {}
-
-        for agent in self.agents.values():
-            # Skip if this agent sent the message
-            if agent.bot_name.lower() in sender_name.lower():
-                skip_reasons[agent.agent_id] = "is_sender"
-                continue
-            # Skip if agent isn't in this channel
-            if channel_name not in self._agent_channels.get(agent.agent_id, set()):
-                skip_reasons[agent.agent_id] = f"not_in_channel({channel_name})"
-                continue
-            if not self._agent_within_budget(agent):
-                skip_reasons[agent.agent_id] = "over_budget"
-                continue
-            responding_agents.append(agent)
-
-        if not responding_agents:
-            logger.info(
-                "No responding agents for msg in #%s from '%s'. Skips: %s",
-                channel_name, sender_name, skip_reasons,
-            )
-            return
-
-        logger.info(
-            "%d agents evaluating msg in #%s from '%s': %s",
-            len(responding_agents), channel_name, sender_name,
-            [a.agent_id for a in responding_agents],
-        )
-
-        # Randomize decision order so no agent consistently evaluates first
-        random.shuffle(responding_agents)
-
-        # Sequential decide-then-respond: each agent decides one at a time so
-        # later agents see earlier replies before making their decision.  The
-        # agent's decide prompt receives thread metadata (participant count,
-        # reply count, whether OP has replied) so it can judge whether to join
-        # the thread, wait, or start a new top-level message.
-
-        for agent in responding_agents:
-            delay = random.uniform(5, 30)
-            await asyncio.sleep(delay)
-
-            # Re-check budget and time
-            if not self.is_within_time_limit or not self._agent_within_budget(agent):
-                continue
-
-            # Decide (with current channel history that includes earlier replies).
-            # The thread context tells the agent whether the thread is full, so it
-            # can choose "new_thread" instead of "respond".
-            try:
-                decision = await self._agent_decide(agent, channel_name, msg)
-            except Exception as exc:
-                logger.warning("[%s] Decision error: %s", agent.agent_id, exc)
-                continue
-
-            if not decision.get("should_respond"):
-                continue
-
-            # Get updated channel history (includes any replies posted since we started)
-            history = self._channel_history.get(channel_name, [])
-
-            try:
-                action = decision.get("action", "respond")
-                if action == "respond":
-                    # Enforce thread discipline: block "respond" if agent can't join thread
-                    if not self._is_thread_open_for(msg, agent.agent_id):
-                        logger.info(
-                            "[%s] Blocked respond — thread full, should use new_thread",
-                            agent.agent_id,
-                        )
-                        continue
-                    response_model = self._select_response_model(decision)
-                    response_text = await agent.respond(
-                        channel_name=channel_name,
-                        channel_history=history[:-1],
-                        new_message=msg,
-                        action_context=decision.get("reason", ""),
-                        model=response_model,
-                    )
-                    # Reply in thread — use the original message's thread_ts if it's
-                    # already in a thread, otherwise use its ts to start a new thread.
-                    reply_thread_ts = msg.get("thread_ts") or msg.get("ts")
-                    await self._post_message(agent.agent_id, channel_name, response_text, thread_ts=reply_thread_ts)
-
-                    # Update thread meta with this new participant
-                    if reply_thread_ts:
-                        meta = self._thread_meta.get(reply_thread_ts)
-                        if meta:
-                            meta["participants"].add(agent.agent_id)
-                            meta["reply_count"] += 1
-
-                elif action == "new_thread":
-                    # Agent wants to start a new top-level message referencing the original
-                    response_model = self._select_response_model(decision)
-                    # Provide context so the agent knows to reference the original post
-                    original_sender = msg.get("sender", "someone")
-                    action_context = (
-                        f"You are starting a NEW top-level message in #{channel_name}, inspired by "
-                        f"{original_sender}'s post. Reference their post but take a different angle. "
-                        f"Original context: {decision.get('reason', '')}"
-                    )
-                    response_text = await agent.respond(
-                        channel_name=channel_name,
-                        channel_history=history,
-                        new_message=msg,
-                        action_context=action_context,
-                        model=response_model,
-                    )
-                    # Post as top-level (no thread_ts)
-                    if self._can_post_toplevel(agent.agent_id, channel_name):
-                        await self._post_message(agent.agent_id, channel_name, response_text)
-
-            except Exception as exc:
-                logger.error("[%s] Response failed: %s", agent.agent_id, exc)
-
-        # Flush any buffered LLM logs after processing all responses
-        if self._llm_log_buffer:
-            await self._flush_llm_logs()
-
-    def _build_thread_context(self, msg: dict) -> str:
-        """Build a human-readable summary of thread state for the decide prompt."""
-        thread_ts = msg.get("thread_ts")
-        if not thread_ts:
-            # This is a top-level message, but it may have acquired replies since
-            # it was posted (e.g., an earlier agent in the sequential loop replied).
-            # Check if this message's ts has become a thread root.
-            msg_ts = msg.get("ts")
-            if msg_ts:
-                meta = self._thread_meta.get(msg_ts)
-                if meta and meta["reply_count"] > 0:
-                    logger.info(
-                        "Thread context: top-level msg ts=%s now has %d replies, %d participants",
-                        msg_ts, meta["reply_count"], len(meta["participants"]),
-                    )
-                    participants = sorted(meta["participants"])
-                    parts = [
-                        f"This post already has a thread with {len(participants)} participants: {', '.join(participants)}.",
-                        f"Replies so far: {meta['reply_count']}.",
-                        f"RULE: Threads are limited to 2 participants. If you are not already a participant, "
-                        f"you MUST NOT join this thread. Use action \"new_thread\" to start a separate "
-                        f"top-level message referencing this post instead.",
-                    ]
-                    return "\n".join(parts)
-            return "This is a top-level message (no thread yet). You may respond to start a 1-on-1 discussion."
-
-        meta = self._thread_meta.get(thread_ts)
-        if not meta:
-            return "This is a thread reply (no metadata available)."
-
-        participants = sorted(meta["participants"])
-        parts = [
-            f"Thread participants: {', '.join(participants)} ({len(participants)} total).",
-            f"Replies so far: {meta['reply_count']}.",
-        ]
-        if len(participants) >= 2:
-            parts.append(
-                "RULE: This thread already has 2 participants. No new participants may join. "
-                "If you are not one of the participants listed above, use action \"new_thread\"."
-            )
-        if meta["reply_count"] >= 4:
-            parts.append(
-                "This thread has had several exchanges. You should be working toward a conclusion: "
-                "either a :memo: Summary with a strong collaboration proposal, or a graceful close "
-                "acknowledging insufficient overlap."
-            )
-        return "\n".join(parts)
-
-    async def _agent_decide(self, agent: Agent, channel_name: str, msg: dict) -> dict:
-        """Run Phase 1 decision for an agent. Always uses Sonnet."""
-        settings = get_settings()
-        history = self._channel_history.get(channel_name, [])
-        thread_context = self._build_thread_context(msg)
-        return await agent.decide(
-            channel_name=channel_name,
-            channel_history=history[:-1],
-            new_message=msg,
-            thread_context=thread_context,
-            model=settings.llm_agent_model_sonnet,
-        )
-
-    def _can_post_toplevel(self, agent_id: str, channel: str) -> bool:
-        """Check if this agent can still post a new top-level message in this channel."""
-        key = (agent_id, channel)
-        return self._toplevel_posts.get(key, 0) < self.max_toplevel_per_channel
-
-    async def _post_message(self, agent_id: str, channel: str, text: str, thread_ts: str | None = None) -> None:
-        """Post a message and record it in the database."""
-        # Track top-level posts
-        if not thread_ts:
-            key = (agent_id, channel)
-            self._toplevel_posts[key] = self._toplevel_posts.get(key, 0) + 1
-
-        client = self.slack_clients.get(agent_id)
-        agent = self.agents.get(agent_id)
-
-        result = None
-        if client:
-            result = client.post_message(channel, text, thread_ts=thread_ts)
-        else:
-            logger.info("[%s] MOCK post to #%s: %s...", agent_id, channel, text[:60])
-
-        # Update channel history
-        if channel not in self._channel_history:
-            self._channel_history[channel] = []
-        bot_name = agent.bot_name if agent else f"{agent_id}Bot"
-        self._channel_history[channel].append({
-            "sender": bot_name,
-            "content": text,
-            "ts": result.get("ts") if result else None,
-        })
-
-        # Log to database
-        if self.session_factory and self.simulation_run_id:
-            await self._log_message(
-                agent_id=agent_id,
-                channel_id=result.get("channel", channel) if result else channel,
-                channel_name=channel,
-                message_ts=result.get("ts") if result else None,
-                message_length=len(text),
-                phase="respond",
-            )
-
     async def _log_message(
         self,
         agent_id: str,
         channel_id: str,
         channel_name: str,
         message_ts: str | None,
+        thread_ts: str | None,
         message_length: int,
         phase: str,
     ) -> None:
@@ -655,6 +1001,7 @@ class SimulationEngine:
                     channel_id=channel_id,
                     channel_name=channel_name,
                     message_ts=message_ts,
+                    thread_ts=thread_ts,
                     message_length=message_length,
                     phase=phase,
                 )
@@ -669,118 +1016,93 @@ class SimulationEngine:
                 run = run_result.scalar_one_or_none()
                 if run:
                     run.total_messages = (run.total_messages or 0) + 1
-                    agent = self.agents.get(agent_id)
-                    if agent:
-                        run.total_api_calls = sum(
-                            a.api_call_count for a in self.agents.values()
-                        )
+                    run.total_api_calls = sum(
+                        a.api_call_count for a in self.agents.values()
+                    )
                 await db.commit()
         except Exception as exc:
             logger.warning("Failed to log message: %s", exc)
 
-    # Channels every bot joins regardless of profile
-    _UNIVERSAL_CHANNELS = {"general", "funding-opportunities"}
-
-    # Keywords that indicate relevance to each topic channel
-    _CHANNEL_KEYWORDS: dict[str, list[str]] = {
-        "drug-repurposing": [
-            "drug", "repurpos", "pharmacolog", "therapeutic", "compound",
-            "small molecule", "target", "ligand", "polypharmacol",
-        ],
-        "structural-biology": [
-            "structur", "cryo", "crystallograph", "x-ray", "microscop",
-            "tomograph", "molecular visualization", "conformation",
-        ],
-        "aging-and-longevity": [
-            "aging", "longevity", "lifespan", "neurodegenerat", "age-related",
-            "senescen", "alzheimer", "parkinson",
-        ],
-        "single-cell-omics": [
-            "single-cell", "single cell", "scrna", "transcriptom", "genomic",
-            "multiom", "sequencing", "omics",
-        ],
-        "chemical-biology": [
-            "chemical biolog", "proteomics", "chemoproteom", "covalent",
-            "activity-based", "abpp", "chemical probe", "mass spectrom",
-        ],
-    }
-
-    def _pick_channels_for_agent(self, agent: Agent) -> list[str]:
-        """Decide which seeded channels an agent should join based on its profile."""
-        profile_text = agent.public_profile.lower()
-        channels = list(self._UNIVERSAL_CHANNELS)
-        for channel_name, keywords in self._CHANNEL_KEYWORDS.items():
-            if any(kw in profile_text for kw in keywords):
-                channels.append(channel_name)
-        return channels
-
-    def _ensure_seeded_channels(self) -> None:
-        """Create any missing seeded channels and join relevant bots."""
-        # Use the first available client to create channels
-        creator = next(iter(self.slack_clients.values()), None)
-        if not creator or not creator._app:
-            return
-
-        try:
-            result = creator._app.client.conversations_list(types="public_channel", limit=200)
-            existing = {ch["name"]: ch["id"] for ch in result.get("channels", [])}
-        except Exception as exc:
-            logger.warning("Failed to list channels: %s", exc)
-            return
-
-        # Ensure all seeded channels exist
-        for channel_name in SEEDED_CHANNELS:
-            if channel_name not in existing:
-                logger.info("Creating seeded channel #%s", channel_name)
-                channel_data = creator.create_channel(channel_name)
-                if channel_data:
-                    existing[channel_name] = channel_data.get("id", "")
-
-        # Update channel name→ID map for all clients (includes newly created channels)
-        for client in self.slack_clients.values():
-            client._channel_name_to_id.update(existing)
-
-        # Join each bot to its relevant channels
-        for agent_id, client in self.slack_clients.items():
-            agent = self.agents.get(agent_id)
-            if not agent:
-                continue
-            channels_to_join = self._pick_channels_for_agent(agent)
-            self._agent_channels[agent_id] = set(channels_to_join)
-            for ch_name in channels_to_join:
-                ch_id = existing.get(ch_name)
-                if ch_id:
-                    client.join_channel(ch_id)
-            logger.info("[%s] Joined channels: %s", agent_id, ", ".join(sorted(channels_to_join)))
-
-    def _infer_sender_agent(self, sender_name: str) -> str | None:
-        """Try to infer which agent sent a message from their bot name."""
-        sender_lower = sender_name.lower()
-        for agent_id in self.agents:
-            if agent_id in sender_lower:
-                return agent_id
-        return None
+    # ------------------------------------------------------------------
+    # Post-simulation
+    # ------------------------------------------------------------------
 
     async def update_all_working_memories(self) -> None:
         """Update working memory for all agents after the simulation."""
         for agent in self.agents.values():
-            if not self.session_factory or not self.simulation_run_id:
-                continue
             try:
-                from sqlalchemy import select
-                async with self.session_factory() as db:
-                    result = await db.execute(
-                        select(AgentMessage).where(
-                            AgentMessage.simulation_run_id == self.simulation_run_id,
-                            AgentMessage.agent_id == agent.agent_id,
-                        )
-                    )
-                    messages = result.scalars().all()
-                    recent = [
-                        {"channel": m.channel_name, "content": ""}
-                        for m in messages
-                    ]
-                if recent:
-                    await agent.update_working_memory(recent)
+                # Build summary of agent's interactions
+                agent_entries = [
+                    e for e in self.message_log._entries
+                    if e.sender_agent_id == agent.agent_id
+                ]
+                if not agent_entries:
+                    continue
+
+                messages_text = "\n".join(
+                    f"[#{e.channel}] {e.content[:200]}"
+                    for e in agent_entries[:30]
+                )
+
+                system_prompt = agent.build_system_prompt()
+                messages = [
+                    {
+                        "role": "user",
+                        "content": f"""Based on your recent conversations, update your working memory.
+
+Your recent messages:
+{messages_text}
+
+Write an updated working memory summarizing:
+(a) Collaboration opportunities and their status
+(b) Feedback or directions from your PI (if any)
+(c) Current priorities
+
+Keep it concise — under 300 words.""",
+                    }
+                ]
+
+                agent.api_call_count += 1
+                response = await generate_agent_response(
+                    system_prompt=system_prompt,
+                    messages=messages,
+                    max_tokens=400,
+                    log_meta={"agent_id": agent.agent_id, "phase": "memory"},
+                )
+                agent.update_working_memory_file(response)
             except Exception as exc:
                 logger.error("[%s] Working memory update failed: %s", agent.agent_id, exc)
+
+
+def _extract_json(text: str) -> dict[str, Any]:
+    """Extract JSON from LLM response text."""
+    text = text.strip()
+    if text.startswith("{"):
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            pass
+    if "```json" in text:
+        start = text.find("```json") + 7
+        end = text.find("```", start)
+        if end > start:
+            try:
+                return json.loads(text[start:end].strip())
+            except json.JSONDecodeError:
+                pass
+    if "```" in text:
+        start = text.find("```") + 3
+        end = text.find("```", start)
+        if end > start:
+            try:
+                return json.loads(text[start:end].strip())
+            except json.JSONDecodeError:
+                pass
+    start = text.find("{")
+    end = text.rfind("}") + 1
+    if start >= 0 and end > start:
+        try:
+            return json.loads(text[start:end])
+        except json.JSONDecodeError:
+            pass
+    raise ValueError(f"Could not extract JSON from response: {text[:200]}")

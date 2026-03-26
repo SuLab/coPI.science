@@ -1,11 +1,11 @@
-"""Agent class — holds identity, profiles, and generates responses."""
+"""Agent class — holds identity, profiles, and builds prompts for each phase."""
 
 import logging
-import os
+import re
 from pathlib import Path
 from typing import Any
 
-from src.services.llm import generate_agent_response, make_decision
+from src.agent.state import AgentState, PostRef, ThreadState
 
 logger = logging.getLogger(__name__)
 
@@ -16,7 +16,7 @@ PROMPTS_DIR = Path("prompts")
 class Agent:
     """
     Represents a single lab agent (Slack bot).
-    Holds identity, profiles, and orchestrates LLM calls.
+    Holds identity, profiles, and per-simulation mutable state.
     """
 
     def __init__(self, agent_id: str, bot_name: str, pi_name: str):
@@ -26,11 +26,14 @@ class Agent:
         self._public_profile: str | None = None
         self._private_profile: str | None = None
         self._working_memory: str | None = None
-        self._base_system_prompt: str | None = None
-        self._decision_prompt: str | None = None
-        self._lab_directory: str | None = None  # Shared across agents
+        self._lab_directory: str | None = None
         self.api_call_count: int = 0
         self.message_count: int = 0
+        self.state = AgentState()
+
+    # ------------------------------------------------------------------
+    # Profile properties (cached, loaded from disk)
+    # ------------------------------------------------------------------
 
     @property
     def public_profile(self) -> str:
@@ -59,32 +62,22 @@ class Agent:
             )
         return self._working_memory
 
-    @property
-    def base_system_prompt(self) -> str:
-        if self._base_system_prompt is None:
-            self._base_system_prompt = self._load_file(
-                PROMPTS_DIR / "agent-system.md",
-                _default_system_prompt(),
-            )
-        return self._base_system_prompt
-
-    @property
-    def decision_prompt_template(self) -> str:
-        if self._decision_prompt is None:
-            self._decision_prompt = self._load_file(
-                PROMPTS_DIR / "agent-respond-decision.md",
-                _default_decision_prompt(),
-            )
-        return self._decision_prompt
-
     def reload_profiles(self):
-        """Reload profiles from disk (call after working memory updates)."""
+        """Reload profiles from disk."""
         self._public_profile = None
         self._private_profile = None
         self._working_memory = None
 
-    def build_system_prompt(self, channel_name: str, channel_description: str = "") -> str:
-        """Build the full system prompt for an agent in a given channel."""
+    # ------------------------------------------------------------------
+    # System prompt (shared across all phases)
+    # ------------------------------------------------------------------
+
+    def build_system_prompt(self) -> str:
+        """Build the full agent system prompt with identity and profiles."""
+        base_prompt = self._load_file(
+            PROMPTS_DIR / "agent-system.md",
+            _default_system_prompt(),
+        )
         lab_directory_section = ""
         if self._lab_directory:
             lab_directory_section = f"""
@@ -92,7 +85,7 @@ class Agent:
 Use these to reference other labs' work in conversations. Include links when citing.
 {self._lab_directory}
 """
-        return f"""{self.base_system_prompt}
+        return f"""{base_prompt}
 
 ## Your Identity
 You are **{self.bot_name}**, the AI agent representing the {self.pi_name} lab at Scripps Research.
@@ -106,191 +99,171 @@ Your agent ID is "{self.agent_id}". When communicating, represent your lab profe
 
 ## Your Working Memory
 {self.working_memory if self.working_memory else "*No working memory yet — this is your first simulation.*"}
-{lab_directory_section}
-## Current Context
-Channel: #{channel_name}
-{f"Channel description: {channel_description}" if channel_description else ""}
-"""
+{lab_directory_section}"""
 
-    async def decide(
+    # ------------------------------------------------------------------
+    # Phase 2: Scan & Filter prompt
+    # ------------------------------------------------------------------
+
+    def build_phase2_scan_prompt(self, new_posts: list[dict[str, str]]) -> tuple[str, list[dict]]:
+        """
+        Build system + messages for Phase 2 scan/filter.
+
+        new_posts: list of {post_id, channel, sender, content_snippet}
+        Returns (system_prompt, messages).
+        """
+        system_prompt = self.build_system_prompt()
+        phase2_template = self._load_file(
+            PROMPTS_DIR / "phase2-scan-filter.md",
+            "Evaluate posts and return JSON with selected_post_ids.",
+        )
+
+        # Format posts for the prompt
+        posts_text = "\n\n".join(
+            f"**Post ID: {p['post_id']}** in #{p['channel']} by {p['sender']}:\n{p['content_snippet']}"
+            for p in new_posts
+        )
+        prompt = phase2_template.replace("{new_posts}", posts_text)
+
+        messages = [{"role": "user", "content": prompt}]
+        return system_prompt, messages
+
+    def build_phase2_prune_prompt(self) -> tuple[str, list[dict]]:
+        """Build system + messages for Phase 2 prune."""
+        system_prompt = self.build_system_prompt()
+        prune_template = self._load_file(
+            PROMPTS_DIR / "phase2-prune.md",
+            "Prune interesting_posts to ≤20. Return JSON with keep_post_ids.",
+        )
+
+        posts_text = "\n\n".join(
+            f"**Post ID: {p.post_id}** in #{p.channel} by {p.sender_agent_id}:\n{p.content_snippet}"
+            for p in self.state.interesting_posts
+        )
+        prompt = prune_template.replace("{interesting_posts}", posts_text)
+
+        messages = [{"role": "user", "content": prompt}]
+        return system_prompt, messages
+
+    # ------------------------------------------------------------------
+    # Phase 4: Thread Reply prompt
+    # ------------------------------------------------------------------
+
+    def build_phase4_prompt(
         self,
-        channel_name: str,
-        channel_history: list[dict],
-        new_message: dict,
-        thread_context: str = "",
-        model: str | None = None,
-    ) -> dict:
+        thread: ThreadState,
+        thread_history: list[dict[str, str]],
+        other_agent_name: str,
+        other_agent_lab: str,
+    ) -> tuple[str, list[dict]]:
         """
-        Phase 1: Decide whether to respond to a message.
-        Returns {should_respond, action, reason}.
+        Build system + messages for Phase 4 thread reply.
+
+        thread_history: list of {sender, content} dicts.
+        Returns (system_prompt, messages).
         """
-        system_prompt = self.build_system_prompt(channel_name)
-        decision_system = f"{system_prompt}\n\n{self.decision_prompt_template}"
+        system_prompt = self.build_system_prompt()
+        phase4_template = self._load_file(
+            PROMPTS_DIR / "phase4-thread-reply.md",
+            "Compose a thread reply.",
+        )
 
-        history_text = _format_history(channel_history)
-        new_msg_text = _format_message(new_message)
-
-        thread_section = ""
-        if thread_context:
-            thread_section = f"\nThread state:\n{thread_context}\n"
-
-        messages = [
-            {
-                "role": "user",
-                "content": f"""You just received this message in #{channel_name}:
-
-{new_msg_text}
-{thread_section}
-Recent channel history:
-{history_text}
-
-Decide whether and how to respond. Output ONLY valid JSON.""",
-            }
-        ]
-
-        self.api_call_count += 1
-        try:
-            result = await make_decision(
-                decision_system,
-                messages,
-                model=model,
-                log_meta={"agent_id": self.agent_id, "phase": "decide", "channel": channel_name},
+        # Thread phase guidance
+        if thread.message_count <= 4:
+            thread_phase = "EXPLORE"
+            phase_guidance = (
+                "You are in the EXPLORE phase. Share relevant specifics from your lab's recent work. "
+                "Ask clarifying questions about the other lab's capabilities. Use retrieve_profile and "
+                "retrieve_abstract tools to learn more. Do NOT propose a full collaboration yet."
             )
-            return result
-        except Exception as exc:
-            logger.error("[%s] Decision call failed: %s", self.agent_id, exc)
-            return {"should_respond": False, "action": "ignore", "reason": str(exc)}
-
-    async def respond(
-        self,
-        channel_name: str,
-        channel_history: list[dict],
-        new_message: dict,
-        action_context: str = "",
-        model: str | None = None,
-    ) -> str:
-        """
-        Phase 2: Generate a response to post in Slack.
-        """
-        system_prompt = self.build_system_prompt(channel_name)
-
-        history_text = _format_history(channel_history)
-        new_msg_text = _format_message(new_message)
-
-        messages = [
-            {
-                "role": "user",
-                "content": f"""You received this message in #{channel_name}:
-
-{new_msg_text}
-
-Recent channel history:
-{history_text}
-
-{f"Context: {action_context}" if action_context else ""}
-
-Respond naturally as {self.bot_name}. Be specific, concrete, and substantive.
-Do not use markdown headers — just write naturally as in a Slack message.
-Keep your response focused and under 500 words.""",
-            }
-        ]
-
-        self.api_call_count += 1
-        self.message_count += 1
-        try:
-            response = await generate_agent_response(
-                system_prompt=system_prompt,
-                messages=messages,
-                model=model,
-                max_tokens=800,
-                log_meta={"agent_id": self.agent_id, "phase": "respond", "channel": channel_name},
+        elif thread.message_count <= 11:
+            thread_phase = "DECIDE"
+            phase_guidance = (
+                "You are in the DECIDE phase. Narrow the scope: is there genuine complementarity? "
+                "Can you name a specific first experiment? If yes, build toward a :memo: Summary proposal. "
+                "If no, begin wrapping up gracefully."
             )
-            return response
-        except Exception as exc:
-            logger.error("[%s] Response call failed: %s", self.agent_id, exc)
-            raise
+        else:
+            thread_phase = "MUST CONCLUDE"
+            phase_guidance = (
+                "This is message 12 — you MUST conclude the thread now. Either post a :memo: Summary "
+                "with a collaboration proposal, or close gracefully acknowledging insufficient overlap."
+            )
 
-    async def generate_kickstart_message(
-        self,
-        channel_name: str,
-        model: str | None = None,
-    ) -> str:
-        """Generate a kickstart message to initiate conversation."""
-        system_prompt = self.build_system_prompt(channel_name)
-
-        kickstart_prompt = self._load_file(
-            PROMPTS_DIR / "agent-kickstart.md",
-            (
-                "You've just joined the #{channel_name} channel. "
-                "Introduce a recent result or open question from your lab. "
-                "Be specific. Keep it to 2-4 sentences. No markdown headers."
-            ),
-        )
-        # Substitute channel name into the prompt template
-        kickstart_prompt = kickstart_prompt.replace("{channel_name}", channel_name)
-
-        messages = [
-            {
-                "role": "user",
-                "content": kickstart_prompt,
-            }
-        ]
-
-        self.api_call_count += 1
-        self.message_count += 1
-        response = await generate_agent_response(
-            system_prompt=system_prompt,
-            messages=messages,
-            model=model,
-            max_tokens=400,
-            log_meta={"agent_id": self.agent_id, "phase": "kickstart", "channel": channel_name},
-        )
-        return response
-
-    async def update_working_memory(
-        self,
-        recent_messages: list[dict],
-        model: str | None = None,
-    ) -> str:
-        """Update working memory after a simulation run."""
-        system_prompt = self.build_system_prompt("memory-update")
-
-        messages_text = "\n".join(
-            f"[{m.get('channel', 'unknown')}] {m.get('content', '')[:200]}"
-            for m in recent_messages[:30]
+        # Format thread history
+        history_text = "\n".join(
+            f"**{m['sender']}**: {m['content']}" for m in thread_history
         )
 
-        messages = [
-            {
-                "role": "user",
-                "content": f"""Based on your recent conversations in the Slack workspace, update your working memory.
+        # Build instructions based on phase
+        if thread_phase == "EXPLORE":
+            instructions = (
+                "Write a reply that shares specific details from your lab and asks a clarifying "
+                "question. Use tools proactively to research the other lab."
+            )
+        elif thread_phase == "DECIDE":
+            instructions = (
+                "Write a reply that moves toward a conclusion. Either build toward a specific "
+                ":memo: Summary proposal or acknowledge insufficient overlap."
+            )
+        else:
+            instructions = (
+                "This is the final message. You MUST either:\n"
+                "1. Post a :memo: Summary with a specific collaboration proposal, OR\n"
+                "2. If the other agent already posted a :memo: Summary you agree with, reply with ✅, OR\n"
+                "3. Close gracefully explaining why there's no good proposal."
+            )
 
-Your recent messages:
-{messages_text}
+        prompt_text = phase4_template.replace("{channel_name}", thread.channel)
+        prompt_text = prompt_text.replace("{other_agent_name}", other_agent_name)
+        prompt_text = prompt_text.replace("{other_agent_lab}", other_agent_lab)
+        prompt_text = prompt_text.replace("{message_count}", str(thread.message_count))
+        prompt_text = prompt_text.replace("{thread_phase}", thread_phase)
+        prompt_text = prompt_text.replace("{thread_history}", history_text)
+        prompt_text = prompt_text.replace("{phase_guidance}", phase_guidance)
+        prompt_text = prompt_text.replace("{instructions}", instructions)
 
-Write an updated working memory section that summarizes:
-(a) Collaboration opportunities you've identified and their status
-(b) Feedback or directions from your PI (if any)
-(c) Your current understanding of priorities
+        messages = [{"role": "user", "content": prompt_text}]
+        return system_prompt, messages
 
-Keep it concise — this is a living summary, not a log. Under 300 words.""",
-            }
-        ]
+    # ------------------------------------------------------------------
+    # Phase 5: New Post prompt
+    # ------------------------------------------------------------------
 
-        self.api_call_count += 1
-        response = await generate_agent_response(
-            system_prompt=system_prompt,
-            messages=messages,
-            model=model,
-            max_tokens=400,
-            log_meta={"agent_id": self.agent_id, "phase": "memory"},
+    def build_phase5_prompt(self) -> tuple[str, list[dict]]:
+        """
+        Build system + messages for Phase 5 new post.
+        Returns (system_prompt, messages).
+        """
+        system_prompt = self.build_system_prompt()
+        phase5_template = self._load_file(
+            PROMPTS_DIR / "phase5-new-post.md",
+            "Choose to reply to an interesting post or make a new top-level post.",
         )
 
-        # Write updated working memory to private profile
-        self._update_working_memory_file(response)
-        return response
+        # Format interesting posts
+        if self.state.interesting_posts:
+            interesting_text = "\n\n".join(
+                f"**Post ID: {p.post_id}** in #{p.channel} by {p.sender_agent_id}:\n{p.content_snippet}"
+                for p in self.state.interesting_posts
+            )
+        else:
+            interesting_text = "(none)"
 
-    def _update_working_memory_file(self, new_memory: str) -> None:
+        # Format subscribed channels
+        channels_text = ", ".join(f"#{ch}" for ch in sorted(self.state.subscribed_channels))
+
+        prompt_text = phase5_template.replace("{interesting_posts}", interesting_text)
+        prompt_text = prompt_text.replace("{subscribed_channels}", channels_text)
+
+        messages = [{"role": "user", "content": prompt_text}]
+        return system_prompt, messages
+
+    # ------------------------------------------------------------------
+    # Working memory update
+    # ------------------------------------------------------------------
+
+    def update_working_memory_file(self, new_memory: str) -> None:
         """Write working memory to profiles/memory/{agent_id}.md."""
         memory_path = PROFILES_DIR / "memory" / f"{self.agent_id}.md"
         try:
@@ -300,31 +273,16 @@ Keep it concise — this is a living summary, not a log. Under 300 words.""",
         except Exception as exc:
             logger.error("[%s] Failed to update working memory: %s", self.agent_id, exc)
 
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
     @staticmethod
     def _load_file(path: Path, default: str) -> str:
         try:
             return path.read_text(encoding="utf-8")
         except FileNotFoundError:
             return default
-
-
-def _format_history(messages: list[dict]) -> str:
-    """Format channel history for LLM context."""
-    if not messages:
-        return "(no previous messages)"
-    parts = []
-    for msg in messages[-20:]:  # Last 20 messages
-        sender = msg.get("sender", "unknown")
-        content = msg.get("content", "")
-        parts.append(f"{sender}: {content}")
-    return "\n".join(parts)
-
-
-def _format_message(message: dict) -> str:
-    """Format a single message for LLM context."""
-    sender = message.get("sender", "unknown")
-    content = message.get("content", "")
-    return f"{sender}: {content}"
 
 
 def _default_system_prompt() -> str:
@@ -338,8 +296,6 @@ called "labbot". Your role is to facilitate scientific collaboration by engaging
    without specific scientific context are not acceptable.
 
 2. **True complementarity.** Each lab must bring something the other doesn't have.
-   If either lab's contribution could be done by hiring a postdoc independently, the collaboration
-   idea is too generic.
 
 3. **Concrete first experiment required.** Any collaboration beyond initial interest must include
    a proposed first experiment scoped to days-to-weeks, naming specific assays, methods, or reagents.
@@ -348,11 +304,6 @@ called "labbot". Your role is to facilitate scientific collaboration by engaging
    than either lab doing it alone, don't propose it.
 
 5. **Non-generic benefits.** Both labs must benefit in ways specific to the collaboration.
-
-## Confidence Labels
-- **High:** Clear complementarity, concrete first experiment, both sides benefit non-generically
-- **Moderate:** Good synergy but first experiment less defined, or one benefit less clear
-- **Speculative:** Interesting but needs development — label these ("This is speculative, but...")
 
 ## Communication Style
 - Professional but not stiff — like a knowledgeable postdoc representing the lab
@@ -364,29 +315,4 @@ called "labbot". Your role is to facilitate scientific collaboration by engaging
 ## Rules
 - Cannot commit effort or resources on behalf of your PI
 - Cannot share private profile information
-- Cannot DM other labs' PIs (only DM your own PI)
-- When a promising collaboration is identified, explore it to a concrete first experiment
-  before naturally pausing for human review"""
-
-
-def _default_decision_prompt() -> str:
-    return """Evaluate whether you should respond to this message in Slack.
-
-Consider:
-- Is the message directly relevant to your lab's expertise?
-- Are you directly addressed or tagged?
-- Is there a genuine collaboration opportunity worth exploring?
-- Do you have something specific and substantive to add?
-
-Do NOT respond if:
-- You're just being polite
-- Another agent already said what you would say
-- You have nothing specific to contribute
-- The topic is completely outside your lab's expertise
-
-Return ONLY this JSON (no other text):
-{
-  "should_respond": true or false,
-  "action": "respond" | "ignore" | "create_channel" | "dm_pi",
-  "reason": "brief reason for your decision"
-}"""
+- Cannot DM other labs' PIs (only DM your own PI)"""
