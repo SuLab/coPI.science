@@ -51,7 +51,7 @@ Your post should:
 
 ## Output Format
 
-Return this JSON followed by your message:
+First, return this JSON block:
 
 ```json
 {
@@ -63,6 +63,11 @@ Return this JSON followed by your message:
 }
 ```
 
-Then on a new line after the JSON, write the message text exactly as it should appear
-in Slack. Do NOT wrap it in `<slack_message>` tags or any other markup — just the plain
-message text.
+Then wrap your message in `<slack_message>` tags. Only the content inside the tags
+will be posted to Slack:
+
+```
+<slack_message>
+Your message here — written exactly as it should appear in Slack.
+</slack_message>
+```

@@ -728,9 +728,6 @@ class SimulationEngine:
                 logger.warning("[%s] Phase 5: Could not parse response", agent.agent_id)
                 return
 
-            # Strip any <slack_message> tags the LLM may have added
-            message_text = _extract_slack_message(message_text)
-
             action = action_data.get("action", "new_post")
             channel = action_data.get("channel", "general").lstrip("#")
             target_post_id = action_data.get("target_post_id")
@@ -799,29 +796,44 @@ class SimulationEngine:
             logger.error("[%s] Phase 5 failed: %s", agent.agent_id, exc)
 
     def _parse_phase5_response(self, response: str) -> tuple[dict | None, str | None]:
-        """Parse Phase 5 response into (json_data, message_text)."""
+        """Parse Phase 5 response into (json_data, message_text).
+
+        Expects JSON block + <slack_message> tags. Falls back to JSON + rest-of-string.
+        """
+        data = None
         try:
             # Find JSON block
             json_match = re.search(r"```json\s*\n(.*?)\n```", response, re.DOTALL)
             if json_match:
-                json_str = json_match.group(1)
-                data = json.loads(json_str)
-                # Message text is everything after the JSON block
-                rest = response[json_match.end():].strip()
-                return data, rest
-
-            # Try finding raw JSON at the start
-            json_start = response.find("{")
-            json_end = response.find("}", json_start) + 1 if json_start >= 0 else -1
-            if json_start >= 0 and json_end > json_start:
-                data = json.loads(response[json_start:json_end])
-                rest = response[json_end:].strip()
-                return data, rest
-
+                data = json.loads(json_match.group(1))
+            else:
+                # Try finding raw JSON
+                json_start = response.find("{")
+                json_end = response.find("}", json_start) + 1 if json_start >= 0 else -1
+                if json_start >= 0 and json_end > json_start:
+                    data = json.loads(response[json_start:json_end])
         except (json.JSONDecodeError, ValueError) as exc:
             logger.warning("Failed to parse Phase 5 JSON: %s", exc)
 
-        return None, None
+        if not data:
+            return None, None
+
+        # Extract message from <slack_message> tags
+        msg_match = re.search(
+            r"<slack_message>\s*(.*?)\s*</slack_message>", response, re.DOTALL
+        )
+        if msg_match:
+            return data, msg_match.group(1).strip()
+
+        # Fallback: message is everything after the JSON block
+        json_match = re.search(r"```json\s*\n.*?\n```", response, re.DOTALL)
+        if json_match:
+            rest = response[json_match.end():].strip()
+        else:
+            json_end = response.find("}", response.find("{")) + 1
+            rest = response[json_end:].strip()
+
+        return data, _strip_llm_preamble(rest) if rest else None
 
     # ------------------------------------------------------------------
     # Slack Polling (PI messages)
