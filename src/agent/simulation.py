@@ -525,20 +525,12 @@ class SimulationEngine:
                 },
             )
 
-            # Guard against empty responses (tool-use loop can produce empty text)
+            # Extract message from <slack_message> tags, fall back to preamble stripping
+            response_text = _extract_slack_message(response_text)
+
             if not response_text or not response_text.strip():
                 logger.warning(
-                    "[%s] Phase 4: Empty response for thread %s, skipping post",
-                    agent.agent_id, thread.thread_id,
-                )
-                return
-
-            # Strip LLM preamble/commentary that leaks before the actual message
-            response_text = _strip_llm_preamble(response_text)
-
-            if not response_text.strip():
-                logger.warning(
-                    "[%s] Phase 4: Only preamble in response for thread %s, skipping",
+                    "[%s] Phase 4: Empty/unparseable response for thread %s, skipping",
                     agent.agent_id, thread.thread_id,
                 )
                 return
@@ -1178,6 +1170,15 @@ Keep it concise — under 300 words.""",
                 agent.update_working_memory_file(response)
             except Exception as exc:
                 logger.error("[%s] Working memory update failed: %s", agent.agent_id, exc)
+
+
+def _extract_slack_message(text: str) -> str:
+    """Extract the message from <slack_message> tags if present, else fall back to preamble stripping."""
+    match = re.search(r"<slack_message>\s*(.*?)\s*</slack_message>", text, re.DOTALL)
+    if match:
+        return match.group(1).strip()
+    # Fallback: strip preamble heuristically
+    return _strip_llm_preamble(text)
 
 
 def _strip_llm_preamble(text: str) -> str:

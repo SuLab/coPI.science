@@ -34,13 +34,17 @@ you should already have the information you need.
 
 ## Output
 
-Write ONLY the message text as it should appear in Slack. Do not include:
-- Internal reasoning, thinking, or commentary about your research process
-- JSON, metadata, or formatting instructions
-- Preamble like "Based on my research..." or "Let me think about..."
-- Separators (--- or similar) before your actual message
+Your final response MUST contain exactly one `<slack_message>` block. Everything inside
+the block will be posted verbatim to Slack. Everything outside it is discarded.
 
-Start your reply directly with the words you want posted to the Slack thread.
+```
+<slack_message>
+Your message here — written as it should appear in Slack.
+</slack_message>
+```
+
+You may think/reason freely outside the block, but ONLY the content between
+`<slack_message>` and `</slack_message>` tags will be posted.
 
 If you are posting a :memo: Summary (collaboration proposal), format it clearly with:
 - What each lab brings
