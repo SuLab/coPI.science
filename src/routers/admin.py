@@ -21,6 +21,7 @@ from src.models import (
     Publication,
     ResearcherProfile,
     SimulationRun,
+    ThreadDecision,
     User,
 )
 from src.services.orcid import fetch_orcid_profile
@@ -412,6 +413,166 @@ async def admin_llm_calls(
             filter_agent=agent,
             filter_phase=phase,
             filter_model=model,
+        ),
+    )
+
+
+@router.get("/discussions", response_class=HTMLResponse)
+async def admin_discussions(
+    request: Request,
+    run_id: str | None = None,
+    channel_filter: str | None = None,
+    status_filter: str | None = None,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_admin_user),
+):
+    """Discussion summary: threads grouped by status."""
+    from sqlalchemy import case, distinct, literal, text
+
+    # Pick which simulation run to show
+    runs_result = await db.execute(
+        select(SimulationRun).order_by(SimulationRun.started_at.desc())
+    )
+    runs = runs_result.scalars().all()
+
+    selected_run_id = None
+    if run_id:
+        try:
+            selected_run_id = uuid.UUID(run_id)
+        except ValueError:
+            pass
+    if not selected_run_id and runs:
+        selected_run_id = runs[0].id
+
+    if not selected_run_id:
+        return templates.TemplateResponse(
+            request,
+            "admin/discussions.html",
+            _template_context(
+                request,
+                current_user,
+                active_admin="discussions",
+                runs=runs,
+                selected_run_id=None,
+                threads=[],
+                counts={},
+                channels=[],
+                channel_filter=channel_filter,
+                status_filter=status_filter,
+            ),
+        )
+
+    # Get all root posts (new_post phase, no thread_ts) for this run
+    roots_result = await db.execute(
+        select(AgentMessage)
+        .where(
+            AgentMessage.simulation_run_id == selected_run_id,
+            AgentMessage.phase == "new_post",
+            AgentMessage.thread_ts.is_(None),
+        )
+        .order_by(AgentMessage.created_at)
+    )
+    root_posts = roots_result.scalars().all()
+
+    # Get reply counts per thread
+    reply_counts_result = await db.execute(
+        select(
+            AgentMessage.thread_ts,
+            func.count(AgentMessage.id).label("reply_count"),
+            func.count(distinct(AgentMessage.agent_id)).label("participant_count"),
+        )
+        .where(
+            AgentMessage.simulation_run_id == selected_run_id,
+            AgentMessage.phase == "thread_reply",
+        )
+        .group_by(AgentMessage.thread_ts)
+    )
+    reply_map = {
+        r.thread_ts: {"replies": r.reply_count, "participants": r.participant_count}
+        for r in reply_counts_result
+    }
+
+    # Get thread decisions for this run
+    decisions_result = await db.execute(
+        select(ThreadDecision)
+        .where(ThreadDecision.simulation_run_id == selected_run_id)
+        .order_by(ThreadDecision.decided_at)
+    )
+    all_decisions = decisions_result.scalars().all()
+
+    # Build a map: thread_id -> final outcome (last decision wins)
+    decision_map: dict[str, ThreadDecision] = {}
+    for d in all_decisions:
+        decision_map[d.thread_id] = d
+
+    # Build thread list
+    threads = []
+    available_channels = set()
+    for post in root_posts:
+        ts = post.message_ts
+        available_channels.add(post.channel_name)
+        reply_info = reply_map.get(ts, {"replies": 0, "participants": 0})
+        decision = decision_map.get(ts)
+
+        if decision:
+            if decision.outcome == "proposal":
+                thread_status = "proposal"
+            elif decision.outcome == "no_proposal":
+                thread_status = "no_proposal"
+            elif decision.outcome == "timeout":
+                thread_status = "timeout"
+            else:
+                thread_status = decision.outcome
+        elif reply_info["replies"] > 0:
+            thread_status = "active"
+        else:
+            thread_status = "no_replies"
+
+        threads.append({
+            "message_ts": ts,
+            "channel_name": post.channel_name,
+            "agent_id": post.agent_id,
+            "created_at": post.created_at,
+            "reply_count": reply_info["replies"],
+            "participant_count": reply_info["participants"],
+            "status": thread_status,
+            "decision": decision,
+        })
+
+    # Apply filters
+    if channel_filter:
+        threads = [t for t in threads if t["channel_name"] == channel_filter]
+    if status_filter:
+        threads = [t for t in threads if t["status"] == status_filter]
+
+    # Count by status (before filtering)
+    counts: dict[str, int] = {}
+    for post in root_posts:
+        ts = post.message_ts
+        reply_info = reply_map.get(ts, {"replies": 0, "participants": 0})
+        decision = decision_map.get(ts)
+        if decision:
+            s = decision.outcome
+        elif reply_info["replies"] > 0:
+            s = "active"
+        else:
+            s = "no_replies"
+        counts[s] = counts.get(s, 0) + 1
+
+    return templates.TemplateResponse(
+        request,
+        "admin/discussions.html",
+        _template_context(
+            request,
+            current_user,
+            active_admin="discussions",
+            runs=runs,
+            selected_run_id=selected_run_id,
+            threads=threads,
+            counts=counts,
+            channels=sorted(available_channels),
+            channel_filter=channel_filter,
+            status_filter=status_filter,
         ),
     )
 

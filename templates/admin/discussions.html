@@ -1,0 +1,139 @@
+{% extends "base.html" %}
+{% block title %}Admin — Discussions — CoPI{% endblock %}
+
+{% block content %}
+<div class="flex items-center justify-between mb-6">
+    <h1 class="text-2xl font-bold text-gray-900">Discussions</h1>
+    {% if runs %}
+    <form method="GET" action="/admin/discussions" class="flex items-center gap-2">
+        <label class="text-sm text-gray-500">Run:</label>
+        <select name="run_id" onchange="this.form.submit()"
+                class="text-sm border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500">
+            {% for run in runs %}
+            <option value="{{ run.id }}" {% if run.id == selected_run_id %}selected{% endif %}>
+                {{ run.started_at.strftime('%b %d %H:%M') }} ({{ run.status }})
+            </option>
+            {% endfor %}
+        </select>
+    </form>
+    {% endif %}
+</div>
+
+{% if not selected_run_id %}
+<p class="text-gray-400 text-sm">No simulation runs found.</p>
+{% else %}
+
+<!-- Summary cards -->
+{% set status_meta = {
+    'no_replies':  {'label': 'No Replies',   'color': 'gray',   'icon': '—'},
+    'active':      {'label': 'Active',       'color': 'blue',   'icon': '...'},
+    'proposal':    {'label': 'Proposal',     'color': 'green',  'icon': 'check'},
+    'no_proposal': {'label': 'No Proposal',  'color': 'amber',  'icon': 'x'},
+    'timeout':     {'label': 'Timeout',      'color': 'red',    'icon': 'clock'},
+} %}
+<div class="grid grid-cols-2 md:grid-cols-5 gap-4 mb-8">
+    {% for key, meta in status_meta.items() %}
+    {% set n = counts.get(key, 0) %}
+    <a href="/admin/discussions?run_id={{ selected_run_id }}{% if status_filter != key %}&status_filter={{ key }}{% endif %}"
+       class="bg-white rounded-xl border border-gray-200 p-4 text-center hover:border-{{ meta.color }}-300 transition
+              {% if status_filter == key %}ring-2 ring-{{ meta.color }}-400{% endif %}">
+        <div class="text-3xl font-bold text-{{ meta.color }}-600">{{ n }}</div>
+        <div class="text-sm text-gray-500 mt-1">{{ meta.label }}</div>
+    </a>
+    {% endfor %}
+</div>
+
+<!-- Filters -->
+<div class="flex items-center gap-4 mb-4">
+    <form method="GET" action="/admin/discussions" class="flex items-center gap-3">
+        <input type="hidden" name="run_id" value="{{ selected_run_id }}">
+        <select name="channel_filter" class="text-sm border-gray-300 rounded-md shadow-sm">
+            <option value="">All Channels</option>
+            {% for ch in channels %}
+            <option value="{{ ch }}" {% if channel_filter == ch %}selected{% endif %}>#{{ ch }}</option>
+            {% endfor %}
+        </select>
+        <select name="status_filter" class="text-sm border-gray-300 rounded-md shadow-sm">
+            <option value="">All Statuses</option>
+            {% for key, meta in status_meta.items() %}
+            <option value="{{ key }}" {% if status_filter == key %}selected{% endif %}>{{ meta.label }}</option>
+            {% endfor %}
+        </select>
+        <button type="submit"
+                class="px-3 py-1.5 bg-indigo-600 text-white text-sm rounded-md hover:bg-indigo-700">Filter</button>
+        {% if channel_filter or status_filter %}
+        <a href="/admin/discussions?run_id={{ selected_run_id }}" class="text-sm text-gray-500 hover:text-gray-700">Clear</a>
+        {% endif %}
+    </form>
+</div>
+
+<!-- Threads table -->
+<div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+    <table class="min-w-full divide-y divide-gray-200">
+        <thead class="bg-gray-50">
+            <tr>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Channel</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Posted By</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Replies</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Participants</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Outcome</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Time</th>
+            </tr>
+        </thead>
+        <tbody class="divide-y divide-gray-100">
+            {% for t in threads %}
+            {% set meta = status_meta.get(t.status, {'label': t.status, 'color': 'gray'}) %}
+            <tr class="hover:bg-gray-50 {% if t.decision %}cursor-pointer{% endif %}"
+                {% if t.decision %}onclick="document.getElementById('detail-{{ loop.index }}').classList.toggle('hidden')"{% endif %}>
+                <td class="px-4 py-3">
+                    <span class="px-2 py-0.5 rounded-full text-xs bg-{{ meta.color }}-100 text-{{ meta.color }}-700">
+                        {{ meta.label }}
+                    </span>
+                </td>
+                <td class="px-4 py-3 text-sm">#{{ t.channel_name }}</td>
+                <td class="px-4 py-3 text-sm font-medium">{{ t.agent_id | capitalize }}Bot</td>
+                <td class="px-4 py-3 text-sm">{{ t.reply_count }}</td>
+                <td class="px-4 py-3 text-sm">
+                    {% if t.decision %}
+                        {{ t.decision.agent_a | capitalize }}Bot + {{ t.decision.agent_b | capitalize }}Bot
+                    {% elif t.participant_count > 0 %}
+                        {{ t.participant_count }} agent{{ 's' if t.participant_count != 1 }}
+                    {% else %}
+                        —
+                    {% endif %}
+                </td>
+                <td class="px-4 py-3 text-sm text-gray-500">
+                    {% if t.decision %}
+                        {{ t.decision.outcome | replace('_', ' ') | capitalize }}
+                        <span class="text-xs text-gray-400">{{ t.decision.decided_at.strftime('%H:%M') }}</span>
+                    {% else %}
+                        —
+                    {% endif %}
+                </td>
+                <td class="px-4 py-3 text-sm text-gray-500">{{ t.created_at.strftime('%H:%M:%S') }}</td>
+            </tr>
+            {% if t.decision and t.decision.summary_text %}
+            <tr id="detail-{{ loop.index }}" class="hidden">
+                <td colspan="7" class="px-6 py-4 bg-gray-50">
+                    <div class="text-sm text-gray-700 max-w-3xl whitespace-pre-wrap">{{ t.decision.summary_text[:1000] }}{% if t.decision.summary_text | length > 1000 %}...{% endif %}</div>
+                </td>
+            </tr>
+            {% endif %}
+            {% else %}
+            <tr>
+                <td colspan="7" class="px-4 py-8 text-center text-gray-400 text-sm">No discussions found</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<div class="mt-4 text-sm text-gray-400">
+    Showing {{ threads | length }} thread{{ 's' if threads | length != 1 }}
+    {% if channel_filter or status_filter %}(filtered){% endif %}
+    &bull; Total root posts: {{ counts.values() | sum }}
+</div>
+
+{% endif %}
+{% endblock %}
