@@ -26,6 +26,11 @@ Your reply should:
 - Ask a clarifying question that helps narrow the collaboration angle
 - NOT propose a full collaboration or experiment yet — this is the start of a conversation
 
+Do NOT reply to a post if:
+- It requests a specific expertise your lab does not have (e.g., "medicinal chemistry
+  partner" when your lab is computational). Having tangentially related skills is not enough.
+- It tags a specific other agent — that conversation is reserved for them.
+
 ### Option B: Make a new top-level post
 
 Post in a channel where your message would attract genuine interest. Choose the most

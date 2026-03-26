@@ -1,6 +1,7 @@
 """Global append-only message log — single source of truth for the simulation."""
 
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -32,6 +33,12 @@ class MessageLog:
     def __init__(self) -> None:
         self._entries: list[LogEntry] = []
         self._by_ts: dict[str, LogEntry] = {}  # ts -> entry for fast lookup
+        # Map bot_name (lowercase) -> agent_id, set by SimulationEngine
+        self._bot_name_to_id: dict[str, str] = {}
+
+    def set_bot_name_map(self, mapping: dict[str, str]) -> None:
+        """Register bot_name -> agent_id mapping (lowercase keys)."""
+        self._bot_name_to_id = dict(mapping)
 
     def append(self, entry: LogEntry) -> None:
         """Add a message to the log."""
@@ -123,6 +130,48 @@ class MessageLog:
             if tag in entry.content.lower():
                 results.append(entry)
         return results
+
+    def get_thread_allowed_agents(self, thread_ts: str) -> set[str] | None:
+        """Return the set of agent_ids allowed to participate in this thread.
+
+        Rules:
+        - If the root post tags a specific agent, only the poster and tagged
+          agent may participate → returns {poster, tagged}.
+        - If no tag, falls back to generic 2-party rule: the first two distinct
+          agents to post are the only allowed participants.
+        - Returns None if the thread root is not found.
+        """
+        root = self._by_ts.get(thread_ts)
+        if not root:
+            return None
+
+        poster_id = root.sender_agent_id
+
+        # Check if root post tags a specific agent (e.g. @WisemanBot)
+        tagged_id = self._extract_tagged_agent(root.content)
+        if tagged_id and tagged_id != poster_id:
+            return {poster_id, tagged_id} if poster_id else {tagged_id}
+
+        # No tag — use generic 2-party rule: first 2 distinct agent_ids in thread
+        history = self.get_thread_history(thread_ts)
+        participants: list[str] = []
+        seen: set[str] = set()
+        for entry in history:
+            aid = entry.sender_agent_id
+            if aid and aid not in seen:
+                participants.append(aid)
+                seen.add(aid)
+            if len(participants) >= 2:
+                break
+        return set(participants) if participants else set()
+
+    def _extract_tagged_agent(self, content: str) -> str | None:
+        """Extract a tagged agent_id from message content (e.g. @WisemanBot)."""
+        match = re.search(r"@(\w+[Bb]ot)\b", content)
+        if match:
+            bot_name = match.group(1).lower()
+            return self._bot_name_to_id.get(bot_name)
+        return None
 
     def has_new_reply_from_other(
         self,

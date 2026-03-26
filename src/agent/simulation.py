@@ -98,6 +98,7 @@ class SimulationEngine:
         self._bot_name_to_id: dict[str, str] = {
             a.bot_name.lower(): a.agent_id for a in agents
         }
+        self.message_log.set_bot_name_map(self._bot_name_to_id)
 
         # LLM call log buffer
         self._llm_log_buffer: list[dict] = []
@@ -276,7 +277,7 @@ class SimulationEngine:
                 "post_id": p.ts,
                 "channel": p.channel,
                 "sender": p.sender_name,
-                "content_snippet": p.content[:200],
+                "content_snippet": p.content,
             }
             for p in new_posts
         ]
@@ -368,6 +369,14 @@ class SimulationEngine:
                 continue
             if len(agent.state.active_threads) >= settings.active_thread_threshold:
                 break
+            # Check thread participation rules
+            allowed = self.message_log.get_thread_allowed_agents(thread_id)
+            if allowed and agent.agent_id not in allowed:
+                logger.info(
+                    "[%s] Phase 3: Skipping tagged thread %s — not in allowed set %s",
+                    agent.agent_id, thread_id, allowed,
+                )
+                continue
             # Determine the other agent
             other_id = self._infer_agent_id(entry.sender_name) or entry.sender_agent_id
             if other_id and other_id != agent.agent_id:
@@ -391,10 +400,9 @@ class SimulationEngine:
                 continue
             if len(agent.state.active_threads) >= settings.active_thread_threshold:
                 break
-            # Enforce 2-party thread: only activate if ≤2 unique participants
-            thread_history = self.message_log.get_thread_history(thread_id)
-            thread_participants = {e.sender_agent_id for e in thread_history if e.sender_agent_id}
-            if len(thread_participants) >= 2 and agent.agent_id not in thread_participants:
+            # Check thread participation rules
+            allowed = self.message_log.get_thread_allowed_agents(thread_id)
+            if allowed and len(allowed) >= 2 and agent.agent_id not in allowed:
                 continue
             other_id = self._infer_agent_id(entry.sender_name) or entry.sender_agent_id
             if other_id and other_id != agent.agent_id:
@@ -464,6 +472,16 @@ class SimulationEngine:
 
         # Update message count
         thread.message_count = len(history_entries)
+
+        # Final participation check before composing a reply
+        allowed = self.message_log.get_thread_allowed_agents(thread.thread_id)
+        if allowed and agent.agent_id not in allowed:
+            logger.info(
+                "[%s] Phase 4: Aborting reply to thread %s — not in allowed set %s",
+                agent.agent_id, thread.thread_id, allowed,
+            )
+            agent.state.active_threads.pop(thread.thread_id, None)
+            return
 
         # Check for system-enforced close
         if thread.message_count >= settings.max_thread_messages:
@@ -678,14 +696,13 @@ class SimulationEngine:
                 continue
             if post.post_id in agent.state.active_threads:
                 continue
-            # Check 2-party rule: if another agent already replied to this post,
-            # only allow if we'd be the second participant
-            thread_history = self.message_log.get_thread_history(post.post_id)
-            thread_participants = {e.sender_agent_id for e in thread_history if e.sender_agent_id}
-            if len(thread_participants) >= 2 and agent.agent_id not in thread_participants:
+            # Check thread participation rules: if the post tags a specific agent,
+            # only that agent can reply; otherwise generic 2-party rule applies
+            allowed = self.message_log.get_thread_allowed_agents(post.post_id)
+            if allowed and len(allowed) >= 2 and agent.agent_id not in allowed:
                 logger.debug(
-                    "[%s] Phase 5: Skipping post %s — thread already has 2 participants",
-                    agent.agent_id, post.post_id,
+                    "[%s] Phase 5: Skipping post %s — not in allowed set %s",
+                    agent.agent_id, post.post_id, allowed,
                 )
                 continue
             available_posts.append(post)
@@ -724,13 +741,12 @@ class SimulationEngine:
             target_post_id = action_data.get("target_post_id")
 
             if action == "reply" and target_post_id:
-                # Enforce 2-party thread discipline
-                thread_history = self.message_log.get_thread_history(target_post_id)
-                thread_participants = {e.sender_agent_id for e in thread_history if e.sender_agent_id}
-                if len(thread_participants) >= 2 and agent.agent_id not in thread_participants:
+                # Enforce thread participation rules
+                allowed = self.message_log.get_thread_allowed_agents(target_post_id)
+                if allowed and agent.agent_id not in allowed:
                     logger.info(
-                        "[%s] Phase 5: Blocked reply to %s — thread already has 2 participants",
-                        agent.agent_id, target_post_id,
+                        "[%s] Phase 5: Blocked reply to %s — not in allowed set %s",
+                        agent.agent_id, target_post_id, allowed,
                     )
                     return
 
