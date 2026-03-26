@@ -291,6 +291,9 @@ class SimulationEngine:
                 max_tokens=500,
                 log_meta={"agent_id": agent.agent_id, "phase": "scan"},
             )
+            if not response or not response.strip():
+                logger.warning("[%s] Phase 2: Empty response from LLM, skipping", agent.agent_id)
+                return
             result = _extract_json(response)
             selected_ids = set(result.get("selected_post_ids", []))
 
@@ -328,6 +331,9 @@ class SimulationEngine:
                 max_tokens=500,
                 log_meta={"agent_id": agent.agent_id, "phase": "prune"},
             )
+            if not response or not response.strip():
+                logger.warning("[%s] Phase 2 prune: empty response", agent.agent_id)
+                return
             result = _extract_json(response)
             keep_ids = set(result.get("keep_post_ids", []))
 
@@ -500,6 +506,24 @@ class SimulationEngine:
                     "channel": thread.channel,
                 },
             )
+
+            # Guard against empty responses (tool-use loop can produce empty text)
+            if not response_text or not response_text.strip():
+                logger.warning(
+                    "[%s] Phase 4: Empty response for thread %s, skipping post",
+                    agent.agent_id, thread.thread_id,
+                )
+                return
+
+            # Strip LLM preamble/commentary that leaks before the actual message
+            response_text = _strip_llm_preamble(response_text)
+
+            if not response_text.strip():
+                logger.warning(
+                    "[%s] Phase 4: Only preamble in response for thread %s, skipping",
+                    agent.agent_id, thread.thread_id,
+                )
+                return
 
             # Post the reply
             await self._post_message(
@@ -685,6 +709,9 @@ class SimulationEngine:
                 max_tokens=600,
                 log_meta={"agent_id": agent.agent_id, "phase": "new_post"},
             )
+            if not response or not response.strip():
+                logger.warning("[%s] Phase 5: Empty response from LLM, skipping", agent.agent_id)
+                return
 
             # Parse the JSON + message from the response
             action_data, message_text = self._parse_phase5_response(response)
@@ -798,7 +825,12 @@ class SimulationEngine:
         if not client or not client.is_connected:
             return
 
-        for ch_name, ch_id in self._channel_id_map.items():
+        # Only poll seeded channels (not archived/stale channels from prior sims)
+        seeded_ids = {
+            ch_name: ch_id for ch_name, ch_id in self._channel_id_map.items()
+            if ch_name in SEEDED_CHANNELS
+        }
+        for ch_name, ch_id in seeded_ids.items():
             oldest = self._poll_cursors.get(ch_id, "0")
             try:
                 messages = client.poll_channel_messages(ch_id, oldest=oldest)
@@ -1124,9 +1156,52 @@ Keep it concise — under 300 words.""",
                     max_tokens=400,
                     log_meta={"agent_id": agent.agent_id, "phase": "memory"},
                 )
+                if not response or not response.strip():
+                    logger.warning("[%s] Working memory update: empty response", agent.agent_id)
+                    continue
                 agent.update_working_memory_file(response)
             except Exception as exc:
                 logger.error("[%s] Working memory update failed: %s", agent.agent_id, exc)
+
+
+def _strip_llm_preamble(text: str) -> str:
+    """Remove LLM internal reasoning that leaks before the actual Slack message.
+
+    Detects patterns like internal commentary followed by a --- separator,
+    or lines that look like self-talk about tool results.
+    """
+    # If there's a --- separator, take everything after the last one
+    if "\n---\n" in text:
+        parts = text.split("\n---\n")
+        # Use the last part (the actual message)
+        candidate = parts[-1].strip()
+        if candidate:
+            text = candidate
+
+    # Strip lines at the start that look like internal reasoning
+    preamble_patterns = [
+        r"^(These|The|Let me|I('ll| should| need| couldn't| didn't| can't| wasn't)|"
+        r"My |Based on|After |Since |Looking at|It seems|Ok,|Okay,|Hmm)",
+    ]
+    lines = text.split("\n")
+    # Only strip leading lines that match preamble patterns AND are followed
+    # by a blank line (paragraph break) before the real message
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped:
+            # Blank line — check if remaining lines look like a real message
+            rest = "\n".join(lines[i + 1:]).strip()
+            if rest:
+                # Check if everything before this blank line was preamble
+                preamble_section = "\n".join(lines[:i]).strip()
+                if preamble_section and re.match(
+                    preamble_patterns[0], preamble_section, re.IGNORECASE
+                ):
+                    logger.debug("Stripped preamble: %.100s", preamble_section)
+                    return rest
+            break
+
+    return text
 
 
 def _extract_json(text: str) -> dict[str, Any]:

@@ -34,8 +34,13 @@ you should already have the information you need.
 
 ## Output
 
-Write your reply message. Do not include any JSON or metadata — just the message text
-as it should appear in Slack.
+Write ONLY the message text as it should appear in Slack. Do not include:
+- Internal reasoning, thinking, or commentary about your research process
+- JSON, metadata, or formatting instructions
+- Preamble like "Based on my research..." or "Let me think about..."
+- Separators (--- or similar) before your actual message
+
+Start your reply directly with the words you want posted to the Slack thread.
 
 If you are posting a :memo: Summary (collaboration proposal), format it clearly with:
 - What each lab brings
