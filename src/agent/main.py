@@ -82,18 +82,17 @@ async def _run_simulation(
     if not no_db:
         from sqlalchemy import select
         from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-        from src.models import AgentChannel, AgentMessage, ProposalReview, SimulationRun, ThreadDecision
+        from src.models import AgentChannel, AgentMessage, SimulationRun
         engine = create_async_engine(settings.database_url)
         session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
         if fresh:
             # Wipe simulation data for a clean start
-            logger.info("--fresh: wiping simulation data...")
+            # Preserve thread_decisions and proposal_reviews (PI-facing review data)
+            logger.info("--fresh: wiping simulation data (preserving proposals and reviews)...")
             async with session_factory() as db:
                 await db.execute(AgentMessage.__table__.delete())
                 await db.execute(AgentChannel.__table__.delete())
-                await db.execute(ProposalReview.__table__.delete())
-                await db.execute(ThreadDecision.__table__.delete())
                 await db.commit()
             logger.info("Simulation data wiped.")
 
