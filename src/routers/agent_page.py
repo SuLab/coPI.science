@@ -53,6 +53,7 @@ def _template_context(request: Request, user: User, **kwargs) -> dict:
 @router.get("", response_class=HTMLResponse)
 async def my_agent(
     request: Request,
+    slack_error: str | None = None,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -162,6 +163,7 @@ async def my_agent(
             reviewed=reviewed,
             has_private_profile=has_private_profile,
             slack_invite_url=SLACK_INVITE_URL,
+            slack_error=slack_error,
         ),
     )
 
@@ -346,13 +348,13 @@ async def save_private_profile(
 
 
 @router.post("/slack")
-async def save_slack_username(
+async def connect_slack(
     request: Request,
-    slack_user_id: str = Form(...),
+    email: str = Form(...),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Save the PI's Slack username/ID."""
+    """Look up the PI's Slack user ID from their email address."""
     agent_result = await db.execute(
         select(AgentRegistry).where(AgentRegistry.user_id == current_user.id)
     )
@@ -360,7 +362,47 @@ async def save_slack_username(
     if not agent:
         return RedirectResponse(url="/agent", status_code=302)
 
-    agent.slack_user_id = slack_user_id.strip()
-    await db.commit()
+    email = email.strip()
+    slack_user_id = None
+    error = None
 
-    return RedirectResponse(url="/agent", status_code=302)
+    # Use any available bot token to do the lookup
+    try:
+        from slack_sdk import WebClient
+        from src.config import get_settings
+        settings = get_settings()
+        env_tokens = settings.get_slack_tokens()
+
+        # Find first valid bot token
+        bot_token = None
+        for tokens in env_tokens.values():
+            t = tokens.get("bot", "")
+            if t and not t.startswith("xoxb-placeholder"):
+                bot_token = t
+                break
+
+        if not bot_token:
+            error = "No Slack bot token available to perform lookup."
+        else:
+            client = WebClient(token=bot_token)
+            result = client.users_lookupByEmail(email=email)
+            slack_user_id = result["user"]["id"]
+    except Exception as exc:
+        error_msg = str(exc)
+        if "users_not_found" in error_msg:
+            error = f"No Slack user found with email {email}. Have you joined the workspace first?"
+        else:
+            logger.warning("Slack lookup failed for %s: %s", email, exc)
+            error = f"Slack lookup failed: {error_msg[:100]}"
+
+    if slack_user_id:
+        agent.slack_user_id = slack_user_id
+        await db.commit()
+        return RedirectResponse(url="/agent", status_code=302)
+
+    # Re-render dashboard with error
+    # We need to rebuild the full dashboard context
+    return RedirectResponse(
+        url="/agent?slack_error=" + (error or "Unknown error"),
+        status_code=302,
+    )

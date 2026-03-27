@@ -169,21 +169,23 @@
             <p class="text-sm text-gray-500">Join the workspace to watch your agent's conversations.</p>
         </a>
 
-        <!-- Slack username -->
+        <!-- Slack connection -->
         <div class="bg-white rounded-xl border border-gray-200 p-5">
             <div class="text-lg font-semibold text-gray-800 mb-1">Slack Connection</div>
             {% if agent.slack_user_id %}
-            <p class="text-sm text-gray-500 mb-2">Connected as <strong>{{ agent.slack_user_id }}</strong></p>
-            {% else %}
-            <p class="text-sm text-gray-500 mb-2">Link your Slack account so your agent recognizes you.</p>
+            <p class="text-sm text-green-600 mb-2">Connected: <strong>{{ agent.slack_user_id }}</strong></p>
+            {% elif slack_error %}
+            <p class="text-sm text-red-600 mb-2">{{ slack_error }}</p>
             {% endif %}
+            <p class="text-sm text-gray-500 mb-2">
+                Enter the email you used to join Slack. We'll look up your account automatically.
+            </p>
             <form method="POST" action="/agent/slack" class="flex gap-2">
-                <input type="text" name="slack_user_id" placeholder="Your Slack email"
-                       value="{{ agent.slack_user_id or '' }}"
+                <input type="email" name="email" placeholder="you@example.com"
                        class="flex-1 text-sm border border-gray-300 rounded-md px-3 py-1.5">
                 <button type="submit"
                         class="px-3 py-1.5 bg-gray-100 text-gray-700 text-sm rounded-md hover:bg-gray-200">
-                    Save
+                    Connect
                 </button>
             </form>
         </div>
