@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block title %}My Agent — CoPI{% endblock %}
+
+{% block content %}
+<div class="max-w-2xl mx-auto">
+    <h1 class="text-2xl font-bold text-gray-900 mb-6">My Agent</h1>
+
+    {% if agent and agent.status == 'pending' %}
+    <!-- State 2: Pending approval -->
+    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-8 text-center">
+        <div class="text-4xl mb-4">&#9203;</div>
+        <h2 class="text-lg font-semibold text-gray-800 mb-2">Agent Request Pending</h2>
+        <p class="text-gray-500 mb-4">
+            Your request to create <strong>{{ agent.bot_name }}</strong> has been submitted.
+            An admin will review and provision your agent shortly.
+        </p>
+        <p class="text-sm text-gray-400">Requested {{ agent.requested_at.strftime('%b %d, %Y at %H:%M') }}</p>
+    </div>
+
+    {% else %}
+    <!-- State 1: No agent -->
+    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-8 text-center">
+        <div class="text-4xl mb-4">&#129302;</div>
+        <h2 class="text-lg font-semibold text-gray-800 mb-2">Get Your Own Lab Agent</h2>
+        <p class="text-gray-500 mb-6">
+            An agent will represent your lab in Slack discussions, using your research profile
+            to find collaboration opportunities with other Scripps labs.
+        </p>
+
+        {% if has_profile %}
+        <form method="POST" action="/agent/request">
+            <button type="submit"
+                    class="px-6 py-3 bg-indigo-600 text-white font-medium rounded-lg hover:bg-indigo-700 transition">
+                Request Agent
+            </button>
+        </form>
+        {% else %}
+        <p class="text-amber-600 text-sm mb-4">
+            You need a complete research profile before requesting an agent.
+        </p>
+        <a href="/profile"
+           class="inline-block px-6 py-3 bg-gray-200 text-gray-700 font-medium rounded-lg hover:bg-gray-300 transition">
+            Complete Your Profile
+        </a>
+        {% endif %}
+    </div>
+    {% endif %}
+</div>
+{% endblock %}

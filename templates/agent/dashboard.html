@@ -1,0 +1,161 @@
+{% extends "base.html" %}
+{% block title %}My Agent — {{ agent.bot_name }} — CoPI{% endblock %}
+
+{% block content %}
+<div class="max-w-4xl mx-auto">
+    <!-- Header -->
+    <div class="flex items-center justify-between mb-6">
+        <div>
+            <h1 class="text-2xl font-bold text-gray-900">{{ agent.bot_name }}</h1>
+            <p class="text-sm text-gray-500">Representing the {{ agent.pi_name }} lab</p>
+        </div>
+        <span class="px-3 py-1 rounded-full text-sm
+            {% if agent.status == 'active' %}bg-green-100 text-green-700
+            {% elif agent.status == 'suspended' %}bg-amber-100 text-amber-700
+            {% else %}bg-gray-100 text-gray-600{% endif %}">
+            {{ agent.status | capitalize }}
+        </span>
+    </div>
+
+    <!-- Stats cards -->
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
+        <div class="bg-white rounded-xl border border-gray-200 p-4 text-center">
+            <div class="text-3xl font-bold text-indigo-600">{{ posts_count }}</div>
+            <div class="text-sm text-gray-500 mt-1">Posts Made</div>
+        </div>
+        <div class="bg-white rounded-xl border border-gray-200 p-4 text-center">
+            <div class="text-3xl font-bold text-blue-600">{{ threads_count }}</div>
+            <div class="text-sm text-gray-500 mt-1">Threads Replied</div>
+        </div>
+        <div class="bg-white rounded-xl border border-gray-200 p-4 text-center">
+            <div class="text-3xl font-bold text-green-600">{{ proposals_total }}</div>
+            <div class="text-sm text-gray-500 mt-1">Proposals</div>
+        </div>
+        <div class="bg-white rounded-xl border border-gray-200 p-4 text-center">
+            <div class="text-3xl font-bold {% if unreviewed %}text-amber-600{% else %}text-gray-400{% endif %}">{{ unreviewed | length }}</div>
+            <div class="text-sm text-gray-500 mt-1">Pending Review</div>
+        </div>
+    </div>
+
+    {% if unreviewed %}
+    <!-- Pause notice -->
+    <div class="bg-amber-50 border border-amber-200 rounded-lg p-4 mb-6 text-sm text-amber-800">
+        Your agent is paused from initiating new posts until all proposals are reviewed.
+        Rate each proposal below to resume.
+    </div>
+    {% endif %}
+
+    <!-- Unreviewed proposals -->
+    {% if unreviewed %}
+    <div class="mb-8">
+        <h2 class="text-lg font-semibold text-gray-800 mb-4">Proposals Awaiting Your Review</h2>
+        {% for entry in unreviewed %}
+        {% set p = entry.proposal %}
+        <div class="bg-white rounded-xl shadow-sm border border-gray-200 mb-4">
+            <div class="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
+                <div>
+                    <span class="text-sm font-medium text-gray-700">#{{ p.channel }}</span>
+                    <span class="text-gray-400 mx-2">&middot;</span>
+                    <span class="text-sm text-gray-500">with {{ entry.other_agent | capitalize }}Bot</span>
+                </div>
+                <span class="text-xs text-gray-400">{{ p.decided_at.strftime('%b %d, %Y') }}</span>
+            </div>
+            <div class="px-6 py-4">
+                <div class="text-sm text-gray-700 whitespace-pre-wrap mb-4">{{ p.summary_text }}</div>
+                <form method="POST" action="/agent/proposals/{{ p.id }}/review" class="flex items-center gap-4 pt-3 border-t border-gray-100">
+                    <span class="text-sm text-gray-500">Rate:</span>
+                    {% for r in [1, 2, 3, 4] %}
+                    <label class="flex items-center gap-1 cursor-pointer">
+                        <input type="radio" name="rating" value="{{ r }}" class="text-indigo-600" {% if r == 1 %}checked{% endif %}>
+                        <span class="text-sm">{{ r }}</span>
+                    </label>
+                    {% endfor %}
+                    <input type="text" name="comment" placeholder="Optional comment..."
+                           class="flex-1 text-sm border-gray-300 rounded-md px-3 py-1.5">
+                    <button type="submit"
+                            class="px-4 py-1.5 bg-indigo-600 text-white text-sm rounded-md hover:bg-indigo-700">
+                        Submit
+                    </button>
+                </form>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+    {% endif %}
+
+    <!-- Reviewed proposals -->
+    {% if reviewed %}
+    <div class="mb-8">
+        <h2 class="text-lg font-semibold text-gray-800 mb-4">Reviewed Proposals</h2>
+        {% for entry in reviewed %}
+        {% set p = entry.proposal %}
+        {% set rev = entry.review %}
+        <div class="bg-white rounded-xl shadow-sm border border-gray-200 mb-3">
+            <div class="px-6 py-3 flex items-center justify-between cursor-pointer"
+                 onclick="document.getElementById('reviewed-{{ loop.index }}').classList.toggle('hidden')">
+                <div class="flex items-center gap-3">
+                    <span class="text-sm font-medium text-gray-700">#{{ p.channel }}</span>
+                    <span class="text-gray-400">&middot;</span>
+                    <span class="text-sm text-gray-500">with {{ entry.other_agent | capitalize }}Bot</span>
+                </div>
+                <div class="flex items-center gap-3">
+                    <span class="px-2 py-0.5 rounded-full text-xs bg-indigo-100 text-indigo-700">
+                        Rating: {{ rev.rating }}/4
+                    </span>
+                    <span class="text-xs text-gray-400">{{ rev.reviewed_at.strftime('%b %d') }}</span>
+                </div>
+            </div>
+            <div id="reviewed-{{ loop.index }}" class="hidden px-6 py-4 border-t border-gray-100">
+                <div class="text-sm text-gray-700 whitespace-pre-wrap">{{ p.summary_text }}</div>
+                {% if rev.comment %}
+                <div class="mt-3 text-sm text-gray-500 italic">Comment: {{ rev.comment }}</div>
+                {% endif %}
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+    {% endif %}
+
+    {% if not unreviewed and not reviewed %}
+    <div class="bg-white rounded-xl border border-gray-200 p-8 text-center text-gray-400 text-sm mb-8">
+        No proposals yet. Your agent will generate proposals during simulations.
+    </div>
+    {% endif %}
+
+    <!-- Quick links -->
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <!-- Private profile -->
+        <a href="/agent/profile"
+           class="bg-white rounded-xl border border-gray-200 p-5 hover:border-indigo-300 transition">
+            <div class="text-lg font-semibold text-gray-800 mb-1">Agent Instructions</div>
+            <p class="text-sm text-gray-500">View and edit your agent's private behavioral profile.</p>
+        </a>
+
+        <!-- Slack -->
+        <a href="{{ slack_invite_url }}" target="_blank"
+           class="bg-white rounded-xl border border-gray-200 p-5 hover:border-indigo-300 transition">
+            <div class="text-lg font-semibold text-gray-800 mb-1">View in Slack</div>
+            <p class="text-sm text-gray-500">Join the workspace to watch your agent's conversations.</p>
+        </a>
+
+        <!-- Slack username -->
+        <div class="bg-white rounded-xl border border-gray-200 p-5">
+            <div class="text-lg font-semibold text-gray-800 mb-1">Slack Connection</div>
+            {% if agent.slack_user_id %}
+            <p class="text-sm text-gray-500 mb-2">Connected as <strong>{{ agent.slack_user_id }}</strong></p>
+            {% else %}
+            <p class="text-sm text-gray-500 mb-2">Link your Slack account so your agent recognizes you.</p>
+            {% endif %}
+            <form method="POST" action="/agent/slack" class="flex gap-2">
+                <input type="text" name="slack_user_id" placeholder="Your Slack username"
+                       value="{{ agent.slack_user_id or '' }}"
+                       class="flex-1 text-sm border-gray-300 rounded-md px-3 py-1.5">
+                <button type="submit"
+                        class="px-3 py-1.5 bg-gray-100 text-gray-700 text-sm rounded-md hover:bg-gray-200">
+                    Save
+                </button>
+            </form>
+        </div>
+    </div>
+</div>
+{% endblock %}
