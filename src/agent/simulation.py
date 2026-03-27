@@ -1161,12 +1161,16 @@ class SimulationEngine:
                     continue
 
                 msg_count = self.message_log.get_thread_message_count(thread_id)
+                # Check if the last message was from the other agent (pending reply)
+                history = self.message_log.get_thread_history(thread_id)
+                last_sender = history[-1].sender_agent_id if history else None
+                has_pending = last_sender is not None and last_sender != aid
                 agent.state.active_threads[thread_id] = ThreadState(
                     thread_id=thread_id,
                     channel=entry.channel,
                     other_agent_id=other_id,
                     message_count=msg_count,
-                    has_pending_reply=True,
+                    has_pending_reply=has_pending,
                 )
 
         # 3. Rebuild pending_proposals per agent
