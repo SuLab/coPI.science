@@ -1,0 +1,85 @@
+{% extends "base.html" %}
+{% block title %}Admin — Agent {{ agent.bot_name }} — CoPI{% endblock %}
+
+{% block content %}
+<div class="max-w-2xl mx-auto">
+    <a href="/admin/agents" class="text-sm text-gray-500 hover:text-gray-700">&larr; Agents</a>
+    <h1 class="text-2xl font-bold text-gray-900 mt-2 mb-6">
+        {% if agent.status == 'pending' %}Review Agent Request{% else %}Edit Agent{% endif %}
+    </h1>
+
+    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
+        <div class="grid grid-cols-2 gap-4 text-sm mb-6">
+            <div>
+                <span class="text-gray-500">Status:</span>
+                <span class="ml-2 px-2 py-0.5 rounded-full text-xs
+                    {% if agent.status == 'active' %}bg-green-100 text-green-700
+                    {% elif agent.status == 'pending' %}bg-amber-100 text-amber-700
+                    {% else %}bg-gray-100 text-gray-600{% endif %}">
+                    {{ agent.status | capitalize }}
+                </span>
+            </div>
+            <div>
+                <span class="text-gray-500">PI:</span>
+                <span class="ml-2 font-medium">{{ agent.pi_name }}</span>
+            </div>
+            {% if linked_user %}
+            <div>
+                <span class="text-gray-500">Linked user:</span>
+                <span class="ml-2">{{ linked_user.name }} ({{ linked_user.orcid }})</span>
+            </div>
+            {% endif %}
+            <div>
+                <span class="text-gray-500">Requested:</span>
+                <span class="ml-2">{{ agent.requested_at.strftime('%b %d, %Y %H:%M') }}</span>
+            </div>
+        </div>
+
+        <form method="POST" action="/admin/agents/{{ agent.id }}/approve">
+            <div class="space-y-4">
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Agent ID (slug)</label>
+                    <input type="text" name="agent_slug" value="{{ agent.agent_id or '' }}"
+                           placeholder="e.g. wiseman"
+                           class="w-full text-sm border-gray-300 rounded-md focus:ring-indigo-500 focus:border-indigo-500">
+                    <p class="text-xs text-gray-400 mt-1">Lowercase, no spaces. Used for file paths and env vars.</p>
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Bot Name</label>
+                    <input type="text" name="bot_name" value="{{ agent.bot_name }}"
+                           placeholder="e.g. WisemanBot"
+                           class="w-full text-sm border-gray-300 rounded-md focus:ring-indigo-500 focus:border-indigo-500">
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Slack Bot Token</label>
+                    <input type="text" name="slack_bot_token" value="{{ agent.slack_bot_token or '' }}"
+                           placeholder="xoxb-..."
+                           class="w-full text-sm font-mono border-gray-300 rounded-md focus:ring-indigo-500 focus:border-indigo-500">
+                    <p class="text-xs text-gray-400 mt-1">SLACK_BOT_TOKEN for this agent. Create a Slack app first.</p>
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Slack App Token</label>
+                    <input type="text" name="slack_app_token" value="{{ agent.slack_app_token or '' }}"
+                           placeholder="xapp-..."
+                           class="w-full text-sm font-mono border-gray-300 rounded-md focus:ring-indigo-500 focus:border-indigo-500">
+                </div>
+            </div>
+
+            <div class="flex items-center gap-3 mt-6 pt-4 border-t border-gray-200">
+                <button type="submit"
+                        class="px-5 py-2 bg-green-600 text-white text-sm font-medium rounded-lg hover:bg-green-700">
+                    {% if agent.status == 'pending' %}Approve & Activate{% else %}Save Changes{% endif %}
+                </button>
+                {% if agent.status == 'pending' %}
+                <form method="POST" action="/admin/agents/{{ agent.id }}/reject" class="inline">
+                    <button type="submit"
+                            class="px-5 py-2 bg-red-100 text-red-700 text-sm font-medium rounded-lg hover:bg-red-200">
+                        Reject
+                    </button>
+                </form>
+                {% endif %}
+            </div>
+        </form>
+    </div>
+</div>
+{% endblock %}

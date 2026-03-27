@@ -1,0 +1,112 @@
+{% extends "base.html" %}
+{% block title %}Admin — Agents — CoPI{% endblock %}
+
+{% block content %}
+<h1 class="text-2xl font-bold text-gray-900 mb-6">Agents</h1>
+
+<!-- Summary cards -->
+<div class="grid grid-cols-3 gap-4 mb-8">
+    <div class="bg-white rounded-xl border border-gray-200 p-4 text-center">
+        <div class="text-3xl font-bold text-amber-600">{{ pending | length }}</div>
+        <div class="text-sm text-gray-500 mt-1">Pending</div>
+    </div>
+    <div class="bg-white rounded-xl border border-gray-200 p-4 text-center">
+        <div class="text-3xl font-bold text-green-600">{{ active | length }}</div>
+        <div class="text-sm text-gray-500 mt-1">Active</div>
+    </div>
+    <div class="bg-white rounded-xl border border-gray-200 p-4 text-center">
+        <div class="text-3xl font-bold text-gray-400">{{ suspended | length }}</div>
+        <div class="text-sm text-gray-500 mt-1">Suspended</div>
+    </div>
+</div>
+
+{% if pending %}
+<!-- Pending requests -->
+<div class="bg-white rounded-xl shadow-sm border border-amber-200 overflow-hidden mb-6">
+    <div class="px-6 py-4 border-b border-amber-200 bg-amber-50">
+        <h2 class="font-semibold text-amber-800">Pending Requests</h2>
+    </div>
+    <table class="min-w-full divide-y divide-gray-200">
+        <thead class="bg-gray-50">
+            <tr>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">PI Name</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Bot Name</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Requested</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Actions</th>
+            </tr>
+        </thead>
+        <tbody class="divide-y divide-gray-100">
+            {% for a in pending %}
+            <tr class="hover:bg-gray-50">
+                <td class="px-4 py-3 text-sm font-medium">{{ a.pi_name }}</td>
+                <td class="px-4 py-3 text-sm">{{ a.bot_name }}</td>
+                <td class="px-4 py-3 text-sm text-gray-500">{{ a.requested_at.strftime('%b %d %H:%M') }}</td>
+                <td class="px-4 py-3">
+                    <a href="/admin/agents/{{ a.id }}"
+                       class="text-sm text-indigo-600 hover:text-indigo-800 font-medium">Review</a>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+
+<!-- Active agents -->
+<div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden mb-6">
+    <div class="px-6 py-4 border-b border-gray-200">
+        <h2 class="font-semibold text-gray-800">Active Agents</h2>
+    </div>
+    <table class="min-w-full divide-y divide-gray-200">
+        <thead class="bg-gray-50">
+            <tr>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Agent ID</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Bot Name</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">PI</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Linked User</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Tokens</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Actions</th>
+            </tr>
+        </thead>
+        <tbody class="divide-y divide-gray-100">
+            {% for a in active %}
+            <tr class="hover:bg-gray-50">
+                <td class="px-4 py-3 text-sm font-mono">{{ a.agent_id }}</td>
+                <td class="px-4 py-3 text-sm font-medium">{{ a.bot_name }}</td>
+                <td class="px-4 py-3 text-sm">{{ a.pi_name }}</td>
+                <td class="px-4 py-3 text-sm">
+                    {% if a.user_id and user_map.get(a.user_id | string) %}
+                        <span class="text-green-600">{{ user_map[a.user_id | string] }}</span>
+                    {% else %}
+                        <form method="POST" action="/admin/agents/{{ a.id }}/link" class="flex gap-1">
+                            <select name="user_id" class="text-xs border-gray-300 rounded-md py-1">
+                                <option value="">— Link user —</option>
+                                {% for u in all_users %}
+                                <option value="{{ u.id }}">{{ u.name }}</option>
+                                {% endfor %}
+                            </select>
+                            <button type="submit" class="text-xs px-2 py-1 bg-gray-100 rounded hover:bg-gray-200">Link</button>
+                        </form>
+                    {% endif %}
+                </td>
+                <td class="px-4 py-3 text-sm">
+                    {% if a.slack_bot_token %}
+                        <span class="text-green-500 text-xs">Bot token set</span>
+                    {% else %}
+                        <span class="text-gray-400 text-xs">No tokens</span>
+                    {% endif %}
+                </td>
+                <td class="px-4 py-3">
+                    <a href="/admin/agents/{{ a.id }}"
+                       class="text-sm text-indigo-600 hover:text-indigo-800">Edit</a>
+                </td>
+            </tr>
+            {% else %}
+            <tr>
+                <td colspan="6" class="px-4 py-8 text-center text-gray-400 text-sm">No active agents</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}

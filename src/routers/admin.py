@@ -16,6 +16,7 @@ from src.dependencies import get_admin_user, get_current_user
 from src.models import (
     AgentChannel,
     AgentMessage,
+    AgentRegistry,
     Job,
     LlmCallLog,
     Publication,
@@ -588,6 +589,159 @@ async def admin_discussions(
             status_filter=status_filter,
         ),
     )
+
+
+@router.get("/agents", response_class=HTMLResponse)
+async def admin_agents(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_admin_user),
+):
+    """Agent registry management."""
+    result = await db.execute(
+        select(AgentRegistry).order_by(AgentRegistry.requested_at.desc())
+    )
+    agents = result.scalars().all()
+
+    # Get linked user names
+    user_map = {}
+    for agent in agents:
+        if agent.user_id:
+            u_result = await db.execute(select(User).where(User.id == agent.user_id))
+            u = u_result.scalar_one_or_none()
+            if u:
+                user_map[str(agent.user_id)] = u.name
+
+    # Get all users for the linking dropdown
+    users_result = await db.execute(select(User).order_by(User.name))
+    all_users = users_result.scalars().all()
+
+    pending = [a for a in agents if a.status == "pending"]
+    active = [a for a in agents if a.status == "active"]
+    suspended = [a for a in agents if a.status == "suspended"]
+
+    return templates.TemplateResponse(
+        request,
+        "admin/agents.html",
+        _template_context(
+            request,
+            current_user,
+            active_admin="agents",
+            pending=pending,
+            active=active,
+            suspended=suspended,
+            user_map=user_map,
+            all_users=all_users,
+        ),
+    )
+
+
+@router.get("/agents/{agent_id}", response_class=HTMLResponse)
+async def admin_agent_detail(
+    agent_id: uuid.UUID,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_admin_user),
+):
+    """Agent detail / approval form."""
+    result = await db.execute(
+        select(AgentRegistry).where(AgentRegistry.id == agent_id)
+    )
+    agent = result.scalar_one_or_none()
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    # Get linked user
+    linked_user = None
+    if agent.user_id:
+        u_result = await db.execute(select(User).where(User.id == agent.user_id))
+        linked_user = u_result.scalar_one_or_none()
+
+    return templates.TemplateResponse(
+        request,
+        "admin/agent_detail.html",
+        _template_context(
+            request,
+            current_user,
+            active_admin="agents",
+            agent=agent,
+            linked_user=linked_user,
+        ),
+    )
+
+
+@router.post("/agents/{agent_id}/approve")
+async def admin_approve_agent(
+    agent_id: uuid.UUID,
+    request: Request,
+    agent_slug: str = Form(...),
+    bot_name: str = Form(...),
+    slack_bot_token: str = Form(""),
+    slack_app_token: str = Form(""),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_admin_user),
+):
+    """Approve an agent request."""
+    result = await db.execute(
+        select(AgentRegistry).where(AgentRegistry.id == agent_id)
+    )
+    agent = result.scalar_one_or_none()
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    agent.agent_id = agent_slug.strip().lower()
+    agent.bot_name = bot_name.strip()
+    agent.slack_bot_token = slack_bot_token.strip() or None
+    agent.slack_app_token = slack_app_token.strip() or None
+    agent.status = "active"
+    agent.approved_at = datetime.now(timezone.utc)
+    agent.approved_by = current_user.id
+    await db.commit()
+
+    return RedirectResponse(url="/admin/agents", status_code=302)
+
+
+@router.post("/agents/{agent_id}/reject")
+async def admin_reject_agent(
+    agent_id: uuid.UUID,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_admin_user),
+):
+    """Reject an agent request."""
+    result = await db.execute(
+        select(AgentRegistry).where(AgentRegistry.id == agent_id)
+    )
+    agent = result.scalar_one_or_none()
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    agent.status = "suspended"
+    await db.commit()
+
+    return RedirectResponse(url="/admin/agents", status_code=302)
+
+
+@router.post("/agents/{agent_id}/link")
+async def admin_link_agent(
+    agent_id: uuid.UUID,
+    request: Request,
+    user_id: str = Form(...),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_admin_user),
+):
+    """Link an agent to a user account."""
+    result = await db.execute(
+        select(AgentRegistry).where(AgentRegistry.id == agent_id)
+    )
+    agent = result.scalar_one_or_none()
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    agent.user_id = uuid.UUID(user_id) if user_id else None
+    await db.commit()
+
+    return RedirectResponse(url="/admin/agents", status_code=302)
 
 
 @router.post("/impersonate")
