@@ -22,6 +22,7 @@
         <label class="text-sm text-gray-500">Run:</label>
         <select name="run_id" onchange="this.form.submit()"
                 class="text-sm border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500">
+            <option value="all" {% if selected_run_id == 'all' %}selected{% endif %}>All Runs</option>
             {% for run in runs %}
             <option value="{{ run.id }}" {% if run.id == selected_run_id %}selected{% endif %}>
                 {{ run.started_at.strftime('%b %d %H:%M') }} ({{ run.status }})

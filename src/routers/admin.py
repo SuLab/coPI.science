@@ -436,8 +436,9 @@ async def admin_discussions(
     )
     runs = runs_result.scalars().all()
 
-    selected_run_id = None
-    if run_id:
+    show_all_runs = run_id == "all"
+    selected_run_id = "all" if show_all_runs else None
+    if not show_all_runs and run_id:
         try:
             selected_run_id = uuid.UUID(run_id)
         except ValueError:
@@ -463,51 +464,43 @@ async def admin_discussions(
             ),
         )
 
-    # Get all root posts (new_post phase, no thread_ts) for this run
-    roots_result = await db.execute(
-        select(AgentMessage)
-        .where(
-            AgentMessage.simulation_run_id == selected_run_id,
-            AgentMessage.phase == "new_post",
-            AgentMessage.thread_ts.is_(None),
-        )
-        .order_by(AgentMessage.created_at)
+    # Get all root posts (new_post phase, no thread_ts)
+    roots_query = select(AgentMessage).where(
+        AgentMessage.phase == "new_post",
+        AgentMessage.thread_ts.is_(None),
+    )
+    if not show_all_runs:
+        roots_query = roots_query.where(AgentMessage.simulation_run_id == selected_run_id)
+    roots_result = await db.execute(roots_query.order_by(AgentMessage.created_at)
     )
     root_posts = roots_result.scalars().all()
 
     # Get reply counts and replier agent IDs per thread
-    reply_counts_result = await db.execute(
-        select(
-            AgentMessage.thread_ts,
-            func.count(AgentMessage.id).label("reply_count"),
-        )
-        .where(
-            AgentMessage.simulation_run_id == selected_run_id,
-            AgentMessage.phase == "thread_reply",
-        )
-        .group_by(AgentMessage.thread_ts)
-    )
+    reply_query = select(
+        AgentMessage.thread_ts,
+        func.count(AgentMessage.id).label("reply_count"),
+    ).where(AgentMessage.phase == "thread_reply")
+    if not show_all_runs:
+        reply_query = reply_query.where(AgentMessage.simulation_run_id == selected_run_id)
+    reply_counts_result = await db.execute(reply_query.group_by(AgentMessage.thread_ts))
     reply_count_map = {r.thread_ts: r.reply_count for r in reply_counts_result}
 
     # Get distinct replier agent IDs per thread
-    repliers_result = await db.execute(
-        select(AgentMessage.thread_ts, AgentMessage.agent_id)
-        .where(
-            AgentMessage.simulation_run_id == selected_run_id,
-            AgentMessage.phase == "thread_reply",
-        )
-        .distinct()
+    replier_query = select(AgentMessage.thread_ts, AgentMessage.agent_id).where(
+        AgentMessage.phase == "thread_reply",
     )
+    if not show_all_runs:
+        replier_query = replier_query.where(AgentMessage.simulation_run_id == selected_run_id)
+    repliers_result = await db.execute(replier_query.distinct())
     replier_map: dict[str, set[str]] = {}
     for r in repliers_result:
         replier_map.setdefault(r.thread_ts, set()).add(r.agent_id)
 
-    # Get thread decisions for this run
-    decisions_result = await db.execute(
-        select(ThreadDecision)
-        .where(ThreadDecision.simulation_run_id == selected_run_id)
-        .order_by(ThreadDecision.decided_at)
-    )
+    # Get thread decisions
+    decisions_query = select(ThreadDecision)
+    if not show_all_runs:
+        decisions_query = decisions_query.where(ThreadDecision.simulation_run_id == selected_run_id)
+    decisions_result = await db.execute(decisions_query.order_by(ThreadDecision.decided_at))
     all_decisions = decisions_result.scalars().all()
 
     # Build a map: thread_id -> final outcome (last decision wins)
@@ -560,14 +553,12 @@ async def admin_discussions(
     if status_filter:
         threads = [t for t in threads if t["status"] == status_filter]
 
-    # Get proposal reviews for this run
+    # Get proposal reviews
     from src.models import ProposalReview as PR
-    reviews_result = await db.execute(
-        select(PR)
-        .join(ThreadDecision, PR.thread_decision_id == ThreadDecision.id)
-        .where(ThreadDecision.simulation_run_id == selected_run_id)
-        .order_by(PR.reviewed_at)
-    )
+    reviews_query = select(PR).join(ThreadDecision, PR.thread_decision_id == ThreadDecision.id)
+    if not show_all_runs:
+        reviews_query = reviews_query.where(ThreadDecision.simulation_run_id == selected_run_id)
+    reviews_result = await db.execute(reviews_query.order_by(PR.reviewed_at))
     all_reviews = reviews_result.scalars().all()
     reviews_by_decision: dict[str, list] = {}
     for rev in all_reviews:
