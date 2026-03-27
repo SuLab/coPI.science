@@ -570,7 +570,9 @@ class SimulationEngine:
                         "[%s] Thread %s: proposal confirmed with ✅",
                         agent.agent_id, thread.thread_id,
                     )
-                    summary_text = entry.content
+                    # Extract text starting from :memo: marker
+                    memo_idx = entry.content.find(":memo:")
+                    summary_text = entry.content[memo_idx:].strip() if memo_idx >= 0 else entry.content
                     agent.state.pending_proposals.append(ProposalRef(
                         thread_id=thread.thread_id,
                         channel=thread.channel,
