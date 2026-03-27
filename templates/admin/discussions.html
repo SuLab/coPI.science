@@ -96,7 +96,11 @@
                 <td class="px-4 py-3 text-sm">{{ t.reply_count }}</td>
                 <td class="px-4 py-3 text-sm">
                     {% if t.decision %}
-                        {{ t.decision.agent_b | capitalize }}Bot
+                        {% if t.decision.agent_a == t.agent_id %}
+                            {{ t.decision.agent_b | capitalize }}Bot
+                        {% else %}
+                            {{ t.decision.agent_a | capitalize }}Bot
+                        {% endif %}
                     {% elif t.replier %}
                         {{ t.replier | capitalize }}Bot
                     {% else %}
@@ -116,7 +120,7 @@
             {% if t.decision and t.decision.summary_text %}
             <tr id="detail-{{ loop.index }}" class="hidden">
                 <td colspan="7" class="px-6 py-4 bg-gray-50">
-                    <div class="text-sm text-gray-700 max-w-3xl whitespace-pre-wrap">{{ t.decision.summary_text[:1000] }}{% if t.decision.summary_text | length > 1000 %}...{% endif %}</div>
+                    <div class="text-sm text-gray-700 max-w-3xl whitespace-pre-wrap">{{ t.decision.summary_text }}</div>
                 </td>
             </tr>
             {% endif %}
