@@ -627,19 +627,39 @@ async def admin_discussions(
         ]
 
     if export:
-        from fastapi.responses import PlainTextResponse
-        lines = []
+        proposals = []
         for t in threads:
             d = t.get("decision")
             if not d or not d.summary_text:
                 continue
+            proposals.append({
+                "channel": t["channel_name"],
+                "agent_a": d.agent_a,
+                "agent_b": d.agent_b,
+                "outcome": d.outcome,
+                "date": d.decided_at.strftime("%Y-%m-%d %H:%M UTC"),
+                "summary": d.summary_text.strip(),
+            })
+
+        if export == "html":
+            return templates.TemplateResponse(
+                request,
+                "admin/discussions_export.html",
+                {"request": request, "proposals": proposals},
+                headers={"Content-Disposition": "attachment; filename=proposals.html"},
+            )
+
+        # Default: plain text
+        from fastapi.responses import PlainTextResponse
+        lines = []
+        for p in proposals:
             lines.append(f"{'=' * 72}")
-            lines.append(f"Channel: #{t['channel_name']}")
-            lines.append(f"Agents: {d.agent_a.capitalize()}Bot + {d.agent_b.capitalize()}Bot")
-            lines.append(f"Outcome: {d.outcome}")
-            lines.append(f"Date: {d.decided_at.strftime('%Y-%m-%d %H:%M UTC')}")
+            lines.append(f"Channel: #{p['channel']}")
+            lines.append(f"Agents: {p['agent_a'].capitalize()}Bot + {p['agent_b'].capitalize()}Bot")
+            lines.append(f"Outcome: {p['outcome']}")
+            lines.append(f"Date: {p['date']}")
             lines.append("")
-            lines.append(d.summary_text.strip())
+            lines.append(p["summary"])
             lines.append("")
         if not lines:
             lines.append("No proposals found with current filters.")

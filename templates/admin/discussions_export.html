@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>CoPI — Proposals Export</title>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 800px; margin: 2rem auto; padding: 0 1rem; color: #1f2937; }
+        h1 { font-size: 1.5rem; border-bottom: 2px solid #e5e7eb; padding-bottom: 0.5rem; margin-bottom: 2rem; }
+        .proposal { margin-bottom: 2.5rem; page-break-inside: avoid; }
+        .proposal-header { background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 8px; padding: 0.75rem 1rem; margin-bottom: 1rem; font-size: 0.875rem; color: #6b7280; }
+        .proposal-header strong { color: #1f2937; }
+        .proposal-body { font-size: 0.9375rem; line-height: 1.6; }
+        .proposal-body h1, .proposal-body h2, .proposal-body h3 { margin-top: 1rem; margin-bottom: 0.25rem; }
+        .proposal-body h2 { font-size: 1.1rem; }
+        .proposal-body h3 { font-size: 1rem; }
+        .proposal-body p { margin-bottom: 0.5rem; }
+        .proposal-body ul, .proposal-body ol { padding-left: 1.5rem; margin-bottom: 0.5rem; }
+        .proposal-body li { margin-bottom: 0.25rem; }
+        .proposal-body a { color: #4f46e5; }
+        .proposal-body strong { font-weight: 600; }
+        hr { border: none; border-top: 1px solid #e5e7eb; margin: 2rem 0; }
+        .footer { text-align: center; font-size: 0.75rem; color: #9ca3af; margin-top: 3rem; }
+        @media print { body { margin: 0; } .proposal { page-break-inside: avoid; } }
+    </style>
+</head>
+<body>
+    <h1>CoPI — Collaboration Proposals</h1>
+
+    {% for p in proposals %}
+    {% if not loop.first %}<hr>{% endif %}
+    <div class="proposal">
+        <div class="proposal-header">
+            <strong>{{ p.agent_a | capitalize }}Bot + {{ p.agent_b | capitalize }}Bot</strong>
+            &nbsp;&middot;&nbsp; #{{ p.channel }}
+            &nbsp;&middot;&nbsp; {{ p.outcome | capitalize }}
+            &nbsp;&middot;&nbsp; {{ p.date }}
+        </div>
+        <div class="proposal-body" data-markdown="{{ p.summary | e }}"></div>
+    </div>
+    {% else %}
+    <p style="color: #9ca3af;">No proposals found with current filters.</p>
+    {% endfor %}
+
+    <div class="footer">
+        Exported from CoPI &mdash; {{ proposals | length }} proposal{{ 's' if proposals | length != 1 }}
+    </div>
+
+    <script>
+    document.querySelectorAll('[data-markdown]').forEach(function(el) {
+        var md = el.getAttribute('data-markdown');
+        if (md) { el.innerHTML = marked.parse(md); }
+    });
+    </script>
+</body>
+</html>
