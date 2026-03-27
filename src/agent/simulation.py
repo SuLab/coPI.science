@@ -116,6 +116,8 @@ class SimulationEngine:
 
     @property
     def is_within_time_limit(self) -> bool:
+        if self.max_runtime_minutes <= 0:
+            return True  # run forever (until SIGTERM)
         if not self._start_time:
             return True
         elapsed = (datetime.now(timezone.utc) - self._start_time).total_seconds()
@@ -138,6 +140,7 @@ class SimulationEngine:
         # Setup
         self._ensure_seeded_channels()
         self._build_lab_directories()
+        await self._rebuild_state_from_slack()
         set_call_log_callback(self._on_llm_call)
 
         # Main loop
@@ -1032,6 +1035,218 @@ class SimulationEngine:
             len(lab_pubs), pub_count,
         )
 
+    async def _rebuild_state_from_slack(self) -> None:
+        """Rebuild MessageLog and agent state from Slack history + DB."""
+        client = next(iter(self.slack_clients.values()), None)
+        if not client or not client.is_connected:
+            logger.info("No Slack client available — skipping state rebuild")
+            return
+
+        # Build a mapping of bot_user_id -> agent_id
+        bot_uid_to_agent: dict[str, str] = {}
+        for aid, c in self.slack_clients.items():
+            if c.bot_user_id:
+                bot_uid_to_agent[c.bot_user_id] = aid
+
+        # 1. Poll full Slack history for all seeded channels
+        seeded_ids = {
+            ch_name: ch_id for ch_name, ch_id in self._channel_id_map.items()
+            if ch_name in SEEDED_CHANNELS
+        }
+        total_messages = 0
+        total_threads = 0
+        for ch_name, ch_id in seeded_ids.items():
+            messages = client.get_full_channel_history(ch_id)
+            for msg in messages:
+                ts = msg.get("ts", "")
+                user_id = msg.get("user", "")
+                bot_id = msg.get("bot_id")
+                is_bot = bool(bot_id) or msg.get("subtype") == "bot_message"
+
+                # Determine sender agent ID for bot messages
+                sender_agent_id = None
+                if is_bot and user_id:
+                    sender_agent_id = bot_uid_to_agent.get(user_id)
+
+                sender_name = msg.get("username", "") or user_id
+                entry = LogEntry(
+                    ts=ts,
+                    channel=ch_name,
+                    sender_agent_id=sender_agent_id,
+                    sender_name=sender_name,
+                    content=msg.get("text", ""),
+                    thread_ts=msg.get("thread_ts") if msg.get("thread_ts") != ts else None,
+                    posted_at=float(ts) if ts else 0.0,
+                    is_bot=is_bot,
+                )
+                self.message_log.append(entry)
+                total_messages += 1
+
+                # Update poll cursor to latest
+                if ts:
+                    self._poll_cursors[ch_id] = ts
+
+                # If this message has thread replies, fetch them
+                reply_count = msg.get("reply_count", 0)
+                if reply_count > 0:
+                    replies = client.get_all_thread_replies(ch_id, ts)
+                    total_threads += 1
+                    for reply in replies:
+                        rts = reply.get("ts", "")
+                        if rts == ts:
+                            continue  # skip parent (already added)
+                        r_user_id = reply.get("user", "")
+                        r_is_bot = bool(reply.get("bot_id")) or reply.get("subtype") == "bot_message"
+                        r_agent_id = bot_uid_to_agent.get(r_user_id) if r_is_bot else None
+                        r_entry = LogEntry(
+                            ts=rts,
+                            channel=ch_name,
+                            sender_agent_id=r_agent_id,
+                            sender_name=reply.get("username", "") or r_user_id,
+                            content=reply.get("text", ""),
+                            thread_ts=ts,
+                            posted_at=float(rts) if rts else 0.0,
+                            is_bot=r_is_bot,
+                        )
+                        self.message_log.append(r_entry)
+                        total_messages += 1
+
+        logger.info(
+            "Rebuilt MessageLog: %d messages across %d channels, %d threads",
+            total_messages, len(seeded_ids), total_threads,
+        )
+
+        # 2. Rebuild active_threads per agent
+        # Get all closed thread IDs from thread_decisions
+        closed_thread_ids: set[str] = set()
+        if self.session_factory:
+            try:
+                from sqlalchemy import select as sa_select
+                async with self.session_factory() as db:
+                    result = await db.execute(
+                        sa_select(ThreadDecision.thread_id)
+                    )
+                    closed_thread_ids = {r[0] for r in result}
+            except Exception as exc:
+                logger.warning("Failed to load thread decisions: %s", exc)
+
+        for agent in self.agents.values():
+            aid = agent.agent_id
+            # Find threads where this agent participated
+            for entry in self.message_log._entries:
+                if entry.sender_agent_id != aid:
+                    continue
+                thread_id = entry.thread_ts or entry.ts
+                # Skip if already closed or already tracked
+                if thread_id in closed_thread_ids:
+                    continue
+                if thread_id in agent.state.active_threads:
+                    continue
+                # Only count thread replies (not root posts without replies)
+                if entry.thread_ts is None:
+                    continue
+                # Find the other agent in this thread
+                root = self.message_log.get_entry(thread_id)
+                if not root:
+                    continue
+                other_id = root.sender_agent_id if root.sender_agent_id != aid else None
+                if not other_id:
+                    # Check other replies for the other agent
+                    history = self.message_log.get_thread_history(thread_id)
+                    for h in history:
+                        if h.sender_agent_id and h.sender_agent_id != aid:
+                            other_id = h.sender_agent_id
+                            break
+                if not other_id:
+                    continue
+
+                msg_count = self.message_log.get_thread_message_count(thread_id)
+                agent.state.active_threads[thread_id] = ThreadState(
+                    thread_id=thread_id,
+                    channel=entry.channel,
+                    other_agent_id=other_id,
+                    message_count=msg_count,
+                    has_pending_reply=True,
+                )
+
+        # 3. Rebuild pending_proposals per agent
+        if self.session_factory:
+            try:
+                from sqlalchemy import select as sa_select
+                async with self.session_factory() as db:
+                    proposals_result = await db.execute(
+                        sa_select(ThreadDecision).where(
+                            ThreadDecision.outcome == "proposal"
+                        )
+                    )
+                    proposals = proposals_result.scalars().all()
+
+                    reviewed_result = await db.execute(
+                        sa_select(
+                            ProposalReview.thread_decision_id,
+                            ProposalReview.agent_id,
+                        )
+                    )
+                    reviewed_set = {
+                        (r.thread_decision_id, r.agent_id) for r in reviewed_result
+                    }
+
+                for td in proposals:
+                    for aid in (td.agent_a, td.agent_b):
+                        agent = self.agents.get(aid)
+                        if not agent:
+                            continue
+                        is_reviewed = (td.id, aid) in reviewed_set
+                        other = td.agent_b if aid == td.agent_a else td.agent_a
+                        agent.state.pending_proposals.append(ProposalRef(
+                            thread_id=td.thread_id,
+                            channel=td.channel,
+                            other_agent_id=other,
+                            summary_text=td.summary_text or "",
+                            proposed_at=td.decided_at.timestamp() if td.decided_at else 0.0,
+                            reviewed=is_reviewed,
+                        ))
+            except Exception as exc:
+                logger.warning("Failed to rebuild proposals: %s", exc)
+
+        # 4. Rebuild api_call_count per agent from DB
+        if self.session_factory and self.simulation_run_id:
+            try:
+                from sqlalchemy import func as sa_func
+                from sqlalchemy import select as sa_select
+                async with self.session_factory() as db:
+                    result = await db.execute(
+                        sa_select(
+                            LlmCallLog.agent_id,
+                            sa_func.count(LlmCallLog.id).label("count"),
+                        )
+                        .where(LlmCallLog.simulation_run_id == self.simulation_run_id)
+                        .group_by(LlmCallLog.agent_id)
+                    )
+                    for r in result:
+                        agent = self.agents.get(r.agent_id)
+                        if agent:
+                            agent.api_call_count = r.count
+            except Exception as exc:
+                logger.warning("Failed to rebuild api_call_count: %s", exc)
+
+        # 5. Set last_seen_cursor per agent to latest message time
+        if self.message_log._entries:
+            latest_ts = max(e.posted_at for e in self.message_log._entries)
+            for agent in self.agents.values():
+                agent.state.last_seen_cursor = latest_ts
+
+        # Log rebuild summary
+        for agent in self.agents.values():
+            at = len(agent.state.active_threads)
+            pp = len(agent.state.pending_proposals)
+            unrev = sum(1 for p in agent.state.pending_proposals if not p.reviewed)
+            if at or pp:
+                logger.info(
+                    "[%s] Restored: %d active threads, %d proposals (%d unreviewed), %d API calls",
+                    agent.agent_id, at, pp, unrev, agent.api_call_count,
+                )
+
     def _infer_agent_id(self, name: str) -> str | None:
         """Try to infer agent_id from a bot name or display name."""
         name_lower = name.lower()
@@ -1095,16 +1310,15 @@ class SimulationEngine:
 
     async def _sync_proposal_reviews_from_db(self) -> None:
         """Check DB for web-app proposal reviews and mark in-memory proposals as reviewed."""
-        if not self.session_factory or not self.simulation_run_id:
+        if not self.session_factory:
             return
         try:
             async with self.session_factory() as db:
                 from sqlalchemy import select as sa_select
-                # Get all reviews for proposals in this simulation run
+                # Get all reviews across all runs (proposals persist across sessions)
                 result = await db.execute(
                     sa_select(ProposalReview.agent_id, ThreadDecision.thread_id)
                     .join(ThreadDecision, ProposalReview.thread_decision_id == ThreadDecision.id)
-                    .where(ThreadDecision.simulation_run_id == self.simulation_run_id)
                 )
                 reviewed_set = {(r.agent_id, r.thread_id) for r in result}
 

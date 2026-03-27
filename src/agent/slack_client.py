@@ -113,6 +113,77 @@ class AgentSlackClient:
             logger.error("[%s] Failed to get thread replies: %s", self.agent_id, exc)
             return []
 
+    def get_full_channel_history(
+        self,
+        channel_id: str,
+    ) -> list[dict[str, Any]]:
+        """
+        Fetch all messages from a channel (paginated).
+        Returns list of raw Slack message dicts, oldest first.
+        """
+        if not self._client:
+            return []
+        all_messages = []
+        cursor = None
+        try:
+            while True:
+                kwargs: dict[str, Any] = {"channel": channel_id, "limit": 200}
+                if cursor:
+                    kwargs["cursor"] = cursor
+                result = self._client.conversations_history(**kwargs)
+                messages = result.get("messages", [])
+                # Filter out system subtypes
+                messages = [
+                    m for m in messages
+                    if m.get("subtype") not in (
+                        "message_deleted", "message_changed",
+                        "channel_join", "channel_leave",
+                        "channel_purpose", "channel_topic",
+                        "channel_name", "channel_archive", "channel_unarchive",
+                        "bot_add", "bot_remove",
+                    )
+                ]
+                all_messages.extend(messages)
+                metadata = result.get("response_metadata", {})
+                cursor = metadata.get("next_cursor")
+                if not cursor:
+                    break
+            return list(reversed(all_messages))  # oldest first
+        except SlackApiError as exc:
+            logger.error("[%s] Failed to get channel history %s: %s", self.agent_id, channel_id, exc)
+            return list(reversed(all_messages))
+
+    def get_all_thread_replies(
+        self,
+        channel_id: str,
+        thread_ts: str,
+    ) -> list[dict[str, Any]]:
+        """
+        Fetch all replies in a thread (paginated).
+        Returns list including parent message, oldest first.
+        """
+        if not self._client:
+            return []
+        all_messages = []
+        cursor = None
+        try:
+            while True:
+                kwargs: dict[str, Any] = {
+                    "channel": channel_id, "ts": thread_ts, "limit": 200,
+                }
+                if cursor:
+                    kwargs["cursor"] = cursor
+                result = self._client.conversations_replies(**kwargs)
+                all_messages.extend(result.get("messages", []))
+                metadata = result.get("response_metadata", {})
+                cursor = metadata.get("next_cursor")
+                if not cursor:
+                    break
+            return all_messages
+        except SlackApiError as exc:
+            logger.error("[%s] Failed to get thread replies: %s", self.agent_id, exc)
+            return all_messages
+
     # ------------------------------------------------------------------
     # User resolution
     # ------------------------------------------------------------------

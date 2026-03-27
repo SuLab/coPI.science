@@ -1,7 +1,10 @@
 """Agent simulation engine entry point.
 
 Usage:
-    python -m src.agent.main --max-runtime 60 --budget 50
+    python -m src.agent.main                        # resume, run until stopped
+    python -m src.agent.main --max-runtime 60       # resume, stop after 60 min
+    python -m src.agent.main --fresh                 # wipe + fresh start
+    python -m src.agent.main --fresh --max-runtime 60
 """
 
 import asyncio
@@ -27,13 +30,14 @@ app = typer.Typer()
 
 @app.command()
 def main(
-    max_runtime: int = typer.Option(60, "--max-runtime", help="Max runtime in minutes"),
+    max_runtime: int = typer.Option(0, "--max-runtime", help="Max runtime in minutes (0 = run until stopped)"),
     budget: int = typer.Option(50, "--budget", help="Max LLM calls per agent"),
     mock: bool = typer.Option(False, "--mock", help="Run in mock mode without real Slack tokens"),
     no_db: bool = typer.Option(False, "--no-db", help="Skip database logging"),
+    fresh: bool = typer.Option(False, "--fresh", help="Wipe simulation data and start fresh"),
 ):
     """Run the turn-based agent simulation."""
-    asyncio.run(_run_simulation(max_runtime, budget, mock, no_db))
+    asyncio.run(_run_simulation(max_runtime, budget, mock, no_db, fresh))
 
 
 async def _run_simulation(
@@ -41,6 +45,7 @@ async def _run_simulation(
     budget: int,
     mock: bool,
     no_db: bool,
+    fresh: bool,
 ) -> None:
     settings = get_settings()
 
@@ -75,30 +80,76 @@ async def _run_simulation(
     simulation_run_id = None
 
     if not no_db:
+        from sqlalchemy import select
         from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-        from src.models import SimulationRun
+        from src.models import AgentChannel, AgentMessage, ProposalReview, SimulationRun, ThreadDecision
         engine = create_async_engine(settings.database_url)
         session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
-        # Create simulation run record
-        async with session_factory() as db:
-            run = SimulationRun(
-                status="running",
-                config={
-                    "max_runtime": max_runtime,
-                    "budget_cap": budget,
-                    "mock": mock,
-                    "agent_count": len(agents),
-                    "active_thread_threshold": settings.active_thread_threshold,
-                    "max_thread_messages": settings.max_thread_messages,
-                },
-            )
-            db.add(run)
-            await db.commit()
-            simulation_run_id = run.id
-            logger.info("Created simulation run %s", simulation_run_id)
+        if fresh:
+            # Wipe simulation data for a clean start
+            logger.info("--fresh: wiping simulation data...")
+            async with session_factory() as db:
+                await db.execute(AgentMessage.__table__.delete())
+                await db.execute(AgentChannel.__table__.delete())
+                await db.execute(ProposalReview.__table__.delete())
+                await db.execute(ThreadDecision.__table__.delete())
+                await db.commit()
+            logger.info("Simulation data wiped.")
+
+            # Create new simulation run
+            async with session_factory() as db:
+                run = SimulationRun(
+                    status="running",
+                    config={
+                        "max_runtime": max_runtime,
+                        "budget_cap": budget,
+                        "mock": mock,
+                        "agent_count": len(agents),
+                        "active_thread_threshold": settings.active_thread_threshold,
+                        "max_thread_messages": settings.max_thread_messages,
+                    },
+                )
+                db.add(run)
+                await db.commit()
+                simulation_run_id = run.id
+                logger.info("Created new simulation run %s", simulation_run_id)
+        else:
+            # Resume: find the latest simulation run
+            async with session_factory() as db:
+                result = await db.execute(
+                    select(SimulationRun)
+                    .order_by(SimulationRun.started_at.desc())
+                    .limit(1)
+                )
+                existing_run = result.scalar_one_or_none()
+
+                if existing_run:
+                    simulation_run_id = existing_run.id
+                    existing_run.status = "running"
+                    existing_run.ended_at = None
+                    await db.commit()
+                    logger.info("Resuming simulation run %s", simulation_run_id)
+                else:
+                    # No existing run — create one
+                    run = SimulationRun(
+                        status="running",
+                        config={
+                            "max_runtime": max_runtime,
+                            "budget_cap": budget,
+                            "mock": mock,
+                            "agent_count": len(agents),
+                            "active_thread_threshold": settings.active_thread_threshold,
+                            "max_thread_messages": settings.max_thread_messages,
+                        },
+                    )
+                    db.add(run)
+                    await db.commit()
+                    simulation_run_id = run.id
+                    logger.info("Created new simulation run %s", simulation_run_id)
 
     # Create simulation engine
+    runtime_label = f"{max_runtime}m" if max_runtime > 0 else "indefinite"
     sim_engine = SimulationEngine(
         agents=agents,
         slack_clients=slack_clients,
@@ -120,8 +171,9 @@ async def _run_simulation(
 
     try:
         logger.info(
-            "Starting simulation: %d agents, %dm max runtime, %d budget/agent",
-            len(agents), max_runtime, budget,
+            "Starting simulation: %d agents, %s max runtime, %d budget/agent%s",
+            len(agents), runtime_label, budget,
+            " (fresh start)" if fresh else " (resuming)",
         )
         await sim_engine.start()
     except Exception:
@@ -137,9 +189,10 @@ async def _run_simulation(
                 )
                 run = result.scalar_one_or_none()
                 if run:
-                    run.status = "completed"
+                    run.status = "stopped"
                     run.ended_at = datetime.now(timezone.utc)
                     run.total_api_calls = sum(a.api_call_count for a in agents)
+                    run.total_messages = sum(a.message_count for a in agents)
                     await db.commit()
 
         # Update working memories
@@ -147,7 +200,7 @@ async def _run_simulation(
             logger.info("Updating agent working memories...")
             await sim_engine.update_all_working_memories()
 
-        logger.info("Simulation complete.")
+        logger.info("Simulation stopped.")
         logger.info(
             "Summary: %s",
             {a.agent_id: {"messages": a.message_count, "api_calls": a.api_call_count}
