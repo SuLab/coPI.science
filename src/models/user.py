@@ -47,6 +47,9 @@ class User(Base):
     jobs: Mapped[list["Job"]] = relationship(
         "Job", back_populates="user", cascade="all, delete-orphan"
     )
+    agent: Mapped["AgentRegistry | None"] = relationship(
+        "AgentRegistry", back_populates="user", uselist=False, foreign_keys="AgentRegistry.user_id"
+    )
 
     def __repr__(self) -> str:
         return f"<User id={self.id} orcid={self.orcid} name={self.name!r}>"
