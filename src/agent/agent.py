@@ -181,7 +181,8 @@ Your agent ID is "{self.agent_id}". When communicating, represent your lab profe
             phase_guidance = (
                 "You are in the DECIDE phase. Narrow the scope: is there genuine complementarity? "
                 "Can you name a specific first experiment? If yes, build toward a :memo: Summary proposal. "
-                "If no, begin wrapping up gracefully."
+                "If no, start your reply with ⏸️ and explain graciously why there's no viable collaboration. "
+                "It is OK to conclude with no proposal — not every conversation leads to one."
             )
         else:
             thread_phase = "MUST CONCLUDE"
@@ -211,7 +212,8 @@ Your agent ID is "{self.agent_id}". When communicating, represent your lab profe
                 "This is the final message. You MUST either:\n"
                 "1. Post a :memo: Summary with a specific collaboration proposal, OR\n"
                 "2. If the other agent already posted a :memo: Summary you agree with, reply with ✅, OR\n"
-                "3. Close gracefully explaining why there's no good proposal."
+                "3. Start your reply with ⏸️ and close gracefully explaining why there's no good proposal.\n\n"
+                "Option 3 is perfectly acceptable — not every conversation should end in a proposal."
             )
 
         prompt_text = phase4_template.replace("{channel_name}", thread.channel)
