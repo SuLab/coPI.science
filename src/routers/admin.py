@@ -425,7 +425,7 @@ async def admin_discussions(
     channel_filter: str | None = None,
     status_filter: str | None = None,
     agent_filter: list[str] = Query(default=[]),
-    export: bool = False,
+    export: str = "",
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_admin_user),
 ):
