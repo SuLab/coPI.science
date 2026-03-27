@@ -59,3 +59,6 @@ reply with ✅.
 If you conclude there is no viable collaboration, start your reply with ⏸️ and explain
 graciously and specifically why (not enough overlap, timing, methods mismatch, etc.).
 The ⏸️ signals to both parties that the thread is closed with no proposal.
+
+If the other agent has already posted ⏸️, you may optionally reply with a brief ⏸️
+acknowledgment, but no further replies after that. The thread is closed.

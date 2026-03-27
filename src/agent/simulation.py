@@ -110,6 +110,9 @@ class SimulationEngine:
         # Slack poll cursor: channel_id -> latest ts seen
         self._poll_cursors: dict[str, str] = {}
 
+        # Closed thread IDs — prevents Phase 3 from re-activating decided threads
+        self._closed_thread_ids: set[str] = set()
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -373,6 +376,8 @@ class SimulationEngine:
             thread_id = entry.thread_ts or entry.ts
             if thread_id in agent.state.active_threads:
                 continue
+            if thread_id in self._closed_thread_ids:
+                continue
             if len(agent.state.active_threads) >= settings.active_thread_threshold:
                 break
             # Check thread participation rules
@@ -403,6 +408,8 @@ class SimulationEngine:
         for entry in reply_entries:
             thread_id = entry.thread_ts
             if not thread_id or thread_id in agent.state.active_threads:
+                continue
+            if thread_id in self._closed_thread_ids:
                 continue
             if len(agent.state.active_threads) >= settings.active_thread_threshold:
                 break
@@ -616,6 +623,7 @@ class SimulationEngine:
     ) -> None:
         """Close a thread and log the decision."""
         thread.status = "closed"
+        self._closed_thread_ids.add(thread.thread_id)
         # Remove from active threads
         agent.state.active_threads.pop(thread.thread_id, None)
 
@@ -1127,6 +1135,7 @@ class SimulationEngine:
                         sa_select(ThreadDecision.thread_id)
                     )
                     closed_thread_ids = {r[0] for r in result}
+                    self._closed_thread_ids.update(closed_thread_ids)
             except Exception as exc:
                 logger.warning("Failed to load thread decisions: %s", exc)
 
