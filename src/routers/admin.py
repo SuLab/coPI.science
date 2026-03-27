@@ -4,7 +4,7 @@ import logging
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, Form, HTTPException, Request, status
+from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, status
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import func, select
@@ -424,6 +424,8 @@ async def admin_discussions(
     run_id: str | None = None,
     channel_filter: str | None = None,
     status_filter: str | None = None,
+    agent_filter: list[str] = Query(default=[]),
+    export: bool = False,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_admin_user),
 ):
@@ -598,11 +600,53 @@ async def admin_discussions(
         s = t["status"]
         counts[s] = counts.get(s, 0) + 1
 
+    # Collect available agents from threads
+    available_agents = set()
+    for t in threads:
+        available_agents.add(t["agent_id"])
+        if t.get("replier"):
+            available_agents.add(t["replier"])
+        if t.get("decision"):
+            available_agents.add(t["decision"].agent_a)
+            available_agents.add(t["decision"].agent_b)
+
     # Apply filters
     if channel_filter:
         threads = [t for t in threads if t["channel_name"] == channel_filter]
     if status_filter:
         threads = [t for t in threads if t["status"] == status_filter]
+    if agent_filter:
+        agent_set = set(agent_filter)
+        threads = [
+            t for t in threads
+            if t["agent_id"] in agent_set
+            or (t.get("replier") and t["replier"] in agent_set)
+            or (t.get("decision") and (
+                t["decision"].agent_a in agent_set or t["decision"].agent_b in agent_set
+            ))
+        ]
+
+    if export:
+        from fastapi.responses import PlainTextResponse
+        lines = []
+        for t in threads:
+            d = t.get("decision")
+            if not d or not d.summary_text:
+                continue
+            lines.append(f"{'=' * 72}")
+            lines.append(f"Channel: #{t['channel_name']}")
+            lines.append(f"Agents: {d.agent_a.capitalize()}Bot + {d.agent_b.capitalize()}Bot")
+            lines.append(f"Outcome: {d.outcome}")
+            lines.append(f"Date: {d.decided_at.strftime('%Y-%m-%d %H:%M UTC')}")
+            lines.append("")
+            lines.append(d.summary_text.strip())
+            lines.append("")
+        if not lines:
+            lines.append("No proposals found with current filters.")
+        return PlainTextResponse(
+            "\n".join(lines),
+            headers={"Content-Disposition": "attachment; filename=proposals.txt"},
+        )
 
     return templates.TemplateResponse(
         request,
@@ -616,8 +660,10 @@ async def admin_discussions(
             threads=threads,
             counts=counts,
             channels=sorted(available_channels),
+            agents=sorted(available_agents),
             channel_filter=channel_filter,
             status_filter=status_filter,
+            agent_filter=agent_filter or [],
         ),
     )
 

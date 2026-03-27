@@ -73,9 +73,18 @@
             <option value="{{ key }}" {% if status_filter == key %}selected{% endif %}>{{ meta.label }}</option>
             {% endfor %}
         </select>
+        <select name="agent_filter" multiple size="4"
+                class="text-sm border-gray-300 rounded-md shadow-sm min-w-[140px]"
+                title="Hold Ctrl/Cmd to select multiple">
+            {% for a in agents %}
+            <option value="{{ a }}" {% if a in agent_filter %}selected{% endif %}>{{ a | capitalize }}Bot</option>
+            {% endfor %}
+        </select>
         <button type="submit"
                 class="px-3 py-1.5 bg-indigo-600 text-white text-sm rounded-md hover:bg-indigo-700">Filter</button>
-        {% if channel_filter or status_filter %}
+        <button type="submit" name="export" value="true"
+                class="px-3 py-1.5 bg-gray-600 text-white text-sm rounded-md hover:bg-gray-700">Export</button>
+        {% if channel_filter or status_filter or agent_filter %}
         <a href="/admin/discussions?run_id={{ selected_run_id }}" class="text-sm text-gray-500 hover:text-gray-700">Clear</a>
         {% endif %}
     </form>
