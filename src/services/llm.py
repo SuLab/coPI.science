@@ -221,6 +221,34 @@ async def generate_with_tools(
             # Final text response — no more tool calls
             response_text = text_blocks[0].text if text_blocks else ""
 
+            # Retry once with higher max_tokens if response was truncated
+            if message.stop_reason == "max_tokens":
+                retry_max = max_tokens * 2
+                logger.warning(
+                    "Response truncated (stop_reason=max_tokens, %d tokens). "
+                    "Retrying with max_tokens=%d",
+                    message.usage.output_tokens, retry_max,
+                )
+                t0 = time.monotonic()
+                retry_msg = client.messages.create(
+                    model=model,
+                    max_tokens=retry_max,
+                    system=system_prompt,
+                    messages=conversation,
+                )
+                retry_latency = (time.monotonic() - t0) * 1000
+                latency_ms += retry_latency
+                total_input_tokens += retry_msg.usage.input_tokens
+                total_output_tokens += retry_msg.usage.output_tokens
+                retry_texts = [b for b in retry_msg.content if b.type == "text"]
+                if retry_texts:
+                    response_text = retry_texts[0].text
+                if retry_msg.stop_reason == "max_tokens":
+                    logger.warning(
+                        "Response still truncated after retry (%d tokens)",
+                        retry_msg.usage.output_tokens,
+                    )
+
             if _call_log_callback and log_meta:
                 from datetime import datetime, timezone
                 _call_log_callback({
@@ -274,6 +302,29 @@ async def generate_with_tools(
     total_input_tokens += message.usage.input_tokens
     total_output_tokens += message.usage.output_tokens
     response_text = message.content[0].text if message.content else ""
+
+    # Retry once with higher max_tokens if response was truncated
+    if message.stop_reason == "max_tokens":
+        retry_max = max_tokens * 2
+        logger.warning(
+            "Response truncated after max rounds (stop_reason=max_tokens, %d tokens). "
+            "Retrying with max_tokens=%d",
+            message.usage.output_tokens, retry_max,
+        )
+        t0 = time.monotonic()
+        retry_msg = client.messages.create(
+            model=model,
+            max_tokens=retry_max,
+            system=system_prompt,
+            messages=conversation,
+        )
+        retry_latency = (time.monotonic() - t0) * 1000
+        latency_ms += retry_latency
+        total_input_tokens += retry_msg.usage.input_tokens
+        total_output_tokens += retry_msg.usage.output_tokens
+        retry_texts = [b for b in retry_msg.content if b.type == "text"]
+        if retry_texts:
+            response_text = retry_texts[0].text
 
     if _call_log_callback and log_meta:
         from datetime import datetime, timezone

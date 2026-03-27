@@ -517,7 +517,7 @@ class SimulationEngine:
                 tools=TOOL_DEFINITIONS,
                 tool_executor=tool_executor,
                 model=settings.llm_agent_model_opus,
-                max_tokens=1200,
+                max_tokens=1500,
                 log_meta={
                     "agent_id": agent.agent_id,
                     "phase": "thread_reply",
