@@ -474,12 +474,11 @@ async def admin_discussions(
     )
     root_posts = roots_result.scalars().all()
 
-    # Get reply counts per thread
+    # Get reply counts and replier agent IDs per thread
     reply_counts_result = await db.execute(
         select(
             AgentMessage.thread_ts,
             func.count(AgentMessage.id).label("reply_count"),
-            func.count(distinct(AgentMessage.agent_id)).label("participant_count"),
         )
         .where(
             AgentMessage.simulation_run_id == selected_run_id,
@@ -487,10 +486,20 @@ async def admin_discussions(
         )
         .group_by(AgentMessage.thread_ts)
     )
-    reply_map = {
-        r.thread_ts: {"replies": r.reply_count, "participants": r.participant_count}
-        for r in reply_counts_result
-    }
+    reply_count_map = {r.thread_ts: r.reply_count for r in reply_counts_result}
+
+    # Get distinct replier agent IDs per thread
+    repliers_result = await db.execute(
+        select(AgentMessage.thread_ts, AgentMessage.agent_id)
+        .where(
+            AgentMessage.simulation_run_id == selected_run_id,
+            AgentMessage.phase == "thread_reply",
+        )
+        .distinct()
+    )
+    replier_map: dict[str, set[str]] = {}
+    for r in repliers_result:
+        replier_map.setdefault(r.thread_ts, set()).add(r.agent_id)
 
     # Get thread decisions for this run
     decisions_result = await db.execute(
@@ -511,8 +520,13 @@ async def admin_discussions(
     for post in root_posts:
         ts = post.message_ts
         available_channels.add(post.channel_name)
-        reply_info = reply_map.get(ts, {"replies": 0, "participants": 0})
+        reply_count = reply_count_map.get(ts, 0)
+        repliers = replier_map.get(ts, set())
         decision = decision_map.get(ts)
+
+        # Find the other agent (replier who isn't the poster)
+        other_agents = repliers - {post.agent_id}
+        replier = next(iter(other_agents), None) if other_agents else None
 
         if decision:
             if decision.outcome == "proposal":
@@ -523,7 +537,7 @@ async def admin_discussions(
                 thread_status = "timeout"
             else:
                 thread_status = decision.outcome
-        elif reply_info["replies"] > 0:
+        elif reply_count > 0:
             thread_status = "active"
         else:
             thread_status = "no_replies"
@@ -533,8 +547,8 @@ async def admin_discussions(
             "channel_name": post.channel_name,
             "agent_id": post.agent_id,
             "created_at": post.created_at,
-            "reply_count": reply_info["replies"],
-            "participant_count": reply_info["participants"],
+            "reply_count": reply_count,
+            "replier": replier,
             "status": thread_status,
             "decision": decision,
         })
@@ -549,11 +563,10 @@ async def admin_discussions(
     counts: dict[str, int] = {}
     for post in root_posts:
         ts = post.message_ts
-        reply_info = reply_map.get(ts, {"replies": 0, "participants": 0})
         decision = decision_map.get(ts)
         if decision:
             s = decision.outcome
-        elif reply_info["replies"] > 0:
+        elif reply_count_map.get(ts, 0) > 0:
             s = "active"
         else:
             s = "no_replies"

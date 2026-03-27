@@ -76,7 +76,7 @@
                 <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Channel</th>
                 <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Posted By</th>
                 <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Replies</th>
-                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Participants</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Replier</th>
                 <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Outcome</th>
                 <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Time</th>
             </tr>
@@ -96,9 +96,9 @@
                 <td class="px-4 py-3 text-sm">{{ t.reply_count }}</td>
                 <td class="px-4 py-3 text-sm">
                     {% if t.decision %}
-                        {{ t.decision.agent_a | capitalize }}Bot + {{ t.decision.agent_b | capitalize }}Bot
-                    {% elif t.participant_count > 0 %}
-                        {{ t.participant_count }} agent{{ 's' if t.participant_count != 1 }}
+                        {{ t.decision.agent_b | capitalize }}Bot
+                    {% elif t.replier %}
+                        {{ t.replier | capitalize }}Bot
                     {% else %}
                         —
                     {% endif %}
