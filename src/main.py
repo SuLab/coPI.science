@@ -28,7 +28,10 @@ class AgentBadgeMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         request.state.agent_badge_count = 0
         user_id_str = request.session.get("user_id") if "session" in request.scope else None
-        if user_id_str:
+        # Use impersonated user if applicable
+        impersonate_id = request.cookies.get("copi-impersonate") if user_id_str else None
+        effective_user_id = impersonate_id or user_id_str
+        if effective_user_id:
             try:
                 from src.models import AgentRegistry, ProposalReview, ThreadDecision
                 session_factory = get_session_factory()
@@ -36,7 +39,7 @@ class AgentBadgeMiddleware(BaseHTTPMiddleware):
                     # Get agent for this user
                     result = await db.execute(
                         select(AgentRegistry.agent_id).where(
-                            AgentRegistry.user_id == uuid.UUID(user_id_str),
+                            AgentRegistry.user_id == uuid.UUID(effective_user_id),
                             AgentRegistry.status == "active",
                         )
                     )
