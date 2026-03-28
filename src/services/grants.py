@@ -91,6 +91,22 @@ async def fetch_opportunity_detail(opp_id: str) -> dict[str, Any] | None:
     }
 
 
+async def fetch_opportunity_by_number(opp_number: str) -> dict[str, Any] | None:
+    """Look up a funding opportunity by its FOA number (e.g., RFA-AI-27-019).
+
+    Searches by keyword and matches on number. Returns full detail if found.
+    """
+    results = await search_opportunities(keyword=opp_number, rows=5)
+    for r in results:
+        if r.get("number", "").upper() == opp_number.upper():
+            if r.get("id"):
+                detail = await fetch_opportunity_detail(str(r["id"]))
+                if detail:
+                    return detail
+            return r
+    return None
+
+
 async def search_for_researchers(
     researcher_keywords: dict[str, list[str]],
     agencies: list[str] | None = None,

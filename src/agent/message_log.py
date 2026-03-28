@@ -22,6 +22,11 @@ class LogEntry:
     is_bot: bool = True
 
 
+def is_funding_post(content: str) -> bool:
+    """Return True if the message is a funding-related post (marked with :moneybag:)."""
+    return ":moneybag:" in content
+
+
 class MessageLog:
     """
     Append-only in-memory message log.
@@ -135,6 +140,7 @@ class MessageLog:
         """Return the set of agent_ids allowed to participate in this thread.
 
         Rules:
+        - Funding threads (:moneybag:) are open to all → returns None.
         - If the root post tags a specific agent, only the poster and tagged
           agent may participate → returns {poster, tagged}.
         - If no tag, falls back to generic 2-party rule: the first two distinct
@@ -143,6 +149,10 @@ class MessageLog:
         """
         root = self._by_ts.get(thread_ts)
         if not root:
+            return None
+
+        # Funding threads are open to all participants
+        if is_funding_post(root.content):
             return None
 
         poster_id = root.sender_agent_id
@@ -167,6 +177,11 @@ class MessageLog:
         if len(participants) < 2:
             return None  # Thread still open — anyone can join
         return set(participants)
+
+    def is_funding_thread(self, thread_ts: str) -> bool:
+        """Return True if the thread root is a funding post."""
+        root = self._by_ts.get(thread_ts)
+        return bool(root and is_funding_post(root.content))
 
     def _extract_tagged_agent(self, content: str) -> str | None:
         """Extract a tagged agent_id from message content (e.g. @WisemanBot)."""

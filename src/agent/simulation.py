@@ -12,7 +12,7 @@ from typing import Any
 
 from src.agent.agent import Agent
 from src.agent.channels import SEEDED_CHANNELS
-from src.agent.message_log import LogEntry, MessageLog
+from src.agent.message_log import LogEntry, MessageLog, is_funding_post
 from src.agent.state import PostRef, ProposalRef, ThreadState
 from src.agent.tools import TOOL_DEFINITIONS, execute_tool
 from src.config import get_settings
@@ -128,6 +128,13 @@ class SimulationEngine:
 
     def _agent_within_budget(self, agent: Agent) -> bool:
         return agent.api_call_count < self.budget_cap
+
+    def _non_funding_thread_count(self, agent: Agent) -> int:
+        """Count active threads that are NOT funding-related."""
+        return sum(
+            1 for t in agent.state.active_threads.values()
+            if not self.message_log.is_funding_thread(t.thread_id)
+        )
 
     async def start(self) -> None:
         """Run the full simulation."""
@@ -378,7 +385,7 @@ class SimulationEngine:
                 continue
             if thread_id in self._closed_thread_ids:
                 continue
-            if len(agent.state.active_threads) >= settings.active_thread_threshold:
+            if self._non_funding_thread_count(agent) >= settings.active_thread_threshold:
                 break
             # Check thread participation rules
             allowed = self.message_log.get_thread_allowed_agents(thread_id)
@@ -411,7 +418,7 @@ class SimulationEngine:
                 continue
             if thread_id in self._closed_thread_ids:
                 continue
-            if len(agent.state.active_threads) >= settings.active_thread_threshold:
+            if self._non_funding_thread_count(agent) >= settings.active_thread_threshold:
                 break
             # Check thread participation rules
             allowed = self.message_log.get_thread_allowed_agents(thread_id)
@@ -675,11 +682,15 @@ class SimulationEngine:
         phase4_thread_ids = phase4_thread_ids or set()
 
         # Check preconditions
-        if len(agent.state.active_threads) >= settings.active_thread_threshold:
+        if self._non_funding_thread_count(agent) >= settings.active_thread_threshold:
             logger.debug("[%s] Phase 5: Skipped (at thread threshold)", agent.agent_id)
             return
 
-        if any(not p.reviewed for p in agent.state.pending_proposals):
+        has_unreviewed_non_funding = any(
+            not p.reviewed and not self.message_log.is_funding_thread(p.thread_id)
+            for p in agent.state.pending_proposals
+        )
+        if has_unreviewed_non_funding:
             logger.debug("[%s] Phase 5: Skipped (pending proposal)", agent.agent_id)
             return
 

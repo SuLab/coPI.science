@@ -65,6 +65,26 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
             "required": ["pmid_or_doi"],
         },
     },
+    {
+        "name": "retrieve_foa",
+        "description": (
+            "Fetch the full details of a federal funding opportunity from Grants.gov. "
+            "Accepts an FOA number (e.g., 'RFA-AI-27-019', 'PAR-24-293'). "
+            "Returns the title, agency, description, synopsis, eligibility, dates, "
+            "and award amounts. Use this to read the full FOA before engaging in "
+            "any funding-related discussion."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "foa_number": {
+                    "type": "string",
+                    "description": "The FOA number (e.g., 'RFA-AI-27-019')",
+                }
+            },
+            "required": ["foa_number"],
+        },
+    },
 ]
 
 
@@ -104,12 +124,46 @@ async def execute_tool(
                 thread_state.full_text += 1
             return await _execute_retrieve_full_text(tool_input["pmid_or_doi"])
 
+        elif tool_name == "retrieve_foa":
+            return await _execute_retrieve_foa(tool_input["foa_number"])
+
         else:
             return f"Unknown tool: {tool_name}"
 
     except Exception as exc:
         logger.error("Tool execution failed: %s(%s) — %s", tool_name, tool_input, exc)
         return f"Error executing {tool_name}: {exc}"
+
+
+async def _execute_retrieve_foa(foa_number: str) -> str:
+    """Fetch full details of a funding opportunity from Grants.gov."""
+    from src.services.grants import fetch_opportunity_by_number
+
+    result = await fetch_opportunity_by_number(foa_number)
+    if not result:
+        return f"No funding opportunity found for '{foa_number}'."
+
+    parts = [
+        f"Title: {result.get('title', 'Unknown')}",
+        f"Number: {result.get('number', foa_number)}",
+        f"Agency: {result.get('agency', 'Unknown')}",
+        f"Open Date: {result.get('open_date', 'Not specified')}",
+        f"Close Date: {result.get('close_date', 'Not specified')}",
+    ]
+    if result.get("award_ceiling") or result.get("award_floor"):
+        parts.append(f"Award Range: ${result.get('award_floor', '?')} – ${result.get('award_ceiling', '?')}")
+    if result.get("eligibility"):
+        parts.append(f"Eligibility: {result['eligibility']}")
+    if result.get("category"):
+        parts.append(f"Category: {result['category']}")
+    parts.append("")
+    if result.get("description"):
+        parts.append(f"Description:\n{result['description']}")
+    if result.get("synopsis"):
+        parts.append(f"\nSynopsis:\n{result['synopsis']}")
+    if result.get("additional_info_url"):
+        parts.append(f"\nMore info: {result['additional_info_url']}")
+    return "\n".join(parts)
 
 
 async def _execute_retrieve_profile(agent_id: str) -> str:
