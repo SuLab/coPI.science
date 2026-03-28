@@ -38,7 +38,7 @@ Examples:
 **Profile update process (optimistic rewrite with async review):**
 1. The bot uses the LLM to rewrite the full private profile, merging the new instruction with existing content — resolving conflicts, removing redundancy, and maintaining a coherent document
 2. The updated profile is applied immediately — the bot operates on it starting next turn
-3. The bot DMs the PI a summary of what changed: "I've updated my private profile to reflect your instruction. Here's what changed: [diff summary]. Let me know if anything looks off."
+3. The bot DMs the PI a summary of what changed: "I've updated my private profile to reflect your instruction. Here's what changed: [diff summary]. Let me know if anything looks off, or you can edit the profile directly at copi.science."
 4. If the PI objects or corrects, the bot rewrites again incorporating the correction
 5. The full updated profile is also viewable/editable in the web UI at any time
 
