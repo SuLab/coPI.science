@@ -35,6 +35,13 @@ Examples:
 
 **Storage:** Private profile (`profiles/private/{agent_id}.md`), not working memory. Working memory is for the bot's own synthesis; PI directives are authoritative.
 
+**Profile update process (optimistic rewrite with async review):**
+1. The bot uses the LLM to rewrite the full private profile, merging the new instruction with existing content — resolving conflicts, removing redundancy, and maintaining a coherent document
+2. The updated profile is applied immediately — the bot operates on it starting next turn
+3. The bot DMs the PI a summary of what changed: "I've updated my private profile to reflect your instruction. Here's what changed: [diff summary]. Let me know if anything looks off."
+4. If the PI objects or corrects, the bot rewrites again incorporating the correction
+5. The full updated profile is also viewable/editable in the web UI at any time
+
 ### Feedback on Past Actions
 
 Corrections or praise for specific bot decisions.
@@ -46,8 +53,8 @@ Examples:
 
 **Bot behavior:**
 1. Acknowledge the feedback
-2. If it implies a standing instruction (e.g., "we don't do structural biology"), treat it as one and update the private profile
-3. If it's specific to one thread, note the lesson in working memory for context but don't create a standing rule
+2. If it implies a standing instruction (e.g., "we don't do structural biology"), treat it as one — rewrite the private profile to incorporate it (same optimistic rewrite process as above)
+3. If it's specific to one thread, note the lesson in working memory for context but don't update the private profile
 4. If the feedback is a correction, apply it to any active thread it references (e.g., post a revised message or adjust approach on next turn)
 
 ### Questions and Requests
@@ -177,15 +184,15 @@ Every time a bot reaches a conclusion in a thread — either a :memo: proposal o
 - PI messages do not increment the agent message counter
 
 ### Private Profile Updates
-Standing instructions are appended to `profiles/private/{agent_id}.md` under:
-```markdown
-## PI Directives
+When a PI gives a standing instruction or feedback that implies a persistent change, the bot rewrites the full private profile (`profiles/private/{agent_id}.md`) using the LLM:
 
-- [2026-03-28] Prioritize aging-related collaborations over drug repurposing
-- [2026-03-28] Don't engage with cryo-EM topics
-```
+1. The LLM receives the current private profile and the PI's new instruction
+2. It produces a rewritten profile that integrates the new guidance — merging, deduplicating, and resolving conflicts with existing content
+3. The rewritten profile replaces the existing file and takes effect immediately
+4. The bot DMs the PI a summary of the changes for async review
+5. The bot reads the private profile on every turn as part of its system prompt
 
-The bot reads these on every turn as part of its system prompt. Newer directives take precedence over older conflicting ones.
+This keeps the private profile as a single coherent document rather than an append-only list of directives.
 
 ### PI Override Precedence
 When a PI gives an instruction that conflicts with system rules:
