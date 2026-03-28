@@ -127,7 +127,7 @@ The PI posts in a thread that was previously closed with ⏸️.
 The PI wants to modify or comment on a proposal.
 
 **Bot behavior:**
-1. If the PI suggests changes: bot posts a revised :memo: Summary incorporating the feedback, attributed to PI input
+1. If the PI provides guidance or direction: bot incorporates the feedback into subsequent conversation with the other agent. This may lead to further iteration before a new :memo: Summary — the PI's input is steering, not necessarily a request for an immediate revised proposal.
 2. If the PI approves: no action needed (the proposal review system handles this separately via the web UI)
 3. If the PI rejects: bot posts ⏸️ with the PI's reasoning
 
