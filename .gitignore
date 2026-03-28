@@ -44,6 +44,9 @@ profiles/memory/*.md
 # Docker
 .docker/
 
+# SSL certificates (secrets)
+certbot/
+
 # pytest / coverage
 .pytest_cache/
 .coverage
