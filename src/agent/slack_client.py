@@ -5,12 +5,15 @@ chat.postMessage for posting.
 """
 
 import logging
+import time
 from typing import Any
 
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
 logger = logging.getLogger(__name__)
+
+MAX_RETRIES = 3
 
 
 class AgentSlackClient:
@@ -49,6 +52,23 @@ class AgentSlackClient:
     def is_connected(self) -> bool:
         return self._client is not None
 
+    def _call_with_retry(self, method, **kwargs) -> Any:
+        """Call a Slack API method with retry on rate limiting."""
+        for attempt in range(MAX_RETRIES):
+            try:
+                return method(**kwargs)
+            except SlackApiError as exc:
+                if exc.response.get("error") == "ratelimited":
+                    retry_after = int(exc.response.headers.get("Retry-After", 5))
+                    logger.warning(
+                        "[%s] Rate limited, retrying in %ds (attempt %d/%d)",
+                        self.agent_id, retry_after, attempt + 1, MAX_RETRIES,
+                    )
+                    time.sleep(retry_after)
+                else:
+                    raise
+        raise SlackApiError("Rate limit retries exhausted", response=exc.response)
+
     @property
     def bot_user_id(self) -> str | None:
         return self._bot_user_id
@@ -70,7 +90,8 @@ class AgentSlackClient:
         if not self._client:
             return []
         try:
-            result = self._client.conversations_history(
+            result = self._call_with_retry(
+                self._client.conversations_history,
                 channel=channel_id, oldest=oldest, limit=limit, inclusive=False,
             )
             messages = result.get("messages", [])
@@ -103,7 +124,8 @@ class AgentSlackClient:
         if not self._client:
             return []
         try:
-            result = self._client.conversations_replies(
+            result = self._call_with_retry(
+                self._client.conversations_replies,
                 channel=channel_id, ts=thread_ts, oldest=oldest, inclusive=False,
             )
             messages = result.get("messages", [])
@@ -130,7 +152,9 @@ class AgentSlackClient:
                 kwargs: dict[str, Any] = {"channel": channel_id, "limit": 200}
                 if cursor:
                     kwargs["cursor"] = cursor
-                result = self._client.conversations_history(**kwargs)
+                result = self._call_with_retry(
+                    self._client.conversations_history, **kwargs,
+                )
                 messages = result.get("messages", [])
                 # Filter out system subtypes
                 messages = [
@@ -173,7 +197,9 @@ class AgentSlackClient:
                 }
                 if cursor:
                     kwargs["cursor"] = cursor
-                result = self._client.conversations_replies(**kwargs)
+                result = self._call_with_retry(
+                    self._client.conversations_replies, **kwargs,
+                )
                 all_messages.extend(result.get("messages", []))
                 metadata = result.get("response_metadata", {})
                 cursor = metadata.get("next_cursor")
@@ -236,7 +262,7 @@ class AgentSlackClient:
             kwargs: dict[str, Any] = {"channel": channel_id, "text": text}
             if thread_ts:
                 kwargs["thread_ts"] = thread_ts
-            result = self._client.chat_postMessage(**kwargs)
+            result = self._call_with_retry(self._client.chat_postMessage, **kwargs)
             return result.data
         except SlackApiError as exc:
             logger.error("[%s] Failed to post to #%s: %s", self.agent_id, channel, exc)

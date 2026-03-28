@@ -82,6 +82,7 @@ class SimulationEngine:
         budget_cap: int = 50,
         session_factory=None,
         simulation_run_id: uuid.UUID | None = None,
+        reset_cursors: bool = False,
     ):
         self.agents = {a.agent_id: a for a in agents}
         self.slack_clients = slack_clients
@@ -89,6 +90,7 @@ class SimulationEngine:
         self.budget_cap = budget_cap
         self.session_factory = session_factory
         self.simulation_run_id = simulation_run_id
+        self._reset_cursors = reset_cursors
 
         self._start_time: datetime | None = None
         self._running = False
@@ -155,6 +157,7 @@ class SimulationEngine:
 
         # Main loop
         turn_count = 0
+        consecutive_idle = 0
         while self._running and self.is_within_time_limit:
             # Poll Slack for PI messages
             await self._poll_slack_for_pi_messages()
@@ -172,8 +175,9 @@ class SimulationEngine:
             logger.info("=== Turn %d: %s ===", turn_count + 1, agent.agent_id)
 
             # Run 5-phase turn
+            did_work = False
             try:
-                await self._run_turn(agent)
+                did_work = await self._run_turn(agent)
             except Exception:
                 logger.exception("Error during turn for %s", agent.agent_id)
 
@@ -181,8 +185,22 @@ class SimulationEngine:
             agent.state.last_selected = time.time()
             turn_count += 1
 
-            # Optional delay
-            if settings.turn_delay_seconds > 0:
+            # Idle backoff: if no LLM calls were made, delay before next turn
+            if did_work:
+                consecutive_idle = 0
+            else:
+                consecutive_idle += 1
+
+            if consecutive_idle > 0:
+                if consecutive_idle <= 3:
+                    delay = 5
+                elif consecutive_idle <= 10:
+                    delay = 15
+                else:
+                    delay = 30
+                logger.debug("Idle backoff: %ds (idle streak: %d)", delay, consecutive_idle)
+                await asyncio.sleep(delay)
+            elif settings.turn_delay_seconds > 0:
                 await asyncio.sleep(settings.turn_delay_seconds)
 
             # Flush LLM logs periodically
@@ -219,8 +237,10 @@ class SimulationEngine:
     # Turn execution (5 phases)
     # ------------------------------------------------------------------
 
-    async def _run_turn(self, agent: Agent) -> None:
-        """Run all 5 phases for a single agent turn."""
+    async def _run_turn(self, agent: Agent) -> bool:
+        """Run all 5 phases for a single agent turn. Returns True if work was done."""
+        api_calls_before = agent.api_call_count
+
         # Phase 1: Channel discovery
         self._phase1_channel_discovery(agent)
 
@@ -238,6 +258,8 @@ class SimulationEngine:
 
         # Update cursor
         agent.state.last_seen_cursor = time.time()
+
+        return agent.api_call_count > api_calls_before
 
     # ------------------------------------------------------------------
     # Phase 1: Channel Discovery
@@ -385,7 +407,8 @@ class SimulationEngine:
                 continue
             if thread_id in self._closed_thread_ids:
                 continue
-            if self._non_funding_thread_count(agent) >= settings.active_thread_threshold:
+            is_funding = self.message_log.is_funding_thread(thread_id)
+            if not is_funding and self._non_funding_thread_count(agent) >= settings.active_thread_threshold:
                 break
             # Check thread participation rules
             allowed = self.message_log.get_thread_allowed_agents(thread_id)
@@ -418,7 +441,8 @@ class SimulationEngine:
                 continue
             if thread_id in self._closed_thread_ids:
                 continue
-            if self._non_funding_thread_count(agent) >= settings.active_thread_threshold:
+            is_funding = self.message_log.is_funding_thread(thread_id)
+            if not is_funding and self._non_funding_thread_count(agent) >= settings.active_thread_threshold:
                 break
             # Check thread participation rules
             allowed = self.message_log.get_thread_allowed_agents(thread_id)
@@ -682,17 +706,12 @@ class SimulationEngine:
         phase4_thread_ids = phase4_thread_ids or set()
 
         # Check preconditions
-        if self._non_funding_thread_count(agent) >= settings.active_thread_threshold:
-            logger.debug("[%s] Phase 5: Skipped (at thread threshold)", agent.agent_id)
-            return
-
+        at_thread_threshold = self._non_funding_thread_count(agent) >= settings.active_thread_threshold
         has_unreviewed_non_funding = any(
             not p.reviewed and not self.message_log.is_funding_thread(p.thread_id)
             for p in agent.state.pending_proposals
         )
-        if has_unreviewed_non_funding:
-            logger.debug("[%s] Phase 5: Skipped (pending proposal)", agent.agent_id)
-            return
+        blocked_for_regular = at_thread_threshold or has_unreviewed_non_funding
 
         if random.random() < settings.phase5_skip_probability:
             logger.debug("[%s] Phase 5: Skipped (random)", agent.agent_id)
@@ -706,6 +725,13 @@ class SimulationEngine:
                 continue
             if post.post_id in agent.state.active_threads:
                 continue
+
+            is_funding = self.message_log.is_funding_thread(post.post_id)
+
+            # If blocked for regular posts, only allow funding posts through
+            if blocked_for_regular and not is_funding:
+                continue
+
             # Check thread participation rules: if the post tags a specific agent,
             # only that agent can reply; otherwise generic 2-party rule applies
             allowed = self.message_log.get_thread_allowed_agents(post.post_id)
@@ -716,6 +742,13 @@ class SimulationEngine:
                 )
                 continue
             available_posts.append(post)
+
+        if not available_posts:
+            if blocked_for_regular:
+                logger.debug("[%s] Phase 5: Skipped (blocked for regular, no funding posts available)", agent.agent_id)
+            else:
+                logger.debug("[%s] Phase 5: No available posts", agent.agent_id)
+            return
 
         # Temporarily replace interesting_posts for prompt building
         original_posts = agent.state.interesting_posts
@@ -1255,7 +1288,11 @@ class SimulationEngine:
                 logger.warning("Failed to rebuild api_call_count: %s", exc)
 
         # 5. Set last_seen_cursor per agent to latest message time
-        if self.message_log._entries:
+        if self._reset_cursors:
+            logger.info("--reset-cursors: agents will re-scan all posts")
+            for agent in self.agents.values():
+                agent.state.last_seen_cursor = 0
+        elif self.message_log._entries:
             latest_ts = max(e.posted_at for e in self.message_log._entries)
             for agent in self.agents.values():
                 agent.state.last_seen_cursor = latest_ts

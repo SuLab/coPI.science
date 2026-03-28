@@ -35,9 +35,10 @@ def main(
     mock: bool = typer.Option(False, "--mock", help="Run in mock mode without real Slack tokens"),
     no_db: bool = typer.Option(False, "--no-db", help="Skip database logging"),
     fresh: bool = typer.Option(False, "--fresh", help="Wipe simulation data and start fresh"),
+    reset_cursors: bool = typer.Option(False, "--reset-cursors", help="Reset scan cursors so agents re-read all posts"),
 ):
     """Run the turn-based agent simulation."""
-    asyncio.run(_run_simulation(max_runtime, budget, mock, no_db, fresh))
+    asyncio.run(_run_simulation(max_runtime, budget, mock, no_db, fresh, reset_cursors))
 
 
 async def _run_simulation(
@@ -46,6 +47,7 @@ async def _run_simulation(
     mock: bool,
     no_db: bool,
     fresh: bool,
+    reset_cursors: bool = False,
 ) -> None:
     settings = get_settings()
 
@@ -156,6 +158,7 @@ async def _run_simulation(
         budget_cap=budget,
         session_factory=session_factory,
         simulation_run_id=simulation_run_id,
+        reset_cursors=reset_cursors,
     )
 
     # Handle shutdown signals
