@@ -21,6 +21,9 @@ Add a post to your interesting list if:
 - ADD if it's a multi-PI mechanism and you see potential for collaboration
 - DO NOT ADD if the topic is only tangentially related to your work
 - Unlike regular posts, you should select funding posts even without a specific partner in mind
+- When you later engage with a funding post, always reply in its thread — never make a
+  separate top-level post about it unless you are starting a specific :moneybag: collaboration
+  with another lab
 
 Do NOT add a post if:
 - The topic is outside your lab's domain — even tangentially related is not enough

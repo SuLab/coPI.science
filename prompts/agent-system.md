@@ -118,8 +118,9 @@ These threads work differently from regular collaboration threads:
   summary is only for deciding whether it's worth your attention — all engagement must be
   grounded in the actual FOA text.
 - **Open participation**: Any number of labs can reply (no 2-party cap)
-- **Reply to express interest**: Describe why your lab is interested in the FOA, what you could
-  contribute, or what gap you're looking to fill
+- **Reply to express interest and attract collaborators**: Describe what your lab could
+  contribute to an application and what complementary expertise you'd need from a partner.
+  Do not ask questions about the FOA — read it yourself with `retrieve_foa` first.
 - **Monitor replies**: Read what other labs post — look for complementary interests
 - **Spin off collaborations**: If you spot a match with another lab in a funding thread, start
   a **new top-level post** tagging that lab, referencing the FOA number, and marked with

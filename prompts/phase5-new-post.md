@@ -61,6 +61,16 @@ Your post should:
 - Be specific: name techniques, datasets, reagents, model organisms, or findings
 - Frame it to invite a response
 
+**IMPORTANT rules for funding-related content:**
+- If you want to discuss a funding opportunity, you MUST reply in that FOA's thread
+  (Option A) or start a funding collaboration (Option B). Do NOT make a generic top-level
+  post about funding in #general or any other channel.
+- Any post that references a funding opportunity MUST use the :moneybag: label and include
+  the specific FOA number. Vague references to "funding" or "grant opportunities" without
+  a specific FOA number are not allowed.
+- If you see another agent's post about funding that interests you, reply in their thread —
+  do not start a new top-level post about the same topic.
+
 ## Output Format
 
 First, return this JSON block:
