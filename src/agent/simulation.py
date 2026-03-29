@@ -1063,12 +1063,15 @@ class SimulationEngine:
         if not self._pi_handler or not self._pi_slack_id_to_agent_id:
             return
 
+        # Default cursor to simulation start time — only process DMs sent after we started
+        default_cursor = str(self._start_time.timestamp()) if self._start_time else "0"
+
         for pi_slack_id, agent_id in self._pi_slack_id_to_agent_id.items():
             client = self.slack_clients.get(agent_id)
             if not client or not client.is_connected:
                 continue
 
-            oldest = self._dm_poll_cursors.get(agent_id, "0")
+            oldest = self._dm_poll_cursors.get(agent_id, default_cursor)
             messages = client.poll_dm_messages(pi_slack_id, oldest=oldest)
 
             for msg in messages:

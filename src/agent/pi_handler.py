@@ -54,9 +54,7 @@ class PIHandler:
                 await self._send_dm(agent_id, pi_slack_id,
                     "Thanks for the feedback — I'll keep that in mind for future interactions.")
         elif category == "question":
-            await self._send_dm(agent_id, pi_slack_id,
-                "I'll be able to answer questions like this soon. "
-                "For now, you can check my activity on the admin dashboard at copi.science.")
+            await self._handle_question(agent_id, pi_slack_id, text)
         else:
             logger.warning("[%s] Unknown DM category: %s", agent_id, category)
 
@@ -132,6 +130,92 @@ class PIHandler:
             await self._send_dm(agent_id, pi_slack_id,
                 "I received your instruction but encountered an error updating my profile. "
                 "You can edit it directly at copi.science.")
+
+    async def _handle_question(self, agent_id: str, pi_slack_id: str, question: str) -> None:
+        """Answer a PI's question about the bot's current state or activity."""
+        agent = self.agents.get(agent_id)
+        if not agent:
+            return
+
+        context = self._build_state_summary(agent)
+
+        system_prompt = (
+            f"You are {agent.bot_name}, an AI agent representing the {agent.pi_name} lab. "
+            f"Your PI is asking you a question via DM. Answer concisely and specifically based "
+            f"on the state summary below. If you don't have the information to answer, say so.\n\n"
+            f"Use Slack mrkdwn formatting: *bold*, _italic_. Keep your answer under 500 words."
+        )
+
+        user_msg = f"## My Current State\n\n{context}\n\n## PI's Question\n\n{question}"
+
+        try:
+            settings = get_settings()
+            response = await generate_agent_response(
+                system_prompt=system_prompt,
+                messages=[{"role": "user", "content": user_msg}],
+                model=settings.llm_agent_model_sonnet,
+                max_tokens=800,
+                log_meta={"agent_id": agent_id, "phase": "pi_question"},
+            )
+            await self._send_dm(agent_id, pi_slack_id, response.strip())
+        except Exception as exc:
+            logger.error("[%s] Failed to answer PI question: %s", agent_id, exc)
+            await self._send_dm(agent_id, pi_slack_id,
+                "Sorry, I had trouble processing your question. "
+                "You can check my activity at copi.science.")
+
+    def _build_state_summary(self, agent: Agent) -> str:
+        """Build a text summary of the agent's current state for PI queries."""
+        parts = []
+
+        # Active threads
+        active = agent.state.active_threads
+        if active:
+            lines = []
+            for t in active.values():
+                other = self.agents.get(t.other_agent_id)
+                other_name = other.bot_name if other else t.other_agent_id
+                lines.append(f"- #{t.channel} with {other_name}: {t.message_count} messages, status={t.status}")
+            parts.append(f"**Active threads ({len(active)}):**\n" + "\n".join(lines))
+        else:
+            parts.append("**Active threads:** None")
+
+        # Interesting posts
+        interesting = agent.state.interesting_posts
+        if interesting:
+            lines = []
+            for p in interesting[:10]:
+                lines.append(f"- #{p.channel} from {p.sender_agent_id}: {p.content_snippet[:80]}...")
+            suffix = f"\n({len(interesting) - 10} more)" if len(interesting) > 10 else ""
+            parts.append(f"**Interesting posts ({len(interesting)}):**\n" + "\n".join(lines) + suffix)
+        else:
+            parts.append("**Interesting posts:** None")
+
+        # Pending proposals
+        proposals = agent.state.pending_proposals
+        if proposals:
+            lines = []
+            for p in proposals:
+                other = self.agents.get(p.other_agent_id)
+                other_name = other.bot_name if other else p.other_agent_id
+                status = "reviewed" if p.reviewed else "awaiting review"
+                lines.append(f"- #{p.channel} with {other_name} ({status}): {p.summary_text[:80]}...")
+            parts.append(f"**Pending proposals ({len(proposals)}):**\n" + "\n".join(lines))
+        else:
+            parts.append("**Pending proposals:** None")
+
+        # Subscribed channels
+        channels = agent.state.subscribed_channels
+        if channels:
+            parts.append(f"**Subscribed channels:** {', '.join(f'#{c}' for c in sorted(channels))}")
+
+        # Standing instructions (from private profile)
+        parts.append(f"**Private profile (standing instructions):**\n{agent.private_profile[:500]}")
+
+        # API budget
+        parts.append(f"**API calls used:** {agent.api_call_count}")
+
+        return "\n\n".join(parts)
 
     # ------------------------------------------------------------------
     # Channel tag handling
