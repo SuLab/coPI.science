@@ -217,6 +217,15 @@ Your agent ID is "{self.agent_id}". When communicating, represent your lab profe
                 "Option 3 is perfectly acceptable — not every conversation should end in a proposal."
             )
 
+        # Inject PI context if the PI posted in this thread
+        if thread.pi_context:
+            phase_guidance += (
+                f"\n\n**Your PI has posted in this thread.** Their message is authoritative — "
+                f"incorporate their direction into your reply. If they corrected something you "
+                f"said, acknowledge the correction to the other agent. PI's message: "
+                f"\"{thread.pi_context}\""
+            )
+
         prompt_text = phase4_template.replace("{channel_name}", thread.channel)
         prompt_text = prompt_text.replace("{other_agent_name}", other_agent_name)
         prompt_text = prompt_text.replace("{other_agent_lab}", other_agent_lab)
@@ -275,6 +284,16 @@ Your agent ID is "{self.agent_id}". When communicating, represent your lab profe
             self._working_memory = None  # Invalidate cache
         except Exception as exc:
             logger.error("[%s] Failed to update working memory: %s", self.agent_id, exc)
+
+    def update_private_profile(self, new_profile: str) -> None:
+        """Write private profile to profiles/private/{agent_id}.md."""
+        profile_path = PROFILES_DIR / "private" / f"{self.agent_id}.md"
+        try:
+            profile_path.parent.mkdir(parents=True, exist_ok=True)
+            profile_path.write_text(new_profile + "\n", encoding="utf-8")
+            self._private_profile = None  # Invalidate cache
+        except Exception as exc:
+            logger.error("[%s] Failed to update private profile: %s", self.agent_id, exc)
 
     # ------------------------------------------------------------------
     # Helpers

@@ -95,6 +95,9 @@ class SimulationEngine:
         self._start_time: datetime | None = None
         self._running = False
         self.message_log = MessageLog()
+        self._pi_slack_id_to_agent_id: dict[str, str] = {}  # PI slack_user_id -> agent_id
+        self._dm_poll_cursors: dict[str, str] = {}  # agent_id -> latest DM ts
+        self._pi_handler = None  # Initialized in start() after PI mappings loaded
 
         # Agent name lookups
         self._bot_name_to_id: dict[str, str] = {
@@ -152,15 +155,27 @@ class SimulationEngine:
         # Setup
         self._ensure_seeded_channels()
         self._build_lab_directories()
+        await self._load_pi_mappings()
         await self._rebuild_state_from_slack()
         set_call_log_callback(self._on_llm_call)
+
+        # Initialize PI handler after mappings are loaded
+        from src.agent.pi_handler import PIHandler
+        self._pi_handler = PIHandler(
+            agents=self.agents,
+            slack_clients=self.slack_clients,
+            pi_slack_id_to_agent_id=self._pi_slack_id_to_agent_id,
+            message_log=self.message_log,
+            session_factory=self.session_factory,
+        )
 
         # Main loop
         turn_count = 0
         consecutive_idle = 0
         while self._running and self.is_within_time_limit:
-            # Poll Slack for PI messages
+            # Poll Slack for PI messages (channels + DMs)
             await self._poll_slack_for_pi_messages()
+            await self._poll_pi_dms()
 
             # Sync proposal reviews from web app
             await self._sync_proposal_reviews_from_db()
@@ -696,6 +711,15 @@ class SimulationEngine:
             agent.agent_id, thread.thread_id, outcome,
         )
 
+        # Notify PI via DM
+        if self._pi_handler:
+            try:
+                await self._pi_handler.notify_thread_conclusion(
+                    agent.agent_id, thread, outcome, summary_text,
+                )
+            except Exception as exc:
+                logger.debug("Failed to notify PI of thread conclusion: %s", exc)
+
     # ------------------------------------------------------------------
     # Phase 5: New Post (conditional)
     # ------------------------------------------------------------------
@@ -713,7 +737,10 @@ class SimulationEngine:
         )
         blocked_for_regular = at_thread_threshold or has_unreviewed_non_funding
 
-        if random.random() < settings.phase5_skip_probability:
+        # Check for PI-priority posts — these bypass random skip and blocking
+        has_pi_priority = any(p.pi_priority for p in agent.state.interesting_posts)
+
+        if not has_pi_priority and random.random() < settings.phase5_skip_probability:
             logger.debug("[%s] Phase 5: Skipped (random)", agent.agent_id)
             return
 
@@ -728,8 +755,8 @@ class SimulationEngine:
 
             is_funding = self.message_log.is_funding_thread(post.post_id)
 
-            # If blocked for regular posts, only allow funding posts through
-            if blocked_for_regular and not is_funding:
+            # PI-priority and funding posts bypass regular blocking
+            if blocked_for_regular and not is_funding and not post.pi_priority:
                 continue
 
             # Check thread participation rules: if the post tags a specific agent,
@@ -924,8 +951,9 @@ class SimulationEngine:
                     if user_id and client.is_bot_user(user_id):
                         continue
 
-                    # Human message — add to log
+                    # Human message — resolve PI identity
                     sender_name = client.resolve_user_name(user_id)
+                    pi_agent_id = self._pi_slack_id_to_agent_id.get(user_id)
                     entry = LogEntry(
                         ts=ts,
                         channel=ch_name,
@@ -944,6 +972,28 @@ class SimulationEngine:
 
                     # Check if PI message references a proposal (clears pending block)
                     self._check_pi_proposal_review(entry)
+
+                    # PI-specific handling
+                    if pi_agent_id and self._pi_handler:
+                        thread_ts = msg.get("thread_ts")
+
+                        # PI posted in a closed thread → reopen it
+                        if thread_ts and thread_ts in self._closed_thread_ids:
+                            await self._reopen_thread(pi_agent_id, thread_ts, entry)
+
+                        # PI posted in an active thread → set pi_context
+                        elif thread_ts:
+                            agent = self.agents.get(pi_agent_id)
+                            if agent and thread_ts in agent.state.active_threads:
+                                thread = agent.state.active_threads[thread_ts]
+                                thread.pi_context = entry.content
+                                thread.has_pending_reply = True
+                                logger.info("[%s] PI posted in active thread %s", pi_agent_id, thread_ts)
+
+                        # PI tagged their bot in a top-level post or reply
+                        bot_name = self.agents[pi_agent_id].bot_name if pi_agent_id in self.agents else None
+                        if bot_name and f"@{bot_name.lower()}" in msg.get("text", "").lower():
+                            await self._pi_handler.handle_channel_tag(pi_agent_id, entry)
 
                     # Update cursor
                     if ts:
@@ -966,6 +1016,77 @@ class SimulationEngine:
                         "[%s] Proposal in thread %s reviewed by PI",
                         agent.agent_id, thread_ts,
                     )
+
+    async def _reopen_thread(self, agent_id: str, thread_ts: str, pi_entry: LogEntry) -> None:
+        """Reopen a closed thread when a PI posts in it."""
+        self._closed_thread_ids.discard(thread_ts)
+        agent = self.agents.get(agent_id)
+        if not agent:
+            return
+
+        # Find the other agent from thread history
+        history = self.message_log.get_thread_history(thread_ts)
+        other_id = None
+        for entry in history:
+            if entry.sender_agent_id and entry.sender_agent_id != agent_id:
+                other_id = entry.sender_agent_id
+                break
+
+        if not other_id:
+            logger.warning("[%s] Cannot reopen thread %s — no other agent found", agent_id, thread_ts)
+            return
+
+        # Create fresh ThreadState for both agents
+        agent.state.active_threads[thread_ts] = ThreadState(
+            thread_id=thread_ts,
+            channel=pi_entry.channel,
+            other_agent_id=other_id,
+            message_count=0,  # Fresh cap
+            has_pending_reply=True,
+            pi_context=pi_entry.content,
+        )
+
+        other_agent = self.agents.get(other_id)
+        if other_agent:
+            other_agent.state.active_threads[thread_ts] = ThreadState(
+                thread_id=thread_ts,
+                channel=pi_entry.channel,
+                other_agent_id=agent_id,
+                message_count=0,
+                has_pending_reply=True,
+            )
+
+        logger.info("[%s] PI reopened closed thread %s with %s", agent_id, thread_ts, other_id)
+
+    async def _poll_pi_dms(self) -> None:
+        """Poll for DMs from PIs and process them via PIHandler."""
+        if not self._pi_handler or not self._pi_slack_id_to_agent_id:
+            return
+
+        for pi_slack_id, agent_id in self._pi_slack_id_to_agent_id.items():
+            client = self.slack_clients.get(agent_id)
+            if not client or not client.is_connected:
+                continue
+
+            oldest = self._dm_poll_cursors.get(agent_id, "0")
+            messages = client.poll_dm_messages(pi_slack_id, oldest=oldest)
+
+            for msg in messages:
+                ts = msg.get("ts", "")
+                text = msg.get("text", "").strip()
+                if not text:
+                    continue
+
+                logger.info("[%s] PI DM from %s: %s", agent_id, pi_slack_id, text[:80])
+
+                try:
+                    await self._pi_handler.handle_dm(agent_id, pi_slack_id, text)
+                except Exception as exc:
+                    logger.error("[%s] Failed to handle PI DM: %s", agent_id, exc, exc_info=True)
+
+                # Update cursor to this message
+                if ts > oldest:
+                    self._dm_poll_cursors[agent_id] = ts
 
     # ------------------------------------------------------------------
     # Message posting
@@ -1021,6 +1142,29 @@ class SimulationEngine:
     # ------------------------------------------------------------------
     # Setup helpers
     # ------------------------------------------------------------------
+
+    async def _load_pi_mappings(self) -> None:
+        """Load PI Slack user ID -> agent ID mapping from AgentRegistry."""
+        if not self.session_factory:
+            logger.info("No DB session — skipping PI mapping load")
+            return
+        try:
+            from sqlalchemy import select
+            from src.models import AgentRegistry
+            async with self.session_factory() as db:
+                result = await db.execute(
+                    select(AgentRegistry.agent_id, AgentRegistry.slack_user_id)
+                    .where(AgentRegistry.slack_user_id.isnot(None))
+                    .where(AgentRegistry.status == "active")
+                )
+                for row in result:
+                    self._pi_slack_id_to_agent_id[row.slack_user_id] = row.agent_id
+            if self._pi_slack_id_to_agent_id:
+                logger.info("Loaded PI mappings: %s", {v: k[:8] + "..." for k, v in self._pi_slack_id_to_agent_id.items()})
+            else:
+                logger.info("No PI Slack accounts linked yet")
+        except Exception as exc:
+            logger.warning("Failed to load PI mappings: %s", exc)
 
     def _ensure_seeded_channels(self) -> None:
         """Create any missing seeded channels and join relevant bots."""

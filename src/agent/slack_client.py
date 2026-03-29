@@ -28,6 +28,7 @@ class AgentSlackClient:
         self._client: WebClient | None = None
         self._bot_user_id: str | None = None
         self._channel_name_to_id: dict[str, str] = {}  # name -> ID cache
+        self._dm_channels: dict[str, str] = {}  # user_id -> DM channel_id
 
     def connect(self) -> bool:
         """Authenticate and cache bot user ID. Returns True on success."""
@@ -267,6 +268,47 @@ class AgentSlackClient:
         except SlackApiError as exc:
             logger.error("[%s] Failed to post to #%s: %s", self.agent_id, channel, exc)
             return None
+
+    # ------------------------------------------------------------------
+    # Direct messages
+    # ------------------------------------------------------------------
+
+    def open_dm_channel(self, user_id: str) -> str | None:
+        """Open a DM channel with a user. Returns the DM channel ID, cached."""
+        if user_id in self._dm_channels:
+            return self._dm_channels[user_id]
+        if not self._client:
+            return None
+        try:
+            result = self._call_with_retry(self._client.conversations_open, users=user_id)
+            ch_id = result["channel"]["id"]
+            self._dm_channels[user_id] = ch_id
+            return ch_id
+        except SlackApiError as exc:
+            logger.error("[%s] Failed to open DM with %s: %s", self.agent_id, user_id, exc)
+            return None
+
+    def send_dm(self, user_id: str, text: str) -> dict | None:
+        """Send a DM to a user. Returns message result or None."""
+        dm_channel = self.open_dm_channel(user_id)
+        if not dm_channel:
+            logger.warning("[%s] Cannot send DM — no channel for %s", self.agent_id, user_id)
+            return None
+        return self.post_message(dm_channel, text)
+
+    def poll_dm_messages(
+        self,
+        user_id: str,
+        oldest: str = "0",
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        """Poll for new DM messages from a specific user."""
+        dm_channel = self.open_dm_channel(user_id)
+        if not dm_channel:
+            return []
+        messages = self.poll_channel_messages(dm_channel, oldest=oldest, limit=limit)
+        # Filter to only messages from the target user (not from the bot)
+        return [m for m in messages if m.get("user") == user_id]
 
     # ------------------------------------------------------------------
     # Channel operations

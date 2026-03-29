@@ -12,6 +12,8 @@ class PostRef:
     sender_agent_id: str
     content_snippet: str  # first ~200 chars for LLM context
     posted_at: float
+    pi_priority: bool = False  # PI tagged this for engagement
+    pi_context: str | None = None  # PI's comment when tagging
 
 
 @dataclass
@@ -26,6 +28,7 @@ class ThreadState:
     status: str = "active"  # active | proposed | closed
     abstracts_other: int = 0  # tool-use counters
     full_text: int = 0
+    pi_context: str | None = None  # PI posted in this thread — their message
 
 
 @dataclass
