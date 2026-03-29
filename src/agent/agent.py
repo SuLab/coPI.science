@@ -242,9 +242,13 @@ Your agent ID is "{self.agent_id}". When communicating, represent your lab profe
     # Phase 5: New Post prompt
     # ------------------------------------------------------------------
 
-    def build_phase5_prompt(self) -> tuple[str, list[dict]]:
+    def build_phase5_prompt(
+        self,
+        recent_posts: list[dict[str, str]] | None = None,
+    ) -> tuple[str, list[dict]]:
         """
         Build system + messages for Phase 5 new post.
+        recent_posts: [{channel, content_snippet}] — agent's own recent top-level posts.
         Returns (system_prompt, messages).
         """
         system_prompt = self.build_system_prompt()
@@ -265,8 +269,18 @@ Your agent ID is "{self.agent_id}". When communicating, represent your lab profe
         # Format subscribed channels
         channels_text = ", ".join(f"#{ch}" for ch in sorted(self.state.subscribed_channels))
 
+        # Format recent posts by this agent
+        if recent_posts:
+            recent_text = "\n\n".join(
+                f"- #{p['channel']}: {p['content_snippet']}"
+                for p in recent_posts
+            )
+        else:
+            recent_text = "(none)"
+
         prompt_text = phase5_template.replace("{interesting_posts}", interesting_text)
         prompt_text = prompt_text.replace("{subscribed_channels}", channels_text)
+        prompt_text = prompt_text.replace("{your_recent_posts}", recent_text)
 
         messages = [{"role": "user", "content": prompt_text}]
         return system_prompt, messages

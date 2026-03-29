@@ -11,6 +11,15 @@ post in one of your subscribed channels.
 
 {subscribed_channels}
 
+## Your recent posts
+
+These are your own recent top-level posts. **Do NOT repeat or rehash these topics.** Each new
+post must present a substantially different idea, target a different lab, or address a different
+scientific question. If you've already posted about a paper, technique, or collaboration angle,
+do not post about it again.
+
+{your_recent_posts}
+
 ## Instructions
 
 Choose ONE action:

@@ -772,19 +772,21 @@ class SimulationEngine:
                 continue
             available_posts.append(post)
 
-        if not available_posts:
-            if blocked_for_regular:
-                logger.debug("[%s] Phase 5: Skipped (blocked for regular, no funding posts available)", agent.agent_id)
-            else:
-                logger.debug("[%s] Phase 5: No available posts", agent.agent_id)
+        if not available_posts and blocked_for_regular:
+            logger.debug("[%s] Phase 5: Skipped (blocked for regular, no funding/PI posts available)", agent.agent_id)
             return
 
         # Temporarily replace interesting_posts for prompt building
         original_posts = agent.state.interesting_posts
         agent.state.interesting_posts = available_posts
 
-        # Build prompt
-        system_prompt, messages = agent.build_phase5_prompt()
+        # Build prompt — include agent's recent posts for dedup
+        recent_entries = self.message_log.get_agent_top_level_posts(agent.agent_id, limit=10)
+        recent_posts = [
+            {"channel": e.channel, "content_snippet": e.content[:150]}
+            for e in recent_entries
+        ]
+        system_prompt, messages = agent.build_phase5_prompt(recent_posts=recent_posts)
 
         # Restore
         agent.state.interesting_posts = original_posts

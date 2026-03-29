@@ -93,6 +93,14 @@ class MessageLog:
         count += sum(1 for e in self._entries if e.thread_ts == thread_ts)
         return count
 
+    def get_agent_top_level_posts(self, agent_id: str, limit: int = 10) -> list[LogEntry]:
+        """Return the agent's own top-level posts, most recent first."""
+        posts = [
+            e for e in self._entries
+            if e.sender_agent_id == agent_id and e.thread_ts is None
+        ]
+        return posts[-limit:]
+
     def get_replies_to_agent_posts(
         self,
         agent_id: str,
