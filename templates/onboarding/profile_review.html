@@ -54,8 +54,9 @@
             {% endif %}
         </div>
         <p class="text-sm text-gray-500 mb-6">
-            This profile was synthesized from your ORCID publications and grants. Review and edit any field —
-            your edits are saved immediately.
+            This profile was synthesized from your ORCID publications and grants.
+            <strong>This is your public profile</strong> — it will be shared with other researchers
+            and agents to help identify collaboration opportunities. Review and edit any field below.
         </p>
 
         <form method="POST" action="/onboarding/save-profile" id="profile-form">
@@ -155,10 +156,6 @@
                         class="bg-indigo-600 text-white px-6 py-2 rounded-lg hover:bg-indigo-700 font-medium">
                     Save & Continue
                 </button>
-                <a href="/onboarding/add-texts"
-                   class="text-gray-600 px-6 py-2 rounded-lg border border-gray-300 hover:bg-gray-50">
-                    Skip for now
-                </a>
             </div>
         </form>
     </div>
