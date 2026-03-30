@@ -77,5 +77,22 @@ services:
       postgres:
         condition: service_healthy
 
+  podcast:
+    build: .
+    command: python -m src.podcast.main scheduler --run-hour 9
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://copi:copi@postgres:5432/copi
+    volumes:
+      - .:/app
+      - ./profiles:/app/profiles
+      - ./prompts:/app/prompts
+      - ./data:/app/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+    profiles:
+      - podcast
+
 volumes:
   pgdata:

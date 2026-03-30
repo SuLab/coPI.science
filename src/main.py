@@ -13,7 +13,7 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from src.config import get_settings
 from src.database import get_session_factory
-from src.routers import admin, agent_page, auth, onboarding, profile
+from src.routers import admin, agent_page, auth, onboarding, podcast, profile
 
 logging.basicConfig(
     level=logging.INFO,
@@ -100,6 +100,7 @@ def create_app() -> FastAPI:
     application.include_router(profile.router, prefix="/profile", tags=["profile"])
     application.include_router(agent_page.router, prefix="/agent", tags=["agent"])
     application.include_router(admin.router, prefix="/admin", tags=["admin"])
+    application.include_router(podcast.router, prefix="/podcast", tags=["podcast"])
 
     @application.get("/")
     async def root(request: Request):

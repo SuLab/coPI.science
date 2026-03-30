@@ -11,6 +11,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from src.config import get_settings
 from src.database import get_db
 from src.dependencies import get_admin_user, get_current_user
 from src.models import (
@@ -19,6 +20,7 @@ from src.models import (
     AgentRegistry,
     Job,
     LlmCallLog,
+    PodcastEpisode,
     Publication,
     ResearcherProfile,
     SimulationRun,
@@ -934,6 +936,48 @@ async def impersonate_user(
         secure=not request.app.state.allow_http if hasattr(request.app.state, "allow_http") else False,
     )
     return response
+
+
+@router.get("/podcast", response_class=HTMLResponse)
+async def admin_podcast(
+    request: Request,
+    agent_filter: str | None = None,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_admin_user),
+):
+    """Podcast episodes overview."""
+    query = select(PodcastEpisode).order_by(PodcastEpisode.episode_date.desc()).limit(200)
+    result = await db.execute(query)
+    all_episodes = result.scalars().all()
+
+    # Apply agent filter
+    episodes = [e for e in all_episodes if not agent_filter or e.agent_id == agent_filter]
+
+    # Summary stats
+    total = len(all_episodes)
+    with_audio = sum(1 for e in all_episodes if e.audio_file_path)
+    slack_delivered = sum(1 for e in all_episodes if e.slack_delivered)
+    agent_ids = sorted({e.agent_id for e in all_episodes})
+
+    settings = get_settings()
+    base_url = settings.podcast_base_url or settings.base_url
+
+    return templates.TemplateResponse(
+        request,
+        "admin/podcast.html",
+        _template_context(
+            request,
+            current_user,
+            active_admin="podcast",
+            episodes=episodes,
+            total=total,
+            with_audio=with_audio,
+            slack_delivered=slack_delivered,
+            agent_ids=agent_ids,
+            agent_filter=agent_filter,
+            base_url=base_url,
+        ),
+    )
 
 
 @router.post("/impersonate/stop")

@@ -32,6 +32,7 @@ All specs are in `/specs/`:
 - `profile-ingestion.md` — 9-step pipeline, ORCID → PubMed → PMC → LLM
 - `admin-dashboard.md` — read-only, server-rendered, impersonation
 - `agent-system.md` — Slack Bolt, Socket Mode, two-phase LLM calls, simulation engine
+- `labbot-podcast.md` — daily personalized research briefing: PubMed search, LLM selection/summarization, ElevenLabs TTS, Slack DM delivery, per-PI RSS podcast feed
 
 ## Tech Stack
 
