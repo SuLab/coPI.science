@@ -1,0 +1,12 @@
+*Today's Research Brief — April 02, 2026*
+
+*A computer-aided drug repurposing: the antibacterial agents targeting GroEL.*
+Authors not available · British journal of pharmacology · 2026
+
+*What they found:*
+Using a three-step computational workflow (essential gene target screening via CEG 2.0, drug candidate filtering via DrugBank and antiBac-Pred with molecular docking/MD simulations, and in vitro validation), the authors identified daprodustat and ezetimibe as repurposable antibacterial agents targeting the bacterial chaperone GroEL. Both drugs showed activity against *Staphylococcus aureus* and *Escherichia coli* ΔtolC, with the efflux pump inhibitor PAβN further enhancing daprodustat's efficacy against both species and ezetimibe's potency specifically against *S. aureus*. MD simulations confirmed stable binding of both drugs to GroEL orthologs in each organism.
+
+*Why this matters for your lab:*
+This paper represents a fairly traditional structure-based drug repurposing pipeline (docking + MD + in vitro), which contrasts sharply with the knowledge graph–driven and graph neural network approaches your lab uses in tools like DBR-X and MechRepoNet. The workflow relies on DrugBank — a source already integrated into BioThings Explorer — but doesn't leverage heterogeneous knowledge graphs, path-based mechanistic reasoning, or claims data validation, which are hallmarks of your repurposing strategy. The methodological overlap is limited: there's no knowledge graph component, no explainability framework, and no mechanism-of-action path curation akin to DrugMechDB. That said, the identified drug-target-pathogen relationships (daprodustat→GroEL, ezetimibe→GroEL) could serve as testable edges in your knowledge graphs if your lab ever expands drug repurposing efforts into infectious disease beyond SARS-CoV-2, but the immediate utility is low.
+
+*PubMed:* https://pubmed.ncbi.nlm.nih.gov/41239775/

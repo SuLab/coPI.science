@@ -213,7 +213,7 @@ async def run_pipeline_for_agent(
     Returns True if an episode was produced and recorded.
     """
     from src.models.podcast import PodcastEpisode
-    from src.podcast.elevenlabs import generate_audio, get_audio_duration_seconds
+    from src.podcast.mistral_tts import generate_audio, get_audio_duration_seconds
     from src.podcast.pubmed_search import build_queries, fetch_candidates
     from src.podcast.state import get_delivered_pmids, record_delivery
 

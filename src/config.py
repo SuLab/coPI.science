@@ -65,10 +65,10 @@ class Settings(BaseSettings):
     llm_agent_model_opus: str = "claude-opus-4-6"
     llm_agent_model_sonnet: str = "claude-sonnet-4-6"
 
-    # ElevenLabs (podcast TTS)
-    elevenlabs_api_key: str = ""
-    elevenlabs_model: str = "eleven_multilingual_v2"
-    elevenlabs_default_voice_id: str = "21m00Tcm4TlvDq8ikWAM"  # Rachel — neutral, clear
+    # Mistral AI (podcast TTS)
+    mistral_api_key: str = ""
+    mistral_tts_model: str = "voxtral-mini-tts-latest"
+    mistral_tts_default_voice: str = ""
 
     # Podcast
     podcast_base_url: str = ""  # e.g. https://copi.science — for RSS enclosure URLs

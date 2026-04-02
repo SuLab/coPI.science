@@ -2,7 +2,7 @@
 
 ## Overview
 
-LabBot Podcast is a daily personalized research briefing service for each PI. It surfaces the single most relevant and impactful recent publication from the scientific literature based on the PI's profile, generates a structured text summary highlighting findings and tools useful to the PI's ongoing work, and produces a short audio episode via ElevenLabs TTS. PIs receive the text summary via Slack DM from their lab bot and can subscribe to a per-PI RSS podcast feed to listen to the audio.
+LabBot Podcast is a daily personalized research briefing service for each PI. It surfaces the single most relevant and impactful recent publication from the scientific literature based on the PI's profile, generates a structured text summary highlighting findings and tools useful to the PI's ongoing work, and produces a short audio episode via Mistral AI TTS. PIs receive the text summary via Slack DM from their lab bot and can subscribe to a per-PI RSS podcast feed to listen to the audio.
 
 The system runs once per day (alongside GrantBot) and requires no PI interaction to be useful — but PIs can tune it through the same standing-instruction DM mechanism used by the agent system.
 
@@ -31,8 +31,8 @@ LabBot Podcast runs as a separate Docker container (`podcast` service), mirrorin
 
 ### New External Dependency
 
-**ElevenLabs API** — text-to-speech generation.
-- Configured via `ELEVENLABS_API_KEY` environment variable
+**Mistral AI API** — text-to-speech generation.
+- Configured via `MISTRAL_API_KEY` environment variable
 - Voice selection per agent configured in `data/podcast_voices.json` (agent_id → voice_id); falls back to a default voice if not set
 - Audio files stored at `data/podcast_audio/{agent_id}/{YYYY-MM-DD}.mp3`
 
@@ -73,13 +73,13 @@ One LLM call (Opus) with:
 
 Output is a structured text summary (see format below). This is the content delivered to the PI via Slack and used as the TTS input.
 
-### Step 5: Generate Audio (ElevenLabs)
+### Step 5: Generate Audio (Mistral AI)
 
-Pass the text summary to the ElevenLabs TTS API:
+Pass the text summary to the Mistral AI TTS API:
 - Voice: agent-specific or default
-- Model: `eleven_multilingual_v2` (configurable via `ELEVENLABS_MODEL`)
+- Model: configurable via `MISTRAL_TTS_MODEL`
 - Output: MP3 file saved to `data/podcast_audio/{agent_id}/{YYYY-MM-DD}.mp3`
-- If ElevenLabs call fails, continue — Slack text delivery still proceeds
+- If Mistral TTS call fails, continue — Slack text delivery still proceeds
 
 ### Step 6: Serve Audio via RSS
 
@@ -239,9 +239,9 @@ New environment variables:
 
 | Variable | Required | Description |
 |---|---|---|
-| `ELEVENLABS_API_KEY` | Yes (for audio) | ElevenLabs API key |
-| `ELEVENLABS_MODEL` | No | TTS model ID (default: `eleven_multilingual_v2`) |
-| `ELEVENLABS_DEFAULT_VOICE_ID` | No | Default voice when no per-agent override exists |
+| `MISTRAL_API_KEY` | Yes (for audio) | Mistral AI API key |
+| `MISTRAL_TTS_MODEL` | No | TTS model ID (default: `mistral-tts-latest`) |
+| `MISTRAL_TTS_DEFAULT_VOICE` | No | Default voice when no per-agent override exists |
 | `PODCAST_BASE_URL` | Yes | Public base URL for RSS enclosure links (e.g., `https://copi.science`) |
 | `PODCAST_SEARCH_WINDOW_DAYS` | No | Rolling search window in days (default: `14`) |
 | `PODCAST_MAX_CANDIDATES` | No | Max PubMed abstracts per agent per day (default: `50`) |
@@ -284,7 +284,7 @@ src/podcast/
 ├── main.py          # Scheduler entry point (APScheduler, same pattern as grantbot.py)
 ├── pipeline.py      # Per-agent pipeline (steps 1–8 above)
 ├── pubmed_search.py # Query builder from ResearcherProfile
-├── elevenlabs.py    # ElevenLabs TTS client wrapper
+├── mistral_tts.py   # Mistral AI TTS client wrapper
 ├── rss.py           # RSS feed builder (reads from DB)
 └── state.py         # podcast_state.json read/write helpers
 
@@ -331,7 +331,7 @@ The bot's private profile rewrite (via `prompts/pi-profile-rewrite.md`) should i
 - No audio, no RSS
 
 ### Phase 2: Audio + RSS
-- ElevenLabs TTS integration
+- Mistral AI TTS integration
 - Audio file storage and streaming endpoint
 - RSS feed generation and `/podcast/{agent_id}/feed.xml` endpoint
 - Per-agent voice configuration
