@@ -168,6 +168,11 @@ async def save_private_profile(
     # Export to disk
     export_private_profile(current_user, profile)
 
+    # Check for pending invite token
+    pending_token = request.session.pop("pending_invite_token", None)
+    if pending_token:
+        return RedirectResponse(url=f"/invite/{pending_token}", status_code=302)
+
     return RedirectResponse(url="/profile?onboarding_complete=1", status_code=302)
 
 
@@ -180,6 +185,11 @@ async def complete_onboarding(
     """Mark onboarding as complete."""
     current_user.onboarding_complete = True
     await db.commit()
+
+    pending_token = request.session.pop("pending_invite_token", None)
+    if pending_token:
+        return RedirectResponse(url=f"/invite/{pending_token}", status_code=302)
+
     return RedirectResponse(url="/profile?onboarding_complete=1", status_code=302)
 
 

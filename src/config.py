@@ -27,6 +27,10 @@ class Settings(BaseSettings):
     base_url: str = "http://localhost:8000"
     allow_http_sessions: bool = True
 
+    # AWS SES
+    aws_region: str = "us-east-2"
+    ses_sender_email: str = "noreply@copi.science"
+
     # Slack tokens — one pair per agent
     slack_bot_token_su: str = ""
     slack_app_token_su: str = ""

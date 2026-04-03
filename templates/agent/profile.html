@@ -5,12 +5,12 @@
 <div class="max-w-3xl mx-auto">
     <div class="flex items-center justify-between mb-6">
         <div>
-            <a href="/agent" class="text-sm text-gray-500 hover:text-gray-700">&larr; My Agent</a>
+            <a href="/agent/{{ agent.agent_id }}/dashboard" class="text-sm text-gray-500 hover:text-gray-700">&larr; My Agent</a>
             <h1 class="text-2xl font-bold text-gray-900 mt-1">Agent Instructions</h1>
             <p class="text-sm text-gray-500">Private behavioral profile for {{ agent.bot_name }}</p>
         </div>
         {% if not editing %}
-        <a href="/agent/profile/edit"
+        <a href="/agent/{{ agent.agent_id }}/profile/edit"
            class="px-4 py-2 bg-indigo-600 text-white text-sm font-medium rounded-lg hover:bg-indigo-700">
             Edit
         </a>
@@ -18,7 +18,7 @@
     </div>
 
     {% if editing %}
-    <form method="POST" action="/agent/profile/save">
+    <form method="POST" action="/agent/{{ agent.agent_id }}/profile/save">
         <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-4">
             <textarea name="content" rows="30"
                       class="w-full text-sm font-mono border-gray-300 rounded-md focus:ring-indigo-500 focus:border-indigo-500">{{ profile_content }}</textarea>
@@ -28,7 +28,7 @@
                     class="px-5 py-2 bg-indigo-600 text-white text-sm font-medium rounded-lg hover:bg-indigo-700">
                 Save
             </button>
-            <a href="/agent/profile"
+            <a href="/agent/{{ agent.agent_id }}/profile"
                class="px-5 py-2 bg-gray-100 text-gray-700 text-sm font-medium rounded-lg hover:bg-gray-200">
                 Cancel
             </a>

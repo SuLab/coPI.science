@@ -13,7 +13,7 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from src.config import get_settings
 from src.database import get_session_factory
-from src.routers import admin, agent_page, auth, onboarding, profile
+from src.routers import admin, agent_page, auth, invite, onboarding, profile
 
 logging.basicConfig(
     level=logging.INFO,
@@ -33,34 +33,46 @@ class AgentBadgeMiddleware(BaseHTTPMiddleware):
         effective_user_id = impersonate_id or user_id_str
         if effective_user_id:
             try:
-                from src.models import AgentRegistry, ProposalReview, ThreadDecision
+                from src.models import AgentDelegate, AgentRegistry, ProposalReview, ThreadDecision
                 session_factory = get_session_factory()
                 async with session_factory() as db:
-                    # Get agent for this user
-                    result = await db.execute(
+                    uid = uuid.UUID(effective_user_id)
+
+                    # Get all agent_ids the user has access to (own + delegated)
+                    own_result = await db.execute(
                         select(AgentRegistry.agent_id).where(
-                            AgentRegistry.user_id == uuid.UUID(effective_user_id),
+                            AgentRegistry.user_id == uid,
                             AgentRegistry.status == "active",
                         )
                     )
-                    row = result.first()
-                    if row:
-                        aid = row[0]
-                        # Count proposals not yet reviewed by this agent
-                        total_result = await db.execute(
-                            select(func.count(ThreadDecision.id)).where(
-                                ThreadDecision.outcome == "proposal",
-                                (ThreadDecision.agent_a == aid) | (ThreadDecision.agent_b == aid),
-                            )
+                    delegated_result = await db.execute(
+                        select(AgentRegistry.agent_id)
+                        .join(AgentDelegate, AgentDelegate.agent_registry_id == AgentRegistry.id)
+                        .where(
+                            AgentDelegate.user_id == uid,
+                            AgentRegistry.status == "active",
                         )
-                        total = total_result.scalar() or 0
-                        reviewed_result = await db.execute(
-                            select(func.count(ProposalReview.id)).where(
-                                ProposalReview.agent_id == aid
+                    )
+                    agent_ids = [r[0] for r in own_result] + [r[0] for r in delegated_result]
+
+                    if agent_ids:
+                        badge_count = 0
+                        for aid in agent_ids:
+                            total_result = await db.execute(
+                                select(func.count(ThreadDecision.id)).where(
+                                    ThreadDecision.outcome == "proposal",
+                                    (ThreadDecision.agent_a == aid) | (ThreadDecision.agent_b == aid),
+                                )
                             )
-                        )
-                        reviewed = reviewed_result.scalar() or 0
-                        request.state.agent_badge_count = max(0, total - reviewed)
+                            total = total_result.scalar() or 0
+                            reviewed_result = await db.execute(
+                                select(func.count(ProposalReview.id)).where(
+                                    ProposalReview.agent_id == aid
+                                )
+                            )
+                            reviewed = reviewed_result.scalar() or 0
+                            badge_count += max(0, total - reviewed)
+                        request.state.agent_badge_count = badge_count
             except Exception:
                 pass
         return await call_next(request)
@@ -100,6 +112,7 @@ def create_app() -> FastAPI:
     application.include_router(profile.router, prefix="/profile", tags=["profile"])
     application.include_router(agent_page.router, prefix="/agent", tags=["agent"])
     application.include_router(admin.router, prefix="/admin", tags=["admin"])
+    application.include_router(invite.router, tags=["invite"])
 
     @application.get("/")
     async def root(request: Request):

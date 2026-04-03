@@ -9,10 +9,12 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import distinct, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from src.database import get_db
-from src.dependencies import get_current_user
+from src.dependencies import get_agent_with_access, get_current_user
 from src.models import (
+    AgentDelegate,
     AgentMessage,
     AgentRegistry,
     ProposalReview,
@@ -48,26 +50,45 @@ def _template_context(request: Request, user: User, **kwargs) -> dict:
 
 
 # --------------------------------------------------------------------------
-# Main dashboard
+# Landing page — agent listing / auto-redirect
 # --------------------------------------------------------------------------
 
 
 @router.get("", response_class=HTMLResponse)
-async def my_agent(
+async def agent_landing(
     request: Request,
-    slack_error: str | None = None,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """My Agent page — dispatches to one of three states."""
-    # Look up agent record for this user
+    """Agent landing page — lists all agents the user has access to."""
+    # Own agent
     result = await db.execute(
         select(AgentRegistry).where(AgentRegistry.user_id == current_user.id)
     )
-    agent = result.scalar_one_or_none()
+    own_agent = result.scalar_one_or_none()
 
-    if not agent:
-        # State 1: No agent
+    # Delegated agents
+    delegated_result = await db.execute(
+        select(AgentRegistry)
+        .join(AgentDelegate, AgentDelegate.agent_registry_id == AgentRegistry.id)
+        .where(AgentDelegate.user_id == current_user.id)
+    )
+    delegated_agents = delegated_result.scalars().all()
+
+    # Collect all accessible agents
+    all_agents = []
+    if own_agent:
+        all_agents.append(own_agent)
+    all_agents.extend(delegated_agents)
+
+    # Auto-redirect if exactly one agent and it's active
+    if len(all_agents) == 1 and all_agents[0].status == "active":
+        return RedirectResponse(
+            url=f"/agent/{all_agents[0].agent_id}/dashboard", status_code=302
+        )
+
+    # No agents at all — show request page
+    if not all_agents:
         has_profile = (
             current_user.onboarding_complete
             and current_user.profile
@@ -81,16 +102,47 @@ async def my_agent(
             ),
         )
 
-    if agent.status == "pending":
-        # State 2: Pending approval
+    # Single agent but pending — show request page
+    if len(all_agents) == 1 and own_agent and own_agent.status == "pending":
         return templates.TemplateResponse(
             request,
             "agent/request.html",
-            _template_context(request, current_user, agent=agent),
+            _template_context(request, current_user, agent=own_agent),
         )
 
-    # State 3: Active agent — show dashboard
+    # Multiple agents (or single delegated) — show listing
+    return templates.TemplateResponse(
+        request,
+        "agent/listing.html",
+        _template_context(
+            request,
+            current_user,
+            own_agent=own_agent,
+            delegated_agents=delegated_agents,
+        ),
+    )
+
+
+# --------------------------------------------------------------------------
+# Agent dashboard
+# --------------------------------------------------------------------------
+
+
+@router.get("/{agent_id}/dashboard", response_class=HTMLResponse)
+async def agent_dashboard(
+    agent_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Agent dashboard — shows stats, proposals, and settings."""
+    agent, is_owner = await get_agent_with_access(agent_id, db, current_user)
+
+    if agent.status != "active":
+        return RedirectResponse(url="/agent", status_code=302)
+
     aid = agent.agent_id
+    slack_error = request.query_params.get("slack_error")
 
     # Stats
     posts_count_result = await db.execute(
@@ -135,7 +187,6 @@ async def my_agent(
         other = p.agent_b if p.agent_a == aid else p.agent_a
         entry = {"proposal": p, "other_agent": other}
         if p.id in reviewed_ids:
-            # Get the review
             rev_result = await db.execute(
                 select(ProposalReview).where(
                     ProposalReview.thread_decision_id == p.id,
@@ -151,10 +202,42 @@ async def my_agent(
     private_profile_path = PROFILES_DIR / "private" / f"{aid}.md"
     has_private_profile = private_profile_path.exists()
 
-    # Resolve delegate display names
+    # Resolve delegate display names (legacy Slack-only delegates)
     delegates = []
     if agent.delegate_slack_ids:
         delegates = _resolve_delegate_names(agent.delegate_slack_ids)
+
+    # Pending invitations (for PI view)
+    from src.models import DelegateInvitation
+    pending_invitations = []
+    if is_owner:
+        pending_result = await db.execute(
+            select(DelegateInvitation).where(
+                DelegateInvitation.agent_registry_id == agent.id,
+                DelegateInvitation.status == "pending",
+            ).order_by(DelegateInvitation.created_at.desc())
+        )
+        pending_invitations = pending_result.scalars().all()
+
+    # Web delegates
+    web_delegates_result = await db.execute(
+        select(AgentDelegate)
+        .options(selectinload(AgentDelegate.user))
+        .where(AgentDelegate.agent_registry_id == agent.id)
+    )
+    web_delegates = web_delegates_result.scalars().all()
+
+    # Check if current delegate user has Slack linked
+    delegate_has_slack = True
+    if not is_owner:
+        delegate_slack_ids = agent.delegate_slack_ids or []
+        # Check if any of the delegate's possible Slack IDs are in the list
+        # For now, we check by trying to find their user in the web delegates
+        delegate_has_slack = any(
+            _user_slack_id_in_list(wd.user, delegate_slack_ids)
+            for wd in web_delegates
+            if wd.user_id == current_user.id
+        )
 
     return templates.TemplateResponse(
         request,
@@ -163,6 +246,7 @@ async def my_agent(
             request,
             current_user,
             agent=agent,
+            is_owner=is_owner,
             posts_count=posts_count,
             threads_count=threads_count,
             proposals_total=len(proposals),
@@ -172,9 +256,19 @@ async def my_agent(
             slack_invite_url=SLACK_INVITE_URL,
             slack_error=slack_error,
             delegates=delegates,
+            web_delegates=web_delegates,
+            pending_invitations=pending_invitations,
+            delegate_has_slack=delegate_has_slack,
             delegate_error=request.query_params.get("delegate_error"),
         ),
     )
+
+
+def _user_slack_id_in_list(user: User, slack_ids: list[str]) -> bool:
+    """Check if a user's email maps to any Slack ID in the list (heuristic)."""
+    # We can't check without calling Slack API, so for now always return False
+    # This gets properly resolved in Step 5 (Slack sync)
+    return False
 
 
 # --------------------------------------------------------------------------
@@ -189,23 +283,18 @@ async def request_agent(
     current_user: User = Depends(get_current_user),
 ):
     """Submit an agent request."""
-    # Must have complete profile
     if not current_user.onboarding_complete or not current_user.profile:
         raise HTTPException(status_code=400, detail="Complete your profile first")
 
-    # Check if already has an agent
     existing = await db.execute(
         select(AgentRegistry).where(AgentRegistry.user_id == current_user.id)
     )
     if existing.scalar_one_or_none():
         return RedirectResponse(url="/agent", status_code=302)
 
-    # Create pending agent request
-    # agent_id is the last name, lowercased, ASCII-only
     last_name = current_user.name.split()[-1].lower()
     agent_id = "".join(c for c in last_name if c.isalpha())
 
-    # Ensure uniqueness — append first initial if collision
     collision = await db.execute(
         select(AgentRegistry).where(AgentRegistry.agent_id == agent_id)
     )
@@ -231,8 +320,9 @@ async def request_agent(
 # --------------------------------------------------------------------------
 
 
-@router.post("/proposals/{thread_decision_id}/review")
+@router.post("/{agent_id}/proposals/{thread_decision_id}/review")
 async def review_proposal(
+    agent_id: str,
     thread_decision_id: uuid.UUID,
     request: Request,
     rating: int = Form(...),
@@ -244,15 +334,8 @@ async def review_proposal(
     if rating < 1 or rating > 4:
         raise HTTPException(status_code=400, detail="Rating must be 1-4")
 
-    # Get agent for current user
-    agent_result = await db.execute(
-        select(AgentRegistry).where(AgentRegistry.user_id == current_user.id)
-    )
-    agent = agent_result.scalar_one_or_none()
-    if not agent:
-        raise HTTPException(status_code=404, detail="No agent found")
+    agent, is_owner = await get_agent_with_access(agent_id, db, current_user)
 
-    # Verify the thread decision exists and involves this agent
     td_result = await db.execute(
         select(ThreadDecision).where(ThreadDecision.id == thread_decision_id)
     )
@@ -262,7 +345,6 @@ async def review_proposal(
     if agent.agent_id not in (td.agent_a, td.agent_b):
         raise HTTPException(status_code=403, detail="Not your proposal")
 
-    # Check for existing review
     existing = await db.execute(
         select(ProposalReview).where(
             ProposalReview.thread_decision_id == thread_decision_id,
@@ -275,18 +357,20 @@ async def review_proposal(
     review = ProposalReview(
         thread_decision_id=thread_decision_id,
         agent_id=agent.agent_id,
-        user_id=current_user.id,
+        user_id=agent.user_id,  # Always the PI
+        delegate_user_id=current_user.id if not is_owner else None,
         rating=rating,
         comment=comment.strip() or None,
     )
     db.add(review)
     await db.commit()
 
-    return RedirectResponse(url="/agent", status_code=302)
+    return RedirectResponse(url=f"/agent/{agent_id}/dashboard", status_code=302)
 
 
-@router.post("/proposals/{thread_decision_id}/reopen")
+@router.post("/{agent_id}/proposals/{thread_decision_id}/reopen")
 async def reopen_proposal(
+    agent_id: str,
     thread_decision_id: uuid.UUID,
     request: Request,
     guidance: str = Form(...),
@@ -298,15 +382,8 @@ async def reopen_proposal(
     if not guidance:
         raise HTTPException(status_code=400, detail="Guidance text is required")
 
-    # Get agent for current user
-    agent_result = await db.execute(
-        select(AgentRegistry).where(AgentRegistry.user_id == current_user.id)
-    )
-    agent = agent_result.scalar_one_or_none()
-    if not agent:
-        raise HTTPException(status_code=404, detail="No agent found")
+    agent, is_owner = await get_agent_with_access(agent_id, db, current_user)
 
-    # Verify the thread decision exists and involves this agent
     td_result = await db.execute(
         select(ThreadDecision).where(ThreadDecision.id == thread_decision_id)
     )
@@ -329,7 +406,6 @@ async def reopen_proposal(
 
         client = WebClient(token=bot_token)
 
-        # Resolve channel name to ID
         channels_result = client.conversations_list(types="public_channel,private_channel", limit=200)
         channel_id = None
         for ch in channels_result.get("channels", []):
@@ -340,7 +416,6 @@ async def reopen_proposal(
         if not channel_id:
             raise HTTPException(status_code=500, detail=f"Channel #{td.channel} not found")
 
-        # Post as the bot, attributing to PI
         message = f"*PI guidance from {current_user.name}:*\n\n{guidance}"
         client.chat_postMessage(
             channel=channel_id,
@@ -357,7 +432,6 @@ async def reopen_proposal(
         logger.error("Failed to post PI guidance to Slack: %s", exc)
         raise HTTPException(status_code=500, detail=f"Failed to post to Slack: {str(exc)[:100]}")
 
-    # Mark as reviewed (so the proposal thread poll picks it up and reopens)
     existing = await db.execute(
         select(ProposalReview).where(
             ProposalReview.thread_decision_id == thread_decision_id,
@@ -368,14 +442,15 @@ async def reopen_proposal(
         review = ProposalReview(
             thread_decision_id=thread_decision_id,
             agent_id=agent.agent_id,
-            user_id=current_user.id,
+            user_id=agent.user_id,  # Always the PI
+            delegate_user_id=current_user.id if not is_owner else None,
             rating=0,  # 0 = reopened with guidance, not a rating
             comment=f"[Reopened] {guidance[:500]}",
         )
         db.add(review)
         await db.commit()
 
-    return RedirectResponse(url="/agent", status_code=302)
+    return RedirectResponse(url=f"/agent/{agent_id}/dashboard", status_code=302)
 
 
 # --------------------------------------------------------------------------
@@ -383,18 +458,16 @@ async def reopen_proposal(
 # --------------------------------------------------------------------------
 
 
-@router.get("/profile", response_class=HTMLResponse)
+@router.get("/{agent_id}/profile", response_class=HTMLResponse)
 async def view_private_profile(
+    agent_id: str,
     request: Request,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """View agent's private profile."""
-    agent_result = await db.execute(
-        select(AgentRegistry).where(AgentRegistry.user_id == current_user.id)
-    )
-    agent = agent_result.scalar_one_or_none()
-    if not agent or agent.status != "active":
+    agent, is_owner = await get_agent_with_access(agent_id, db, current_user)
+    if agent.status != "active":
         return RedirectResponse(url="/agent", status_code=302)
 
     profile_path = PROFILES_DIR / "private" / f"{agent.agent_id}.md"
@@ -404,23 +477,22 @@ async def view_private_profile(
         request,
         "agent/profile.html",
         _template_context(
-            request, current_user, agent=agent, profile_content=content, editing=False
+            request, current_user, agent=agent, is_owner=is_owner,
+            profile_content=content, editing=False,
         ),
     )
 
 
-@router.get("/profile/edit", response_class=HTMLResponse)
+@router.get("/{agent_id}/profile/edit", response_class=HTMLResponse)
 async def edit_private_profile(
+    agent_id: str,
     request: Request,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """Edit agent's private profile."""
-    agent_result = await db.execute(
-        select(AgentRegistry).where(AgentRegistry.user_id == current_user.id)
-    )
-    agent = agent_result.scalar_one_or_none()
-    if not agent or agent.status != "active":
+    agent, is_owner = await get_agent_with_access(agent_id, db, current_user)
+    if agent.status != "active":
         return RedirectResponse(url="/agent", status_code=302)
 
     profile_path = PROFILES_DIR / "private" / f"{agent.agent_id}.md"
@@ -430,75 +502,69 @@ async def edit_private_profile(
         request,
         "agent/profile.html",
         _template_context(
-            request, current_user, agent=agent, profile_content=content, editing=True
+            request, current_user, agent=agent, is_owner=is_owner,
+            profile_content=content, editing=True,
         ),
     )
 
 
-@router.post("/profile/save")
+@router.post("/{agent_id}/profile/save")
 async def save_private_profile(
+    agent_id: str,
     request: Request,
     content: str = Form(...),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """Save private profile to disk and database."""
-    agent_result = await db.execute(
-        select(AgentRegistry).where(AgentRegistry.user_id == current_user.id)
-    )
-    agent = agent_result.scalar_one_or_none()
-    if not agent or agent.status != "active":
+    agent, is_owner = await get_agent_with_access(agent_id, db, current_user)
+    if agent.status != "active":
         return RedirectResponse(url="/agent", status_code=302)
 
-    # Write to disk
     profile_path = PROFILES_DIR / "private" / f"{agent.agent_id}.md"
     profile_path.parent.mkdir(parents=True, exist_ok=True)
     profile_path.write_text(content)
 
-    # Persist to DB
+    # Persist to DB — use the PI's user_id, not the delegate's
     profile_result = await db.execute(
-        select(ResearcherProfile).where(ResearcherProfile.user_id == current_user.id)
+        select(ResearcherProfile).where(ResearcherProfile.user_id == agent.user_id)
     )
     profile = profile_result.scalar_one_or_none()
     if profile:
         profile.private_profile_md = content.strip() or None
         await db.commit()
 
-    return RedirectResponse(url="/agent/profile", status_code=302)
+    return RedirectResponse(url=f"/agent/{agent_id}/profile", status_code=302)
 
 
 # --------------------------------------------------------------------------
-# Slack username
+# Slack connection (PI only)
 # --------------------------------------------------------------------------
 
 
-@router.post("/slack")
+@router.post("/{agent_id}/slack")
 async def connect_slack(
+    agent_id: str,
     request: Request,
     email: str = Form(...),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """Look up the PI's Slack user ID from their email address."""
-    agent_result = await db.execute(
-        select(AgentRegistry).where(AgentRegistry.user_id == current_user.id)
-    )
-    agent = agent_result.scalar_one_or_none()
-    if not agent:
-        return RedirectResponse(url="/agent", status_code=302)
+    agent, is_owner = await get_agent_with_access(agent_id, db, current_user)
+    if not is_owner:
+        raise HTTPException(status_code=403, detail="Only the PI can connect Slack")
 
     email = email.strip()
     slack_user_id = None
     error = None
 
-    # Use any available bot token to do the lookup
     try:
         from slack_sdk import WebClient
         from src.config import get_settings
         settings = get_settings()
         env_tokens = settings.get_slack_tokens()
 
-        # Find first valid bot token
         bot_token = None
         for tokens in env_tokens.values():
             t = tokens.get("bot", "")
@@ -523,12 +589,10 @@ async def connect_slack(
     if slack_user_id:
         agent.slack_user_id = slack_user_id
         await db.commit()
-        return RedirectResponse(url="/agent", status_code=302)
+        return RedirectResponse(url=f"/agent/{agent_id}/dashboard", status_code=302)
 
-    # Re-render dashboard with error
-    # We need to rebuild the full dashboard context
     return RedirectResponse(
-        url="/agent?slack_error=" + (error or "Unknown error"),
+        url=f"/agent/{agent_id}/dashboard?slack_error=" + (error or "Unknown error"),
         status_code=302,
     )
 
@@ -565,28 +629,27 @@ def _resolve_delegate_names(slack_ids: list[str]) -> list[dict]:
 
 
 # --------------------------------------------------------------------------
-# Delegate management
+# Delegate Slack connection
 # --------------------------------------------------------------------------
 
 
-@router.post("/delegates/add")
-async def add_delegate(
+@router.post("/{agent_id}/delegates/connect-slack")
+async def delegate_connect_slack(
+    agent_id: str,
     request: Request,
-    email: str = Form(...),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Add a delegate Slack account to this agent."""
-    agent_result = await db.execute(
-        select(AgentRegistry).where(AgentRegistry.user_id == current_user.id)
-    )
-    agent = agent_result.scalar_one_or_none()
-    if not agent or agent.status != "active":
-        return RedirectResponse(url="/agent", status_code=302)
+    """Let a delegate link their Slack account to this agent."""
+    agent, is_owner = await get_agent_with_access(agent_id, db, current_user)
 
-    email = email.strip()
+    if not current_user.email:
+        return RedirectResponse(
+            url=f"/agent/{agent_id}/dashboard?slack_error=No email on your account.",
+            status_code=302,
+        )
+
     error = None
-
     try:
         from slack_sdk import WebClient
         bot_token = _get_bot_token()
@@ -594,63 +657,205 @@ async def add_delegate(
             error = "No Slack bot token available."
         else:
             client = WebClient(token=bot_token)
-            result = client.users_lookupByEmail(email=email)
-            slack_user_id = result["user"]["id"]
-
-            # Don't add if it's the primary PI
-            if slack_user_id == agent.slack_user_id:
-                error = "That's your own account — no need to add as delegate."
-            else:
-                # Don't add duplicates
-                current_delegates = list(agent.delegate_slack_ids or [])
-                if slack_user_id in current_delegates:
-                    error = "That account is already a delegate."
-                else:
-                    current_delegates.append(slack_user_id)
-                    agent.delegate_slack_ids = current_delegates
-                    await db.commit()
-                    logger.info(
-                        "Delegate %s added to agent %s by %s",
-                        slack_user_id, agent.agent_id, current_user.name,
-                    )
-                    return RedirectResponse(url="/agent", status_code=302)
+            result = client.users_lookupByEmail(email=current_user.email)
+            sid = result["user"]["id"]
+            current_ids = list(agent.delegate_slack_ids or [])
+            if sid not in current_ids:
+                current_ids.append(sid)
+                agent.delegate_slack_ids = current_ids
+                await db.commit()
+            return RedirectResponse(url=f"/agent/{agent_id}/dashboard", status_code=302)
     except Exception as exc:
         error_msg = str(exc)
         if "users_not_found" in error_msg:
-            error = f"No Slack user found with email {email}."
+            error = f"No Slack account found for {current_user.email}. Please join the workspace first."
         else:
-            logger.warning("Delegate lookup failed for %s: %s", email, exc)
-            error = f"Lookup failed: {error_msg[:100]}"
+            error = f"Slack lookup failed: {error_msg[:100]}"
 
     return RedirectResponse(
-        url="/agent?delegate_error=" + (error or "Unknown error"),
+        url=f"/agent/{agent_id}/dashboard?slack_error=" + (error or "Unknown error"),
         status_code=302,
     )
 
 
-@router.post("/delegates/{slack_user_id}/remove")
-async def remove_delegate(
-    slack_user_id: str,
+# --------------------------------------------------------------------------
+# Delegate management — invitation-based
+# --------------------------------------------------------------------------
+
+
+@router.post("/{agent_id}/delegates/invite")
+async def invite_delegate(
+    agent_id: str,
+    request: Request,
+    emails: str = Form(...),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Send delegate invitation(s) by email."""
+    import re
+    import secrets
+    from datetime import datetime, timedelta, timezone
+
+    from src.config import get_settings
+    from src.models import DelegateInvitation
+    from src.services.email import send_delegate_invitation
+
+    agent, is_owner = await get_agent_with_access(agent_id, db, current_user)
+    if not is_owner:
+        raise HTTPException(status_code=403, detail="Only the PI can manage delegates")
+    if agent.status != "active":
+        return RedirectResponse(url="/agent", status_code=302)
+
+    settings = get_settings()
+
+    # Parse comma/newline-separated emails
+    email_list = [
+        e.strip().lower()
+        for e in re.split(r"[,\n]+", emails)
+        if e.strip()
+    ]
+
+    errors = []
+    sent_count = 0
+    for email in email_list:
+        # Basic validation
+        if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email):
+            errors.append(f"Invalid email: {email}")
+            continue
+
+        # Don't invite yourself
+        if current_user.email and email == current_user.email.lower():
+            errors.append("You can't invite yourself.")
+            continue
+
+        # Check if already an active delegate
+        existing_delegate = await db.execute(
+            select(AgentDelegate)
+            .join(User, AgentDelegate.user_id == User.id)
+            .where(
+                AgentDelegate.agent_registry_id == agent.id,
+                func.lower(User.email) == email,
+            )
+        )
+        if existing_delegate.scalar_one_or_none():
+            errors.append(f"{email} is already a delegate.")
+            continue
+
+        # Check for pending invitation
+        existing_invite = await db.execute(
+            select(DelegateInvitation).where(
+                DelegateInvitation.agent_registry_id == agent.id,
+                DelegateInvitation.email == email,
+                DelegateInvitation.status == "pending",
+            )
+        )
+        if existing_invite.scalar_one_or_none():
+            errors.append(f"Invitation already pending for {email}.")
+            continue
+
+        # Create invitation
+        token = secrets.token_urlsafe(48)
+        invitation = DelegateInvitation(
+            agent_registry_id=agent.id,
+            invited_by_user_id=current_user.id,
+            email=email,
+            token=token,
+            status="pending",
+            expires_at=datetime.now(timezone.utc) + timedelta(days=30),
+        )
+        db.add(invitation)
+        await db.flush()  # Get the ID
+
+        # Send email (non-blocking — invitation is created regardless)
+        invite_url = f"{settings.base_url}/invite/{token}"
+        send_delegate_invitation(email, agent.pi_name, agent.bot_name, invite_url)
+        sent_count += 1
+
+    await db.commit()
+
+    error_msg = "; ".join(errors) if errors else ""
+    if error_msg:
+        return RedirectResponse(
+            url=f"/agent/{agent_id}/dashboard?delegate_error={error_msg}",
+            status_code=302,
+        )
+    return RedirectResponse(url=f"/agent/{agent_id}/dashboard", status_code=302)
+
+
+@router.post("/{agent_id}/delegates/{invitation_id}/revoke")
+async def revoke_invitation(
+    agent_id: str,
+    invitation_id: uuid.UUID,
     request: Request,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Remove a delegate Slack account from this agent."""
-    agent_result = await db.execute(
-        select(AgentRegistry).where(AgentRegistry.user_id == current_user.id)
-    )
-    agent = agent_result.scalar_one_or_none()
-    if not agent or agent.status != "active":
-        return RedirectResponse(url="/agent", status_code=302)
+    """Revoke a pending delegate invitation."""
+    from src.models import DelegateInvitation
 
-    current_delegates = list(agent.delegate_slack_ids or [])
-    if slack_user_id in current_delegates:
-        current_delegates.remove(slack_user_id)
-        agent.delegate_slack_ids = current_delegates if current_delegates else None
+    agent, is_owner = await get_agent_with_access(agent_id, db, current_user)
+    if not is_owner:
+        raise HTTPException(status_code=403, detail="Only the PI can manage delegates")
+
+    result = await db.execute(
+        select(DelegateInvitation).where(
+            DelegateInvitation.id == invitation_id,
+            DelegateInvitation.agent_registry_id == agent.id,
+            DelegateInvitation.status == "pending",
+        )
+    )
+    invitation = result.scalar_one_or_none()
+    if invitation:
+        invitation.status = "revoked"
+        await db.commit()
+
+    return RedirectResponse(url=f"/agent/{agent_id}/dashboard", status_code=302)
+
+
+@router.post("/{agent_id}/delegates/{delegate_id}/remove")
+async def remove_delegate(
+    agent_id: str,
+    delegate_id: uuid.UUID,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Remove an active delegate."""
+    agent, is_owner = await get_agent_with_access(agent_id, db, current_user)
+    if not is_owner:
+        raise HTTPException(status_code=403, detail="Only the PI can manage delegates")
+
+    result = await db.execute(
+        select(AgentDelegate)
+        .options(selectinload(AgentDelegate.user))
+        .where(
+            AgentDelegate.id == delegate_id,
+            AgentDelegate.agent_registry_id == agent.id,
+        )
+    )
+    delegate = result.scalar_one_or_none()
+    if delegate:
+        # Remove Slack ID if present
+        if delegate.user.email and agent.delegate_slack_ids:
+            try:
+                from slack_sdk import WebClient
+                bot_token = _get_bot_token()
+                if bot_token:
+                    client = WebClient(token=bot_token)
+                    slack_result = client.users_lookupByEmail(email=delegate.user.email)
+                    sid = slack_result["user"]["id"]
+                    current_ids = list(agent.delegate_slack_ids or [])
+                    if sid in current_ids:
+                        current_ids.remove(sid)
+                        agent.delegate_slack_ids = current_ids if current_ids else None
+            except Exception:
+                pass  # Slack sync is best-effort
+
+        await db.delete(delegate)
         await db.commit()
         logger.info(
             "Delegate %s removed from agent %s by %s",
-            slack_user_id, agent.agent_id, current_user.name,
+            delegate.user_id, agent.agent_id, current_user.name,
         )
 
-    return RedirectResponse(url="/agent", status_code=302)
+    return RedirectResponse(url=f"/agent/{agent_id}/dashboard", status_code=302)

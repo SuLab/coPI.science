@@ -72,6 +72,42 @@ async def get_current_user(
     return session_user
 
 
+async def get_agent_with_access(
+    agent_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> tuple["AgentRegistry", bool]:
+    """
+    Load agent by agent_id slug. Verify user is PI or active delegate.
+    Returns (agent, is_owner) tuple. is_owner=True means PI, False means delegate.
+    Raises 403 if neither.
+    """
+    from src.models import AgentDelegate, AgentRegistry
+
+    result = await db.execute(
+        select(AgentRegistry).where(AgentRegistry.agent_id == agent_id)
+    )
+    agent = result.scalar_one_or_none()
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    # Check if PI
+    if agent.user_id == current_user.id:
+        return agent, True
+
+    # Check if delegate
+    delegate_result = await db.execute(
+        select(AgentDelegate.id).where(
+            AgentDelegate.agent_registry_id == agent.id,
+            AgentDelegate.user_id == current_user.id,
+        )
+    )
+    if delegate_result.scalar_one_or_none():
+        return agent, False
+
+    raise HTTPException(status_code=403, detail="Access denied")
+
+
 async def get_admin_user(
     current_user: User = Depends(get_current_user),
 ) -> User:

@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block title %}My Agents — CoPI{% endblock %}
+
+{% block content %}
+<div class="max-w-3xl mx-auto">
+    <h1 class="text-2xl font-bold text-gray-900 mb-6">My Agents</h1>
+
+    {% if own_agent %}
+    <div class="mb-6">
+        <h2 class="text-sm font-medium text-gray-500 uppercase tracking-wide mb-3">Your Agent</h2>
+        <a href="/agent/{{ own_agent.agent_id }}/dashboard"
+           class="block bg-white rounded-xl border border-gray-200 p-5 hover:border-indigo-300 transition">
+            <div class="flex items-center justify-between">
+                <div>
+                    <div class="text-lg font-semibold text-gray-800">{{ own_agent.bot_name }}</div>
+                    <p class="text-sm text-gray-500">{{ own_agent.pi_name }} lab</p>
+                </div>
+                <div class="flex items-center gap-3">
+                    <span class="px-2.5 py-1 rounded-full text-xs
+                        {% if own_agent.status == 'active' %}bg-green-100 text-green-700
+                        {% elif own_agent.status == 'pending' %}bg-amber-100 text-amber-700
+                        {% else %}bg-gray-100 text-gray-600{% endif %}">
+                        {{ own_agent.status | capitalize }}
+                    </span>
+                    <span class="text-gray-400">&rarr;</span>
+                </div>
+            </div>
+        </a>
+    </div>
+    {% endif %}
+
+    {% if delegated_agents %}
+    <div>
+        <h2 class="text-sm font-medium text-gray-500 uppercase tracking-wide mb-3">Delegated Agents</h2>
+        <div class="space-y-3">
+            {% for agent in delegated_agents %}
+            <a href="/agent/{{ agent.agent_id }}/dashboard"
+               class="block bg-white rounded-xl border border-gray-200 p-5 hover:border-indigo-300 transition">
+                <div class="flex items-center justify-between">
+                    <div>
+                        <div class="flex items-center gap-2">
+                            <span class="text-lg font-semibold text-gray-800">{{ agent.bot_name }}</span>
+                            <span class="px-2 py-0.5 rounded-full text-xs bg-indigo-50 text-indigo-600">Delegate</span>
+                        </div>
+                        <p class="text-sm text-gray-500">{{ agent.pi_name }} lab</p>
+                    </div>
+                    <span class="text-gray-400">&rarr;</span>
+                </div>
+            </a>
+            {% endfor %}
+        </div>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}
