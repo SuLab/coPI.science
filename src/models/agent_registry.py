@@ -48,6 +48,14 @@ class AgentRegistry(Base):
     user: Mapped["User | None"] = relationship(
         "User", foreign_keys=[user_id], back_populates="agent"
     )
+    delegates: Mapped[list["AgentDelegate"]] = relationship(
+        "AgentDelegate", back_populates="agent", cascade="all, delete-orphan"
+    )
+    invitations: Mapped[list["DelegateInvitation"]] = relationship(
+        "DelegateInvitation",
+        foreign_keys="DelegateInvitation.agent_registry_id",
+        cascade="all, delete-orphan",
+    )
 
     def __repr__(self) -> str:
         return f"<AgentRegistry agent_id={self.agent_id} status={self.status}>"
@@ -69,6 +77,11 @@ class ProposalReview(Base):
         UUID(as_uuid=True),
         ForeignKey("users.id", ondelete="CASCADE"),
         nullable=False,
+    )
+    delegate_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
     )
     rating: Mapped[int] = mapped_column(SmallInteger, nullable=False)
     comment: Mapped[str | None] = mapped_column(Text, nullable=True)

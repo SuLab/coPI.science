@@ -50,6 +50,9 @@ class User(Base):
     agent: Mapped["AgentRegistry | None"] = relationship(
         "AgentRegistry", back_populates="user", uselist=False, foreign_keys="AgentRegistry.user_id"
     )
+    delegated_agents: Mapped[list["AgentDelegate"]] = relationship(
+        "AgentDelegate", back_populates="user", cascade="all, delete-orphan"
+    )
 
     def __repr__(self) -> str:
         return f"<User id={self.id} orcid={self.orcid} name={self.name!r}>"
