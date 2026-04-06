@@ -21,7 +21,7 @@ from pathlib import Path
 import httpx
 
 from src.config import get_settings
-from src.podcast.tts_utils import get_audio_duration_seconds, strip_markdown
+from src.podcast.tts_utils import get_audio_duration_seconds, normalize_audio, strip_markdown
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +81,7 @@ async def generate_audio(text: str, agent_id: str, output_path: Path) -> bool:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_bytes(resp.content)
         logger.info("Audio saved to %s (%d bytes)", output_path, len(resp.content))
+        normalize_audio(output_path)
         return True
     except httpx.ConnectError:
         logger.error(
