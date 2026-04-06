@@ -3,17 +3,19 @@
 import base64
 import json
 import logging
-import re
 from pathlib import Path
 
 import httpx
 
 from src.config import get_settings
+from src.podcast.tts_utils import get_audio_duration_seconds, strip_markdown
 
 logger = logging.getLogger(__name__)
 
 VOICES_FILE = Path("data/podcast_voices.json")
 MISTRAL_TTS_URL = "https://api.mistral.ai/v1/audio/speech"
+
+__all__ = ["generate_audio", "get_audio_duration_seconds"]
 
 
 def get_voice(agent_id: str) -> str:
@@ -29,18 +31,6 @@ def get_voice(agent_id: str) -> str:
     return settings.mistral_tts_default_voice
 
 
-def _strip_markdown(text: str) -> str:
-    """Remove markdown formatting so TTS reads clean prose."""
-    # Remove bold/italic markers (* and _)
-    text = re.sub(r"\*+([^*]+)\*+", r"\1", text)
-    text = re.sub(r"_+([^_]+)_+", r"\1", text)
-    # Remove inline code
-    text = re.sub(r"`[^`]+`", "", text)
-    # Remove URLs but keep surrounding text
-    text = re.sub(r"https?://\S+", "", text)
-    return text.strip()
-
-
 async def generate_audio(text: str, agent_id: str, output_path: Path) -> bool:
     """Generate TTS audio via Mistral AI and save to output_path.
 
@@ -52,7 +42,7 @@ async def generate_audio(text: str, agent_id: str, output_path: Path) -> bool:
         return False
 
     voice = get_voice(agent_id)
-    clean_text = _strip_markdown(text)
+    clean_text = strip_markdown(text)
     payload = {
         "model": settings.mistral_tts_model,
         "input": clean_text,
@@ -86,12 +76,3 @@ async def generate_audio(text: str, agent_id: str, output_path: Path) -> bool:
         return False
 
 
-def get_audio_duration_seconds(audio_path: Path) -> int | None:
-    """Return audio duration in seconds using mutagen, or None if unavailable."""
-    try:
-        from mutagen.mp3 import MP3
-        audio = MP3(str(audio_path))
-        return int(audio.info.length)
-    except Exception as exc:
-        logger.debug("Could not read audio duration from %s: %s", audio_path, exc)
-        return None

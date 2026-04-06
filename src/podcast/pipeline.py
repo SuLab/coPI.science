@@ -213,8 +213,8 @@ async def run_pipeline_for_agent(
     Returns True if an episode was produced and recorded.
     """
     from src.models.podcast import PodcastEpisode
-    from src.podcast.mistral_tts import generate_audio, get_audio_duration_seconds
     from src.podcast.pubmed_search import build_queries, fetch_candidates
+    from src.podcast.tts_utils import get_audio_duration_seconds
     from src.podcast.state import get_delivered_pmids, record_delivery
 
     settings = get_settings()
@@ -267,8 +267,14 @@ async def run_pipeline_for_agent(
         logger.error("Agent %s: summary generation failed", agent_id)
         return False
 
-    # Step 6: Generate audio
+    # Step 6: Generate audio (backend selected by PODCAST_TTS_BACKEND)
     audio_path = AUDIO_DIR / agent_id / f"{today.isoformat()}.mp3"
+    if settings.podcast_tts_backend == "local":
+        from src.podcast.local_tts import generate_audio
+        logger.info("Agent %s: using local vLLM-Omni TTS backend", agent_id)
+    else:
+        from src.podcast.mistral_tts import generate_audio
+        logger.info("Agent %s: using Mistral AI TTS backend", agent_id)
     audio_ok = await generate_audio(summary, agent_id, audio_path)
     audio_file_path = str(audio_path) if audio_ok else None
     audio_duration = None

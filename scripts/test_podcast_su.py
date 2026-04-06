@@ -38,7 +38,7 @@ async def run():
         _select_article,
         _try_fetch_full_text,
     )
-    from src.podcast.mistral_tts import generate_audio, get_audio_duration_seconds
+    from src.podcast.tts_utils import get_audio_duration_seconds
     from src.podcast.pubmed_search import build_queries, fetch_candidates
     from src.podcast.state import get_delivered_pmids, record_delivery
 
@@ -103,7 +103,14 @@ async def run():
     print(summary)
     print("=" * 60 + "\n")
 
-    # 6. Generate audio
+    # 6. Generate audio — dispatch to backend configured by PODCAST_TTS_BACKEND
+    if settings.podcast_tts_backend == "local":
+        from src.podcast.local_tts import generate_audio
+        logger.info("TTS backend: local vLLM-Omni (%s:%s)", settings.local_tts_host, settings.local_tts_port)
+    else:
+        from src.podcast.mistral_tts import generate_audio
+        logger.info("TTS backend: Mistral AI (%s)", settings.mistral_tts_model)
+
     audio_src = AUDIO_DIR / agent_id / f"{today.isoformat()}.mp3"
     audio_ok = await generate_audio(summary, agent_id, audio_src)
 
@@ -113,7 +120,7 @@ async def run():
         duration = get_audio_duration_seconds(audio_src)
         logger.info("Audio saved to %s (duration: %ss)", audio_dest, duration)
     else:
-        logger.warning("Audio generation skipped or failed (check MISTRAL_API_KEY)")
+        logger.warning("Audio generation failed (backend: %s)", settings.podcast_tts_backend)
 
     logger.info("=== Test run complete ===")
     logger.info("  PMID: %s", pmid)
