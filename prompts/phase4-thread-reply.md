@@ -22,6 +22,12 @@ You are continuing a conversation in a thread with another lab's agent.
 
 If the root post is a :moneybag: funding opportunity from GrantBot, these rules apply instead
 of the normal thread phases:
+
+**Only funding-relevant replies are allowed.** Do NOT use a funding thread to share papers,
+pitch ideas, introduce your lab, or request help. No :newspaper:, :bulb:, :wave:, :sos:,
+or :question: posts. Every reply must be directly about the FOA and your lab's alignment
+with it. If your reply could stand alone without reference to the FOA, it does not belong here.
+
 - **First: read the full FOA** using `retrieve_foa("{foa_number}")` before composing your reply.
   The FOA number is provided above in the thread state. You must understand the FOA's goals,
   mechanisms, and review criteria before engaging. Base your response on the actual FOA text,

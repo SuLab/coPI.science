@@ -856,9 +856,19 @@ class SimulationEngine:
                 if foa_text:
                     foa_contexts[post.post_id] = foa_text
 
+        # Also pre-load FOAs from active/closed threads for Option B
+        # (starting a new funding collab from a previously seen FOA)
+        thread_foa_contexts: dict[str, str] = {}
+        for ts in agent.state.active_threads.values():
+            if ts.foa_number and ts.foa_number not in thread_foa_contexts:
+                foa_text = format_foa_for_prompt(ts.foa_number)
+                if foa_text:
+                    thread_foa_contexts[ts.foa_number] = foa_text
+
         system_prompt, messages = agent.build_phase5_prompt(
             recent_posts=recent_posts,
             foa_contexts=foa_contexts,
+            thread_foa_contexts=thread_foa_contexts,
         )
 
         # Restore
@@ -982,14 +992,19 @@ class SimulationEngine:
     def _parse_phase5_response(self, response: str) -> tuple[dict | None, str | None]:
         """Parse Phase 5 response into (json_data, message_text).
 
-        Expects JSON block + <slack_message> tags. Falls back to JSON + rest-of-string.
+        Expects JSON block + <slack_message> tags.  Uses the LAST JSON code
+        block so that if the LLM revises its decision mid-response the final
+        action wins.  Requires <slack_message> tags for the message body —
+        raw text after the JSON block is never used (prevents reasoning leakage).
         """
         data = None
         try:
-            # Find JSON block
-            json_match = re.search(r"```json\s*\n(.*?)\n```", response, re.DOTALL)
-            if json_match:
-                data = json.loads(json_match.group(1))
+            # Find the LAST ```json``` block (LLM may revise mid-response)
+            json_matches = list(
+                re.finditer(r"```json\s*\n(.*?)\n```", response, re.DOTALL)
+            )
+            if json_matches:
+                data = json.loads(json_matches[-1].group(1))
             else:
                 # Try finding raw JSON
                 json_start = response.find("{")
@@ -1002,22 +1017,14 @@ class SimulationEngine:
         if not data:
             return None, None
 
-        # Extract message from <slack_message> tags
+        # Extract message from <slack_message> tags (required — no raw-text fallback)
         msg_match = re.search(
             r"<slack_message>\s*(.*?)\s*</slack_message>", response, re.DOTALL
         )
         if msg_match:
             return data, msg_match.group(1).strip()
 
-        # Fallback: message is everything after the JSON block
-        json_match = re.search(r"```json\s*\n.*?\n```", response, re.DOTALL)
-        if json_match:
-            rest = response[json_match.end():].strip()
-        else:
-            json_end = response.find("}", response.find("{")) + 1
-            rest = response[json_end:].strip()
-
-        return data, _strip_llm_preamble(rest) if rest else None
+        return data, None
 
     # ------------------------------------------------------------------
     # Slack Polling (PI messages)

@@ -30,6 +30,13 @@ Pick the post from your interesting list that has the best potential for a speci
 concrete collaboration with your lab. Write a reply that opens a focused dialogue.
 
 **If the post is a :moneybag: funding opportunity (from GrantBot):**
+
+Funding threads are special — they exist to coordinate applications around a specific FOA.
+**Only funding-relevant replies are allowed.** Do NOT use a funding thread to share papers,
+pitch ideas, introduce your lab, or request help. No :newspaper:, :bulb:, :wave:, :sos:,
+or :question: posts. Your reply must be *directly about the FOA and your lab's alignment
+with it.*
+
 - The full FOA details are provided in `<foa_details>` below the post — read them carefully.
   Base your reply on the actual FOA goals, mechanisms, and review criteria, not just the summary.
 - Your reply MUST reference the specific FOA number and engage with the FOA's scientific scope
@@ -37,6 +44,8 @@ concrete collaboration with your lab. Write a reply that opens a focused dialogu
   mechanisms, or research areas from the FOA description
 - Optionally tag another lab that would be a strong co-PI partner for this FOA
 - Do NOT ignore the FOA content and post generically about your own research
+- Do NOT use the thread to share tangentially related publications or expertise — if your
+  reply could stand alone without reference to the FOA, it does not belong here
 - If your lab's work doesn't clearly align with the FOA, do not reply — choose a different
   action or skip
 
@@ -54,8 +63,10 @@ Do NOT reply to a post if:
 ### Option B: Start a funding-originated collaboration
 
 If you noticed a complementary interest in a :moneybag: funding opportunity thread, you may
-start a new top-level post tagging the relevant lab. Before posting, use `retrieve_foa(foa_number)`
-to read the full FOA if you haven't already. Your post should:
+start a new top-level post tagging the relevant lab. The full FOA details for FOAs you have
+encountered are provided in the "Available FOA details for funding collaborations" section
+below. If the FOA details are not available there, you cannot use this option — choose a
+different action or skip. Your post should:
 - Start with :moneybag: and reference the specific FOA number
 - Describe the collaboration angle: what each lab would bring toward specific aims
 - Reference specific goals or objectives from the FOA

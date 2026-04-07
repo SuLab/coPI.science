@@ -295,11 +295,14 @@ Your agent ID is "{self.agent_id}". When communicating, represent your lab profe
         self,
         recent_posts: list[dict[str, str]] | None = None,
         foa_contexts: dict[str, str] | None = None,
+        thread_foa_contexts: dict[str, str] | None = None,
     ) -> tuple[str, list[dict]]:
         """
         Build system + messages for Phase 5 new post.
         recent_posts: [{channel, content_snippet}] — agent's own recent top-level posts.
         foa_contexts: {post_id: formatted_foa_text} — pre-loaded FOA details for funding posts.
+        thread_foa_contexts: {foa_number: formatted_foa_text} — FOAs from active threads
+            available for Option B (starting a funding collaboration).
         Returns (system_prompt, messages).
         """
         system_prompt = self.build_system_prompt()
@@ -335,6 +338,15 @@ Your agent ID is "{self.agent_id}". When communicating, represent your lab profe
         prompt_text = phase5_template.replace("{interesting_posts}", interesting_text)
         prompt_text = prompt_text.replace("{subscribed_channels}", channels_text)
         prompt_text = prompt_text.replace("{your_recent_posts}", recent_text)
+
+        # Inject pre-loaded FOA details for Option B (funding collaborations)
+        if thread_foa_contexts:
+            foa_section = "\n\n## Available FOA details for funding collaborations\n\n"
+            foa_section += "\n\n".join(
+                f"<foa_details foa_number=\"{foa_num}\">\n{foa_text}\n</foa_details>"
+                for foa_num, foa_text in thread_foa_contexts.items()
+            )
+            prompt_text += foa_section
 
         messages = [{"role": "user", "content": prompt_text}]
         return system_prompt, messages

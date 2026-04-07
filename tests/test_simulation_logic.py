@@ -166,7 +166,8 @@ Hi @SuBot — your BioThings work is great!
         assert msg == "Hi @SuBot — your BioThings work is great!"
         assert "Some thinking" not in msg
 
-    def test_json_plus_plain_text_fallback(self, engine):
+    def test_plain_text_without_tags_returns_none(self, engine):
+        """Without <slack_message> tags, message should be None (no raw-text fallback)."""
         response = """```json
 {"action": "new_post", "channel": "general", "post_type": "paper", "tagged_agent": null, "target_post_id": null}
 ```
@@ -174,13 +175,29 @@ Hi @SuBot — your BioThings work is great!
 :newspaper: Paper — We just published on cryo-ET of mitochondria."""
         data, msg = engine._parse_phase5_response(response)
         assert data["action"] == "new_post"
-        assert msg.startswith(":newspaper:")
+        assert msg is None
 
-    def test_raw_json_plus_text(self, engine):
+    def test_uses_last_json_block(self, engine):
+        """When LLM revises its decision mid-response, the last JSON block wins."""
+        response = """```json
+{"action": "new_post", "channel": "general", "post_type": "paper", "tagged_agent": "lotz"}
+```
+
+Actually I should skip this turn.
+
+```json
+{"action": "skip"}
+```"""
+        data, msg = engine._parse_phase5_response(response)
+        assert data["action"] == "skip"
+        assert msg is None
+
+    def test_raw_json_plus_text_no_tags(self, engine):
+        """Raw JSON without <slack_message> tags returns None for message."""
         response = '{"action": "new_post", "channel": "general", "post_type": "idea", "tagged_agent": null, "target_post_id": null}\n\n:bulb: Idea — What if we combined...'
         data, msg = engine._parse_phase5_response(response)
         assert data["action"] == "new_post"
-        assert ":bulb:" in msg
+        assert msg is None
 
     def test_malformed_json_returns_none(self, engine):
         data, msg = engine._parse_phase5_response("no json at all, just text")
