@@ -11,7 +11,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.database import get_db
 from src.dependencies import get_current_user
 from src.models import Job, ResearcherProfile, User
-from src.services.profile_export import export_private_profile
+from src.services.profile_export import (
+    ORCID_TO_AGENT_ID,
+    PRIVATE_PROFILES_DIR,
+    export_private_profile,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -153,10 +157,39 @@ async def private_profile(
     )
     profile = profile_result.scalar_one_or_none()
 
-    # Show the seed if user hasn't saved a live profile yet
+    # Show the best available content: DB live profile → DB seed → on-disk file → default template
     content = ""
     if profile:
         content = profile.private_profile_md or profile.private_profile_seed or ""
+
+    # Fall back to existing on-disk private profile (e.g. pilot labs that were
+    # set up before the user claimed their account via ORCID login).
+    if not content:
+        agent_id = ORCID_TO_AGENT_ID.get(current_user.orcid)
+        if agent_id:
+            disk_path = PRIVATE_PROFILES_DIR / f"{agent_id}.md"
+            if disk_path.exists():
+                content = disk_path.read_text(encoding="utf-8").strip()
+
+    # For brand-new users with no existing profile anywhere, seed with the
+    # standard section template so they aren't staring at a blank page.
+    if not content:
+        lab_name = current_user.name or "My"
+        content = f"""# {lab_name} Lab — Private Profile
+
+## PI Behavioral Instructions
+
+### Collaboration Preferences
+- Add preferences here: what kinds of collaborations interest you, and what would you rather not pursue?
+
+### Communication Style
+- Add guidance for how your agent should communicate on your behalf (e.g. tone, what to emphasize or avoid).
+
+### Topic Priorities
+- No specific priority ordering yet. Add priorities here to guide which opportunities your agent pursues first.
+
+### Criteria to Always Explore
+- No specific criteria yet. Add questions or checks your agent should always ask when evaluating collaborations."""
 
     return templates.TemplateResponse(
         request,
