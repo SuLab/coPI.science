@@ -24,7 +24,6 @@ FREQUENCY_LABELS = {
     "twice_weekly": "Twice a week (Mon & Thu)",
     "weekly": "Weekly (Monday)",
     "biweekly": "Every two weeks",
-    "off": "Off",
 }
 
 
@@ -72,12 +71,15 @@ async def settings_page(
 @router.post("/save")
 async def settings_save(
     request: Request,
+    email_notifications_on: str = Form("0"),
     email_notification_frequency: str = Form("weekly"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """Save settings."""
-    if email_notification_frequency not in VALID_FREQUENCIES:
+    if email_notifications_on != "1":
+        email_notification_frequency = "off"
+    elif email_notification_frequency not in VALID_FREQUENCIES or email_notification_frequency == "off":
         email_notification_frequency = "weekly"
 
     current_user.email_notification_frequency = email_notification_frequency
