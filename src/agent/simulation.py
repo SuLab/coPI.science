@@ -126,6 +126,10 @@ class SimulationEngine:
         # Key: tuple(sorted([agent_a, agent_b])), Value: list of dicts
         self._prior_threads: dict[tuple[str, str], list[dict]] = {}
 
+        # Last agent to make an LLM call — prevents the same agent from making
+        # back-to-back LLM calls when it's the only active agent.
+        self._last_llm_caller: str | None = None
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -213,6 +217,25 @@ class SimulationEngine:
                 logger.info("All agents over budget or no agent selected. Stopping.")
                 break
 
+            # Prevent the same agent from making back-to-back LLM calls.
+            # If this agent was the last to make an LLM call, skip its turn
+            # so other agents get a chance (or the simulation idles).
+            if self._last_llm_caller == agent.agent_id:
+                agent.state.last_selected = time.time()
+                consecutive_idle += 1
+                if consecutive_idle <= 3:
+                    delay = 5
+                elif consecutive_idle <= 10:
+                    delay = 15
+                else:
+                    delay = 30
+                logger.debug(
+                    "[%s] Skipped: was last LLM caller (idle backoff: %ds)",
+                    agent.agent_id, delay,
+                )
+                await asyncio.sleep(delay)
+                continue
+
             logger.info("=== Turn %d: %s ===", turn_count + 1, agent.agent_id)
 
             # Run 5-phase turn
@@ -221,6 +244,10 @@ class SimulationEngine:
                 did_work = await self._run_turn(agent)
             except Exception:
                 logger.exception("Error during turn for %s", agent.agent_id)
+
+            # Track last agent to make an LLM call
+            if did_work:
+                self._last_llm_caller = agent.agent_id
 
             # Update last_selected
             agent.state.last_selected = time.time()
