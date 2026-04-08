@@ -140,6 +140,8 @@ class SimulationEngine:
         return elapsed < self.max_runtime_minutes * 60
 
     def _agent_within_budget(self, agent: Agent) -> bool:
+        if self.budget_cap <= 0:
+            return True  # unlimited
         return agent.api_call_count < self.budget_cap
 
     def _non_funding_thread_count(self, agent: Agent) -> int:
