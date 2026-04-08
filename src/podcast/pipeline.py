@@ -112,11 +112,15 @@ async def _generate_summary(
     else:
         authors_str = ", ".join(authors_list)
 
+    pmid = record.get("pmid", "")
+    # Preprint records carry a canonical URL; PubMed records use the standard URL
+    paper_url = record.get("url") or f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
+
     paper_section = f"""Title: {record.get('title', '')}
 Authors: {authors_str}
 Journal: {record.get('journal') or 'Unknown'}
 Year: {record.get('year') or 'Unknown'}
-PMID: {record.get('pmid', '')}
+URL: {paper_url}
 
 Abstract:
 {record.get('abstract', '')}"""
@@ -135,7 +139,7 @@ Abstract:
         .replace("{authors}", authors_str)
         .replace("{journal}", record.get("journal") or "Unknown")
         .replace("{year}", str(record.get("year") or ""))
-        .replace("{pmid}", record.get("pmid", ""))
+        .replace("{paper_url}", paper_url)
     )
 
     try:
@@ -153,7 +157,10 @@ Abstract:
 
 
 async def _try_fetch_full_text(pmid: str) -> str | None:
-    """Attempt to fetch full text from PMC; return None on failure."""
+    """Attempt to fetch full text from PMC; return None on failure or for non-PubMed IDs."""
+    # Preprint IDs are prefixed (e.g. "biorxiv:...", "arxiv:...") — PMC doesn't have them
+    if not pmid.isdigit():
+        return None
     try:
         from src.services.pubmed import fetch_full_text
         result = await fetch_full_text(pmid)

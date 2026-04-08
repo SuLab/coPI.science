@@ -31,6 +31,8 @@ If no paper clears the relevance bar, return:
 - It is purely clinical or epidemiological with no basic science relevance
 - Recency alone makes it interesting — the connection must be specific and actionable
 
+**NOTE:** Some candidates are preprints (from bioRxiv, medRxiv, or arXiv) and are marked as such in the journal field. Preprints are valid candidates — treat them the same as peer-reviewed papers for selection purposes.
+
 **PREFER** papers that release a concrete output alongside findings (code, dataset, protocol, reagent, model). These tend to be immediately useful.
 
 ## Candidate Papers

@@ -107,28 +107,43 @@ async def fetch_candidates(
     days: int = 14,
     max_total: int = 50,
 ) -> list[dict[str, Any]]:
-    """Search PubMed and return candidate records, excluding already-delivered PMIDs.
+    """Search PubMed and preprint servers, return candidate records excluding already-delivered IDs.
 
-    Returns list of dicts with: pmid, title, abstract, journal, year, pub_types
+    Returns list of dicts with: pmid, title, abstract, journal, year, pub_types.
+    Preprint records also include a 'url' and 'source' field.
     """
-    pmids = await search_recent_pmids(queries, days=days, max_total=max_total * 2)
+    from src.podcast.preprint_search import fetch_preprint_candidates
 
-    # Filter out already-delivered
-    pmids = [p for p in pmids if p not in already_delivered]
-    if not pmids:
-        return []
+    # Fetch PubMed and preprints concurrently
+    pubmed_pmids_task = search_recent_pmids(queries, days=days, max_total=max_total * 2)
+    preprint_task = fetch_preprint_candidates(
+        queries,
+        already_delivered=already_delivered,
+        days=days,
+        max_total=max(max_total // 3, 10),
+    )
 
-    records = await fetch_pubmed_records(pmids[:max_total])
+    pmids_raw, preprint_candidates = await asyncio.gather(pubmed_pmids_task, preprint_task)
 
-    # Filter out reviews/editorials and items without abstracts
-    candidates = []
-    for rec in records:
+    # Filter PubMed results
+    pmids = [p for p in pmids_raw if p not in already_delivered]
+    pubmed_records = await fetch_pubmed_records(pmids[:max_total]) if pmids else []
+
+    # Filter out reviews/editorials and items without abstracts from PubMed
+    pubmed_candidates = []
+    for rec in pubmed_records:
         if not rec.get("abstract"):
             continue
         pub_types = [pt.lower() for pt in (rec.get("pub_types") or [])]
         if any(t in pt for t in ("review", "editorial", "comment", "letter") for pt in pub_types):
             continue
-        candidates.append(rec)
+        pubmed_candidates.append(rec)
 
-    logger.info("%d candidates after filtering (reviews/no abstract removed)", len(candidates))
+    candidates = pubmed_candidates + preprint_candidates
+    logger.info(
+        "%d total candidates (PubMed: %d, preprints: %d)",
+        len(candidates),
+        len(pubmed_candidates),
+        len(preprint_candidates),
+    )
     return candidates

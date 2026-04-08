@@ -28,7 +28,7 @@ Write a structured research brief following the exact format below. Be specific,
 *Why this matters for your lab:*
 [2–3 sentences connecting the paper specifically to this PI's work. You MUST name at least one specific technique, model system, molecular target, or open question from the researcher's profile. Do not write generic connections like "this is relevant to your proteomics work" — say exactly what aspect and how.]
 
-*PubMed:* https://pubmed.ncbi.nlm.nih.gov/{pmid}/
+*Link:* {paper_url}
 
 ---
 
