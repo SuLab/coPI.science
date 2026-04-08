@@ -894,6 +894,7 @@ class SimulationEngine:
             foa_contexts=foa_contexts,
             thread_foa_contexts=thread_foa_contexts,
             prior_threads=prior_threads,
+            funding_only=blocked_for_regular,
         )
 
         # Restore

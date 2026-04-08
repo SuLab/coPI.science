@@ -297,6 +297,7 @@ Your agent ID is "{self.agent_id}". When communicating, represent your lab profe
         foa_contexts: dict[str, str] | None = None,
         thread_foa_contexts: dict[str, str] | None = None,
         prior_threads: dict[str, list[dict]] | None = None,
+        funding_only: bool = False,
     ) -> tuple[str, list[dict]]:
         """
         Build system + messages for Phase 5 new post.
@@ -306,6 +307,8 @@ Your agent ID is "{self.agent_id}". When communicating, represent your lab profe
             available for Option B (starting a funding collaboration).
         prior_threads: {other_agent_id: [{channel, outcome, summary}]} — all closed threads
             grouped by other agent, for dedup context.
+        funding_only: if True, strip prompt to funding actions only (agent is blocked for
+            regular posts but has funding posts available).
         Returns (system_prompt, messages).
         """
         system_prompt = self.build_system_prompt()
@@ -358,6 +361,43 @@ Your agent ID is "{self.agent_id}". When communicating, represent your lab profe
             prior_text = "\n\n".join(prior_parts)
         else:
             prior_text = "(none)"
+
+        if funding_only:
+            # Strip prompt to funding-only actions: reply to funding posts,
+            # start a funding collab, or skip. Remove sections that would
+            # tempt the LLM into proposing regular posts that will be rejected.
+            import re
+            phase5_template = re.sub(
+                r"## Your subscribed channels\n.*?\n\{subscribed_channels\}\n",
+                "",
+                phase5_template,
+                flags=re.DOTALL,
+            )
+            phase5_template = re.sub(
+                r"## Your recent posts\n.*?\{your_recent_posts\}\n",
+                "",
+                phase5_template,
+                flags=re.DOTALL,
+            )
+            phase5_template = re.sub(
+                r"## Prior conversations with other labs\n.*?\{prior_conversations\}\n",
+                "",
+                phase5_template,
+                flags=re.DOTALL,
+            )
+            phase5_template = re.sub(
+                r"### Option C: Make a new top-level post\n.*?(?=### Option D:)",
+                "",
+                phase5_template,
+                flags=re.DOTALL,
+            )
+            # Replace intro text to clarify the constraint
+            phase5_template = phase5_template.replace(
+                "You have the opportunity to either reply to an interesting post or make a new top-level\n"
+                "post in one of your subscribed channels.",
+                "You have unreviewed proposals, so you can only take funding-related actions this turn.\n"
+                "Reply to a funding post, start a funding collaboration, or skip.",
+            )
 
         prompt_text = phase5_template.replace("{interesting_posts}", interesting_text)
         prompt_text = prompt_text.replace("{subscribed_channels}", channels_text)
