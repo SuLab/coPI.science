@@ -54,3 +54,6 @@ htmlcov/
 
 # Runtime data (state files, generated audio — ephemeral)
 data/
+
+# Test output artifacts
+.labbot-tests/
