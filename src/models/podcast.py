@@ -18,7 +18,7 @@ class PodcastEpisode(Base):
     )
     agent_id: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
     episode_date: Mapped[date] = mapped_column(Date, nullable=False)
-    pmid: Mapped[str] = mapped_column(String(20), nullable=False)
+    pmid: Mapped[str] = mapped_column(String(100), nullable=False)
     paper_title: Mapped[str] = mapped_column(String(500), nullable=False)
     paper_authors: Mapped[str] = mapped_column(String(500), nullable=False)
     paper_journal: Mapped[str] = mapped_column(String(255), nullable=False)

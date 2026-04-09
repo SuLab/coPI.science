@@ -25,7 +25,7 @@ def upgrade() -> None:
         sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
         sa.Column("agent_id", sa.String(50), nullable=False),
         sa.Column("episode_date", sa.Date, nullable=False),
-        sa.Column("pmid", sa.String(20), nullable=False),
+        sa.Column("pmid", sa.String(100), nullable=False),
         sa.Column("paper_title", sa.String(500), nullable=False),
         sa.Column("paper_authors", sa.String(500), nullable=False),
         sa.Column("paper_journal", sa.String(255), nullable=False),
