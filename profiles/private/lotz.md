@@ -22,3 +22,11 @@
 ### Criteria to Always Explore
 - When talking to computational labs: always ask whether they have experience with multi-donor scRNA-seq integration and what tools they'd use
 - When talking to drug discovery labs: always ask whether they have readouts for FoxO activity or chondrocyte stress resistance
+
+## Podcast Preferences
+
+- Prioritize papers on osteoarthritis, cartilage biology, joint aging, or intervertebral disc degeneration
+- Strong interest in FoxO transcription factor biology, KLF4, or transcriptional regulation of tissue homeostasis
+- Also interested in single-cell RNA-seq methods for musculoskeletal tissues, spatial transcriptomics, or multi-omics approaches to joint disease
+- Interested in senolytic therapies, cellular senescence in joint tissue, or neuro-skeletal interactions
+- Skip papers on rheumatoid arthritis or autoimmune joint disease — focus is on OA and degenerative disease

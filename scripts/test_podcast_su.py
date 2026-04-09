@@ -33,6 +33,7 @@ async def run():
     from src.config import get_settings
     from src.podcast.pipeline import (
         _generate_summary,
+        _load_podcast_preferences,
         _load_public_profile,
         _parse_profile_markdown,
         _select_article,
@@ -49,12 +50,18 @@ async def run():
 
     logger.info("=== LabBot Podcast test run for agent: %s ===", agent_id)
 
-    # 1. Load profile
+    # 1. Load profiles
     profile_text = _load_public_profile(agent_id)
     if not profile_text:
         logger.error("No public profile found for agent: %s", agent_id)
         return
     logger.info("Loaded profile (%d chars)", len(profile_text))
+
+    preferences_text = _load_podcast_preferences(agent_id)
+    if preferences_text:
+        logger.info("Loaded podcast preferences (%d chars)", len(preferences_text))
+    else:
+        logger.info("No podcast preferences found for agent: %s", agent_id)
 
     # 2. Build queries and fetch candidates
     profile_dict = _parse_profile_markdown(profile_text)
@@ -76,7 +83,7 @@ async def run():
         return
 
     # 3. LLM article selection
-    selected, justification = await _select_article(profile_text, candidates, agent_id)
+    selected, justification = await _select_article(profile_text, candidates, agent_id, preferences_text)
     if selected is None:
         logger.error("No article selected — aborting")
         return
@@ -89,7 +96,7 @@ async def run():
     logger.info("Full text fetched: %s", bool(full_text))
 
     # 5. Generate text summary
-    summary = await _generate_summary(profile_text, selected, full_text, agent_id)
+    summary = await _generate_summary(profile_text, selected, full_text, agent_id, preferences_text)
     if not summary:
         logger.error("Summary generation failed — aborting")
         return

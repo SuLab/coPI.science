@@ -18,3 +18,11 @@
 2. IDP conformational dynamics and function
 3. Single-molecule methods development
 4. Condensate-membrane interactions
+
+## Podcast Preferences
+
+- Prioritize papers on biomolecular condensates, liquid-liquid phase separation, or membraneless organelle biology
+- Strong interest in intrinsically disordered proteins (IDPs), conformational dynamics, or allostery in disordered systems
+- Also interested in single-molecule FRET methods, microfluidics for biophysics, or multicolor smFRET developments
+- Interested in condensate-membrane interactions, phase separation in neurodegeneration (TDP-43, FUS, α-synuclein), or bacterial condensate biology
+- Skip purely cell biological papers without biophysical measurements or molecular mechanism insights

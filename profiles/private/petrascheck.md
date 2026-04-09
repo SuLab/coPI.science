@@ -22,3 +22,11 @@
 ### Criteria to Always Explore
 - When talking to pharmacology labs: always ask whether their compounds have been tested in aging contexts and whether combination with our longevity compounds makes scientific sense
 - When talking to structural labs: always ask whether ribosome structural studies under our compound treatment would answer their mechanistic questions as well as ours
+
+## Podcast Preferences
+
+- Prioritize papers on aging mechanisms, lifespan extension, or geroprotective compounds — especially those identifying new molecular targets
+- Strong interest in C. elegans aging biology, integrated stress response, mTOR, autophagy, or lipid metabolism in aging
+- Also interested in polypharmacology approaches, graph neural network-based drug design, or proteome-wide target identification methods (ABPP, thermal proteomics)
+- Interested in serotonin receptor biology, energy balance, or feeding behavior as they relate to aging
+- Skip papers focused only on clinical human aging cohort studies without mechanistic insights

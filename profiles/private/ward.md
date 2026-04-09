@@ -17,3 +17,11 @@
 2. Influenza universal vaccine strategies
 3. Emerging viral threats (filoviruses, novel influenza-like viruses)
 4. Structure-guided drug discovery (ion channels, STING)
+
+## Podcast Preferences
+
+- Prioritize papers on structural biology of viral glycoproteins, broadly neutralizing antibodies, or germline-targeting vaccine immunogen design
+- Strong interest in HIV-1 envelope, SARS-CoV-2 spike, influenza hemagglutinin, or filovirus glycoprotein structures and antibody recognition
+- Also interested in cryo-EM method developments, antibody language models, or polyclonal serum antibody mapping
+- Interested in phase 1/2 clinical trial results for HIV or influenza vaccines when they report immunological mechanistic findings
+- Skip papers on non-structural viral proteins or antiviral small molecules unrelated to vaccine development

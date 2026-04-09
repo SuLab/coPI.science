@@ -70,7 +70,8 @@ async def generate_audio(text: str, agent_id: str, output_path: Path) -> bool:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_bytes(audio_bytes)
         logger.info("Audio saved to %s (%d bytes)", output_path, len(audio_bytes))
-        normalize_audio(output_path)
+        if settings.podcast_normalize_audio:
+            normalize_audio(output_path)
         return True
     except Exception as exc:
         logger.error("Mistral TTS failed for agent %s: %s", agent_id, exc)

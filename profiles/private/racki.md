@@ -23,3 +23,11 @@
 ### Criteria to Always Explore
 - When talking to chemistry/drug discovery labs: always ask whether their compound platforms could generate PPK or PPX inhibitors
 - When talking to structural biology labs: always ask whether their methods can be applied to bacteria or bacterial-mammalian interfaces
+
+## Podcast Preferences
+
+- Prioritize papers on polyphosphate biology, bacterial chromatin organization, or phase separation in bacteria
+- Strong interest in Pseudomonas aeruginosa biology, biofilm formation, antibiotic tolerance, or anti-infective targets
+- Also interested in biomolecular condensates, liquid-liquid phase separation, or polymer physics of nucleic acid-ion interactions in any system
+- Interested in cryo-ET or in situ structural biology of bacteria or bacterial-host interactions
+- Skip mammalian cell biology papers unless they have direct relevance to condensate biophysics or chromatin organization mechanisms

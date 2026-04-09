@@ -11,6 +11,7 @@ from src.config import get_settings
 logger = logging.getLogger(__name__)
 
 PROFILES_DIR = Path("profiles/public")
+PRIVATE_PROFILES_DIR = Path("profiles/private")
 AUDIO_DIR = Path("data/podcast_audio")
 
 
@@ -20,6 +21,15 @@ def _load_public_profile(agent_id: str) -> str:
     if path.exists():
         return path.read_text(encoding="utf-8")
     return ""
+
+
+def _load_podcast_preferences(agent_id: str) -> str:
+    """Load the Podcast Preferences section from the agent's private profile."""
+    path = PRIVATE_PROFILES_DIR / f"{agent_id}.md"
+    if not path.exists():
+        return ""
+    text = path.read_text(encoding="utf-8")
+    return _extract_section_text(text, "Podcast Preferences")
 
 
 def _format_candidates_for_prompt(records: list[dict[str, Any]]) -> str:
@@ -38,6 +48,7 @@ async def _select_article(
     profile_text: str,
     candidates: list[dict[str, Any]],
     agent_id: str,
+    preferences_text: str = "",
 ) -> tuple[dict[str, Any], str] | tuple[None, str]:
     """Use Sonnet to pick the most relevant article.
 
@@ -50,7 +61,12 @@ async def _select_article(
     prompt_path = Path("prompts/podcast-select.md")
     template = prompt_path.read_text(encoding="utf-8")
     candidates_text = _format_candidates_for_prompt(candidates)
-    prompt = template.replace("{profile}", profile_text).replace("{candidates}", candidates_text)
+    prompt = (
+        template
+        .replace("{profile}", profile_text)
+        .replace("{candidates}", candidates_text)
+        .replace("{preferences}", preferences_text or "No specific preferences set.")
+    )
 
     try:
         response = await generate_agent_response(
@@ -94,6 +110,7 @@ async def _generate_summary(
     record: dict[str, Any],
     full_text: str | None,
     agent_id: str,
+    preferences_text: str = "",
 ) -> str | None:
     """Use Opus to generate the structured text summary."""
     from src.services.llm import generate_agent_response
@@ -140,6 +157,7 @@ Abstract:
         .replace("{journal}", record.get("journal") or "Unknown")
         .replace("{year}", str(record.get("year") or ""))
         .replace("{paper_url}", paper_url)
+        .replace("{preferences}", preferences_text or "No specific preferences set.")
     )
 
     try:
@@ -229,11 +247,15 @@ async def run_pipeline_for_agent(
 
     logger.info("Starting podcast pipeline for agent: %s (%s)", agent_id, pi_name)
 
-    # Step 1: Load profile
+    # Step 1: Load profiles
     profile_text = _load_public_profile(agent_id)
     if not profile_text:
         logger.warning("Agent %s: no public profile found, skipping", agent_id)
         return False
+
+    preferences_text = _load_podcast_preferences(agent_id)
+    if preferences_text:
+        logger.info("Agent %s: loaded podcast preferences (%d chars)", agent_id, len(preferences_text))
 
     # Build a minimal profile dict from markdown for query building
     profile_dict = _parse_profile_markdown(profile_text)
@@ -257,7 +279,7 @@ async def run_pipeline_for_agent(
         return False
 
     # Step 3: LLM article selection
-    selected, justification = await _select_article(profile_text, candidates, agent_id)
+    selected, justification = await _select_article(profile_text, candidates, agent_id, preferences_text)
     if selected is None:
         logger.info("Agent %s: no article selected", agent_id)
         return False
@@ -269,7 +291,7 @@ async def run_pipeline_for_agent(
     full_text = await _try_fetch_full_text(pmid)
 
     # Step 5: Generate text summary
-    summary = await _generate_summary(profile_text, selected, full_text, agent_id)
+    summary = await _generate_summary(profile_text, selected, full_text, agent_id, preferences_text)
     if not summary:
         logger.error("Agent %s: summary generation failed", agent_id)
         return False

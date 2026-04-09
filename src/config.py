@@ -83,6 +83,7 @@ class Settings(BaseSettings):
     podcast_base_url: str = ""  # e.g. https://copi.science — for RSS enclosure URLs
     podcast_search_window_days: int = 14
     podcast_max_candidates: int = 50
+    podcast_normalize_audio: bool = False  # set true to run ffmpeg loudnorm after TTS
 
     # Worker
     worker_poll_interval: int = 5  # seconds

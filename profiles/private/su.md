@@ -24,3 +24,11 @@
 ### Criteria to Always Explore
 - Before proposing a collaboration, identify: what specific dataset/resource would we provide? What specific analytical service/infrastructure would we provide? What would we get back that we can't generate ourselves?
 - Always ask: does the wet-lab group have a specific disease model or compound collection we could connect to our drug repurposing predictions?
+
+## Podcast Preferences
+
+- Prioritize papers releasing new tools, databases, APIs, or code repositories — these are immediately actionable for the lab
+- Strong preference for knowledge graph methods, biomedical data integration, LLM/RAG applications in biomedicine, and drug repurposing approaches
+- Also interested in benchmark datasets for biomedical NLP, entity normalization, or relation extraction
+- Skip purely wet-lab papers with no computational component or data resource contribution
+- Skip review articles and editorials — primary research only

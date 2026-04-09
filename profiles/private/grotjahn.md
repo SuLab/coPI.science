@@ -23,3 +23,11 @@
 ### Criteria to Always Explore
 - Always ask: what is the biological or therapeutic question that structural imaging would answer? What decision would the cryo-ET data help make?
 - Always ask: can the partner lab provide pharmacologically defined, well-controlled samples (treated vs. untreated, with known concentrations and time points)?
+
+## Podcast Preferences
+
+- Prioritize papers using cryo-ET, cryo-FIB-SEM, or in situ structural biology of mitochondria, ER, or membrane contact sites
+- Strong interest in papers on mitochondrial dynamics, cristae morphology, or organellar membrane remodeling
+- Also interested in new computational tools for cryo-ET data analysis, subtomogram averaging, or membrane segmentation
+- Interested in the integrated stress response or UPR as it relates to mitochondrial structural changes
+- Skip purely biochemical or cell biological papers without structural imaging data

@@ -18,3 +18,11 @@
 2. Structure-based virtual screening for specific validated targets
 3. Methods development collaborations (scoring functions, GPU acceleration)
 4. AlphaFold/structural prediction integration with docking
+
+## Podcast Preferences
+
+- Prioritize papers on molecular docking methods, scoring function development, or GPU-accelerated virtual screening
+- Strong interest in covalent docking, reactive docking approaches, or covalent inhibitor design for novel targets
+- Also interested in AutoDock benchmarks, docking evaluation studies, or comparative analyses of docking methods
+- Interested in AlphaFold or AI-based protein structure predictions being applied to drug discovery and virtual screening
+- Skip purely experimental pharmacology papers without a computational or structural component

@@ -22,3 +22,11 @@
 ### Criteria to Always Explore
 - When talking to structural labs: always ask whether they can visualize a specific protein-ligand interaction at one of our ABPP-identified sites
 - When talking to computational labs: always ask whether their data (variant, expression, interaction) can be overlaid with our reactive cysteine map to prioritize targets
+
+## Podcast Preferences
+
+- Prioritize papers on activity-based protein profiling, chemoproteomic platforms, covalent inhibitor discovery, or targeted protein degradation
+- Strong interest in papers identifying new ligandable cysteines, reactive residues, or undruggable protein targets
+- Also interested in FAAH, MAGL, endocannabinoid pharmacology, or serine hydrolase biology
+- Prefer papers releasing chemical probes, datasets, or mass spectrometry methods that could be adopted by the lab
+- Skip papers on non-covalent drug discovery unless the target is directly relevant to our disease areas

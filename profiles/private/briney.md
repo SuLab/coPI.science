@@ -17,3 +17,11 @@
 2. B cell repertoire analysis for vaccine responses
 3. AI-driven protein structure prediction and immunogen design
 4. Cross-reactive antibody responses to emerging viral threats
+
+## Podcast Preferences
+
+- Prioritize papers on antibody language models, protein language models applied to immunology, or AI-driven antibody/protein design
+- Strong interest in B cell development, VDJ recombination, antibody repertoire diversity, or single-cell BCR sequencing
+- Also interested in broadly neutralizing antibodies against HIV, influenza, or emerging viruses — especially papers with neutralization breadth data
+- Interested in structural or computational methods for conformational ensemble-based vaccine immunogen design
+- Skip papers focused on T cell immunology or non-antibody immune responses unless they directly inform B cell biology

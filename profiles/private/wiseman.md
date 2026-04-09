@@ -22,3 +22,11 @@
 ### Criteria to Always Explore
 - When talking to structural biology labs: always ask whether they can visualize what happens to mitochondria or ER structure when we treat cells with our HRI activators
 - When talking to other pharmacology labs: always explore whether our compound collections are complementary (not overlapping)
+
+## Podcast Preferences
+
+- Prioritize papers on UPR signaling (ATF6, PERK, IRE1), integrated stress response, and ER/mitochondrial proteostasis
+- Strong interest in transthyretin or immunoglobulin light chain amyloid disease papers — mechanisms and therapeutic approaches
+- Also interested in AAA+ protease biology, mitochondrial quality control, and ischemia/reperfusion injury
+- Preferentially select papers reporting new pharmacological tools, chemical probes, or mechanistic insights over clinical studies
+- Skip purely clinical amyloid papers without basic biology findings

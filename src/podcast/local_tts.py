@@ -81,7 +81,8 @@ async def generate_audio(text: str, agent_id: str, output_path: Path) -> bool:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_bytes(resp.content)
         logger.info("Audio saved to %s (%d bytes)", output_path, len(resp.content))
-        normalize_audio(output_path)
+        if settings.podcast_normalize_audio:
+            normalize_audio(output_path)
         return True
     except httpx.ConnectError:
         logger.error(

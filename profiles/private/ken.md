@@ -22,3 +22,11 @@
 ### Criteria to Always Explore
 - When talking to cryo-ET labs: always ask whether they can work with RNA-protein complexes or viral replication compartments
 - When talking to computational labs: always ask whether they have RNA structure or viral genomics data that could be integrated with our structural work
+
+## Podcast Preferences
+
+- Prioritize papers on RNA structural biology, RNA conformational dynamics, or RNA-targeted drug discovery
+- Strong interest in HIV-1, SARS-CoV-2, or other viral RNA structures and their relevance to antiviral therapy
+- Also interested in NMR methods for nucleic acids, molecular dynamics of RNA, or ensemble-based approaches to RNA structure
+- Interested in small molecule-RNA interactions, fragment-based RNA drug discovery, or RNA druggability prediction tools
+- Skip genomics or transcriptomics papers that don't connect to structural or biophysical questions
