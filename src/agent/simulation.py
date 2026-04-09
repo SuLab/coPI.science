@@ -126,6 +126,10 @@ class SimulationEngine:
         # Key: tuple(sorted([agent_a, agent_b])), Value: list of dicts
         self._prior_threads: dict[tuple[str, str], list[dict]] = {}
 
+        # Thread IDs already reopened via DB-synced PI guidance (rating=0 reviews)
+        # to avoid re-processing on every turn.
+        self._db_reopened_thread_ids: set[str] = set()
+
         # Last agent to make an LLM call — prevents the same agent from making
         # back-to-back LLM calls when it's the only active agent.
         self._last_llm_caller: str | None = None
@@ -1848,21 +1852,44 @@ class SimulationEngine:
             logger.warning("Failed to flush LLM call logs: %s", exc)
 
     async def _sync_proposal_reviews_from_db(self) -> None:
-        """Check DB for web-app proposal reviews and mark in-memory proposals as reviewed."""
+        """Check DB for web-app proposal reviews and mark in-memory proposals as reviewed.
+
+        For rating=0 reviews (reopened with PI guidance), also reopen the thread
+        so both agents resume discussion incorporating the PI's direction.
+        """
         if not self.session_factory:
             return
         try:
             async with self.session_factory() as db:
                 from sqlalchemy import select as sa_select
-                # Get all reviews across all runs (proposals persist across sessions)
+                # Get all reviews with rating and guidance info
                 result = await db.execute(
-                    sa_select(ProposalReview.agent_id, ThreadDecision.thread_id)
+                    sa_select(
+                        ProposalReview.agent_id,
+                        ProposalReview.rating,
+                        ProposalReview.comment,
+                        ThreadDecision.thread_id,
+                        ThreadDecision.channel,
+                    )
                     .join(ThreadDecision, ProposalReview.thread_decision_id == ThreadDecision.id)
                 )
-                reviewed_set = {(r.agent_id, r.thread_id) for r in result}
+                rows = list(result)
 
+            reviewed_set = {(r.agent_id, r.thread_id) for r in rows}
             if not reviewed_set:
                 return
+
+            # Build lookup for rating=0 (reopened with guidance) reviews
+            reopen_guidance: dict[tuple[str, str], tuple[str, str]] = {}
+            for r in rows:
+                if r.rating == 0 and r.comment:
+                    # Strip "[Reopened...] " prefix stored by the web/email route
+                    guidance = r.comment
+                    if guidance.startswith("[Reopened via email] "):
+                        guidance = guidance[len("[Reopened via email] "):]
+                    elif guidance.startswith("[Reopened] "):
+                        guidance = guidance[len("[Reopened] "):]
+                    reopen_guidance[(r.agent_id, r.thread_id)] = (guidance, r.channel)
 
             # Mark matching in-memory proposals as reviewed
             newly_reviewed: list[tuple[Agent, str]] = []
@@ -1877,10 +1904,77 @@ class SimulationEngine:
                                 agent.agent_id, proposal.thread_id,
                             )
 
+            # Detect rating=0 reviews that need thread reopening, independent of
+            # the reviewed flag (which may already be True from a prior sync).
+            newly_reopened: list[tuple[Agent, str, str, str]] = []  # agent, other_id, thread_id, guidance
+            for agent in self.agents.values():
+                for proposal in agent.state.pending_proposals:
+                    key = (agent.agent_id, proposal.thread_id)
+                    if key in reopen_guidance and proposal.thread_id not in self._db_reopened_thread_ids:
+                        guidance, _channel = reopen_guidance[key]
+                        newly_reopened.append(
+                            (agent, proposal.other_agent_id, proposal.thread_id, guidance)
+                        )
+
             # Update memory for agents whose proposals were just reviewed
             for agent, other_id in newly_reviewed:
                 event = f"PI reviewed proposal with {other_id} — agent is now unblocked for new posts"
                 await self._update_agent_memory(agent, event)
+
+            # Reopen threads where PI provided guidance (rating=0)
+            for agent, other_id, thread_id, guidance in newly_reopened:
+                channel = None
+                for p in agent.state.pending_proposals:
+                    if p.thread_id == thread_id:
+                        channel = p.channel
+                        break
+                if not channel:
+                    continue
+
+                # Create a synthetic log entry for the PI guidance so it appears
+                # in thread history and the agents can see it
+                pi_entry = LogEntry(
+                    ts=str(time.time()),
+                    channel=channel,
+                    sender_agent_id=None,
+                    sender_name="PI (via web)",
+                    content=guidance,
+                    thread_ts=thread_id,
+                    posted_at=time.time(),
+                    is_bot=False,
+                )
+                self.message_log.append(pi_entry)
+
+                # Reopen the thread for both agents
+                self._closed_thread_ids.discard(thread_id)
+                existing_count = len(self.message_log.get_thread_history(thread_id))
+
+                agent.state.active_threads[thread_id] = ThreadState(
+                    thread_id=thread_id,
+                    channel=channel,
+                    other_agent_id=other_id,
+                    message_count=0,
+                    has_pending_reply=True,
+                    pi_context=guidance,
+                    message_count_offset=existing_count,
+                )
+
+                other_agent = self.agents.get(other_id)
+                if other_agent:
+                    other_agent.state.active_threads[thread_id] = ThreadState(
+                        thread_id=thread_id,
+                        channel=channel,
+                        other_agent_id=agent.agent_id,
+                        message_count=0,
+                        has_pending_reply=True,
+                        message_count_offset=existing_count,
+                    )
+
+                self._db_reopened_thread_ids.add(thread_id)
+                logger.info(
+                    "[%s] PI guidance via web reopened thread %s with %s: %.60s",
+                    agent.agent_id, thread_id, other_id, guidance[:60],
+                )
         except Exception as exc:
             logger.debug("Proposal review sync failed: %s", exc)
 
