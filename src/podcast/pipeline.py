@@ -11,7 +11,6 @@ from src.config import get_settings
 logger = logging.getLogger(__name__)
 
 PROFILES_DIR = Path("profiles/public")
-PRIVATE_PROFILES_DIR = Path("profiles/private")
 AUDIO_DIR = Path("data/podcast_audio")
 
 
@@ -23,13 +22,41 @@ def _load_public_profile(agent_id: str) -> str:
     return ""
 
 
-def _load_podcast_preferences(agent_id: str) -> str:
-    """Load the Podcast Preferences section from the agent's private profile."""
-    path = PRIVATE_PROFILES_DIR / f"{agent_id}.md"
-    if not path.exists():
+async def _load_podcast_preferences(agent_id: str) -> str:
+    """Load the Podcast Preferences section from the agent's latest private ProfileRevision in the DB."""
+    try:
+        from sqlalchemy import desc, select
+
+        from src.database import get_session_factory
+        from src.models.agent_registry import AgentRegistry
+        from src.models.profile_revision import ProfileRevision
+
+        session_factory = get_session_factory()
+        async with session_factory() as db:
+            reg_result = await db.execute(
+                select(AgentRegistry.id).where(AgentRegistry.agent_id == agent_id)
+            )
+            reg_row = reg_result.first()
+            if not reg_row:
+                return ""
+
+            rev_result = await db.execute(
+                select(ProfileRevision.content)
+                .where(
+                    ProfileRevision.agent_registry_id == reg_row[0],
+                    ProfileRevision.profile_type == "private",
+                )
+                .order_by(desc(ProfileRevision.created_at))
+                .limit(1)
+            )
+            rev_row = rev_result.first()
+            if not rev_row:
+                return ""
+
+            return _extract_section_text(rev_row[0], "Podcast Preferences")
+    except Exception as exc:
+        logger.warning("Could not load podcast preferences for %s: %s", agent_id, exc)
         return ""
-    text = path.read_text(encoding="utf-8")
-    return _extract_section_text(text, "Podcast Preferences")
 
 
 def _format_candidates_for_prompt(records: list[dict[str, Any]]) -> str:
@@ -253,7 +280,7 @@ async def run_pipeline_for_agent(
         logger.warning("Agent %s: no public profile found, skipping", agent_id)
         return False
 
-    preferences_text = _load_podcast_preferences(agent_id)
+    preferences_text = await _load_podcast_preferences(agent_id)
     if preferences_text:
         logger.info("Agent %s: loaded podcast preferences (%d chars)", agent_id, len(preferences_text))
 

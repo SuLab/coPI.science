@@ -29,7 +29,9 @@ env/
 logs/*.json
 logs/*.log
 
-# Bot working memory (ephemeral, not committed)
+# Agent profiles (versioned in database via ProfileRevision, not git)
+profiles/public/*.md
+profiles/private/*.md
 profiles/memory/*.md
 
 # IDE

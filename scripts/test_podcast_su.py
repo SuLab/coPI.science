@@ -57,7 +57,7 @@ async def run():
         return
     logger.info("Loaded profile (%d chars)", len(profile_text))
 
-    preferences_text = _load_podcast_preferences(agent_id)
+    preferences_text = await _load_podcast_preferences(agent_id)
     if preferences_text:
         logger.info("Loaded podcast preferences (%d chars)", len(preferences_text))
     else:
