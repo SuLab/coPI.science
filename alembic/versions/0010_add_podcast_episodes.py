@@ -1,8 +1,8 @@
 """Add podcast_episodes table
 
-Revision ID: 0005
-Revises: 0004
-Create Date: 2026-03-30 00:00:00.000000
+Revision ID: 0010
+Revises: 0009
+Create Date: 2026-04-09 00:00:00.000000
 
 """
 
@@ -13,8 +13,8 @@ from sqlalchemy.dialects import postgresql
 
 from alembic import op
 
-revision: str = "0005"
-down_revision: Union[str, None] = "0004"
+revision: str = "0010"
+down_revision: Union[str, None] = "0009"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
