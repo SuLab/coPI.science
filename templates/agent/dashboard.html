@@ -126,9 +126,8 @@
                                     (4, "Excellent idea", "High interest, no notable weaknesses"),
                                 ] %}
                                 {% for val, label, desc in ratings %}
-                                <label class="flex items-start gap-2 cursor-pointer p-2 rounded-lg border
-                                    {% if val == 3 %}border-indigo-200 bg-indigo-50{% else %}border-gray-200 hover:bg-gray-50{% endif %}">
-                                    <input type="radio" name="rating" value="{{ val }}" class="mt-0.5 text-indigo-600" {% if val == 3 %}checked{% endif %}>
+                                <label class="flex items-start gap-2 cursor-pointer p-2 rounded-lg border border-gray-200 hover:bg-gray-50">
+                                    <input type="radio" name="rating" value="{{ val }}" class="mt-0.5 text-indigo-600" required>
                                     <div>
                                         <div class="text-sm font-medium text-gray-800">{{ val }} — {{ label }}</div>
                                         <div class="text-xs text-gray-500">{{ desc }}</div>
