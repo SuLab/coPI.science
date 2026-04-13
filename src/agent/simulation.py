@@ -14,6 +14,13 @@ from typing import Any
 from src.agent.agent import Agent
 from src.agent.channels import SEEDED_CHANNELS
 from src.agent.foa_cache import extract_foa_number, format_foa_for_prompt
+from src.agent.funding_rules import (
+    format_funding_thread_summary,
+    format_your_prior_messages,
+    is_acknowledgment_only_funding_reply,
+    is_announcement_only_funding_reply,
+    summarize_funding_thread,
+)
 from src.agent.message_log import LogEntry, MessageLog, is_funding_post
 from src.agent.state import PostRef, ProposalRef, ThreadState
 from src.agent.tools import TOOL_DEFINITIONS, execute_tool
@@ -676,12 +683,29 @@ class SimulationEngine:
         other_name = other_agent.bot_name if other_agent else thread.other_agent_id
         other_lab = other_agent.pi_name if other_agent else "Unknown"
 
+        # Funding-thread context (self-dedup + late-joiner summary)
+        is_funding = self.message_log.is_funding_thread(thread.thread_id)
+        your_prior_text: str | None = None
+        thread_activity_text: str | None = None
+        if is_funding:
+            your_prior_entries = [
+                e for e in history_entries if e.sender_agent_id == agent.agent_id
+            ]
+            your_prior_text = format_your_prior_messages(your_prior_entries)
+            summary = summarize_funding_thread(
+                self.message_log, thread.thread_id, viewer_agent_id=agent.agent_id,
+            )
+            thread_activity_text = format_funding_thread_summary(summary)
+
         # Build prompt
         system_prompt, messages = agent.build_phase4_prompt(
             thread=thread,
             thread_history=thread_history,
             other_agent_name=other_name,
             other_agent_lab=other_lab,
+            is_funding_thread=is_funding,
+            your_prior_messages=your_prior_text,
+            thread_activity_summary=thread_activity_text,
         )
 
         # Create tool executor bound to this thread's state
@@ -714,6 +738,31 @@ class SimulationEngine:
                 )
                 return
 
+            # Funding-thread draft validators: reject announcement-only and
+            # acknowledgment-only replies before they hit Slack.
+            if is_funding:
+                rejected_reason = None
+                if is_announcement_only_funding_reply(response_text):
+                    rejected_reason = "announcement-only"
+                elif is_acknowledgment_only_funding_reply(response_text):
+                    rejected_reason = "acknowledgment-only"
+                if rejected_reason:
+                    thread.funding_reject_count += 1
+                    logger.info(
+                        "[%s] Phase 4: Rejected %s draft in funding thread %s (count=%d)",
+                        agent.agent_id, rejected_reason, thread.thread_id,
+                        thread.funding_reject_count,
+                    )
+                    if thread.funding_reject_count >= 2:
+                        # Back off: drop the pending-reply flag so the agent
+                        # stops re-attempting this thread for a while.
+                        thread.has_pending_reply = False
+                        logger.info(
+                            "[%s] Phase 4: Backing off funding thread %s after %d rejections",
+                            agent.agent_id, thread.thread_id, thread.funding_reject_count,
+                        )
+                    return
+
             # Post the reply
             await self._post_message(
                 agent.agent_id, thread.channel, response_text,
@@ -721,6 +770,7 @@ class SimulationEngine:
             )
             agent.message_count += 1
             thread.has_pending_reply = False
+            thread.funding_reject_count = 0
 
             # Check for thread outcome
             await self._check_thread_outcome(agent, thread, response_text)
@@ -950,11 +1000,18 @@ class SimulationEngine:
 
         # Pre-load cached FOA text for funding posts so Phase 5 has full context
         foa_contexts: dict[str, str] = {}
+        funding_thread_summaries: dict[str, str] = {}
         for post in available_posts:
             if post.foa_number:
                 foa_text = format_foa_for_prompt(post.foa_number)
                 if foa_text:
                     foa_contexts[post.post_id] = foa_text
+            if self.message_log.is_funding_thread(post.post_id):
+                summary = summarize_funding_thread(
+                    self.message_log, post.post_id, viewer_agent_id=agent.agent_id,
+                )
+                if not summary.is_empty():
+                    funding_thread_summaries[post.post_id] = format_funding_thread_summary(summary)
 
         # Also pre-load FOAs from active/closed threads for Option B
         # (starting a new funding collab from a previously seen FOA)
@@ -974,6 +1031,7 @@ class SimulationEngine:
             thread_foa_contexts=thread_foa_contexts,
             prior_threads=prior_threads,
             funding_only=blocked_for_regular,
+            funding_thread_summaries=funding_thread_summaries,
         )
 
         # Restore
@@ -1046,6 +1104,23 @@ class SimulationEngine:
                         agent.agent_id, target_post_id, allowed,
                     )
                     return
+
+                # Funding-thread draft validators (atomic spin-off + no-ack rules)
+                if self.message_log.is_funding_thread(target_post_id):
+                    if is_announcement_only_funding_reply(message_text):
+                        logger.info(
+                            "[%s] Phase 5: Rejected announcement-only funding reply to %s",
+                            agent.agent_id, target_post_id,
+                        )
+                        agent.state.consecutive_phase5_skips += 1
+                        return
+                    if is_acknowledgment_only_funding_reply(message_text):
+                        logger.info(
+                            "[%s] Phase 5: Rejected acknowledgment-only funding reply to %s",
+                            agent.agent_id, target_post_id,
+                        )
+                        agent.state.consecutive_phase5_skips += 1
+                        return
 
                 # Reply to an interesting post → creates a new thread
                 await self._post_message(

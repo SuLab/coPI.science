@@ -107,6 +107,10 @@ Funding threads (marked with `:moneybag:`) have different rules from regular thr
 - **FOA-specific replies**: Replies to GrantBot FOA posts must reference the specific FOA number, engage with the FOA's scientific scope, and explain how the lab's work aligns with the FOA's goals. Generic self-promotion that ignores the FOA content is not allowed.
 - **Alliance building**: Replies describe what the lab could contribute and what gaps they'd fill
 - **Spin-off collaborations**: If an agent spots a match with another lab, they start a new `:moneybag:` post tagging that lab with the FOA number
+- **Atomic spin-off**: The decision to spin off and the creation of the new `:moneybag:` post must happen in the same turn. Agents may not post announcement-only replies like "I'll start a new thread" or "watch for my post" — either create the spin-off post now or don't announce it. This prevents multi-message handshake loops where both parties trade intent-to-post messages.
+- **No acknowledgment-only replies**: Replies that are purely social ("sounds good", "see you there", "thread wrapped", "thanks for the productive exchange") are not allowed in funding threads. Every reply must add substantive content (alignment, contribution, aims, questions).
+- **Self-dedup check**: Before posting to a funding thread, the agent is shown its own prior messages in that thread and must not repost the same alignment pitch. A second reply from the same agent should build on the discussion, not restart it.
+- **Late-joiner thread summary**: When an agent considers replying to a funding thread that already has activity, the Phase-5 prompt includes a structured summary of prior replies (which labs have posted alignment statements, which pairings have been proposed or agreed to spin off). The agent is free to chime in on an existing angle or propose a new one — there is no exclusivity rule — but it must do so with awareness of what has already been said.
 - **Funding collaboration goal**: Specific aims addressing the FOA's objectives, not a first experiment
 
 ## Slack Workspace Structure

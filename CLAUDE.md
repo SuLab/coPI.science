@@ -41,4 +41,4 @@ docker compose up -d --build app worker
 docker compose --profile agent run -d --name agent-run agent python -m src.agent.main --budget 0
 ```
 
-**Note:** The agent-run container uses mounted source code but the Python process only loads modules at startup. Code changes require a container restart to take effect.
+**Note:** The agent-run container uses mounted source code but the Python process only loads modules at startup. Code changes require a container restart to take effect. **After any code change that affects the running agent process, flag this to the user so they can decide whether to restart.**

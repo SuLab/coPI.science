@@ -32,6 +32,7 @@ class ThreadState:
     pi_context: str | None = None  # PI posted in this thread — their message
     message_count_offset: int = 0  # subtract from message_count for PI-reopened threads
     foa_number: str | None = None  # FOA number for funding threads
+    funding_reject_count: int = 0  # drafts rejected by funding-rules validators
 
 
 @dataclass
