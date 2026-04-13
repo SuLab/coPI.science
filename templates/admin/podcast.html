@@ -76,7 +76,7 @@
                     {% endif %}
                 </td>
                 <td class="px-4 py-3 text-sm">
-                    <a href="https://pubmed.ncbi.nlm.nih.gov/{{ ep.pmid }}/" target="_blank"
+                    <a href="{{ ep.paper_url or 'https://pubmed.ncbi.nlm.nih.gov/' ~ ep.pmid ~ '/' }}" target="_blank"
                        class="text-indigo-600 hover:underline font-mono text-xs">{{ ep.pmid }}</a>
                 </td>
                 <td class="px-4 py-3 text-sm">

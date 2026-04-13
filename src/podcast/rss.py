@@ -48,7 +48,7 @@ def _build_item(ep: Any, agent_id: str, base_url: str) -> str:
     title = _escape(f"{ep.paper_title} — {date_str}")
     description = _escape(ep.text_summary)
     guid = f"{agent_id}-{date_str}"
-    pmid_url = f"https://pubmed.ncbi.nlm.nih.gov/{ep.pmid}/"
+    pmid_url = getattr(ep, "paper_url", None) or f"https://pubmed.ncbi.nlm.nih.gov/{ep.pmid}/"
 
     enclosure_xml = ""
     duration_xml = ""

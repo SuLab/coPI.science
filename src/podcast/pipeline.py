@@ -312,6 +312,7 @@ async def run_pipeline_for_agent(
         return False
 
     pmid = selected.get("pmid", "")
+    paper_url = selected.get("url") or f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
     logger.info("Agent %s: selected PMID %s", agent_id, pmid)
 
     # Step 4: Try to fetch full text
@@ -366,6 +367,7 @@ async def run_pipeline_for_agent(
         paper_authors=authors_str,
         paper_journal=selected.get("journal") or "",
         paper_year=selected.get("year") or 0,
+        paper_url=paper_url,
         text_summary=summary,
         audio_file_path=audio_file_path,
         audio_duration_seconds=audio_duration,

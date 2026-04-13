@@ -96,7 +96,7 @@ async def _run_pipeline_background(agent_id: str, bot_name: str, pi_name: str, b
         logger.error("On-demand podcast pipeline failed for %s: %s", agent_id, exc, exc_info=True)
 
 
-@router.post("/{agent_id}/generate")
+@router.api_route("/{agent_id}/generate", methods=["GET", "POST"])
 async def podcast_generate(
     agent_id: str,
     db: AsyncSession = Depends(get_db),

@@ -23,6 +23,7 @@ class PodcastEpisode(Base):
     paper_authors: Mapped[str] = mapped_column(String(500), nullable=False)
     paper_journal: Mapped[str] = mapped_column(String(255), nullable=False)
     paper_year: Mapped[int] = mapped_column(Integer, nullable=False)
+    paper_url: Mapped[str | None] = mapped_column(String(1000), nullable=True)
     text_summary: Mapped[str] = mapped_column(Text, nullable=False)
     audio_file_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
     audio_duration_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
