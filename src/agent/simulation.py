@@ -803,6 +803,10 @@ class SimulationEngine:
                     # Extract text starting from :memo: marker
                     memo_idx = entry.content.find(":memo:")
                     summary_text = entry.content[memo_idx:].strip() if memo_idx >= 0 else entry.content
+                    agent.state.pending_proposals = [
+                        p for p in agent.state.pending_proposals
+                        if p.thread_id != thread.thread_id
+                    ]
                     agent.state.pending_proposals.append(ProposalRef(
                         thread_id=thread.thread_id,
                         channel=thread.channel,
@@ -857,8 +861,14 @@ class SimulationEngine:
         if other_agent and thread.thread_id in other_agent.state.active_threads:
             other_agent.state.active_threads[thread.thread_id].status = "closed"
             other_agent.state.active_threads.pop(thread.thread_id, None)
-            # If proposal, add to other agent's pending_proposals too
+            # If proposal, add to other agent's pending_proposals too.
+            # Replace any existing entry for the same thread so reopen/re-propose
+            # cycles don't accumulate duplicates during a single run.
             if outcome == "proposal" and summary_text:
+                other_agent.state.pending_proposals = [
+                    p for p in other_agent.state.pending_proposals
+                    if p.thread_id != thread.thread_id
+                ]
                 other_agent.state.pending_proposals.append(ProposalRef(
                     thread_id=thread.thread_id,
                     channel=thread.channel,
@@ -1865,21 +1875,37 @@ class SimulationEngine:
                         (r.thread_decision_id, r.agent_id) for r in reviewed_result
                     }
 
+                # Keep only the latest ThreadDecision per (agent_id, thread_id).
+                # Older rows represent prior propose/reopen cycles and their
+                # reviews are stale — the most recent re-proposal is the only
+                # one whose review status affects the agent's current block.
+                latest_by_key: dict[tuple[str, str], ThreadDecision] = {}
                 for td in proposals:
                     for aid in (td.agent_a, td.agent_b):
-                        agent = self.agents.get(aid)
-                        if not agent:
+                        if aid not in self.agents:
                             continue
-                        is_reviewed = (td.id, aid) in reviewed_set
-                        other = td.agent_b if aid == td.agent_a else td.agent_a
-                        agent.state.pending_proposals.append(ProposalRef(
-                            thread_id=td.thread_id,
-                            channel=td.channel,
-                            other_agent_id=other,
-                            summary_text=td.summary_text or "",
-                            proposed_at=td.decided_at.timestamp() if td.decided_at else 0.0,
-                            reviewed=is_reviewed,
-                        ))
+                        key = (aid, td.thread_id)
+                        existing = latest_by_key.get(key)
+                        if existing is None:
+                            latest_by_key[key] = td
+                            continue
+                        td_ts = td.decided_at.timestamp() if td.decided_at else 0.0
+                        ex_ts = existing.decided_at.timestamp() if existing.decided_at else 0.0
+                        if td_ts > ex_ts:
+                            latest_by_key[key] = td
+
+                for (aid, _tid), td in latest_by_key.items():
+                    agent = self.agents[aid]
+                    is_reviewed = (td.id, aid) in reviewed_set
+                    other = td.agent_b if aid == td.agent_a else td.agent_a
+                    agent.state.pending_proposals.append(ProposalRef(
+                        thread_id=td.thread_id,
+                        channel=td.channel,
+                        other_agent_id=other,
+                        summary_text=td.summary_text or "",
+                        proposed_at=td.decided_at.timestamp() if td.decided_at else 0.0,
+                        reviewed=is_reviewed,
+                    ))
             except Exception as exc:
                 logger.warning("Failed to rebuild proposals: %s", exc)
 
@@ -2041,12 +2067,20 @@ class SimulationEngine:
 
             # Detect rating=0 reviews that need thread reopening, independent of
             # the reviewed flag (which may already be True from a prior sync).
+            # Dedupe by thread_id within this pass so that if the PI reviewed
+            # both sides of the pair, we only reopen the thread once.
             newly_reopened: list[tuple[Agent, str, str, str]] = []  # agent, other_id, thread_id, guidance
+            seen_reopens: set[str] = set()
             for agent in self.agents.values():
                 for proposal in agent.state.pending_proposals:
+                    if proposal.thread_id in seen_reopens:
+                        continue
+                    if proposal.thread_id in self._db_reopened_thread_ids:
+                        continue
                     key = (agent.agent_id, proposal.thread_id)
-                    if key in reopen_guidance and proposal.thread_id not in self._db_reopened_thread_ids:
+                    if key in reopen_guidance:
                         guidance, _channel = reopen_guidance[key]
+                        seen_reopens.add(proposal.thread_id)
                         newly_reopened.append(
                             (agent, proposal.other_agent_id, proposal.thread_id, guidance)
                         )
