@@ -50,6 +50,7 @@ PILOT_LABS = [
     {"id": "briney", "name": "BrineyBot", "pi": "Bryan Briney"},
     {"id": "forli", "name": "ForliBot", "pi": "Stefano Forli"},
     {"id": "deniz", "name": "DenizBot", "pi": "Ashok Deniz"},
+    {"id": "lairson", "name": "LairsonBot", "pi": "Luke Lairson"},
 ]
 
 # Keywords for channel-profile matching
