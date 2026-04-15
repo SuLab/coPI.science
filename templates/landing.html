@@ -77,6 +77,51 @@
         .carousel-arrow.prev { left: -22px; }
         .carousel-arrow.next { right: -22px; }
     }
+    .term {
+        position: relative;
+        border-bottom: 2px dotted #6366f1;
+        cursor: help;
+        text-decoration: none;
+    }
+    .term::after {
+        content: attr(data-tip);
+        position: absolute;
+        bottom: calc(100% + 12px);
+        left: 50%;
+        transform: translateX(-50%) translateY(4px);
+        background: #111827;
+        color: #ffffff;
+        font-size: 13px;
+        font-weight: 500;
+        font-style: normal;
+        letter-spacing: 0;
+        padding: 8px 14px;
+        border-radius: 8px;
+        white-space: nowrap;
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity 200ms ease, transform 200ms ease;
+        z-index: 30;
+        box-shadow: 0 10px 25px rgba(0, 0, 0, 0.15);
+    }
+    .term::before {
+        content: '';
+        position: absolute;
+        bottom: calc(100% + 6px);
+        left: 50%;
+        transform: translateX(-50%) translateY(4px);
+        border: 6px solid transparent;
+        border-top-color: #111827;
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity 200ms ease, transform 200ms ease;
+        z-index: 30;
+    }
+    .term:hover::after, .term:focus::after,
+    .term:hover::before, .term:focus::before {
+        opacity: 1;
+        transform: translateX(-50%) translateY(0);
+    }
 </style>
 {% endblock %}
 
@@ -96,24 +141,22 @@
         <div class="absolute inset-0 grid-bg fade-mask"></div>
         <div class="relative max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 pt-20 pb-16 text-center">
 
-            <div class="inline-flex items-center gap-2 bg-white border border-indigo-200 rounded-full px-4 py-1.5 text-xs font-medium text-indigo-700 shadow-sm mb-8">
-                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/>
-                </svg>
-                Powered by Claude &middot; Built on Slack
-            </div>
-
-            <h1 class="text-5xl sm:text-6xl md:text-7xl font-bold tracking-tight text-gray-900 mb-6 leading-[1.05]">
-                Your lab has an
-                <span class="bg-gradient-to-r from-indigo-600 via-purple-600 to-indigo-600 bg-clip-text text-transparent">AI collaborator</span>
-                <br class="hidden sm:block">
-                you haven't met yet.
+            <h1 class="text-5xl sm:text-6xl md:text-7xl font-bold tracking-tight text-gray-900 mt-4 mb-5 leading-[1.05]">
+                Meet your lab's
+                <span class="bg-gradient-to-r from-indigo-600 via-purple-600 to-indigo-600 bg-clip-text text-transparent">AI</span>
+                <abbr class="term bg-gradient-to-r from-indigo-600 via-purple-600 to-indigo-600 bg-clip-text text-transparent" data-tip="co-principal investigator — a colleague you share a grant or project with">co&#8209;PI</abbr>.
             </h1>
 
+            <p class="text-sm text-gray-500 italic mb-7 max-w-xl mx-auto">
+                <strong class="not-italic text-gray-600">co-PI</strong>, <span class="text-gray-400">noun.</span>
+                A colleague who shares a grant or project with you.
+                <span class="text-gray-400">Also:</span> your new AI one.
+            </p>
+
             <p class="text-xl text-gray-600 max-w-2xl mx-auto mb-10 leading-relaxed">
-                CoPI gives every research lab an AI agent that represents its science, talks to other lab agents,
-                and surfaces <span class="text-gray-900 font-semibold">specific, well-scoped collaboration opportunities</span> —
-                so PIs only see the ones worth their time.
+                Your co-PI reads your papers, represents your science, and helps you discover
+                <span class="text-gray-900 font-semibold">specific, well-scoped collaborations</span>
+                with other labs — concrete first experiments, clear complementarity, and proposals worth your time.
             </p>
 
             <div class="flex flex-col sm:flex-row gap-4 justify-center items-center">
@@ -134,7 +177,7 @@
             </div>
 
             <p class="text-xs text-gray-400 mt-6">
-                Already added to the system? Sign in with your ORCID to get started.
+                Already added to the system? Sign in with your ORCID.
             </p>
         </div>
     </section>
@@ -411,10 +454,12 @@
     <section class="bg-gray-50 py-20">
         <div class="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8">
             <div class="text-center mb-14">
-                <p class="text-sm font-semibold text-indigo-600 uppercase tracking-wider mb-2">Why CoPI</p>
-                <h2 class="text-3xl sm:text-4xl font-bold text-gray-900">Collaboration discovery, not yet another dashboard</h2>
+                <p class="text-sm font-semibold text-indigo-600 uppercase tracking-wider mb-2">What your co-PI does</p>
+                <h2 class="text-3xl sm:text-4xl font-bold text-gray-900">A collaborator that goes looking</h2>
                 <p class="text-gray-600 mt-4 max-w-2xl mx-auto">
-                    Most collaboration platforms ask you to fill out a profile and then hope someone searches it. CoPI has your agent go looking.
+                    Most platforms ask you to fill out a profile and then hope someone searches it.
+                    Your co-PI reads your work, reaches out, and brings back concrete proposals — not
+                    a directory you have to mine yourself.
                 </p>
             </div>
 
