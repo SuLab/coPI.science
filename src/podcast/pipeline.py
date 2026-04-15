@@ -59,28 +59,32 @@ async def _load_podcast_preferences(agent_id: str) -> str:
         return ""
 
 
-async def _load_structured_preferences(agent_id: str, db_session=None):
-    """Load PodcastPreferences row for this agent from DB. Returns ORM row or None."""
+async def _load_structured_preferences(agent_id: str | None = None, user_id=None, db_session=None):
+    """Load PodcastPreferences row from DB by agent_id or user_id. Returns ORM row or None."""
+    if not agent_id and not user_id:
+        return None
     try:
         from sqlalchemy import select
 
         from src.models.podcast_preferences import PodcastPreferences
 
+        def _build_query():
+            if agent_id:
+                return select(PodcastPreferences).where(PodcastPreferences.agent_id == agent_id)
+            return select(PodcastPreferences).where(PodcastPreferences.user_id == user_id)
+
         if db_session is not None:
-            result = await db_session.execute(
-                select(PodcastPreferences).where(PodcastPreferences.agent_id == agent_id)
-            )
+            result = await db_session.execute(_build_query())
             return result.scalar_one_or_none()
 
         from src.database import get_session_factory
         session_factory = get_session_factory()
         async with session_factory() as db:
-            result = await db.execute(
-                select(PodcastPreferences).where(PodcastPreferences.agent_id == agent_id)
-            )
+            result = await db.execute(_build_query())
             return result.scalar_one_or_none()
     except Exception as exc:
-        logger.warning("Could not load structured podcast preferences for %s: %s", agent_id, exc)
+        key = agent_id or str(user_id)
+        logger.warning("Could not load structured podcast preferences for %s: %s", key, exc)
         return None
 
 
@@ -310,7 +314,7 @@ async def run_pipeline_for_agent(
         logger.info("Agent %s: loaded podcast preferences (%d chars)", agent_id, len(preferences_text))
 
     # Load structured preferences (voice, keywords, journals) from DB
-    prefs = await _load_structured_preferences(agent_id, db_session=db_session)
+    prefs = await _load_structured_preferences(agent_id=agent_id, db_session=db_session)
     if prefs:
         logger.info(
             "Agent %s: structured preferences — voice=%s, keywords=%d, preferred_journals=%d",
@@ -378,6 +382,9 @@ async def run_pipeline_for_agent(
     if settings.podcast_tts_backend == "local":
         from src.podcast.local_tts import generate_audio
         logger.info("Agent %s: using local vLLM-Omni TTS backend", agent_id)
+    elif settings.podcast_tts_backend == "openai":
+        from src.podcast.openai_tts import generate_audio
+        logger.info("Agent %s: using OpenAI TTS backend", agent_id)
     else:
         from src.podcast.mistral_tts import generate_audio
         logger.info("Agent %s: using Mistral AI TTS backend", agent_id)
@@ -433,6 +440,188 @@ async def run_pipeline_for_agent(
         "Agent %s: episode complete (audio=%s, slack=%s)", agent_id, audio_ok, slack_ok
     )
     return True
+
+
+async def run_podcast_for_user(
+    user_id,
+    db_session,
+) -> bool:
+    """Run the full podcast pipeline for a plain ORCID user (no agent required).
+
+    Loads the user's ResearcherProfile from the DB, builds search queries from
+    structured profile fields, selects and summarises an article, generates audio,
+    and persists a PodcastEpisode keyed by user_id.
+
+    Returns True if an episode was produced and recorded.
+    """
+    import uuid as _uuid
+
+    from sqlalchemy import select as _select
+
+    from src.models.podcast import PodcastEpisode
+    from src.models.profile import ResearcherProfile
+    from src.models.user import User
+    from src.podcast.pubmed_search import build_queries, fetch_candidates
+    from src.podcast.state import get_delivered_pmids_for_user, record_delivery_for_user
+    from src.podcast.tts_utils import get_audio_duration_seconds
+
+    settings = get_settings()
+    today = date.today()
+    user_id_str = str(user_id)
+
+    # Load user
+    user_result = await db_session.execute(
+        _select(User).where(User.id == user_id)
+    )
+    user = user_result.scalar_one_or_none()
+    if not user:
+        logger.warning("run_podcast_for_user: user %s not found", user_id_str)
+        return False
+
+    logger.info("Starting podcast pipeline for user: %s (%s)", user_id_str, user.name)
+
+    # Load ResearcherProfile
+    profile_result = await db_session.execute(
+        _select(ResearcherProfile).where(ResearcherProfile.user_id == user_id)
+    )
+    profile = profile_result.scalar_one_or_none()
+    if not profile or not profile.research_summary:
+        logger.warning("User %s: no completed profile found, skipping", user_id_str)
+        return False
+
+    # Build profile text from structured DB fields (no disk file needed)
+    profile_text = _build_profile_text_from_db(user, profile)
+
+    # Load structured preferences keyed by user_id
+    prefs = await _load_structured_preferences(user_id=user_id, db_session=db_session)
+    if prefs:
+        logger.info(
+            "User %s: structured preferences — voice=%s, keywords=%d",
+            user_id_str, prefs.voice_id, len(prefs.extra_keywords),
+        )
+
+    # Build profile dict for query building
+    profile_dict = {
+        "research_summary": profile.research_summary or "",
+        "disease_areas": profile.disease_areas or [],
+        "techniques": profile.techniques or [],
+        "experimental_models": profile.experimental_models or [],
+        "keywords": profile.keywords or [],
+    }
+
+    queries = build_queries(profile_dict)
+    if not queries:
+        logger.warning("User %s: could not build search queries", user_id_str)
+        return False
+
+    if prefs and prefs.extra_keywords:
+        extra_terms = [f'"{kw}"' for kw in prefs.extra_keywords[:20] if kw.strip()]
+        if extra_terms:
+            queries.append(" OR ".join(extra_terms))
+
+    already_delivered = get_delivered_pmids_for_user(user_id_str)
+    candidates = await fetch_candidates(
+        queries,
+        already_delivered=already_delivered,
+        days=settings.podcast_search_window_days,
+        max_total=settings.podcast_max_candidates,
+    )
+
+    if not candidates:
+        logger.info("User %s: no new candidate articles found", user_id_str)
+        return False
+
+    # Build journal context from preferences
+    journal_context = ""
+    if prefs and prefs.preferred_journals:
+        journal_context += f"\nPreferred sources: {', '.join(prefs.preferred_journals)}. Give these extra weight when relevance is comparable."
+    if prefs and prefs.deprioritized_journals:
+        journal_context += f"\nDeprioritized sources: {', '.join(prefs.deprioritized_journals)}. Avoid unless exceptionally relevant."
+    combined_preferences = journal_context
+
+    # Article selection
+    selected, justification = await _select_article(profile_text, candidates, user_id_str, combined_preferences)
+    if selected is None:
+        logger.info("User %s: no article selected", user_id_str)
+        return False
+
+    pmid = selected.get("pmid", "")
+    paper_url = selected.get("url") or f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
+    logger.info("User %s: selected PMID %s", user_id_str, pmid)
+
+    full_text = await _try_fetch_full_text(pmid)
+
+    summary = await _generate_summary(profile_text, selected, full_text, user_id_str, combined_preferences)
+    if not summary:
+        logger.error("User %s: summary generation failed", user_id_str)
+        return False
+
+    # Generate audio — stored under data/podcast_audio/users/{user_id}/
+    audio_path = AUDIO_DIR / "users" / user_id_str / f"{today.isoformat()}.mp3"
+    voice_override = prefs.voice_id if prefs else None
+    if settings.podcast_tts_backend == "local":
+        from src.podcast.local_tts import generate_audio
+    elif settings.podcast_tts_backend == "openai":
+        from src.podcast.openai_tts import generate_audio
+    else:
+        from src.podcast.mistral_tts import generate_audio
+    audio_ok = await generate_audio(summary, user_id_str, audio_path, voice_override=voice_override)
+    audio_file_path = str(audio_path) if audio_ok else None
+    audio_duration = get_audio_duration_seconds(audio_path) if audio_ok else None
+
+    # Extract metadata
+    authors_list = selected.get("authors") or []
+    if len(authors_list) > 3:
+        authors_str = ", ".join(authors_list[:3]) + " et al."
+    else:
+        authors_str = ", ".join(authors_list) if authors_list else "Unknown"
+
+    # Persist episode keyed by user_id (agent_id left NULL)
+    episode = PodcastEpisode(
+        user_id=user_id,
+        agent_id=None,
+        episode_date=today,
+        pmid=pmid,
+        paper_title=selected.get("title") or "",
+        paper_authors=authors_str,
+        paper_journal=selected.get("journal") or "",
+        paper_year=selected.get("year") or 0,
+        paper_url=paper_url,
+        text_summary=summary,
+        audio_file_path=audio_file_path,
+        audio_duration_seconds=audio_duration,
+        slack_delivered=False,
+        selection_justification=justification,
+    )
+    db_session.add(episode)
+    await db_session.flush()
+
+    record_delivery_for_user(user_id_str, pmid)
+
+    logger.info(
+        "User %s: episode complete (audio=%s)", user_id_str, audio_ok
+    )
+    return True
+
+
+def _build_profile_text_from_db(user, profile) -> str:
+    """Construct a plain-text profile summary from DB fields for use in LLM prompts."""
+    lines = [f"# {user.name}"]
+    if user.institution:
+        lines.append(f"Institution: {user.institution}")
+    if user.department:
+        lines.append(f"Department: {user.department}")
+    if profile.research_summary:
+        lines.append(f"\n## Research Summary\n{profile.research_summary}")
+    if profile.disease_areas:
+        lines.append("\n## Disease Areas\n" + "\n".join(f"- {v}" for v in profile.disease_areas))
+    if profile.techniques:
+        lines.append("\n## Key Methods and Technologies\n" + "\n".join(f"- {v}" for v in profile.techniques))
+    if profile.experimental_models:
+        lines.append("\n## Model Systems\n" + "\n".join(f"- {v}" for v in profile.experimental_models))
+    if profile.keywords:
+        lines.append("\n## Keywords\n" + "\n".join(f"- {v}" for v in profile.keywords))
+    return "\n".join(lines)
 
 
 def _parse_profile_markdown(text: str) -> dict[str, Any]:

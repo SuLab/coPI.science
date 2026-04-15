@@ -402,9 +402,10 @@ async def run_grantbot(
 
     if not dry_run:
         from slack_sdk import WebClient
-        bot_token = getattr(settings, "slack_bot_token_grantbot", "")
+        slack_tokens = settings.get_slack_tokens()
+        bot_token = slack_tokens.get("grantbot", {}).get("bot", "")
         if not bot_token or bot_token.startswith("xoxb-placeholder"):
-            bot_token = settings.slack_bot_token_su
+            bot_token = slack_tokens.get("su", {}).get("bot", "")
             logger.info("No grantbot Slack token — using SuBot's token as fallback")
         if bot_token and not bot_token.startswith("xoxb-placeholder"):
             slack_client = WebClient(token=bot_token)
