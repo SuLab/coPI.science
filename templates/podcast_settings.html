@@ -1,0 +1,155 @@
+{% extends "base.html" %}
+{% block title %}Podcast Settings — CoPI{% endblock %}
+
+{% block content %}
+<div class="max-w-2xl mx-auto">
+    <div class="flex items-center justify-between mb-6">
+        <div>
+            <a href="/profile" class="text-sm text-gray-500 hover:text-gray-700">&larr; My Profile</a>
+            <h1 class="text-2xl font-bold text-gray-900 mt-1">Podcast Settings</h1>
+            <p class="text-sm text-gray-500">Customize your daily LabBot research briefing</p>
+        </div>
+    </div>
+
+    {% if saved %}
+    <div class="bg-green-50 border border-green-200 rounded-lg p-3 mb-6 text-sm text-green-700">
+        Preferences saved successfully.
+    </div>
+    {% endif %}
+
+    <!-- Feed URL card -->
+    <div class="bg-indigo-50 border border-indigo-200 rounded-xl p-5 mb-6">
+        <h2 class="text-sm font-semibold text-indigo-800 mb-1">Your Podcast Feed URL</h2>
+        <p class="text-xs text-indigo-600 mb-3">
+            Subscribe to this URL in any podcast app (Apple Podcasts, Overcast, Pocket Casts, etc.)
+            to receive audio episodes automatically. The URL is stable and does not require login.
+        </p>
+        <div class="flex items-center gap-2">
+            <input type="text" readonly value="{{ feed_url }}"
+                   id="feed-url-input"
+                   class="flex-1 text-xs bg-white border border-indigo-300 rounded-lg px-3 py-2 font-mono text-gray-700 focus:outline-none" />
+            <button type="button"
+                    onclick="navigator.clipboard.writeText(document.getElementById('feed-url-input').value).then(() => { this.textContent = 'Copied!'; setTimeout(() => this.textContent = 'Copy', 1500); })"
+                    class="px-3 py-2 bg-indigo-600 text-white text-xs font-medium rounded-lg hover:bg-indigo-700 whitespace-nowrap">
+                Copy
+            </button>
+        </div>
+        <p class="text-xs text-indigo-500 mt-2">
+            New episodes are generated daily at 9am UTC. You can also
+            <button type="button" id="generate-btn"
+                    onclick="triggerGenerate()"
+                    class="underline hover:text-indigo-700">generate one now</button>.
+        </p>
+        <p id="generate-status" class="text-xs text-indigo-700 mt-1 hidden"></p>
+    </div>
+
+    <form method="POST" action="/podcast/settings">
+
+        <!-- Voice selection -->
+        <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-4">
+            <h2 class="text-base font-semibold text-gray-800 mb-1">Voice</h2>
+            <p class="text-sm text-gray-500 mb-4">
+                Select the text-to-speech voice used for your audio episodes.
+                Voices are from Mistral AI's <code class="text-xs bg-gray-100 px-1 rounded">voxtral-mini-tts-latest</code> model.
+            </p>
+            <select name="voice_id"
+                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-indigo-500 focus:border-indigo-500">
+                <option value="" {% if not prefs or not prefs.voice_id %}selected{% endif %}>
+                    Default (system setting)
+                </option>
+                {% for voice_id, voice_label in voices %}
+                <option value="{{ voice_id }}"
+                        {% if prefs and prefs.voice_id == voice_id %}selected{% endif %}>
+                    {{ voice_label }}
+                </option>
+                {% endfor %}
+            </select>
+        </div>
+
+        <!-- Extra search keywords -->
+        <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-4">
+            <h2 class="text-base font-semibold text-gray-800 mb-1">Extra Search Keywords</h2>
+            <p class="text-sm text-gray-500 mb-4">
+                Additional terms to include in the daily literature search, beyond what is
+                auto-extracted from your profile. One keyword or phrase per line (max 20).
+                These are added as quoted PubMed search terms.
+            </p>
+            <textarea name="extra_keywords_raw" rows="6"
+                      placeholder="insulin receptor substrate&#10;adipose tissue browning&#10;mitochondrial fission"
+                      class="w-full text-sm border border-gray-300 rounded-lg px-3 py-2 focus:ring-indigo-500 focus:border-indigo-500 font-mono">{% if prefs and prefs.extra_keywords %}{{ prefs.extra_keywords | join('\n') }}{% endif %}</textarea>
+            <p class="text-xs text-gray-400 mt-1">
+                {% if prefs and prefs.extra_keywords %}{{ prefs.extra_keywords | length }} keyword(s) saved.{% else %}No extra keywords set.{% endif %}
+            </p>
+        </div>
+
+        <!-- Source preferences -->
+        <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-4">
+            <h2 class="text-base font-semibold text-gray-800 mb-1">Source Preferences</h2>
+            <p class="text-sm text-gray-500 mb-5">
+                Guide the article selection by telling the AI which journals or preprint servers
+                to prioritize or avoid. One source per line (or comma-separated).
+            </p>
+
+            <div class="mb-4">
+                <label class="block text-sm font-medium text-gray-700 mb-1">
+                    Preferred sources
+                    <span class="font-normal text-gray-400 ml-1">— given extra weight when relevance is comparable</span>
+                </label>
+                <textarea name="preferred_journals_raw" rows="4"
+                          placeholder="Nature Methods&#10;Cell Systems&#10;eLife&#10;bioRxiv"
+                          class="w-full text-sm border border-gray-300 rounded-lg px-3 py-2 focus:ring-indigo-500 focus:border-indigo-500 font-mono">{% if prefs and prefs.preferred_journals %}{{ prefs.preferred_journals | join('\n') }}{% endif %}</textarea>
+            </div>
+
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">
+                    Deprioritized sources
+                    <span class="font-normal text-gray-400 ml-1">— skipped unless exceptionally relevant</span>
+                </label>
+                <textarea name="deprioritized_journals_raw" rows="4"
+                          placeholder="Frontiers in Neuroscience&#10;PLOS ONE"
+                          class="w-full text-sm border border-gray-300 rounded-lg px-3 py-2 focus:ring-indigo-500 focus:border-indigo-500 font-mono">{% if prefs and prefs.deprioritized_journals %}{{ prefs.deprioritized_journals | join('\n') }}{% endif %}</textarea>
+            </div>
+        </div>
+
+        <div class="flex items-center gap-3">
+            <button type="submit"
+                    class="px-5 py-2 bg-indigo-600 text-white text-sm font-medium rounded-lg hover:bg-indigo-700">
+                Save Preferences
+            </button>
+            <a href="/profile"
+               class="px-5 py-2 bg-gray-100 text-gray-700 text-sm font-medium rounded-lg hover:bg-gray-200">
+                Cancel
+            </a>
+        </div>
+        <p class="mt-3 text-xs text-gray-400">
+            Changes take effect on the next scheduled podcast run (daily at 9am UTC).
+        </p>
+    </form>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+async function triggerGenerate() {
+    const btn = document.getElementById('generate-btn');
+    const status = document.getElementById('generate-status');
+    btn.disabled = true;
+    btn.textContent = 'Starting…';
+    status.classList.remove('hidden');
+    status.textContent = 'Requesting episode generation…';
+    try {
+        const resp = await fetch('/podcast/user/generate', { method: 'POST' });
+        if (resp.ok) {
+            status.textContent = 'Generation started — check your feed in a few minutes.';
+        } else {
+            const data = await resp.json().catch(() => ({}));
+            status.textContent = 'Error: ' + (data.detail || resp.statusText);
+        }
+    } catch (e) {
+        status.textContent = 'Request failed: ' + e.message;
+    }
+    btn.disabled = false;
+    btn.textContent = 'generate one now';
+}
+</script>
+{% endblock %}

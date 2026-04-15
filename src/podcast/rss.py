@@ -1,4 +1,9 @@
-"""RSS feed builder for podcast episodes."""
+"""RSS feed builder for podcast episodes.
+
+Supports two keying modes:
+  - agent_id  (str)  — pilot-lab agents, URLs at /podcast/{agent_id}/...
+  - user_id   (UUID) — plain ORCID users, URLs at /podcast/users/{user_id}/...
+"""
 
 import logging
 from datetime import datetime, timezone
@@ -11,14 +16,28 @@ logger = logging.getLogger(__name__)
 AUDIO_DIR = Path("data/podcast_audio")
 
 
-def build_feed(agent_id: str, pi_name: str, episodes: list[Any], base_url: str) -> str:
-    """Build an RSS 2.0 feed with iTunes extensions for the given agent's episodes.
+def build_feed(
+    pi_name: str,
+    episodes: list[Any],
+    base_url: str,
+    agent_id: str | None = None,
+    user_id: str | None = None,
+) -> str:
+    """Build an RSS 2.0 feed with iTunes extensions.
 
     episodes: list of PodcastEpisode ORM objects, newest first.
     base_url: public base URL (e.g. https://copi.science)
+    agent_id: set for pilot-lab agent feeds.
+    user_id:  set for plain-user feeds (UUID as string).
     """
-    feed_url = f"{base_url}/podcast/{agent_id}/feed.xml"
-    items_xml = "\n".join(_build_item(ep, agent_id, base_url) for ep in episodes)
+    if agent_id:
+        feed_url = f"{base_url}/podcast/{agent_id}/feed.xml"
+    else:
+        feed_url = f"{base_url}/podcast/users/{user_id}/feed.xml"
+
+    items_xml = "\n".join(
+        _build_item(ep, base_url, agent_id=agent_id, user_id=user_id) for ep in episodes
+    )
 
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0"
@@ -26,7 +45,7 @@ def build_feed(agent_id: str, pi_name: str, episodes: list[Any], base_url: str) 
      xmlns:atom="http://www.w3.org/2005/Atom">
   <channel>
     <title>{_escape(pi_name)} — LabBot Research Briefings</title>
-    <description>Daily personalized research summaries for {_escape(pi_name)} at Scripps Research.</description>
+    <description>Daily personalized research summaries for {_escape(pi_name)}.</description>
     <link>{_escape(feed_url)}</link>
     <language>en-us</language>
     <atom:link href="{_escape(feed_url)}" rel="self" type="application/rss+xml"/>
@@ -38,7 +57,12 @@ def build_feed(agent_id: str, pi_name: str, episodes: list[Any], base_url: str) 
 </rss>"""
 
 
-def _build_item(ep: Any, agent_id: str, base_url: str) -> str:
+def _build_item(
+    ep: Any,
+    base_url: str,
+    agent_id: str | None = None,
+    user_id: str | None = None,
+) -> str:
     """Build a single RSS <item> for a PodcastEpisode."""
     date_str = ep.episode_date.isoformat()
     pub_date = format_datetime(
@@ -47,13 +71,18 @@ def _build_item(ep: Any, agent_id: str, base_url: str) -> str:
     )
     title = _escape(f"{ep.paper_title} — {date_str}")
     description = _escape(ep.text_summary)
-    guid = f"{agent_id}-{date_str}"
     pmid_url = getattr(ep, "paper_url", None) or f"https://pubmed.ncbi.nlm.nih.gov/{ep.pmid}/"
+
+    if agent_id:
+        guid = f"{agent_id}-{date_str}"
+        audio_url = f"{base_url}/podcast/{agent_id}/audio/{date_str}.mp3"
+    else:
+        guid = f"user-{user_id}-{date_str}"
+        audio_url = f"{base_url}/podcast/users/{user_id}/audio/{date_str}.mp3"
 
     enclosure_xml = ""
     duration_xml = ""
     if ep.audio_file_path:
-        audio_url = f"{base_url}/podcast/{agent_id}/audio/{date_str}.mp3"
         audio_path = Path(ep.audio_file_path)
         file_size = audio_path.stat().st_size if audio_path.exists() else 0
         enclosure_xml = (

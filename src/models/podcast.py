@@ -1,9 +1,17 @@
-"""PodcastEpisode model."""
+"""PodcastEpisode model.
+
+Episodes are keyed by either agent_id (pilot-lab agents) or user_id (plain
+ORCID users).  Exactly one should be set per row.
+
+Uniqueness constraints:
+  - uq_podcast_agent_date: one episode per agent per day (agent path)
+  - ix_podcast_episodes_user_date: partial unique index (user path, via migration 0013)
+"""
 
 import uuid
 from datetime import date, datetime
 
-from sqlalchemy import Boolean, Date, DateTime, Integer, String, Text, UniqueConstraint, func
+from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -16,7 +24,15 @@ class PodcastEpisode(Base):
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
-    agent_id: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    # For pilot-lab agents (legacy path) — nullable to support user-only episodes
+    agent_id: Mapped[str | None] = mapped_column(String(50), nullable=True, index=True)
+    # For plain ORCID users (no agent required)
+    user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
     episode_date: Mapped[date] = mapped_column(Date, nullable=False)
     pmid: Mapped[str] = mapped_column(String(100), nullable=False)
     paper_title: Mapped[str] = mapped_column(String(500), nullable=False)
@@ -34,8 +50,12 @@ class PodcastEpisode(Base):
     )
 
     __table_args__ = (
+        # Agent-path uniqueness (PostgreSQL ignores NULLs in UNIQUE constraints,
+        # so this only enforces uniqueness when agent_id IS NOT NULL)
         UniqueConstraint("agent_id", "episode_date", name="uq_podcast_agent_date"),
+        # User-path uniqueness is enforced by the partial index created in migration 0013
     )
 
     def __repr__(self) -> str:
-        return f"<PodcastEpisode agent={self.agent_id} date={self.episode_date} pmid={self.pmid}>"
+        key = f"agent={self.agent_id}" if self.agent_id else f"user={self.user_id}"
+        return f"<PodcastEpisode {key} date={self.episode_date} pmid={self.pmid}>"

@@ -1,13 +1,27 @@
 """Unit tests for podcast pipeline pure-logic functions and RSS builder."""
 
+import json
+import os
+import tempfile
 from datetime import date
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from src.podcast.pubmed_search import build_queries
-from src.podcast.pipeline import _format_candidates_for_prompt, _extract_section_text
+from src.podcast.pipeline import (
+    _format_candidates_for_prompt,
+    _extract_section_text,
+    _build_profile_text_from_db,
+)
 from src.podcast.rss import build_feed
+from src.podcast.state import (
+    get_delivered_pmids,
+    record_delivery,
+    get_delivered_pmids_for_user,
+    record_delivery_for_user,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -149,29 +163,38 @@ def _make_episode(**kwargs):
 
 
 class TestBuildFeed:
+    # --- agent path ---
+
     def test_returns_valid_xml_root(self):
-        xml = build_feed("testagent", "Jane Smith", [], "https://example.com")
+        xml = build_feed("Jane Smith", [], "https://example.com", agent_id="testagent")
         assert xml.startswith("<?xml")
         assert "<rss" in xml
 
     def test_includes_pi_name_in_channel(self):
-        xml = build_feed("testagent", "Jane Smith", [], "https://example.com")
+        xml = build_feed("Jane Smith", [], "https://example.com", agent_id="testagent")
         assert "Jane Smith" in xml
+
+    def test_agent_feed_url_uses_agent_id(self):
+        xml = build_feed("Jane Smith", [], "https://example.com", agent_id="testagent")
+        assert "/podcast/testagent/feed.xml" in xml
 
     def test_single_episode_appears_in_feed(self):
         ep = _make_episode()
-        xml = build_feed("testagent", "Jane Smith", [ep], "https://example.com")
+        xml = build_feed("Jane Smith", [ep], "https://example.com", agent_id="testagent")
         assert "A Great Paper" in xml
         assert "2026-04-10" in xml
 
     def test_pubmed_link_used_when_no_paper_url(self):
         ep = _make_episode(pmid="99887766", paper_url=None)
-        xml = build_feed("testagent", "Jane Smith", [ep], "https://example.com")
+        xml = build_feed("Jane Smith", [ep], "https://example.com", agent_id="testagent")
         assert "pubmed.ncbi.nlm.nih.gov/99887766" in xml
 
     def test_paper_url_overrides_pubmed_link(self):
-        ep = _make_episode(pmid="biorxiv:2026.01.01.123456", paper_url="https://www.biorxiv.org/content/10.1101/2026.01.01.123456v1")
-        xml = build_feed("testagent", "Jane Smith", [ep], "https://example.com")
+        ep = _make_episode(
+            pmid="biorxiv:2026.01.01.123456",
+            paper_url="https://www.biorxiv.org/content/10.1101/2026.01.01.123456v1",
+        )
+        xml = build_feed("Jane Smith", [ep], "https://example.com", agent_id="testagent")
         assert "biorxiv.org" in xml
         assert "pubmed.ncbi.nlm.nih.gov" not in xml
 
@@ -179,21 +202,142 @@ class TestBuildFeed:
         audio_file = tmp_path / "2026-04-10.mp3"
         audio_file.write_bytes(b"\x00" * 1000)
         ep = _make_episode(audio_file_path=str(audio_file), audio_duration_seconds=90)
-        xml = build_feed("testagent", "Jane Smith", [ep], "https://example.com")
+        xml = build_feed("Jane Smith", [ep], "https://example.com", agent_id="testagent")
         assert "<enclosure" in xml
         assert 'type="audio/mpeg"' in xml
         assert "<itunes:duration>1:30</itunes:duration>" in xml
 
     def test_no_enclosure_when_no_audio(self):
         ep = _make_episode(audio_file_path=None)
-        xml = build_feed("testagent", "Jane Smith", [ep], "https://example.com")
+        xml = build_feed("Jane Smith", [ep], "https://example.com", agent_id="testagent")
         assert "<enclosure" not in xml
 
     def test_xml_escaping_in_title(self):
         ep = _make_episode(paper_title="Proteins & <Stuff>")
-        xml = build_feed("testagent", "Jane Smith", [ep], "https://example.com")
+        xml = build_feed("Jane Smith", [ep], "https://example.com", agent_id="testagent")
         assert "Proteins &amp; &lt;Stuff&gt;" in xml
 
     def test_empty_episodes_list(self):
-        xml = build_feed("testagent", "Jane Smith", [], "https://example.com")
+        xml = build_feed("Jane Smith", [], "https://example.com", agent_id="testagent")
         assert "<item>" not in xml
+
+    def test_agent_guid_format(self):
+        ep = _make_episode()
+        xml = build_feed("Jane Smith", [ep], "https://example.com", agent_id="testagent")
+        assert "testagent-2026-04-10" in xml
+
+    # --- user path ---
+
+    def test_user_feed_url_uses_user_id(self):
+        uid = "11111111-2222-3333-4444-555555555555"
+        xml = build_feed("Alice Brown", [], "https://example.com", user_id=uid)
+        assert f"/podcast/users/{uid}/feed.xml" in xml
+
+    def test_user_feed_has_correct_pi_name(self):
+        uid = "11111111-2222-3333-4444-555555555555"
+        xml = build_feed("Alice Brown", [], "https://example.com", user_id=uid)
+        assert "Alice Brown" in xml
+
+    def test_user_audio_url_uses_user_path(self, tmp_path):
+        uid = "11111111-2222-3333-4444-555555555555"
+        audio_file = tmp_path / "2026-04-10.mp3"
+        audio_file.write_bytes(b"\x00" * 500)
+        ep = _make_episode(audio_file_path=str(audio_file))
+        xml = build_feed("Alice Brown", [ep], "https://example.com", user_id=uid)
+        assert f"/podcast/users/{uid}/audio/2026-04-10.mp3" in xml
+
+    def test_user_guid_format(self):
+        uid = "11111111-2222-3333-4444-555555555555"
+        ep = _make_episode()
+        xml = build_feed("Alice Brown", [ep], "https://example.com", user_id=uid)
+        assert f"user-{uid}-2026-04-10" in xml
+
+
+# ---------------------------------------------------------------------------
+# State helpers — user path
+# ---------------------------------------------------------------------------
+
+class TestUserState:
+    def test_new_user_has_empty_delivered_set(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("src.podcast.state.STATE_FILE", tmp_path / "state.json")
+        result = get_delivered_pmids_for_user("user-uuid-abc")
+        assert result == set()
+
+    def test_record_and_retrieve_user_delivery(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("src.podcast.state.STATE_FILE", tmp_path / "state.json")
+        record_delivery_for_user("user-uuid-abc", "12345")
+        record_delivery_for_user("user-uuid-abc", "67890")
+        result = get_delivered_pmids_for_user("user-uuid-abc")
+        assert result == {"12345", "67890"}
+
+    def test_user_and_agent_state_are_independent(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("src.podcast.state.STATE_FILE", tmp_path / "state.json")
+        record_delivery("myagent", "11111")
+        record_delivery_for_user("user-uuid-abc", "22222")
+        assert get_delivered_pmids("myagent") == {"11111"}
+        assert get_delivered_pmids_for_user("user-uuid-abc") == {"22222"}
+        # no cross-contamination
+        assert "22222" not in get_delivered_pmids("myagent")
+        assert "11111" not in get_delivered_pmids_for_user("user-uuid-abc")
+
+    def test_duplicate_pmid_not_added_twice(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("src.podcast.state.STATE_FILE", tmp_path / "state.json")
+        record_delivery_for_user("user-uuid-abc", "99999")
+        record_delivery_for_user("user-uuid-abc", "99999")
+        raw = json.loads((tmp_path / "state.json").read_text())
+        assert raw["users"]["user-uuid-abc"]["delivered_pmids"].count("99999") == 1
+
+    def test_atomic_write_leaves_valid_json(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("src.podcast.state.STATE_FILE", tmp_path / "state.json")
+        record_delivery_for_user("u1", "aaa")
+        content = (tmp_path / "state.json").read_text()
+        parsed = json.loads(content)  # must be valid JSON
+        assert "users" in parsed
+
+
+# ---------------------------------------------------------------------------
+# _build_profile_text_from_db
+# ---------------------------------------------------------------------------
+
+class TestBuildProfileTextFromDb:
+    def _make_user(self, **kwargs):
+        defaults = dict(name="Dr. Alice", institution="MIT", department="Biology")
+        defaults.update(kwargs)
+        return SimpleNamespace(**defaults)
+
+    def _make_profile(self, **kwargs):
+        defaults = dict(
+            research_summary="We study protein aggregation.",
+            disease_areas=["Alzheimer's", "Parkinson's"],
+            techniques=["cryo-EM", "mass spectrometry"],
+            experimental_models=["mouse", "iPSC"],
+            keywords=["proteostasis", "neurodegeneration"],
+        )
+        defaults.update(kwargs)
+        return SimpleNamespace(**defaults)
+
+    def test_includes_user_name(self):
+        text = _build_profile_text_from_db(self._make_user(), self._make_profile())
+        assert "Dr. Alice" in text
+
+    def test_includes_research_summary(self):
+        text = _build_profile_text_from_db(self._make_user(), self._make_profile())
+        assert "protein aggregation" in text
+
+    def test_includes_disease_areas(self):
+        text = _build_profile_text_from_db(self._make_user(), self._make_profile())
+        assert "Alzheimer" in text
+
+    def test_includes_techniques(self):
+        text = _build_profile_text_from_db(self._make_user(), self._make_profile())
+        assert "cryo-EM" in text
+
+    def test_handles_none_fields_gracefully(self):
+        profile = self._make_profile(disease_areas=None, techniques=None, keywords=None)
+        text = _build_profile_text_from_db(self._make_user(), profile)
+        assert "protein aggregation" in text  # summary still present
+
+    def test_handles_missing_institution(self):
+        user = self._make_user(institution=None, department=None)
+        text = _build_profile_text_from_db(user, self._make_profile())
+        assert "Dr. Alice" in text
