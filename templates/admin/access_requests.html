@@ -1,0 +1,142 @@
+{% extends "base.html" %}
+{% block title %}Admin — Access Requests — CoPI{% endblock %}
+
+{% block content %}
+<h1 class="text-2xl font-bold text-gray-900 mb-6">Access Requests</h1>
+
+<div class="grid grid-cols-3 gap-4 mb-8">
+    <div class="bg-white rounded-xl border border-gray-200 p-4 text-center">
+        <div class="text-3xl font-bold text-amber-600">{{ pending | length }}</div>
+        <div class="text-sm text-gray-500 mt-1">Pending</div>
+    </div>
+    <div class="bg-white rounded-xl border border-gray-200 p-4 text-center">
+        <div class="text-3xl font-bold text-green-600">{{ recent_allowed | length }}</div>
+        <div class="text-sm text-gray-500 mt-1">Recently allowed</div>
+    </div>
+    <div class="bg-white rounded-xl border border-gray-200 p-4 text-center">
+        <div class="text-3xl font-bold text-gray-400">{{ denied | length }}</div>
+        <div class="text-sm text-gray-500 mt-1">Denied</div>
+    </div>
+</div>
+
+<!-- Pending -->
+<div class="bg-white rounded-xl shadow-sm border border-amber-200 overflow-hidden mb-8">
+    <div class="px-6 py-4 border-b border-amber-200 bg-amber-50">
+        <h2 class="font-semibold text-amber-800">Pending</h2>
+    </div>
+    {% if pending %}
+    <table class="min-w-full divide-y divide-gray-200">
+        <thead class="bg-gray-50">
+            <tr>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Name</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Email</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">ORCID</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Institution</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Requested</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Actions</th>
+            </tr>
+        </thead>
+        <tbody class="divide-y divide-gray-100">
+            {% for u in pending %}
+            <tr class="hover:bg-gray-50">
+                <td class="px-4 py-3 text-sm font-medium">{{ u.name }}</td>
+                <td class="px-4 py-3 text-sm text-gray-600">{{ u.email or '—' }}</td>
+                <td class="px-4 py-3 text-sm font-mono text-xs">
+                    <a href="https://orcid.org/{{ u.orcid }}" target="_blank" class="text-indigo-600 hover:underline">{{ u.orcid }}</a>
+                </td>
+                <td class="px-4 py-3 text-sm text-gray-600">{{ u.institution or '—' }}</td>
+                <td class="px-4 py-3 text-sm text-gray-500" data-utc="{{ u.created_at.isoformat() }}" data-utc-fmt="short">{{ u.created_at.strftime('%b %d') }}</td>
+                <td class="px-4 py-3 whitespace-nowrap">
+                    <form method="POST" action="/admin/access-requests/{{ u.id }}/approve" class="inline">
+                        <button type="submit" class="text-sm bg-green-600 hover:bg-green-700 text-white px-3 py-1 rounded">Approve</button>
+                    </form>
+                    <form method="POST" action="/admin/access-requests/{{ u.id }}/deny" class="inline">
+                        <button type="submit" class="text-sm bg-gray-300 hover:bg-gray-400 text-gray-800 px-3 py-1 rounded">Deny</button>
+                    </form>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p class="text-sm text-gray-500 px-6 py-4">No pending requests.</p>
+    {% endif %}
+</div>
+
+<!-- Allowlist -->
+<div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden mb-8">
+    <div class="px-6 py-4 border-b border-gray-200 flex justify-between items-center">
+        <h2 class="font-semibold text-gray-800">ORCID Allowlist</h2>
+        <span class="text-xs text-gray-500">Pre-approved ORCIDs bypass the access gate</span>
+    </div>
+    <div class="px-6 py-4 border-b border-gray-100 bg-gray-50">
+        <form method="POST" action="/admin/access-allowlist/add" class="flex gap-2">
+            <input type="text" name="orcid" required placeholder="0000-0000-0000-0000" class="px-3 py-2 border border-gray-300 rounded-md text-sm font-mono w-48">
+            <input type="text" name="note" placeholder="note (optional)" class="px-3 py-2 border border-gray-300 rounded-md text-sm flex-grow">
+            <button type="submit" class="bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-medium px-4 py-2 rounded">Add</button>
+        </form>
+    </div>
+    {% if allowlist %}
+    <table class="min-w-full divide-y divide-gray-200">
+        <thead class="bg-gray-50">
+            <tr>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">ORCID</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Note</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Added</th>
+                <th class="px-4 py-3"></th>
+            </tr>
+        </thead>
+        <tbody class="divide-y divide-gray-100">
+            {% for a in allowlist %}
+            <tr class="hover:bg-gray-50">
+                <td class="px-4 py-3 text-sm font-mono text-xs">
+                    <a href="https://orcid.org/{{ a.orcid }}" target="_blank" class="text-indigo-600 hover:underline">{{ a.orcid }}</a>
+                </td>
+                <td class="px-4 py-3 text-sm text-gray-600">{{ a.note or '—' }}</td>
+                <td class="px-4 py-3 text-sm text-gray-500">{{ a.created_at.strftime('%b %d %Y') }}</td>
+                <td class="px-4 py-3 text-right">
+                    <form method="POST" action="/admin/access-allowlist/{{ a.id }}/remove" class="inline">
+                        <button type="submit" class="text-xs text-red-600 hover:text-red-800">Remove</button>
+                    </form>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% endif %}
+</div>
+
+{% if denied %}
+<!-- Denied -->
+<div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden mb-8">
+    <div class="px-6 py-4 border-b border-gray-200">
+        <h2 class="font-semibold text-gray-800">Denied</h2>
+    </div>
+    <table class="min-w-full divide-y divide-gray-200">
+        <thead class="bg-gray-50">
+            <tr>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Name</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Email</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">ORCID</th>
+                <th class="px-4 py-3"></th>
+            </tr>
+        </thead>
+        <tbody class="divide-y divide-gray-100">
+            {% for u in denied %}
+            <tr>
+                <td class="px-4 py-3 text-sm">{{ u.name }}</td>
+                <td class="px-4 py-3 text-sm text-gray-600">{{ u.email or '—' }}</td>
+                <td class="px-4 py-3 text-sm font-mono text-xs">{{ u.orcid }}</td>
+                <td class="px-4 py-3 text-right">
+                    <form method="POST" action="/admin/access-requests/{{ u.id }}/approve" class="inline">
+                        <button type="submit" class="text-xs text-indigo-600 hover:text-indigo-800">Approve after all</button>
+                    </form>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+
+{% endblock %}
