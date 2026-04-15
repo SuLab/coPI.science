@@ -18,8 +18,13 @@ MISTRAL_TTS_URL = "https://api.mistral.ai/v1/audio/speech"
 __all__ = ["generate_audio", "get_audio_duration_seconds"]
 
 
-def get_voice(agent_id: str) -> str:
-    """Return the configured voice for an agent, falling back to default."""
+def get_voice(agent_id: str, voice_override: str | None = None) -> str:
+    """Return the TTS voice for an agent.
+
+    Priority: voice_override (from DB preferences) → podcast_voices.json → env default.
+    """
+    if voice_override:
+        return voice_override
     settings = get_settings()
     if VOICES_FILE.exists():
         try:
@@ -31,7 +36,9 @@ def get_voice(agent_id: str) -> str:
     return settings.mistral_tts_default_voice
 
 
-async def generate_audio(text: str, agent_id: str, output_path: Path) -> bool:
+async def generate_audio(
+    text: str, agent_id: str, output_path: Path, voice_override: str | None = None
+) -> bool:
     """Generate TTS audio via Mistral AI and save to output_path.
 
     Returns True on success, False on failure.
@@ -41,7 +48,7 @@ async def generate_audio(text: str, agent_id: str, output_path: Path) -> bool:
         logger.warning("MISTRAL_API_KEY not set — skipping audio generation")
         return False
 
-    voice = get_voice(agent_id)
+    voice = get_voice(agent_id, voice_override=voice_override)
     clean_text = strip_markdown(text)
     payload = {
         "model": settings.mistral_tts_model,

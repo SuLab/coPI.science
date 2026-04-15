@@ -246,13 +246,14 @@ New environment variables:
 | `PODCAST_SEARCH_WINDOW_DAYS` | No | Rolling search window in days (default: `14`) |
 | `PODCAST_MAX_CANDIDATES` | No | Max PubMed abstracts per agent per day (default: `50`) |
 
-Per-agent voice overrides: `data/podcast_voices.json`
+Per-agent voice overrides (Phase 2/3): `data/podcast_voices.json`
 ```json
 {
-  "su": "voice_id_abc123",
-  "wiseman": "voice_id_def456"
+  "su": "alex",
+  "wiseman": "stella"
 }
 ```
+**Deprecated in Phase 4** — voice preferences move to the `podcast_preferences` DB table. The JSON file is still read as a fallback while the migration is in progress.
 
 ---
 
@@ -311,6 +312,8 @@ The LLM calls from the podcast pipeline should set a `source` tag in `LlmCallLog
 
 ## PI Customization
 
+### Via Standing Instructions (Current)
+
 PIs can adjust podcast behavior through standing instructions to their lab bot (same DM mechanism as the agent system — see `pi-interaction.md`). The podcast pipeline reads the private profile when building the selection prompt.
 
 Examples of effective standing instructions:
@@ -319,6 +322,149 @@ Examples of effective standing instructions:
 - "Skip anything about C. elegans — we're not pursuing that direction anymore"
 
 The bot's private profile rewrite (via `prompts/pi-profile-rewrite.md`) should include a `## Podcast Preferences` section that the podcast pipeline reads when constructing the selection and summarization prompts.
+
+### Via Preferences UI (Phase 4)
+
+A structured preferences page at `/agent/{agent_id}/podcast-settings` replaces the `data/podcast_voices.json` file and augments the standing-instructions mechanism with three explicit controls:
+
+1. **Voice** — select the TTS voice used for audio generation
+2. **Extra search keywords** — additional terms appended to PubMed/preprint queries beyond the auto-extracted profile keywords
+3. **Source preferences** — journals or preprint servers to prioritize (boosted in the selection prompt) or deprioritize
+
+See the **Podcast Preferences UI** section below for the full design.
+
+---
+
+## Podcast Preferences UI
+
+### Route and Access Control
+
+| Route | Method | Handler | Access |
+|---|---|---|---|
+| `/agent/{agent_id}/podcast-settings` | `GET` | Render preferences form | Agent owner or admin |
+| `/agent/{agent_id}/podcast-settings` | `POST` | Save preferences | Agent owner or admin |
+
+Implemented in `src/routers/agent_page.py`, following the same ownership check pattern as `/agent/{agent_id}/profile/edit`. Non-owners receive a 403.
+
+### Data Model: `PodcastPreferences`
+
+A new table storing structured preferences per agent. One row per agent (upserted on save).
+
+```python
+class PodcastPreferences(Base):
+    __tablename__ = "podcast_preferences"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    agent_id: Mapped[str] = mapped_column(String, nullable=False, unique=True, index=True)
+    voice_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    extra_keywords: Mapped[list[str]] = mapped_column(ARRAY(String), nullable=False, default=list)
+    preferred_journals: Mapped[list[str]] = mapped_column(ARRAY(String), nullable=False, default=list)
+    deprioritized_journals: Mapped[list[str]] = mapped_column(ARRAY(String), nullable=False, default=list)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+```
+
+Add migration `0012_add_podcast_preferences.py`, revising `0011`.
+
+The `data/podcast_voices.json` file is deprecated once this table is live. The pipeline reads `voice_id` from `PodcastPreferences` first, falling back to `MISTRAL_TTS_DEFAULT_VOICE`.
+
+### Form Fields
+
+#### 1. Voice Selection
+
+A `<select>` dropdown pre-populated with valid Mistral Voxtral voices. The current TTS model is `voxtral-mini-tts-latest`.
+
+Available voices for `voxtral-mini-tts-latest` (verify current list at [Mistral docs](https://docs.mistral.ai/capabilities/audio/#text-to-speech)):
+
+| Voice ID | Description |
+|---|---|
+| `alex` | US English, male, neutral |
+| `deedee` | US English, female, bright |
+| `jasmine` | US English, female, warm |
+| `laurel` | US English, female, clear |
+| `luna` | US English, female, soft |
+| `rio` | US English, male, energetic |
+| `stella` | US English, female, professional |
+| `theo` | US English, male, measured |
+| `tyler` | US English, male, conversational |
+
+> **Note:** This list should be refreshed from the Mistral API at deploy time. If Mistral exposes a `GET /v1/audio/voices` endpoint, the admin UI should call it to populate the dropdown dynamically. If not available, hardcode from the table above and update as the API evolves.
+
+The form shows a short audio preview label next to each voice name if available. The current agent's voice is pre-selected; if no voice is set, the first voice in the list is shown as the default.
+
+#### 2. Extra Search Keywords
+
+A plain `<textarea>` accepting one keyword or phrase per line. These are appended as additional quoted terms to the PubMed/preprint query in Step 1 of the pipeline.
+
+```
+insulin receptor substrate
+adipose tissue browning
+mitochondrial fission
+```
+
+Stored as `extra_keywords: list[str]` (each non-blank line becomes one entry). Max 20 entries, each up to 100 characters.
+
+#### 3. Source Preferences
+
+Two separate tag-input fields (or textareas with comma-separation):
+
+**Preferred sources** — journals or preprint servers to actively surface. Shown first in the selection-prompt candidate list and referenced explicitly in the prompt:
+> "Prefer papers from: {preferred_journals}. Give these extra weight when relevance is comparable."
+
+**Deprioritized sources** — journals or preprint servers to down-rank. Added as a negative signal in the selection prompt:
+> "Deprioritize papers from: {deprioritized_journals} unless exceptionally relevant."
+
+Examples:
+- Preferred: `Nature Methods`, `Cell Systems`, `bioRxiv`, `eLife`
+- Deprioritized: `Frontiers in ...`, `PLOS ONE`
+
+Stored as `preferred_journals: list[str]` and `deprioritized_journals: list[str]`.
+
+### Template
+
+`templates/agent/podcast_settings.html` — extends `base.html`, matches the visual style of `templates/agent/profile_edit.html`.
+
+Sections:
+1. **Voice** — `<select>` with voice options
+2. **Extra Keywords** — `<textarea>` with instructions
+3. **Source Preferences** — two `<textarea>` fields (preferred / deprioritized), comma or newline separated
+4. **Save button** — POSTs to the same URL, redirects back on success with a flash message
+
+### Pipeline Integration
+
+In `run_pipeline_for_agent()` (`src/podcast/pipeline.py`), after loading profile and preferences text:
+
+```python
+# Load structured preferences from DB
+prefs = await _load_podcast_preferences_structured(agent_id)  # returns PodcastPreferences | None
+
+# Step 2 (query building): inject extra_keywords
+if prefs and prefs.extra_keywords:
+    queries.extend(
+        f'"{kw}"' for kw in prefs.extra_keywords[:20]
+    )
+
+# Step 3 (article selection): inject journal preferences into selection prompt
+journal_context = ""
+if prefs and prefs.preferred_journals:
+    journal_context += f"\nPreferred sources: {', '.join(prefs.preferred_journals)}."
+if prefs and prefs.deprioritized_journals:
+    journal_context += f"\nDeprioritized sources: {', '.join(prefs.deprioritized_journals)}."
+# journal_context is appended to the {preferences} block in the selection prompt
+
+# Step 5 (TTS): use voice from preferences
+voice_override = prefs.voice_id if prefs else None
+# mistral_tts.get_voice() checks PodcastPreferences first, then podcast_voices.json, then env default
+```
+
+Add `_load_podcast_preferences_structured(agent_id)` as an async helper that queries `PodcastPreferences` and returns the ORM row or `None`.
+
+Update `mistral_tts.get_voice()` and `local_tts.get_voice()` to accept an optional `voice_override` parameter passed from the pipeline instead of reading from `podcast_voices.json` directly.
+
+### Admin Visibility
+
+The existing `/admin/podcast` page gets a **Preferences** column in the agent filter section: when an agent is selected, show a summary of its preferences (voice, keyword count, journal counts) with a link to the preferences page.
 
 ---
 
@@ -340,6 +486,15 @@ The bot's private profile rewrite (via `prompts/pi-profile-rewrite.md`) should i
 - Podcast preferences section in private profile
 - Pipeline reads preferences when building prompts
 - Admin dashboard podcast tab with LLM usage metrics
+
+### Phase 4: Structured Preferences UI
+- `PodcastPreferences` DB table (migration `0012`)
+- `GET/POST /agent/{agent_id}/podcast-settings` route and form
+- Voice picker pre-populated with valid Mistral Voxtral voice IDs
+- Extra keywords textarea (up to 20 terms, injected into PubMed queries)
+- Source preferences (preferred/deprioritized journals, injected into selection prompt)
+- Deprecate `data/podcast_voices.json` in favour of DB-stored voice preference
+- Admin podcast page shows per-agent preference summary
 
 ---
 

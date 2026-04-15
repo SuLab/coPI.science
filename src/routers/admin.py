@@ -21,6 +21,7 @@ from src.models import (
     Job,
     LlmCallLog,
     PodcastEpisode,
+    PodcastPreferences,
     Publication,
     ResearcherProfile,
     SimulationRun,
@@ -981,6 +982,12 @@ async def admin_podcast(
     slack_delivered = sum(1 for e in all_episodes if e.slack_delivered)
     agent_ids = sorted({e.agent_id for e in all_episodes})
 
+    # Load preferences for all agents that have episodes
+    prefs_result = await db.execute(select(PodcastPreferences))
+    prefs_by_agent: dict[str, PodcastPreferences] = {
+        p.agent_id: p for p in prefs_result.scalars().all()
+    }
+
     settings = get_settings()
     base_url = settings.podcast_base_url or settings.base_url
 
@@ -998,6 +1005,7 @@ async def admin_podcast(
             agent_ids=agent_ids,
             agent_filter=agent_filter,
             base_url=base_url,
+            prefs_by_agent=prefs_by_agent,
         ),
     )
 

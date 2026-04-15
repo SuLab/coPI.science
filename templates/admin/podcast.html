@@ -45,8 +45,65 @@
             RSS Feed ↗
         </a>
     </div>
+    <div>
+        <a href="/agent/{{ agent_filter }}/podcast-settings"
+           class="inline-flex items-center gap-1 text-sm text-indigo-600 hover:underline">
+            Podcast Settings ↗
+        </a>
+    </div>
     {% endif %}
 </div>
+
+<!-- Preferences summary (visible when an agent is selected) -->
+{% if agent_filter %}
+{% set prefs = prefs_by_agent.get(agent_filter) %}
+<div class="bg-white rounded-lg border border-gray-200 p-4 mb-4">
+    <div class="flex items-center justify-between mb-2">
+        <h3 class="text-sm font-medium text-gray-700">Podcast Preferences — {{ agent_filter }}</h3>
+        <a href="/agent/{{ agent_filter }}/podcast-settings"
+           class="text-xs text-indigo-600 hover:underline">Edit ↗</a>
+    </div>
+    {% if prefs %}
+    <dl class="grid grid-cols-3 gap-4 text-sm">
+        <div>
+            <dt class="text-xs font-medium text-gray-500 uppercase mb-0.5">Voice</dt>
+            <dd class="text-gray-800">
+                {% if prefs.voice_id %}{{ prefs.voice_id }}{% else %}<span class="text-gray-400">system default</span>{% endif %}
+            </dd>
+        </div>
+        <div>
+            <dt class="text-xs font-medium text-gray-500 uppercase mb-0.5">Extra Keywords</dt>
+            <dd class="text-gray-800">
+                {% if prefs.extra_keywords %}
+                <span class="text-gray-600">{{ prefs.extra_keywords | length }} term(s)</span>
+                <div class="text-xs text-gray-400 mt-0.5">{{ prefs.extra_keywords | join(', ') }}</div>
+                {% else %}
+                <span class="text-gray-400">none</span>
+                {% endif %}
+            </dd>
+        </div>
+        <div>
+            <dt class="text-xs font-medium text-gray-500 uppercase mb-0.5">Source Preferences</dt>
+            <dd class="text-gray-800 text-xs">
+                {% if prefs.preferred_journals %}
+                <div class="text-green-700 mb-0.5">▲ {{ prefs.preferred_journals | join(', ') }}</div>
+                {% endif %}
+                {% if prefs.deprioritized_journals %}
+                <div class="text-amber-700">▼ {{ prefs.deprioritized_journals | join(', ') }}</div>
+                {% endif %}
+                {% if not prefs.preferred_journals and not prefs.deprioritized_journals %}
+                <span class="text-gray-400">none</span>
+                {% endif %}
+            </dd>
+        </div>
+    </dl>
+    {% else %}
+    <p class="text-sm text-gray-400">No preferences configured for this agent.
+        <a href="/agent/{{ agent_filter }}/podcast-settings" class="text-indigo-600 hover:underline">Set up preferences ↗</a>
+    </p>
+    {% endif %}
+</div>
+{% endif %}
 
 <!-- Episodes table -->
 <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">

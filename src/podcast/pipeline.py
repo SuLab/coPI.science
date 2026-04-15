@@ -59,6 +59,31 @@ async def _load_podcast_preferences(agent_id: str) -> str:
         return ""
 
 
+async def _load_structured_preferences(agent_id: str, db_session=None):
+    """Load PodcastPreferences row for this agent from DB. Returns ORM row or None."""
+    try:
+        from sqlalchemy import select
+
+        from src.models.podcast_preferences import PodcastPreferences
+
+        if db_session is not None:
+            result = await db_session.execute(
+                select(PodcastPreferences).where(PodcastPreferences.agent_id == agent_id)
+            )
+            return result.scalar_one_or_none()
+
+        from src.database import get_session_factory
+        session_factory = get_session_factory()
+        async with session_factory() as db:
+            result = await db.execute(
+                select(PodcastPreferences).where(PodcastPreferences.agent_id == agent_id)
+            )
+            return result.scalar_one_or_none()
+    except Exception as exc:
+        logger.warning("Could not load structured podcast preferences for %s: %s", agent_id, exc)
+        return None
+
+
 def _format_candidates_for_prompt(records: list[dict[str, Any]]) -> str:
     """Format PubMed records as a numbered list for the selection prompt."""
     lines = []
@@ -284,6 +309,14 @@ async def run_pipeline_for_agent(
     if preferences_text:
         logger.info("Agent %s: loaded podcast preferences (%d chars)", agent_id, len(preferences_text))
 
+    # Load structured preferences (voice, keywords, journals) from DB
+    prefs = await _load_structured_preferences(agent_id, db_session=db_session)
+    if prefs:
+        logger.info(
+            "Agent %s: structured preferences — voice=%s, keywords=%d, preferred_journals=%d",
+            agent_id, prefs.voice_id, len(prefs.extra_keywords), len(prefs.preferred_journals),
+        )
+
     # Build a minimal profile dict from markdown for query building
     profile_dict = _parse_profile_markdown(profile_text)
 
@@ -292,6 +325,13 @@ async def run_pipeline_for_agent(
     if not queries:
         logger.warning("Agent %s: could not build search queries", agent_id)
         return False
+
+    # Inject extra keywords from structured preferences as additional quoted queries
+    if prefs and prefs.extra_keywords:
+        extra_terms = [f'"{kw}"' for kw in prefs.extra_keywords[:20] if kw.strip()]
+        if extra_terms:
+            queries.append(" OR ".join(extra_terms))
+            logger.info("Agent %s: injected %d extra keyword terms", agent_id, len(extra_terms))
 
     already_delivered = get_delivered_pmids(agent_id)
     candidates = await fetch_candidates(
@@ -305,8 +345,16 @@ async def run_pipeline_for_agent(
         logger.info("Agent %s: no new candidate articles found", agent_id)
         return False
 
+    # Build journal context to append to preferences text for selection prompt
+    journal_context = ""
+    if prefs and prefs.preferred_journals:
+        journal_context += f"\nPreferred sources: {', '.join(prefs.preferred_journals)}. Give these extra weight when relevance is comparable."
+    if prefs and prefs.deprioritized_journals:
+        journal_context += f"\nDeprioritized sources: {', '.join(prefs.deprioritized_journals)}. Avoid unless exceptionally relevant."
+    combined_preferences = (preferences_text or "") + journal_context
+
     # Step 3: LLM article selection
-    selected, justification = await _select_article(profile_text, candidates, agent_id, preferences_text)
+    selected, justification = await _select_article(profile_text, candidates, agent_id, combined_preferences)
     if selected is None:
         logger.info("Agent %s: no article selected", agent_id)
         return False
@@ -319,20 +367,21 @@ async def run_pipeline_for_agent(
     full_text = await _try_fetch_full_text(pmid)
 
     # Step 5: Generate text summary
-    summary = await _generate_summary(profile_text, selected, full_text, agent_id, preferences_text)
+    summary = await _generate_summary(profile_text, selected, full_text, agent_id, combined_preferences)
     if not summary:
         logger.error("Agent %s: summary generation failed", agent_id)
         return False
 
     # Step 6: Generate audio (backend selected by PODCAST_TTS_BACKEND)
     audio_path = AUDIO_DIR / agent_id / f"{today.isoformat()}.mp3"
+    voice_override = prefs.voice_id if prefs else None
     if settings.podcast_tts_backend == "local":
         from src.podcast.local_tts import generate_audio
         logger.info("Agent %s: using local vLLM-Omni TTS backend", agent_id)
     else:
         from src.podcast.mistral_tts import generate_audio
         logger.info("Agent %s: using Mistral AI TTS backend", agent_id)
-    audio_ok = await generate_audio(summary, agent_id, audio_path)
+    audio_ok = await generate_audio(summary, agent_id, audio_path, voice_override=voice_override)
     audio_file_path = str(audio_path) if audio_ok else None
     audio_duration = None
     if audio_ok:

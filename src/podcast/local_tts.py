@@ -35,8 +35,13 @@ def _get_local_tts_url() -> str:
     return f"http://{settings.local_tts_host}:{settings.local_tts_port}/v1/audio/speech"
 
 
-def get_voice(agent_id: str) -> str:
-    """Return the configured voice for an agent, falling back to default."""
+def get_voice(agent_id: str, voice_override: str | None = None) -> str:
+    """Return the TTS voice for an agent.
+
+    Priority: voice_override (from DB preferences) → podcast_voices.json → env default.
+    """
+    if voice_override:
+        return voice_override
     settings = get_settings()
     if VOICES_FILE.exists():
         try:
@@ -48,7 +53,9 @@ def get_voice(agent_id: str) -> str:
     return settings.local_tts_voice or "default"
 
 
-async def generate_audio(text: str, agent_id: str, output_path: Path) -> bool:
+async def generate_audio(
+    text: str, agent_id: str, output_path: Path, voice_override: str | None = None
+) -> bool:
     """Generate TTS audio via a local vLLM-Omni server and save to output_path.
 
     The server must expose an OpenAI-compatible /v1/audio/speech endpoint
@@ -58,7 +65,7 @@ async def generate_audio(text: str, agent_id: str, output_path: Path) -> bool:
     """
     settings = get_settings()
     url = _get_local_tts_url()
-    voice = get_voice(agent_id)
+    voice = get_voice(agent_id, voice_override=voice_override)
     clean_text = strip_markdown(text)
 
     payload = {

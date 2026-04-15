@@ -65,3 +65,27 @@ docker compose --profile podcast run --rm podcast python -m src.podcast.main
 # Test pipeline for 'su' agent only
 docker compose exec app python scripts/test_podcast_su.py
 ```
+
+## Database Migration Caveat
+
+If the DB was initialized from the `main` branch schema and then this branch is checked out, `alembic upgrade head` will stamp the version without re-running migrations that share a revision ID with ones already applied on `main`. Any columns added by branch-specific migrations may be silently missing.
+
+**Symptom:** `UndefinedColumnError` at runtime despite `alembic current` showing `head`.
+
+**Fix:** Check for missing columns and apply them manually:
+```bash
+docker compose exec app python -c "
+import asyncio
+from src.database import get_engine
+from sqlalchemy import text
+
+async def check():
+    eng = get_engine()
+    async with eng.connect() as conn:
+        result = await conn.execute(text(\"SELECT column_name FROM information_schema.columns WHERE table_name='researcher_profiles' ORDER BY ordinal_position\"))
+        print([r[0] for r in result])
+
+asyncio.run(check())
+"
+```
+Then add any missing columns with `ALTER TABLE ... ADD COLUMN IF NOT EXISTS ...`.

@@ -708,6 +708,112 @@ async def save_public_profile(
 
 
 # --------------------------------------------------------------------------
+# Podcast settings (owner or admin)
+# --------------------------------------------------------------------------
+
+# Valid Mistral voxtral-mini-tts-latest voices (verify at docs.mistral.ai/capabilities/audio/)
+MISTRAL_VOICES = [
+    ("alex", "Alex — US English, male, neutral"),
+    ("deedee", "Deedee — US English, female, bright"),
+    ("jasmine", "Jasmine — US English, female, warm"),
+    ("laurel", "Laurel — US English, female, clear"),
+    ("luna", "Luna — US English, female, soft"),
+    ("rio", "Rio — US English, male, energetic"),
+    ("stella", "Stella — US English, female, professional"),
+    ("theo", "Theo — US English, male, measured"),
+    ("tyler", "Tyler — US English, male, conversational"),
+]
+
+
+@router.get("/{agent_id}/podcast-settings", response_class=HTMLResponse)
+async def get_podcast_settings(
+    agent_id: str,
+    request: Request,
+    saved: bool = False,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """View podcast preferences for an agent."""
+    from sqlalchemy import select as sa_select
+
+    from src.models.podcast_preferences import PodcastPreferences
+
+    agent, is_owner = await get_agent_with_access(agent_id, db, current_user)
+    if agent.status != "active":
+        return RedirectResponse(url="/agent", status_code=302)
+
+    result = await db.execute(
+        sa_select(PodcastPreferences).where(PodcastPreferences.agent_id == agent_id)
+    )
+    prefs = result.scalar_one_or_none()
+
+    return templates.TemplateResponse(
+        request,
+        "agent/podcast_settings.html",
+        _template_context(
+            request, current_user,
+            agent=agent,
+            is_owner=is_owner,
+            prefs=prefs,
+            voices=MISTRAL_VOICES,
+            saved=saved,
+        ),
+    )
+
+
+@router.post("/{agent_id}/podcast-settings")
+async def save_podcast_settings(
+    agent_id: str,
+    request: Request,
+    voice_id: str = Form(""),
+    extra_keywords_raw: str = Form(""),
+    preferred_journals_raw: str = Form(""),
+    deprioritized_journals_raw: str = Form(""),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Save podcast preferences for an agent."""
+    from sqlalchemy import select as sa_select
+
+    from src.models.podcast_preferences import PodcastPreferences
+
+    agent, is_owner = await get_agent_with_access(agent_id, db, current_user)
+    if agent.status != "active":
+        return RedirectResponse(url="/agent", status_code=302)
+
+    # Keywords: newline-only (phrases can legitimately contain commas)
+    def _parse_keywords(raw: str) -> list[str]:
+        return [v for line in raw.splitlines() if (v := line.strip())][:20]
+
+    # Journals: accept both newlines and commas as separators
+    def _parse_journals(raw: str) -> list[str]:
+        return [v for part in raw.replace(",", "\n").splitlines() if (v := part.strip())][:20]
+
+    extra_keywords = _parse_keywords(extra_keywords_raw)
+    preferred_journals = _parse_journals(preferred_journals_raw)
+    deprioritized_journals = _parse_journals(deprioritized_journals_raw)
+    clean_voice = voice_id.strip() or None
+
+    result = await db.execute(
+        sa_select(PodcastPreferences).where(PodcastPreferences.agent_id == agent_id)
+    )
+    prefs = result.scalar_one_or_none()
+
+    if prefs is None:
+        prefs = PodcastPreferences(agent_id=agent_id)
+        db.add(prefs)
+
+    prefs.voice_id = clean_voice
+    prefs.extra_keywords = extra_keywords
+    prefs.preferred_journals = preferred_journals
+    prefs.deprioritized_journals = deprioritized_journals
+    await db.commit()
+
+    logger.info("Podcast preferences saved for agent %s by %s", agent_id, current_user.name)
+    return RedirectResponse(url=f"/agent/{agent_id}/podcast-settings?saved=1", status_code=302)
+
+
+# --------------------------------------------------------------------------
 # Slack connection (PI only)
 # --------------------------------------------------------------------------
 
