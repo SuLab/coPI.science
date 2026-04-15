@@ -3,6 +3,7 @@
 Import all models here so Alembic can detect them.
 """
 
+from src.models.access import AccessAllowlist, WaitlistSignup
 from src.models.agent_activity import AgentChannel, AgentMessage, LlmCallLog, SimulationRun, ThreadDecision
 from src.models.agent_registry import AgentRegistry, ProposalReview
 from src.models.delegate import AgentDelegate, DelegateInvitation
@@ -34,4 +35,6 @@ __all__ = [
     "ProfileRevision",
     "PodcastEpisode",
     "PodcastPreferences",
+    "AccessAllowlist",
+    "WaitlistSignup",
 ]

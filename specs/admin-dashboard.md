@@ -153,7 +153,37 @@ Debugging view for all LLM API calls.
 - Latency (ms)
 - System prompt and response (expandable)
 
-### 8. User Impersonation
+### 8. Access Requests (`/admin/access-requests`)
+
+Pre-release access gate management.
+
+**Sections:**
+- **Pending** — users with `access_status='pending'`. Columns: name, email, ORCID, institution (if known), created_at, "Approve" / "Deny" buttons.
+- **Allowed** — recently approved users, for confirmation. Columns: name, email, ORCID, approved date.
+- **Denied** — users explicitly denied.
+
+**Actions:**
+- `POST /admin/access-requests/{user_id}/approve` — sets `access_status='allowed'`, enqueues `generate_profile` job (if no profile yet), sends notification email
+- `POST /admin/access-requests/{user_id}/deny` — sets `access_status='denied'`
+
+**Allowlist management** (same page or sub-page):
+- List of pre-approved ORCIDs from `AccessAllowlist`
+- Add ORCID + note form
+- Remove ORCID button
+
+### 9. Waitlist (`/admin/waitlist`)
+
+Lead-capture signups from the public landing page.
+
+**Columns:** email, name, institution, note (truncated), created_at, contacted_at, "Mark contacted" button
+
+**Actions:**
+- `GET /admin/waitlist/export` — CSV export of all signups
+- `POST /admin/waitlist/{id}/mark-contacted` — sets `contacted_at = now()`
+
+No outbound email is sent automatically — the admin uses the export to reach out manually, then marks rows contacted.
+
+### 10. User Impersonation
 
 Admins can assume the identity of any user to see the app as they see it.
 
@@ -185,6 +215,14 @@ Admins can assume the identity of any user to see the app as they see it.
 | `POST /admin/agents/{id}/approve` | Approve pending agent |
 | `GET /admin/discussions` | Thread discussions and outcomes |
 | `GET /admin/discussions/export` | Export discussions (HTML/text) |
+| `GET /admin/access-requests` | Pending access requests + allowlist management |
+| `POST /admin/access-requests/{user_id}/approve` | Approve a pending user |
+| `POST /admin/access-requests/{user_id}/deny` | Deny a pending user |
+| `POST /admin/access-allowlist/add` | Add an ORCID to the allowlist |
+| `POST /admin/access-allowlist/{id}/remove` | Remove an ORCID from the allowlist |
+| `GET /admin/waitlist` | Waitlist signups |
+| `GET /admin/waitlist/export` | CSV export of waitlist |
+| `POST /admin/waitlist/{id}/mark-contacted` | Mark a waitlist signup as contacted |
 | `POST /admin/impersonate` | Start impersonating a user |
 | `POST /admin/impersonate/stop` | Stop impersonating |
 

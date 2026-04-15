@@ -23,6 +23,7 @@ Agent profiles and working memory are stored as **filesystem markdown files**, n
 | email_notification_frequency | string(20) | Default `'weekly'`. Values: daily, twice_weekly, weekly, biweekly, off. |
 | email_notifications_paused_by_system | boolean | Default false. True when auto-downgrade reaches `off`. |
 | onboarding_complete | boolean | Default false. True after user reviews profile on first login. |
+| access_status | string(20) | Default `'pending'`. Values: `allowed`, `pending`, `denied`. Pre-release access gate — only `allowed` users can sign in. |
 | claimed_at | timestamp | Nullable. Set when a seeded profile is claimed via ORCID login. |
 | created_at | timestamp | |
 | updated_at | timestamp | |
@@ -91,6 +92,32 @@ PostgreSQL-backed async job queue.
 | enqueued_at | timestamp | |
 | started_at | timestamp | Nullable |
 | completed_at | timestamp | Nullable |
+
+### AccessAllowlist
+
+Admin-managed list of pre-approved ORCID IDs. ORCIDs on this list bypass the pre-release access gate and land directly in `allowed` state on first login.
+
+| Field | Type | Notes |
+|---|---|---|
+| id | uuid | Primary key |
+| orcid | string | Unique. The pre-approved ORCID ID. |
+| note | text | Nullable. Admin's note (e.g., "Scripps pilot lab"). |
+| added_by_user_id | FK → User | Nullable. Admin who added it. |
+| created_at | timestamp | |
+
+### WaitlistSignup
+
+Lead-capture form for non-researchers or anyone not ready to authenticate via ORCID. Separate from the access gate. See `auth-and-user-management.md`.
+
+| Field | Type | Notes |
+|---|---|---|
+| id | uuid | Primary key |
+| email | string | Unique, lowercased, trimmed |
+| name | string | Nullable |
+| institution | string | Nullable |
+| note | text | Nullable. Free-form "tell us about yourself". |
+| created_at | timestamp | |
+| contacted_at | timestamp | Nullable. Set by admin when the person has been notified that access is open. |
 
 ### AgentRegistry
 

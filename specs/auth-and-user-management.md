@@ -1,5 +1,41 @@
 # Auth and User Management Specification
 
+## Public Landing Page
+
+`GET /` renders a public landing page (`templates/landing.html`) for unauthenticated visitors. It describes what CoPI does — lab agents that discover collaborations in Slack — and notes that the site is in **pre-release**: new users must be added to the system before they can sign in.
+
+The page has two CTAs:
+- **Sign in with ORCID** → starts the ORCID OAuth flow (subject to the access gate, see below)
+- **Notify me when access opens** → waitlist signup form
+
+Authenticated users hitting `/` are redirected to `/profile` (existing behavior). `/login` continues to work as a direct ORCID entry point for backward compatibility.
+
+## Waitlist
+
+Non-researchers (or researchers who don't want to commit an ORCID login yet) can join a waitlist from the landing page. The waitlist is intentionally separate from the ORCID access gate — they capture different audiences and are reconciled by the admin.
+
+### WaitlistSignup (new table)
+
+| Field | Type | Notes |
+|---|---|---|
+| id | uuid | Primary key |
+| email | string | Required, lowercased, trimmed |
+| name | string | Nullable |
+| institution | string | Nullable |
+| note | text | Nullable. Free-form "tell us about yourself" field. |
+| created_at | timestamp | |
+| contacted_at | timestamp | Nullable. Set by admin when the person has been notified that access is open. |
+
+**Constraints:** Unique on `email`. Repeat submissions update `created_at` and `note` rather than erroring.
+
+### Submission
+
+`POST /waitlist` accepts the form, validates the email format, upserts the row, and shows a thank-you state. Rate-limited per IP to discourage abuse. No email verification — this is a lead-capture form, not an authentication step.
+
+### Admin
+
+See `admin-dashboard.md` for the `/admin/waitlist` page (list, CSV export, mark-contacted).
+
 ## Authentication
 
 CoPI uses ORCID OAuth exclusively. No email/password authentication. ORCID cannot be unlinked.
@@ -27,9 +63,43 @@ Use **Authlib** for the OAuth 2.0 flow. Register ORCID as an OAuth provider with
 - Scope: `/authenticate`
 - User info from: `https://pub.orcid.org/v3.0/{ORCID-ID}/record`
 
+## Access Gate (Pre-Release)
+
+While CoPI is in pre-release, ORCID login alone is not sufficient — each User has an `access_status` that determines whether they can enter the app.
+
+### User.access_status
+
+| Value | Meaning |
+|---|---|
+| `allowed` | User can sign in and use the app normally |
+| `pending` | User has authenticated via ORCID (or been seeded) but is waiting for admin approval. No session is established and no profile pipeline runs. |
+| `denied` | Admin has explicitly denied access. Treated like `pending` from the user's perspective, but admin sees them separately. |
+
+Default for new users: `pending`. Seeded pilot-lab profiles and existing users at the time of migration are backfilled to `allowed`.
+
+### Allowlist
+
+An admin-managed list of pre-approved ORCID IDs (stored in the database, manageable via CLI and admin UI). When a user authenticates via ORCID, if their ORCID is on the allowlist, their User record is created (or updated) with `access_status='allowed'` automatically — they bypass the pending state. The 12 pilot-lab ORCIDs are seeded onto this list.
+
+### Gated Callback Flow
+
+The ORCID OAuth callback runs to completion (we want to capture every attempt), but the post-callback behavior branches on `access_status`:
+
+- **`allowed`** → set session, run profile pipeline if needed, redirect to onboarding or `/profile` (existing behavior)
+- **`pending` or `denied`** → do **not** set `user_id` in the session, do **not** enqueue the `generate_profile` job, redirect to `/access-pending`
+
+The `/access-pending` page thanks the user, confirms their ORCID was received, and offers a form to capture an email address (since ORCID may not return one) so the admin can notify them when access opens. The captured email is written to the `User.email` field.
+
+### Admin Approval
+
+Admins approve pending users via `/admin/access-requests` (see `admin-dashboard.md`). Approving a user:
+1. Sets `access_status` to `allowed`
+2. Enqueues a `generate_profile` job (skipped if the user already has a profile)
+3. Sends a notification email to the user that access is open (via the existing SES email service)
+
 ## Signup / Onboarding Flow
 
-Account creation happens automatically on first ORCID login:
+Account creation happens automatically on first ORCID login (subject to the access gate above):
 
 1. **ORCID OAuth** → account created with name, email, ORCID ID from OAuth response
 2. **Profile pipeline runs** → pull ORCID data (affiliation, grants, works), fetch PubMed abstracts, run LLM synthesis. Show progress indicator: "Pulling your publications... Analyzing your research... Building your profile..."

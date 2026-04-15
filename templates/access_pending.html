@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block title %}Access pending — CoPI{% endblock %}
+
+{% block content %}
+<div class="max-w-xl mx-auto mt-8">
+    <div class="bg-white rounded-xl shadow-md border border-gray-200 p-8">
+        <h1 class="text-2xl font-bold text-gray-800 mb-3">Thanks for signing in</h1>
+        <p class="text-gray-600 mb-4">
+            CoPI is in pre-release. We've received your ORCID
+            {% if pending_info.orcid %}
+            (<span class="font-mono text-sm">{{ pending_info.orcid }}</span>)
+            {% endif %}
+            and you're in the queue for access.
+        </p>
+        <p class="text-gray-600 mb-6">
+            An admin will review your request and notify you by email when your account is activated.
+        </p>
+
+        {% if email_saved %}
+        <div class="bg-green-50 border border-green-200 rounded-lg p-4 text-sm text-green-800">
+            Got it — we'll email you at <strong>{{ pending_info.email }}</strong> when access opens.
+        </div>
+        {% elif pending_info.email %}
+        <div class="bg-indigo-50 border border-indigo-200 rounded-lg p-4 text-sm text-indigo-800">
+            We'll reach out at <strong>{{ pending_info.email }}</strong> when access opens.
+        </div>
+        {% else %}
+        <div class="border-t border-gray-200 pt-5">
+            <p class="text-sm text-gray-600 mb-3">
+                ORCID didn't share an email with us. Leave one below so we can notify you:
+            </p>
+            {% if email_error %}
+            <div class="bg-red-50 border border-red-200 rounded-md p-3 mb-3 text-sm text-red-700">
+                {{ email_error }}
+            </div>
+            {% endif %}
+            <form method="POST" action="/access-pending/email" class="flex gap-2">
+                <input type="email" name="email" required placeholder="you@university.edu"
+                       class="flex-grow px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500">
+                <button type="submit"
+                        class="bg-indigo-600 hover:bg-indigo-700 text-white font-medium px-4 py-2 rounded-md text-sm">
+                    Save
+                </button>
+            </form>
+        </div>
+        {% endif %}
+
+        <div class="mt-6 text-center">
+            <a href="/" class="text-sm text-indigo-600 hover:underline">← Back to home</a>
+        </div>
+    </div>
+</div>
+{% endblock %}

@@ -13,7 +13,7 @@ from fastapi.templating import Jinja2Templates
 
 from src.config import get_settings
 from src.database import get_db
-from src.models import Job, User
+from src.models import AccessAllowlist, Job, User
 from src.services.orcid import fetch_orcid_profile
 
 templates = Jinja2Templates(directory="templates")
@@ -104,30 +104,40 @@ async def auth_callback(
         logger.warning("Failed to fetch ORCID profile for %s: %s", orcid_id, exc)
         profile_data = {"orcid": orcid_id, "name": orcid_name}
 
+    # Check the allowlist — ORCIDs on it bypass the pre-release access gate
+    allowlist_result = await db.execute(
+        select(AccessAllowlist).where(AccessAllowlist.orcid == orcid_id)
+    )
+    is_allowlisted = allowlist_result.scalar_one_or_none() is not None
+
     # Find or create user
     result = await db.execute(select(User).where(User.orcid == orcid_id))
     user = result.scalar_one_or_none()
 
     if user is None:
-        # Create new user
+        # Create new user — pending unless allowlisted
         user = User(
             orcid=orcid_id,
             name=profile_data.get("name") or orcid_name,
             email=profile_data.get("email"),
             institution=profile_data.get("institution"),
             department=profile_data.get("department"),
+            access_status="allowed" if is_allowlisted else "pending",
         )
         db.add(user)
         await db.flush()  # Get the ID
 
-        # Enqueue profile generation job
-        job = Job(
-            type="generate_profile",
-            user_id=user.id,
-            payload={"user_id": str(user.id), "orcid": orcid_id},
-        )
-        db.add(job)
-        logger.info("Created new user %s (%s) and enqueued profile job", user.id, orcid_id)
+        # Only enqueue profile generation for allowed users
+        if user.access_status == "allowed":
+            job = Job(
+                type="generate_profile",
+                user_id=user.id,
+                payload={"user_id": str(user.id), "orcid": orcid_id},
+            )
+            db.add(job)
+            logger.info("Created allowed user %s (%s), enqueued profile job", user.id, orcid_id)
+        else:
+            logger.info("Created pending user %s (%s) — awaiting admin approval", user.id, orcid_id)
     else:
         # Existing user — update name/institution if empty
         if not user.name and profile_data.get("name"):
@@ -138,15 +148,42 @@ async def auth_callback(
             user.department = profile_data["department"]
         if not user.email and profile_data.get("email"):
             user.email = profile_data["email"]
+        # Allowlist can promote an existing pending user to allowed
+        if is_allowlisted and user.access_status != "allowed":
+            user.access_status = "allowed"
+            from src.models import ResearcherProfile
+            profile_check = await db.execute(
+                select(ResearcherProfile.id).where(ResearcherProfile.user_id == user.id)
+            )
+            if profile_check.scalar_one_or_none() is None:
+                db.add(
+                    Job(
+                        type="generate_profile",
+                        user_id=user.id,
+                        payload={"user_id": str(user.id), "orcid": orcid_id},
+                    )
+                )
         # Set claimed_at if this was a seeded profile
         if user.claimed_at is None:
             user.claimed_at = datetime.now(timezone.utc)
-        logger.info("Existing user %s logged in", user.id)
+        logger.info("Existing user %s logged in (access=%s)", user.id, user.access_status)
 
     await db.commit()
 
+    # Access gate: users who aren't allowed do not get a session
+    if user.access_status != "allowed":
+        # Stash ORCID + any known email in session for the /access-pending page
+        request.session["pending_access"] = {
+            "user_id": str(user.id),
+            "orcid": orcid_id,
+            "email": user.email,
+            "name": user.name,
+        }
+        return RedirectResponse(url="/access-pending", status_code=302)
+
     # Set session
     request.session["user_id"] = str(user.id)
+    request.session.pop("pending_access", None)
 
     # Check for pending invite token — skip onboarding, go straight to acceptance
     pending_token = request.session.pop("pending_invite_token", None)

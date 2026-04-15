@@ -4,16 +4,14 @@ import logging
 import uuid
 
 from fastapi import FastAPI, Request
-from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
-from fastapi.templating import Jinja2Templates
 from sqlalchemy import func, select
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 
 from src.config import get_settings
 from src.database import get_session_factory
-from src.routers import admin, agent_page, auth, invite, onboarding, podcast, profile
+from src.routers import admin, agent_page, auth, invite, onboarding, podcast, profile, public
 from src.routers import settings as settings_router
 
 logging.basicConfig(
@@ -108,6 +106,7 @@ def create_app() -> FastAPI:
         logger.warning("Static files directory not found, skipping mount")
 
     # Include routers
+    application.include_router(public.router, tags=["public"])
     application.include_router(auth.router, tags=["auth"])
     application.include_router(onboarding.router, prefix="/onboarding", tags=["onboarding"])
     application.include_router(profile.router, prefix="/profile", tags=["profile"])
@@ -116,13 +115,6 @@ def create_app() -> FastAPI:
     application.include_router(invite.router, tags=["invite"])
     application.include_router(settings_router.router, prefix="/settings", tags=["settings"])
     application.include_router(podcast.router, prefix="/podcast", tags=["podcast"])
-
-    @application.get("/")
-    async def root(request: Request):
-        """Root redirect — logged-in users go to profile, others to login."""
-        if request.session.get("user_id"):
-            return RedirectResponse(url="/profile", status_code=302)
-        return RedirectResponse(url="/login", status_code=302)
 
     @application.get("/api/health")
     async def health():

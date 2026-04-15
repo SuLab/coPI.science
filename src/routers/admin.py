@@ -15,6 +15,7 @@ from src.config import get_settings
 from src.database import get_db
 from src.dependencies import get_admin_user, get_current_user
 from src.models import (
+    AccessAllowlist,
     AgentChannel,
     AgentMessage,
     AgentRegistry,
@@ -27,6 +28,7 @@ from src.models import (
     SimulationRun,
     ThreadDecision,
     User,
+    WaitlistSignup,
 )
 from src.services.orcid import fetch_orcid_profile
 
@@ -1019,3 +1021,252 @@ async def stop_impersonating(
     response = RedirectResponse(url="/admin/users", status_code=302)
     response.delete_cookie("copi-impersonate")
     return response
+
+
+# ---------------------------------------------------------------------------
+# Access requests + allowlist
+# ---------------------------------------------------------------------------
+
+
+@router.get("/access-requests", response_class=HTMLResponse)
+async def admin_access_requests(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_admin_user),
+):
+    """List pending/allowed/denied users and manage the allowlist."""
+    pending_result = await db.execute(
+        select(User).where(User.access_status == "pending").order_by(User.created_at.desc())
+    )
+    pending = pending_result.scalars().all()
+
+    denied_result = await db.execute(
+        select(User).where(User.access_status == "denied").order_by(User.created_at.desc())
+    )
+    denied = denied_result.scalars().all()
+
+    recent_allowed_result = await db.execute(
+        select(User)
+        .where(User.access_status == "allowed")
+        .order_by(User.updated_at.desc())
+        .limit(25)
+    )
+    recent_allowed = recent_allowed_result.scalars().all()
+
+    allowlist_result = await db.execute(
+        select(AccessAllowlist).order_by(AccessAllowlist.created_at.desc())
+    )
+    allowlist = allowlist_result.scalars().all()
+
+    return templates.TemplateResponse(
+        request,
+        "admin/access_requests.html",
+        _template_context(
+            request,
+            current_user,
+            active_admin="access",
+            pending=pending,
+            denied=denied,
+            recent_allowed=recent_allowed,
+            allowlist=allowlist,
+        ),
+    )
+
+
+@router.post("/access-requests/{user_id}/approve")
+async def admin_approve_access(
+    user_id: uuid.UUID,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_admin_user),
+):
+    """Approve a pending user; enqueue profile job if needed."""
+    result = await db.execute(select(User).where(User.id == user_id))
+    user = result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    user.access_status = "allowed"
+
+    profile_result = await db.execute(
+        select(ResearcherProfile.id).where(ResearcherProfile.user_id == user.id)
+    )
+    if profile_result.scalar_one_or_none() is None:
+        db.add(
+            Job(
+                type="generate_profile",
+                user_id=user.id,
+                payload={"user_id": str(user.id), "orcid": user.orcid},
+            )
+        )
+
+    await db.commit()
+    logger.info("Admin %s approved access for user %s", current_user.name, user.id)
+    return RedirectResponse(url="/admin/access-requests", status_code=302)
+
+
+@router.post("/access-requests/{user_id}/deny")
+async def admin_deny_access(
+    user_id: uuid.UUID,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_admin_user),
+):
+    """Deny a pending user."""
+    result = await db.execute(select(User).where(User.id == user_id))
+    user = result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    user.access_status = "denied"
+    await db.commit()
+    logger.info("Admin %s denied access for user %s", current_user.name, user.id)
+    return RedirectResponse(url="/admin/access-requests", status_code=302)
+
+
+@router.post("/access-allowlist/add")
+async def admin_allowlist_add(
+    request: Request,
+    orcid: str = Form(...),
+    note: str = Form(""),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_admin_user),
+):
+    """Add an ORCID to the allowlist."""
+    orcid_clean = orcid.strip()
+    if not orcid_clean:
+        return RedirectResponse(url="/admin/access-requests", status_code=302)
+
+    existing = await db.execute(
+        select(AccessAllowlist).where(AccessAllowlist.orcid == orcid_clean)
+    )
+    if existing.scalar_one_or_none() is None:
+        db.add(
+            AccessAllowlist(
+                orcid=orcid_clean,
+                note=note.strip() or None,
+                added_by_user_id=current_user.id,
+            )
+        )
+
+    # If a user with this ORCID already exists and is pending, promote them.
+    user_result = await db.execute(select(User).where(User.orcid == orcid_clean))
+    user = user_result.scalar_one_or_none()
+    if user and user.access_status != "allowed":
+        user.access_status = "allowed"
+        profile_result = await db.execute(
+            select(ResearcherProfile.id).where(ResearcherProfile.user_id == user.id)
+        )
+        if profile_result.scalar_one_or_none() is None:
+            db.add(
+                Job(
+                    type="generate_profile",
+                    user_id=user.id,
+                    payload={"user_id": str(user.id), "orcid": user.orcid},
+                )
+            )
+
+    await db.commit()
+    return RedirectResponse(url="/admin/access-requests", status_code=302)
+
+
+@router.post("/access-allowlist/{entry_id}/remove")
+async def admin_allowlist_remove(
+    entry_id: uuid.UUID,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_admin_user),
+):
+    """Remove an ORCID from the allowlist."""
+    result = await db.execute(
+        select(AccessAllowlist).where(AccessAllowlist.id == entry_id)
+    )
+    entry = result.scalar_one_or_none()
+    if entry:
+        await db.delete(entry)
+        await db.commit()
+    return RedirectResponse(url="/admin/access-requests", status_code=302)
+
+
+# ---------------------------------------------------------------------------
+# Waitlist
+# ---------------------------------------------------------------------------
+
+
+@router.get("/waitlist", response_class=HTMLResponse)
+async def admin_waitlist(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_admin_user),
+):
+    """List waitlist signups."""
+    result = await db.execute(
+        select(WaitlistSignup).order_by(WaitlistSignup.created_at.desc())
+    )
+    signups = result.scalars().all()
+
+    return templates.TemplateResponse(
+        request,
+        "admin/waitlist.html",
+        _template_context(
+            request,
+            current_user,
+            active_admin="waitlist",
+            signups=signups,
+        ),
+    )
+
+
+@router.get("/waitlist/export")
+async def admin_waitlist_export(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_admin_user),
+):
+    """CSV export of waitlist signups."""
+    import csv
+    import io
+
+    from fastapi.responses import Response
+
+    result = await db.execute(
+        select(WaitlistSignup).order_by(WaitlistSignup.created_at.desc())
+    )
+    signups = result.scalars().all()
+
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["email", "name", "institution", "note", "created_at", "contacted_at"])
+    for s in signups:
+        writer.writerow(
+            [
+                s.email,
+                s.name or "",
+                s.institution or "",
+                (s.note or "").replace("\n", " "),
+                s.created_at.isoformat() if s.created_at else "",
+                s.contacted_at.isoformat() if s.contacted_at else "",
+            ]
+        )
+
+    return Response(
+        content=buf.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=waitlist.csv"},
+    )
+
+
+@router.post("/waitlist/{signup_id}/mark-contacted")
+async def admin_waitlist_mark_contacted(
+    signup_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_admin_user),
+):
+    """Mark a waitlist signup as contacted."""
+    result = await db.execute(
+        select(WaitlistSignup).where(WaitlistSignup.id == signup_id)
+    )
+    signup = result.scalar_one_or_none()
+    if signup:
+        signup.contacted_at = datetime.now(timezone.utc)
+        await db.commit()
+    return RedirectResponse(url="/admin/waitlist", status_code=302)
