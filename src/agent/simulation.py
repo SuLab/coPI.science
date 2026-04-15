@@ -14,6 +14,13 @@ from typing import Any
 from src.agent.agent import Agent
 from src.agent.channels import SEEDED_CHANNELS
 from src.agent.foa_cache import extract_foa_number, format_foa_for_prompt
+from src.agent.funding_rules import (
+    format_funding_thread_summary,
+    format_your_prior_messages,
+    is_acknowledgment_only_funding_reply,
+    is_announcement_only_funding_reply,
+    summarize_funding_thread,
+)
 from src.agent.message_log import LogEntry, MessageLog, is_funding_post
 from src.agent.state import PostRef, ProposalRef, ThreadState
 from src.agent.tools import TOOL_DEFINITIONS, execute_tool
@@ -43,6 +50,7 @@ PILOT_LABS = [
     {"id": "briney", "name": "BrineyBot", "pi": "Bryan Briney"},
     {"id": "forli", "name": "ForliBot", "pi": "Stefano Forli"},
     {"id": "deniz", "name": "DenizBot", "pi": "Ashok Deniz"},
+    {"id": "lairson", "name": "LairsonBot", "pi": "Luke Lairson"},
 ]
 
 # Keywords for channel-profile matching
@@ -676,12 +684,29 @@ class SimulationEngine:
         other_name = other_agent.bot_name if other_agent else thread.other_agent_id
         other_lab = other_agent.pi_name if other_agent else "Unknown"
 
+        # Funding-thread context (self-dedup + late-joiner summary)
+        is_funding = self.message_log.is_funding_thread(thread.thread_id)
+        your_prior_text: str | None = None
+        thread_activity_text: str | None = None
+        if is_funding:
+            your_prior_entries = [
+                e for e in history_entries if e.sender_agent_id == agent.agent_id
+            ]
+            your_prior_text = format_your_prior_messages(your_prior_entries)
+            summary = summarize_funding_thread(
+                self.message_log, thread.thread_id, viewer_agent_id=agent.agent_id,
+            )
+            thread_activity_text = format_funding_thread_summary(summary)
+
         # Build prompt
         system_prompt, messages = agent.build_phase4_prompt(
             thread=thread,
             thread_history=thread_history,
             other_agent_name=other_name,
             other_agent_lab=other_lab,
+            is_funding_thread=is_funding,
+            your_prior_messages=your_prior_text,
+            thread_activity_summary=thread_activity_text,
         )
 
         # Create tool executor bound to this thread's state
@@ -714,6 +739,31 @@ class SimulationEngine:
                 )
                 return
 
+            # Funding-thread draft validators: reject announcement-only and
+            # acknowledgment-only replies before they hit Slack.
+            if is_funding:
+                rejected_reason = None
+                if is_announcement_only_funding_reply(response_text):
+                    rejected_reason = "announcement-only"
+                elif is_acknowledgment_only_funding_reply(response_text):
+                    rejected_reason = "acknowledgment-only"
+                if rejected_reason:
+                    thread.funding_reject_count += 1
+                    logger.info(
+                        "[%s] Phase 4: Rejected %s draft in funding thread %s (count=%d)",
+                        agent.agent_id, rejected_reason, thread.thread_id,
+                        thread.funding_reject_count,
+                    )
+                    if thread.funding_reject_count >= 2:
+                        # Back off: drop the pending-reply flag so the agent
+                        # stops re-attempting this thread for a while.
+                        thread.has_pending_reply = False
+                        logger.info(
+                            "[%s] Phase 4: Backing off funding thread %s after %d rejections",
+                            agent.agent_id, thread.thread_id, thread.funding_reject_count,
+                        )
+                    return
+
             # Post the reply
             await self._post_message(
                 agent.agent_id, thread.channel, response_text,
@@ -721,6 +771,7 @@ class SimulationEngine:
             )
             agent.message_count += 1
             thread.has_pending_reply = False
+            thread.funding_reject_count = 0
 
             # Check for thread outcome
             await self._check_thread_outcome(agent, thread, response_text)
@@ -752,6 +803,10 @@ class SimulationEngine:
                     # Extract text starting from :memo: marker
                     memo_idx = entry.content.find(":memo:")
                     summary_text = entry.content[memo_idx:].strip() if memo_idx >= 0 else entry.content
+                    agent.state.pending_proposals = [
+                        p for p in agent.state.pending_proposals
+                        if p.thread_id != thread.thread_id
+                    ]
                     agent.state.pending_proposals.append(ProposalRef(
                         thread_id=thread.thread_id,
                         channel=thread.channel,
@@ -806,8 +861,14 @@ class SimulationEngine:
         if other_agent and thread.thread_id in other_agent.state.active_threads:
             other_agent.state.active_threads[thread.thread_id].status = "closed"
             other_agent.state.active_threads.pop(thread.thread_id, None)
-            # If proposal, add to other agent's pending_proposals too
+            # If proposal, add to other agent's pending_proposals too.
+            # Replace any existing entry for the same thread so reopen/re-propose
+            # cycles don't accumulate duplicates during a single run.
             if outcome == "proposal" and summary_text:
+                other_agent.state.pending_proposals = [
+                    p for p in other_agent.state.pending_proposals
+                    if p.thread_id != thread.thread_id
+                ]
                 other_agent.state.pending_proposals.append(ProposalRef(
                     thread_id=thread.thread_id,
                     channel=thread.channel,
@@ -930,7 +991,10 @@ class SimulationEngine:
             self.message_log.is_funding_thread(p.post_id)
             for p in agent.state.interesting_posts
         )
-        if not available_posts and blocked_for_regular and not has_funding_interesting:
+        has_thread_foas = any(
+            ts.foa_number for ts in agent.state.active_threads.values()
+        )
+        if not available_posts and blocked_for_regular and not has_funding_interesting and not has_thread_foas:
             logger.debug("[%s] Phase 5: Skipped (blocked, no funding/PI posts available)", agent.agent_id)
             return
 
@@ -947,11 +1011,18 @@ class SimulationEngine:
 
         # Pre-load cached FOA text for funding posts so Phase 5 has full context
         foa_contexts: dict[str, str] = {}
+        funding_thread_summaries: dict[str, str] = {}
         for post in available_posts:
             if post.foa_number:
                 foa_text = format_foa_for_prompt(post.foa_number)
                 if foa_text:
                     foa_contexts[post.post_id] = foa_text
+            if self.message_log.is_funding_thread(post.post_id):
+                summary = summarize_funding_thread(
+                    self.message_log, post.post_id, viewer_agent_id=agent.agent_id,
+                )
+                if not summary.is_empty():
+                    funding_thread_summaries[post.post_id] = format_funding_thread_summary(summary)
 
         # Also pre-load FOAs from active/closed threads for Option B
         # (starting a new funding collab from a previously seen FOA)
@@ -971,6 +1042,7 @@ class SimulationEngine:
             thread_foa_contexts=thread_foa_contexts,
             prior_threads=prior_threads,
             funding_only=blocked_for_regular,
+            funding_thread_summaries=funding_thread_summaries,
         )
 
         # Restore
@@ -1043,6 +1115,23 @@ class SimulationEngine:
                         agent.agent_id, target_post_id, allowed,
                     )
                     return
+
+                # Funding-thread draft validators (atomic spin-off + no-ack rules)
+                if self.message_log.is_funding_thread(target_post_id):
+                    if is_announcement_only_funding_reply(message_text):
+                        logger.info(
+                            "[%s] Phase 5: Rejected announcement-only funding reply to %s",
+                            agent.agent_id, target_post_id,
+                        )
+                        agent.state.consecutive_phase5_skips += 1
+                        return
+                    if is_acknowledgment_only_funding_reply(message_text):
+                        logger.info(
+                            "[%s] Phase 5: Rejected acknowledgment-only funding reply to %s",
+                            agent.agent_id, target_post_id,
+                        )
+                        agent.state.consecutive_phase5_skips += 1
+                        return
 
                 # Reply to an interesting post → creates a new thread
                 await self._post_message(
@@ -1786,21 +1875,37 @@ class SimulationEngine:
                         (r.thread_decision_id, r.agent_id) for r in reviewed_result
                     }
 
+                # Keep only the latest ThreadDecision per (agent_id, thread_id).
+                # Older rows represent prior propose/reopen cycles and their
+                # reviews are stale — the most recent re-proposal is the only
+                # one whose review status affects the agent's current block.
+                latest_by_key: dict[tuple[str, str], ThreadDecision] = {}
                 for td in proposals:
                     for aid in (td.agent_a, td.agent_b):
-                        agent = self.agents.get(aid)
-                        if not agent:
+                        if aid not in self.agents:
                             continue
-                        is_reviewed = (td.id, aid) in reviewed_set
-                        other = td.agent_b if aid == td.agent_a else td.agent_a
-                        agent.state.pending_proposals.append(ProposalRef(
-                            thread_id=td.thread_id,
-                            channel=td.channel,
-                            other_agent_id=other,
-                            summary_text=td.summary_text or "",
-                            proposed_at=td.decided_at.timestamp() if td.decided_at else 0.0,
-                            reviewed=is_reviewed,
-                        ))
+                        key = (aid, td.thread_id)
+                        existing = latest_by_key.get(key)
+                        if existing is None:
+                            latest_by_key[key] = td
+                            continue
+                        td_ts = td.decided_at.timestamp() if td.decided_at else 0.0
+                        ex_ts = existing.decided_at.timestamp() if existing.decided_at else 0.0
+                        if td_ts > ex_ts:
+                            latest_by_key[key] = td
+
+                for (aid, _tid), td in latest_by_key.items():
+                    agent = self.agents[aid]
+                    is_reviewed = (td.id, aid) in reviewed_set
+                    other = td.agent_b if aid == td.agent_a else td.agent_a
+                    agent.state.pending_proposals.append(ProposalRef(
+                        thread_id=td.thread_id,
+                        channel=td.channel,
+                        other_agent_id=other,
+                        summary_text=td.summary_text or "",
+                        proposed_at=td.decided_at.timestamp() if td.decided_at else 0.0,
+                        reviewed=is_reviewed,
+                    ))
             except Exception as exc:
                 logger.warning("Failed to rebuild proposals: %s", exc)
 
@@ -1962,12 +2067,20 @@ class SimulationEngine:
 
             # Detect rating=0 reviews that need thread reopening, independent of
             # the reviewed flag (which may already be True from a prior sync).
+            # Dedupe by thread_id within this pass so that if the PI reviewed
+            # both sides of the pair, we only reopen the thread once.
             newly_reopened: list[tuple[Agent, str, str, str]] = []  # agent, other_id, thread_id, guidance
+            seen_reopens: set[str] = set()
             for agent in self.agents.values():
                 for proposal in agent.state.pending_proposals:
+                    if proposal.thread_id in seen_reopens:
+                        continue
+                    if proposal.thread_id in self._db_reopened_thread_ids:
+                        continue
                     key = (agent.agent_id, proposal.thread_id)
-                    if key in reopen_guidance and proposal.thread_id not in self._db_reopened_thread_ids:
+                    if key in reopen_guidance:
                         guidance, _channel = reopen_guidance[key]
+                        seen_reopens.add(proposal.thread_id)
                         newly_reopened.append(
                             (agent, proposal.other_agent_id, proposal.thread_id, guidance)
                         )

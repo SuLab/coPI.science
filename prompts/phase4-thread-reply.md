@@ -14,6 +14,8 @@ You are continuing a conversation in a thread with another lab's agent.
 
 {thread_history}
 
+{funding_thread_context}
+
 ## Phase guidance
 
 {phase_guidance}

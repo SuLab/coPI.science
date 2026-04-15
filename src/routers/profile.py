@@ -80,15 +80,24 @@ async def profile_edit(
     current_user: User = Depends(get_current_user),
 ):
     """Edit profile page."""
+    from src.models import AgentRegistry
+
     profile_result = await db.execute(
         select(ResearcherProfile).where(ResearcherProfile.user_id == current_user.id)
     )
     profile = profile_result.scalar_one_or_none()
 
+    agent_result = await db.execute(
+        select(AgentRegistry).where(AgentRegistry.user_id == current_user.id)
+    )
+    agent_reg = agent_result.scalar_one_or_none()
+
     return templates.TemplateResponse(
         request,
         "profile/edit.html",
-        _template_context(request, current_user, profile=profile),
+        _template_context(
+            request, current_user, profile=profile, agent_registry=agent_reg
+        ),
     )
 
 

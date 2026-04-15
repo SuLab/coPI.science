@@ -203,6 +203,9 @@ Your agent ID is "{self.agent_id}". When communicating, represent your lab profe
         thread_history: list[dict[str, str]],
         other_agent_name: str,
         other_agent_lab: str,
+        is_funding_thread: bool = False,
+        your_prior_messages: str | None = None,
+        thread_activity_summary: str | None = None,
     ) -> tuple[str, list[dict]]:
         """
         Build system + messages for Phase 4 thread reply.
@@ -274,6 +277,37 @@ Your agent ID is "{self.agent_id}". When communicating, represent your lab profe
                 f"\"{thread.pi_context}\""
             )
 
+        # Funding-thread context block: rendered only when this is a :moneybag: thread.
+        if is_funding_thread:
+            funding_ctx_lines = [
+                "## Funding thread — additional rules",
+                "",
+                "This is a :moneybag: funding thread. In addition to the normal reply rules:",
+                "",
+                "- **No announcement-only replies.** Do not post replies that merely announce "
+                "a future spin-off ('I'll start a new thread', 'watch for my post', "
+                "'posting it now', 'thread wrapped'). Either create the spin-off post this "
+                "turn via a new top-level :moneybag: post, or reply only with substantive "
+                "content (a new aim, a specific contribution, a scoping question).",
+                "- **No acknowledgment-only replies.** 'Sounds good', 'thanks', 'see you "
+                "there', 'agreed' are not allowed. Every reply must add substantive content.",
+                "- **Self-dedup.** If you have already replied in this thread, your next "
+                "reply must build on the discussion — do not repost the same alignment "
+                "pitch. See your prior messages below.",
+                "",
+                "### Your prior messages in this thread",
+                "",
+                your_prior_messages or "(none — this would be your first reply)",
+                "",
+                "### Prior activity in this thread",
+                "",
+                thread_activity_summary or "(no prior activity)",
+                "",
+            ]
+            funding_context = "\n".join(funding_ctx_lines)
+        else:
+            funding_context = ""
+
         prompt_text = phase4_template.replace("{channel_name}", thread.channel)
         prompt_text = prompt_text.replace("{other_agent_name}", other_agent_name)
         prompt_text = prompt_text.replace("{other_agent_lab}", other_agent_lab)
@@ -283,6 +317,7 @@ Your agent ID is "{self.agent_id}". When communicating, represent your lab profe
         prompt_text = prompt_text.replace("{phase_guidance}", phase_guidance)
         prompt_text = prompt_text.replace("{instructions}", instructions)
         prompt_text = prompt_text.replace("{foa_number}", thread.foa_number or "none")
+        prompt_text = prompt_text.replace("{funding_thread_context}", funding_context)
 
         messages = [{"role": "user", "content": prompt_text}]
         return system_prompt, messages
@@ -298,6 +333,7 @@ Your agent ID is "{self.agent_id}". When communicating, represent your lab profe
         thread_foa_contexts: dict[str, str] | None = None,
         prior_threads: dict[str, list[dict]] | None = None,
         funding_only: bool = False,
+        funding_thread_summaries: dict[str, str] | None = None,
     ) -> tuple[str, list[dict]]:
         """
         Build system + messages for Phase 5 new post.
@@ -324,6 +360,12 @@ Your agent ID is "{self.agent_id}". When communicating, represent your lab profe
                 part = f"**Post ID: {p.post_id}** in #{p.channel} by {p.sender_agent_id}:\n{p.content_snippet}"
                 if foa_contexts and p.post_id in foa_contexts:
                     part += f"\n\n<foa_details foa_number=\"{p.foa_number}\">\n{foa_contexts[p.post_id]}\n</foa_details>"
+                if funding_thread_summaries and p.post_id in funding_thread_summaries:
+                    part += (
+                        f"\n\n<thread_activity post_id=\"{p.post_id}\">\n"
+                        f"{funding_thread_summaries[p.post_id]}\n"
+                        f"</thread_activity>"
+                    )
                 parts.append(part)
             interesting_text = "\n\n".join(parts)
         else:

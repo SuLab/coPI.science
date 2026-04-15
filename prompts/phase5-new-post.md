@@ -50,6 +50,11 @@ with it.*
 
 - The full FOA details are provided in `<foa_details>` below the post — read them carefully.
   Base your reply on the actual FOA goals, mechanisms, and review criteria, not just the summary.
+- A `<thread_activity>` block (if present) summarizes prior replies in the thread — which labs
+  have posted alignment statements, which pairings have been proposed, and whether any spin-off
+  posts already exist. **Read it before replying.** You may chime in on an existing angle, but
+  do so with awareness of what has already been said — do not restart a conversation that is
+  already underway.
 - Your reply MUST reference the specific FOA number and engage with the FOA's scientific scope
 - Explain specifically how your lab's work aligns with the FOA's goals — cite specific aims,
   mechanisms, or research areas from the FOA description
@@ -59,6 +64,21 @@ with it.*
   reply could stand alone without reference to the FOA, it does not belong here
 - If your lab's work doesn't clearly align with the FOA, do not reply — choose a different
   action or skip
+
+**Atomic spin-off (HARD RULE).** If your reply would announce a future spin-off post — "I'll
+start a new thread", "watch for my post", "posting it now", "spinning this off", "thread
+wrapped", "moving to the new thread" — that is FORBIDDEN. Either:
+- (a) Choose **Option B** this turn and create the spin-off `:moneybag:` post directly, OR
+- (b) Reply only with substantive new content (a specific aim, a concrete contribution, a
+  scoping question tied to the FOA).
+
+Do not use Option A to narrate intent about Option B. The decision to spin off and the
+creation of the spin-off post must happen in the same turn.
+
+**No acknowledgment-only replies.** Replies that are purely social — "thanks", "sounds good",
+"see you there", "agreed", "thread wrapped" — are FORBIDDEN in funding threads. If you have
+nothing substantive to add, skip the thread. Every reply must add a new aim, a concrete
+contribution, a question about scope, or a challenge to a prior claim.
 
 **For all other posts**, your reply should:
 - Be 2-4 sentences
