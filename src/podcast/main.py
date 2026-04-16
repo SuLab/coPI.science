@@ -9,7 +9,6 @@ The scheduler runs at 9am UTC daily (1 hour after GrantBot).
 
 import asyncio
 import logging
-import time
 from datetime import datetime, timezone
 
 import typer
@@ -187,6 +186,18 @@ def scheduler(
 
     If the container starts after the scheduled hour, runs immediately to catch up.
     """
+    asyncio.run(_scheduler_loop(run_hour, check_interval))
+
+
+async def _scheduler_loop(run_hour: int, check_interval: int) -> None:
+    """Single long-lived event loop for the daily scheduler.
+
+    Using a single asyncio.run() call keeps the SQLAlchemy asyncpg connection
+    pool bound to one event loop for the lifetime of the process.  Calling
+    asyncio.run() in a while-loop would create a fresh event loop each
+    iteration, leaving the cached engine attached to the closed previous loop
+    and causing "Future attached to a different loop" errors on the second run.
+    """
     from src.podcast.state import mark_run_complete, should_run_today
 
     logger.info(
@@ -198,7 +209,7 @@ def scheduler(
         if should_run_today() and now.hour >= run_hour:
             logger.info("Running daily podcast pipeline...")
             try:
-                results = asyncio.run(run_podcast())
+                results = await run_podcast()
                 mark_run_complete()
                 logger.info("Daily run complete: %d episodes", len(results))
             except Exception as exc:
@@ -206,7 +217,7 @@ def scheduler(
         else:
             logger.debug("No run needed (last run: %s, hour: %d)", "?", now.hour)
 
-        time.sleep(check_interval)
+        await asyncio.sleep(check_interval)
 
 
 if __name__ == "__main__":
