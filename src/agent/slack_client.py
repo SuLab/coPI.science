@@ -5,6 +5,7 @@ chat.postMessage for posting.
 """
 
 import logging
+import re
 import time
 from typing import Any
 
@@ -12,6 +13,23 @@ from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
 logger = logging.getLogger(__name__)
+
+# Slack blocks have a 3000-char limit per text object.
+_BLOCK_TEXT_LIMIT = 3000
+
+
+def markdown_to_mrkdwn(text: str) -> str:
+    """Convert standard Markdown to Slack mrkdwn dialect.
+
+    Key differences handled:
+    - **bold** -> *bold*  (double asterisks to single)
+    - Standard bullet lists (- item) -> Slack bullet (• item)
+    """
+    # Convert **bold** → *bold* (but don't touch already-single *)
+    text = re.sub(r'\*\*(.+?)\*\*', r'*\1*', text)
+    # Convert bullet-list lines: leading "- " to "• "
+    text = re.sub(r'^(\s*)- ', r'\1• ', text, flags=re.MULTILINE)
+    return text
 
 MAX_RETRIES = 3
 
@@ -260,7 +278,25 @@ class AgentSlackClient:
             pass
 
         try:
-            kwargs: dict[str, Any] = {"channel": channel_id, "text": text}
+            slack_text = markdown_to_mrkdwn(text)
+            # Build section blocks so Slack renders mrkdwn; split on the
+            # 3000-char block limit to avoid API errors on long posts.
+            chunks = [
+                slack_text[i:i + _BLOCK_TEXT_LIMIT]
+                for i in range(0, len(slack_text), _BLOCK_TEXT_LIMIT)
+            ]
+            blocks = [
+                {
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": chunk},
+                }
+                for chunk in chunks
+            ]
+            kwargs: dict[str, Any] = {
+                "channel": channel_id,
+                "text": slack_text,   # fallback for notifications / plain clients
+                "blocks": blocks,
+            }
             if thread_ts:
                 kwargs["thread_ts"] = thread_ts
             result = self._call_with_retry(self._client.chat_postMessage, **kwargs)
