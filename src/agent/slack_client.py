@@ -105,6 +105,12 @@ class AgentSlackClient:
         """
         if not self._client:
             return []
+        # Ensure bot is in the channel — rotating pollers across tokens means
+        # whichever bot is picked may not yet be a member.
+        try:
+            self._client.conversations_join(channel=channel_id)
+        except SlackApiError:
+            pass
         try:
             result = self._call_with_retry(
                 self._client.conversations_history,
@@ -139,6 +145,12 @@ class AgentSlackClient:
         """
         if not self._client:
             return []
+        # Same rationale as poll_channel_messages: the rotated poll client may
+        # not be a channel member, and conversations.replies also requires it.
+        try:
+            self._client.conversations_join(channel=channel_id)
+        except SlackApiError:
+            pass
         try:
             result = self._call_with_retry(
                 self._client.conversations_replies,
