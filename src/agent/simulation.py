@@ -78,6 +78,11 @@ _CHANNEL_KEYWORDS: dict[str, list[str]] = {
 }
 _UNIVERSAL_CHANNELS = {"general", "funding-opportunities"}
 
+# Slack poll throttles. PI messages come from humans, so sub-turn latency is
+# unnecessary; polling every turn was saturating one bot token's rate limit.
+CHANNEL_POLL_INTERVAL = 15.0   # seconds between conversations.history sweeps
+PROPOSAL_POLL_INTERVAL = 30.0  # seconds between conversations.replies sweeps
+
 
 class SimulationEngine:
     """
@@ -141,6 +146,12 @@ class SimulationEngine:
         # Last agent to make an LLM call — prevents the same agent from making
         # back-to-back LLM calls when it's the only active agent.
         self._last_llm_caller: str | None = None
+
+        # Wall-clock throttles for Slack pollers + round-robin cursor over
+        # connected clients, so one agent's token doesn't carry all poll load.
+        self._last_channel_poll: float = 0.0
+        self._last_proposal_poll: float = 0.0
+        self._poll_client_cursor: int = 0
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -1230,6 +1241,17 @@ class SimulationEngine:
     # Slack Polling (PI messages)
     # ------------------------------------------------------------------
 
+    def _next_poll_client(self):
+        """Round-robin a connected Slack client for shared-token polling."""
+        connected = [
+            c for c in self.slack_clients.values() if c and c.is_connected
+        ]
+        if not connected:
+            return None
+        client = connected[self._poll_client_cursor % len(connected)]
+        self._poll_client_cursor += 1
+        return client
+
     async def _poll_slack_for_pi_messages(self) -> None:
         """
         Poll all channels for new human (non-bot) messages.
@@ -1238,9 +1260,13 @@ class SimulationEngine:
         if not self.slack_clients:
             return
 
-        # Use first available client to poll
-        client = next(iter(self.slack_clients.values()), None)
-        if not client or not client.is_connected:
+        now = time.time()
+        if now - self._last_channel_poll < CHANNEL_POLL_INTERVAL:
+            return
+        self._last_channel_poll = now
+
+        client = self._next_poll_client()
+        if not client:
             return
 
         # Only poll seeded channels (not archived/stale channels from prior sims)
@@ -1451,6 +1477,11 @@ class SimulationEngine:
         if not self._pi_slack_id_to_agent_ids:
             return
 
+        now = time.time()
+        if now - self._last_proposal_poll < PROPOSAL_POLL_INTERVAL:
+            return
+        self._last_proposal_poll = now
+
         # Collect PI user IDs for quick lookup
         pi_user_ids = set(self._pi_slack_id_to_agent_ids.keys())
         if not pi_user_ids:
@@ -1470,12 +1501,7 @@ class SimulationEngine:
         if not threads_to_poll:
             return
 
-        # Use the first available connected client for polling
-        client = None
-        for c in self.slack_clients.values():
-            if c and c.is_connected:
-                client = c
-                break
+        client = self._next_poll_client()
         if not client:
             return
 
