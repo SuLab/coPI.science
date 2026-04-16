@@ -306,8 +306,31 @@ async def run_pipeline_for_agent(
     # Step 1: Load profiles
     profile_text = _load_public_profile(agent_id)
     if not profile_text:
-        logger.warning("Agent %s: no public profile found, skipping", agent_id)
-        return False
+        # Fallback: agent may have a linked user with a DB ResearcherProfile
+        from sqlalchemy import select as _select
+        from src.models.agent_registry import AgentRegistry
+        from src.models.profile import ResearcherProfile
+        from src.models.user import User
+
+        agent_row = (await db_session.execute(
+            _select(AgentRegistry).where(AgentRegistry.agent_id == agent_id)
+        )).scalar_one_or_none()
+
+        if agent_row and agent_row.user_id:
+            user_row = (await db_session.execute(
+                _select(User).where(User.id == agent_row.user_id)
+            )).scalar_one_or_none()
+            profile_row = (await db_session.execute(
+                _select(ResearcherProfile).where(ResearcherProfile.user_id == agent_row.user_id)
+            )).scalar_one_or_none()
+
+            if user_row and profile_row and profile_row.research_summary:
+                profile_text = _build_profile_text_from_db(user_row, profile_row)
+                logger.info("Agent %s: no markdown profile, using DB profile for user %s", agent_id, agent_row.user_id)
+
+        if not profile_text:
+            logger.warning("Agent %s: no public profile found, skipping", agent_id)
+            return False
 
     preferences_text = await _load_podcast_preferences(agent_id)
     if preferences_text:
