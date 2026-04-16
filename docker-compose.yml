@@ -25,6 +25,7 @@ services:
       - .:/app
       - ./profiles:/app/profiles
       - ./prompts:/app/prompts
+      - ./data:/app/data
     depends_on:
       postgres:
         condition: service_healthy
@@ -65,6 +66,26 @@ services:
       - .:/app
       - ./profiles:/app/profiles
       - ./prompts:/app/prompts
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  podcast:
+    build: .
+    command: python -m src.podcast.main scheduler --run-hour 9
+    env_file: .env
+    environment:
+      # Override LOCAL_TTS_HOST so the container can reach a vLLM-Omni server
+      # running on the host machine (127.0.0.1 does not reach the host from inside Docker).
+      LOCAL_TTS_HOST: host.docker.internal
+    extra_hosts:
+      # Ensures host.docker.internal resolves on Linux (Docker Desktop sets it automatically on Mac/Windows).
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - .:/app
+      - ./profiles:/app/profiles
+      - ./prompts:/app/prompts
+      - ./data:/app/data
     depends_on:
       postgres:
         condition: service_healthy

@@ -38,45 +38,41 @@ class Settings(BaseSettings):
     notification_check_interval: int = 300  # seconds (5 minutes)
     inbound_poll_interval: int = 60  # seconds
 
-    # Slack tokens — one pair per agent
-    slack_bot_token_su: str = ""
-    slack_app_token_su: str = ""
-    slack_bot_token_wiseman: str = ""
-    slack_app_token_wiseman: str = ""
-    slack_bot_token_lotz: str = ""
-    slack_app_token_lotz: str = ""
-    slack_bot_token_cravatt: str = ""
-    slack_app_token_cravatt: str = ""
-    slack_bot_token_grotjahn: str = ""
-    slack_app_token_grotjahn: str = ""
-    slack_bot_token_petrascheck: str = ""
-    slack_app_token_petrascheck: str = ""
-    slack_bot_token_ken: str = ""
-    slack_app_token_ken: str = ""
-    slack_bot_token_racki: str = ""
-    slack_app_token_racki: str = ""
-    slack_bot_token_saez: str = ""
-    slack_app_token_saez: str = ""
-    slack_bot_token_wu: str = ""
-    slack_app_token_wu: str = ""
-    slack_bot_token_ward: str = ""
-    slack_app_token_ward: str = ""
-    slack_bot_token_briney: str = ""
-    slack_app_token_briney: str = ""
-    slack_bot_token_forli: str = ""
-    slack_app_token_forli: str = ""
-    slack_bot_token_deniz: str = ""
-    slack_app_token_deniz: str = ""
-    slack_bot_token_lairson: str = ""
-    slack_app_token_lairson: str = ""
-    slack_bot_token_grantbot: str = ""
-    slack_app_token_grantbot: str = ""
+    # Slack tokens are loaded dynamically from the environment — see get_slack_tokens().
+    # Add any number of agents to .env using the pattern:
+    #   SLACK_BOT_TOKEN_<AGENT_ID>=xoxb-...
+    #   SLACK_APP_TOKEN_<AGENT_ID>=xapp-...  (optional)
 
     # LLM models
     llm_profile_model: str = "claude-opus-4-6"
     llm_agent_model: str = "claude-sonnet-4-6"
     llm_agent_model_opus: str = "claude-opus-4-6"
     llm_agent_model_sonnet: str = "claude-sonnet-4-6"
+
+    # Mistral AI (podcast TTS)
+    mistral_api_key: str = ""
+    mistral_tts_model: str = "voxtral-mini-tts-latest"
+    mistral_tts_default_voice: str = ""
+
+    # OpenAI TTS
+    openai_api_key: str = ""
+    openai_tts_model: str = "tts-1"
+    openai_tts_default_voice: str = "alloy"
+
+    # Podcast TTS backend: "mistral" (default), "openai", or "local" (vLLM-Omni)
+    podcast_tts_backend: str = "mistral"
+
+    # Local vLLM-Omni TTS server
+    local_tts_host: str = "127.0.0.1"
+    local_tts_port: int = 8010
+    local_tts_model: str = "Qwen/Qwen2-Audio-7B-Instruct"
+    local_tts_voice: str = "default"
+
+    # Podcast
+    podcast_base_url: str = ""  # e.g. https://copi.science — for RSS enclosure URLs
+    podcast_search_window_days: int = 14
+    podcast_max_candidates: int = 50
+    podcast_normalize_audio: bool = False  # set true to run ffmpeg loudnorm after TTS
 
     # Worker
     worker_poll_interval: int = 5  # seconds
@@ -94,33 +90,34 @@ class Settings(BaseSettings):
     max_full_text_per_thread: int = 2
 
     def get_slack_tokens(self) -> dict[str, dict[str, str]]:
-        """Return slack tokens keyed by agent_id."""
-        return {
-            "su": {"bot": self.slack_bot_token_su, "app": self.slack_app_token_su},
-            "wiseman": {"bot": self.slack_bot_token_wiseman, "app": self.slack_app_token_wiseman},
-            "lotz": {"bot": self.slack_bot_token_lotz, "app": self.slack_app_token_lotz},
-            "cravatt": {
-                "bot": self.slack_bot_token_cravatt,
-                "app": self.slack_app_token_cravatt,
-            },
-            "grotjahn": {
-                "bot": self.slack_bot_token_grotjahn,
-                "app": self.slack_app_token_grotjahn,
-            },
-            "petrascheck": {
-                "bot": self.slack_bot_token_petrascheck,
-                "app": self.slack_app_token_petrascheck,
-            },
-            "ken": {"bot": self.slack_bot_token_ken, "app": self.slack_app_token_ken},
-            "racki": {"bot": self.slack_bot_token_racki, "app": self.slack_app_token_racki},
-            "saez": {"bot": self.slack_bot_token_saez, "app": self.slack_app_token_saez},
-            "wu": {"bot": self.slack_bot_token_wu, "app": self.slack_app_token_wu},
-            "ward": {"bot": self.slack_bot_token_ward, "app": self.slack_app_token_ward},
-            "briney": {"bot": self.slack_bot_token_briney, "app": self.slack_app_token_briney},
-            "forli": {"bot": self.slack_bot_token_forli, "app": self.slack_app_token_forli},
-            "deniz": {"bot": self.slack_bot_token_deniz, "app": self.slack_app_token_deniz},
-            "lairson": {"bot": self.slack_bot_token_lairson, "app": self.slack_app_token_lairson},
-        }
+        """Return Slack tokens keyed by agent_id.
+
+        Scans os.environ and the .env file for variables matching:
+            SLACK_BOT_TOKEN_<AGENT_ID>  →  tokens[agent_id]["bot"]
+            SLACK_APP_TOKEN_<AGENT_ID>  →  tokens[agent_id]["app"]
+
+        Agent IDs are lowercased from the suffix, so SLACK_BOT_TOKEN_SU → "su".
+        os.environ takes precedence over .env file values.
+        """
+        import os
+
+        from dotenv import dotenv_values
+
+        # Merge: .env file is the base, actual environment variables override.
+        env: dict[str, str] = {**dotenv_values(".env"), **os.environ}  # type: ignore[arg-type]
+
+        tokens: dict[str, dict[str, str]] = {}
+        for key, val in env.items():
+            if not val:
+                continue
+            upper = key.upper()
+            if upper.startswith("SLACK_BOT_TOKEN_"):
+                agent_id = key[len("SLACK_BOT_TOKEN_"):].lower()
+                tokens.setdefault(agent_id, {"bot": "", "app": ""})["bot"] = val
+            elif upper.startswith("SLACK_APP_TOKEN_"):
+                agent_id = key[len("SLACK_APP_TOKEN_"):].lower()
+                tokens.setdefault(agent_id, {"bot": "", "app": ""})["app"] = val
+        return tokens
 
 
 @lru_cache

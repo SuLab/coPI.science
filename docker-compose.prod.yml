@@ -35,6 +35,7 @@ services:
     volumes:
       - ./profiles:/app/profiles
       - ./prompts:/app/prompts
+      - podcast_data:/app/data
     depends_on:
       postgres:
         condition: service_healthy
@@ -83,7 +84,6 @@ services:
     volumes:
       - ./profiles:/app/profiles
       - ./prompts:/app/prompts
-      - ./data:/app/data
     depends_on:
       postgres:
         condition: service_healthy
@@ -108,7 +108,7 @@ services:
     volumes:
       - ./profiles:/app/profiles
       - ./prompts:/app/prompts
-      - ./data:/app/data
+      - grantbot_data:/app/data
     depends_on:
       postgres:
         condition: service_healthy
@@ -117,6 +117,29 @@ services:
       options:
         awslogs-group: /copi/grantbot
         tag: grantbot
+        awslogs-create-group: "true"
+        awslogs-region: ${AWS_REGION:-us-east-2}
+
+  podcast:
+    build:
+      context: .
+    restart: unless-stopped
+    command: ["python", "-m", "src.podcast.main", "scheduler", "--run-hour", "9"]
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-copi}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-copi}
+    volumes:
+      - ./profiles:/app/profiles
+      - ./prompts:/app/prompts
+      - podcast_data:/app/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+    logging:
+      driver: awslogs
+      options:
+        awslogs-group: /copi/podcast
+        tag: podcast
         awslogs-create-group: "true"
         awslogs-region: ${AWS_REGION:-us-east-2}
 
@@ -167,3 +190,5 @@ services:
 
 volumes:
   pgdata:
+  grantbot_data:
+  podcast_data:
