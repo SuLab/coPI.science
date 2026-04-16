@@ -982,12 +982,12 @@ async def admin_podcast(
     total = len(all_episodes)
     with_audio = sum(1 for e in all_episodes if e.audio_file_path)
     slack_delivered = sum(1 for e in all_episodes if e.slack_delivered)
-    agent_ids = sorted({e.agent_id for e in all_episodes})
+    agent_ids = sorted({e.agent_id for e in all_episodes if e.agent_id is not None})
 
     # Load preferences for all agents that have episodes
     prefs_result = await db.execute(select(PodcastPreferences))
     prefs_by_agent: dict[str, PodcastPreferences] = {
-        p.agent_id: p for p in prefs_result.scalars().all()
+        p.agent_id: p for p in prefs_result.scalars().all() if p.agent_id is not None
     }
 
     settings = get_settings()
