@@ -25,6 +25,7 @@ class AgentBadgeMiddleware(BaseHTTPMiddleware):
     """Inject unreviewed proposal count into request.state for nav badge."""
 
     async def dispatch(self, request: Request, call_next):
+        request.state.posthog_api_key = get_settings().posthog_api_key
         request.state.agent_badge_count = 0
         user_id_str = request.session.get("user_id") if "session" in request.scope else None
         # Use impersonated user if applicable
@@ -101,7 +102,7 @@ def create_app() -> FastAPI:
 
     # Static files
     try:
-        application.mount("/static", StaticFiles(directory="static"), name="static")
+        application.mount("/static", StaticFiles(directory="static", html=True), name="static")
     except RuntimeError:
         logger.warning("Static files directory not found, skipping mount")
 

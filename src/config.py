@@ -72,6 +72,9 @@ class Settings(BaseSettings):
     slack_bot_token_grantbot: str = ""
     slack_app_token_grantbot: str = ""
 
+    # Analytics
+    posthog_api_key: str = ""
+
     # LLM models
     llm_profile_model: str = "claude-opus-4-6"
     llm_agent_model: str = "claude-sonnet-4-6"
