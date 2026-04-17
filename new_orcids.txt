@@ -1,0 +1,27 @@
+# New Scripps PIs — 2026-04-16
+# Ahmed Badran
+0000-0002-8105-1883
+# Peng Wu
+0000-0002-5204-0229
+# Keren Lasker
+0000-0002-5480-4173
+# Dorothee Kern
+0000-0002-7631-8328
+# Marco Mravic
+0000-0001-6294-1824
+# Ian MacRae
+0000-0002-5112-0294
+# James Paulson
+0000-0003-4589-5322
+# Giordano Lippi
+0000-0003-3911-0525
+# Ian Wilson
+0000-0002-6469-2419
+# Ian Seiple
+0000-0002-8732-1362
+# Shannon Miller
+0000-0003-3569-6231
+# James Williamson
+0000-0002-8772-468X
+# Colleen Maillie
+0000-0001-7050-4464

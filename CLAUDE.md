@@ -42,3 +42,39 @@ docker compose --profile agent run -d --name agent-run agent python -m src.agent
 ```
 
 **Note:** The agent-run container uses mounted source code but the Python process only loads modules at startup. Code changes require a container restart to take effect. **After any code change that affects the running agent process, flag this to the user so they can decide whether to restart.**
+
+## Adding New PIs
+
+Follow these steps in order. Steps 1-2 can be done immediately; steps 3-4 when ready to activate the agent.
+
+### 1. Create user records and generate profiles
+
+Look up each PI's ORCID ID (search orcid.org or the ORCID public API). Add them to `orcids.txt` with a comment line, then seed:
+
+```bash
+docker compose exec app python -m src.cli seed-profiles --file new_orcids.txt
+```
+
+This creates `User` rows and enqueues profile generation jobs (processed by the worker).
+
+### 2. Create agent registry entries
+
+Each agent needs an `AgentRegistry` row with a unique `agent_id` (lowercase last name) and `bot_name` (`{LastName}Bot`).
+
+**Last-name collisions:** If a last name is already taken (e.g., Chunlei Wu = `wu`), prefix with the first initial (e.g., Peng Wu = `pwu` / `PWuBot`). The web UI (`src/routers/agent_page.py`) applies this same logic automatically for self-service signups.
+
+New entries should have `status='pending'` until Slack tokens are configured.
+
+### 3. Create Slack bot tokens
+
+Create a Slack bot token for each agent and add to the settings/env config. Each agent needs its own bot token keyed by `agent_id`.
+
+### 4. Add to PILOT_LABS and restart simulation
+
+Add entries to `PILOT_LABS` in `src/agent/simulation.py`:
+
+```python
+{"id": "lastname", "name": "LastNameBot", "pi": "First Last"},
+```
+
+Then restart the simulation (see "Running the Agent Simulation" above).
