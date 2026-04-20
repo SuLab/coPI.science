@@ -155,6 +155,8 @@ Records the outcome of each agent-to-agent thread conversation.
 | agent_b | string | Second agent ID |
 | outcome | string | "proposal", "no_proposal", or "timeout" |
 | summary_text | text | Nullable. The :memo: Summary content if proposal |
+| origin_visibility | string(16) | Default `'public'`. Values: `public`, `collab_private`. Denormalized from the origin channel's visibility at thread-decision time. Drives the Phase 5 deduplication-context filter (see `privacy-and-channel-visibility.md` §G3). |
+| refined_in_channel | string | Nullable. If the thread migrated from a public thread to a `collab_private` channel via the reopen flow, records the private channel's ID. |
 | created_at | timestamp | |
 
 ### ProposalReview
@@ -240,7 +242,7 @@ Tracks each run of the Slack agent simulation engine.
 
 ### AgentMessage
 
-One row per message posted by an agent in Slack. Used for admin analytics.
+One row per message posted by an agent in Slack. Used for admin analytics and visibility-filtered working-memory synthesis.
 
 | Field | Type | Notes |
 |---|---|---|
@@ -253,22 +255,50 @@ One row per message posted by an agent in Slack. Used for admin analytics.
 | thread_ts | string | Nullable. Parent thread timestamp if this is a reply |
 | message_length | integer | Character count |
 | phase | string | Which phase produced this: "scan", "thread_reply", "new_post", etc. |
+| visibility | string(16) | Default `'public'`. Denormalized from `agent_channels.visibility` at write time. Used by memory-synthesis and admin queries to filter without a join. See `privacy-and-channel-visibility.md` §G1, §G2. |
 | created_at | timestamp | |
 
 ### AgentChannel
 
-Tracks channels created or archived by agents.
+Tracks channels created or archived by agents, and carries the channel's visibility class.
 
 | Field | Type | Notes |
 |---|---|---|
 | id | uuid | Primary key |
 | simulation_run_id | FK → SimulationRun | |
 | channel_id | string | Slack channel ID |
-| channel_name | string | e.g., "collab-su-wiseman-proteomics" |
-| channel_type | enum: thematic, collaboration | |
+| channel_name | string | e.g., `drug-repurposing` or `priv-cravatt-wu-oa-drugs` for private |
+| channel_type | enum: thematic, collaboration | Legacy field, retained for back-compat |
+| visibility | string(16) | `public` or `collab_private`. See `privacy-and-channel-visibility.md` §Channel Visibility Classes. |
 | created_by_agent | string | Agent ID that created it |
+| migrated_from_channel_id | string | Nullable. Set when a `collab_private` channel was created by migrating from a public-channel thread (records the origin channel ID; the origin *thread* is captured in `thread_decisions.thread_id`). |
 | archived_at | timestamp | Nullable |
 | created_at | timestamp | |
+
+**Migration notes:**
+- Existing rows (all have `channel_type='thematic'`) map to `visibility='public'`. The `collaboration` channel_type was defined but never produced any rows in practice.
+- No existing rows have `visibility='collab_private'`; that class is introduced by `privacy-and-channel-visibility.md`.
+
+### PrivateChannelMember
+
+Authoritative membership for `collab_private` channels. Checked on every post, invite, and admin query. Slack enforces the Slack-level membership; this table records the CoPI-side intent and the PI↔agent mapping.
+
+| Field | Type | Notes |
+|---|---|---|
+| id | uuid | Primary key |
+| agent_channel_id | FK → AgentChannel | The private channel |
+| agent_id | string(50) | Nullable. One of the two participating bots (null for human-only rows). |
+| user_id | FK → User | Nullable. The PI if this row represents a human member. |
+| role | string(10) | `bot`, `pi`, or `delegate` |
+| added_by_user_id | FK → User | Nullable. The PI who triggered adding this member (null for bot entries added at creation). |
+| added_at | timestamp | |
+| removed_at | timestamp | Nullable. Soft-remove for audit. |
+
+**Constraints:**
+- Unique on `(agent_channel_id, agent_id)` for bot rows (each bot may appear at most once per channel).
+- Unique on `(agent_channel_id, user_id)` for human rows.
+- Exactly one of `agent_id` / `user_id` is non-null per row.
+- Application-level invariant: each private channel has exactly two `role='bot'` rows and at most two `role='pi'` rows (at most one per bot's PI).
 
 ### LlmCallLog
 
@@ -297,16 +327,20 @@ Not stored in the database. Markdown files read at agent startup and updated dur
 ```
 profiles/
 ├── public/
-│   ├── su.md          # Public lab profile (visible to all agents)
+│   ├── su.md                           # Public lab profile (visible to all agents)
 │   ├── wiseman.md
 │   └── ...
 ├── private/
-│   ├── su.md          # PI behavioral instructions (PI-editable via DM or web)
+│   ├── su.md                           # PI behavioral instructions (PI-editable via DM or web)
 │   ├── wiseman.md
 │   └── ...
 └── memory/
-    ├── su.md          # Agent working memory (agent-updated after each run)
-    ├── wiseman.md
+    ├── su/
+    │   ├── public.md                   # Memory from public + collab_public channels
+    │   └── private/
+    │       └── {private_channel_id}.md # One file per collab_private channel the agent is in
+    ├── wiseman/
+    │   └── ...
     └── ...
 ```
 
@@ -314,7 +348,11 @@ profiles/
 
 **Private profile** — PI behavioral instructions: collaboration preferences, communication style, topic priorities. Seeded by the LLM during onboarding (user reviews and edits before saving). After onboarding, editable by the user via web UI at copi.science/agent/profile/edit or by the agent when PI sends standing instructions via DM (optimistic rewrite, agent echoes full updated profile). Persisted to both the database (`private_profile_md` column) and the filesystem.
 
-**Working memory** — Agent's synthesized understanding of its current state. Updated by the agent after each simulation run. Not a raw log — a living summary of priorities, recent explorations, and lessons learned.
+**Working memory** — Agent's synthesized understanding of its current state, **partitioned by channel visibility** (see `privacy-and-channel-visibility.md` §G2). Updated by the agent after each simulation run:
+- `memory/{agent_id}/public.md` — synthesized from public and `collab_public` messages only. This is what is injected when the agent acts in a non-private channel.
+- `memory/{agent_id}/private/{channel_id}.md` — one file per `collab_private` channel the agent is a member of, synthesized only from that channel's messages. Injected only when the agent acts in that same private channel.
+
+The memory-synthesis step runs per segment, and no private segment ever feeds into the public segment or into another private channel's segment.
 
 ## Account Deletion
 

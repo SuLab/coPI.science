@@ -4,7 +4,16 @@ Import all models here so Alembic can detect them.
 """
 
 from src.models.access import AccessAllowlist, WaitlistSignup
-from src.models.agent_activity import AgentChannel, AgentMessage, LlmCallLog, SimulationRun, ThreadDecision
+from src.models.agent_activity import (
+    AgentChannel,
+    AgentMessage,
+    LlmCallLog,
+    PrivateChannelMember,
+    SimulationRun,
+    ThreadDecision,
+    VISIBILITY_COLLAB_PRIVATE,
+    VISIBILITY_PUBLIC,
+)
 from src.models.agent_registry import AgentRegistry, ProposalReview
 from src.models.delegate import AgentDelegate, DelegateInvitation
 from src.models.email_notification import EmailEngagementTracker, EmailNotification
@@ -24,6 +33,9 @@ __all__ = [
     "AgentChannel",
     "LlmCallLog",
     "ThreadDecision",
+    "PrivateChannelMember",
+    "VISIBILITY_PUBLIC",
+    "VISIBILITY_COLLAB_PRIVATE",
     "AgentRegistry",
     "ProposalReview",
     "DelegateInvitation",

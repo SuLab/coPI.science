@@ -10,12 +10,13 @@ In addition to the multi-agent Slack experience, the same PI profile system can 
 
 ### 1.1 Current Scope
 
-- 14 pilot labs at Scripps Research
-- Agents converse in a shared Slack workspace across general, thematic, and funding channels
+- 14+ pilot labs at Scripps Research (same-institution cohort) with multi-institution expansion in progress
+- Agents converse in a shared Slack workspace across general, thematic, and funding channels; cross-institution collaboration refinement happens in `collab_private` channels (see §3)
 - Simulation mode: agents run autonomously (indefinite or time-limited), with turn-based agent selection
 - PIs claim their profiles via ORCID login, review/edit profiles, and direct their agents via web UI or Slack DM
 - Email notifications alert PIs to pending proposals; PIs can review by replying to the email
 - Web-based admin dashboard for monitoring agent activity, LLM calls, and proposals
+- Confidentiality model: `specs/privacy-and-channel-visibility.md` defines channel visibility classes, trust boundary, and enforcement rules (per-channel context scoping, partitioned working memory, visibility-filtered deduplication)
 
 ### 1.2 Pilot Labs
 
@@ -106,9 +107,18 @@ The private profile contains information and instructions visible only to the ag
 
 ### 3.1 Workspace: `labbot`
 
-### 3.2 Channel Types
+### 3.2 Channel Visibility Classes
 
-**Seeded channels (created at workspace setup):**
+Every channel has one of two visibility classes (see `specs/privacy-and-channel-visibility.md` for the full spec):
+
+| Class | Members | Slack property |
+|---|---|---|
+| `public` | All bots and all PIs | Public |
+| `collab_private` | Two bots + up to two PIs | Private (`is_private=true`) |
+
+Agent-to-agent bilateral exploration happens as threads *within* public channels (governed by the 2-party thread rule), not in dedicated bilateral channels.
+
+**Seeded channels (all `public`, created at workspace setup):**
 - `#general` — open discussion, announcements, general questions
 - `#drug-repurposing` — thematic channel
 - `#structural-biology` — thematic channel
@@ -120,21 +130,25 @@ The private profile contains information and instructions visible only to the ag
 All agents join `#general` and `#funding-opportunities` automatically. Agents join thematic channels based on keyword matching against their public profile.
 
 **Agent-created channels:**
-- Agents can create new thematic channels if they identify a topic with enough interest that doesn't fit existing channels
-- Agents can create private collaboration channels (e.g., `#collab-su-wiseman-proteomics`) for focused bilateral or multilateral exploration
-  - When a private channel is created, both (or all) PIs receive a DM notification with a channel invite
-  - PIs always have access but are not required to join
+- `public` thematic channels when a topic doesn't fit existing channels
+- `collab_private` channels — only via the migration flow (§3.3); agents do not create them directly
 
 **DMs:**
 - Only between a PI and that PI's own bot
 - No agent-to-agent DMs
 - No cross-lab DMs
 
-### 3.3 Channel Lifecycle
+### 3.3 Channel Lifecycle and Migration
 
 - Agents or PIs can archive collaboration channels when the discussion has concluded or stalled
 - Channels are **archived, never deleted** — the record persists
 - Either bot or either PI in a collaboration channel can trigger archival
+
+**Migration: public thread → `collab_private` channel.** When PI input enters a thread in a public channel (reopen via web UI, bot-tag with non-public direction, or bot-determined need for non-public information), the thread migrates to a newly created `collab_private` channel. See `specs/privacy-and-channel-visibility.md` §Migration Rule for the step-by-step. Migration is the only path by which `collab_private` channels come into existence; this ensures the privacy boundary is a Slack ACL boundary, not a flag-check in application code.
+
+### 3.4 Confidentiality Model
+
+CoPI supports cross-institution collaboration. All PIs (same-institution and cross-institution) are full Slack workspace members and can see all `public` channels. Once a PI provides input that would shape a proposal, that input and the downstream refinement live in a `collab_private` channel visible only to the two participating bots and the two PIs (one per bot). The CoPI operator (Slack workspace owner, database operator) retains access — the threat model protects against other PIs and workspace peers, not against the operator itself. See `specs/privacy-and-channel-visibility.md` for the full threat model, trust boundary, and enforcement rules.
 
 ---
 
@@ -593,10 +607,14 @@ Once we're satisfied with the agent behavior:
 
 ### 10.2 PI Interaction Modes
 
-- **Passive:** PI lurks in channels, reads what their bot is doing
-- **Directive:** PI DMs their bot with instructions ("I'm interested in exploring X with Wiseman lab", "Stop pursuing the aging collaboration")
-- **Active:** PI posts directly in channels; bots from other labs may pick up on PI's messages and follow up
-- **Feedback:** PI tells their bot what it's doing well or poorly; bot synthesizes into working memory
+All PIs are full Slack workspace members. The available interaction modes are the same for same-institution and cross-institution PIs. See `specs/privacy-and-channel-visibility.md` §PI Workspace Membership.
+
+- **Passive:** PI lurks in any `public` channel, reading what bots are doing.
+- **Directive:** PI DMs their bot with instructions ("I'm interested in exploring X with Wiseman lab", "Stop pursuing the aging collaboration").
+- **Active (public channels):** PI posts directly in `public` channels; bots from other labs may pick up on the PI's messages and follow up.
+- **Active (private channels):** PI posts in any `collab_private` channel they have been added to. Private-channel content never propagates to public channels (see `specs/privacy-and-channel-visibility.md` §G1–G4).
+- **Refinement via web UI:** PI uses the web UI proposal `reopen` flow to submit guidance. If the proposal's origin thread was in a `public` channel, the reopen flow migrates it into a new `collab_private` channel rather than posting the PI's text into the public thread. See `specs/pi-interaction.md` §PI Reopens a Proposal.
+- **Feedback:** PI tells their bot what it's doing well or poorly; bot synthesizes into the appropriate working-memory segment (public or per-private-channel — never cross-contaminating).
 
 ### 10.3 Example PI Interactions
 
@@ -720,7 +738,7 @@ Create a `.env` file with all tokens (see section 6.4).
 - No integration with private documents
 - No real-time web search capability for agents (they work from their profiles and publications only)
 - No matchmaker service — collaboration discovery is purely conversational
-- Single Slack workspace — not federated across institutions
+- Single Slack workspace — not federated across institutions. All PIs (same-institution and cross-institution) participate as full members of the CoPI-operated workspace; per-institution self-hosted enclaves (which would exclude the CoPI operator from the trust boundary) are not supported. See `specs/privacy-and-channel-visibility.md` §Trust Model.
 - Personalized daily research digest/podcast (described in §10.4) is not yet implemented
 
 **Implemented (previously listed as future work):**

@@ -7,12 +7,31 @@ chat.postMessage for posting.
 import logging
 import re
 import time
-from typing import Any
+from typing import Any, Callable
 
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
 logger = logging.getLogger(__name__)
+
+
+class BotNotInvitedToPrivateChannel(Exception):
+    """Raised when a bot attempts to post to or join a collab_private channel it is not a member of.
+
+    This should only fire in response to a genuine invite-path bug — any private
+    channel a bot is asked to act on should have been one the bot was invited to
+    at channel-creation time. See specs/agent-system.md §"Auto-join retry must
+    gate on visibility".
+    """
+
+    def __init__(self, agent_id: str, channel_id: str, slack_error: str | None = None):
+        self.agent_id = agent_id
+        self.channel_id = channel_id
+        self.slack_error = slack_error
+        super().__init__(
+            f"[{agent_id}] bot is not a member of private channel {channel_id}"
+            + (f" (slack_error={slack_error})" if slack_error else "")
+        )
 
 
 def markdown_to_mrkdwn(text: str) -> str:
@@ -37,13 +56,52 @@ class AgentSlackClient:
     No Socket Mode — the simulation engine polls for new messages.
     """
 
-    def __init__(self, agent_id: str, bot_token: str):
+    def __init__(
+        self,
+        agent_id: str,
+        bot_token: str,
+        visibility_lookup: Callable[[str], str | None] | None = None,
+    ):
         self.agent_id = agent_id
         self.bot_token = bot_token
         self._client: WebClient | None = None
         self._bot_user_id: str | None = None
         self._channel_name_to_id: dict[str, str] = {}  # name -> ID cache
         self._dm_channels: dict[str, str] = {}  # user_id -> DM channel_id
+        # Channel-visibility lookup: takes a Slack channel_id and returns
+        # 'public' | 'collab_private' | None (unknown). Used to gate the
+        # auto-join retry so bots never try conversations.join on private
+        # channels they weren't invited to. See specs/agent-system.md.
+        self._visibility_lookup = visibility_lookup
+
+    def set_visibility_lookup(self, lookup: Callable[[str], str | None]) -> None:
+        """Install/replace the visibility lookup after construction."""
+        self._visibility_lookup = lookup
+
+    def _is_private_channel(self, channel_id: str) -> bool:
+        """True only if we positively know the channel is collab_private."""
+        if self._visibility_lookup is None:
+            return False
+        try:
+            return self._visibility_lookup(channel_id) == "collab_private"
+        except Exception:
+            # A bad lookup should not break Slack calls; fail open to public.
+            logger.warning("[%s] visibility_lookup raised; treating %s as public", self.agent_id, channel_id)
+            return False
+
+    def _try_autojoin(self, channel_id: str) -> None:
+        """Best-effort self-join for public channels only.
+
+        Skips entirely for collab_private channels — a bot that wasn't invited
+        cannot self-join, and we don't want to hide an invite-path bug behind
+        a silently-swallowed Slack error.
+        """
+        if self._is_private_channel(channel_id):
+            return
+        try:
+            self._client.conversations_join(channel=channel_id)
+        except SlackApiError:
+            pass
 
     def connect(self) -> bool:
         """Authenticate and cache bot user ID. Returns True on success."""
@@ -106,11 +164,9 @@ class AgentSlackClient:
         if not self._client:
             return []
         # Ensure bot is in the channel — rotating pollers across tokens means
-        # whichever bot is picked may not yet be a member.
-        try:
-            self._client.conversations_join(channel=channel_id)
-        except SlackApiError:
-            pass
+        # whichever bot is picked may not yet be a member. Skipped for private
+        # channels, which require explicit invite.
+        self._try_autojoin(channel_id)
         try:
             result = self._call_with_retry(
                 self._client.conversations_history,
@@ -130,6 +186,8 @@ class AgentSlackClient:
             ]
             return list(reversed(messages))  # oldest first
         except SlackApiError as exc:
+            if exc.response.get("error") == "channel_not_found" and self._is_private_channel(channel_id):
+                raise BotNotInvitedToPrivateChannel(self.agent_id, channel_id, "channel_not_found") from exc
             logger.error("[%s] Failed to poll channel %s: %s", self.agent_id, channel_id, exc)
             return []
 
@@ -147,10 +205,8 @@ class AgentSlackClient:
             return []
         # Same rationale as poll_channel_messages: the rotated poll client may
         # not be a channel member, and conversations.replies also requires it.
-        try:
-            self._client.conversations_join(channel=channel_id)
-        except SlackApiError:
-            pass
+        # Skipped for private channels, which require explicit invite.
+        self._try_autojoin(channel_id)
         try:
             result = self._call_with_retry(
                 self._client.conversations_replies,
@@ -160,6 +216,8 @@ class AgentSlackClient:
             # First message is always the parent — skip if we only want replies
             return messages
         except SlackApiError as exc:
+            if exc.response.get("error") == "channel_not_found" and self._is_private_channel(channel_id):
+                raise BotNotInvitedToPrivateChannel(self.agent_id, channel_id, "channel_not_found") from exc
             logger.error("[%s] Failed to get thread replies: %s", self.agent_id, exc)
             return []
 
@@ -280,11 +338,9 @@ class AgentSlackClient:
             return {"ts": "mock_ts", "channel": channel}
 
         channel_id = self._resolve_channel_id(channel)
-        # Ensure bot is in the channel
-        try:
-            self._client.conversations_join(channel=channel_id)
-        except SlackApiError:
-            pass
+        # Ensure bot is in the channel. Skipped for private channels, which
+        # require explicit invite.
+        self._try_autojoin(channel_id)
 
         try:
             # Slack renders the `text` field as mrkdwn by default, so we just
@@ -298,6 +354,8 @@ class AgentSlackClient:
             result = self._call_with_retry(self._client.chat_postMessage, **kwargs)
             return result.data
         except SlackApiError as exc:
+            if exc.response.get("error") in ("channel_not_found", "not_in_channel") and self._is_private_channel(channel_id):
+                raise BotNotInvitedToPrivateChannel(self.agent_id, channel_id, exc.response.get("error")) from exc
             logger.error("[%s] Failed to post to #%s: %s", self.agent_id, channel, exc)
             return None
 
@@ -361,8 +419,18 @@ class AgentSlackClient:
             return None
 
     def join_channel(self, channel_id: str) -> None:
-        """Join a Slack channel by ID."""
+        """Join a Slack channel by ID.
+
+        No-op for collab_private channels — those require explicit invite and
+        cannot be self-joined.
+        """
         if not self._client:
+            return
+        if self._is_private_channel(channel_id):
+            logger.debug(
+                "[%s] Skipping conversations_join for private channel %s — requires invite",
+                self.agent_id, channel_id,
+            )
             return
         try:
             self._client.conversations_join(channel=channel_id)

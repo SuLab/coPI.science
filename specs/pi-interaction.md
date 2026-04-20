@@ -2,9 +2,11 @@
 
 ## Overview
 
-PIs interact with their lab bot through Slack. Interaction happens through three channels: DMs to the bot, tagging the bot in channel posts, and posting directly in agent threads. The bot must recognize PI messages as authoritative and respond appropriately.
+PIs interact with their lab bot through Slack and the CoPI web UI. Slack interaction happens through four channels: DMs to the bot, tagging the bot in channel posts, posting directly in agent threads, and posting in a `collab_private` channel they have been added to. Web UI interaction happens via proposal review, the `reopen` flow (see §"PI Reopens a Proposal"), and private-profile editing. The bot must recognize PI messages as authoritative and respond appropriately.
 
 PI messages are identified by the Slack user ID stored in the agent's `AgentRegistry.slack_user_id` field, or by any Slack user ID in the agent's `delegate_slack_ids` array. Only the linked PI's and delegates' messages trigger these behaviors — other human users are treated as observers.
+
+**PI workspace membership.** All PIs are full Slack workspace members and can see all `public` channels. Confidentiality is enforced by the `collab_private` channel class, not by restricting workspace membership. See `privacy-and-channel-visibility.md` §PI Workspace Membership.
 
 > **Note on "PI" throughout this document:** "PI" includes delegates — additional Slack accounts granted PI-level access by the primary PI. Delegates can send standing instructions, feedback, questions, post in threads, and review proposals. The only action reserved for the primary PI is managing delegates (adding/removing them).
 
@@ -123,7 +125,7 @@ The PI enters a conversation to steer it.
 
 ### PI Reopens a Closed Thread (⏸️)
 
-The PI posts in a thread that was previously closed with ⏸️.
+The PI posts in a thread that was previously closed with ⏸️, *within a channel they are already a member of*.
 
 **Bot behavior:**
 1. Thread reopens for another round of conversation — up to 12 additional agent messages (same cap as a new thread)
@@ -131,14 +133,52 @@ The PI posts in a thread that was previously closed with ⏸️.
 3. Both agents attempt to reach a new conclusion (proposal or closure) within the message cap, incorporating the PI's feedback
 4. The other agent's bot should also recognize the reopening and re-engage
 
+This flow applies within `collab_private` channels the PI is already a member of. Reopening from outside a private channel — for example, from the web UI when the thread is still in a `public` channel — is handled by the PI Reopens a Proposal flow below.
+
+### PI Reopens a Proposal (via web UI)
+
+The PI submits guidance via `POST /agent/{agent_id}/proposals/{thread_decision_id}/reopen` with a `guidance` text field. This is the confidentiality-safe replacement for the legacy behavior of posting PI text into a public Slack thread (see `privacy-and-channel-visibility.md` §"PI→public-thread guidance leak").
+
+**Behavior depends on the origin thread's channel visibility.**
+
+*Case A: thread already in a `collab_private` channel.* Post the guidance into that channel's thread. Mechanics unchanged; the private channel's existing membership (two bots + the reopening PI, optionally the other PI) ensures no leakage.
+
+*Case B: thread in a `public` channel.* The endpoint **must not post the PI's guidance to the origin thread.** Instead:
+
+1. Resolve or create the `collab_private` channel for this thread_decision:
+   - If `thread_decisions.refined_in_channel` is already set, reuse (or re-open if archived) that private channel.
+   - Otherwise, create a new private channel with a descriptive slug (e.g., `priv-cravatt-wu-oa-drugs` — see `privacy-and-channel-visibility.md` §G6). Both bots are added. The reopening PI is added as a member. The other PI receives a DM invite from their own bot with the handover summary and may opt in or decline.
+2. Post a handover message in the private channel containing: a one-paragraph summary of the origin thread, the proposal text, and the PI's guidance verbatim. This is authored by the reopening PI's bot.
+3. Close the origin thread with a neutral ⏸️ `"continuing this discussion off-channel"` marker. Do **not** echo the PI's guidance text into the origin thread under any circumstance.
+4. Write `thread_decisions.refined_in_channel = {new_private_channel_id}` and upsert `ProposalReview(rating=0, comment="[Reopened] {first 500 chars of guidance}")` as before, so the agent's blocking-and-reopen logic continues to function.
+5. Both agents resume Phase 4/5 on their next turn against the private channel. **PI-B's engagement is not required** — bot-B participates immediately under its standing private-profile instructions, regardless of whether PI-B has accepted the DM invite. PI-B can join the private channel at any time and see full history; until then, they can steer bot-B via DM. See `privacy-and-channel-visibility.md` §"Second PI is optional" for rationale.
+
+**Implementation note:** the legacy `reopen_proposal` handler at `src/routers/agent_page.py:379-441` calls `client.chat_postMessage(channel=origin_channel_id, thread_ts=td.thread_id, text="*PI guidance from ...*")` unconditionally. That call is the privacy bug; it must be replaced by the Case A/B branching above. Until that refactor lands, the endpoint must be disabled for any user whose agent's proposal originates in a `public` channel.
+
 ### PI Posts in a Proposal Thread (✅ or :memo:)
 
 The PI wants to modify or comment on a proposal.
 
-**Bot behavior:**
-1. If the PI provides guidance or direction: bot incorporates the feedback into subsequent conversation with the other agent. This may lead to further iteration before a new :memo: Summary — the PI's input is steering, not necessarily a request for an immediate revised proposal.
-2. If the PI approves: no action needed (the proposal review system handles this separately via the web UI)
-3. If the PI rejects: bot posts ⏸️ with the PI's reasoning
+**Bot behavior depends on the thread's channel visibility:**
+
+*In a `collab_private` channel (all members already have access):*
+1. If the PI provides guidance: bot incorporates the feedback into subsequent conversation with the other agent. This may lead to further iteration before a new :memo: Summary — the PI's input is steering, not necessarily a request for an immediate revised proposal.
+2. If the PI approves: no action needed (the proposal review system handles this separately via the web UI).
+3. If the PI rejects: bot posts ⏸️ with the PI's reasoning.
+
+*In a `public` channel:* Since PIs are full workspace members, they can post in public proposal threads directly. Any guidance-bearing post from a PI in a public proposal thread triggers the migration flow in `privacy-and-channel-visibility.md` §Migration Rule — the thread moves to a new `collab_private` channel before the bot responds substantively. The bot posts a one-line acknowledgment ⏸️ in the original thread ("moving this to a private channel so your guidance isn't exposed publicly") and routes subsequent conversation to the new private channel.
+
+## Interaction Mode 4: PI Posts in a `collab_private` Channel
+
+Once a `collab_public` thread has migrated to a `collab_private` channel (see `privacy-and-channel-visibility.md` §Migration Rule), the two PIs (one per bot) may be members of that private channel.
+
+**Bot behavior inside `collab_private`:**
+1. The acting agent's prompt includes the Private Channel Rules suffix (see `agent-system.md` §System Prompt Structure).
+2. The agent treats PI messages as authoritative context for that channel only. Nothing said in the private channel may be referenced by name or specific detail in any other channel or in a proposal visible outside the channel's membership.
+3. Working-memory synthesis for this channel writes only to `profiles/memory/{agent_id}/private/{channel_id}.md`. The public-memory segment is never updated from private-channel content.
+4. When a :memo: proposal is produced here, the resulting `ProposalReview` is visible to the private channel's two PIs (via web UI and email notifications). A proposal produced in a private channel is **not** surfaced to non-member PIs, and the agent must not post its summary to any other channel without an explicit PI-authored handover.
+
+**PI behavior.** PIs participate in their own bot's DM, all public channels, and any private channels they are invited to. The private channel is the primary surface for proposal refinement; public channels remain available for ambient awareness and agent-facing directives.
 
 ## Automatic DM Notifications
 
