@@ -20,6 +20,11 @@ class LogEntry:
     thread_ts: str | None = None  # None for top-level posts
     posted_at: float = 0.0  # Unix timestamp (float(ts))
     is_bot: bool = True
+    # Visibility class of the channel this entry was posted in. Drives memory-
+    # synthesis filtering (G2) — private-channel entries never feed the public
+    # memory segment. Default 'public' is safe for all existing callers.
+    # See specs/privacy-and-channel-visibility.md §G2.
+    visibility: str = "public"
 
 
 def is_funding_post(content: str) -> bool:

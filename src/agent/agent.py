@@ -6,11 +6,24 @@ from pathlib import Path
 from typing import Any
 
 from src.agent.state import AgentState, PostRef, ThreadState
+from src.models.agent_activity import VISIBILITY_COLLAB_PRIVATE, VISIBILITY_PUBLIC
 
 logger = logging.getLogger(__name__)
 
 PROFILES_DIR = Path("profiles")
 PROMPTS_DIR = Path("prompts")
+
+
+# Private Channel Rules block — appended to the system prompt when the agent is
+# acting in a collab_private channel. See specs/privacy-and-channel-visibility.md §G4.
+PRIVATE_CHANNEL_RULES = """
+## Private channel rules
+You are in a private channel with a small membership (two bots plus up to two
+PIs). Anything said here must not be referenced by name or specific detail in
+any public channel, any other private channel, or any proposal visible outside
+this channel's membership. If someone outside this channel asks about progress,
+say "we're still refining; I'll post when we have a shareable summary."
+"""
 
 
 class Agent:
@@ -25,7 +38,7 @@ class Agent:
         self.pi_name = pi_name  # e.g., "Andrew Su"
         self._public_profile: str | None = None
         self._private_profile: str | None = None
-        self._working_memory: str | None = None
+        self._public_working_memory: str | None = None  # cached public memory segment
         self._lab_directory: str | None = None
         self.api_call_count: int = 0
         self.message_count: int = 0
@@ -54,26 +67,64 @@ class Agent:
         return self._private_profile
 
     @property
+    def public_working_memory(self) -> str:
+        """Working memory derived from public channels only.
+
+        Path: profiles/memory/{agent_id}/public.md. Falls back to the legacy
+        profiles/memory/{agent_id}.md path when the partitioned layout hasn't
+        been created yet — safe because all legacy content derives from public
+        channels (private channels didn't exist pre-partition).
+
+        See specs/privacy-and-channel-visibility.md §G2.
+        """
+        if self._public_working_memory is None:
+            new_path = PROFILES_DIR / "memory" / self.agent_id / "public.md"
+            legacy_path = PROFILES_DIR / "memory" / f"{self.agent_id}.md"
+            if new_path.exists():
+                self._public_working_memory = self._load_file(new_path, "")
+            else:
+                self._public_working_memory = self._load_file(legacy_path, "")
+        return self._public_working_memory
+
+    def get_private_channel_memory(self, channel_id: str) -> str:
+        """Working memory scoped to a single collab_private channel.
+
+        Returns empty string if no memory has been synthesized yet for that
+        channel. Not cached — files are small and read only when the agent
+        acts in the channel.
+        """
+        path = PROFILES_DIR / "memory" / self.agent_id / "private" / f"{channel_id}.md"
+        return self._load_file(path, "")
+
+    # Back-compat alias: internal callers that don't yet thread a visibility
+    # argument still work and always see the public segment (safe default —
+    # never private content). Prefer public_working_memory in new code.
+    @property
     def working_memory(self) -> str:
-        if self._working_memory is None:
-            self._working_memory = self._load_file(
-                PROFILES_DIR / "memory" / f"{self.agent_id}.md",
-                "",
-            )
-        return self._working_memory
+        return self.public_working_memory
 
     def reload_profiles(self):
         """Reload profiles from disk."""
         self._public_profile = None
         self._private_profile = None
-        self._working_memory = None
+        self._public_working_memory = None
 
     # ------------------------------------------------------------------
     # System prompt (shared across all phases)
     # ------------------------------------------------------------------
 
-    def build_system_prompt(self) -> str:
-        """Build the full agent system prompt with identity and profiles."""
+    def build_system_prompt(
+        self,
+        visibility: str = VISIBILITY_PUBLIC,
+        channel_id: str | None = None,
+    ) -> str:
+        """Build the full agent system prompt with identity and profiles.
+
+        visibility: the visibility class of the channel the agent is about to
+        act in. When 'collab_private', the private-channel memory segment for
+        ``channel_id`` is also injected and a Private Channel Rules block is
+        appended. See specs/privacy-and-channel-visibility.md §G1, §G4.
+        """
         base_prompt = self._load_file(
             PROMPTS_DIR / "agent-system.md",
             _default_system_prompt(),
@@ -85,6 +136,8 @@ class Agent:
 Use these to reference other labs' work in conversations. Include links when citing.
 {self._lab_directory}
 """
+        working_memory_text = self._compose_working_memory(visibility, channel_id)
+        private_rules = PRIVATE_CHANNEL_RULES if visibility == VISIBILITY_COLLAB_PRIVATE else ""
         return f"""{base_prompt}
 
 ## Your Identity
@@ -98,8 +151,8 @@ Your agent ID is "{self.agent_id}". When communicating, represent your lab profe
 {self.private_profile}
 
 ## Your Working Memory
-{self.working_memory if self.working_memory else "*No working memory yet — this is your first simulation.*"}
-{lab_directory_section}"""
+{working_memory_text}
+{lab_directory_section}{private_rules}"""
 
     def build_scan_system_prompt(self) -> str:
         """Build a lightweight system prompt for scan/filter phases.
@@ -123,17 +176,27 @@ Your agent ID is "{self.agent_id}". When communicating, represent your lab profe
 ## Your Private Instructions
 {self.private_profile}"""
 
-    def build_thread_reply_system_prompt(self) -> str:
+    def build_thread_reply_system_prompt(
+        self,
+        visibility: str = VISIBILITY_PUBLIC,
+        channel_id: str | None = None,
+    ) -> str:
         """Build a system prompt for thread replies.
 
         Omits lab directory — by mid-conversation you already know who you're
         talking to. Use retrieve_profile tool if you need details on another lab.
         Includes working memory since it may contain thread-relevant context.
+
+        visibility/channel_id: same semantics as build_system_prompt — determines
+        which memory segment is injected and whether the Private Channel Rules
+        block is appended.
         """
         base_prompt = self._load_file(
             PROMPTS_DIR / "agent-system.md",
             _default_system_prompt(),
         )
+        working_memory_text = self._compose_working_memory(visibility, channel_id)
+        private_rules = PRIVATE_CHANNEL_RULES if visibility == VISIBILITY_COLLAB_PRIVATE else ""
         return f"""{base_prompt}
 
 ## Your Identity
@@ -147,7 +210,32 @@ Your agent ID is "{self.agent_id}". When communicating, represent your lab profe
 {self.private_profile}
 
 ## Your Working Memory
-{self.working_memory if self.working_memory else "*No working memory yet — this is your first simulation.*"}"""
+{working_memory_text}{private_rules}"""
+
+    def _compose_working_memory(
+        self,
+        visibility: str,
+        channel_id: str | None,
+    ) -> str:
+        """Compose the working-memory section of a system prompt.
+
+        Public-only for public/collab_public actions; public + the specific
+        private-channel segment for collab_private actions. See
+        specs/privacy-and-channel-visibility.md §G1, §G2.
+        """
+        segments: list[str] = []
+        public_segment = self.public_working_memory
+        if public_segment:
+            segments.append(public_segment)
+        if visibility == VISIBILITY_COLLAB_PRIVATE and channel_id:
+            private_segment = self.get_private_channel_memory(channel_id)
+            if private_segment:
+                segments.append(
+                    f"### Private channel notes (scope: this channel only)\n{private_segment}"
+                )
+        if not segments:
+            return "*No working memory yet — this is your first simulation.*"
+        return "\n\n".join(segments)
 
     # ------------------------------------------------------------------
     # Phase 2: Scan & Filter prompt
@@ -206,14 +294,21 @@ Your agent ID is "{self.agent_id}". When communicating, represent your lab profe
         is_funding_thread: bool = False,
         your_prior_messages: str | None = None,
         thread_activity_summary: str | None = None,
+        visibility: str = VISIBILITY_PUBLIC,
+        channel_id: str | None = None,
     ) -> tuple[str, list[dict]]:
         """
         Build system + messages for Phase 4 thread reply.
 
         thread_history: list of {sender, content} dicts.
+        visibility/channel_id: visibility class of the thread's channel and the
+            channel's Slack ID. Threaded through to the system prompt builder
+            for visibility-scoped memory injection.
         Returns (system_prompt, messages).
         """
-        system_prompt = self.build_thread_reply_system_prompt()
+        system_prompt = self.build_thread_reply_system_prompt(
+            visibility=visibility, channel_id=channel_id,
+        )
         phase4_template = self._load_file(
             PROMPTS_DIR / "phase4-thread-reply.md",
             "Compose a thread reply.",
@@ -334,6 +429,8 @@ Your agent ID is "{self.agent_id}". When communicating, represent your lab profe
         prior_threads: dict[str, list[dict]] | None = None,
         funding_only: bool = False,
         funding_thread_summaries: dict[str, str] | None = None,
+        visibility: str = VISIBILITY_PUBLIC,
+        channel_id: str | None = None,
     ) -> tuple[str, list[dict]]:
         """
         Build system + messages for Phase 5 new post.
@@ -346,8 +443,13 @@ Your agent ID is "{self.agent_id}". When communicating, represent your lab profe
         funding_only: if True, strip prompt to funding actions only (agent is blocked for
             regular posts but has funding posts available).
         Returns (system_prompt, messages).
+
+        visibility/channel_id: Phase 5 is the "new post" phase, which in v1
+            always operates in a public channel. The parameters are plumbed
+            through for symmetry with the other phase builders; future work
+            that lets agents initiate private-channel posts will use them.
         """
-        system_prompt = self.build_system_prompt()
+        system_prompt = self.build_system_prompt(visibility=visibility, channel_id=channel_id)
         phase5_template = self._load_file(
             PROMPTS_DIR / "phase5-new-post.md",
             "Choose to reply to an interesting post or make a new top-level post.",
@@ -462,13 +564,45 @@ Your agent ID is "{self.agent_id}". When communicating, represent your lab profe
     # Working memory update
     # ------------------------------------------------------------------
 
-    def update_working_memory_file(self, new_memory: str) -> None:
-        """Write working memory to profiles/memory/{agent_id}.md."""
-        memory_path = PROFILES_DIR / "memory" / f"{self.agent_id}.md"
+    def update_working_memory_file(
+        self,
+        new_memory: str,
+        visibility: str = VISIBILITY_PUBLIC,
+        channel_id: str | None = None,
+    ) -> None:
+        """Write working memory to the visibility-scoped segment.
+
+        Public memory → profiles/memory/{agent_id}/public.md.
+        Private memory → profiles/memory/{agent_id}/private/{channel_id}.md
+        (requires channel_id). See specs/privacy-and-channel-visibility.md §G2.
+        """
+        if visibility == VISIBILITY_COLLAB_PRIVATE:
+            if not channel_id:
+                logger.error("[%s] Private memory update missing channel_id", self.agent_id)
+                return
+            memory_path = (
+                PROFILES_DIR / "memory" / self.agent_id / "private" / f"{channel_id}.md"
+            )
+        else:
+            memory_path = PROFILES_DIR / "memory" / self.agent_id / "public.md"
         try:
             memory_path.parent.mkdir(parents=True, exist_ok=True)
             memory_path.write_text(new_memory + "\n", encoding="utf-8")
-            self._working_memory = None  # Invalidate cache
+            # Best-effort cleanup of the legacy unpartitioned file so subsequent
+            # loads go through the new path — only on public writes, and only
+            # if we just wrote to the partitioned location.
+            if visibility == VISIBILITY_PUBLIC:
+                legacy = PROFILES_DIR / "memory" / f"{self.agent_id}.md"
+                if legacy.exists():
+                    try:
+                        legacy.unlink()
+                    except OSError as exc:
+                        logger.warning(
+                            "[%s] Could not remove legacy memory file %s: %s",
+                            self.agent_id, legacy, exc,
+                        )
+                self._public_working_memory = None  # invalidate public cache
+            # Private segments are not cached, so no invalidation needed.
         except Exception as exc:
             logger.error("[%s] Failed to update working memory: %s", self.agent_id, exc)
 

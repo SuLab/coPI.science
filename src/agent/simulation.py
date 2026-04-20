@@ -26,6 +26,7 @@ from src.agent.state import PostRef, ProposalRef, ThreadState
 from src.agent.tools import TOOL_DEFINITIONS, execute_tool
 from src.config import get_settings
 from src.models import AgentMessage, LlmCallLog, ProposalReview, SimulationRun, ThreadDecision
+from src.models.agent_activity import VISIBILITY_COLLAB_PRIVATE, VISIBILITY_PUBLIC
 from src.services.llm import (
     generate_agent_response,
     generate_with_tools,
@@ -33,6 +34,20 @@ from src.services.llm import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _visibility_permits(origin: str, current: str) -> bool:
+    """True iff an origin-visibility record may appear in a current-visibility context.
+
+    Implements the ordering `public < collab_private` from G3:
+    - public origins are visible in any context.
+    - collab_private origins are visible only in a collab_private context.
+
+    See specs/privacy-and-channel-visibility.md §G3.
+    """
+    if origin == VISIBILITY_PUBLIC:
+        return True
+    return current == VISIBILITY_COLLAB_PRIVATE
 
 # Pilot lab configurations
 PILOT_LABS = [
@@ -128,6 +143,10 @@ class SimulationEngine:
 
         # Channel ID map (populated during setup)
         self._channel_id_map: dict[str, str] = {}  # name -> id
+        # Channel visibility map (populated from agent_channels.visibility
+        # during setup; defaults to 'public' for any name not present). Used
+        # by G1 prompt scoping and G3 dedup filtering.
+        self._channel_visibility: dict[str, str] = {}  # name -> 'public' | 'collab_private'
 
         # Slack poll cursor: channel_id -> latest ts seen
         self._poll_cursors: dict[str, str] = {}
@@ -709,6 +728,13 @@ class SimulationEngine:
             )
             thread_activity_text = format_funding_thread_summary(summary)
 
+        # Resolve the thread's channel visibility for G1 prompt scoping. In v1
+        # all threads live in public channels, so this is effectively always
+        # VISIBILITY_PUBLIC; the lookup hook is in place for when migrations
+        # start producing collab_private channels.
+        thread_visibility = self._resolve_channel_visibility(thread.channel)
+        thread_channel_id = self._channel_id_map.get(thread.channel)
+
         # Build prompt
         system_prompt, messages = agent.build_phase4_prompt(
             thread=thread,
@@ -718,6 +744,8 @@ class SimulationEngine:
             is_funding_thread=is_funding,
             your_prior_messages=your_prior_text,
             thread_activity_summary=thread_activity_text,
+            visibility=thread_visibility,
+            channel_id=thread_channel_id,
         )
 
         # Create tool executor bound to this thread's state
@@ -931,13 +959,42 @@ class SimulationEngine:
                 other_event += f". Summary: {summary_text[:200]}"
             await self._update_agent_memory(other_agent, other_event)
 
-    def _get_prior_threads_for_agent(self, agent_id: str) -> dict[str, list[dict]]:
-        """Return {other_agent_id: [thread summaries]} for all prior conversations."""
+    def _resolve_channel_visibility(self, channel_name: str) -> str:
+        """Look up the visibility class of a channel by its name.
+
+        Backed by an in-memory map (``self._channel_visibility``) populated
+        alongside ``self._channel_id_map`` at rebuild/bootstrap time. Defaults
+        to VISIBILITY_PUBLIC when the channel is not tracked (e.g., seeded
+        channels before their AgentChannel row is created).
+        """
+        return self._channel_visibility.get(channel_name, VISIBILITY_PUBLIC)
+
+    def _get_prior_threads_for_agent(
+        self,
+        agent_id: str,
+        current_visibility: str = VISIBILITY_PUBLIC,
+    ) -> dict[str, list[dict]]:
+        """Return {other_agent_id: [thread summaries]} visible at the given visibility level.
+
+        Implements G3 (visibility-filtered dedup context): a thread_decision
+        with ``origin_visibility='collab_private'`` never surfaces in a
+        ``public``-channel Phase 5 prompt. See
+        specs/privacy-and-channel-visibility.md §G3.
+        """
         result: dict[str, list[dict]] = {}
         for (a, b), threads in self._prior_threads.items():
-            if agent_id in (a, b):
-                other = b if a == agent_id else a
-                result[other] = threads
+            if agent_id not in (a, b):
+                continue
+            other = b if a == agent_id else a
+            visible = [
+                t for t in threads
+                if _visibility_permits(
+                    t.get("origin_visibility", VISIBILITY_PUBLIC),
+                    current_visibility,
+                )
+            ]
+            if visible:
+                result[other] = visible
         return result
 
     # ------------------------------------------------------------------
@@ -1044,8 +1101,15 @@ class SimulationEngine:
                 if foa_text:
                     thread_foa_contexts[ts.foa_number] = foa_text
 
-        # Prior conversations for dedup — all closed threads grouped by other agent
-        prior_threads = self._get_prior_threads_for_agent(agent.agent_id)
+        # Prior conversations for dedup — visibility-filtered per G3.
+        # Phase 5 in v1 always runs against public channels (private channels
+        # come into being via migration, not via Phase 5 new posts), so we pass
+        # VISIBILITY_PUBLIC here. When/if Phase 5 ever runs against a private
+        # channel, resolve the visibility from that channel's AgentChannel row.
+        current_visibility = VISIBILITY_PUBLIC
+        prior_threads = self._get_prior_threads_for_agent(
+            agent.agent_id, current_visibility=current_visibility,
+        )
 
         system_prompt, messages = agent.build_phase5_prompt(
             recent_posts=recent_posts,
@@ -1054,6 +1118,7 @@ class SimulationEngine:
             prior_threads=prior_threads,
             funding_only=blocked_for_regular,
             funding_thread_summaries=funding_thread_summaries,
+            visibility=current_visibility,
         )
 
         # Restore
@@ -1662,6 +1727,8 @@ class SimulationEngine:
         if not client or not client.is_connected:
             # Mock mode — populate channel map with fake IDs
             self._channel_id_map = {ch: f"mock_{ch}" for ch in SEEDED_CHANNELS}
+            # All seeded channels are public.
+            self._channel_visibility = {ch: VISIBILITY_PUBLIC for ch in SEEDED_CHANNELS}
             return
 
         existing = client.list_channels()
@@ -1675,6 +1742,11 @@ class SimulationEngine:
                     existing[ch_name] = ch_data.get("id", "")
 
         self._channel_id_map = dict(existing)
+        # Seeded channels are always 'public'. Agent-created channels (including
+        # future collab_private channels) populate their own entries when the
+        # agent_channels rows are loaded during engine-state rebuild.
+        for ch_name in existing:
+            self._channel_visibility.setdefault(ch_name, VISIBILITY_PUBLIC)
 
         # Join the first (polling) client to ALL seeded channels so it can poll them
         for ch_name, ch_id in existing.items():
@@ -1831,6 +1903,8 @@ class SimulationEngine:
                             "channel": td.channel,
                             "outcome": td.outcome,
                             "summary": (td.summary_text or "")[:400] or None,
+                            # Carried for G3 dedup-context visibility filtering.
+                            "origin_visibility": td.origin_visibility,
                         })
                     self._closed_thread_ids.update(closed_thread_ids)
             except Exception as exc:
@@ -2220,24 +2294,41 @@ class SimulationEngine:
     # Post-simulation
     # ------------------------------------------------------------------
 
-    async def _update_agent_memory(self, agent: Agent, event: str) -> None:
+    async def _update_agent_memory(
+        self,
+        agent: Agent,
+        event: str,
+        visibility: str = VISIBILITY_PUBLIC,
+        channel_id: str | None = None,
+    ) -> None:
         """Incrementally update an agent's working memory after a significant event.
 
         Triggered by: thread closure, PI DM, or proposal review — not batched at
         simulation end.
+
+        visibility/channel_id: controls which memory segment is updated and
+            which subset of the message log is used as synthesis context, per
+            G2. v1 callers always pass public (the default); the
+            thread-closure path will pass the thread's visibility once
+            private-channel migration lands.
         """
         try:
-            # Gather recent activity for context
+            # Gather recent activity for context — filter the message log to
+            # entries with matching visibility. Public syntheses never see
+            # private-channel messages, and vice-versa. See §G2.
             agent_entries = [
                 e for e in self.message_log._entries
                 if e.sender_agent_id == agent.agent_id
+                and e.visibility == visibility
             ]
             messages_text = "\n".join(
                 f"[#{e.channel}] {e.content[:200]}"
                 for e in agent_entries[-20:]
             ) if agent_entries else "(no recent messages)"
 
-            system_prompt = agent.build_thread_reply_system_prompt()
+            system_prompt = agent.build_thread_reply_system_prompt(
+                visibility=visibility, channel_id=channel_id,
+            )
             messages = [
                 {
                     "role": "user",
@@ -2270,8 +2361,13 @@ Keep it concise — under 300 words.""",
             if not response or not response.strip():
                 logger.warning("[%s] Memory update: empty response", agent.agent_id)
                 return
-            agent.update_working_memory_file(response)
-            logger.info("[%s] Working memory updated (trigger: %s)", agent.agent_id, event[:60])
+            agent.update_working_memory_file(
+                response, visibility=visibility, channel_id=channel_id,
+            )
+            logger.info(
+                "[%s] Working memory updated (visibility=%s, trigger: %s)",
+                agent.agent_id, visibility, event[:60],
+            )
 
             # Record revision
             if self.session_factory:
