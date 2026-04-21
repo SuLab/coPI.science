@@ -2258,7 +2258,12 @@ class SimulationEngine:
         try:
             async with self.session_factory() as db:
                 from sqlalchemy import select as sa_select
-                # Get all reviews with rating and guidance info
+                # Get all reviews with rating and guidance info, plus the
+                # ThreadDecision's refined_in_channel marker (set when a
+                # reopen migrated the refinement into a collab_private
+                # channel — in that case the legacy "reopen the public
+                # thread" path must NOT fire, or we'd drop the PI's
+                # guidance back into the public thread and leak it).
                 result = await db.execute(
                     sa_select(
                         ProposalReview.agent_id,
@@ -2266,6 +2271,7 @@ class SimulationEngine:
                         ProposalReview.comment,
                         ThreadDecision.thread_id,
                         ThreadDecision.channel,
+                        ThreadDecision.refined_in_channel,
                     )
                     .join(ThreadDecision, ProposalReview.thread_decision_id == ThreadDecision.id)
                 )
@@ -2275,10 +2281,14 @@ class SimulationEngine:
             if not reviewed_set:
                 return
 
-            # Build lookup for rating=0 (reopened with guidance) reviews
+            # Build lookup for rating=0 (reopened with guidance) reviews.
+            # Rows with refined_in_channel set are skipped entirely — those
+            # reopens were handled by the private-channel migration flow;
+            # resurrecting the legacy public-thread reopen would undo the
+            # privacy guarantee.
             reopen_guidance: dict[tuple[str, str], tuple[str, str]] = {}
             for r in rows:
-                if r.rating == 0 and r.comment:
+                if r.rating == 0 and r.comment and r.refined_in_channel is None:
                     # Strip "[Reopened...] " prefix stored by the web/email route
                     guidance = r.comment
                     if guidance.startswith("[Reopened via email] "):
