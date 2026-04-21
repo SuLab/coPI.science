@@ -385,7 +385,21 @@ async def reopen_proposal(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Reopen a proposal thread with PI guidance posted via the bot."""
+    """Reopen a proposal thread with PI guidance.
+
+    Default behavior (``enable_private_refinement=True``): when the origin
+    thread lives in a public channel, migrate it to a new ``collab_private``
+    channel, post the PI's guidance there, and close the origin thread with a
+    neutral ⏸️ marker — **the PI's text is never echoed into the public
+    thread.** See specs/pi-interaction.md §"PI Reopens a Proposal" and
+    specs/privacy-and-channel-visibility.md §Migration Rule.
+
+    Legacy behavior (``enable_private_refinement=False``): post the PI's
+    guidance verbatim into the origin thread. Retained as an emergency
+    rollback lever during early rollout.
+    """
+    from src.config import get_settings
+
     guidance = guidance.strip()
     if not guidance:
         raise HTTPException(status_code=400, detail="Guidance text is required")
@@ -401,44 +415,83 @@ async def reopen_proposal(
     if agent.agent_id not in (td.agent_a, td.agent_b):
         raise HTTPException(status_code=403, detail="Not your proposal")
 
-    # Post guidance to Slack thread via the agent's bot token
-    try:
-        from slack_sdk import WebClient
-        from src.config import get_settings
-        settings = get_settings()
-        env_tokens = settings.get_slack_tokens()
-        bot_token = env_tokens.get(agent.agent_id, {}).get("bot")
+    settings = get_settings()
 
-        if not bot_token or bot_token.startswith("xoxb-placeholder"):
-            raise HTTPException(status_code=500, detail="No bot token available")
-
-        client = WebClient(token=bot_token)
-
-        channels_result = client.conversations_list(types="public_channel,private_channel", limit=200)
-        channel_id = None
-        for ch in channels_result.get("channels", []):
-            if ch["name"] == td.channel:
-                channel_id = ch["id"]
-                break
-
-        if not channel_id:
-            raise HTTPException(status_code=500, detail=f"Channel #{td.channel} not found")
-
-        message = f"*PI guidance from {current_user.name}:*\n\n{guidance}"
-        client.chat_postMessage(
-            channel=channel_id,
-            text=message,
-            thread_ts=td.thread_id,
-        )
+    if settings.enable_private_refinement and td.origin_visibility == "public":
+        # New behavior: migrate to a collab_private channel before any PI
+        # text touches Slack.
+        from src.services.private_channels import migrate_public_thread_to_private
+        try:
+            result = await migrate_public_thread_to_private(
+                db,
+                thread_decision=td,
+                creator_agent_id=agent.agent_id,
+                creator_pi_user=current_user,
+                guidance_text=guidance,
+            )
+            logger.info(
+                "PI %s reopened proposal %s: migrated #%s → private #%s",
+                current_user.name, td.thread_id, td.channel, result.channel_name,
+            )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logger.error("Migration to private channel failed: %s", exc, exc_info=True)
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to open private refinement channel: {str(exc)[:120]}",
+            )
+    elif td.origin_visibility != "public":
+        # Origin already private — post guidance there. (Not exercised in v1
+        # since no rows have origin_visibility='collab_private' yet, but the
+        # branch is defined so future migrations don't require a rewrite.)
         logger.info(
-            "PI %s posted guidance in proposal thread %s via %s",
-            current_user.name, td.thread_id, agent.agent_id,
+            "Proposal %s origin is already private — posting guidance in-channel",
+            td.thread_id,
         )
-    except HTTPException:
-        raise
-    except Exception as exc:
-        logger.error("Failed to post PI guidance to Slack: %s", exc)
-        raise HTTPException(status_code=500, detail=f"Failed to post to Slack: {str(exc)[:100]}")
+        raise HTTPException(
+            status_code=501,
+            detail="Refinement on an already-private thread is not yet implemented",
+        )
+    else:
+        # Legacy fallback: flag is off → post guidance verbatim to the origin
+        # public thread. This reproduces the pre-refactor behavior and is the
+        # same code as before; kept gated so rollback is a config change.
+        try:
+            from slack_sdk import WebClient
+
+            env_tokens = settings.get_slack_tokens()
+            bot_token = env_tokens.get(agent.agent_id, {}).get("bot")
+            if not bot_token or bot_token.startswith("xoxb-placeholder"):
+                raise HTTPException(status_code=500, detail="No bot token available")
+            client = WebClient(token=bot_token)
+            channels_result = client.conversations_list(
+                types="public_channel,private_channel", limit=200,
+            )
+            channel_id = None
+            for ch in channels_result.get("channels", []):
+                if ch["name"] == td.channel:
+                    channel_id = ch["id"]
+                    break
+            if not channel_id:
+                raise HTTPException(status_code=500, detail=f"Channel #{td.channel} not found")
+            client.chat_postMessage(
+                channel=channel_id,
+                text=f"*PI guidance from {current_user.name}:*\n\n{guidance}",
+                thread_ts=td.thread_id,
+            )
+            logger.warning(
+                "LEGACY PATH: PI %s posted guidance in proposal thread %s via %s "
+                "(enable_private_refinement=False)",
+                current_user.name, td.thread_id, agent.agent_id,
+            )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logger.error("Failed to post PI guidance to Slack: %s", exc)
+            raise HTTPException(
+                status_code=500, detail=f"Failed to post to Slack: {str(exc)[:100]}",
+            )
 
     existing = await db.execute(
         select(ProposalReview).where(

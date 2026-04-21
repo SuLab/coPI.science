@@ -96,6 +96,14 @@ class Settings(BaseSettings):
     max_abstracts_other_per_thread: int = 10
     max_full_text_per_thread: int = 2
 
+    # Privacy rollout — when True (default), POST /agent/{id}/proposals/{tid}/reopen
+    # migrates the thread into a new collab_private channel instead of posting
+    # the PI's guidance text into the origin public thread. Can be set to False
+    # to restore the legacy behavior during initial rollout or in an emergency.
+    # See specs/privacy-and-channel-visibility.md and specs/pi-interaction.md
+    # §"PI Reopens a Proposal".
+    enable_private_refinement: bool = True
+
     def get_slack_tokens(self) -> dict[str, dict[str, str]]:
         """Return slack tokens keyed by agent_id."""
         return {

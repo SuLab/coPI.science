@@ -418,6 +418,69 @@ class AgentSlackClient:
             logger.error("[%s] Failed to create channel %s: %s", self.agent_id, name, exc)
             return None
 
+    def create_private_channel(self, name: str) -> dict | None:
+        """Create a new Slack private channel (is_private=true).
+
+        Returns the channel dict on success or None on failure. The creating
+        bot is automatically a member; additional members must be added via
+        invite_to_channel. See specs/privacy-and-channel-visibility.md for
+        the full migration flow.
+        """
+        if not self._client:
+            logger.info("[%s] MOCK create private channel: #%s", self.agent_id, name)
+            return {"id": f"mock_priv_{name}", "name": name, "is_private": True}
+        try:
+            result = self._call_with_retry(
+                self._client.conversations_create, name=name, is_private=True,
+            )
+            ch = result["channel"]
+            self._channel_name_to_id[ch["name"]] = ch["id"]
+            return ch
+        except SlackApiError as exc:
+            logger.error(
+                "[%s] Failed to create private channel %s: %s",
+                self.agent_id, name, exc.response.get("error"),
+            )
+            return None
+
+    def invite_to_channel(self, channel_id: str, user_ids: list[str]) -> bool:
+        """Invite one or more Slack user IDs (bots or humans) to a channel.
+
+        Returns True on success. Tolerates per-user errors ('already_in_channel',
+        'cant_invite_self') and logs them without failing the whole call — the
+        invite is considered successful as long as every user ends up as a member.
+        """
+        if not user_ids:
+            return True
+        if not self._client:
+            logger.info(
+                "[%s] MOCK invite to %s: %s",
+                self.agent_id, channel_id, ", ".join(user_ids),
+            )
+            return True
+        # Slack accepts a comma-separated list, but per-user errors abort the
+        # call — invite one at a time so tolerable errors don't block others.
+        all_ok = True
+        for uid in user_ids:
+            try:
+                self._call_with_retry(
+                    self._client.conversations_invite, channel=channel_id, users=uid,
+                )
+            except SlackApiError as exc:
+                err = exc.response.get("error")
+                if err in ("already_in_channel", "cant_invite_self"):
+                    logger.debug(
+                        "[%s] Invite %s -> %s: tolerable (%s)",
+                        self.agent_id, uid, channel_id, err,
+                    )
+                    continue
+                logger.error(
+                    "[%s] Invite %s -> %s failed: %s",
+                    self.agent_id, uid, channel_id, err,
+                )
+                all_ok = False
+        return all_ok
+
     def join_channel(self, channel_id: str) -> None:
         """Join a Slack channel by ID.
 
