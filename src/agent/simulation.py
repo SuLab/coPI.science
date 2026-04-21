@@ -235,6 +235,11 @@ class SimulationEngine:
         self._build_lab_directories()
         await self._load_pi_mappings()
         await self._rebuild_state_from_slack()
+        # Rebuild advanced last_seen_cursor to max(all_messages), which can
+        # overshoot messages in private channels (typically older than the
+        # latest public chatter). Rewind member-bot cursors so Phase 2 can
+        # still scan the handover and any subsequent private-channel activity.
+        self._rewind_cursors_for_private_channels()
         set_call_log_callback(self._on_llm_call)
 
         # Backfill FOA cache for any previously posted opportunities
@@ -1045,8 +1050,54 @@ class SimulationEngine:
                     for c in self.slack_clients.values():
                         c._channel_name_to_id[ac.channel_name] = ac.channel_id
 
+            # Cursor rewind — always, for every known private channel (not only
+            # newly-discovered ones), so this repairs any member bot whose
+            # last_seen_cursor advanced past a private-channel message before
+            # we'd subscribed them. Without this, the handover would be stuck
+            # "in the past" relative to an agent's global scan cursor and
+            # Phase 2 would skip it forever.
+            self._rewind_cursors_for_private_channels()
+
         except Exception as exc:
             logger.warning("Failed to sync private channels from DB: %s", exc)
+
+    def _rewind_cursors_for_private_channels(self) -> None:
+        """Ensure each private channel's member bots have a cursor that lets
+        them scan messages in that channel.
+
+        For every tracked collab_private channel, find the oldest message in
+        the in-memory log for that channel and rewind each member bot's
+        last_seen_cursor to just before it (taking the min with its current
+        value). No-op when the log has no messages for the channel yet (e.g.,
+        discovery fired before rebuild/poll populated the log).
+        """
+        if not self._private_channel_members:
+            return
+        # channel_id -> oldest posted_at in the in-memory log.
+        oldest_in_channel: dict[str, float] = {}
+        for entry in self.message_log._entries:
+            cid = self._channel_id_map.get(entry.channel)
+            if not cid or cid not in self._private_channel_members:
+                continue
+            prev = oldest_in_channel.get(cid)
+            if prev is None or entry.posted_at < prev:
+                oldest_in_channel[cid] = entry.posted_at
+
+        for cid, member_ids in self._private_channel_members.items():
+            oldest = oldest_in_channel.get(cid)
+            if oldest is None:
+                continue
+            rewind_to = oldest - 0.001  # just before, so "> cursor" includes it
+            for aid in member_ids:
+                agent = self.agents.get(aid)
+                if not agent:
+                    continue
+                if agent.state.last_seen_cursor > rewind_to:
+                    logger.info(
+                        "[%s] Rewinding last_seen_cursor %.3f -> %.3f to scan private channel",
+                        aid, agent.state.last_seen_cursor, rewind_to,
+                    )
+                    agent.state.last_seen_cursor = rewind_to
 
     def _resolve_channel_visibility(self, channel_name: str) -> str:
         """Look up the visibility class of a channel by its name.
