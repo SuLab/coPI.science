@@ -2329,7 +2329,17 @@ class SimulationEngine:
                 rows = list(result)
 
             reviewed_set = {(r.agent_id, r.thread_id) for r in rows}
-            if not reviewed_set:
+            # Thread IDs of proposals that have been migrated to a private
+            # channel. Any agent with a pending proposal on such a thread is
+            # unblocked: the proposal is under active refinement, not
+            # awaiting first review. Without this, only the PI who triggered
+            # the reopen (and whose ProposalReview row exists) would be
+            # unblocked — the other agent would stay blocked and silently
+            # skip Phase 5 in the private channel.
+            migrated_threads = {
+                r.thread_id for r in rows if r.refined_in_channel is not None
+            }
+            if not reviewed_set and not migrated_threads:
                 return
 
             # Build lookup for rating=0 (reopened with guidance) reviews.
@@ -2348,12 +2358,19 @@ class SimulationEngine:
                         guidance = guidance[len("[Reopened] "):]
                     reopen_guidance[(r.agent_id, r.thread_id)] = (guidance, r.channel)
 
-            # Mark matching in-memory proposals as reviewed
+            # Mark matching in-memory proposals as reviewed. A proposal is
+            # considered reviewed for unblocking purposes if EITHER this agent
+            # has a ProposalReview row OR the proposal has been migrated to a
+            # private channel (refinement supersedes review).
             newly_reviewed: list[tuple[Agent, str]] = []
             for agent in self.agents.values():
                 for proposal in agent.state.pending_proposals:
                     if not proposal.reviewed:
-                        if (agent.agent_id, proposal.thread_id) in reviewed_set:
+                        unblock = (
+                            (agent.agent_id, proposal.thread_id) in reviewed_set
+                            or proposal.thread_id in migrated_threads
+                        )
+                        if unblock:
                             proposal.reviewed = True
                             newly_reviewed.append((agent, proposal.other_agent_id))
                             logger.info(
