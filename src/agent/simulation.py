@@ -1177,9 +1177,18 @@ class SimulationEngine:
                 continue
 
             is_funding = self.message_log.is_funding_thread(post.post_id)
+            # Posts in collab_private channels are by definition PI-engaged
+            # refinement; they must bypass the unreviewed-proposal block for
+            # the same reason pi_priority and funding posts do. Without this,
+            # an agent with any unrelated pending proposal would silently skip
+            # the handover message that migrated the conversation into the
+            # private channel in the first place.
+            is_private = (
+                self._channel_visibility.get(post.channel) == VISIBILITY_COLLAB_PRIVATE
+            )
 
-            # PI-priority and funding posts bypass regular blocking
-            if blocked_for_regular and not is_funding and not post.pi_priority:
+            # PI-priority, funding, and private-channel posts bypass regular blocking
+            if blocked_for_regular and not is_funding and not post.pi_priority and not is_private:
                 continue
 
             # Check thread participation rules: if the post tags a specific agent,
@@ -1251,12 +1260,22 @@ class SimulationEngine:
             agent.agent_id, current_visibility=current_visibility,
         )
 
+        # funding_only strips the prompt to funding actions. Only apply when
+        # the agent is actually funding-restricted — if any available post is
+        # non-funding (e.g., a private-channel handover that also bypasses
+        # blocking), the LLM needs the regular reply path.
+        has_available_non_funding = any(
+            not self.message_log.is_funding_thread(p.post_id)
+            for p in available_posts
+        )
+        funding_only = blocked_for_regular and not has_available_non_funding
+
         system_prompt, messages = agent.build_phase5_prompt(
             recent_posts=recent_posts,
             foa_contexts=foa_contexts,
             thread_foa_contexts=thread_foa_contexts,
             prior_threads=prior_threads,
-            funding_only=blocked_for_regular,
+            funding_only=funding_only,
             funding_thread_summaries=funding_thread_summaries,
             visibility=current_visibility,
         )
@@ -1304,14 +1323,24 @@ class SimulationEngine:
             target_post_id = action_data.get("target_post_id")
             post_type = action_data.get("post_type", "")
 
-            # If agent is blocked, only allow funding-related actions
+            # If agent is blocked, only allow bypass-eligible actions: funding
+            # replies, funding posts, or replies to a post in a collab_private
+            # channel (the PI has explicitly engaged that refinement).
             if blocked_for_regular:
                 is_funding_reply = (
                     action == "reply" and target_post_id
                     and self.message_log.is_funding_thread(target_post_id)
                 )
                 is_funding_post = post_type == "funding_collab"
-                if not is_funding_reply and not is_funding_post:
+                is_private_reply = False
+                if action == "reply" and target_post_id:
+                    target_entry = self.message_log.get_entry(target_post_id)
+                    if target_entry and (
+                        self._channel_visibility.get(target_entry.channel)
+                        == VISIBILITY_COLLAB_PRIVATE
+                    ):
+                        is_private_reply = True
+                if not is_funding_reply and not is_funding_post and not is_private_reply:
                     logger.info(
                         "[%s] Phase 5: Blocked non-funding action while proposals pending",
                         agent.agent_id,
