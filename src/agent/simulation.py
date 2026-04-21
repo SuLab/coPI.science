@@ -222,12 +222,14 @@ class SimulationEngine:
 
         # Setup
         self._ensure_seeded_channels()
+        # Load any collab_private channels created via the web-UI reopen flow
+        # BEFORE rebuilding state so the rebuild's history-fetch loop covers
+        # them too — otherwise the handover message wouldn't land in the
+        # message log until the first per-turn poll tick.
+        await self._sync_private_channels_from_db()
         self._build_lab_directories()
         await self._load_pi_mappings()
         await self._rebuild_state_from_slack()
-        # Load any collab_private channels created via the web-UI reopen flow
-        # before rebuilding message-log cursors so the first poll covers them.
-        await self._sync_private_channels_from_db()
         set_call_log_callback(self._on_llm_call)
 
         # Backfill FOA cache for any previously posted opportunities
@@ -1413,12 +1415,16 @@ class SimulationEngine:
         if not client:
             return
 
-        # Only poll seeded channels (not archived/stale channels from prior sims)
-        seeded_ids = {
+        # Poll seeded channels plus any collab_private channels tracked in
+        # _channel_visibility. Skipping non-seeded public channels avoids
+        # polling archived/stale channels from prior sims.
+        polled_ids = {
             ch_name: ch_id for ch_name, ch_id in self._channel_id_map.items()
             if ch_name in SEEDED_CHANNELS
+            or self._channel_visibility.get(ch_name) == VISIBILITY_COLLAB_PRIVATE
         }
-        for ch_name, ch_id in seeded_ids.items():
+        for ch_name, ch_id in polled_ids.items():
+            ch_visibility = self._channel_visibility.get(ch_name, VISIBILITY_PUBLIC)
             oldest = self._poll_cursors.get(ch_id, "0")
             try:
                 messages = client.poll_channel_messages(ch_id, oldest=oldest)
@@ -1447,6 +1453,7 @@ class SimulationEngine:
                             thread_ts=msg.get("thread_ts"),
                             posted_at=float(ts) if ts else 0.0,
                             is_bot=True,
+                            visibility=ch_visibility,
                         )
                         if not self.message_log.get_entry(ts):
                             self.message_log.append(entry)
@@ -1466,6 +1473,7 @@ class SimulationEngine:
                         thread_ts=msg.get("thread_ts"),
                         posted_at=float(ts) if ts else 0.0,
                         is_bot=False,
+                        visibility=ch_visibility,
                     )
                     self.message_log.append(entry)
                     logger.info(
@@ -1898,14 +1906,17 @@ class SimulationEngine:
             if c.bot_user_id:
                 bot_uid_to_agent[c.bot_user_id] = aid
 
-        # 1. Poll full Slack history for all seeded channels
-        seeded_ids = {
+        # 1. Poll full Slack history for seeded channels + any known
+        # collab_private channels. Same filter as the live-poll loop.
+        polled_ids = {
             ch_name: ch_id for ch_name, ch_id in self._channel_id_map.items()
             if ch_name in SEEDED_CHANNELS
+            or self._channel_visibility.get(ch_name) == VISIBILITY_COLLAB_PRIVATE
         }
         total_messages = 0
         total_threads = 0
-        for ch_name, ch_id in seeded_ids.items():
+        for ch_name, ch_id in polled_ids.items():
+            ch_visibility = self._channel_visibility.get(ch_name, VISIBILITY_PUBLIC)
             messages = client.get_full_channel_history(ch_id)
             for msg in messages:
                 ts = msg.get("ts", "")
@@ -1928,6 +1939,7 @@ class SimulationEngine:
                     thread_ts=msg.get("thread_ts") if msg.get("thread_ts") != ts else None,
                     posted_at=float(ts) if ts else 0.0,
                     is_bot=is_bot,
+                    visibility=ch_visibility,
                 )
                 self.message_log.append(entry)
                 total_messages += 1
@@ -1957,13 +1969,14 @@ class SimulationEngine:
                             thread_ts=ts,
                             posted_at=float(rts) if rts else 0.0,
                             is_bot=r_is_bot,
+                            visibility=ch_visibility,
                         )
                         self.message_log.append(r_entry)
                         total_messages += 1
 
         logger.info(
             "Rebuilt MessageLog: %d messages across %d channels, %d threads",
-            total_messages, len(seeded_ids), total_threads,
+            total_messages, len(polled_ids), total_threads,
         )
 
         # 2. Rebuild active_threads per agent
