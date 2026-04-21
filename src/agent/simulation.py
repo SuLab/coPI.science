@@ -147,6 +147,11 @@ class SimulationEngine:
         # during setup; defaults to 'public' for any name not present). Used
         # by G1 prompt scoping and G3 dedup filtering.
         self._channel_visibility: dict[str, str] = {}  # name -> 'public' | 'collab_private'
+        # Per-private-channel member-bot set (channel_id -> {agent_id, ...}).
+        # Used to route polling/history calls through a bot that can actually
+        # see the private channel; non-member bots get channel_not_found from
+        # Slack for private channels they aren't in.
+        self._private_channel_members: dict[str, set[str]] = {}
 
         # Slack poll cursor: channel_id -> latest ts seen
         self._poll_cursors: dict[str, str] = {}
@@ -1032,6 +1037,9 @@ class SimulationEngine:
                         agent = self.agents.get(aid)
                         if agent:
                             agent.state.subscribed_channels.add(ac.channel_name)
+                    # Record membership so polling/history calls for this
+                    # private channel route through a bot that can see it.
+                    self._private_channel_members[ac.channel_id] = set(bot_ids)
                     # Share channel name↔id with every client cache so post_message
                     # can resolve the name if one is passed.
                     for c in self.slack_clients.values():
@@ -1387,6 +1395,25 @@ class SimulationEngine:
     # Slack Polling (PI messages)
     # ------------------------------------------------------------------
 
+    def _client_for_channel(self, channel_id: str, fallback):
+        """Return a Slack client that can access ``channel_id``.
+
+        For collab_private channels, picks a connected member bot (tracked in
+        ``_private_channel_members``). For any other channel, returns the
+        fallback (typically the round-robin poll client).
+
+        Returns None if the channel is private and no connected member is
+        available — the caller should skip the channel in that case.
+        """
+        members = self._private_channel_members.get(channel_id)
+        if not members:
+            return fallback
+        for aid in members:
+            client = self.slack_clients.get(aid)
+            if client and client.is_connected:
+                return client
+        return None  # private, but no connected member
+
     def _next_poll_client(self):
         """Round-robin a connected Slack client for shared-token polling."""
         connected = [
@@ -1411,8 +1438,8 @@ class SimulationEngine:
             return
         self._last_channel_poll = now
 
-        client = self._next_poll_client()
-        if not client:
+        default_client = self._next_poll_client()
+        if not default_client:
             return
 
         # Poll seeded channels plus any collab_private channels tracked in
@@ -1425,6 +1452,14 @@ class SimulationEngine:
         }
         for ch_name, ch_id in polled_ids.items():
             ch_visibility = self._channel_visibility.get(ch_name, VISIBILITY_PUBLIC)
+            # Private channels need a member bot; non-members get channel_not_found.
+            client = self._client_for_channel(ch_id, default_client)
+            if client is None:
+                logger.debug(
+                    "Skipping poll for private channel #%s — no connected member bot",
+                    ch_name,
+                )
+                continue
             oldest = self._poll_cursors.get(ch_id, "0")
             try:
                 messages = client.poll_channel_messages(ch_id, oldest=oldest)
@@ -1895,8 +1930,8 @@ class SimulationEngine:
 
     async def _rebuild_state_from_slack(self) -> None:
         """Rebuild MessageLog and agent state from Slack history + DB."""
-        client = next(iter(self.slack_clients.values()), None)
-        if not client or not client.is_connected:
+        default_client = next(iter(self.slack_clients.values()), None)
+        if not default_client or not default_client.is_connected:
             logger.info("No Slack client available — skipping state rebuild")
             return
 
@@ -1917,6 +1952,14 @@ class SimulationEngine:
         total_threads = 0
         for ch_name, ch_id in polled_ids.items():
             ch_visibility = self._channel_visibility.get(ch_name, VISIBILITY_PUBLIC)
+            # Route per-channel: private channels need a member bot.
+            client = self._client_for_channel(ch_id, default_client)
+            if client is None:
+                logger.debug(
+                    "Skipping rebuild for private channel #%s — no connected member bot",
+                    ch_name,
+                )
+                continue
             messages = client.get_full_channel_history(ch_id)
             for msg in messages:
                 ts = msg.get("ts", "")
