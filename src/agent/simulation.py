@@ -571,6 +571,10 @@ class SimulationEngine:
         """
         Auto-activate threads where this agent was tagged or
         where someone replied to this agent's top-level posts.
+
+        Skipped entirely for entries in collab_private channels: those channels
+        are flat discussions (no threading), so tags and replies there are
+        just content for Phase 2/5 to consider, not thread-activation signals.
         """
         settings = get_settings()
         cursor = agent.state.last_seen_cursor
@@ -578,6 +582,9 @@ class SimulationEngine:
         # Check for tags
         tagged_entries = self.message_log.get_tags_for_agent(agent.bot_name, cursor)
         for entry in tagged_entries:
+            # Private channels are flat — no thread activation.
+            if self._channel_visibility.get(entry.channel) == VISIBILITY_COLLAB_PRIVATE:
+                continue
             thread_id = entry.thread_ts or entry.ts
             if thread_id in agent.state.active_threads:
                 continue
@@ -619,6 +626,9 @@ class SimulationEngine:
         # Check for replies to agent's own top-level posts
         reply_entries = self.message_log.get_replies_to_agent_posts(agent.agent_id, cursor)
         for entry in reply_entries:
+            # Private channels are flat — no thread activation.
+            if self._channel_visibility.get(entry.channel) == VISIBILITY_COLLAB_PRIVATE:
+                continue
             thread_id = entry.thread_ts
             if not thread_id or thread_id in agent.state.active_threads:
                 continue
@@ -667,6 +677,12 @@ class SimulationEngine:
         threads_to_reply: list[ThreadState] = []
         for thread in agent.state.active_threads.values():
             if thread.status != "active":
+                continue
+            # Safety net: Phase 4 does threaded replies, which are never the
+            # right thing in a collab_private channel. Skip any active_thread
+            # that somehow ended up pointing at a private channel — Phase 2/5
+            # handle those flat.
+            if self._channel_visibility.get(thread.channel) == VISIBILITY_COLLAB_PRIVATE:
                 continue
             # Check if there's a new reply from the other agent
             has_new = self.message_log.has_new_reply_from_other(
