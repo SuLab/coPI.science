@@ -500,13 +500,16 @@ class AgentSlackClient:
         except SlackApiError as exc:
             logger.warning("[%s] Failed to join channel %s: %s", self.agent_id, channel_id, exc)
 
-    def list_channels(self, include_private: bool = True) -> dict[str, str]:
-        """List channels this bot is a member of. Returns {name: id} dict.
+    def list_channels(self, include_private: bool = False) -> dict[str, str]:
+        """List channels. Returns {name: id} dict.
 
-        include_private=True (default) lists both public and private channels —
-        private channels are only returned for channels this bot has been
-        invited to, which is the behavior we want for the simulation engine
-        to discover collab_private channels after migration.
+        Default returns only public channels (original behavior, required for
+        the seeded-channel bootstrap). Passing ``include_private=True`` adds
+        collab_private channels this bot is a member of — but note that with
+        private channels included, Slack's conversations.list behaves
+        differently and may omit public channels the bot is not a member of.
+        Prefer DB-driven discovery via ``_sync_private_channels_from_db``
+        instead of using this flag.
         """
         if not self._client:
             return {}
