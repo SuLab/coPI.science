@@ -77,23 +77,78 @@ def _build_slug(agent_a: str, agent_b: str, origin_channel_name: str) -> str:
     return normalize_channel_name(raw)
 
 
-def _build_handover_message(
+# Slack's chat.postMessage enforces a ~4000-char text limit (without blocks);
+# anything longer is silently split or truncated on some paths. Build the
+# handover as 2-3 deliberate top-level messages to keep each comfortably
+# under the limit with clean content boundaries. See observed split on
+# priv-lotz-su-single-cell-omics where a single ~4600-char handover landed
+# as two unrelated-looking posts (one orphaned mid-bullet).
+_MAX_POST_CHARS = 3500
+
+
+def _build_handover_messages(
     creator_pi_name: str,
     proposal_summary: str | None,
     guidance_text: str,
     origin_channel_name: str,
-) -> str:
+) -> list[str]:
+    """Return the sequence of top-level posts that together form the handover.
+
+    Posts (in order):
+      1. Header + proposal summary.
+      2. PI guidance (split into multiple posts if necessary to stay under
+         _MAX_POST_CHARS).
+      3. Closing "bots, please proceed" prompt.
+
+    Every returned post is guaranteed to be under _MAX_POST_CHARS characters.
+    """
     summary_block = proposal_summary.strip() if proposal_summary else "_(no summary recorded)_"
-    return (
+    header = (
         f"*Private refinement channel*\n\n"
         f"This channel was created because {creator_pi_name} reopened the proposal "
         f"with guidance. The original thread was in #{origin_channel_name}; "
         f"further discussion will happen here so their guidance stays within this "
         f"channel's membership.\n\n"
-        f"*Proposal summary:*\n{summary_block}\n\n"
-        f"*Guidance from {creator_pi_name}:*\n{guidance_text.strip()}\n\n"
-        f"Continuing the conversation here — bots, please proceed with refinement."
+        f"*Proposal summary:*\n{summary_block}"
     )
+    guidance_posts = _chunk_guidance(creator_pi_name, guidance_text.strip())
+    closing = "Continuing the conversation here — bots, please proceed with refinement."
+
+    posts = [header, *guidance_posts, closing]
+    # Defensive: ensure no single chunk exceeds the limit. If the header
+    # itself somehow does (summary way too long), hard-truncate with a marker.
+    return [p if len(p) <= _MAX_POST_CHARS else p[: _MAX_POST_CHARS - 20] + "\n…(truncated)" for p in posts]
+
+
+def _chunk_guidance(creator_pi_name: str, guidance_text: str) -> list[str]:
+    """Split guidance into 1+ posts, breaking on paragraph boundaries."""
+    header_prefix = f"*Guidance from {creator_pi_name}"  # " (1 of N):*\n..."
+    budget_per_post = _MAX_POST_CHARS - len(header_prefix) - 20  # leave room for "(N of M):*\n"
+
+    if len(guidance_text) + len(header_prefix) + 4 <= _MAX_POST_CHARS:
+        return [f"*Guidance from {creator_pi_name}:*\n{guidance_text}"]
+
+    # Split on blank lines first, then on single newlines, then on sentence
+    # boundaries as a last resort.
+    paragraphs = guidance_text.split("\n\n")
+    chunks: list[str] = []
+    current = ""
+    for para in paragraphs:
+        if not current:
+            current = para
+        elif len(current) + 2 + len(para) <= budget_per_post:
+            current = f"{current}\n\n{para}"
+        else:
+            chunks.append(current)
+            current = para
+    if current:
+        chunks.append(current)
+
+    total = len(chunks)
+    return [
+        f"*Guidance from {creator_pi_name} ({i+1} of {total}):*\n{chunk}"
+        for i, chunk in enumerate(chunks)
+    ]
 
 
 def _build_other_pi_dm(
@@ -226,14 +281,18 @@ async def migrate_public_thread_to_private(
     # web app is short-lived, so just look it up fresh.
     origin_channel_id = creator_client._resolve_channel_id(origin_channel_name)
 
-    # Post handover message in the new private channel
-    handover = _build_handover_message(
+    # Post the handover as 2+ top-level messages so each stays within
+    # Slack's per-message length limit and no content gets orphaned in a
+    # mid-bullet split. All posts go top-level — collab_private channels
+    # are flat (no threading).
+    handover_posts = _build_handover_messages(
         creator_pi_name=creator_pi_user.name,
         proposal_summary=thread_decision.summary_text,
         guidance_text=guidance_text,
         origin_channel_name=origin_channel_name,
     )
-    creator_client.post_message(new_channel_id, handover)
+    for post in handover_posts:
+        creator_client.post_message(new_channel_id, post)
 
     # Close the origin thread with a neutral marker — NO PI text echoed.
     creator_client.post_message(

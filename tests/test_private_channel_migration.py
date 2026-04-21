@@ -9,10 +9,27 @@ import pytest
 
 from src.agent.slack_client import AgentSlackClient
 from src.services.private_channels import (
-    _build_handover_message,
+    _build_handover_messages,
     _build_other_pi_dm,
     _build_slug,
 )
+
+
+def _join_handover(
+    creator_pi_name: str,
+    proposal_summary: str | None,
+    guidance_text: str,
+    origin_channel_name: str,
+) -> str:
+    """Test helper: concatenate all handover posts for content assertions."""
+    return "\n---\n".join(
+        _build_handover_messages(
+            creator_pi_name=creator_pi_name,
+            proposal_summary=proposal_summary,
+            guidance_text=guidance_text,
+            origin_channel_name=origin_channel_name,
+        )
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -50,51 +67,94 @@ class TestSlug:
 # ---------------------------------------------------------------------------
 
 
-class TestHandoverMessage:
+class TestHandoverMessages:
     def test_contains_guidance_verbatim(self):
-        msg = _build_handover_message(
+        joined = _join_handover(
             creator_pi_name="Andrew Su",
             proposal_summary="Joint cryo-ET study of mitochondrial remodeling.",
             guidance_text="Include the unpublished HRI activator structural data.",
             origin_channel_name="structural-biology",
         )
-        assert "Include the unpublished HRI activator structural data." in msg
+        assert "Include the unpublished HRI activator structural data." in joined
 
     def test_contains_proposal_summary(self):
-        msg = _build_handover_message(
+        joined = _join_handover(
             creator_pi_name="Andrew Su",
             proposal_summary="Joint cryo-ET study of mitochondrial remodeling.",
             guidance_text="x",
             origin_channel_name="structural-biology",
         )
-        assert "Joint cryo-ET study of mitochondrial remodeling." in msg
+        assert "Joint cryo-ET study of mitochondrial remodeling." in joined
 
     def test_tolerates_missing_summary(self):
-        msg = _build_handover_message(
+        joined = _join_handover(
             creator_pi_name="Andrew Su",
             proposal_summary=None,
             guidance_text="x",
             origin_channel_name="general",
         )
-        assert "(no summary recorded)" in msg
+        assert "(no summary recorded)" in joined
 
     def test_references_origin_channel(self):
-        msg = _build_handover_message(
+        joined = _join_handover(
             creator_pi_name="Andrew Su",
             proposal_summary="s",
             guidance_text="g",
             origin_channel_name="drug-repurposing",
         )
-        assert "#drug-repurposing" in msg
+        assert "#drug-repurposing" in joined
 
     def test_names_creator_pi(self):
-        msg = _build_handover_message(
+        joined = _join_handover(
             creator_pi_name="Andrew Su",
             proposal_summary="s",
             guidance_text="g",
             origin_channel_name="general",
         )
-        assert "Andrew Su" in msg
+        assert "Andrew Su" in joined
+
+    def test_short_handover_returns_three_posts(self):
+        """Short content: [header, single guidance, closing] = 3 posts."""
+        posts = _build_handover_messages(
+            creator_pi_name="Andrew Su",
+            proposal_summary="short summary",
+            guidance_text="short guidance",
+            origin_channel_name="general",
+        )
+        assert len(posts) == 3
+        assert posts[0].startswith("*Private refinement channel*")
+        assert "short guidance" in posts[1]
+        assert posts[2] == "Continuing the conversation here — bots, please proceed with refinement."
+
+    def test_long_guidance_splits_across_posts(self):
+        """Long guidance exceeds per-post budget → split, with (N of M) labels."""
+        long_guidance = "\n\n".join([f"Paragraph {i}: " + ("x" * 500) for i in range(10)])
+        posts = _build_handover_messages(
+            creator_pi_name="Andrew Su",
+            proposal_summary="summary",
+            guidance_text=long_guidance,
+            origin_channel_name="general",
+        )
+        # At least 4 posts: header + ≥2 guidance chunks + closing
+        assert len(posts) >= 4
+        # Every post is under the length budget
+        assert all(len(p) <= 3500 for p in posts)
+        # Guidance chunks labeled (N of M)
+        guidance_chunks = [p for p in posts if p.startswith("*Guidance from Andrew Su")]
+        assert len(guidance_chunks) >= 2
+        for i, chunk in enumerate(guidance_chunks, start=1):
+            assert f"({i} of {len(guidance_chunks)})" in chunk
+
+    def test_every_post_under_length_budget(self):
+        """Even pathologically long inputs are clamped."""
+        huge = "a" * 50000
+        posts = _build_handover_messages(
+            creator_pi_name="Andrew Su",
+            proposal_summary=huge,
+            guidance_text=huge,
+            origin_channel_name="general",
+        )
+        assert all(len(p) <= 3500 for p in posts)
 
 
 # ---------------------------------------------------------------------------
