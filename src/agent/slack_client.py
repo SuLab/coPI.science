@@ -500,12 +500,19 @@ class AgentSlackClient:
         except SlackApiError as exc:
             logger.warning("[%s] Failed to join channel %s: %s", self.agent_id, channel_id, exc)
 
-    def list_channels(self) -> dict[str, str]:
-        """List all public channels. Returns {name: id} dict."""
+    def list_channels(self, include_private: bool = True) -> dict[str, str]:
+        """List channels this bot is a member of. Returns {name: id} dict.
+
+        include_private=True (default) lists both public and private channels —
+        private channels are only returned for channels this bot has been
+        invited to, which is the behavior we want for the simulation engine
+        to discover collab_private channels after migration.
+        """
         if not self._client:
             return {}
+        types = "public_channel,private_channel" if include_private else "public_channel"
         try:
-            result = self._client.conversations_list(types="public_channel", limit=200)
+            result = self._client.conversations_list(types=types, limit=200)
             mapping = {ch["name"]: ch["id"] for ch in result.get("channels", [])}
             self._channel_name_to_id.update(mapping)
             return mapping

@@ -225,6 +225,9 @@ class SimulationEngine:
         self._build_lab_directories()
         await self._load_pi_mappings()
         await self._rebuild_state_from_slack()
+        # Load any collab_private channels created via the web-UI reopen flow
+        # before rebuilding message-log cursors so the first poll covers them.
+        await self._sync_private_channels_from_db()
         set_call_log_callback(self._on_llm_call)
 
         # Backfill FOA cache for any previously posted opportunities
@@ -249,8 +252,10 @@ class SimulationEngine:
             await self._poll_pi_dms()
             await self._poll_proposal_threads_for_pi()
 
-            # Sync proposal reviews from web app
+            # Sync proposal reviews and any newly-created private channels from
+            # the web app. Both are DB-driven, so a single tick picks them up.
             await self._sync_proposal_reviews_from_db()
+            await self._sync_private_channels_from_db()
 
             # Select agent
             agent = self._select_agent()
@@ -958,6 +963,80 @@ class SimulationEngine:
             if summary_text:
                 other_event += f". Summary: {summary_text[:200]}"
             await self._update_agent_memory(other_agent, other_event)
+
+    async def _sync_private_channels_from_db(self) -> None:
+        """Discover collab_private channels created via the web-UI reopen flow.
+
+        Queries ``agent_channels`` for rows with ``visibility='collab_private'``
+        and integrates each new one into the engine state:
+
+        - Adds to ``_channel_id_map`` and ``_channel_visibility``.
+        - Adds the channel name to every member bot's ``subscribed_channels``
+          (resolved from ``private_channel_members``), so Phase 2 scans it and
+          Phase 4/5 can act in it.
+        - Seeds a poll cursor so the first poll picks up the handover message.
+
+        Cheap to call every main-loop tick — a single query returning a handful
+        of rows. Idempotent: channels already known are skipped.
+        """
+        if not self.session_factory:
+            return
+        try:
+            from sqlalchemy import select as sa_select
+            from src.models import AgentChannel, PrivateChannelMember
+
+            async with self.session_factory() as db:
+                priv_rows = (await db.execute(
+                    sa_select(AgentChannel).where(
+                        AgentChannel.visibility == VISIBILITY_COLLAB_PRIVATE,
+                        AgentChannel.archived_at.is_(None),
+                    )
+                )).scalars().all()
+
+                # Integrate each channel we haven't seen yet.
+                newly_discovered: list[AgentChannel] = []
+                for ac in priv_rows:
+                    if ac.channel_name in self._channel_id_map:
+                        continue
+                    self._channel_id_map[ac.channel_name] = ac.channel_id
+                    self._channel_visibility[ac.channel_name] = VISIBILITY_COLLAB_PRIVATE
+                    newly_discovered.append(ac)
+
+                if not newly_discovered:
+                    return
+
+                # Load bot memberships for the newly-discovered channels.
+                new_ids = [ac.id for ac in newly_discovered]
+                members = (await db.execute(
+                    sa_select(PrivateChannelMember).where(
+                        PrivateChannelMember.agent_channel_id.in_(new_ids),
+                        PrivateChannelMember.role == "bot",
+                        PrivateChannelMember.removed_at.is_(None),
+                    )
+                )).scalars().all()
+
+                by_channel: dict[uuid.UUID, list[str]] = {}
+                for m in members:
+                    if m.agent_id:
+                        by_channel.setdefault(m.agent_channel_id, []).append(m.agent_id)
+
+                for ac in newly_discovered:
+                    bot_ids = by_channel.get(ac.id, [])
+                    logger.info(
+                        "Discovered private channel #%s (id=%s); subscribing bots: %s",
+                        ac.channel_name, ac.channel_id, bot_ids,
+                    )
+                    for aid in bot_ids:
+                        agent = self.agents.get(aid)
+                        if agent:
+                            agent.state.subscribed_channels.add(ac.channel_name)
+                    # Share channel name↔id with every client cache so post_message
+                    # can resolve the name if one is passed.
+                    for c in self.slack_clients.values():
+                        c._channel_name_to_id[ac.channel_name] = ac.channel_id
+
+        except Exception as exc:
+            logger.warning("Failed to sync private channels from DB: %s", exc)
 
     def _resolve_channel_visibility(self, channel_name: str) -> str:
         """Look up the visibility class of a channel by its name.
