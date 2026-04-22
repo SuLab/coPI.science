@@ -140,7 +140,34 @@ Analytics on agent-to-agent thread conversations and outcomes.
 
 **Export:** HTML and plain text export options for proposal review.
 
-### 7. LLM Call Logs (`/admin/llm-calls`)
+### 7. Matchmaker (`/admin/matchmaker`)
+
+Admin tool for generating collaboration proposals between two PIs on demand, without running an agent simulation. See `labbot-matchmaker.md` for the full specification.
+
+**Generate form (top of page):**
+- Two dropdowns listing all users with a complete `ResearcherProfile`, sorted by name
+- Client-side enforcement: same user cannot be selected in both dropdowns; Generate button disabled until both are selected
+- On submit: POSTs to `/admin/matchmaker/generate`, shows spinner, redirects to detail view on success
+
+**Proposals table:**
+- Confidence badge (High = green, Moderate = yellow, Speculative = gray)
+- PI A / PI B names
+- Proposal title (truncated)
+- Generated timestamp
+- View / Delete actions
+
+**Filters:**
+- PI multi-select (matches either side)
+- Confidence filter
+
+**Row click** → proposal detail page (`/admin/matchmaker/{id}`)
+
+**Proposal detail (`/admin/matchmaker/{id}`):**
+- Header: PI A × PI B, confidence badge, generated timestamp, token counts
+- Full proposal rendered as markdown
+- Delete button
+
+### 8. LLM Call Logs (`/admin/llm-calls`)
 
 Debugging view for all LLM API calls.
 
@@ -153,7 +180,7 @@ Debugging view for all LLM API calls.
 - Latency (ms)
 - System prompt and response (expandable)
 
-### 8. Access Requests (`/admin/access-requests`)
+### 9. Access Requests (`/admin/access-requests`)
 
 Pre-release access gate management.
 
@@ -171,7 +198,7 @@ Pre-release access gate management.
 - Add ORCID + note form
 - Remove ORCID button
 
-### 9. Waitlist (`/admin/waitlist`)
+### 10. Waitlist (`/admin/waitlist`)
 
 Lead-capture signups from the public landing page.
 
@@ -183,7 +210,7 @@ Lead-capture signups from the public landing page.
 
 No outbound email is sent automatically — the admin uses the export to reach out manually, then marks rows contacted.
 
-### 10. User Impersonation
+### 11. User Impersonation
 
 Admins can assume the identity of any user to see the app as they see it.
 
@@ -215,6 +242,10 @@ Admins can assume the identity of any user to see the app as they see it.
 | `POST /admin/agents/{id}/approve` | Approve pending agent |
 | `GET /admin/discussions` | Thread discussions and outcomes |
 | `GET /admin/discussions/export` | Export discussions (HTML/text) |
+| `GET /admin/matchmaker` | Matchmaker tab with generate form and proposals table |
+| `POST /admin/matchmaker/generate` | Run LLM pipeline and store result |
+| `GET /admin/matchmaker/{id}` | Proposal detail view |
+| `POST /admin/matchmaker/{id}/delete` | Delete a proposal |
 | `GET /admin/access-requests` | Pending access requests + allowlist management |
 | `POST /admin/access-requests/{user_id}/approve` | Approve a pending user |
 | `POST /admin/access-requests/{user_id}/deny` | Deny a pending user |

@@ -401,6 +401,124 @@ async def generate_with_tools(
     return response_text
 
 
+async def generate_matchmaker_proposal(
+    name_a: str,
+    public_profile_a: str,
+    private_profile_a: str,
+    publications_a: str,
+    name_b: str,
+    public_profile_b: str,
+    private_profile_b: str,
+    publications_b: str,
+    model: str | None = None,
+) -> dict[str, Any]:
+    """
+    Generate a collaboration proposal between two PIs using their profiles.
+
+    Returns a dict with keys: proposal_md, title, confidence, input_tokens, output_tokens, model.
+    """
+    settings = get_settings()
+    model = model or settings.llm_agent_model_opus
+
+    prompt_path = "prompts/matchmaker.md"
+    try:
+        with open(prompt_path) as f:
+            system_prompt = f.read()
+    except FileNotFoundError:
+        raise RuntimeError(f"Matchmaker prompt not found at {prompt_path}")
+
+    user_message = f"""## PI A: {name_a}
+
+### Public Profile
+{public_profile_a}
+
+### Private Instructions (confidential — do not quote directly)
+{private_profile_a or '(none provided)'}
+
+### Recent Publications
+{publications_a or '(none available)'}
+
+---
+
+## PI B: {name_b}
+
+### Public Profile
+{public_profile_b}
+
+### Private Instructions (confidential — do not quote directly)
+{private_profile_b or '(none provided)'}
+
+### Recent Publications
+{publications_b or '(none available)'}"""
+
+    client = get_anthropic_client()
+    t0 = time.monotonic()
+    message = client.messages.create(
+        model=model,
+        max_tokens=2000,
+        system=[
+            {
+                "type": "text",
+                "text": system_prompt,
+                "cache_control": {"type": "ephemeral"},
+            }
+        ],
+        messages=[{"role": "user", "content": user_message}],
+    )
+    latency_ms = (time.monotonic() - t0) * 1000
+    logger.info(
+        "Matchmaker LLM call: model=%s input=%d output=%d latency=%.0fms",
+        model,
+        message.usage.input_tokens,
+        message.usage.output_tokens,
+        latency_ms,
+    )
+
+    response_text = message.content[0].text if message.content else ""
+
+    # Extract content inside <proposal> tags
+    proposal_md = response_text
+    if "<proposal>" in response_text and "</proposal>" in response_text:
+        start = response_text.find("<proposal>") + len("<proposal>")
+        end = response_text.find("</proposal>")
+        proposal_md = response_text[start:end].strip()
+
+    # Extract title from first heading
+    title = "Untitled Proposal"
+    for line in proposal_md.splitlines():
+        line = line.strip()
+        if line.startswith("# "):
+            title = line[2:].strip()
+            break
+
+    # Extract confidence label
+    confidence = "speculative"
+    lower = proposal_md.lower()
+    conf_line = next(
+        (ln for ln in proposal_md.splitlines() if "**confidence:**" in ln.lower()), ""
+    )
+    if conf_line:
+        if "high" in conf_line.lower():
+            confidence = "high"
+        elif "moderate" in conf_line.lower():
+            confidence = "moderate"
+        else:
+            confidence = "speculative"
+    elif "**confidence:** high" in lower:
+        confidence = "high"
+    elif "**confidence:** moderate" in lower:
+        confidence = "moderate"
+
+    return {
+        "proposal_md": proposal_md,
+        "title": title,
+        "confidence": confidence,
+        "input_tokens": message.usage.input_tokens,
+        "output_tokens": message.usage.output_tokens,
+        "model": model,
+    }
+
+
 def _default_synthesis_prompt() -> str:
     return """You are a scientific profile synthesizer. Given information about a researcher's publications, grants, and submitted texts, generate a structured JSON profile.
 

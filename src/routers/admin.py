@@ -21,6 +21,7 @@ from src.models import (
     AgentRegistry,
     Job,
     LlmCallLog,
+    MatchmakerProposal,
     PodcastEpisode,
     PodcastPreferences,
     Publication,
@@ -1270,3 +1271,244 @@ async def admin_waitlist_mark_contacted(
         signup.contacted_at = datetime.now(timezone.utc)
         await db.commit()
     return RedirectResponse(url="/admin/waitlist", status_code=302)
+
+
+# ---------------------------------------------------------------------------
+# Matchmaker
+# ---------------------------------------------------------------------------
+
+@router.get("/matchmaker", response_class=HTMLResponse)
+async def admin_matchmaker(
+    request: Request,
+    pi_filter: list[uuid.UUID] = Query(default=[]),
+    confidence_filter: str | None = None,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_admin_user),
+):
+    """Matchmaker tab — generate and view admin-initiated collaboration proposals."""
+    # All users with a complete profile for the dropdowns
+    profiles_result = await db.execute(
+        select(User)
+        .join(ResearcherProfile, ResearcherProfile.user_id == User.id)
+        .where(ResearcherProfile.research_summary.isnot(None))
+        .order_by(User.name)
+    )
+    eligible_users = profiles_result.scalars().all()
+
+    # Fetch proposals with PI relationships eager-loaded
+    proposals_query = (
+        select(MatchmakerProposal)
+        .options(
+            selectinload(MatchmakerProposal.pi_a),
+            selectinload(MatchmakerProposal.pi_b),
+        )
+        .order_by(MatchmakerProposal.generated_at.desc())
+    )
+    if pi_filter:
+        proposals_query = proposals_query.where(
+            (MatchmakerProposal.pi_a_id.in_(pi_filter))
+            | (MatchmakerProposal.pi_b_id.in_(pi_filter))
+        )
+    if confidence_filter:
+        proposals_query = proposals_query.where(
+            MatchmakerProposal.confidence == confidence_filter
+        )
+    proposals_result = await db.execute(proposals_query)
+    proposals = proposals_result.scalars().all()
+
+    return templates.TemplateResponse(
+        request,
+        "admin/matchmaker.html",
+        _template_context(
+            request,
+            current_user,
+            active_admin="matchmaker",
+            eligible_users=eligible_users,
+            proposals=proposals,
+            pi_filter=pi_filter,
+            confidence_filter=confidence_filter,
+            error=None,
+        ),
+    )
+
+
+@router.post("/matchmaker/generate", response_class=HTMLResponse)
+async def admin_matchmaker_generate(
+    request: Request,
+    pi_a_id: uuid.UUID = Form(...),
+    pi_b_id: uuid.UUID = Form(...),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_admin_user),
+):
+    """Run the LLM matchmaker pipeline and store the resulting proposal."""
+    from src.services.llm import generate_matchmaker_proposal
+
+    async def _render_error(msg: str):
+        profiles_result = await db.execute(
+            select(User)
+            .join(ResearcherProfile, ResearcherProfile.user_id == User.id)
+            .where(ResearcherProfile.research_summary.isnot(None))
+            .order_by(User.name)
+        )
+        eligible_users = profiles_result.scalars().all()
+        proposals_result = await db.execute(
+            select(MatchmakerProposal)
+            .options(
+                selectinload(MatchmakerProposal.pi_a),
+                selectinload(MatchmakerProposal.pi_b),
+            )
+            .order_by(MatchmakerProposal.generated_at.desc())
+        )
+        proposals = proposals_result.scalars().all()
+        return templates.TemplateResponse(
+            request,
+            "admin/matchmaker.html",
+            _template_context(
+                request,
+                current_user,
+                active_admin="matchmaker",
+                eligible_users=eligible_users,
+                proposals=proposals,
+                pi_filter=[],
+                confidence_filter=None,
+                error=msg,
+            ),
+        )
+
+    if pi_a_id == pi_b_id:
+        return await _render_error("Please select two different PIs.")
+
+    # Load profiles and recent publications for both PIs
+    async def _load_user_data(user_id: uuid.UUID):
+        user_result = await db.execute(
+            select(User)
+            .where(User.id == user_id)
+            .options(selectinload(User.profile))
+        )
+        user = user_result.scalar_one_or_none()
+        if not user or not user.profile or not user.profile.research_summary:
+            return None, None, None
+        pubs_result = await db.execute(
+            select(Publication)
+            .where(Publication.user_id == user_id)
+            .order_by(Publication.year.desc())
+            .limit(20)
+        )
+        pubs = pubs_result.scalars().all()
+        return user, user.profile, pubs
+
+    user_a, profile_a, pubs_a = await _load_user_data(pi_a_id)
+    user_b, profile_b, pubs_b = await _load_user_data(pi_b_id)
+
+    if not profile_a:
+        return await _render_error("PI A does not have a complete profile yet.")
+    if not profile_b:
+        return await _render_error("PI B does not have a complete profile yet.")
+
+    def _format_profile(profile: ResearcherProfile) -> str:
+        parts = [profile.research_summary or ""]
+        if profile.techniques:
+            parts.append("**Techniques:** " + ", ".join(profile.techniques))
+        if profile.experimental_models:
+            parts.append("**Model systems:** " + ", ".join(profile.experimental_models))
+        if profile.disease_areas:
+            parts.append("**Disease areas:** " + ", ".join(profile.disease_areas))
+        if profile.key_targets:
+            parts.append("**Key targets:** " + ", ".join(profile.key_targets))
+        if profile.grant_titles:
+            parts.append("**Active grants:** " + "; ".join(profile.grant_titles))
+        return "\n\n".join(parts)
+
+    def _format_pubs(pubs) -> str:
+        if not pubs:
+            return "(none)"
+        lines = []
+        for p in pubs:
+            pos = f" [{p.author_position}]" if p.author_position else ""
+            journal = f" — {p.journal}" if p.journal else ""
+            year = f" ({p.year})" if p.year else ""
+            pmid = f" PMID:{p.pmid}" if p.pmid else ""
+            lines.append(f"- {p.title}{pos}{year}{journal}{pmid}")
+        return "\n".join(lines)
+
+    settings = get_settings()
+
+    try:
+        result = await generate_matchmaker_proposal(
+            name_a=user_a.name,
+            public_profile_a=_format_profile(profile_a),
+            private_profile_a=profile_a.private_profile_md or "",
+            publications_a=_format_pubs(pubs_a),
+            name_b=user_b.name,
+            public_profile_b=_format_profile(profile_b),
+            private_profile_b=profile_b.private_profile_md or "",
+            publications_b=_format_pubs(pubs_b),
+            model=settings.llm_agent_model_opus,
+        )
+    except Exception as exc:
+        logger.error("Matchmaker LLM call failed: %s", exc)
+        return await _render_error(f"LLM call failed: {exc}")
+
+    proposal = MatchmakerProposal(
+        pi_a_id=pi_a_id,
+        pi_b_id=pi_b_id,
+        proposal_md=result["proposal_md"],
+        title=result["title"],
+        confidence=result["confidence"],
+        llm_model=result["model"],
+        input_tokens=result["input_tokens"],
+        output_tokens=result["output_tokens"],
+    )
+    db.add(proposal)
+    await db.commit()
+
+    return RedirectResponse(url=f"/admin/matchmaker/{proposal.id}", status_code=302)
+
+
+@router.get("/matchmaker/{proposal_id}", response_class=HTMLResponse)
+async def admin_matchmaker_detail(
+    request: Request,
+    proposal_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_admin_user),
+):
+    """Detail view for a single matchmaker proposal."""
+    result = await db.execute(
+        select(MatchmakerProposal)
+        .where(MatchmakerProposal.id == proposal_id)
+        .options(
+            selectinload(MatchmakerProposal.pi_a),
+            selectinload(MatchmakerProposal.pi_b),
+        )
+    )
+    proposal = result.scalar_one_or_none()
+    if not proposal:
+        raise HTTPException(status_code=404, detail="Proposal not found")
+
+    return templates.TemplateResponse(
+        request,
+        "admin/matchmaker_detail.html",
+        _template_context(
+            request,
+            current_user,
+            active_admin="matchmaker",
+            proposal=proposal,
+        ),
+    )
+
+
+@router.post("/matchmaker/{proposal_id}/delete")
+async def admin_matchmaker_delete(
+    proposal_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_admin_user),
+):
+    """Delete a matchmaker proposal."""
+    result = await db.execute(
+        select(MatchmakerProposal).where(MatchmakerProposal.id == proposal_id)
+    )
+    proposal = result.scalar_one_or_none()
+    if proposal:
+        await db.delete(proposal)
+        await db.commit()
+    return RedirectResponse(url="/admin/matchmaker", status_code=302)

@@ -93,6 +93,25 @@ PostgreSQL-backed async job queue.
 | started_at | timestamp | Nullable |
 | completed_at | timestamp | Nullable |
 
+### MatchmakerProposal
+
+Admin-generated collaboration proposals produced by a single LLM call from two PIs' public and private profiles, without running an agent simulation. See `labbot-matchmaker.md`.
+
+| Field | Type | Notes |
+|---|---|---|
+| id | uuid | Primary key |
+| pi_a_id | FK → User | First PI (CASCADE delete) |
+| pi_b_id | FK → User | Second PI (CASCADE delete) |
+| proposal_md | text | Full proposal in markdown |
+| title | string(500) | Extracted from first `# heading` in proposal_md |
+| confidence | string(20) | `high` / `moderate` / `speculative` |
+| llm_model | string(100) | Model used (e.g. `claude-opus-4-7`) |
+| input_tokens | integer | Nullable. Input token count |
+| output_tokens | integer | Nullable. Output token count |
+| generated_at | timestamp | Server default now() |
+
+**Indexes:** `pi_a_id`, `pi_b_id`
+
 ### AccessAllowlist
 
 Admin-managed list of pre-approved ORCID IDs. ORCIDs on this list bypass the pre-release access gate and land directly in `allowed` state on first login.
