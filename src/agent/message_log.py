@@ -106,6 +106,22 @@ class MessageLog:
         ]
         return posts[-limit:]
 
+    def get_last_bot_sender_in_channel(self, channel_name: str) -> str | None:
+        """Return the agent_id of the most recent bot-authored message in a channel.
+
+        Returns None if no bot has posted there yet. Used to enforce
+        turn-taking in flat collab_private channels (a bot shouldn't post
+        back-to-back there without the other bot responding first).
+        """
+        for entry in reversed(self._entries):
+            if entry.channel != channel_name:
+                continue
+            if not entry.is_bot:
+                continue
+            if entry.sender_agent_id:
+                return entry.sender_agent_id
+        return None
+
     def get_replies_to_agent_posts(
         self,
         agent_id: str,

@@ -177,3 +177,34 @@ class TestHasNewReplyFromOther:
         log.append(_post("1", "general", "su", "SuBot", "Root"))
         log.append(_post("2.0", "general", "wiseman", "WisemanBot", "Old reply", thread_ts="1"))
         assert log.has_new_reply_from_other("1", "su", since=3.0) is False
+
+
+# ---------------------------------------------------------------
+# get_last_bot_sender_in_channel (private-channel turn-taking)
+# ---------------------------------------------------------------
+
+class TestLastBotSenderInChannel:
+    def test_returns_most_recent_bot(self, log):
+        log.append(_post("1", "priv-x", "su", "SuBot", "first"))
+        log.append(_post("2", "priv-x", "wiseman", "WisemanBot", "second"))
+        log.append(_post("3", "priv-x", "su", "SuBot", "third"))
+        assert log.get_last_bot_sender_in_channel("priv-x") == "su"
+
+    def test_scoped_by_channel(self, log):
+        log.append(_post("1", "priv-x", "su", "SuBot", "hi"))
+        log.append(_post("2", "priv-y", "wiseman", "WisemanBot", "hi"))
+        assert log.get_last_bot_sender_in_channel("priv-x") == "su"
+        assert log.get_last_bot_sender_in_channel("priv-y") == "wiseman"
+
+    def test_none_when_empty(self, log):
+        assert log.get_last_bot_sender_in_channel("priv-x") is None
+
+    def test_skips_human_messages(self, log):
+        log.append(_post("1", "priv-x", "su", "SuBot", "bot"))
+        # Human message (is_bot=False, no sender_agent_id)
+        human = LogEntry(
+            ts="2", channel="priv-x", sender_agent_id=None,
+            sender_name="PI", content="human msg", posted_at=2.0, is_bot=False,
+        )
+        log.append(human)
+        assert log.get_last_bot_sender_in_channel("priv-x") == "su"

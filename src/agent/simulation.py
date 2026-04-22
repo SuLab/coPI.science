@@ -1226,6 +1226,18 @@ class SimulationEngine:
             if blocked_for_regular and not is_funding and not post.pi_priority and not is_private:
                 continue
 
+            # Turn-taking in flat private channels: don't reply if we were
+            # the most recent bot to post there. Wait for the other bot.
+            if is_private and (
+                self.message_log.get_last_bot_sender_in_channel(post.channel)
+                == agent.agent_id
+            ):
+                logger.debug(
+                    "[%s] Phase 5: Skipping private-channel post %s — we were last to post in #%s",
+                    agent.agent_id, post.post_id, post.channel,
+                )
+                continue
+
             # Check thread participation rules: if the post tags a specific agent,
             # only that agent can reply; otherwise generic 2-party rule applies
             allowed = self.message_log.get_thread_allowed_agents(post.post_id)
@@ -1357,6 +1369,23 @@ class SimulationEngine:
             channel = action_data.get("channel", "general").lstrip("#")
             target_post_id = action_data.get("target_post_id")
             post_type = action_data.get("post_type", "")
+
+            # Turn-taking enforcement for private channels: reject any action
+            # that would post back-to-back with our previous private-channel
+            # message. Belt-and-braces — the available_posts pre-filter also
+            # catches this for the "reply" path, but this gate covers new
+            # top-level posts the LLM might propose.
+            if (
+                self._channel_visibility.get(channel) == VISIBILITY_COLLAB_PRIVATE
+                and self.message_log.get_last_bot_sender_in_channel(channel)
+                == agent.agent_id
+            ):
+                logger.info(
+                    "[%s] Phase 5: Rejecting back-to-back post in private #%s",
+                    agent.agent_id, channel,
+                )
+                agent.state.consecutive_phase5_skips += 1
+                return
 
             # If agent is blocked, only allow bypass-eligible actions: funding
             # replies, funding posts, or replies to a post in a collab_private
