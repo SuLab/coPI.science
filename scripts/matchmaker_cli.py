@@ -39,6 +39,7 @@ def load_profile_files(slug: str) -> tuple[str, str, str]:
     Returns (pi_name, public_md, private_md).
     pi_name is extracted from the '**PI:**' line in the public profile.
     """
+    slug = slug.lower()
     public_path = Path("profiles/public") / f"{slug}.md"
     private_path = Path("profiles/private") / f"{slug}.md"
 
