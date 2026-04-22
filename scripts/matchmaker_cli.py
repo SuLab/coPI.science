@@ -2,11 +2,22 @@
 """Generate a matchmaker collaboration proposal from two PI profile directories.
 
 Usage (from repo root inside the app container):
+
+  Single pair (positional args):
     python scripts/matchmaker_cli.py <pi_a_slug> <pi_b_slug> [--dry-run]
+
+  Batch from TSV file (-t flag, no positional args):
+    python scripts/matchmaker_cli.py -t pairs.tsv [--dry-run]
+
+The TSV file has two tab-separated columns (pi_a, pi_b), one pair per line.
+Lines starting with '#' and blank lines are ignored. A header row whose first
+cell is "pi_a" (case-insensitive) is also skipped automatically.
 
 Examples:
     python scripts/matchmaker_cli.py su wiseman
     python scripts/matchmaker_cli.py grotjahn lotz --dry-run
+    python scripts/matchmaker_cli.py -t pairs.tsv
+    python scripts/matchmaker_cli.py -t pairs.tsv --dry-run
 
 The PI slug must match a filename in profiles/public/ (without .md extension).
 Private profiles from profiles/private/{slug}.md are included if they exist.
@@ -121,24 +132,84 @@ async def run(slug_a: str, slug_b: str, dry_run: bool) -> None:
     await engine.dispose()
 
 
+def _parse_tsv(path: str) -> list[tuple[str, str]]:
+    """Parse a two-column TSV file into a list of (pi_a, pi_b) slug pairs."""
+    pairs: list[tuple[str, str]] = []
+    with open(path) as f:
+        for lineno, line in enumerate(f, 1):
+            line = line.rstrip("\n")
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split("\t")
+            if len(parts) < 2:
+                print(f"Warning: line {lineno} has fewer than 2 columns, skipping: {line!r}")
+                continue
+            a, b = parts[0].strip(), parts[1].strip()
+            if lineno == 1 and a.lower() == "pi_a":
+                continue  # skip header row
+            if not a or not b:
+                print(f"Warning: line {lineno} has empty slug, skipping.")
+                continue
+            pairs.append((a, b))
+    return pairs
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Generate a matchmaker proposal from two PI profile slugs."
+        description="Generate matchmaker proposals from PI profile slugs.",
+        epilog=(
+            "Single pair:  matchmaker_cli.py su wiseman\n"
+            "Batch TSV:    matchmaker_cli.py -t pairs.tsv"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("pi_a", help="Slug for PI A (e.g. 'su', 'wiseman')")
-    parser.add_argument("pi_b", help="Slug for PI B (e.g. 'grotjahn', 'lotz')")
+    parser.add_argument("pi_a", nargs="?", help="Slug for PI A (e.g. 'su')")
+    parser.add_argument("pi_b", nargs="?", help="Slug for PI B (e.g. 'wiseman')")
+    parser.add_argument(
+        "-t", "--tsv",
+        metavar="FILE",
+        help="TSV file with two columns (pi_a, pi_b); one pair per line",
+    )
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Print proposal to stdout without writing to the database",
+        help="Print proposals to stdout without writing to the database",
     )
     args = parser.parse_args()
 
-    if args.pi_a == args.pi_b:
-        print("Error: PI A and PI B must be different.")
-        sys.exit(1)
+    # Build list of pairs to process
+    if args.tsv:
+        if args.pi_a or args.pi_b:
+            parser.error("Cannot combine -t/--tsv with positional PI arguments.")
+        pairs = _parse_tsv(args.tsv)
+        if not pairs:
+            print("No valid pairs found in TSV file.")
+            sys.exit(1)
+    elif args.pi_a and args.pi_b:
+        pairs = [(args.pi_a, args.pi_b)]
+    else:
+        parser.error("Provide either two positional slugs or -t FILE.")
 
-    asyncio.run(run(args.pi_a, args.pi_b, args.dry_run))
+    errors: list[str] = []
+    for i, (slug_a, slug_b) in enumerate(pairs):
+        if len(pairs) > 1:
+            print(f"\n{'='*72}")
+            print(f"Pair {i + 1}/{len(pairs)}: {slug_a}  ×  {slug_b}")
+            print(f"{'='*72}")
+        if slug_a == slug_b:
+            msg = f"Skipping {slug_a} × {slug_b}: PI A and PI B must be different."
+            print(msg)
+            errors.append(msg)
+            continue
+        try:
+            asyncio.run(run(slug_a, slug_b, args.dry_run))
+        except SystemExit:
+            errors.append(f"Failed: {slug_a} × {slug_b}")
+
+    if errors:
+        print(f"\n{len(errors)} pair(s) failed:")
+        for e in errors:
+            print(f"  {e}")
 
 
 if __name__ == "__main__":
