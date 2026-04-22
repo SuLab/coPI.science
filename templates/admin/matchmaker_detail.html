@@ -26,9 +26,9 @@
         <div>
             <h1 class="text-xl font-bold text-gray-900 mb-2">{{ proposal.title }}</h1>
             <div class="flex items-center gap-4 text-sm text-gray-600 flex-wrap">
-                <span class="font-medium">{{ proposal.pi_a.name }}</span>
+                <span class="font-medium">{{ proposal.name_a }}</span>
                 <span class="text-gray-400">&times;</span>
-                <span class="font-medium">{{ proposal.pi_b.name }}</span>
+                <span class="font-medium">{{ proposal.name_b }}</span>
                 <span class="text-gray-300">|</span>
                 {% set conf_meta = {
                     'high':       {'label': 'High',       'color': 'green'},
