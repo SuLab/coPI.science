@@ -38,6 +38,16 @@ router = APIRouter()
 templates = Jinja2Templates(directory="templates")
 
 
+def _extract_proposal(text: str) -> str:
+    """Return content inside <proposal>…</proposal> tags, or the full text if absent."""
+    import re
+    match = re.search(r"<proposal>(.*?)</proposal>", text or "", re.DOTALL)
+    return match.group(1).strip() if match else (text or "").strip()
+
+
+templates.env.filters["extract_proposal"] = _extract_proposal
+
+
 def _template_context(
     request: Request, current_user: User, active_admin: str = "", **kwargs
 ) -> dict:
@@ -675,7 +685,7 @@ async def admin_discussions(
                 "agent_b": d.agent_b,
                 "outcome": d.outcome,
                 "date": d.decided_at.strftime("%Y-%m-%d %H:%M UTC"),
-                "summary": d.summary_text.strip(),
+                "summary": _extract_proposal(d.summary_text),
             })
 
         if export == "html":
@@ -1277,6 +1287,36 @@ async def admin_waitlist_mark_contacted(
 # Matchmaker
 # ---------------------------------------------------------------------------
 
+async def _get_eligible_matchmaker_users(db: AsyncSession) -> list:
+    """Users eligible for matchmaker: have a DB profile OR a disk profile via AgentRegistry."""
+    from pathlib import Path
+
+    # Users with a complete DB profile
+    db_result = await db.execute(
+        select(User)
+        .join(ResearcherProfile, ResearcherProfile.user_id == User.id)
+        .where(ResearcherProfile.research_summary.isnot(None))
+    )
+    db_users = {u.id: u for u in db_result.scalars().all()}
+
+    # Users linked to an agent that has a disk profile
+    agent_result = await db.execute(
+        select(AgentRegistry).where(AgentRegistry.user_id.isnot(None))
+    )
+    for agent_reg in agent_result.scalars().all():
+        if agent_reg.user_id in db_users:
+            continue
+        if Path(f"profiles/public/{agent_reg.agent_id}.md").exists():
+            user_result = await db.execute(
+                select(User).where(User.id == agent_reg.user_id)
+            )
+            user = user_result.scalar_one_or_none()
+            if user:
+                db_users[user.id] = user
+
+    return sorted(db_users.values(), key=lambda u: u.name)
+
+
 @router.get("/matchmaker", response_class=HTMLResponse)
 async def admin_matchmaker(
     request: Request,
@@ -1287,14 +1327,7 @@ async def admin_matchmaker(
     current_user: User = Depends(get_admin_user),
 ):
     """Matchmaker tab — generate and view admin-initiated collaboration proposals."""
-    # All users with a complete profile for the dropdowns
-    profiles_result = await db.execute(
-        select(User)
-        .join(ResearcherProfile, ResearcherProfile.user_id == User.id)
-        .where(ResearcherProfile.research_summary.isnot(None))
-        .order_by(User.name)
-    )
-    eligible_users = profiles_result.scalars().all()
+    eligible_users = await _get_eligible_matchmaker_users(db)
 
     # Fetch proposals with PI relationships eager-loaded
     proposals_query = (
@@ -1325,7 +1358,7 @@ async def admin_matchmaker(
                 "title": p.title or "",
                 "confidence": p.confidence or "",
                 "date": p.generated_at.strftime("%Y-%m-%d %H:%M UTC"),
-                "proposal_md": (p.proposal_md or "").strip(),
+                "proposal_md": _extract_proposal(p.proposal_md or ""),
             }
             for p in proposals
         ]
@@ -1385,13 +1418,7 @@ async def admin_matchmaker_generate(
     from src.services.llm import generate_matchmaker_proposal
 
     async def _render_error(msg: str):
-        profiles_result = await db.execute(
-            select(User)
-            .join(ResearcherProfile, ResearcherProfile.user_id == User.id)
-            .where(ResearcherProfile.research_summary.isnot(None))
-            .order_by(User.name)
-        )
-        eligible_users = profiles_result.scalars().all()
+        eligible_users = await _get_eligible_matchmaker_users(db)
         proposals_result = await db.execute(
             select(MatchmakerProposal)
             .options(
@@ -1421,14 +1448,51 @@ async def admin_matchmaker_generate(
 
     # Load profiles and recent publications for both PIs
     async def _load_user_data(user_id: uuid.UUID):
+        from pathlib import Path
         user_result = await db.execute(
             select(User)
             .where(User.id == user_id)
             .options(selectinload(User.profile))
         )
         user = user_result.scalar_one_or_none()
-        if not user or not user.profile or not user.profile.research_summary:
-            return None, None, None
+        if not user:
+            return None, None, None, None
+
+        # DB profile takes precedence; fall back to disk profile for seeded agents
+        profile_text = None
+        private_text = ""
+        if user.profile and user.profile.research_summary:
+            profile = user.profile
+            parts = [profile.research_summary]
+            if profile.techniques:
+                parts.append("**Techniques:** " + ", ".join(profile.techniques))
+            if profile.experimental_models:
+                parts.append("**Model systems:** " + ", ".join(profile.experimental_models))
+            if profile.disease_areas:
+                parts.append("**Disease areas:** " + ", ".join(profile.disease_areas))
+            if profile.key_targets:
+                parts.append("**Key targets:** " + ", ".join(profile.key_targets))
+            if profile.grant_titles:
+                parts.append("**Active grants:** " + "; ".join(profile.grant_titles))
+            profile_text = "\n\n".join(parts)
+            private_text = profile.private_profile_md or ""
+        else:
+            # Try disk profile via AgentRegistry
+            agent_result = await db.execute(
+                select(AgentRegistry).where(AgentRegistry.user_id == user_id)
+            )
+            agent_reg = agent_result.scalar_one_or_none()
+            if agent_reg:
+                pub_path = Path(f"profiles/public/{agent_reg.agent_id}.md")
+                priv_path = Path(f"profiles/private/{agent_reg.agent_id}.md")
+                if pub_path.exists():
+                    profile_text = pub_path.read_text(encoding="utf-8").strip()
+                if priv_path.exists():
+                    private_text = priv_path.read_text(encoding="utf-8").strip()
+
+        if not profile_text:
+            return None, None, None, None
+
         pubs_result = await db.execute(
             select(Publication)
             .where(Publication.user_id == user_id)
@@ -1436,54 +1500,41 @@ async def admin_matchmaker_generate(
             .limit(20)
         )
         pubs = pubs_result.scalars().all()
-        return user, user.profile, pubs
 
-    user_a, profile_a, pubs_a = await _load_user_data(pi_a_id)
-    user_b, profile_b, pubs_b = await _load_user_data(pi_b_id)
+        def _format_pubs(pubs) -> str:
+            if not pubs:
+                return "(none)"
+            lines = []
+            for p in pubs:
+                pos = f" [{p.author_position}]" if p.author_position else ""
+                journal = f" — {p.journal}" if p.journal else ""
+                year = f" ({p.year})" if p.year else ""
+                pmid = f" PMID:{p.pmid}" if p.pmid else ""
+                lines.append(f"- {p.title}{pos}{year}{journal}{pmid}")
+            return "\n".join(lines)
 
-    if not profile_a:
+        return user, profile_text, private_text, _format_pubs(pubs)
+
+    user_a, profile_text_a, private_a, pubs_text_a = await _load_user_data(pi_a_id)
+    user_b, profile_text_b, private_b, pubs_text_b = await _load_user_data(pi_b_id)
+
+    if not profile_text_a:
         return await _render_error("PI A does not have a complete profile yet.")
-    if not profile_b:
+    if not profile_text_b:
         return await _render_error("PI B does not have a complete profile yet.")
-
-    def _format_profile(profile: ResearcherProfile) -> str:
-        parts = [profile.research_summary or ""]
-        if profile.techniques:
-            parts.append("**Techniques:** " + ", ".join(profile.techniques))
-        if profile.experimental_models:
-            parts.append("**Model systems:** " + ", ".join(profile.experimental_models))
-        if profile.disease_areas:
-            parts.append("**Disease areas:** " + ", ".join(profile.disease_areas))
-        if profile.key_targets:
-            parts.append("**Key targets:** " + ", ".join(profile.key_targets))
-        if profile.grant_titles:
-            parts.append("**Active grants:** " + "; ".join(profile.grant_titles))
-        return "\n\n".join(parts)
-
-    def _format_pubs(pubs) -> str:
-        if not pubs:
-            return "(none)"
-        lines = []
-        for p in pubs:
-            pos = f" [{p.author_position}]" if p.author_position else ""
-            journal = f" — {p.journal}" if p.journal else ""
-            year = f" ({p.year})" if p.year else ""
-            pmid = f" PMID:{p.pmid}" if p.pmid else ""
-            lines.append(f"- {p.title}{pos}{year}{journal}{pmid}")
-        return "\n".join(lines)
 
     settings = get_settings()
 
     try:
         result = await generate_matchmaker_proposal(
             name_a=user_a.name,
-            public_profile_a=_format_profile(profile_a),
-            private_profile_a=profile_a.private_profile_md or "",
-            publications_a=_format_pubs(pubs_a),
+            public_profile_a=profile_text_a,
+            private_profile_a=private_a,
+            publications_a=pubs_text_a,
             name_b=user_b.name,
-            public_profile_b=_format_profile(profile_b),
-            private_profile_b=profile_b.private_profile_md or "",
-            publications_b=_format_pubs(pubs_b),
+            public_profile_b=profile_text_b,
+            private_profile_b=private_b,
+            publications_b=pubs_text_b,
             model=settings.llm_agent_model_opus,
         )
     except Exception as exc:

@@ -90,13 +90,14 @@ Produce ONE collaboration proposal between PI A and PI B using the output format
 - Do NOT quote or reveal any private instruction text verbatim in the output.
 - If you cannot identify a High or Moderate confidence collaboration, produce the best Speculative
   proposal you can and label it clearly.
-- Wrap your entire proposal (and only the proposal) in `<proposal>` tags.
+- Wrap your entire proposal (and only the proposal) in `<proposal>` tags. 
+- Any extra header information (e.g. Slack memos) can be place before the `<proposal>` tags but do not include any extra text or description about the generation (e.g "Let me formulate the most compelling collaboration...")
 
 ## Output Format
 
 <proposal>
 # [Collaboration Title — specific, not generic]
-
+**[PI_A] + [PI_B]** [Timestamp]
 **Confidence:** High | Moderate | Speculative
 
 ## Scientific Rationale
@@ -118,4 +119,7 @@ Explains why both labs are essential to execute it.]
 
 ## Open Questions / Next Steps
 - [Bullet list of what would need to be confirmed before committing effort]
+
+## Effort / Resources
+- [Estimate low/med/high for each PI in terms of time, people, and resources required to acheive the goals of the proposal] 
 </proposal>

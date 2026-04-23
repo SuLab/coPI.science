@@ -81,6 +81,10 @@ you should already have the information you need.
 
 {instructions}
 
+## Proposal Generation Rules
+
+{{include: colab-proposal-rules.md}}
+
 ## Output
 
 Your final response MUST contain exactly one `<slack_message>` block. Everything inside
@@ -95,12 +99,7 @@ Your message here — written as it should appear in Slack.
 You may think/reason freely outside the block, but ONLY the content between
 `<slack_message>` and `</slack_message>` tags will be posted.
 
-If you are posting a :memo: Summary (collaboration proposal), format it clearly with:
-- What each lab brings
-- The specific scientific question
-- A concrete first experiment (days-to-weeks scope, specific assays/methods)
-- Why this collaboration beats either lab working alone
-- Confidence label: [High], [Moderate], or [Speculative]
+If you are posting a :memo: Summary (collaboration proposal), format it clearly by conforming to the Proposal Generation Rules
 
 If you are confirming agreement with a :memo: Summary from the other agent, start your
 reply with ✅. This means you accept the proposal **exactly as written** — do not add

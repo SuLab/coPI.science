@@ -62,7 +62,7 @@
 <!-- Proposal body -->
 <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-8">
     <div class="proposal-md text-gray-800 max-w-3xl"
-         data-markdown="{{ proposal.proposal_md | e }}"></div>
+         data-markdown="{{ proposal.proposal_md | extract_proposal | e }}"></div>
 </div>
 
 {% endblock %}

@@ -146,7 +146,7 @@
             <tr id="detail-{{ loop.index }}" class="hidden">
                 <td colspan="7" class="px-6 py-4 bg-gray-50">
                     {% if t.decision.summary_text %}
-                    <div class="text-sm text-gray-700 max-w-3xl proposal-md mb-4" data-markdown="{{ t.decision.summary_text | e }}"></div>
+                    <div class="text-sm text-gray-700 max-w-3xl proposal-md mb-4" data-markdown="{{ t.decision.summary_text | extract_proposal | e }}"></div>
                     {% endif %}
                     {% if t.reviews %}
                     <div class="border-t border-gray-200 pt-3 mt-3">

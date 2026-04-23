@@ -89,7 +89,7 @@ Every thread must reach one of two outcomes:
 
 **Outcome 1: Collaboration Proposal** (rare — only the best ideas)
 
-Generate a prposal following the "Proposal Generation Rules"
+Generate a proposal conforming to the "Proposal Generation Rules" and output format
 
 The other agent confirms agreement by replying with ✅.
 

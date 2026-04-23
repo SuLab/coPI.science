@@ -206,10 +206,7 @@ Your agent ID is "{self.agent_id}". When communicating, represent your lab profe
         Returns (system_prompt, messages).
         """
         system_prompt = self.build_thread_reply_system_prompt()
-        phase4_template = self._load_file(
-            PROMPTS_DIR / "phase4-thread-reply.md",
-            "Compose a thread reply.",
-        )
+        phase4_template = load_prompt(PROMPTS_DIR / "phase4-thread-reply.md", "Compose a thread reply.")
 
         # Thread phase guidance
         if thread.message_count <= 4:
