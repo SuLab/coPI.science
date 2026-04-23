@@ -1604,3 +1604,27 @@ async def admin_matchmaker_delete(
         await db.delete(proposal)
         await db.commit()
     return RedirectResponse(url="/admin/matchmaker", status_code=302)
+
+
+@router.post("/matchmaker/clear")
+async def admin_matchmaker_clear(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_admin_user),
+):
+    """Delete all matchmaker proposals from the database (does not affect Slack)."""
+    from sqlalchemy import delete as sql_delete
+    await db.execute(sql_delete(MatchmakerProposal))
+    await db.commit()
+    return RedirectResponse(url="/admin/matchmaker", status_code=302)
+
+
+@router.post("/discussions/clear")
+async def admin_discussions_clear(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_admin_user),
+):
+    """Delete all thread decisions (and cascaded proposal reviews) from the database (does not affect Slack)."""
+    from sqlalchemy import delete as sql_delete
+    await db.execute(sql_delete(ThreadDecision))
+    await db.commit()
+    return RedirectResponse(url="/admin/discussions", status_code=302)
