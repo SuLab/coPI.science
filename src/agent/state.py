@@ -60,5 +60,5 @@ class AgentState:
 
     # Phase 5 throttling (state-change gate + skip backoff)
     consecutive_phase5_skips: int = 0
-    last_phase5_action_time: float = 0.0  # last time Phase 5 produced a real post
+    last_phase5_action_time: float = 0.0  # last time Phase 5 was evaluated (gates the spontaneous-post timer)
     has_pi_directive: bool = False  # set when PI sends a message, cleared after Phase 5

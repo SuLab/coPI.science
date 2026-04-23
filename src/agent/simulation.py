@@ -1181,6 +1181,12 @@ class SimulationEngine:
         settings = get_settings()
         phase4_thread_ids = phase4_thread_ids or set()
 
+        # Stamp the spontaneous-post timer up front: consulting Phase 5 consumes
+        # the opportunity regardless of whether we end up posting, skipping, or
+        # bailing out early. Without this, a "skip" leaves the timer stale and
+        # every subsequent turn re-fires Phase 5, burning an LLM call per turn.
+        agent.state.last_phase5_action_time = time.time()
+
         # Daily post cap
         today_posts = self._count_today_posts(agent)
         if today_posts >= settings.daily_post_cap:
