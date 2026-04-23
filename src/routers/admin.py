@@ -1282,6 +1282,7 @@ async def admin_matchmaker(
     request: Request,
     pi_filter: list[uuid.UUID] = Query(default=[]),
     confidence_filter: str | None = None,
+    export: str = "",
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_admin_user),
 ):
@@ -1315,6 +1316,46 @@ async def admin_matchmaker(
         )
     proposals_result = await db.execute(proposals_query)
     proposals = proposals_result.scalars().all()
+
+    if export:
+        export_rows = [
+            {
+                "name_a": p.name_a,
+                "name_b": p.name_b,
+                "title": p.title or "",
+                "confidence": p.confidence or "",
+                "date": p.generated_at.strftime("%Y-%m-%d %H:%M UTC"),
+                "proposal_md": (p.proposal_md or "").strip(),
+            }
+            for p in proposals
+        ]
+
+        if export == "html":
+            return templates.TemplateResponse(
+                request,
+                "admin/matchmaker_export.html",
+                {"request": request, "proposals": export_rows},
+                headers={"Content-Disposition": "attachment; filename=matchmaker_proposals.html"},
+            )
+
+        from fastapi.responses import PlainTextResponse
+        lines = []
+        for p in export_rows:
+            lines.append(f"{'=' * 72}")
+            lines.append(f"PI A: {p['name_a']}")
+            lines.append(f"PI B: {p['name_b']}")
+            lines.append(f"Title: {p['title']}")
+            lines.append(f"Confidence: {p['confidence'].capitalize()}")
+            lines.append(f"Generated: {p['date']}")
+            lines.append("")
+            lines.append(p["proposal_md"])
+            lines.append("")
+        if not lines:
+            lines.append("No proposals found with current filters.")
+        return PlainTextResponse(
+            "\n".join(lines),
+            headers={"Content-Disposition": "attachment; filename=matchmaker_proposals.txt"},
+        )
 
     return templates.TemplateResponse(
         request,

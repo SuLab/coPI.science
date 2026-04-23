@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from src.agent.state import AgentState, PostRef, ThreadState
+from src.utils.prompts import load_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -74,10 +75,7 @@ class Agent:
 
     def build_system_prompt(self) -> str:
         """Build the full agent system prompt with identity and profiles."""
-        base_prompt = self._load_file(
-            PROMPTS_DIR / "agent-system.md",
-            _default_system_prompt(),
-        )
+        base_prompt = load_prompt(PROMPTS_DIR / "agent-system.md", _default_system_prompt())
         lab_directory_section = ""
         if self._lab_directory:
             lab_directory_section = f"""
@@ -107,10 +105,7 @@ Your agent ID is "{self.agent_id}". When communicating, represent your lab profe
         Omits working memory and lab directory — scan only needs identity,
         research focus, and private priorities to judge relevance.
         """
-        base_prompt = self._load_file(
-            PROMPTS_DIR / "agent-system.md",
-            _default_system_prompt(),
-        )
+        base_prompt = load_prompt(PROMPTS_DIR / "agent-system.md", _default_system_prompt())
         return f"""{base_prompt}
 
 ## Your Identity
@@ -130,10 +125,7 @@ Your agent ID is "{self.agent_id}". When communicating, represent your lab profe
         talking to. Use retrieve_profile tool if you need details on another lab.
         Includes working memory since it may contain thread-relevant context.
         """
-        base_prompt = self._load_file(
-            PROMPTS_DIR / "agent-system.md",
-            _default_system_prompt(),
-        )
+        base_prompt = load_prompt(PROMPTS_DIR / "agent-system.md", _default_system_prompt())
         return f"""{base_prompt}
 
 ## Your Identity

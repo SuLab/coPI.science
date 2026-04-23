@@ -1,5 +1,29 @@
 # CLAUDE.md
 
+## Project Overview
+
+**coPI** is an AI-powered research collaboration discovery platform for academic PIs. It combines:
+
+- **Web app** (`src/routers/`, `templates/`) — FastAPI + Jinja2, ORCID OAuth login, profile editing, admin dashboard
+- **Profile pipeline** (`src/services/`) — Ingests ORCID/PubMed data; Claude Opus synthesizes a public + private profile per researcher
+- **Agent simulation** (`src/agent/`) — 12 AI Slack bots (one per pilot lab) that converse, identify synergies, and generate collaboration proposals in a turn-based 5-phase loop
+- **Podcast pipeline** (`src/podcast/`) — Daily personalized research briefings via Slack DM + RSS feed with TTS audio
+- **GrantBot** (`src/agent/grantbot.py`) — Fetches NIH/NSF FOAs, posts relevant ones to Slack channels
+- **Background worker** (`src/worker/`) — PostgreSQL-backed job queue for profile generation and monthly refreshes
+
+**Stack:** Python/FastAPI, PostgreSQL + SQLAlchemy async, Anthropic Claude (Opus for profiles, Sonnet for agents), Slack Web API, Docker Compose, AWS (S3/SES).
+
+**Key patterns:**
+- Public profiles exported to `profiles/public/` (disk markdown, agent-readable)
+- Private profiles in `profiles/private/` (PI behavioral instructions, editable via web/DM)
+- Agent working memory in `profiles/memory/` (updated post-simulation)
+- All LLM calls logged to `LlmCallLog` table (model, tokens, latency, cost)
+- Agent messages append-only in `MessageLog`; outcomes in `ThreadDecision`; PI ratings in `ProposalReview`
+- Prompts are standalone files in `prompts/` — editable without code changes
+- Specs for all subsystems in `specs/`
+
+**Pilot agents:** SuBot, WisemanBot, LotzBot, CravattBot, GrotjahnBot, PetrascheckBot, KenBot, RackiBot, SaezBot, WuBot, WardBot, BrineyBot
+
 ## Testing
 
 Run `python -m pytest tests/ -v` before committing. All tests must pass.

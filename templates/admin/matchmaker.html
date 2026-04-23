@@ -81,6 +81,10 @@
         </select>
         <button type="submit"
                 class="px-3 py-1.5 bg-indigo-600 text-white text-sm rounded-md hover:bg-indigo-700">Filter</button>
+        <button type="submit" name="export" value="true"
+                class="px-3 py-1.5 bg-gray-600 text-white text-sm rounded-md hover:bg-gray-700">Export TXT</button>
+        <button type="submit" name="export" value="html"
+                class="px-3 py-1.5 bg-gray-600 text-white text-sm rounded-md hover:bg-gray-700">Export HTML</button>
         {% if pi_filter or confidence_filter %}
         <a href="/admin/matchmaker" class="text-sm text-gray-500 hover:text-gray-700">Clear</a>
         {% endif %}

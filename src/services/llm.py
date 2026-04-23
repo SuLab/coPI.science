@@ -8,6 +8,7 @@ from typing import Any, Callable
 import anthropic
 
 from src.config import get_settings
+from src.utils.prompts import load_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -421,10 +422,8 @@ async def generate_matchmaker_proposal(
     model = model or settings.llm_agent_model_opus
 
     prompt_path = "prompts/matchmaker.md"
-    try:
-        with open(prompt_path) as f:
-            system_prompt = f.read()
-    except FileNotFoundError:
+    system_prompt = load_prompt(prompt_path)
+    if not system_prompt:
         raise RuntimeError(f"Matchmaker prompt not found at {prompt_path}")
 
     user_message = f"""## PI A: {name_a}
