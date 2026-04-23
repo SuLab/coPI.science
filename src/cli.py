@@ -208,6 +208,99 @@ def regenerate_profiles():
     _run(_regenerate())
 
 
+@app.command(name="seed-pilot-labs")
+def seed_pilot_labs(
+    agent_id: str = typer.Option(None, "--agent-id", help="Seed only this agent (e.g. 'su'). Omit for all."),
+    run_pipeline: bool = typer.Option(False, "--run-pipeline", help="Enqueue profile generation jobs"),
+):
+    """Create User + AgentRegistry rows for all pilot labs (or one), bypassing ORCID login."""
+    from src.agent.simulation import PILOT_LABS
+
+    labs = PILOT_LABS
+    if agent_id:
+        labs = [lab for lab in PILOT_LABS if lab["id"] == agent_id]
+        if not labs:
+            console.print(f"[red]Unknown agent-id '{agent_id}'. Valid IDs: {[l['id'] for l in PILOT_LABS]}[/red]")
+            raise typer.Exit(1)
+
+    async def _seed():
+        from datetime import datetime, timezone
+        from sqlalchemy import select
+        from src.models import AgentRegistry, Job, User
+
+        engine, factory = await _get_db()
+        async with factory() as db:
+            created_users = 0
+            created_agents = 0
+            skipped = 0
+
+            for lab in labs:
+                synthetic_orcid = f"synthetic:{lab['id']}"
+
+                # --- User ---
+                result = await db.execute(select(User).where(User.orcid == synthetic_orcid))
+                user = result.scalar_one_or_none()
+
+                if user:
+                    console.print(f"[yellow]User already exists for {lab['pi']} ({synthetic_orcid})[/yellow]")
+                else:
+                    user = User(
+                        orcid=synthetic_orcid,
+                        name=lab["pi"],
+                        access_status="allowed",
+                        onboarding_complete=True,
+                    )
+                    db.add(user)
+                    await db.flush()
+                    created_users += 1
+                    console.print(f"[green]Created user: {lab['pi']} ({synthetic_orcid})[/green]")
+
+                # --- AgentRegistry ---
+                result = await db.execute(
+                    select(AgentRegistry).where(AgentRegistry.agent_id == lab["id"])
+                )
+                agent_reg = result.scalar_one_or_none()
+
+                if agent_reg:
+                    if agent_reg.user_id is None:
+                        agent_reg.user_id = user.id
+                        console.print(f"[yellow]{lab['name']} already exists — linked to user[/yellow]")
+                    else:
+                        console.print(f"[yellow]{lab['name']} already exists — skipping[/yellow]")
+                    skipped += 1
+                else:
+                    agent_reg = AgentRegistry(
+                        agent_id=lab["id"],
+                        bot_name=lab["name"],
+                        pi_name=lab["pi"],
+                        user_id=user.id,
+                        status="active",
+                        approved_at=datetime.now(timezone.utc),
+                    )
+                    db.add(agent_reg)
+                    created_agents += 1
+                    console.print(f"[green]Created agent: {lab['name']} (status=active)[/green]")
+
+                # --- Optional profile job ---
+                if run_pipeline:
+                    job = Job(
+                        type="generate_profile",
+                        user_id=user.id,
+                        payload={"user_id": str(user.id), "orcid": synthetic_orcid},
+                    )
+                    db.add(job)
+                    console.print(f"  [dim]Enqueued profile generation for {lab['pi']}[/dim]")
+
+            await db.commit()
+            console.print(
+                f"\n[bold green]Done.[/bold green] "
+                f"Created {created_users} user(s), {created_agents} agent(s), skipped {skipped}."
+            )
+        await engine.dispose()
+
+    _run(_seed())
+
+
 @app.command(name="backfill-profile-revisions")
 def backfill_profile_revisions():
     """Create initial ProfileRevision rows from existing profile files on disk."""
