@@ -203,7 +203,14 @@ class SimulationEngine:
         )
 
     def _count_today_posts(self, agent: Agent) -> int:
-        """Count top-level posts by this agent in the current Pacific time day."""
+        """Count top-level posts by this agent in public channels, in the current Pacific time day.
+
+        collab_private channels are flat (every refinement reply is a top-level
+        post) and also host PI-initiated handover messages under the bot's
+        token. Both are legitimate per the 2-party private-channel design, so
+        they must not consume the spam-prevention cap that's scoped to public
+        new-conversation posts.
+        """
         from zoneinfo import ZoneInfo
         pacific = ZoneInfo("America/Los_Angeles")
         today_start = datetime.now(pacific).replace(
@@ -212,6 +219,7 @@ class SimulationEngine:
         return sum(
             1 for e in self.message_log.get_agent_top_level_posts(agent.agent_id, limit=100)
             if e.posted_at >= today_start
+            and self._channel_visibility.get(e.channel) != VISIBILITY_COLLAB_PRIVATE
         )
 
     async def start(self) -> None:
@@ -1861,8 +1869,8 @@ class SimulationEngine:
         if not threads_to_poll:
             return
 
-        client = self._next_poll_client()
-        if not client:
+        default_client = self._next_poll_client()
+        if not default_client:
             return
 
         default_cursor = str(self._start_time.timestamp()) if self._start_time else "0"
@@ -1870,6 +1878,17 @@ class SimulationEngine:
         for thread_id, channel_name, agent_id in threads_to_poll:
             ch_id = self._channel_id_map.get(channel_name)
             if not ch_id:
+                continue
+
+            # Route per-channel: collab_private channels need a bot that was
+            # invited. A round-robin client will hit channel_not_found on any
+            # private channel it isn't a member of.
+            client = self._client_for_channel(ch_id, default_client)
+            if client is None:
+                logger.debug(
+                    "Skipping proposal-thread poll for private channel #%s — no connected member bot",
+                    channel_name,
+                )
                 continue
 
             cursor_key = f"proposal_thread:{thread_id}"
