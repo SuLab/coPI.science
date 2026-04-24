@@ -2107,16 +2107,17 @@ class SimulationEngine:
 
     async def _backfill_foa_cache(self) -> None:
         """Ensure locally cached FOA details exist for all previously posted opportunities."""
-        from src.agent.foa_cache import backfill_cache
+        from sqlalchemy import select as sa_select
 
-        posted_path = Path("data/grantbot_posted.json")
-        if not posted_path.exists():
+        from src.agent.foa_cache import backfill_cache
+        from src.models import GrantbotPostedFoa
+
+        if not self.session_factory:
             return
         try:
-            posted_data = json.loads(posted_path.read_text(encoding="utf-8"))
-            posted_numbers = [
-                item.get("number", "") for item in posted_data if item.get("number")
-            ]
+            async with self.session_factory() as db:
+                result = await db.execute(sa_select(GrantbotPostedFoa.foa_number))
+                posted_numbers = [n for n in result.scalars().all() if n]
             if posted_numbers:
                 count = await backfill_cache(posted_numbers)
                 if count:

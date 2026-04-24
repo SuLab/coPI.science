@@ -17,6 +17,7 @@ from src.models.agent_activity import (
 from src.models.agent_registry import AgentRegistry, ProposalReview
 from src.models.delegate import AgentDelegate, DelegateInvitation
 from src.models.email_notification import EmailEngagementTracker, EmailNotification
+from src.models.grantbot_posted import GrantbotPostedFoa
 from src.models.job import Job
 from src.models.profile_revision import ProfileRevision
 from src.models.profile import ResearcherProfile
@@ -45,4 +46,5 @@ __all__ = [
     "ProfileRevision",
     "AccessAllowlist",
     "WaitlistSignup",
+    "GrantbotPostedFoa",
 ]

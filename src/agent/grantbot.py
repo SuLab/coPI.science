@@ -19,8 +19,12 @@ from pathlib import Path
 from typing import Any
 
 import typer
+from sqlalchemy import delete, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from src.config import get_settings
+from src.models import GrantbotPostedFoa
 from src.services.grants import fetch_opportunity_detail, list_posted_opportunities
 
 logging.basicConfig(
@@ -30,7 +34,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 PROFILES_DIR = Path("profiles/public")
-POSTED_LOG = Path("data/grantbot_posted.json")
 
 app = typer.Typer(invoke_without_command=True)
 
@@ -120,21 +123,42 @@ def _build_search_queries(profiles: dict[str, dict]) -> list[str]:
     return queries
 
 
-def _load_posted_log() -> set[str]:
-    """Load the set of already-posted opportunity numbers."""
-    if POSTED_LOG.exists():
-        data = json.loads(POSTED_LOG.read_text(encoding="utf-8"))
-        return set(data.get("posted", []))
-    return set()
+async def _load_posted_numbers(session: AsyncSession) -> set[str]:
+    """Return the set of already-posted FOA numbers from Postgres."""
+    result = await session.execute(select(GrantbotPostedFoa.foa_number))
+    return set(result.scalars().all())
 
 
-def _save_posted_log(posted: set[str]) -> None:
-    """Save the set of posted opportunity numbers."""
-    POSTED_LOG.parent.mkdir(parents=True, exist_ok=True)
-    POSTED_LOG.write_text(
-        json.dumps({"posted": sorted(posted), "updated_at": datetime.now(timezone.utc).isoformat()}),
-        encoding="utf-8",
+async def _claim_foa(
+    session: AsyncSession,
+    foa_number: str,
+    channel: str | None,
+    title: str | None,
+) -> bool:
+    """Attempt to reserve an FOA for posting.
+
+    Uses INSERT ... ON CONFLICT DO NOTHING so that concurrent GrantBot
+    instances cannot both claim and post the same FOA — whoever's insert
+    lands first wins. Commits so other instances see the claim immediately.
+
+    Returns True if this caller owns the claim (proceed to post), else False.
+    """
+    stmt = (
+        pg_insert(GrantbotPostedFoa)
+        .values(foa_number=foa_number, channel=channel, title=title)
+        .on_conflict_do_nothing(index_elements=["foa_number"])
     )
+    result = await session.execute(stmt)
+    await session.commit()
+    return result.rowcount == 1
+
+
+async def _release_foa(session: AsyncSession, foa_number: str) -> None:
+    """Undo a claim when the Slack post itself failed, so a later run can retry."""
+    await session.execute(
+        delete(GrantbotPostedFoa).where(GrantbotPostedFoa.foa_number == foa_number)
+    )
+    await session.commit()
 
 
 async def _select_opportunities(
@@ -330,9 +354,34 @@ async def run_grantbot(
     Returns list of posted opportunities.
     """
     settings = get_settings()
+    engine = create_async_engine(settings.database_url)
+    session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
-    # 1. Load already-posted log
-    posted = _load_posted_log()
+    try:
+        async with session_factory() as session:
+            return await _run_grantbot_with_session(
+                session,
+                channel=channel,
+                dry_run=dry_run,
+                max_posts=max_posts,
+                max_per_channel=max_per_channel,
+            )
+    finally:
+        await engine.dispose()
+
+
+async def _run_grantbot_with_session(
+    session: AsyncSession,
+    channel: str,
+    dry_run: bool,
+    max_posts: int,
+    max_per_channel: int,
+) -> list[dict]:
+    settings = get_settings()
+
+    # 1. Load already-posted set (cheap pre-filter to save LLM cost).
+    #    Final duplicate check is the DB claim below, which is race-safe.
+    posted = await _load_posted_numbers(session)
     logger.info("Already posted %d opportunities", len(posted))
 
     # 2. Fetch all posted NIH/NSF opportunities from Grants.gov
@@ -349,12 +398,12 @@ async def run_grantbot(
         logger.info("No new opportunities to process")
         return []
 
-    # 5. Select: LLM reviews titles to pick broadly relevant biomedical opportunities
+    # 3. Select: LLM reviews titles to pick broadly relevant biomedical opportunities
     selected_nums = await _select_opportunities(all_opps)
     selected_opps = {num: all_opps[num] for num in selected_nums if num in all_opps}
     logger.info("Selected %d opportunities for posting", len(selected_opps))
 
-    # 6. Fetch details for selected opportunities
+    # 4. Fetch details for selected opportunities
     detailed_opps = []
     for num, opp in selected_opps.items():
         if opp.get("id"):
@@ -367,14 +416,14 @@ async def run_grantbot(
                 logger.debug("Detail fetch failed for %s: %s", num, exc)
         detailed_opps.append(opp)
 
-    # 6b. Cache FOA details locally for agent access
+    # 4b. Cache FOA details locally for agent access
     from src.agent.foa_cache import cache_foa
     for opp in detailed_opps:
         opp_num = opp.get("number", "")
         if opp_num:
             cache_foa(opp_num, opp)
 
-    # 7. Draft posts using LLM
+    # 5. Draft posts using LLM
     drafted: list[dict] = []
     for opp in detailed_opps:
         result = await _draft_post(opp)
@@ -396,8 +445,8 @@ async def run_grantbot(
 
     logger.info("Drafted %d posts, posting %d (max %d per channel)", len(drafted), len(to_post), max_per_channel)
 
-    # 7. Post to Slack (or dry-run)
-    posted_list = []
+    # 6. Post to Slack (or dry-run)
+    posted_list: list[dict] = []
     slack_client = None
 
     if not dry_run:
@@ -415,11 +464,7 @@ async def run_grantbot(
         opp_num = opp.get("number", "unknown")
         post_text = item.get("post_text", "")
         target_channel = item.get("channel", "funding-opportunities")
-
-        # Skip if already posted (guards against duplicate FOAs in a single run)
-        if opp_num in posted:
-            logger.info("Skipping duplicate FOA %s (already posted)", opp_num)
-            continue
+        title = opp.get("title")
 
         # Build the full post
         close_date = opp.get("close_date", "Not specified")
@@ -429,24 +474,35 @@ async def run_grantbot(
 
         if dry_run:
             logger.info("DRY RUN — would post to #%s:\n%s\n", target_channel, full_post)
-        elif slack_client:
-            try:
-                slack_client.chat_postMessage(channel=f"#{target_channel}", text=full_post)
-                logger.info("Posted opportunity %s to #%s", opp_num, target_channel)
-            except Exception as exc:
-                logger.error("Failed to post %s to #%s: %s", opp_num, target_channel, exc)
-                continue
+            posted_list.append({"number": opp_num, "title": title, "channel": target_channel})
+            continue
 
-        posted.add(opp_num)
+        # Race-safe claim: only one GrantBot instance (or run) can win the insert.
+        # If another instance already claimed this FOA, we skip without posting.
+        claimed = await _claim_foa(session, opp_num, target_channel, title)
+        if not claimed:
+            logger.info("Skipping FOA %s — already claimed by another run", opp_num)
+            continue
+
+        if not slack_client:
+            # No Slack client available (no token configured). Release the claim
+            # so a future run with credentials can post this FOA.
+            await _release_foa(session, opp_num)
+            continue
+
+        try:
+            slack_client.chat_postMessage(channel=f"#{target_channel}", text=full_post)
+            logger.info("Posted opportunity %s to #%s", opp_num, target_channel)
+        except Exception as exc:
+            logger.error("Failed to post %s to #%s: %s", opp_num, target_channel, exc)
+            await _release_foa(session, opp_num)
+            continue
+
         posted_list.append({
             "number": opp_num,
-            "title": opp.get("title"),
+            "title": title,
             "channel": target_channel,
         })
-
-    # 8. Save posted log (only if not dry run)
-    if not dry_run:
-        _save_posted_log(posted)
 
     logger.info("GrantBot run complete: %d opportunities posted", len(posted_list))
     return posted_list
