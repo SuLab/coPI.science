@@ -800,9 +800,13 @@ class SimulationEngine:
                         "[%s] Thread %s: proposal confirmed with ✅",
                         agent.agent_id, thread.thread_id,
                     )
-                    # Extract text starting from :memo: marker
-                    memo_idx = entry.content.find(":memo:")
-                    summary_text = entry.content[memo_idx:].strip() if memo_idx >= 0 else entry.content
+                    # Extract only the <proposal>…</proposal> block; fall back to :memo: slice
+                    proposal_match = re.search(r"<proposal>(.*?)</proposal>", entry.content, re.DOTALL)
+                    if proposal_match:
+                        summary_text = proposal_match.group(1).strip()
+                    else:
+                        memo_idx = entry.content.find(":memo:")
+                        summary_text = entry.content[memo_idx:].strip() if memo_idx >= 0 else entry.content
                     agent.state.pending_proposals = [
                         p for p in agent.state.pending_proposals
                         if p.thread_id != thread.thread_id
