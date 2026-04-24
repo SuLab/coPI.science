@@ -61,6 +61,23 @@ More internal notes."""
         result = _extract_slack_message(text)
         assert result == ""
 
+    def test_ignores_tag_mention_in_reasoning(self):
+        # LLM reasoning often mentions the tag name (e.g. quoted in backticks).
+        # The extractor must anchor on the real tag pair, not the mention.
+        text = (
+            "I need to think about what to post.\n\n"
+            "The instructions say my output is a single `<slack_message>` "
+            "block that gets posted as a reply.\n\n"
+            "So I'll write a substantive reply now.\n\n"
+            "<slack_message>\n"
+            "The actual message content.\n"
+            "</slack_message>"
+        )
+        result = _extract_slack_message(text)
+        assert result == "The actual message content."
+        assert "block that gets posted" not in result
+        assert "substantive reply" not in result
+
 
 # ---------------------------------------------------------------
 # _strip_llm_preamble
@@ -210,6 +227,23 @@ Actually I should skip this turn.
         assert data is not None
         # Empty or None message
         assert not msg
+
+    def test_ignores_tag_mention_in_reasoning(self, engine):
+        # If the LLM mentions `<slack_message>` in its reasoning, extraction
+        # must still anchor on the real tag pair, not the mention.
+        response = """```json
+{"action": "reply", "target_post_id": "123", "channel": "general", "post_type": "reply", "tagged_agent": null}
+```
+
+The instructions say my output is a single `<slack_message>` block that gets posted as a reply.
+
+<slack_message>
+The actual message.
+</slack_message>"""
+        data, msg = engine._parse_phase5_response(response)
+        assert data["action"] == "reply"
+        assert msg == "The actual message."
+        assert "block that gets posted" not in msg
 
     def test_channel_name_preserved(self, engine):
         response = """```json

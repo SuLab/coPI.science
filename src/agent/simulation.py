@@ -1563,12 +1563,16 @@ class SimulationEngine:
         if not data:
             return None, None
 
-        # Extract message from <slack_message> tags (required — no raw-text fallback)
-        msg_match = re.search(
-            r"<slack_message>\s*(.*?)\s*</slack_message>", response, re.DOTALL
-        )
-        if msg_match:
-            return data, msg_match.group(1).strip()
+        # Extract message from <slack_message> tags (required — no raw-text fallback).
+        # Anchor on the LAST tag pair so a prior mention of the tag name in the
+        # LLM's reasoning (e.g. "my output is a single `<slack_message>` block")
+        # does not pull reasoning into the captured body.
+        last_close = response.rfind("</slack_message>")
+        if last_close >= 0:
+            last_open = response.rfind("<slack_message>", 0, last_close)
+            if last_open >= 0:
+                body = response[last_open + len("<slack_message>"):last_close].strip()
+                return data, body
 
         return data, None
 
@@ -2758,10 +2762,18 @@ Keep it concise — under 300 words.""",
 
 
 def _extract_slack_message(text: str) -> str:
-    """Extract the message from <slack_message> tags if present, else fall back to preamble stripping."""
-    match = re.search(r"<slack_message>\s*(.*?)\s*</slack_message>", text, re.DOTALL)
-    if match:
-        return match.group(1).strip()
+    """Extract the message from <slack_message> tags if present, else fall back to preamble stripping.
+
+    Uses the LAST opening tag before the LAST closing tag so that a prior
+    mention of ``<slack_message>`` inside the LLM's reasoning (e.g.
+    "my output is a single `<slack_message>` block") does not anchor the
+    match and pull preceding reasoning into the captured body.
+    """
+    last_close = text.rfind("</slack_message>")
+    if last_close >= 0:
+        last_open = text.rfind("<slack_message>", 0, last_close)
+        if last_open >= 0:
+            return text[last_open + len("<slack_message>"):last_close].strip()
     # Fallback: strip preamble heuristically
     return _strip_llm_preamble(text)
 
