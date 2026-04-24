@@ -34,6 +34,25 @@ class BotNotInvitedToPrivateChannel(Exception):
         )
 
 
+class ThreadNotFound(Exception):
+    """Raised when a thread_ts points at a deleted/missing parent message.
+
+    Callers must evict the thread_ts from any in-memory state (active_threads,
+    pending_proposals, interesting_posts) when this fires, otherwise they will
+    burn API calls re-polling a grave or — worse — post "replies" that Slack
+    silently converts to top-level posts because the parent is gone.
+    """
+
+    def __init__(self, channel_id: str, thread_ts: str, slack_error: str | None = None):
+        self.channel_id = channel_id
+        self.thread_ts = thread_ts
+        self.slack_error = slack_error
+        super().__init__(
+            f"thread {thread_ts} not found in channel {channel_id}"
+            + (f" (slack_error={slack_error})" if slack_error else "")
+        )
+
+
 def markdown_to_mrkdwn(text: str) -> str:
     """Convert standard Markdown to Slack mrkdwn dialect.
 
@@ -216,7 +235,10 @@ class AgentSlackClient:
             # First message is always the parent — skip if we only want replies
             return messages
         except SlackApiError as exc:
-            if exc.response.get("error") == "channel_not_found" and self._is_private_channel(channel_id):
+            err = exc.response.get("error")
+            if err == "thread_not_found":
+                raise ThreadNotFound(channel_id, thread_ts, err) from exc
+            if err == "channel_not_found" and self._is_private_channel(channel_id):
                 raise BotNotInvitedToPrivateChannel(self.agent_id, channel_id, "channel_not_found") from exc
             logger.error("[%s] Failed to get thread replies: %s", self.agent_id, exc)
             return []
@@ -293,6 +315,9 @@ class AgentSlackClient:
                     break
             return all_messages
         except SlackApiError as exc:
+            err = exc.response.get("error")
+            if err == "thread_not_found":
+                raise ThreadNotFound(channel_id, thread_ts, err) from exc
             logger.error("[%s] Failed to get thread replies: %s", self.agent_id, exc)
             return all_messages
 
@@ -352,10 +377,35 @@ class AgentSlackClient:
             if thread_ts:
                 kwargs["thread_ts"] = thread_ts
             result = self._call_with_retry(self._client.chat_postMessage, **kwargs)
-            return result.data
+            data = result.data
+
+            # Detect the silent orphan case: Slack accepts chat.postMessage with
+            # thread_ts pointing at a deleted parent but drops the thread_ts and
+            # creates a top-level message. Left alone, each deleted-root
+            # produces a cascade of top-level "replies" that other agents then
+            # pick up as fresh roots. Delete our orphan and signal the caller
+            # to evict the dead thread_ts from state.
+            if thread_ts:
+                posted_thread_ts = (data.get("message") or {}).get("thread_ts")
+                if posted_thread_ts != thread_ts:
+                    orphan_ts = data.get("ts")
+                    if orphan_ts:
+                        try:
+                            self._client.chat_delete(channel=channel_id, ts=orphan_ts)
+                        except SlackApiError as delete_exc:
+                            logger.warning(
+                                "[%s] Failed to delete orphan post %s in #%s: %s",
+                                self.agent_id, orphan_ts, channel, delete_exc,
+                            )
+                    raise ThreadNotFound(channel_id, thread_ts, "silent_thread_drop")
+
+            return data
         except SlackApiError as exc:
-            if exc.response.get("error") in ("channel_not_found", "not_in_channel") and self._is_private_channel(channel_id):
-                raise BotNotInvitedToPrivateChannel(self.agent_id, channel_id, exc.response.get("error")) from exc
+            err = exc.response.get("error")
+            if err == "thread_not_found" and thread_ts:
+                raise ThreadNotFound(channel_id, thread_ts, err) from exc
+            if err in ("channel_not_found", "not_in_channel") and self._is_private_channel(channel_id):
+                raise BotNotInvitedToPrivateChannel(self.agent_id, channel_id, err) from exc
             logger.error("[%s] Failed to post to #%s: %s", self.agent_id, channel, exc)
             return None
 

@@ -22,6 +22,7 @@ from src.agent.funding_rules import (
     summarize_funding_thread,
 )
 from src.agent.message_log import LogEntry, MessageLog, is_funding_post
+from src.agent.slack_client import ThreadNotFound
 from src.agent.state import PostRef, ProposalRef, ThreadState
 from src.agent.tools import TOOL_DEFINITIONS, execute_tool
 from src.config import get_settings
@@ -1000,6 +1001,43 @@ class SimulationEngine:
                 other_event += f". Summary: {summary_text[:200]}"
             await self._update_agent_memory(other_agent, other_event)
 
+    def _evict_dead_thread(self, thread_id: str) -> None:
+        """Remove a thread_id from every agent's in-memory state.
+
+        Fires when Slack reports the parent message no longer exists (via
+        ThreadNotFound from conversations.replies or a silent thread_ts drop
+        on chat.postMessage). Without eviction the same dead thread gets
+        re-polled and replied-to forever, producing noisy error logs and —
+        worse — cascading top-level posts.
+        """
+        evicted_from = 0
+        for ag in self.agents.values():
+            removed = False
+            if thread_id in ag.state.active_threads:
+                ag.state.active_threads.pop(thread_id, None)
+                removed = True
+            before = len(ag.state.interesting_posts)
+            ag.state.interesting_posts = [
+                p for p in ag.state.interesting_posts if p.post_id != thread_id
+            ]
+            if len(ag.state.interesting_posts) != before:
+                removed = True
+            before = len(ag.state.pending_proposals)
+            ag.state.pending_proposals = [
+                p for p in ag.state.pending_proposals if p.thread_id != thread_id
+            ]
+            if len(ag.state.pending_proposals) != before:
+                removed = True
+            if removed:
+                evicted_from += 1
+        self._poll_cursors.pop(f"proposal_thread:{thread_id}", None)
+        self._closed_thread_ids.discard(thread_id)
+        if evicted_from:
+            logger.info(
+                "Evicted dead thread %s from %d agent(s)' state",
+                thread_id, evicted_from,
+            )
+
     async def _sync_private_channels_from_db(self) -> None:
         """Discover collab_private channels created via the web-UI reopen flow.
 
@@ -1900,6 +1938,9 @@ class SimulationEngine:
 
             try:
                 replies = client.get_thread_replies(ch_id, thread_id, oldest=oldest)
+            except ThreadNotFound:
+                self._evict_dead_thread(thread_id)
+                continue
             except Exception as exc:
                 logger.debug("Failed to poll proposal thread %s: %s", thread_id, exc)
                 continue
@@ -1971,7 +2012,19 @@ class SimulationEngine:
 
         result = None
         if client and client.is_connected:
-            result = client.post_message(channel, text, thread_ts=thread_ts)
+            try:
+                result = client.post_message(channel, text, thread_ts=thread_ts)
+            except ThreadNotFound:
+                # Parent was deleted. post_message already cleaned up the
+                # orphan top-level post on Slack. Purge the dead thread_ts
+                # from state so no one replies to it again.
+                if thread_ts:
+                    self._evict_dead_thread(thread_ts)
+                logger.warning(
+                    "[%s] Skipped reply to deleted thread %s in #%s",
+                    agent_id, thread_ts, channel,
+                )
+                return
         else:
             logger.info("[%s] MOCK post to #%s: %s...", agent_id, channel, text[:60])
 
@@ -2191,7 +2244,10 @@ class SimulationEngine:
                 # If this message has thread replies, fetch them
                 reply_count = msg.get("reply_count", 0)
                 if reply_count > 0:
-                    replies = client.get_all_thread_replies(ch_id, ts)
+                    try:
+                        replies = client.get_all_thread_replies(ch_id, ts)
+                    except ThreadNotFound:
+                        continue
                     total_threads += 1
                     for reply in replies:
                         rts = reply.get("ts", "")
