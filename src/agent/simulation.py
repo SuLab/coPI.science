@@ -1863,13 +1863,14 @@ class SimulationEngine:
 
                     try:
                         await self._pi_handler.handle_dm(agent_id, pi_slack_id, text)
-                        # Update working memory after PI interaction
+                        # PI DMs deliberately do not update public working memory:
+                        # standing instructions are persisted to the private profile
+                        # by _handle_standing_instruction; other DM categories are
+                        # handled in-band. has_pi_directive still flips so Phase 5
+                        # runs this turn.
                         agent = self.agents.get(agent_id)
                         if agent:
                             agent.state.has_pi_directive = True
-                            await self._update_agent_memory(
-                                agent, f"PI sent a DM: {text[:200]}"
-                            )
                     except Exception as exc:
                         logger.error("[%s] Failed to handle PI DM: %s", agent_id, exc, exc_info=True)
 

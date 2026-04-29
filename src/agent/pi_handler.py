@@ -56,7 +56,11 @@ class PIHandler:
                 await self._handle_standing_instruction(agent_id, pi_slack_id, text)
             else:
                 await self._send_dm(agent_id, pi_slack_id,
-                    "Thanks for the feedback — I'll keep that in mind for future interactions.")
+                    "Thanks for the feedback. I haven't added this to my standing "
+                    "instructions, so it won't shape my future behavior on its own. "
+                    "If you'd like me to remember it, reply with a persistent rule "
+                    "(e.g. \"always X\" or \"never Y\") and I'll write it into my "
+                    "private profile.")
         elif category == "question":
             await self._handle_question(agent_id, pi_slack_id, text)
         else:
