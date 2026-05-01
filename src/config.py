@@ -83,6 +83,12 @@ class Settings(BaseSettings):
     slack_bot_token_manglik: str = ""
     slack_bot_token_susa: str = ""
     slack_bot_token_capra: str = ""
+    # Additional PIs (post-Cabo)
+    slack_bot_token_kim: str = ""
+    slack_bot_token_azumaya: str = ""
+    slack_bot_token_nomura: str = ""
+    slack_bot_token_yeager: str = ""
+    slack_bot_token_moore: str = ""
     slack_bot_token_grantbot: str = ""
 
     # Analytics
@@ -163,6 +169,11 @@ class Settings(BaseSettings):
             "manglik": self.slack_bot_token_manglik,
             "susa": self.slack_bot_token_susa,
             "capra": self.slack_bot_token_capra,
+            "kim": self.slack_bot_token_kim,
+            "azumaya": self.slack_bot_token_azumaya,
+            "nomura": self.slack_bot_token_nomura,
+            "yeager": self.slack_bot_token_yeager,
+            "moore": self.slack_bot_token_moore,
         }
 
 

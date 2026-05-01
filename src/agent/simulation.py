@@ -88,6 +88,12 @@ PILOT_LABS = [
     {"id": "manglik", "name": "ManglikBot", "pi": "Aashish Manglik"},
     {"id": "susa", "name": "SusaBot", "pi": "Katherine Susa"},
     {"id": "capra", "name": "CapraBot", "pi": "Tony Capra"},
+    # Additional PIs
+    {"id": "kim", "name": "KimBot", "pi": "Peter Kim"},               # Stanford
+    {"id": "azumaya", "name": "AzumayaBot", "pi": "Caleigh Azumaya"}, # Genentech
+    {"id": "nomura", "name": "NomuraBot", "pi": "Daniel Nomura"},     # UC Berkeley
+    {"id": "yeager", "name": "YeagerBot", "pi": "Mark Yeager"},
+    {"id": "moore", "name": "MooreBot", "pi": "Jonathan Moore"},
 ]
 
 # Keywords for channel-profile matching

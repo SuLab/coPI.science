@@ -90,3 +90,17 @@
 0000-0003-0077-667X
 # Tony Capra (John A. Capra)
 0000-0001-9743-1795
+# New PIs — 2026-05-01
+# Stanford
+# Peter S. Kim
+0000-0001-6503-4541
+# Genentech
+# Caleigh Azumaya
+0000-0002-3484-9921
+# UC Berkeley
+# Daniel K. Nomura
+0000-0003-1614-8360
+# Mark Yeager
+0000-0002-3301-640X
+# Jonathan Moore
+0000-0001-8633-3313
