@@ -348,7 +348,7 @@ async def _handle_instruction(
 
         settings = get_settings()
         env_tokens = settings.get_slack_tokens()
-        bot_token = env_tokens.get(agent.agent_id, {}).get("bot")
+        bot_token = env_tokens.get(agent.agent_id, "")
 
         if not bot_token or bot_token.startswith("xoxb-placeholder"):
             logger.error("No bot token for agent %s", agent.agent_id)

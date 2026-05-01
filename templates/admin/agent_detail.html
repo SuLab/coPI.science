@@ -66,13 +66,6 @@
                            class="w-full text-sm font-mono">
                     <p class="text-xs text-gray-400 mt-1">SLACK_BOT_TOKEN for this agent. Add to .env as SLACK_BOT_TOKEN_&lt;AGENTID&gt;.</p>
                 </div>
-                <div>
-                    <label class="block text-sm font-medium text-gray-700 mb-1">Slack App Token</label>
-                    <input type="text" name="slack_app_token" value="{{ agent.slack_app_token or '' }}"
-                           placeholder="xapp-..."
-                           class="w-full text-sm font-mono">
-                    <p class="text-xs text-gray-400 mt-1">Add to .env as SLACK_APP_TOKEN_&lt;AGENTID&gt;.</p>
-                </div>
             </div>
 
             <div class="flex items-center gap-3 mt-6 pt-4 border-t border-gray-200">

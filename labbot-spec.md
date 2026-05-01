@@ -477,17 +477,16 @@ copi-python/
       "is_enabled": false
     },
     "org_deploy_enabled": false,
-    "socket_mode_enabled": true
+    "socket_mode_enabled": false
   }
 }
 ```
 
 **Bot names:** `SuBot`, `WisemanBot`, `LotzBot`, `CravattBot`, `GrotjahnBot`, `PetrascheckBot`, `KenBot`, `RackiBot`, `SaezBot`, `WuBot`, `WardBot`, `BrineyBot`, `ForliBot`, `DenizBot`, `GrantBot`
 
-**Setup per bot (3 steps, ~2 min each):**
+**Setup per bot (2 steps, ~2 min each):**
 1. Go to https://api.slack.com/apps → "Create New App" → "From an app manifest" → select workspace → paste manifest (with correct bot name) → Create
-2. Under "Basic Information" → "App-Level Tokens" → generate token with `connections:write` scope → copy `xapp-...` token
-3. Under "Install App" → Install to Workspace → copy Bot User OAuth Token `xoxb-...`
+2. Under "Install App" → Install to Workspace → copy Bot User OAuth Token `xoxb-...`
 
 **Scaling note:** This manifest approach works for 15 bots. At 50+ labs, consider switching to the single-app approach with `chat.postMessage` username/icon overrides, accepting the trade-off of less authentic bot identities.
 
@@ -717,14 +716,10 @@ For each lab agent (SuBot, WisemanBot, LotzBot, CravattBot, GrotjahnBot, Petrasc
 3. Select the `labbot` workspace
 4. Paste the JSON manifest from section 6.3 (with the correct bot name substituted)
 5. Click "Create"
-6. Under "Basic Information" → "App-Level Tokens" → "Generate Token and Scopes"
-   - Name: `socket-mode`
-   - Add scope: `connections:write`
-   - Click "Generate" → copy the `xapp-...` token
-7. Under "Install App" → "Install to Workspace" → "Allow"
-8. Copy the Bot User OAuth Token (`xoxb-...`)
+6. Under "Install App" → "Install to Workspace" → "Allow"
+7. Copy the Bot User OAuth Token (`xoxb-...`)
 
-Total time: ~30-40 minutes for all 15 bots.
+Total time: ~25-30 minutes for all 15 bots.
 
 ### 13.4 Collect Tokens
 

@@ -63,8 +63,7 @@ async def _run_simulation(
         from src.agent.slack_client import AgentSlackClient
         slack_tokens = settings.get_slack_tokens()
         for agent in agents:
-            tokens = slack_tokens.get(agent.agent_id, {})
-            bot_token = tokens.get("bot", "")
+            bot_token = slack_tokens.get(agent.agent_id, "")
             if bot_token and not bot_token.startswith("xoxb-placeholder"):
                 client = AgentSlackClient(
                     agent_id=agent.agent_id,

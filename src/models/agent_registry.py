@@ -29,7 +29,6 @@ class AgentRegistry(Base):
         String(20), nullable=False, default="pending"
     )  # pending, active, suspended
     slack_bot_token: Mapped[str | None] = mapped_column(Text, nullable=True)
-    slack_app_token: Mapped[str | None] = mapped_column(Text, nullable=True)
     slack_user_id: Mapped[str | None] = mapped_column(String(50), nullable=True)
     delegate_slack_ids: Mapped[list[str] | None] = mapped_column(ARRAY(String), nullable=True)
     requested_at: Mapped[datetime] = mapped_column(

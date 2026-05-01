@@ -87,7 +87,7 @@ Worker process polls the jobs table on a configurable interval. Scale to AWS SQS
 - **SDK:** `slack-sdk` (Python) — Web API only, no Socket Mode
 - **Architecture:** Polling-based. The simulation engine polls channels for new messages using `conversations.history`. No webhooks, no event subscriptions.
 - **One Slack app per agent** (12 apps for 12 pilot labs, plus 1 for GrantBot)
-- Each app has its own bot token (`xoxb-...`). App-level tokens (`xapp-...`) are stored but not used (Socket Mode is disabled).
+- Each app has its own bot token (`xoxb-...`). Socket Mode is disabled; app-level tokens (`xapp-...`) are not used.
 - **Required OAuth scopes:** `channels:history`, `channels:join`, `channels:manage`, `channels:read`, `chat:write`, `groups:history`, `groups:read`, `groups:write`, `im:history`, `im:read`, `im:write`, `users:read`, `users:read.email`
 - **DM support:** Agents can send/receive DMs with their linked PI via `conversations.open` + `chat.postMessage`
 
@@ -151,14 +151,11 @@ BASE_URL=https://copi.science
 DOMAIN=copi.science
 ALLOW_HTTP_SESSIONS=false    # true in dev
 
-# Slack — one pair per agent (12 agents + grantbot)
+# Slack — one bot token per agent (one per pilot lab + grantbot)
 SLACK_BOT_TOKEN_SU=xoxb-...
-SLACK_APP_TOKEN_SU=xapp-...
 SLACK_BOT_TOKEN_WISEMAN=xoxb-...
-SLACK_APP_TOKEN_WISEMAN=xapp-...
-# ... (lotz, cravatt, grotjahn, petrascheck, ken, racki, saez, wu, ward, briney)
+# ... (lotz, cravatt, grotjahn, petrascheck, ken, racki, saez, wu, ward, briney, ...)
 SLACK_BOT_TOKEN_GRANTBOT=xoxb-...
-SLACK_APP_TOKEN_GRANTBOT=xapp-...
 ```
 
 ## Project Structure

@@ -751,8 +751,8 @@ async def admin_agents(
     settings = get_settings()
     env_tokens = settings.get_slack_tokens()
     env_token_agents = {
-        aid for aid, tokens in env_tokens.items()
-        if tokens.get("bot") and not tokens["bot"].startswith("xoxb-placeholder")
+        aid for aid, tok in env_tokens.items()
+        if tok and not tok.startswith("xoxb-placeholder")
     }
 
     # Count unreviewed proposals per agent
@@ -839,7 +839,6 @@ async def admin_approve_agent(
     agent_slug: str = Form(...),
     bot_name: str = Form(...),
     slack_bot_token: str = Form(""),
-    slack_app_token: str = Form(""),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_admin_user),
 ):
@@ -854,7 +853,6 @@ async def admin_approve_agent(
     agent.agent_id = agent_slug.strip().lower()
     agent.bot_name = bot_name.strip()
     agent.slack_bot_token = slack_bot_token.strip() or None
-    agent.slack_app_token = slack_app_token.strip() or None
     agent.status = "active"
     agent.approved_at = datetime.now(timezone.utc)
     agent.approved_by = current_user.id

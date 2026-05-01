@@ -171,7 +171,7 @@ def _build_other_pi_dm(
 async def _get_or_fail_bot_token(agent_id: str) -> str:
     settings = get_settings()
     env_tokens = settings.get_slack_tokens()
-    tok = env_tokens.get(agent_id, {}).get("bot")
+    tok = env_tokens.get(agent_id, "")
     if not tok or tok.startswith("xoxb-placeholder"):
         raise RuntimeError(f"No valid Slack bot token for agent '{agent_id}'")
     return tok

@@ -38,39 +38,36 @@ class Settings(BaseSettings):
     notification_check_interval: int = 300  # seconds (5 minutes)
     inbound_poll_interval: int = 60  # seconds
 
-    # Slack tokens — one pair per agent
+    # Slack bot tokens — one per agent
     slack_bot_token_su: str = ""
-    slack_app_token_su: str = ""
     slack_bot_token_wiseman: str = ""
-    slack_app_token_wiseman: str = ""
     slack_bot_token_lotz: str = ""
-    slack_app_token_lotz: str = ""
     slack_bot_token_cravatt: str = ""
-    slack_app_token_cravatt: str = ""
     slack_bot_token_grotjahn: str = ""
-    slack_app_token_grotjahn: str = ""
     slack_bot_token_petrascheck: str = ""
-    slack_app_token_petrascheck: str = ""
     slack_bot_token_ken: str = ""
-    slack_app_token_ken: str = ""
     slack_bot_token_racki: str = ""
-    slack_app_token_racki: str = ""
     slack_bot_token_saez: str = ""
-    slack_app_token_saez: str = ""
     slack_bot_token_wu: str = ""
-    slack_app_token_wu: str = ""
     slack_bot_token_ward: str = ""
-    slack_app_token_ward: str = ""
     slack_bot_token_briney: str = ""
-    slack_app_token_briney: str = ""
     slack_bot_token_forli: str = ""
-    slack_app_token_forli: str = ""
     slack_bot_token_deniz: str = ""
-    slack_app_token_deniz: str = ""
     slack_bot_token_lairson: str = ""
-    slack_app_token_lairson: str = ""
+    slack_bot_token_badran: str = ""
+    slack_bot_token_kern: str = ""
+    slack_bot_token_lasker: str = ""
+    slack_bot_token_lippi: str = ""
+    slack_bot_token_macrae: str = ""
+    slack_bot_token_maillie: str = ""
+    slack_bot_token_miller: str = ""
+    slack_bot_token_mravic: str = ""
+    slack_bot_token_paulson: str = ""
+    slack_bot_token_pwu: str = ""
+    slack_bot_token_seiple: str = ""
+    slack_bot_token_williamson: str = ""
+    slack_bot_token_wilson: str = ""
     slack_bot_token_grantbot: str = ""
-    slack_app_token_grantbot: str = ""
 
     # Analytics
     posthog_api_key: str = ""
@@ -104,33 +101,37 @@ class Settings(BaseSettings):
     # §"PI Reopens a Proposal".
     enable_private_refinement: bool = True
 
-    def get_slack_tokens(self) -> dict[str, dict[str, str]]:
-        """Return slack tokens keyed by agent_id."""
+    def get_slack_tokens(self) -> dict[str, str]:
+        """Return slack bot tokens keyed by agent_id."""
         return {
-            "su": {"bot": self.slack_bot_token_su, "app": self.slack_app_token_su},
-            "wiseman": {"bot": self.slack_bot_token_wiseman, "app": self.slack_app_token_wiseman},
-            "lotz": {"bot": self.slack_bot_token_lotz, "app": self.slack_app_token_lotz},
-            "cravatt": {
-                "bot": self.slack_bot_token_cravatt,
-                "app": self.slack_app_token_cravatt,
-            },
-            "grotjahn": {
-                "bot": self.slack_bot_token_grotjahn,
-                "app": self.slack_app_token_grotjahn,
-            },
-            "petrascheck": {
-                "bot": self.slack_bot_token_petrascheck,
-                "app": self.slack_app_token_petrascheck,
-            },
-            "ken": {"bot": self.slack_bot_token_ken, "app": self.slack_app_token_ken},
-            "racki": {"bot": self.slack_bot_token_racki, "app": self.slack_app_token_racki},
-            "saez": {"bot": self.slack_bot_token_saez, "app": self.slack_app_token_saez},
-            "wu": {"bot": self.slack_bot_token_wu, "app": self.slack_app_token_wu},
-            "ward": {"bot": self.slack_bot_token_ward, "app": self.slack_app_token_ward},
-            "briney": {"bot": self.slack_bot_token_briney, "app": self.slack_app_token_briney},
-            "forli": {"bot": self.slack_bot_token_forli, "app": self.slack_app_token_forli},
-            "deniz": {"bot": self.slack_bot_token_deniz, "app": self.slack_app_token_deniz},
-            "lairson": {"bot": self.slack_bot_token_lairson, "app": self.slack_app_token_lairson},
+            "su": self.slack_bot_token_su,
+            "wiseman": self.slack_bot_token_wiseman,
+            "lotz": self.slack_bot_token_lotz,
+            "cravatt": self.slack_bot_token_cravatt,
+            "grotjahn": self.slack_bot_token_grotjahn,
+            "petrascheck": self.slack_bot_token_petrascheck,
+            "ken": self.slack_bot_token_ken,
+            "racki": self.slack_bot_token_racki,
+            "saez": self.slack_bot_token_saez,
+            "wu": self.slack_bot_token_wu,
+            "ward": self.slack_bot_token_ward,
+            "briney": self.slack_bot_token_briney,
+            "forli": self.slack_bot_token_forli,
+            "deniz": self.slack_bot_token_deniz,
+            "lairson": self.slack_bot_token_lairson,
+            "badran": self.slack_bot_token_badran,
+            "kern": self.slack_bot_token_kern,
+            "lasker": self.slack_bot_token_lasker,
+            "lippi": self.slack_bot_token_lippi,
+            "macrae": self.slack_bot_token_macrae,
+            "maillie": self.slack_bot_token_maillie,
+            "miller": self.slack_bot_token_miller,
+            "mravic": self.slack_bot_token_mravic,
+            "paulson": self.slack_bot_token_paulson,
+            "pwu": self.slack_bot_token_pwu,
+            "seiple": self.slack_bot_token_seiple,
+            "williamson": self.slack_bot_token_williamson,
+            "wilson": self.slack_bot_token_wilson,
         }
 
 

@@ -92,7 +92,7 @@ def _wipe_for_bot(agent_id: str, bot_token: str, channel_ids: list[str], channel
 def wipe_slack():
     settings = get_settings()
     tokens = settings.get_slack_tokens()
-    bots = [(aid, pair["bot"]) for aid, pair in tokens.items() if pair["bot"]]
+    bots = [(aid, tok) for aid, tok in tokens.items() if tok]
     print(f"Bots: {[b[0] for b in bots]}", flush=True)
 
     client = WebClient(token=bots[0][1])

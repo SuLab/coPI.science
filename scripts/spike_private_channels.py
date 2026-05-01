@@ -46,7 +46,7 @@ def _get_tokens(agent_ids: list[str]) -> dict[str, str]:
     env_tokens = settings.get_slack_tokens()
     out = {}
     for aid in agent_ids:
-        tok = env_tokens.get(aid, {}).get("bot")
+        tok = env_tokens.get(aid, "")
         if not tok or tok.startswith("xoxb-placeholder"):
             print(f"FATAL: no valid bot token configured for agent '{aid}'", flush=True)
             sys.exit(2)
