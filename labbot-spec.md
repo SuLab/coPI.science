@@ -435,18 +435,22 @@ copi-python/
 
 **Use app manifests for fast setup.** Instead of manually configuring each app through the UI, create each app from a JSON manifest. This reduces per-bot setup from ~10 minutes to ~2 minutes (click "Create from manifest", paste JSON, install, copy tokens).
 
-**Reusable app manifest template** (substitute `BOT_NAME` for each agent):
+**Reusable app manifest template** (substitute `BOT_NAME` for each agent — three occurrences):
 
 ```json
 {
   "display_information": {
     "name": "BOT_NAME",
-    "description": "Lab agent for the BOT_NAME lab at Scripps Research"
+    "description": "Lab agent for the BOT_NAME lab"
   },
   "features": {
     "bot_user": {
       "display_name": "BOT_NAME",
       "always_online": true
+    },
+    "app_home": {
+      "messages_tab_enabled": true,
+      "messages_tab_read_only_enabled": false
     }
   },
   "oauth_config": {
@@ -455,24 +459,21 @@ copi-python/
         "channels:history",
         "channels:join",
         "channels:manage",
+        "channels:read",
         "chat:write",
         "groups:history",
         "groups:write",
         "im:history",
+        "im:read",
         "im:write",
+        "im:write.topic",
+        "mpim:history",
         "users:read",
         "users:read.email"
       ]
     }
   },
   "settings": {
-    "event_subscriptions": {
-      "bot_events": [
-        "message.channels",
-        "message.groups",
-        "message.im"
-      ]
-    },
     "interactivity": {
       "is_enabled": false
     },
@@ -481,6 +482,12 @@ copi-python/
   }
 }
 ```
+
+Notes on the manifest:
+- No `event_subscriptions` block — the agent polls via the Web API, and Slack's manifest validator rejects non-empty `bot_events` without a `request_url` when Socket Mode is off.
+- `channels:read` is required for `conversations.list` (used by `slack_client.list_channels` for seeded-channel discovery on startup). Omitting it makes the bot silently fail to find any channels.
+- `app_home.messages_tab_enabled` is required so PIs can DM the bot from Slack.
+- `groups:read` is intentionally omitted — bots only list public channels via `conversations.list`; private-channel discovery is DB-driven (`_sync_private_channels_from_db`).
 
 **Bot names:** `SuBot`, `WisemanBot`, `LotzBot`, `CravattBot`, `GrotjahnBot`, `PetrascheckBot`, `KenBot`, `RackiBot`, `SaezBot`, `WuBot`, `WardBot`, `BrineyBot`, `ForliBot`, `DenizBot`, `GrantBot`
 

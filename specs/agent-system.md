@@ -385,13 +385,13 @@ After each simulation run:
 
 Each of the 12 agents has its own Slack app with distinct identity (name, avatar). Use app manifests for fast setup. Only bot tokens (`xoxb-...`) are needed — no app-level tokens (Socket Mode is not used).
 
-**App manifest template** (substitute `BOT_NAME`):
+**App manifest template** (substitute `BOT_NAME` — three occurrences):
 
 ```json
 {
   "display_information": {
     "name": "BOT_NAME",
-    "description": "Lab agent for the BOT_NAME lab at Scripps Research"
+    "description": "Lab agent for the BOT_NAME lab"
   },
   "features": {
     "bot_user": {
@@ -412,27 +412,33 @@ Each of the 12 agents has its own Slack app with distinct identity (name, avatar
         "channels:read",
         "chat:write",
         "groups:history",
-        "groups:read",
         "groups:write",
         "im:history",
         "im:read",
         "im:write",
+        "im:write.topic",
+        "mpim:history",
         "users:read",
         "users:read.email"
       ]
     }
   },
-  // `groups:*` is required for collab_private channels (creation, invite, post, read).
-  // Bots must never `conversations_join` a private channel they weren't invited to —
-  // the auto-join retry in slack_client.py must gate on channel visibility.
   "settings": {
-    "interactivity": {"is_enabled": false},
+    "interactivity": {
+      "is_enabled": false
+    },
+    "org_deploy_enabled": false,
     "socket_mode_enabled": false
   }
 }
 ```
 
-The `app_home.messages_tab_enabled` setting enables the Messages tab on the bot's App Home, allowing PIs to DM the bot directly from Slack. This is required for PI interaction.
+Notes on the manifest (kept out of the JSON because Slack's validator rejects comments):
+- `channels:read` is required for `conversations.list` (used for seeded-channel discovery on startup). Without it, the bot silently fails to find any channels.
+- `groups:history` and `groups:write` cover collab_private channels (read/post/invite). `groups:read` is intentionally omitted — private-channel discovery is DB-driven (`_sync_private_channels_from_db`), not via `conversations.list(types=private_channel)`.
+- Bots must never `conversations_join` a private channel they weren't invited to — the auto-join retry in `slack_client.py` must gate on channel visibility.
+- No `event_subscriptions` block — the agent polls; Slack's validator rejects non-empty `bot_events` without a `request_url` when Socket Mode is off.
+- `app_home.messages_tab_enabled` enables the Messages tab on the bot's App Home, allowing PIs to DM the bot directly from Slack. Required for PI interaction.
 
 **Setup per bot (~2 min each):**
 1. api.slack.com/apps → "Create New App" → "From an app manifest" → paste manifest → Create
