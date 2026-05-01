@@ -461,7 +461,7 @@ async def reopen_proposal(
             from slack_sdk import WebClient
 
             env_tokens = settings.get_slack_tokens()
-            bot_token = env_tokens.get(agent.agent_id, {}).get("bot")
+            bot_token = env_tokens.get(agent.agent_id, "")
             if not bot_token or bot_token.startswith("xoxb-placeholder"):
                 raise HTTPException(status_code=500, detail="No bot token available")
             client = WebClient(token=bot_token)
@@ -735,7 +735,9 @@ async def save_public_profile(
         select(Publication).where(Publication.user_id == agent.user_id)
     )
     user_pubs = list(pub_result.scalars().all())
-    exported_path = export_profile_to_markdown(pi_user, profile, publications=user_pubs)
+    exported_path = export_profile_to_markdown(
+        pi_user, profile, agent.agent_id, publications=user_pubs
+    )
 
     # Record revision
     from src.services.profile_versioning import create_revision
@@ -789,8 +791,7 @@ async def connect_slack(
         env_tokens = settings.get_slack_tokens()
 
         bot_token = None
-        for tokens in env_tokens.values():
-            t = tokens.get("bot", "")
+        for t in env_tokens.values():
             if t and not t.startswith("xoxb-placeholder"):
                 bot_token = t
                 break
@@ -825,8 +826,7 @@ def _get_bot_token() -> str | None:
     from src.config import get_settings
     settings = get_settings()
     env_tokens = settings.get_slack_tokens()
-    for tokens in env_tokens.values():
-        t = tokens.get("bot", "")
+    for t in env_tokens.values():
         if t and not t.startswith("xoxb-placeholder"):
             return t
     return None

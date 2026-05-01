@@ -10,9 +10,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.database import get_db
 from src.dependencies import get_current_user
-from src.models import Job, ResearcherProfile, User
+from src.models import AgentRegistry, Job, ResearcherProfile, User
 from src.services.profile_export import (
-    ORCID_TO_AGENT_ID,
     PRIVATE_PROFILES_DIR,
     export_private_profile,
 )
@@ -111,6 +110,13 @@ async def save_profile(
 
     await db.commit()
 
+    # Look up agent_id (gates file export and revision)
+    agent_result = await db.execute(
+        select(AgentRegistry).where(AgentRegistry.user_id == current_user.id)
+    )
+    agent_reg = agent_result.scalar_one_or_none()
+    agent_id_for_export = agent_reg.agent_id if agent_reg else None
+
     # Export to markdown for agent consumption (include publications)
     from src.services.profile_export import export_profile_to_markdown
     from src.models import Publication
@@ -118,15 +124,12 @@ async def save_profile(
         select(Publication).where(Publication.user_id == current_user.id)
     )
     user_pubs = list(pub_result.scalars().all())
-    exported_path = export_profile_to_markdown(current_user, profile, publications=user_pubs)
+    exported_path = export_profile_to_markdown(
+        current_user, profile, agent_id_for_export, publications=user_pubs
+    )
 
     # Record revision
     from src.services.profile_versioning import create_revision
-    from src.models import AgentRegistry
-    agent_result = await db.execute(
-        select(AgentRegistry).where(AgentRegistry.user_id == current_user.id)
-    )
-    agent_reg = agent_result.scalar_one_or_none()
     if agent_reg and exported_path:
         await create_revision(
             db,
@@ -165,9 +168,12 @@ async def private_profile(
     # Fall back to existing on-disk private profile (e.g. pilot labs that were
     # set up before the user claimed their account via ORCID login).
     if not content:
-        agent_id = ORCID_TO_AGENT_ID.get(current_user.orcid)
-        if agent_id:
-            disk_path = PRIVATE_PROFILES_DIR / f"{agent_id}.md"
+        agent_result = await db.execute(
+            select(AgentRegistry).where(AgentRegistry.user_id == current_user.id)
+        )
+        agent_reg = agent_result.scalar_one_or_none()
+        if agent_reg:
+            disk_path = PRIVATE_PROFILES_DIR / f"{agent_reg.agent_id}.md"
             if disk_path.exists():
                 content = disk_path.read_text(encoding="utf-8").strip()
 
@@ -222,16 +228,18 @@ async def save_private_profile(
 
     await db.commit()
 
-    # Export to disk
-    export_private_profile(current_user, profile)
-
-    # Record revision
-    from src.services.profile_versioning import create_revision
-    from src.models import AgentRegistry
+    # Look up agent_id (gates file export and revision)
     agent_result = await db.execute(
         select(AgentRegistry).where(AgentRegistry.user_id == current_user.id)
     )
     agent_reg = agent_result.scalar_one_or_none()
+    agent_id_for_export = agent_reg.agent_id if agent_reg else None
+
+    # Export to disk
+    export_private_profile(current_user, profile, agent_id_for_export)
+
+    # Record revision
+    from src.services.profile_versioning import create_revision
     if agent_reg and content.strip():
         await create_revision(
             db,

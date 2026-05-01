@@ -11,36 +11,17 @@ logger = logging.getLogger(__name__)
 PROFILES_DIR = Path("profiles/public")
 PRIVATE_PROFILES_DIR = Path("profiles/private")
 
-# Map ORCID → agent ID for pilot labs
-ORCID_TO_AGENT_ID = {
-    "0000-0002-9859-4104": "su",
-    "0000-0001-9287-6840": "wiseman",
-    "0000-0002-6299-8799": "lotz",
-    "0000-0001-5330-3492": "cravatt",
-    "0000-0001-5908-7882": "grotjahn",
-    "0000-0002-1010-145X": "petrascheck",
-    "0000-0001-8336-9935": "ken",
-    "0000-0003-2209-7301": "racki",
-    "0000-0001-5718-5542": "saez",
-    "0000-0002-2629-6124": "wu",
-    "0000-0001-7153-3769": "ward",
-    "0000-0001-9535-2866": "briney",
-    "0000-0002-5964-7111": "forli",
-    "0000-0003-2819-4049": "deniz",
-    "0000-0001-6701-996X": "lairson",
-}
-
 
 def export_profile_to_markdown(
     user: User,
     profile: ResearcherProfile,
+    agent_id: str | None,
     publications: list[Publication] | None = None,
 ) -> Path | None:
     """Export a database profile to profiles/public/{agent_id}.md.
 
-    Returns the path written, or None if the user isn't a pilot lab.
+    Returns the path written, or None if the user has no AgentRegistry entry.
     """
-    agent_id = ORCID_TO_AGENT_ID.get(user.orcid)
     if not agent_id:
         return None
 
@@ -142,12 +123,14 @@ def export_profile_to_markdown(
         return None
 
 
-def export_private_profile(user: User, profile: ResearcherProfile) -> Path | None:
+def export_private_profile(
+    user: User, profile: ResearcherProfile, agent_id: str | None
+) -> Path | None:
     """Export private_profile_md to profiles/private/{agent_id}.md.
 
-    Returns the path written, or None if the user isn't a pilot lab or has no content.
+    Returns the path written, or None if the user has no AgentRegistry entry
+    or no private profile content.
     """
-    agent_id = ORCID_TO_AGENT_ID.get(user.orcid)
     if not agent_id:
         return None
     if not profile.private_profile_md:

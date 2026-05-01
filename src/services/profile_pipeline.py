@@ -336,21 +336,26 @@ async def run_profile_pipeline(
 
     await db.flush()
 
+    # Look up agent_id (gates file export and revision)
+    from src.models import AgentRegistry
+    agent_result = await db.execute(
+        select(AgentRegistry).where(AgentRegistry.user_id == user.id)
+    )
+    agent_reg = agent_result.scalar_one_or_none()
+    agent_id = agent_reg.agent_id if agent_reg else None
+
     # Export to markdown for agent consumption (include publications)
     from src.services.profile_export import export_profile_to_markdown
     pub_result = await db.execute(
         select(Publication).where(Publication.user_id == user.id)
     )
     user_pubs = pub_result.scalars().all()
-    exported_path = export_profile_to_markdown(user, profile, publications=user_pubs)
+    exported_path = export_profile_to_markdown(
+        user, profile, agent_id, publications=user_pubs
+    )
 
     # Record revision
-    from src.models import AgentRegistry
     from src.services.profile_versioning import create_revision
-    agent_result = await db.execute(
-        select(AgentRegistry).where(AgentRegistry.user_id == user.id)
-    )
-    agent_reg = agent_result.scalar_one_or_none()
     if agent_reg and exported_path:
         await create_revision(
             db,
