@@ -67,6 +67,22 @@ class Settings(BaseSettings):
     slack_bot_token_seiple: str = ""
     slack_bot_token_williamson: str = ""
     slack_bot_token_wilson: str = ""
+    slack_bot_token_millar: str = ""
+    # UCSF (Cabo retreat)
+    slack_bot_token_sali: str = ""
+    slack_bot_token_larabell: str = ""
+    slack_bot_token_zaro: str = ""
+    slack_bot_token_roe: str = ""
+    slack_bot_token_santi: str = ""
+    slack_bot_token_wells: str = ""
+    slack_bot_token_echeverria: str = ""
+    slack_bot_token_fraser: str = ""
+    slack_bot_token_craik: str = ""
+    slack_bot_token_stroud: str = ""
+    slack_bot_token_minor: str = ""
+    slack_bot_token_manglik: str = ""
+    slack_bot_token_susa: str = ""
+    slack_bot_token_capra: str = ""
     slack_bot_token_grantbot: str = ""
 
     # Analytics
@@ -132,6 +148,21 @@ class Settings(BaseSettings):
             "seiple": self.slack_bot_token_seiple,
             "williamson": self.slack_bot_token_williamson,
             "wilson": self.slack_bot_token_wilson,
+            "millar": self.slack_bot_token_millar,
+            "sali": self.slack_bot_token_sali,
+            "larabell": self.slack_bot_token_larabell,
+            "zaro": self.slack_bot_token_zaro,
+            "roe": self.slack_bot_token_roe,
+            "santi": self.slack_bot_token_santi,
+            "wells": self.slack_bot_token_wells,
+            "echeverria": self.slack_bot_token_echeverria,
+            "fraser": self.slack_bot_token_fraser,
+            "craik": self.slack_bot_token_craik,
+            "stroud": self.slack_bot_token_stroud,
+            "minor": self.slack_bot_token_minor,
+            "manglik": self.slack_bot_token_manglik,
+            "susa": self.slack_bot_token_susa,
+            "capra": self.slack_bot_token_capra,
         }
 
 
