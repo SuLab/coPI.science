@@ -94,6 +94,7 @@ PILOT_LABS = [
     {"id": "nomura", "name": "NomuraBot", "pi": "Daniel Nomura"},     # UC Berkeley
     {"id": "yeager", "name": "YeagerBot", "pi": "Mark Yeager"},
     {"id": "moore", "name": "MooreBot", "pi": "Jonathan Moore"},
+    {"id": "young", "name": "YoungBot", "pi": "Travis Young"},
 ]
 
 # Keywords for channel-profile matching

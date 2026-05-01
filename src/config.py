@@ -89,6 +89,7 @@ class Settings(BaseSettings):
     slack_bot_token_nomura: str = ""
     slack_bot_token_yeager: str = ""
     slack_bot_token_moore: str = ""
+    slack_bot_token_young: str = ""
     slack_bot_token_grantbot: str = ""
 
     # Analytics
@@ -174,6 +175,7 @@ class Settings(BaseSettings):
             "nomura": self.slack_bot_token_nomura,
             "yeager": self.slack_bot_token_yeager,
             "moore": self.slack_bot_token_moore,
+            "young": self.slack_bot_token_young,
         }
 
 
