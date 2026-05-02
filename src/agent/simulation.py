@@ -1269,9 +1269,12 @@ class SimulationEngine:
 
         # Check preconditions
         at_thread_threshold = self._non_funding_thread_count(agent) >= settings.active_thread_threshold
-        has_unreviewed_non_funding = any(
-            not p.reviewed and not self.message_log.is_funding_thread(p.thread_id)
-            for p in agent.state.pending_proposals
+        unreviewed_non_funding_count = sum(
+            1 for p in agent.state.pending_proposals
+            if not p.reviewed and not self.message_log.is_funding_thread(p.thread_id)
+        )
+        has_unreviewed_non_funding = (
+            unreviewed_non_funding_count >= settings.unreviewed_proposal_block_count
         )
         blocked_for_regular = at_thread_threshold or has_unreviewed_non_funding
 

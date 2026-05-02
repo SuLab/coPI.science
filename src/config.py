@@ -106,6 +106,7 @@ class Settings(BaseSettings):
 
     # Simulation parameters
     active_thread_threshold: int = 3        # per-agent max active threads
+    unreviewed_proposal_block_count: int = 2  # block Phase 5 new posts at N+ unreviewed non-funding proposals
     max_thread_messages: int = 12           # system-enforced thread close
     interesting_posts_cap: int = 20         # triggers prune
     turn_delay_seconds: float = 0.0         # pause between turns
