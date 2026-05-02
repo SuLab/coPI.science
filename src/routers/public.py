@@ -1,12 +1,14 @@
 """Public-facing routes: landing page, waitlist, access-pending."""
 
+import json
 import logging
 import re
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.database import get_db
@@ -17,6 +19,37 @@ router = APIRouter()
 templates = Jinja2Templates(directory="templates")
 
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+# Institution mapping for the Cabo collaboration graph. Mirrors the comment
+# groupings in src/agent/simulation.py PILOT_LABS.
+_SCRIPPS = {
+    "su", "wiseman", "grotjahn", "ward", "briney", "forli", "lairson",
+    "badran", "kern", "lasker", "lippi", "maillie", "millar", "miller",
+    "mravic", "paulson", "pwu", "seiple", "williamson", "wilson",
+}
+_UCSF = {
+    "sali", "larabell", "zaro", "roe", "santi", "wells", "echeverria",
+    "fraser", "craik", "stroud", "minor", "manglik", "susa", "capra",
+}
+_OTHER_INST = {
+    "kim": "Stanford",
+    "azumaya": "Genentech",
+    "nomura": "UC Berkeley",
+    "young": "Calibr-Skaggs",
+}
+
+# Cohort cutover for the Cabo retreat graph: matches commit 0ef4741
+# ("Reshape PILOT_LABS for Cabo retreat"). All proposals to date share a
+# single simulation_run_id, so date is the only way to isolate the new cohort.
+CABO_COHORT_START = datetime(2026, 5, 1, tzinfo=timezone.utc)
+
+
+def _institution_for(agent_id: str) -> str:
+    if agent_id in _SCRIPPS:
+        return "Scripps"
+    if agent_id in _UCSF:
+        return "UCSF"
+    return _OTHER_INST.get(agent_id, "Other")
 
 
 @router.get("/", response_class=HTMLResponse)
@@ -139,5 +172,88 @@ async def access_pending_email(
             "request": request,
             "pending_info": pending_info,
             "email_saved": True,
+        },
+    )
+
+
+@router.get("/cabo-graph", response_class=HTMLResponse)
+async def cabo_graph(request: Request, db: AsyncSession = Depends(get_db)):
+    """PI collaboration network for the Cabo retreat: nodes = active PIs, edges = joint proposals."""
+    nodes_result = await db.execute(
+        text(
+            "SELECT agent_id, pi_name, bot_name FROM agents "
+            "WHERE status='active' ORDER BY pi_name"
+        )
+    )
+    active_rows = nodes_result.fetchall()
+    active_ids = {row.agent_id for row in active_rows}
+
+    edges_result = await db.execute(
+        text(
+            """
+            WITH pairs AS (
+                SELECT
+                    LEAST(agent_a, agent_b)    AS a,
+                    GREATEST(agent_a, agent_b) AS b,
+                    thread_id,
+                    decided_at,
+                    summary_text
+                FROM thread_decisions
+                WHERE outcome = 'proposal'
+                  AND decided_at >= :cohort_start
+            )
+            SELECT
+                a, b,
+                COUNT(DISTINCT thread_id) AS n,
+                MAX(decided_at)           AS last_at,
+                (ARRAY_AGG(summary_text ORDER BY decided_at DESC)
+                    FILTER (WHERE summary_text IS NOT NULL))[1] AS latest_summary
+            FROM pairs
+            GROUP BY a, b
+            """
+        ),
+        {"cohort_start": CABO_COHORT_START},
+    )
+
+    # Compute degree (unique collaborators) and total proposals per node from edges.
+    degree: dict[str, int] = {row.agent_id: 0 for row in active_rows}
+    total_proposals: dict[str, int] = {row.agent_id: 0 for row in active_rows}
+    links: list[dict] = []
+    for r in edges_result:
+        if r.a not in active_ids or r.b not in active_ids:
+            continue
+        links.append(
+            {
+                "source": r.a,
+                "target": r.b,
+                "weight": int(r.n),
+                "summary": (r.latest_summary or "")[:200],
+            }
+        )
+        degree[r.a] += 1
+        degree[r.b] += 1
+        total_proposals[r.a] += int(r.n)
+        total_proposals[r.b] += int(r.n)
+
+    nodes = [
+        {
+            "id": row.agent_id,
+            "pi": row.pi_name,
+            "bot": row.bot_name,
+            "institution": _institution_for(row.agent_id),
+            "degree": degree[row.agent_id],
+            "proposals": total_proposals[row.agent_id],
+        }
+        for row in active_rows
+    ]
+
+    return templates.TemplateResponse(
+        request,
+        "cabo_graph.html",
+        {
+            "request": request,
+            "graph_json": json.dumps({"nodes": nodes, "links": links}),
+            "node_count": len(nodes),
+            "edge_count": len(links),
         },
     )

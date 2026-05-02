@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>CoPI · Cabo collaboration network</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  html, body { height: 100%; margin: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    background:
+      radial-gradient(1200px 600px at 50% -10%, rgba(99,102,241,0.10), transparent 60%),
+      radial-gradient(900px 500px at 90% 110%, rgba(168,85,247,0.10), transparent 60%),
+      #fafafa;
+    overflow: hidden;
+  }
+  .grid-bg {
+    background-image:
+      linear-gradient(to right, rgba(99,102,241,0.05) 1px, transparent 1px),
+      linear-gradient(to bottom, rgba(99,102,241,0.05) 1px, transparent 1px);
+    background-size: 48px 48px;
+    background-position: 0 0;
+  }
+  #viz { width: 100vw; height: 100vh; display: block; cursor: grab; }
+  #viz:active { cursor: grabbing; }
+
+  .node circle {
+    cursor: pointer;
+    transition: stroke-width 150ms ease, filter 150ms ease;
+    filter: drop-shadow(0 2px 4px rgba(15, 23, 42, 0.15));
+  }
+  .node:hover circle, .node.is-active circle {
+    stroke-width: 3px;
+    filter: drop-shadow(0 4px 10px rgba(99, 102, 241, 0.45));
+  }
+  .node text {
+    pointer-events: none;
+    font-size: 12px;
+    font-weight: 600;
+    fill: #1e293b;
+    paint-order: stroke;
+    stroke: rgba(255, 255, 255, 0.9);
+    stroke-width: 3px;
+    stroke-linejoin: round;
+  }
+  .link {
+    stroke: #94a3b8;
+    stroke-linecap: round;
+    transition: stroke-opacity 200ms ease, stroke 200ms ease;
+  }
+  .faded { opacity: 0.08 !important; }
+  .faded-link { stroke-opacity: 0.05 !important; }
+  .highlighted-link { stroke: #6366f1 !important; stroke-opacity: 0.85 !important; }
+
+  .header {
+    position: absolute; top: 24px; left: 32px; right: 32px;
+    display: flex; justify-content: space-between; align-items: flex-start;
+    pointer-events: none;
+  }
+  .header .title {
+    font-size: 26px; font-weight: 700;
+    background: linear-gradient(90deg, #6366f1, #a855f7);
+    -webkit-background-clip: text; background-clip: text;
+    color: transparent;
+    letter-spacing: -0.01em;
+  }
+  .header .sub { font-size: 13px; color: #475569; margin-top: 2px; }
+  .header .right { font-size: 12px; color: #64748b; text-align: right; line-height: 1.5; }
+
+  .legend {
+    position: absolute; left: 32px; bottom: 28px;
+    background: rgba(255,255,255,0.92);
+    border: 1px solid #e2e8f0;
+    border-radius: 12px;
+    padding: 12px 16px;
+    backdrop-filter: blur(8px);
+    box-shadow: 0 4px 16px rgba(15, 23, 42, 0.06);
+    font-size: 12px; color: #334155;
+  }
+  .legend .row { display: flex; align-items: center; gap: 8px; margin: 4px 0; }
+  .legend .swatch { width: 12px; height: 12px; border-radius: 999px; }
+  .legend .edge { height: 3px; border-radius: 2px; background: #94a3b8; }
+
+  .tooltip {
+    position: absolute; pointer-events: none;
+    background: rgba(15, 23, 42, 0.94);
+    color: #f8fafc;
+    border-radius: 8px;
+    padding: 10px 12px;
+    font-size: 12px;
+    line-height: 1.45;
+    max-width: 320px;
+    box-shadow: 0 8px 24px rgba(15, 23, 42, 0.25);
+    opacity: 0;
+    transition: opacity 120ms ease;
+    z-index: 50;
+  }
+  .tooltip.show { opacity: 1; }
+  .tooltip .pi { font-weight: 600; color: #ffffff; }
+  .tooltip .meta { color: #cbd5e1; margin-top: 2px; }
+  .tooltip .summary { color: #e2e8f0; margin-top: 6px; font-style: italic; }
+
+  .copi-pill {
+    position: absolute; top: 24px; left: 32px;
+    display: inline-flex; align-items: center; gap: 8px;
+    background: white; border: 1px solid #e2e8f0;
+    border-radius: 999px; padding: 4px 12px;
+    font-weight: 700; font-size: 13px;
+    box-shadow: 0 2px 6px rgba(15, 23, 42, 0.05);
+  }
+  .copi-pill .dot {
+    width: 8px; height: 8px; border-radius: 999px;
+    background: linear-gradient(135deg, #6366f1, #a855f7);
+  }
+</style>
+</head>
+<body class="grid-bg">
+
+<div class="header">
+  <div style="margin-left: 96px;">
+    <div class="title">Cabo collaboration network</div>
+    <div class="sub">{{ node_count }} PIs · {{ edge_count }} collaborating pairs · joint proposals since May 1, 2026</div>
+  </div>
+  <div class="right">
+    drag a node to reposition · scroll to zoom<br/>
+    hover for details
+  </div>
+</div>
+
+<div class="copi-pill">
+  <span class="dot"></span>
+  <span style="background: linear-gradient(90deg, #6366f1, #a855f7); -webkit-background-clip: text; background-clip: text; color: transparent;">CoPI</span>
+</div>
+
+<svg id="viz"></svg>
+
+<div class="legend">
+  <div class="row"><span class="swatch" style="background:#6366f1"></span> Scripps Research</div>
+  <div class="row"><span class="swatch" style="background:#a855f7"></span> UCSF</div>
+  <div class="row"><span class="swatch" style="background:#64748b"></span> Other</div>
+  <div class="row" style="margin-top:8px;"><span class="edge" style="width:32px; height:2.5px;"></span><span style="color:#64748b;">few</span></div>
+  <div class="row"><span class="edge" style="width:32px; height:8px;"></span><span style="color:#64748b;">many proposals</span></div>
+</div>
+
+<div class="tooltip" id="tooltip"></div>
+
+<script id="graph-data" type="application/json">{{ graph_json|safe }}</script>
+<script>
+(function() {
+  const data = JSON.parse(document.getElementById("graph-data").textContent);
+  const svg = d3.select("#viz");
+  const tooltip = d3.select("#tooltip");
+
+  const width = window.innerWidth;
+  const height = window.innerHeight;
+
+  const COLORS = {
+    Scripps: "#6366f1",
+    UCSF: "#a855f7",
+    Stanford: "#0ea5e9",
+    Genentech: "#f59e0b",
+    "UC Berkeley": "#10b981",
+    "Calibr-Skaggs": "#ec4899",
+    Other: "#64748b",
+  };
+
+  const root = svg.append("g");
+
+  svg.call(
+    d3.zoom()
+      .scaleExtent([0.3, 4])
+      .on("zoom", (event) => root.attr("transform", event.transform))
+  );
+
+  const maxWeight = d3.max(data.links, (d) => d.weight) || 1;
+  const linkWidth = d3.scaleLinear()
+    .domain([1, maxWeight])
+    .range([2.5, 10]);
+  const linkOpacity = d3.scaleLinear()
+    .domain([1, maxWeight])
+    .range([0.55, 0.95]);
+  const linkDistance = d3.scaleLinear()
+    .domain([1, maxWeight])
+    .range([170, 70]);
+
+  const radius = (d) => 12 + Math.sqrt(d.proposals || 0) * 4;
+
+  const simulation = d3.forceSimulation(data.nodes)
+    .force(
+      "link",
+      d3.forceLink(data.links)
+        .id((d) => d.id)
+        .distance((d) => linkDistance(d.weight))
+        .strength((d) => 0.25 + 0.3 * (d.weight / maxWeight))
+    )
+    .force("charge", d3.forceManyBody().strength(-380))
+    .force("center", d3.forceCenter(width / 2, height / 2))
+    .force("collide", d3.forceCollide().radius((d) => radius(d) + 14))
+    .alphaDecay(0.025)
+    .velocityDecay(0.35);
+
+  const link = root.append("g")
+    .attr("class", "links")
+    .selectAll("line")
+    .data(data.links)
+    .join("line")
+    .attr("class", "link")
+    .attr("stroke-width", (d) => linkWidth(d.weight))
+    .attr("stroke-opacity", (d) => linkOpacity(d.weight))
+    .on("mouseover", function (event, d) {
+      const a = typeof d.source === "object" ? d.source : data.nodes.find((n) => n.id === d.source);
+      const b = typeof d.target === "object" ? d.target : data.nodes.find((n) => n.id === d.target);
+      d3.select(this).classed("highlighted-link", true);
+      showTooltip(event,
+        `<div class="pi">${a.pi} ↔ ${b.pi}</div>` +
+        `<div class="meta">${d.weight} joint proposal${d.weight === 1 ? "" : "s"}</div>` +
+        (d.summary ? `<div class="summary">"${escapeHtml(d.summary)}${d.summary.length >= 200 ? "…" : ""}"</div>` : "")
+      );
+    })
+    .on("mousemove", moveTooltip)
+    .on("mouseout", function () {
+      d3.select(this).classed("highlighted-link", false);
+      hideTooltip();
+    });
+
+  const node = root.append("g")
+    .attr("class", "nodes")
+    .selectAll("g")
+    .data(data.nodes)
+    .join("g")
+    .attr("class", "node")
+    .call(
+      d3.drag()
+        .on("start", (event, d) => {
+          if (!event.active) simulation.alphaTarget(0.3).restart();
+          d.fx = d.x; d.fy = d.y;
+        })
+        .on("drag", (event, d) => { d.fx = event.x; d.fy = event.y; })
+        .on("end", (event, d) => {
+          if (!event.active) simulation.alphaTarget(0);
+          d.fx = null; d.fy = null;
+        })
+    )
+    .on("mouseover", (event, d) => {
+      highlightNeighborhood(d);
+      showTooltip(event,
+        `<div class="pi">${d.pi}</div>` +
+        `<div class="meta">${d.institution} · ${d.bot}</div>` +
+        `<div class="meta">${d.proposals} proposal${d.proposals === 1 ? "" : "s"} · ${d.degree} collaborator${d.degree === 1 ? "" : "s"}</div>`
+      );
+    })
+    .on("mousemove", moveTooltip)
+    .on("mouseout", () => {
+      clearHighlight();
+      hideTooltip();
+    });
+
+  node.append("circle")
+    .attr("r", radius)
+    .attr("fill", (d) => COLORS[d.institution] || COLORS.Other)
+    .attr("stroke", "white")
+    .attr("stroke-width", 2);
+
+  node.append("text")
+    .attr("text-anchor", "middle")
+    .attr("dy", (d) => radius(d) + 14)
+    .text((d) => lastName(d.pi));
+
+  simulation.on("tick", () => {
+    link
+      .attr("x1", (d) => d.source.x)
+      .attr("y1", (d) => d.source.y)
+      .attr("x2", (d) => d.target.x)
+      .attr("y2", (d) => d.target.y);
+    node.attr("transform", (d) => `translate(${d.x}, ${d.y})`);
+  });
+
+  function highlightNeighborhood(d) {
+    const neighborIds = new Set([d.id]);
+    data.links.forEach((l) => {
+      const sId = typeof l.source === "object" ? l.source.id : l.source;
+      const tId = typeof l.target === "object" ? l.target.id : l.target;
+      if (sId === d.id) neighborIds.add(tId);
+      if (tId === d.id) neighborIds.add(sId);
+    });
+    node.classed("faded", (n) => !neighborIds.has(n.id));
+    node.classed("is-active", (n) => n.id === d.id);
+    link.classed("faded-link", (l) => {
+      const sId = typeof l.source === "object" ? l.source.id : l.source;
+      const tId = typeof l.target === "object" ? l.target.id : l.target;
+      return sId !== d.id && tId !== d.id;
+    });
+    link.classed("highlighted-link", (l) => {
+      const sId = typeof l.source === "object" ? l.source.id : l.source;
+      const tId = typeof l.target === "object" ? l.target.id : l.target;
+      return sId === d.id || tId === d.id;
+    });
+  }
+
+  function clearHighlight() {
+    node.classed("faded", false).classed("is-active", false);
+    link.classed("faded-link", false).classed("highlighted-link", false);
+  }
+
+  function showTooltip(event, html) {
+    tooltip.html(html).classed("show", true);
+    moveTooltip(event);
+  }
+  function moveTooltip(event) {
+    const pad = 14;
+    const w = tooltip.node().offsetWidth;
+    const h = tooltip.node().offsetHeight;
+    let x = event.clientX + pad;
+    let y = event.clientY + pad;
+    if (x + w > window.innerWidth - 8) x = event.clientX - w - pad;
+    if (y + h > window.innerHeight - 8) y = event.clientY - h - pad;
+    tooltip.style("left", x + "px").style("top", y + "px");
+  }
+  function hideTooltip() { tooltip.classed("show", false); }
+
+  function lastName(fullName) {
+    if (!fullName) return "";
+    const parts = fullName.trim().split(/\s+/);
+    return parts[parts.length - 1].replace(/[.,]$/, "");
+  }
+  function escapeHtml(s) {
+    return s.replace(/[&<>"']/g, (c) => ({
+      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+    }[c]));
+  }
+
+  window.addEventListener("resize", () => {
+    simulation.force("center", d3.forceCenter(window.innerWidth / 2, window.innerHeight / 2));
+    simulation.alpha(0.3).restart();
+  });
+})();
+</script>
+</body>
+</html>
