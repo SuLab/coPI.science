@@ -26,6 +26,7 @@ _SCRIPPS = {
     "su", "wiseman", "grotjahn", "ward", "briney", "forli", "lairson",
     "badran", "kern", "lasker", "lippi", "maillie", "millar", "miller",
     "mravic", "paulson", "pwu", "seiple", "williamson", "wilson",
+    "young",  # Calibr-Skaggs is part of Scripps
 }
 _UCSF = {
     "sali", "larabell", "zaro", "roe", "santi", "wells", "echeverria",
@@ -35,7 +36,6 @@ _OTHER_INST = {
     "kim": "Stanford",
     "azumaya": "Genentech",
     "nomura": "UC Berkeley",
-    "young": "Calibr-Skaggs",
 }
 
 # Cohort cutover for the Cabo retreat graph: matches commit 0ef4741

@@ -26,24 +26,26 @@
   #viz { width: 100vw; height: 100vh; display: block; cursor: grab; }
   #viz:active { cursor: grabbing; }
 
-  .node circle {
+  .node {
     cursor: pointer;
-    transition: stroke-width 150ms ease, filter 150ms ease;
-    filter: drop-shadow(0 2px 4px rgba(15, 23, 42, 0.15));
   }
-  .node:hover circle, .node.is-active circle {
-    stroke-width: 3px;
-    filter: drop-shadow(0 4px 10px rgba(99, 102, 241, 0.45));
+  .node rect {
+    transition: filter 150ms ease, stroke-width 150ms ease;
+    filter: drop-shadow(0 2px 5px rgba(15, 23, 42, 0.18));
+    stroke: rgba(255, 255, 255, 0.9);
+    stroke-width: 1.5px;
+  }
+  .node:hover rect, .node.is-active rect {
+    stroke-width: 2.5px;
+    filter: drop-shadow(0 6px 14px rgba(99, 102, 241, 0.45));
   }
   .node text {
     pointer-events: none;
-    font-size: 12px;
-    font-weight: 600;
-    fill: #1e293b;
-    paint-order: stroke;
-    stroke: rgba(255, 255, 255, 0.9);
-    stroke-width: 3px;
-    stroke-linejoin: round;
+    font-weight: 700;
+    fill: #ffffff;
+    letter-spacing: 0.01em;
+    dominant-baseline: central;
+    text-anchor: middle;
   }
   .link {
     stroke: #94a3b8;
@@ -114,6 +116,22 @@
     width: 8px; height: 8px; border-radius: 999px;
     background: linear-gradient(135deg, #6366f1, #a855f7);
   }
+  .login-btn {
+    position: absolute; top: 24px; right: 32px;
+    display: inline-flex; align-items: center; gap: 6px;
+    background: white; border: 1px solid #e2e8f0;
+    border-radius: 999px; padding: 6px 16px;
+    font-weight: 600; font-size: 13px;
+    color: #4338ca;
+    text-decoration: none;
+    box-shadow: 0 2px 6px rgba(15, 23, 42, 0.05);
+    transition: border-color 150ms ease, box-shadow 150ms ease, transform 150ms ease;
+  }
+  .login-btn:hover {
+    border-color: #a5b4fc;
+    box-shadow: 0 4px 12px rgba(99, 102, 241, 0.18);
+    transform: translateY(-1px);
+  }
 </style>
 </head>
 <body class="grid-bg">
@@ -122,10 +140,9 @@
   <div style="margin-left: 96px;">
     <div class="title">Cabo collaboration network</div>
     <div class="sub">{{ node_count }} PIs · {{ edge_count }} collaborating pairs · joint proposals since May 1, 2026</div>
-  </div>
-  <div class="right">
-    drag a node to reposition · scroll to zoom<br/>
-    hover for details
+    <div class="sub" style="font-size: 12px; color: #64748b; margin-top: 4px;">
+      hover for info, sign in to view proposal details
+    </div>
   </div>
 </div>
 
@@ -134,14 +151,14 @@
   <span style="background: linear-gradient(90deg, #6366f1, #a855f7); -webkit-background-clip: text; background-clip: text; color: transparent;">CoPI</span>
 </div>
 
+<a href="/login" class="login-btn">Sign in</a>
+
 <svg id="viz"></svg>
 
 <div class="legend">
-  <div class="row"><span class="swatch" style="background:#6366f1"></span> Scripps Research</div>
+  <div class="row"><span class="swatch" style="background:#f59e0b"></span> Scripps Research</div>
   <div class="row"><span class="swatch" style="background:#a855f7"></span> UCSF</div>
   <div class="row"><span class="swatch" style="background:#64748b"></span> Other</div>
-  <div class="row" style="margin-top:8px;"><span class="edge" style="width:32px; height:2.5px;"></span><span style="color:#64748b;">few</span></div>
-  <div class="row"><span class="edge" style="width:32px; height:8px;"></span><span style="color:#64748b;">many proposals</span></div>
 </div>
 
 <div class="tooltip" id="tooltip"></div>
@@ -157,14 +174,11 @@
   const height = window.innerHeight;
 
   const COLORS = {
-    Scripps: "#6366f1",
+    Scripps: "#f59e0b",
     UCSF: "#a855f7",
-    Stanford: "#0ea5e9",
-    Genentech: "#f59e0b",
-    "UC Berkeley": "#10b981",
-    "Calibr-Skaggs": "#ec4899",
     Other: "#64748b",
   };
+  const colorFor = (inst) => COLORS[inst] || COLORS.Other;
 
   const root = svg.append("g");
 
@@ -174,30 +188,28 @@
       .on("zoom", (event) => root.attr("transform", event.transform))
   );
 
-  const maxWeight = d3.max(data.links, (d) => d.weight) || 1;
-  const linkWidth = d3.scaleLinear()
-    .domain([1, maxWeight])
-    .range([2.5, 10]);
-  const linkOpacity = d3.scaleLinear()
-    .domain([1, maxWeight])
-    .range([0.55, 0.95]);
-  const linkDistance = d3.scaleLinear()
-    .domain([1, maxWeight])
-    .range([170, 70]);
+  const LINK_WIDTH = 3;
+  const LINK_OPACITY = 0.65;
+  const LINK_DISTANCE = 110;
 
-  const radius = (d) => 12 + Math.sqrt(d.proposals || 0) * 4;
+  const fontSize = (d) => 16.5 + Math.sqrt(d.proposals || 0) * 1.85;
+  // Approximate pill dimensions before live text measurement; refined post-render.
+  const approxPillW = (d) => lastName(d.pi).length * fontSize(d) * 0.6 + 22;
+  const approxPillH = (d) => fontSize(d) + 14;
+  const collideRadius = (d) => Math.max(d._w || approxPillW(d), d._h || approxPillH(d)) / 2 + 6;
 
   const simulation = d3.forceSimulation(data.nodes)
     .force(
       "link",
       d3.forceLink(data.links)
         .id((d) => d.id)
-        .distance((d) => linkDistance(d.weight))
-        .strength((d) => 0.25 + 0.3 * (d.weight / maxWeight))
+        .distance(LINK_DISTANCE)
     )
-    .force("charge", d3.forceManyBody().strength(-380))
+    .force("charge", d3.forceManyBody().strength(-420))
     .force("center", d3.forceCenter(width / 2, height / 2))
-    .force("collide", d3.forceCollide().radius((d) => radius(d) + 14))
+    .force("x", d3.forceX(width / 2).strength(0.04))
+    .force("y", d3.forceY(height / 2).strength(0.18))
+    .force("collide", d3.forceCollide().radius(collideRadius))
     .alphaDecay(0.025)
     .velocityDecay(0.35);
 
@@ -207,8 +219,8 @@
     .data(data.links)
     .join("line")
     .attr("class", "link")
-    .attr("stroke-width", (d) => linkWidth(d.weight))
-    .attr("stroke-opacity", (d) => linkOpacity(d.weight))
+    .attr("stroke-width", LINK_WIDTH)
+    .attr("stroke-opacity", LINK_OPACITY)
     .on("mouseover", function (event, d) {
       const a = typeof d.source === "object" ? d.source : data.nodes.find((n) => n.id === d.source);
       const b = typeof d.target === "object" ? d.target : data.nodes.find((n) => n.id === d.target);
@@ -257,16 +269,28 @@
       hideTooltip();
     });
 
-  node.append("circle")
-    .attr("r", radius)
-    .attr("fill", (d) => COLORS[d.institution] || COLORS.Other)
-    .attr("stroke", "white")
-    .attr("stroke-width", 2);
+  node.append("rect")
+    .attr("fill", (d) => colorFor(d.institution));
 
   node.append("text")
-    .attr("text-anchor", "middle")
-    .attr("dy", (d) => radius(d) + 14)
+    .style("font-size", (d) => fontSize(d) + "px")
     .text((d) => lastName(d.pi));
+
+  // Measure rendered text and size pill rects to fit. Re-run collide once sized.
+  node.each(function(d) {
+    const bbox = d3.select(this).select("text").node().getBBox();
+    d._w = bbox.width + 22;
+    d._h = bbox.height + 12;
+    d3.select(this).select("rect")
+      .attr("x", -d._w / 2)
+      .attr("y", -d._h / 2)
+      .attr("width", d._w)
+      .attr("height", d._h)
+      .attr("rx", d._h / 2)
+      .attr("ry", d._h / 2);
+  });
+  simulation.force("collide").radius(collideRadius);
+  simulation.alpha(0.6).restart();
 
   simulation.on("tick", () => {
     link
@@ -322,8 +346,12 @@
 
   function lastName(fullName) {
     if (!fullName) return "";
-    const parts = fullName.trim().split(/\s+/);
-    return parts[parts.length - 1].replace(/[.,]$/, "");
+    const SUFFIXES = new Set(["jr", "sr", "ii", "iii", "iv"]);
+    const parts = fullName.trim().split(/\s+/).map((p) => p.replace(/[.,]$/, ""));
+    while (parts.length > 1 && SUFFIXES.has(parts[parts.length - 1].toLowerCase())) {
+      parts.pop();
+    }
+    return parts[parts.length - 1];
   }
   function escapeHtml(s) {
     return s.replace(/[&<>"']/g, (c) => ({
@@ -332,7 +360,10 @@
   }
 
   window.addEventListener("resize", () => {
-    simulation.force("center", d3.forceCenter(window.innerWidth / 2, window.innerHeight / 2));
+    const w = window.innerWidth, h = window.innerHeight;
+    simulation.force("center", d3.forceCenter(w / 2, h / 2));
+    simulation.force("x", d3.forceX(w / 2).strength(0.04));
+    simulation.force("y", d3.forceY(h / 2).strength(0.18));
     simulation.alpha(0.3).restart();
   });
 })();
