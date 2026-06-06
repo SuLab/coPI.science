@@ -34,6 +34,14 @@ WHAT TO EXAMINE
        WHERE created_at > NOW() - INTERVAL '24 hours'
        GROUP BY agent_id ORDER BY 2 DESC;"
 
+4. Uncommitted code changes — check whether the working tree has drifted
+   from the last commit:
+     git -C /home/ubuntu/copi-python status --short
+     git -C /home/ubuntu/copi-python stash list
+   If there are modified, staged, or untracked files (ignore the usual
+   noise — logs/, data/, profiles/, *.log), note that uncommitted changes
+   exist. Do NOT diff or read the contents; just report that they're there.
+
 WHAT COUNTS AS A "BUG" OR WASTE
 
 - Repeated tracebacks or unhandled exceptions
@@ -76,7 +84,11 @@ Compose a plain-text email body with these sections:
      description, file:line or log timestamp pointer so a human can dig in
   4. Wasteful-call candidates — agents/phases that look expensive relative
      to output
-  5. Recommended next action (or "none")
+  5. Uncommitted changes — if the working tree has uncommitted changes
+     (beyond the usual logs/data/profiles noise), state that they exist
+     with a note to consider committing them. If the tree is clean, say so
+     in one line or omit this section.
+  6. Recommended next action (or "none")
 
 Keep the whole body under ~400 lines. If there's truly nothing to say,
 still send the email with status OK + the activity snapshot — a daily
