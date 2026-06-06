@@ -33,6 +33,10 @@ class Settings(BaseSettings):
     ses_reply_domain: str = "reply.copi.science"
     ses_inbound_s3_bucket: str = "copi-inbound-email"
     ses_inbound_s3_prefix: str = "inbound/"
+    # Comma-separated recipient allowlist. Empty = send to everyone.
+    outbound_email_allowlist: str = ""
+    # When False, the worker skips inbound S3 polling (avoids log spam if S3 isn't set up).
+    enable_inbound_email: bool = False
 
     # Email notification scheduling
     notification_check_interval: int = 300  # seconds (5 minutes)
@@ -90,6 +94,82 @@ class Settings(BaseSettings):
     slack_bot_token_yeager: str = ""
     slack_bot_token_moore: str = ""
     slack_bot_token_young: str = ""
+    # Onboarding batch 2026-06 (newuserlist01/02)
+    slack_bot_token_achatterjee: str = ""
+    slack_bot_token_bollong: str = ""
+    slack_bot_token_chatterjee: str = ""
+    slack_bot_token_chen: str = ""
+    slack_bot_token_chin: str = ""
+    slack_bot_token_ckim: str = ""
+    slack_bot_token_cliu: str = ""
+    slack_bot_token_cochran: str = ""
+    slack_bot_token_corey: str = ""
+    slack_bot_token_cornish: str = ""
+    slack_bot_token_diercks: str = ""
+    slack_bot_token_ding: str = ""
+    slack_bot_token_ellman: str = ""
+    slack_bot_token_good: str = ""
+    slack_bot_token_gray: str = ""
+    slack_bot_token_hsiehwilson: str = ""
+    slack_bot_token_johnsson: str = ""
+    slack_bot_token_lemke: str = ""
+    slack_bot_token_liu: str = ""
+    slack_bot_token_lyssiotis: str = ""
+    slack_bot_token_mehta: str = ""
+    slack_bot_token_pei: str = ""
+    slack_bot_token_pezacki: str = ""
+    slack_bot_token_schen: str = ""
+    slack_bot_token_schultz: str = ""
+    slack_bot_token_shao: str = ""
+    slack_bot_token_shokat: str = ""
+    slack_bot_token_ting: str = ""
+    slack_bot_token_wang: str = ""
+    slack_bot_token_williams: str = ""
+    slack_bot_token_winssinger: str = ""
+    slack_bot_token_wliu: str = ""
+    slack_bot_token_xiao: str = ""
+    slack_bot_token_yang: str = ""
+    # Onboarding batch 3 — Schultz reunion attendees (2026-06-06)
+    slack_bot_token_mcnamara: str = ""
+    slack_bot_token_watanabe: str = ""
+    slack_bot_token_summerer: str = ""
+    slack_bot_token_vranken: str = ""
+    slack_bot_token_wemmer: str = ""
+    slack_bot_token_zhou: str = ""
+    slack_bot_token_dyoung: str = ""
+    slack_bot_token_brustad: str = ""
+    slack_bot_token_gan: str = ""
+    slack_bot_token_larman: str = ""
+    slack_bot_token_wurdak: str = ""
+    slack_bot_token_ulrich: str = ""
+    slack_bot_token_luesch: str = ""
+    slack_bot_token_ai: str = ""
+    slack_bot_token_gildersleeve: str = ""
+    slack_bot_token_mills: str = ""
+    slack_bot_token_xie: str = ""
+    slack_bot_token_guo: str = ""
+    slack_bot_token_liao: str = ""
+    slack_bot_token_jwang: str = ""
+    slack_bot_token_hogenesch: str = ""
+    slack_bot_token_lee: str = ""
+    slack_bot_token_alfonta: str = ""
+    slack_bot_token_meijler: str = ""
+    slack_bot_token_koh: str = ""
+    slack_bot_token_goto: str = ""
+    slack_bot_token_lin: str = ""
+    slack_bot_token_zuckermann: str = ""
+    slack_bot_token_rwang: str = ""
+    slack_bot_token_mehl: str = ""
+    slack_bot_token_cherry: str = ""
+    slack_bot_token_schiller: str = ""
+    slack_bot_token_santoro: str = ""
+    slack_bot_token_cropp: str = ""
+    slack_bot_token_scanlan: str = ""
+    slack_bot_token_xchen: str = ""
+    slack_bot_token_xwu: str = ""
+    slack_bot_token_zhang: str = ""
+    slack_bot_token_chang: str = ""
+    slack_bot_token_yliu: str = ""
     slack_bot_token_grantbot: str = ""
 
     # Analytics
@@ -177,6 +257,82 @@ class Settings(BaseSettings):
             "yeager": self.slack_bot_token_yeager,
             "moore": self.slack_bot_token_moore,
             "young": self.slack_bot_token_young,
+            # Onboarding batch 2026-06 (newuserlist01/02)
+            "achatterjee": self.slack_bot_token_achatterjee,
+            "bollong": self.slack_bot_token_bollong,
+            "chatterjee": self.slack_bot_token_chatterjee,
+            "chen": self.slack_bot_token_chen,
+            "chin": self.slack_bot_token_chin,
+            "ckim": self.slack_bot_token_ckim,
+            "cliu": self.slack_bot_token_cliu,
+            "cochran": self.slack_bot_token_cochran,
+            "corey": self.slack_bot_token_corey,
+            "cornish": self.slack_bot_token_cornish,
+            "diercks": self.slack_bot_token_diercks,
+            "ding": self.slack_bot_token_ding,
+            "ellman": self.slack_bot_token_ellman,
+            "good": self.slack_bot_token_good,
+            "gray": self.slack_bot_token_gray,
+            "hsiehwilson": self.slack_bot_token_hsiehwilson,
+            "johnsson": self.slack_bot_token_johnsson,
+            "lemke": self.slack_bot_token_lemke,
+            "liu": self.slack_bot_token_liu,
+            "lyssiotis": self.slack_bot_token_lyssiotis,
+            "mehta": self.slack_bot_token_mehta,
+            "pei": self.slack_bot_token_pei,
+            "pezacki": self.slack_bot_token_pezacki,
+            "schen": self.slack_bot_token_schen,
+            "schultz": self.slack_bot_token_schultz,
+            "shao": self.slack_bot_token_shao,
+            "shokat": self.slack_bot_token_shokat,
+            "ting": self.slack_bot_token_ting,
+            "wang": self.slack_bot_token_wang,
+            "williams": self.slack_bot_token_williams,
+            "winssinger": self.slack_bot_token_winssinger,
+            "wliu": self.slack_bot_token_wliu,
+            "xiao": self.slack_bot_token_xiao,
+            "yang": self.slack_bot_token_yang,
+            # Onboarding batch 3 — Schultz reunion attendees (2026-06-06)
+            "mcnamara": self.slack_bot_token_mcnamara,
+            "watanabe": self.slack_bot_token_watanabe,
+            "summerer": self.slack_bot_token_summerer,
+            "vranken": self.slack_bot_token_vranken,
+            "wemmer": self.slack_bot_token_wemmer,
+            "zhou": self.slack_bot_token_zhou,
+            "dyoung": self.slack_bot_token_dyoung,
+            "brustad": self.slack_bot_token_brustad,
+            "gan": self.slack_bot_token_gan,
+            "larman": self.slack_bot_token_larman,
+            "wurdak": self.slack_bot_token_wurdak,
+            "ulrich": self.slack_bot_token_ulrich,
+            "luesch": self.slack_bot_token_luesch,
+            "ai": self.slack_bot_token_ai,
+            "gildersleeve": self.slack_bot_token_gildersleeve,
+            "mills": self.slack_bot_token_mills,
+            "xie": self.slack_bot_token_xie,
+            "guo": self.slack_bot_token_guo,
+            "liao": self.slack_bot_token_liao,
+            "jwang": self.slack_bot_token_jwang,
+            "hogenesch": self.slack_bot_token_hogenesch,
+            "lee": self.slack_bot_token_lee,
+            "alfonta": self.slack_bot_token_alfonta,
+            "meijler": self.slack_bot_token_meijler,
+            "koh": self.slack_bot_token_koh,
+            "goto": self.slack_bot_token_goto,
+            "lin": self.slack_bot_token_lin,
+            "zuckermann": self.slack_bot_token_zuckermann,
+            "rwang": self.slack_bot_token_rwang,
+            "mehl": self.slack_bot_token_mehl,
+            "cherry": self.slack_bot_token_cherry,
+            "schiller": self.slack_bot_token_schiller,
+            "santoro": self.slack_bot_token_santoro,
+            "cropp": self.slack_bot_token_cropp,
+            "scanlan": self.slack_bot_token_scanlan,
+            "xchen": self.slack_bot_token_xchen,
+            "xwu": self.slack_bot_token_xwu,
+            "zhang": self.slack_bot_token_zhang,
+            "chang": self.slack_bot_token_chang,
+            "yliu": self.slack_bot_token_yliu,
         }
 
 

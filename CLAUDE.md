@@ -67,7 +67,24 @@ New entries should have `status='pending'` until Slack tokens are configured.
 
 ### 3. Create Slack bot tokens
 
-Create a Slack bot token for each agent and add to the settings/env config. Each agent needs its own bot token keyed by `agent_id`.
+Run the provisioning script to create a Slack app + bot token per agent (reads
+`PILOT_LABS`, so do step 4 first or alongside):
+
+```bash
+python3 scripts/provision_slack_bots.py            # creates apps, prints OAuth URLs
+```
+
+A workspace admin clicks each OAuth URL; tokens are written to `.env` as
+`SLACK_BOT_TOKEN_<AGENT_ID>`.
+
+**Critical — the `.env` token is NOT enough.** `src/config.py` `Settings` uses
+`extra="ignore"`, and `get_slack_tokens()` returns a hardcoded dict, so each new
+agent ALSO needs, in `src/config.py`:
+1. a field declaration — `slack_bot_token_<id>: str = ""`
+2. a `get_slack_tokens()` dict entry — `"<id>": self.slack_bot_token_<id>,`
+
+Without these, the agent loads but logs `[<id>] No valid Slack token — skipping`
+even though the token is valid and present in the environment.
 
 ### 4. Add to PILOT_LABS and restart simulation
 
