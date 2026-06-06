@@ -50,13 +50,14 @@ _OTHER_INST = {
 # single simulation_run_id, so date is the only way to isolate the new cohort.
 CABO_COHORT_START = datetime(2026, 3, 1, tzinfo=timezone.utc)
 
-# Cohort 001 = the PIs seeded from newuserlist01.tsv + newuserlist02.tsv.
-# These are matched by ORCID (the identifier the lists are keyed on) rather
-# than agent_id, since agent_id collision-prefixing (cliu/liu, schen/chen,
-# ckim/kim, wliu/wu, achatterjee/chatterjee) makes hand-deriving IDs fragile.
-# The last three entries of newuserlist02.tsv had a null ORCID in the TSV;
-# their stored identifiers were resolved from the agents/users tables.
-COHORT001_ORCIDS = frozenset({
+# Schultz alumni pilot = the PIs seeded from newuserlist01.tsv + newuserlist02.tsv
+# (formerly "cohort 001"). These are matched by ORCID (the identifier the lists
+# are keyed on) rather than agent_id, since agent_id collision-prefixing
+# (cliu/liu, schen/chen, ckim/kim, wliu/wu, achatterjee/chatterjee) makes
+# hand-deriving IDs fragile. The last three entries of newuserlist02.tsv had a
+# null ORCID in the TSV; their stored identifiers were resolved from the
+# agents/users tables.
+SCHULTZ_PILOT_ORCIDS = frozenset({
     # newuserlist01.tsv
     "0000-0001-9649-1892",  # Chan Hyuk Kim
     "0000-0003-2585-8268",  # Angad Mehta
@@ -96,14 +97,22 @@ COHORT001_ORCIDS = frozenset({
     "SPARSE-1527BF6A",      # Sida Shao       (null ORCID in TSV; resolved from DB)
 })
 
-# Window start for the cohort-001 graph: only proposals from June 2, 2026 on.
-COHORT001_START = datetime(2026, 6, 2, tzinfo=timezone.utc)
-
-# Schultz alumni reunion run: the 75-agent simulation was RESUMED 2026-06-06 into
-# an existing simulation_run_id, so (as with the other cohorts) date is the only
-# way to isolate it. The run was idle 2026-06-04 → 2026-06-06, so this cutoff is
-# clean. See memory project_reunion_cohort_boundary.
-SCHULTZ_COHORT_START = datetime(2026, 6, 6, tzinfo=timezone.utc)
+# Three time-scoped cohorts of the same long-running simulation. Edges are
+# bounded by proposal *decided_at* (window_end exclusive). The post-creation
+# join boundary (cohort_start) sits EARLIER than the decision window, because a
+# thread can be opened a couple days before its proposal lands (e.g. the group
+# proposals decided Jun 6 came from posts created Jun 4). Bounding posts to the
+# decision window would silently drop those edges. See memory
+# project_graph_cohort_windows.
+#
+# Cabo cohort:            Apr 27 – May  7, 2026 (inlined in the /cabo-graph route)
+# Schultz alumni pilot:   Jun  1 – Jun  4, 2026
+# Schultz group alumni:   Jun  5 – Jun 10, 2026
+JUNE_POST_START = datetime(2026, 6, 1, tzinfo=timezone.utc)  # post boundary for both June cohorts
+SCHULTZ_PILOT_START = datetime(2026, 6, 1, tzinfo=timezone.utc)
+SCHULTZ_PILOT_END = datetime(2026, 6, 5, tzinfo=timezone.utc)  # exclusive: through Jun 4
+SCHULTZ_GROUP_START = datetime(2026, 6, 5, tzinfo=timezone.utc)
+SCHULTZ_GROUP_END = datetime(2026, 6, 11, tzinfo=timezone.utc)  # exclusive: through Jun 10
 
 
 def _institution_for(agent_id: str) -> str:
@@ -488,21 +497,36 @@ async def _build_graph_payload(
     db: AsyncSession,
     *,
     scripps_only: bool = False,
+    all_agents: bool = False,
     orcids: frozenset[str] | None = None,
     cohort_start: datetime = CABO_COHORT_START,
+    window_start: datetime | None = None,
+    window_end: datetime | None = None,
     use_profile_institution: bool = False,
 ):
     """Shared data builder for the collaboration-network views.
 
     Node selection (mutually exclusive):
     - ``orcids`` given: restrict to agents whose user has one of those ORCIDs
-      (used by /cohort001-graph to scope to a seeded PI list).
+      (used by /schultz-alumni-pilot to scope to a seeded PI list).
     - ``scripps_only``: include all Scripps agents regardless of status so we
       pick up investigators who weren't at the meeting (/scripps-graph).
-    - otherwise: active agents only (/cabo-graph).
+    - ``all_agents``: every agent regardless of status. Use for a historical
+      time window where the participants are no longer the current
+      ``status='active'`` roster (e.g. the Cabo retreat week vs. the later
+      reunion run). The ``degree > 0`` trim below keeps only agents that
+      actually appear in an in-window edge.
+    - otherwise: active agents only.
 
-    ``cohort_start`` bounds which posts/proposals count as edges, letting a
-    caller request a rolling window (e.g. the latest two days).
+    ``cohort_start`` bounds which *posts* count (their ``created_at``), keeping
+    edges inside the right cohort/run.
+
+    ``window_start`` / ``window_end`` bound when a proposal was *decided*,
+    letting a caller scope to an arbitrary date range (e.g. a single retreat
+    week). ``window_start`` defaults to ``cohort_start``; ``window_end`` is
+    exclusive and unbounded when ``None``. The window is applied to
+    ``decided_at`` only — not to post creation — so a proposal decided in the
+    window still counts even if its thread was opened earlier.
 
     ``use_profile_institution`` colors nodes by the user's profile institution
     (fuzzy-grouped via :func:`_group_institutions`) instead of the hardcoded
@@ -523,6 +547,15 @@ async def _build_graph_payload(
             text("SELECT agent_id, pi_name, bot_name FROM agents ORDER BY pi_name")
         )
         active_rows = [r for r in nodes_result.fetchall() if r.agent_id in _SCRIPPS]
+    elif all_agents:
+        nodes_result = await db.execute(
+            text(
+                "SELECT a.agent_id, a.pi_name, a.bot_name, u.institution "
+                "FROM agents a LEFT JOIN users u ON u.id = a.user_id "
+                "ORDER BY a.pi_name"
+            )
+        )
+        active_rows = nodes_result.fetchall()
     else:
         nodes_result = await db.execute(
             text(
@@ -540,9 +573,16 @@ async def _build_graph_payload(
     else:
         institution_of = lambda row: _institution_for(row.agent_id)  # noqa: E731
 
+    decided_floor = window_start or cohort_start
+    params = {"cohort_start": cohort_start, "decided_floor": decided_floor}
+    window_end_clause = ""
+    if window_end is not None:
+        window_end_clause = " AND decided_at < :window_end"
+        params["window_end"] = window_end
+
     edges_result = await db.execute(
         text(
-            """
+            f"""
             WITH cohort_posts AS (
                 SELECT message_ts
                 FROM agent_messages
@@ -559,7 +599,7 @@ async def _build_graph_payload(
                     summary_text
                 FROM thread_decisions
                 WHERE outcome = 'proposal'
-                  AND decided_at >= :cohort_start
+                  AND decided_at >= :decided_floor{window_end_clause}
                   AND thread_id IN (SELECT message_ts FROM cohort_posts)
             ),
             -- The agent-only proposal for a thread is the FIRST one the bots
@@ -582,7 +622,7 @@ async def _build_graph_payload(
             GROUP BY a, b
             """
         ),
-        {"cohort_start": cohort_start},
+        params,
     )
 
     # Compute degree (unique collaborators) and total proposals per node from edges.
@@ -652,8 +692,16 @@ def _largest_component(nodes, links):
 
 @router.get("/cabo-graph", response_class=HTMLResponse)
 async def cabo_graph(request: Request, db: AsyncSession = Depends(get_db)):
-    """PI collaboration network for the Cabo retreat: all active PIs."""
-    nodes, links = await _build_graph_payload(db, scripps_only=False)
+    """PI collaboration network for the Cabo retreat: all active PIs.
+
+    Scoped to proposals decided during the retreat week (Apr 27 – May 7, 2026).
+    """
+    nodes, links = await _build_graph_payload(
+        db,
+        all_agents=True,  # Cabo roster is no longer status='active' (reunion run flipped it)
+        window_start=datetime(2026, 4, 27, tzinfo=timezone.utc),
+        window_end=datetime(2026, 5, 8, tzinfo=timezone.utc),  # exclusive: through May 7
+    )
     return templates.TemplateResponse(
         request,
         "cabo_graph.html",
@@ -667,7 +715,7 @@ async def cabo_graph(request: Request, db: AsyncSession = Depends(get_db)):
             "pi_label": "PIs",
             "legend": _LEGACY_LEGEND,
             "color_map": json.dumps(_LEGACY_COLOR_MAP),
-            "since_label": "since March 1, 2026",
+            "since_label": "during April 27 – May 7, 2026",
         },
     )
 
@@ -694,17 +742,20 @@ async def scripps_graph(request: Request, db: AsyncSession = Depends(get_db)):
     )
 
 
-@router.get("/cohort001-graph", response_class=HTMLResponse)
-async def cohort001_graph(request: Request, db: AsyncSession = Depends(get_db)):
-    """Collaboration network for cohort 001 (newuserlist01/02), June 2 on.
+@router.get("/schultz-alumni-pilot", response_class=HTMLResponse)
+async def schultz_alumni_pilot(request: Request, db: AsyncSession = Depends(get_db)):
+    """Schultz alumni pilot collaboration network (June 1 – June 4, 2026).
 
-    Scoped to the PIs seeded from the two cohort-001 user lists (by ORCID),
-    with edges limited to proposals drafted from June 2, 2026 onward.
+    Scoped to the PIs seeded from the two pilot user lists (by ORCID), with
+    edges limited to proposals decided June 1–4, 2026. Nodes are colored by
+    profile institution. (Formerly /cohort001-graph.)
     """
     nodes, links = await _build_graph_payload(
         db,
-        orcids=COHORT001_ORCIDS,
-        cohort_start=COHORT001_START,
+        orcids=SCHULTZ_PILOT_ORCIDS,
+        cohort_start=JUNE_POST_START,
+        window_start=SCHULTZ_PILOT_START,
+        window_end=SCHULTZ_PILOT_END,
         use_profile_institution=True,
     )
     legend, color_map = _institution_legend(nodes)
@@ -717,26 +768,31 @@ async def cohort001_graph(request: Request, db: AsyncSession = Depends(get_db)):
             "node_count": len(nodes),
             "edge_count": len(links),
             "proposal_count": sum(link["weight"] for link in links),
-            "page_title": "Cohort 001 collaboration network",
+            "page_title": "Schultz Alumni Pilot collaboration network",
             "pi_label": "PIs",
             "legend": legend,
             "color_map": json.dumps(color_map),
-            "since_label": "since June 2, 2026",
+            "since_label": "during June 1 – June 4, 2026",
         },
     )
 
 
-@router.get("/schultz-alumni-graph", response_class=HTMLResponse)
-async def schultz_alumni_graph(request: Request, db: AsyncSession = Depends(get_db)):
-    """Collaboration network for the Schultz alumni reunion run (June 6, 2026 on).
+@router.get("/schultz-group-alumni", response_class=HTMLResponse)
+async def schultz_group_alumni(request: Request, db: AsyncSession = Depends(get_db)):
+    """Schultz group alumni reunion collaboration network (June 5 – June 10, 2026).
 
-    All currently-active PIs (the reunion roster of 75), with edges limited to
-    proposals drafted from 2026-06-06 onward — i.e. the discussions produced by
-    the resumed simulation. Nodes are colored by profile institution.
+    Edges limited to proposals decided June 5–10, 2026 — the discussions
+    produced by the resumed reunion run. Uses ``all_agents`` (not
+    ``status='active'``) so the graph stays correct as a historical window even
+    after a later run flips the active roster. Nodes are colored by profile
+    institution. (Formerly /schultz-alumni-graph.)
     """
     nodes, links = await _build_graph_payload(
         db,
-        cohort_start=SCHULTZ_COHORT_START,
+        all_agents=True,
+        cohort_start=JUNE_POST_START,
+        window_start=SCHULTZ_GROUP_START,
+        window_end=SCHULTZ_GROUP_END,
         use_profile_institution=True,
     )
     legend, color_map = _institution_legend(nodes)
@@ -749,10 +805,10 @@ async def schultz_alumni_graph(request: Request, db: AsyncSession = Depends(get_
             "node_count": len(nodes),
             "edge_count": len(links),
             "proposal_count": sum(link["weight"] for link in links),
-            "page_title": "Schultz Alumni collaboration network",
+            "page_title": "Schultz Group Alumni collaboration network",
             "pi_label": "PIs",
             "legend": legend,
             "color_map": json.dumps(color_map),
-            "since_label": "since June 6, 2026",
+            "since_label": "during June 5 – June 10, 2026",
         },
     )
