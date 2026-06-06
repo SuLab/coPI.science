@@ -30,6 +30,7 @@ from src.services.pubmed import (
     convert_pmids_to_pmcids,
     fetch_pmc_methods,
     fetch_pubmed_records,
+    reconcile_pub_doi,
 )
 
 logger = logging.getLogger(__name__)
@@ -187,14 +188,26 @@ async def run_profile_pipeline(
         pub_types_lower = [t.lower() for t in rec.get("pub_types", [])]
         is_research = not any(exc_type in pub_types_lower for exc_type in EXCLUDED_TYPES)
 
-        # Prefer ORCID DOI over PubMed DOI — PubMed ArticleId DOIs are
-        # sometimes stale or incorrect, while ORCID DOIs are author-curated.
-        doi = pmid_to_orcid_doi.get(pmid) or rec.get("doi")
+        # DOI assignment + validation gate. The ORCID-curated DOI is preferred
+        # as the candidate, but it must agree with the DOI PubMed has on file
+        # for this exact PMID — otherwise the candidate points at a different
+        # paper (the failure mode behind the bad-link incident). reconcile_pub_doi
+        # treats rec["doi"] (this PMID's PubMed record) as authoritative: on a
+        # verifiable mismatch it returns the authoritative DOI rather than
+        # persisting a wrong one, and it canonicalizes format drift on a match.
+        assigned_doi = pmid_to_orcid_doi.get(pmid) or rec.get("doi")
+        doi, doi_action = reconcile_pub_doi(assigned_doi, rec.get("doi"))
+        if doi_action == "corrected":
+            logger.warning(
+                "[doi-gate] pmid=%s: candidate DOI %r disagrees with PubMed record "
+                "DOI %r; using authoritative",
+                pmid, assigned_doi, doi,
+            )
 
         if pmid in existing_pubs:
             pub = existing_pubs[pmid]
-            # Update DOI if we now have a better one from ORCID
-            if doi and pmid in pmid_to_orcid_doi and pub.doi != doi:
+            # Apply the validated DOI if it changed.
+            if doi and pub.doi != doi:
                 pub.doi = doi
         else:
             pub = Publication(
