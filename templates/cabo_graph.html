@@ -6,6 +6,8 @@
 <title>CoPI · {{ page_title }}</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://d3js.org/d3.v7.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"></script>
 <style>
   html, body { height: 100%; margin: 0; }
   body {
@@ -80,9 +82,16 @@
     backdrop-filter: blur(8px);
     box-shadow: 0 4px 16px rgba(15, 23, 42, 0.06);
     font-size: 12px; color: #334155;
+    max-height: 60vh; overflow-y: auto;
+    columns: 2; column-gap: 24px;
   }
-  .legend .row { display: flex; align-items: center; gap: 8px; margin: 4px 0; }
-  .legend .swatch { width: 12px; height: 12px; border-radius: 999px; }
+  .legend.single-col { columns: 1; }
+  .legend .row {
+    display: flex; align-items: center; gap: 8px; margin: 4px 0;
+    break-inside: avoid;
+  }
+  .legend .swatch { width: 12px; height: 12px; border-radius: 999px; flex: none; }
+  .legend .count { color: #94a3b8; margin-left: auto; padding-left: 8px; }
   .legend .edge { height: 3px; border-radius: 2px; background: #94a3b8; }
 
   .tooltip {
@@ -103,6 +112,85 @@
   .tooltip .pi { font-weight: 600; color: #ffffff; }
   .tooltip .meta { color: #cbd5e1; margin-top: 2px; }
   .tooltip .summary { color: #e2e8f0; margin-top: 6px; font-style: italic; }
+
+  .modal-overlay {
+    position: fixed; inset: 0;
+    background: rgba(15, 23, 42, 0.55);
+    backdrop-filter: blur(3px);
+    display: none; align-items: center; justify-content: center;
+    z-index: 100; padding: 24px;
+  }
+  .modal-overlay.show { display: flex; }
+  .modal-card {
+    position: relative;
+    background: #ffffff;
+    border-radius: 16px;
+    width: min(680px, 92vw);
+    max-height: 82vh;
+    overflow-y: auto;
+    padding: 28px 30px 26px;
+    box-shadow: 0 24px 64px rgba(15, 23, 42, 0.35);
+  }
+  .modal-close {
+    position: absolute; top: 14px; right: 16px;
+    border: none; background: transparent;
+    font-size: 26px; line-height: 1; color: #94a3b8;
+    cursor: pointer; padding: 4px 8px; border-radius: 8px;
+  }
+  .modal-close:hover { color: #475569; background: #f1f5f9; }
+  .modal-pi {
+    font-size: 19px; font-weight: 700; color: #1e293b;
+    padding-right: 32px;
+  }
+  .modal-meta { font-size: 13px; color: #64748b; margin-top: 4px; }
+  .modal-body {
+    margin-top: 16px;
+    font-size: 14px; line-height: 1.6; color: #334155;
+    word-wrap: break-word;
+    border-top: 1px solid #e2e8f0; padding-top: 16px;
+  }
+  .modal-body > *:first-child { margin-top: 0; }
+  .modal-body > *:last-child { margin-bottom: 0; }
+  .modal-body p { margin: 10px 0; }
+  .modal-body h1, .modal-body h2, .modal-body h3,
+  .modal-body h4, .modal-body h5, .modal-body h6 {
+    margin: 18px 0 8px; font-weight: 700; color: #1e293b; line-height: 1.3;
+  }
+  .modal-body h1 { font-size: 18px; }
+  .modal-body h2 { font-size: 16px; }
+  .modal-body h3, .modal-body h4, .modal-body h5, .modal-body h6 { font-size: 14.5px; }
+  .modal-body strong { color: #1e293b; font-weight: 700; }
+  .modal-body em { font-style: italic; }
+  .modal-body a { color: #4338ca; text-decoration: underline; }
+  .modal-body ul, .modal-body ol { margin: 10px 0; padding-left: 22px; }
+  .modal-body li { margin: 5px 0; }
+  .modal-body li > ul, .modal-body li > ol { margin: 4px 0; }
+  .modal-body hr {
+    border: none; border-top: 1px solid #e2e8f0; margin: 18px 0;
+  }
+  .modal-body blockquote {
+    margin: 10px 0; padding: 4px 14px;
+    border-left: 3px solid #c7d2fe; color: #475569;
+  }
+  .modal-body code {
+    background: #f1f5f9; border-radius: 4px; padding: 1px 5px;
+    font-size: 12.5px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  .modal-body pre {
+    background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px;
+    padding: 12px 14px; overflow-x: auto; margin: 12px 0;
+  }
+  .modal-body pre code { background: none; padding: 0; }
+  .modal-body table {
+    border-collapse: collapse; width: 100%; margin: 12px 0; font-size: 13px;
+    display: block; overflow-x: auto;
+  }
+  .modal-body th, .modal-body td {
+    border: 1px solid #e2e8f0; padding: 7px 10px; text-align: left;
+    vertical-align: top;
+  }
+  .modal-body th { background: #f8fafc; font-weight: 700; color: #1e293b; }
+  .modal-body tr:nth-child(even) td { background: #fcfcfd; }
 
   .copi-pill {
     position: absolute; top: 24px; left: 32px;
@@ -139,9 +227,9 @@
 <div class="header">
   <div style="margin-left: 96px;">
     <div class="title">{{ page_title }}</div>
-    <div class="sub">{{ node_count }} {{ pi_label }} · {{ edge_count }} collaborating pairs · {{ proposal_count }} joint proposals since March 1, 2026</div>
+    <div class="sub">{{ node_count }} {{ pi_label }} · {{ edge_count }} collaborating pairs · {{ proposal_count }} joint proposals {{ since_label }}</div>
     <div class="sub" style="font-size: 12px; color: #64748b; margin-top: 4px;">
-      hover for info, sign in to view proposal details
+      hover for info, click an edge for the full proposal
     </div>
   </div>
 </div>
@@ -155,17 +243,31 @@
 
 <svg id="viz"></svg>
 
-{% if show_full_legend %}
-<div class="legend">
-  <div class="row"><span class="swatch" style="background:#f59e0b"></span> Scripps Research</div>
-  <div class="row"><span class="swatch" style="background:#a855f7"></span> UCSF</div>
-  <div class="row"><span class="swatch" style="background:#64748b"></span> Other</div>
+{% if legend %}
+<div class="legend{% if legend|length <= 6 %} single-col{% endif %}">
+  {% for item in legend %}
+  <div class="row">
+    <span class="swatch" style="background:{{ item.color }}"></span>
+    <span>{{ item.label }}</span>
+    {% if item.count is defined %}<span class="count">{{ item.count }}</span>{% endif %}
+  </div>
+  {% endfor %}
 </div>
 {% endif %}
 
 <div class="tooltip" id="tooltip"></div>
 
+<div class="modal-overlay" id="proposal-modal">
+  <div class="modal-card">
+    <button class="modal-close" aria-label="Close">×</button>
+    <div class="modal-pi"></div>
+    <div class="modal-meta"></div>
+    <div class="modal-body"></div>
+  </div>
+</div>
+
 <script id="graph-data" type="application/json">{{ graph_json|safe }}</script>
+<script id="color-map" type="application/json">{{ color_map|safe }}</script>
 <script>
 (function() {
   const data = JSON.parse(document.getElementById("graph-data").textContent);
@@ -191,12 +293,10 @@
     }
   });
 
-  const COLORS = {
-    Scripps: "#f59e0b",
-    UCSF: "#a855f7",
-    Other: "#64748b",
-  };
-  const colorFor = (inst) => COLORS[inst] || COLORS.Other;
+  const colorMapEl = document.getElementById("color-map");
+  const COLORS = JSON.parse((colorMapEl && colorMapEl.textContent) || "{}");
+  const FALLBACK_COLOR = "#94a3b8";
+  const colorFor = (inst) => COLORS[inst] || FALLBACK_COLOR;
 
   const root = svg.append("g");
 
@@ -239,20 +339,27 @@
     .attr("class", "link")
     .attr("stroke-width", LINK_WIDTH)
     .attr("stroke-opacity", LINK_OPACITY)
+    .style("cursor", (d) => (d.summary ? "pointer" : "default"))
     .on("mouseover", function (event, d) {
-      const a = typeof d.source === "object" ? d.source : data.nodes.find((n) => n.id === d.source);
-      const b = typeof d.target === "object" ? d.target : data.nodes.find((n) => n.id === d.target);
+      const [a, b] = edgePair(d);
       d3.select(this).classed("highlighted-link", true);
+      const teaser = d.summary ? truncate(stripFormatting(d.summary), 200) : "";
       showTooltip(event,
         `<div class="pi">${a.pi} ↔ ${b.pi}</div>` +
         `<div class="meta">${d.weight} joint proposal${d.weight === 1 ? "" : "s"}</div>` +
-        (d.summary ? `<div class="summary">"${escapeHtml(d.summary)}${d.summary.length >= 200 ? "…" : ""}"</div>` : "")
+        (teaser ? `<div class="summary">"${escapeHtml(teaser)}"</div>` : "") +
+        (d.summary ? `<div class="meta" style="margin-top:6px;color:#a5b4fc;">Click to read the full proposal</div>` : "")
       );
     })
     .on("mousemove", moveTooltip)
     .on("mouseout", function () {
       d3.select(this).classed("highlighted-link", false);
       hideTooltip();
+    })
+    .on("click", function (event, d) {
+      if (!d.summary) return;
+      event.stopPropagation();
+      openModal(d);
     });
 
   const node = root.append("g")
@@ -376,6 +483,79 @@
       "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
     }[c]));
   }
+  function truncate(s, n) {
+    return s.length > n ? s.slice(0, n).trimEnd() + "…" : s;
+  }
+  // Slack-style markup → plain text for the hover teaser (full text keeps it).
+  function stripFormatting(s) {
+    return s
+      .replace(/:[a-z0-9_+-]+:/gi, "")   // :memo: and other emoji shortcodes
+      .replace(/\*\*?([^*]+)\*\*?/g, "$1")  // *bold* / **bold**
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+  function edgePair(d) {
+    const a = typeof d.source === "object" ? d.source : data.nodes.find((n) => n.id === d.source);
+    const b = typeof d.target === "object" ? d.target : data.nodes.find((n) => n.id === d.target);
+    return [a, b];
+  }
+
+  // Slack emoji shortcodes (:memo:) → unicode. Unknown shortcodes are dropped.
+  const EMOJI = {
+    memo: "📝", white_check_mark: "✅", heavy_check_mark: "✔️", check: "✔️",
+    dart: "🎯", mag: "🔍", mag_right: "🔍", bulb: "💡", microscope: "🔬",
+    test_tube: "🧪", dna: "🧬", pushpin: "📌", round_pushpin: "📍",
+    handshake: "🤝", rocket: "🚀", chart_with_upwards_trend: "📈",
+    bar_chart: "📊", clipboard: "📋", link: "🔗", pill: "💊", hospital: "🏥",
+    brain: "🧠", gear: "⚙️", wrench: "🔧", hammer_and_wrench: "🛠️",
+    calendar: "📅", busts_in_silhouette: "👥", warning: "⚠️", x: "❌",
+    heavy_plus_sign: "➕", money_with_wings: "💸", moneybag: "💰",
+    sparkles: "✨", star: "⭐", fire: "🔥", tada: "🎉", books: "📚",
+    page_facing_up: "📄", scroll: "📜", arrow_right: "➡️", point_right: "👉",
+  };
+  function emojify(s) {
+    return s.replace(/:([a-z0-9_+-]+):/gi, (m, name) => {
+      const e = EMOJI[name.toLowerCase()];
+      return e === undefined ? "" : e;
+    });
+  }
+  if (window.marked) marked.setOptions({ gfm: true, breaks: true });
+  if (window.DOMPurify) {
+    // Open proposal links in a new tab without leaking the referrer.
+    DOMPurify.addHook("afterSanitizeAttributes", (node) => {
+      if (node.tagName === "A") {
+        node.setAttribute("target", "_blank");
+        node.setAttribute("rel", "noopener noreferrer");
+      }
+    });
+  }
+  function renderMarkdown(s) {
+    const text = emojify(s);
+    if (!window.marked || !window.DOMPurify) {
+      // Graceful fallback if a CDN failed to load.
+      return `<div style="white-space:pre-wrap">${escapeHtml(text)}</div>`;
+    }
+    return DOMPurify.sanitize(marked.parse(text));
+  }
+
+  const modal = d3.select("#proposal-modal");
+  function openModal(d) {
+    hideTooltip();
+    const [a, b] = edgePair(d);
+    modal.select(".modal-pi").text(`${a.pi} ↔ ${b.pi}`);
+    modal.select(".modal-meta").text(
+      `${a.institution} · ${b.institution} — ${d.weight} joint proposal${d.weight === 1 ? "" : "s"}`
+    );
+    // Full proposal text, rendered as sanitized GitHub-flavored markdown.
+    modal.select(".modal-body").html(renderMarkdown(d.summary));
+    modal.node().querySelector(".modal-card").scrollTop = 0;
+    modal.classed("show", true);
+  }
+  function closeModal() { modal.classed("show", false); }
+  modal.on("click", function (event) {
+    if (event.target === this || event.target.classList.contains("modal-close")) closeModal();
+  });
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeModal(); });
 
   window.addEventListener("resize", () => {
     const w = window.innerWidth, h = window.innerHeight;

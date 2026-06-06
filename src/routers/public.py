@@ -561,6 +561,16 @@ async def _build_graph_payload(
                 WHERE outcome = 'proposal'
                   AND decided_at >= :cohort_start
                   AND thread_id IN (SELECT message_ts FROM cohort_posts)
+            ),
+            -- The agent-only proposal for a thread is the FIRST one the bots
+            -- reached. Any later row on the same thread is a re-proposal after a
+            -- PI reopened/refined the thread, so it carries human feedback; we
+            -- keep only the earliest (by decided_at) per thread.
+            thread_first AS (
+                SELECT DISTINCT ON (a, b, thread_id)
+                    a, b, thread_id, decided_at, summary_text
+                FROM pairs
+                ORDER BY a, b, thread_id, decided_at ASC
             )
             SELECT
                 a, b,
@@ -568,7 +578,7 @@ async def _build_graph_payload(
                 MAX(decided_at)           AS last_at,
                 (ARRAY_AGG(summary_text ORDER BY decided_at DESC)
                     FILTER (WHERE summary_text IS NOT NULL))[1] AS latest_summary
-            FROM pairs
+            FROM thread_first
             GROUP BY a, b
             """
         ),
@@ -587,7 +597,7 @@ async def _build_graph_payload(
                 "source": r.a,
                 "target": r.b,
                 "weight": int(r.n),
-                "summary": (r.latest_summary or "")[:200],
+                "summary": r.latest_summary or "",
             }
         )
         degree[r.a] += 1
