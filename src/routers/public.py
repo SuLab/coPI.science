@@ -3,7 +3,10 @@
 import json
 import logging
 import re
+import unicodedata
+from collections import Counter
 from datetime import datetime, timezone
+from difflib import SequenceMatcher
 
 from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -47,6 +50,61 @@ _OTHER_INST = {
 # single simulation_run_id, so date is the only way to isolate the new cohort.
 CABO_COHORT_START = datetime(2026, 3, 1, tzinfo=timezone.utc)
 
+# Cohort 001 = the PIs seeded from newuserlist01.tsv + newuserlist02.tsv.
+# These are matched by ORCID (the identifier the lists are keyed on) rather
+# than agent_id, since agent_id collision-prefixing (cliu/liu, schen/chen,
+# ckim/kim, wliu/wu, achatterjee/chatterjee) makes hand-deriving IDs fragile.
+# The last three entries of newuserlist02.tsv had a null ORCID in the TSV;
+# their stored identifiers were resolved from the agents/users tables.
+COHORT001_ORCIDS = frozenset({
+    # newuserlist01.tsv
+    "0000-0001-9649-1892",  # Chan Hyuk Kim
+    "0000-0003-2585-8268",  # Angad Mehta
+    "0000-0001-5171-7982",  # Arnab Chatterjee
+    "0000-0002-6294-5187",  # Shuibing Chen
+    "0000-0002-3290-2880",  # Chang Liu
+    "0000-0001-7456-2557",  # Priscilla Li-ning Yang
+    "0000-0001-6701-996X",  # Luke Lairson
+    "0000-0001-5661-1714",  # Linda Hsieh-Wilson
+    "0000-0002-4311-971X",  # Han Xiao
+    "0000-0001-6469-795X",  # Andrea Cochran
+    "0000-0002-6231-5302",  # Abhishek Chatterjee
+    "0000-0001-8590-7741",  # Kevan Shokat
+    "0000-0002-8277-5226",  # Alice Ting
+    "0000-0002-5859-2526",  # Lei Wang
+    "0000-0002-0634-0503",  # Edward Lemke
+    "0000-0002-7078-6534",  # Wenshe Liu
+    "0000-0001-5354-7403",  # Nathanael Gray
+    "0000-0002-4233-8945",  # John Pezacki
+    "0000-0002-8002-1981",  # Kai Johnsson
+    "0000-0002-2057-6934",  # Dehua Pei
+    "0000-0003-1636-7766",  # Nicolas Winssinger
+    "0000-0001-8973-493X",  # David Corey
+    "0000-0001-9320-5512",  # Jonathan Ellman
+    "0000-0001-9309-6141",  # Costas Lyssiotis
+    "0000-0002-9859-4104",  # Andrew Su
+    # newuserlist02.tsv
+    "0000-0002-9943-7557",  # David Liu
+    "0000-0003-1219-4757",  # Jason Chin
+    "0000-0002-5676-4718",  # Virginia Cornish
+    "0000-0001-8562-5736",  # Travis Young
+    "0000-0002-7813-0302",  # Christian Diercks
+    "0000-0002-0402-7417",  # Peng Chen
+    "0000-0001-9439-1476",  # Michael Bollong
+    "0000-0003-3188-1202",  # Peter Schultz   (null ORCID in TSV; resolved from DB)
+    "0000-0002-3354-1263",  # Sheng Ding      (null ORCID in TSV; resolved from DB)
+    "SPARSE-1527BF6A",      # Sida Shao       (null ORCID in TSV; resolved from DB)
+})
+
+# Window start for the cohort-001 graph: only proposals from June 2, 2026 on.
+COHORT001_START = datetime(2026, 6, 2, tzinfo=timezone.utc)
+
+# Schultz alumni reunion run: the 75-agent simulation was RESUMED 2026-06-06 into
+# an existing simulation_run_id, so (as with the other cohorts) date is the only
+# way to isolate it. The run was idle 2026-06-04 → 2026-06-06, so this cutoff is
+# clean. See memory project_reunion_cohort_boundary.
+SCHULTZ_COHORT_START = datetime(2026, 6, 6, tzinfo=timezone.utc)
+
 
 def _institution_for(agent_id: str) -> str:
     if agent_id in _SCRIPPS:
@@ -54,6 +112,252 @@ def _institution_for(agent_id: str) -> str:
     if agent_id in _UCSF:
         return "UCSF"
     return _OTHER_INST.get(agent_id, "Other")
+
+
+# ---------------------------------------------------------------------------
+# Institution canonicalization for the cohort views.
+#
+# Profiles store free-text institutions ("Scripps Research", "The Scripps
+# Research Institute", "UCSF Medical Center", ...). We group them so the same
+# institution gets one color/legend entry. The pipeline is, per raw value:
+#   1. normalize  — lowercase, strip accents/punctuation, drop a leading "The"
+#                   and trailing generic org words ("Institute", "University").
+#   2. alias       — map known synonyms/abbreviations/campuses to a canonical
+#                    label (handles cases normalization can't, e.g. "UCSF" vs
+#                    "University of California San Francisco").
+#   3. fuzzy merge — cluster remaining near-identical keys (typos, spacing,
+#                    word-order variants) by string similarity.
+# ---------------------------------------------------------------------------
+
+# Trailing tokens that don't distinguish institutions; stripped from the end of
+# the normalized name so "Scripps Research" == "Scripps Research Institute".
+_INST_TRAILING_NOISE = {
+    "institute", "institution", "university", "system", "inc", "llc", "ltd",
+    "corporation", "corp", "co",
+}
+
+# Canonical label -> the (free-text) variants that should collapse onto it.
+# Variants are matched after normalization, so list them in any common form.
+_INSTITUTION_ALIASES: dict[str, tuple[str, ...]] = {
+    "UCSF": (
+        "ucsf", "uc san francisco", "university of california san francisco",
+        "university of california, san francisco", "ucsf medical center",
+    ),
+    "UC Berkeley": (
+        "uc berkeley", "university of california berkeley",
+        "university of california, berkeley",
+    ),
+    "UC San Diego": (
+        "ucsd", "uc san diego", "university of california san diego",
+        "university of california, san diego",
+    ),
+    "UC Irvine": (
+        "uc irvine", "university of california irvine",
+        "university of california, irvine",
+    ),
+    "UCLA": (
+        "ucla", "uc los angeles", "university of california los angeles",
+        "university of california, los angeles",
+    ),
+    "Scripps Research": (
+        "scripps", "scripps research", "scripps research institute",
+        "the scripps research institute", "tsri",
+    ),
+    "Caltech": ("caltech", "california institute of technology"),
+    "MIT": ("mit", "massachusetts institute of technology"),
+    "Stanford": ("stanford", "stanford university"),
+    "Harvard": ("harvard", "harvard university", "harvard medical school"),
+    "Memorial Sloan Kettering": (
+        "mskcc", "memorial sloan kettering",
+        "memorial sloan kettering cancer center",
+    ),
+}
+
+# Fuzzy-merge threshold for normalized names (typos / spacing / word order).
+_INST_FUZZY_THRESHOLD = 0.88
+
+# Distinct, high-contrast palette for per-institution coloring.
+_INSTITUTION_PALETTE = [
+    "#4C72B0", "#DD8452", "#55A868", "#C44E52", "#8172B2",
+    "#937860", "#DA8BC3", "#CCB974", "#64B5CD", "#1F77B4",
+    "#FF7F0E", "#2CA02C", "#D62728", "#9467BD", "#8C564B",
+    "#E377C2", "#BCBD22", "#17BECF", "#6366F1", "#A855F7",
+    "#F59E0B", "#10B981", "#EF4444", "#3B82F6", "#EC4899",
+    "#14B8A6", "#F472B6", "#84CC16",
+]
+_INSTITUTION_FALLBACK_COLOR = "#94a3b8"
+
+# Reserved brand colors: these institutions always get their official color,
+# regardless of node count or palette ordering. Keyed by canonical alias label
+# (see ``_INSTITUTION_ALIASES``).
+_INSTITUTION_BRAND_COLORS: dict[str, str] = {
+    "Scripps Research": "#FFC951",
+    "Stanford": "#8C1515",
+    "UCSF": "#052049",
+}
+
+# Fixed Scripps/UCSF/Other scheme for the Cabo and Scripps views (which color
+# by the hardcoded buckets in ``_institution_for``, not profile institutions).
+# Reuses the reserved brand colors so the two views never drift apart.
+_LEGACY_OTHER_COLOR = "#64748b"
+_LEGACY_COLOR_MAP = {
+    "Scripps": _INSTITUTION_BRAND_COLORS["Scripps Research"],
+    "UCSF": _INSTITUTION_BRAND_COLORS["UCSF"],
+    "Other": _LEGACY_OTHER_COLOR,
+}
+_LEGACY_LEGEND = [
+    {"label": "Scripps Research", "color": _INSTITUTION_BRAND_COLORS["Scripps Research"]},
+    {"label": "UCSF", "color": _INSTITUTION_BRAND_COLORS["UCSF"]},
+    {"label": "Other", "color": _LEGACY_OTHER_COLOR},
+]
+
+
+def _normalize_inst(raw: str | None) -> str:
+    """Lowercase, de-accent, de-punctuate, and strip generic org words."""
+    if not raw or not raw.strip():
+        return ""
+    s = unicodedata.normalize("NFKD", raw).encode("ascii", "ignore").decode("ascii")
+    s = re.sub(r"[^a-z0-9]+", " ", s.lower()).strip()
+    if s.startswith("the "):
+        s = s[4:]
+    tokens = s.split()
+    while len(tokens) > 1 and tokens[-1] in _INST_TRAILING_NOISE:
+        tokens.pop()
+    return " ".join(tokens)
+
+
+# Normalized-variant -> canonical label, built once from the alias table.
+_ALIAS_INDEX: dict[str, str] = {
+    _normalize_inst(variant): label
+    for label, variants in _INSTITUTION_ALIASES.items()
+    for variant in variants
+}
+
+# Distinctive single-token aliases (abbreviations / unique names) -> label.
+# Matched if the token appears anywhere in a name, so "The Scripps Research
+# Institute (TSRI)" -> Scripps Research via the "scripps"/"tsri" tokens.
+_ALIAS_SINGLE_TOKENS: dict[str, str] = {
+    key: label for key, label in _ALIAS_INDEX.items() if " " not in key
+}
+
+
+def _alias_label(norm: str, tokens: set[str]) -> str | None:
+    """Resolve a normalized institution name to a canonical alias label, via
+    exact match, distinctive-token match, then fuzzy match against variants."""
+    if not norm:
+        return None
+    if norm in _ALIAS_INDEX:
+        return _ALIAS_INDEX[norm]
+    for tok in tokens:
+        if tok in _ALIAS_SINGLE_TOKENS:
+            return _ALIAS_SINGLE_TOKENS[tok]
+    best_label, best_ratio = None, 0.0
+    for variant, label in _ALIAS_INDEX.items():
+        ratio = SequenceMatcher(None, norm, variant).ratio()
+        if ratio > best_ratio:
+            best_label, best_ratio = label, ratio
+    return best_label if best_ratio >= _INST_FUZZY_THRESHOLD else None
+
+
+def _clean_display(raw: str) -> str:
+    """Tidy a raw institution for display: drop a leading 'The' and a trailing
+    corporate suffix, collapse whitespace. Preserves the distinguishing name."""
+    s = re.sub(r"\s+", " ", (raw or "").strip())
+    s = re.sub(r"^[Tt]he\s+", "", s)
+    s = re.sub(r"[,\s]+(?:Inc|LLC|Ltd|Corp)\.?$", "", s).strip()
+    return s
+
+
+def _group_institutions(raws: list[str | None]) -> dict[str | None, str]:
+    """Map each raw institution string to a canonical display label."""
+    distinct = list({r for r in raws})
+    norm = {r: _normalize_inst(r) for r in distinct}
+
+    key_of_raw: dict[str | None, str] = {}
+    label_of_key: dict[str, str] = {}
+
+    # Pass 1: empties and known aliases (exact / token / fuzzy to canonical).
+    for r in distinct:
+        n = norm[r]
+        if not n:
+            key_of_raw[r] = "__unknown__"
+            label_of_key["__unknown__"] = "Unknown"
+            continue
+        label = _alias_label(n, set(n.split()))
+        if label is not None:
+            key = "alias:" + label
+            key_of_raw[r] = key
+            label_of_key[key] = label
+
+    # Pass 2: fuzzy-cluster the rest by normalized-string similarity.
+    clusters: list[dict] = []  # {"rep": norm, "raws": [...]}
+    for r in distinct:
+        if r in key_of_raw:
+            continue
+        n = norm[r]
+        best, best_ratio = None, 0.0
+        for c in clusters:
+            ratio = SequenceMatcher(None, n, c["rep"]).ratio()
+            if ratio > best_ratio:
+                best, best_ratio = c, ratio
+        if best is not None and best_ratio >= _INST_FUZZY_THRESHOLD:
+            best["raws"].append(r)
+        else:
+            clusters.append({"rep": n, "raws": [r]})
+
+    for i, c in enumerate(clusters):
+        key = f"grp:{i}"
+        # Display the shortest original variant (the cleanest form, e.g.
+        # "Scripps Research" over "The Scripps Research Institute").
+        label = _clean_display(min(c["raws"], key=lambda x: (len(x or ""), x or "")))
+        for r in c["raws"]:
+            key_of_raw[r] = key
+        label_of_key[key] = label or "Unknown"
+
+    return {r: label_of_key[key_of_raw[r]] for r in distinct}
+
+
+def _institution_legend(nodes: list[dict]) -> tuple[list[dict], dict[str, str]]:
+    """Color nodes by institution and build a legend.
+
+    Institutions with a single node are collapsed (in place) into a grey
+    "Other" bucket so the legend stays to the meaningfully-shared institutions;
+    each remaining institution gets its own palette color (count desc, "Other"
+    last).
+    """
+    counts = Counter(n["institution"] for n in nodes)
+    singletons = {label for label, count in counts.items() if count == 1}
+    if singletons:
+        for n in nodes:
+            if n["institution"] in singletons:
+                n["institution"] = "Other"
+        counts = Counter(n["institution"] for n in nodes)
+
+    shared = sorted(
+        ((label, count) for label, count in counts.items() if label != "Other"),
+        key=lambda kv: (-kv[1], kv[0].lower()),
+    )
+    # Palette colors not claimed by a reserved brand color, so brand and
+    # palette institutions never collide on the same color.
+    reserved = set(_INSTITUTION_BRAND_COLORS.values())
+    palette = [c for c in _INSTITUTION_PALETTE if c not in reserved]
+    legend, color_map = [], {}
+    palette_i = 0
+    for label, count in shared:
+        brand = _INSTITUTION_BRAND_COLORS.get(label)
+        if brand is not None:
+            color = brand
+        else:
+            color = palette[palette_i % len(palette)]
+            palette_i += 1
+        color_map[label] = color
+        legend.append({"label": label, "color": color, "count": count})
+    if counts.get("Other"):
+        color_map["Other"] = _INSTITUTION_FALLBACK_COLOR
+        legend.append(
+            {"label": "Other", "color": _INSTITUTION_FALLBACK_COLOR, "count": counts["Other"]}
+        )
+    return legend, color_map
 
 
 @router.get("/", response_class=HTMLResponse)
@@ -180,14 +484,41 @@ async def access_pending_email(
     )
 
 
-async def _build_graph_payload(db: AsyncSession, *, scripps_only: bool):
-    """Shared data builder for /cabo-graph and /scripps-graph.
+async def _build_graph_payload(
+    db: AsyncSession,
+    *,
+    scripps_only: bool = False,
+    orcids: frozenset[str] | None = None,
+    cohort_start: datetime = CABO_COHORT_START,
+    use_profile_institution: bool = False,
+):
+    """Shared data builder for the collaboration-network views.
 
-    For the Cabo view, restrict to active agents (the cohort). For the
-    Scripps view, include all Scripps agents regardless of status so we
-    pick up investigators who weren't at the meeting.
+    Node selection (mutually exclusive):
+    - ``orcids`` given: restrict to agents whose user has one of those ORCIDs
+      (used by /cohort001-graph to scope to a seeded PI list).
+    - ``scripps_only``: include all Scripps agents regardless of status so we
+      pick up investigators who weren't at the meeting (/scripps-graph).
+    - otherwise: active agents only (/cabo-graph).
+
+    ``cohort_start`` bounds which posts/proposals count as edges, letting a
+    caller request a rolling window (e.g. the latest two days).
+
+    ``use_profile_institution`` colors nodes by the user's profile institution
+    (fuzzy-grouped via :func:`_group_institutions`) instead of the hardcoded
+    Scripps/UCSF/Other buckets.
     """
-    if scripps_only:
+    if orcids is not None:
+        nodes_result = await db.execute(
+            text(
+                "SELECT a.agent_id, a.pi_name, a.bot_name, u.institution "
+                "FROM agents a JOIN users u ON u.id = a.user_id "
+                "WHERE u.orcid = ANY(:orcids) ORDER BY a.pi_name"
+            ),
+            {"orcids": list(orcids)},
+        )
+        active_rows = nodes_result.fetchall()
+    elif scripps_only:
         nodes_result = await db.execute(
             text("SELECT agent_id, pi_name, bot_name FROM agents ORDER BY pi_name")
         )
@@ -195,12 +526,19 @@ async def _build_graph_payload(db: AsyncSession, *, scripps_only: bool):
     else:
         nodes_result = await db.execute(
             text(
-                "SELECT agent_id, pi_name, bot_name FROM agents "
-                "WHERE status='active' ORDER BY pi_name"
+                "SELECT a.agent_id, a.pi_name, a.bot_name, u.institution "
+                "FROM agents a JOIN users u ON u.id = a.user_id "
+                "WHERE a.status='active' ORDER BY a.pi_name"
             )
         )
         active_rows = nodes_result.fetchall()
     active_ids = {row.agent_id for row in active_rows}
+
+    if use_profile_institution:
+        inst_map = _group_institutions([row.institution for row in active_rows])
+        institution_of = lambda row: inst_map[row.institution]  # noqa: E731
+    else:
+        institution_of = lambda row: _institution_for(row.agent_id)  # noqa: E731
 
     edges_result = await db.execute(
         text(
@@ -234,7 +572,7 @@ async def _build_graph_payload(db: AsyncSession, *, scripps_only: bool):
             GROUP BY a, b
             """
         ),
-        {"cohort_start": CABO_COHORT_START},
+        {"cohort_start": cohort_start},
     )
 
     # Compute degree (unique collaborators) and total proposals per node from edges.
@@ -262,7 +600,7 @@ async def _build_graph_payload(db: AsyncSession, *, scripps_only: bool):
             "id": row.agent_id,
             "pi": row.pi_name,
             "bot": row.bot_name,
-            "institution": _institution_for(row.agent_id),
+            "institution": institution_of(row),
             "degree": degree[row.agent_id],
             "proposals": total_proposals[row.agent_id],
         }
@@ -317,7 +655,9 @@ async def cabo_graph(request: Request, db: AsyncSession = Depends(get_db)):
             "proposal_count": sum(link["weight"] for link in links),
             "page_title": "Cabo collaboration network",
             "pi_label": "PIs",
-            "show_full_legend": True,
+            "legend": _LEGACY_LEGEND,
+            "color_map": json.dumps(_LEGACY_COLOR_MAP),
+            "since_label": "since March 1, 2026",
         },
     )
 
@@ -337,6 +677,72 @@ async def scripps_graph(request: Request, db: AsyncSession = Depends(get_db)):
             "proposal_count": sum(link["weight"] for link in links),
             "page_title": "Scripps Research collaboration network",
             "pi_label": "Scripps PIs",
-            "show_full_legend": False,
+            "legend": [],
+            "color_map": json.dumps(_LEGACY_COLOR_MAP),
+            "since_label": "since March 1, 2026",
+        },
+    )
+
+
+@router.get("/cohort001-graph", response_class=HTMLResponse)
+async def cohort001_graph(request: Request, db: AsyncSession = Depends(get_db)):
+    """Collaboration network for cohort 001 (newuserlist01/02), June 2 on.
+
+    Scoped to the PIs seeded from the two cohort-001 user lists (by ORCID),
+    with edges limited to proposals drafted from June 2, 2026 onward.
+    """
+    nodes, links = await _build_graph_payload(
+        db,
+        orcids=COHORT001_ORCIDS,
+        cohort_start=COHORT001_START,
+        use_profile_institution=True,
+    )
+    legend, color_map = _institution_legend(nodes)
+    return templates.TemplateResponse(
+        request,
+        "cabo_graph.html",
+        {
+            "request": request,
+            "graph_json": json.dumps({"nodes": nodes, "links": links}),
+            "node_count": len(nodes),
+            "edge_count": len(links),
+            "proposal_count": sum(link["weight"] for link in links),
+            "page_title": "Cohort 001 collaboration network",
+            "pi_label": "PIs",
+            "legend": legend,
+            "color_map": json.dumps(color_map),
+            "since_label": "since June 2, 2026",
+        },
+    )
+
+
+@router.get("/schultz-alumni-graph", response_class=HTMLResponse)
+async def schultz_alumni_graph(request: Request, db: AsyncSession = Depends(get_db)):
+    """Collaboration network for the Schultz alumni reunion run (June 6, 2026 on).
+
+    All currently-active PIs (the reunion roster of 75), with edges limited to
+    proposals drafted from 2026-06-06 onward — i.e. the discussions produced by
+    the resumed simulation. Nodes are colored by profile institution.
+    """
+    nodes, links = await _build_graph_payload(
+        db,
+        cohort_start=SCHULTZ_COHORT_START,
+        use_profile_institution=True,
+    )
+    legend, color_map = _institution_legend(nodes)
+    return templates.TemplateResponse(
+        request,
+        "cabo_graph.html",
+        {
+            "request": request,
+            "graph_json": json.dumps({"nodes": nodes, "links": links}),
+            "node_count": len(nodes),
+            "edge_count": len(links),
+            "proposal_count": sum(link["weight"] for link in links),
+            "page_title": "Schultz Alumni collaboration network",
+            "pi_label": "PIs",
+            "legend": legend,
+            "color_map": json.dumps(color_map),
+            "since_label": "since June 6, 2026",
         },
     )
