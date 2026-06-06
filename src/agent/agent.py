@@ -13,6 +13,19 @@ logger = logging.getLogger(__name__)
 PROFILES_DIR = Path("profiles")
 PROMPTS_DIR = Path("prompts")
 
+# Matches a bare DOI. The character class deliberately excludes the delimiters
+# that wrap DOIs in Slack posts (whitespace, quotes, angle brackets from
+# <https://doi.org/...> links, and the ) ] that close markdown/parentheticals).
+_DOI_RE = re.compile(r"10\.\d{4,9}/[^\s\"'<>)\]]+", re.IGNORECASE)
+
+
+def _extract_dois(text: str | None) -> set[str]:
+    """Return the set of normalized DOIs found in ``text`` (lowercased)."""
+    out: set[str] = set()
+    for raw in _DOI_RE.findall(text or ""):
+        out.add(raw.rstrip(".,;").lower())
+    return out
+
 
 # Private Channel Rules block — appended to the system prompt when the agent is
 # acting in a collab_private channel. See specs/privacy-and-channel-visibility.md §G4.
@@ -39,6 +52,7 @@ class Agent:
         self._public_profile: str | None = None
         self._private_profile: str | None = None
         self._public_working_memory: str | None = None  # cached public memory segment
+        self._own_publication_dois: set[str] | None = None  # cached DOIs from own profiles
         self._lab_directory: str | None = None
         self.api_call_count: int = 0
         self.message_count: int = 0
@@ -103,11 +117,37 @@ class Agent:
     def working_memory(self) -> str:
         return self.public_working_memory
 
+    @property
+    def own_publication_dois(self) -> set[str]:
+        """DOIs of the lab's own papers, parsed from its profiles.
+
+        Used to detect when a post or thread is about a paper this lab
+        (co)authored. Profiles list each PI's representative publications with
+        DOIs, so a DOI appearing here means the paper is the lab's own work.
+        Note this only catches papers whose DOI is present in the profile — a
+        prose-only profile yields an empty set, which is why the scan/reply
+        prompts also instruct the model to recognize its own published methods
+        semantically. See GitHub issue #7.
+        """
+        if self._own_publication_dois is None:
+            self._own_publication_dois = _extract_dois(self.public_profile) | _extract_dois(
+                self.private_profile
+            )
+        return self._own_publication_dois
+
+    def cites_own_paper(self, content: str | None) -> bool:
+        """True if ``content`` cites a DOI belonging to this lab's own papers."""
+        own = self.own_publication_dois
+        if not own:
+            return False
+        return bool(_extract_dois(content) & own)
+
     def reload_profiles(self):
         """Reload profiles from disk."""
         self._public_profile = None
         self._private_profile = None
         self._public_working_memory = None
+        self._own_publication_dois = None
 
     # ------------------------------------------------------------------
     # System prompt (shared across all phases)
@@ -254,11 +294,20 @@ Your agent ID is "{self.agent_id}". When communicating, represent your lab profe
             "Evaluate posts and return JSON with selected_post_ids.",
         )
 
-        # Format posts for the prompt
-        posts_text = "\n\n".join(
-            f"**Post ID: {p['post_id']}** in #{p['channel']} by {p['sender']}:\n{p['content_snippet']}"
-            for p in new_posts
-        )
+        # Format posts for the prompt. Flag any post that cites a paper this
+        # lab authored so the model applies the "Papers your own lab authored"
+        # rule (see issue #7).
+        post_blocks: list[str] = []
+        for p in new_posts:
+            header = f"**Post ID: {p['post_id']}** in #{p['channel']} by {p['sender']}:"
+            if self.cites_own_paper(p.get("content_snippet")):
+                header += (
+                    "\n⚠️ SELF-AUTHORED: this post cites a paper your own lab authored. "
+                    "Per the \"Papers your own lab authored\" rule, do NOT add it unless "
+                    "you can take it in a genuinely new direction."
+                )
+            post_blocks.append(f"{header}\n{p['content_snippet']}")
+        posts_text = "\n\n".join(post_blocks)
         prompt = phase2_template.replace("{new_posts}", posts_text)
 
         messages = [{"role": "user", "content": prompt}]
@@ -361,6 +410,18 @@ Your agent ID is "{self.agent_id}". When communicating, represent your lab profe
                 "(no modifications — if you want changes, post your own revised :memo: Summary instead), OR\n"
                 "3. Start your reply with ⏸️ and close gracefully explaining why there's no good proposal.\n\n"
                 "Option 3 is perfectly acceptable — not every conversation should end in a proposal."
+            )
+
+        # If the thread's root post is about a paper this lab authored, warn the
+        # model not to engage as if it were external work (see issue #7).
+        root_content = thread_history[0]["content"] if thread_history else ""
+        if self.cites_own_paper(root_content):
+            phase_guidance += (
+                "\n\n**⚠️ This thread's paper was authored by your own lab.** Do NOT pitch "
+                "your lab's capabilities back as if they were external — the methods in this "
+                "paper are already yours. Acknowledge the authorship plainly. Only continue "
+                "toward a collaboration if you are extending the work in a genuinely new "
+                "direction beyond the paper's scope; otherwise close gracefully with ⏸️."
             )
 
         # Inject PI context if the PI posted in this thread

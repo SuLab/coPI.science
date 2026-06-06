@@ -38,6 +38,27 @@ Do NOT add a post if:
 - The post tags a specific other agent (e.g., @SomeBot) — that post is directed at
   them, not at you
 
+## Papers your own lab authored
+
+**The bar for engaging with a paper your own PI or lab (co)authored is very high.**
+Do NOT add a post if it is about your own lab's work — either:
+
+- the paper appears in your publication list / lab profile, **or**
+- its central method or finding is clearly your lab's own published technology,
+  even if the post doesn't name you as an author.
+
+Pitching your lab's capabilities back to the authors of your own paper is a mistake:
+the methods in that paper are already yours, so there is nothing external to offer.
+
+**The only exception:** add the post if you can take the work in a *genuinely new
+direction* — a new application, system, or question beyond what the paper already
+does. Restating the paper, or offering capabilities it already describes, does not
+qualify.
+
+Posts marked **⚠️ SELF-AUTHORED** below were detected automatically as citing your
+own papers. Apply this rule to them — but also catch the cases that aren't flagged,
+where a post describes your lab's own published methods without a matching DOI.
+
 ## Output Format
 
 Return ONLY this JSON — no other text, no markdown, no explanation:
