@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import re
 import xml.etree.ElementTree as ET
 from typing import Any
 
@@ -13,6 +14,60 @@ logger = logging.getLogger(__name__)
 
 EUTILS_BASE = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
 IDCONV_BASE = "https://pmc.ncbi.nlm.nih.gov/tools/idconv/api/v1/articles"
+
+# Strips a leading "doi:" or a doi.org URL prefix from a raw DOI string.
+_DOI_PREFIX_RE = re.compile(r"^\s*(?:doi:\s*|https?://(?:dx\.)?doi\.org/)", re.IGNORECASE)
+
+
+def normalize_doi(doi: str | None) -> str | None:
+    """Canonicalize a raw DOI string.
+
+    Strips a leading ``doi:`` or ``https://doi.org/`` prefix and trailing
+    whitespace/period junk. Case is preserved (DOIs are case-insensitive but the
+    publisher-registered form often carries case). Returns ``None`` for empty or
+    missing input.
+    """
+    if not doi:
+        return None
+    d = _DOI_PREFIX_RE.sub("", doi.strip()).strip()
+    d = d.rstrip(" .")
+    return d or None
+
+
+def reconcile_pub_doi(
+    assigned_doi: str | None, authoritative_doi: str | None
+) -> tuple[str | None, str]:
+    """Validate an assigned DOI against the DOI registered for its PMID.
+
+    ``authoritative_doi`` is the DOI PubMed has on record for the publication's
+    PMID — the trustworthy answer for "which paper is this PMID". Returns
+    ``(final_doi, action)`` where action is one of:
+
+    - ``"ok"``:         assigned matches authoritative (returned in canonical form)
+    - ``"filled"``:     no assigned DOI; authoritative used
+    - ``"corrected"``:  assigned disagreed with authoritative; authoritative used
+    - ``"unverified"``: no authoritative DOI to check against; assigned kept
+    - ``"none"``:       neither present
+
+    The gate never persists a DOI that disagrees with its PMID's authoritative
+    record: on a verifiable mismatch it returns the authoritative DOI, and on a
+    match it canonicalizes (so format drift like ``doi:`` prefixes or
+    slash-vs-dot corruption is fixed too).
+    """
+    auth = normalize_doi(authoritative_doi)
+    assigned = normalize_doi(assigned_doi)
+    if auth is None and assigned is None:
+        return None, "none"
+    if auth is None:
+        return assigned, "unverified"
+    if assigned is None:
+        return auth, "filled"
+    if assigned.lower() == auth.lower():
+        # Already the right DOI — keep the stored form (DOIs are
+        # case-insensitive, and the stored form is often better-cased than
+        # esummary's lowercased value). Prefix/junk is already stripped above.
+        return assigned, "ok"
+    return auth, "corrected"
 
 # Rate limiting: with API key 10/s, without 3/s
 _request_semaphore = asyncio.Semaphore(8)  # Conservative limit
@@ -51,6 +106,40 @@ async def fetch_pubmed_records(pmids: list[str]) -> list[dict[str, Any]]:
     return results
 
 
+async def fetch_authoritative_dois(pmids: list[str]) -> dict[str, str]:
+    """Return ``{pmid: doi}`` — the DOI PubMed has on record for each PMID.
+
+    Uses the esummary endpoint, whose ``articleids`` are strictly article-scoped
+    (they never include the reference list), making this an authoritative source
+    independent of the efetch XML parser. PMIDs with no record or no DOI on file
+    are omitted. Used by the ingest gate's audit counterpart and
+    ``scripts/audit_pub_dois.py``.
+    """
+    clean = [str(p) for p in pmids if p]
+    if not clean:
+        return {}
+    out: dict[str, str] = {}
+    for i in range(0, len(clean), 200):
+        batch = clean[i : i + 200]
+        try:
+            resp = await _ncbi_get(
+                f"{EUTILS_BASE}/esummary.fcgi",
+                {"db": "pubmed", "id": ",".join(batch), "retmode": "json"},
+            )
+            result = resp.json().get("result", {})
+        except Exception as exc:
+            logger.warning("esummary batch failed (%s...): %s", batch[:3], exc)
+            continue
+        for pmid in result.get("uids", []):
+            for aid in result.get(pmid, {}).get("articleids", []):
+                if aid.get("idtype") == "doi":
+                    doi = normalize_doi(aid.get("value"))
+                    if doi:
+                        out[str(pmid)] = doi
+                    break
+    return out
+
+
 async def _fetch_pubmed_batch(pmids: list[str]) -> list[dict[str, Any]]:
     """Fetch a batch of PubMed records (max 100)."""
     params = {
@@ -80,12 +169,29 @@ def _parse_pubmed_xml(xml_text: str) -> list[dict[str, Any]]:
         if pmid_el is not None:
             record["pmid"] = pmid_el.text
 
-        # PMCID from ArticleIdList
-        for art_id in article.findall(".//ArticleId"):
-            if art_id.get("IdType") == "pmc":
-                record["pmcid"] = art_id.text
-            elif art_id.get("IdType") == "doi":
-                record["doi"] = art_id.text
+        # DOI / PMCID: read ONLY the article's own <ArticleIdList> (under
+        # <PubmedData>). A recursive ".//ArticleId" search also matches the
+        # <ReferenceList>, whose ArticleIds belong to *cited* papers — taking
+        # those (and the previous code kept the last match, deep in the
+        # references) silently stamped the publication with a reference's DOI or
+        # PMCID. This was the root cause of the bad paper links (issue #5):
+        # the spurious DOIs were the most-cited references (CRISPResso2, DAVID,
+        # …), not the article itself.
+        id_container = article.find("./PubmedData/ArticleIdList")
+        if id_container is not None:
+            for art_id in id_container.findall("ArticleId"):
+                id_type = art_id.get("IdType")
+                if id_type == "pmc" and "pmcid" not in record:
+                    record["pmcid"] = art_id.text
+                elif id_type == "doi" and "doi" not in record:
+                    record["doi"] = art_id.text
+        # Article DOI can also appear as an ELocationID under <Article> (also
+        # article-scoped, never a reference).
+        if "doi" not in record:
+            for eloc in article.findall("./MedlineCitation/Article/ELocationID"):
+                if eloc.get("EIdType") == "doi" and eloc.text:
+                    record["doi"] = eloc.text
+                    break
 
         # Title
         title_el = article.find(".//ArticleTitle")
