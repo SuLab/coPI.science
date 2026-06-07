@@ -173,6 +173,7 @@ PILOT_LABS = [
     {"id": "zhang", "name": "ZhangBot", "pi": "Yong Zhang"},
     {"id": "chang", "name": "ChangBot", "pi": "Young-Tae Chang"},
     {"id": "yliu", "name": "YLiuBot", "pi": "Yuzhong Liu"},
+    {"id": "magliery", "name": "MaglieryBot", "pi": "Thomas Magliery"},
 ]
 
 # Keywords for channel-profile matching
@@ -204,6 +205,11 @@ _UNIVERSAL_CHANNELS = {"general", "funding-opportunities"}
 # unnecessary; polling every turn was saturating one bot token's rate limit.
 CHANNEL_POLL_INTERVAL = 15.0   # seconds between conversations.history sweeps
 PROPOSAL_POLL_INTERVAL = 30.0  # seconds between conversations.replies sweeps
+
+# Agents exempt from the unreviewed-proposal Phase-5 block — they keep making
+# new posts no matter how many of their proposals are awaiting review. Scoped to
+# SchultzBot (the reunion host) so he stays active without a human reviewer.
+UNBLOCK_EXEMPT_AGENTS = {"schultz"}
 
 
 class SimulationEngine:
@@ -1369,7 +1375,8 @@ class SimulationEngine:
             if not p.reviewed and not self.message_log.is_funding_thread(p.thread_id)
         )
         has_unreviewed_non_funding = (
-            unreviewed_non_funding_count >= settings.unreviewed_proposal_block_count
+            agent.agent_id not in UNBLOCK_EXEMPT_AGENTS
+            and unreviewed_non_funding_count >= settings.unreviewed_proposal_block_count
         )
         blocked_for_regular = at_thread_threshold or has_unreviewed_non_funding
 

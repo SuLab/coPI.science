@@ -170,6 +170,7 @@ class Settings(BaseSettings):
     slack_bot_token_zhang: str = ""
     slack_bot_token_chang: str = ""
     slack_bot_token_yliu: str = ""
+    slack_bot_token_magliery: str = ""
     slack_bot_token_grantbot: str = ""
 
     # Analytics
@@ -333,6 +334,7 @@ class Settings(BaseSettings):
             "zhang": self.slack_bot_token_zhang,
             "chang": self.slack_bot_token_chang,
             "yliu": self.slack_bot_token_yliu,
+            "magliery": self.slack_bot_token_magliery,
         }
 
 
