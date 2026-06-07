@@ -309,6 +309,9 @@
   const LINK_WIDTH = 3;
   const LINK_OPACITY = 0.65;
   const LINK_DISTANCE = 110;
+  // Fat, invisible tap target laid over each thin edge so it's easy to hit —
+  // especially on touch screens, where there's no hover and fingers are coarse.
+  const LINK_HIT_WIDTH = 26;
 
   const fontSize = (d) => 16.5 + Math.sqrt(d.proposals || 0) * 1.85;
   // Approximate pill dimensions before live text measurement; refined post-render.
@@ -331,29 +334,43 @@
     .alphaDecay(0.025)
     .velocityDecay(0.35);
 
-  const link = root.append("g")
-    .attr("class", "links")
-    .selectAll("line")
+  const linkLayer = root.append("g").attr("class", "links");
+
+  // Visible (thin) edges. Purely cosmetic — interaction is handled by the fat
+  // transparent hit lines below, so these ignore pointer events.
+  const link = linkLayer
+    .selectAll("line.link")
     .data(data.links)
     .join("line")
     .attr("class", "link")
     .attr("stroke-width", LINK_WIDTH)
     .attr("stroke-opacity", LINK_OPACITY)
+    .style("pointer-events", "none");
+
+  // Fat invisible hit lines, drawn on top, carry the hover/tap interaction.
+  const linkHit = linkLayer
+    .selectAll("line.link-hit")
+    .data(data.links)
+    .join("line")
+    .attr("class", "link-hit")
+    .attr("stroke", "transparent")
+    .attr("stroke-width", LINK_HIT_WIDTH)
+    .attr("stroke-linecap", "round")
     .style("cursor", (d) => (d.summary ? "pointer" : "default"))
     .on("mouseover", function (event, d) {
       const [a, b] = edgePair(d);
-      d3.select(this).classed("highlighted-link", true);
+      link.filter((l) => l === d).classed("highlighted-link", true);
       const teaser = d.summary ? truncate(stripFormatting(d.summary), 200) : "";
       showTooltip(event,
         `<div class="pi">${a.pi} ↔ ${b.pi}</div>` +
         `<div class="meta">${d.weight} joint proposal${d.weight === 1 ? "" : "s"}</div>` +
         (teaser ? `<div class="summary">"${escapeHtml(teaser)}"</div>` : "") +
-        (d.summary ? `<div class="meta" style="margin-top:6px;color:#a5b4fc;">Click to read the full proposal</div>` : "")
+        (d.summary ? `<div class="meta" style="margin-top:6px;color:#a5b4fc;">Tap to read the full proposal</div>` : "")
       );
     })
     .on("mousemove", moveTooltip)
-    .on("mouseout", function () {
-      d3.select(this).classed("highlighted-link", false);
+    .on("mouseout", function (event, d) {
+      link.filter((l) => l === d).classed("highlighted-link", false);
       hideTooltip();
     })
     .on("click", function (event, d) {
@@ -419,6 +436,11 @@
 
   simulation.on("tick", () => {
     link
+      .attr("x1", (d) => d.source.x)
+      .attr("y1", (d) => d.source.y)
+      .attr("x2", (d) => d.target.x)
+      .attr("y2", (d) => d.target.y);
+    linkHit
       .attr("x1", (d) => d.source.x)
       .attr("y1", (d) => d.source.y)
       .attr("x2", (d) => d.target.x)
