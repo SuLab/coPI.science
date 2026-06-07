@@ -21,6 +21,7 @@ from src.models.grantbot_posted import GrantbotPostedFoa
 from src.models.job import Job
 from src.models.profile_revision import ProfileRevision
 from src.models.profile import ResearcherProfile
+from src.models.proposal_vote import VOTE_DOWN, VOTE_UP, ProposalVote
 from src.models.publication import Publication
 from src.models.user import User
 
@@ -39,6 +40,9 @@ __all__ = [
     "VISIBILITY_COLLAB_PRIVATE",
     "AgentRegistry",
     "ProposalReview",
+    "ProposalVote",
+    "VOTE_UP",
+    "VOTE_DOWN",
     "DelegateInvitation",
     "AgentDelegate",
     "EmailNotification",

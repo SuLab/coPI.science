@@ -4,18 +4,21 @@ import json
 import logging
 import re
 import unicodedata
+import uuid
 from collections import Counter
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
 
-from fastapi import APIRouter, Depends, Form, Request
+from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
+from pydantic import BaseModel
 from sqlalchemy import select, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.database import get_db
-from src.models import User, WaitlistSignup
+from src.models import VOTE_DOWN, VOTE_UP, ProposalVote, User, WaitlistSignup
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -34,6 +37,7 @@ _SCRIPPS = {
     # Scripps investigators not at the Cabo meeting (suspended/pending)
     "cravatt", "petrascheck", "lotz", "racki", "ken", "deniz", "saez", "wu",
     "macrae", "williams",
+    "schultz",  # Peter Schultz — Scripps Research (Schultz alumni reunion host)
 }
 _UCSF = {
     "sali", "larabell", "zaro", "roe", "santi", "wells", "echeverria",
@@ -503,6 +507,7 @@ async def _build_graph_payload(
     window_start: datetime | None = None,
     window_end: datetime | None = None,
     use_profile_institution: bool = False,
+    largest_component_only: bool = True,
 ):
     """Shared data builder for the collaboration-network views.
 
@@ -531,6 +536,11 @@ async def _build_graph_payload(
     ``use_profile_institution`` colors nodes by the user's profile institution
     (fuzzy-grouped via :func:`_group_institutions`) instead of the hardcoded
     Scripps/UCSF/Other buckets.
+
+    ``largest_component_only`` (default True) trims the result to the single
+    largest connected component — sensible for a dense graph, but it hides
+    isolated proposal dyads, so pass False early in a cohort when proposals are
+    still disconnected pairs.
     """
     if orcids is not None:
         nodes_result = await db.execute(
@@ -592,6 +602,7 @@ async def _build_graph_payload(
             ),
             pairs AS (
                 SELECT
+                    id,
                     LEAST(agent_a, agent_b)    AS a,
                     GREATEST(agent_a, agent_b) AS b,
                     thread_id,
@@ -608,7 +619,7 @@ async def _build_graph_payload(
             -- keep only the earliest (by decided_at) per thread.
             thread_first AS (
                 SELECT DISTINCT ON (a, b, thread_id)
-                    a, b, thread_id, decided_at, summary_text
+                    id, a, b, thread_id, decided_at, summary_text
                 FROM pairs
                 ORDER BY a, b, thread_id, decided_at ASC
             )
@@ -617,7 +628,11 @@ async def _build_graph_payload(
                 COUNT(DISTINCT thread_id) AS n,
                 MAX(decided_at)           AS last_at,
                 (ARRAY_AGG(summary_text ORDER BY decided_at DESC)
-                    FILTER (WHERE summary_text IS NOT NULL))[1] AS latest_summary
+                    FILTER (WHERE summary_text IS NOT NULL))[1] AS latest_summary,
+                (ARRAY_AGG(id ORDER BY decided_at DESC)
+                    FILTER (WHERE summary_text IS NOT NULL))[1] AS latest_decision_id,
+                (ARRAY_AGG(thread_id ORDER BY decided_at DESC)
+                    FILTER (WHERE summary_text IS NOT NULL))[1] AS latest_thread_id
             FROM thread_first
             GROUP BY a, b
             """
@@ -638,6 +653,9 @@ async def _build_graph_payload(
                 "target": r.b,
                 "weight": int(r.n),
                 "summary": r.latest_summary or "",
+                # The exact proposal shown in the modal — votes reference it.
+                "decision_id": str(r.latest_decision_id) if r.latest_decision_id else None,
+                "thread_id": r.latest_thread_id,
             }
         )
         degree[r.a] += 1
@@ -657,7 +675,9 @@ async def _build_graph_payload(
         for row in active_rows
         if degree[row.agent_id] > 0
     ]
-    return _largest_component(nodes, links)
+    if largest_component_only:
+        return _largest_component(nodes, links)
+    return nodes, links
 
 
 def _largest_component(nodes, links):
@@ -757,6 +777,7 @@ async def schultz_alumni_pilot(request: Request, db: AsyncSession = Depends(get_
         window_start=SCHULTZ_PILOT_START,
         window_end=SCHULTZ_PILOT_END,
         use_profile_institution=True,
+        largest_component_only=False,
     )
     legend, color_map = _institution_legend(nodes)
     return templates.TemplateResponse(
@@ -794,6 +815,7 @@ async def schultz_group_alumni(request: Request, db: AsyncSession = Depends(get_
         window_start=SCHULTZ_GROUP_START,
         window_end=SCHULTZ_GROUP_END,
         use_profile_institution=True,
+        largest_component_only=False,
     )
     legend, color_map = _institution_legend(nodes)
     return templates.TemplateResponse(
@@ -812,3 +834,128 @@ async def schultz_group_alumni(request: Request, db: AsyncSession = Depends(get_
             "since_label": "during June 5 – June 10, 2026",
         },
     )
+
+
+# ---------------------------------------------------------------------------
+# Public proposal feedback (no login). Captures lightweight "Great idea" / "Pass"
+# votes — plus optional free-text — on the proposal shown when a graph edge is
+# clicked. A browser-stored ``voter_token`` lets a visitor change their vote and
+# attach details to the same row; see src/models/proposal_vote.py.
+# ---------------------------------------------------------------------------
+
+
+class ProposalVoteIn(BaseModel):
+    decision_id: uuid.UUID
+    vote: str  # "up" (Great idea) | "down" (Pass)
+    voter_token: str | None = None
+    details: str | None = None
+
+
+class ProposalVoteDetailsIn(BaseModel):
+    details: str | None = None
+    voter_token: str | None = None
+
+
+def _clean_token(token: str | None) -> str | None:
+    return (token or "").strip()[:64] or None
+
+
+def _clean_details(details: str | None) -> str | None:
+    return (details or "").strip()[:4000] or None
+
+
+@router.post("/api/proposal-vote")
+async def submit_proposal_vote(
+    payload: ProposalVoteIn, db: AsyncSession = Depends(get_db)
+):
+    """Record (or update) an anonymous vote on a proposal. Returns the vote id."""
+    if payload.vote not in (VOTE_UP, VOTE_DOWN):
+        raise HTTPException(status_code=422, detail="vote must be 'up' or 'down'")
+
+    decision = (
+        await db.execute(
+            text(
+                "SELECT thread_id, agent_a, agent_b FROM thread_decisions "
+                "WHERE id = :id"
+            ),
+            {"id": str(payload.decision_id)},
+        )
+    ).first()
+    if decision is None:
+        raise HTTPException(status_code=404, detail="unknown proposal")
+
+    token = _clean_token(payload.voter_token)
+    details = _clean_details(payload.details)
+
+    # One vote per (proposal, browser token): update in place if they revote.
+    existing = None
+    if token:
+        existing = (
+            await db.execute(
+                select(ProposalVote).where(
+                    ProposalVote.thread_decision_id == payload.decision_id,
+                    ProposalVote.voter_token == token,
+                )
+            )
+        ).scalar_one_or_none()
+
+    if existing is not None:
+        existing.vote = payload.vote
+        if details:
+            existing.details = details
+        vote_obj = existing
+    else:
+        vote_obj = ProposalVote(
+            thread_decision_id=payload.decision_id,
+            thread_id=decision.thread_id,
+            agent_a=decision.agent_a,
+            agent_b=decision.agent_b,
+            vote=payload.vote,
+            details=details,
+            voter_token=token,
+        )
+        db.add(vote_obj)
+
+    try:
+        await db.commit()
+    except IntegrityError:
+        # Lost a race on the unique (decision, token) constraint — fetch & update.
+        await db.rollback()
+        vote_obj = (
+            await db.execute(
+                select(ProposalVote).where(
+                    ProposalVote.thread_decision_id == payload.decision_id,
+                    ProposalVote.voter_token == token,
+                )
+            )
+        ).scalar_one()
+        vote_obj.vote = payload.vote
+        if details:
+            vote_obj.details = details
+        await db.commit()
+
+    await db.refresh(vote_obj)
+    return {"id": str(vote_obj.id)}
+
+
+@router.post("/api/proposal-vote/{vote_id}/details")
+async def update_proposal_vote_details(
+    vote_id: uuid.UUID,
+    payload: ProposalVoteDetailsIn,
+    db: AsyncSession = Depends(get_db),
+):
+    """Attach / update the optional free-text details on an existing vote."""
+    vote_obj = (
+        await db.execute(select(ProposalVote).where(ProposalVote.id == vote_id))
+    ).scalar_one_or_none()
+    if vote_obj is None:
+        raise HTTPException(status_code=404, detail="unknown vote")
+
+    # Light ownership check: if the row has a token, a provided one must match.
+    token = _clean_token(payload.voter_token)
+    if vote_obj.voter_token and token and vote_obj.voter_token != token:
+        raise HTTPException(status_code=403, detail="token mismatch")
+
+    vote_obj.details = _clean_details(payload.details)
+    await db.commit()
+    return {"ok": True}

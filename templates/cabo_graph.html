@@ -192,6 +192,46 @@
   .modal-body th { background: #f8fafc; font-weight: 700; color: #1e293b; }
   .modal-body tr:nth-child(even) td { background: #fcfcfd; }
 
+  .modal-feedback {
+    margin-top: 18px; border-top: 1px solid #e2e8f0; padding-top: 16px;
+  }
+  .vote-prompt {
+    font-size: 13px; font-weight: 600; color: #475569; margin-bottom: 10px;
+  }
+  .vote-row { display: flex; gap: 12px; }
+  .vote-btn {
+    flex: 1; display: inline-flex; align-items: center; justify-content: center;
+    gap: 8px; padding: 10px 14px; border-radius: 10px;
+    font-size: 14px; font-weight: 600; cursor: pointer;
+    border: 1.5px solid; background: #ffffff; transition: all 120ms ease;
+  }
+  .vote-btn .ic { font-size: 15px; font-weight: 800; }
+  .vote-up { color: #15803d; border-color: #86efac; }
+  .vote-up:hover { background: #f0fdf4; border-color: #22c55e; }
+  .vote-down { color: #b91c1c; border-color: #fca5a5; }
+  .vote-down:hover { background: #fef2f2; border-color: #ef4444; }
+  .vote-thanks .thanks-line {
+    font-size: 14px; font-weight: 700; color: #1e293b; margin-bottom: 10px;
+  }
+  .vote-details {
+    width: 100%; box-sizing: border-box; resize: vertical; min-height: 48px;
+    border: 1px solid #cbd5e1; border-radius: 8px; padding: 8px 10px;
+    font-family: inherit; font-size: 13px; color: #334155;
+  }
+  .vote-details:focus {
+    outline: none; border-color: #a5b4fc;
+    box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.15);
+  }
+  .vote-details-actions {
+    display: flex; align-items: center; gap: 10px; margin-top: 8px;
+  }
+  .vote-details-send {
+    border: none; background: #4338ca; color: #ffffff; border-radius: 8px;
+    padding: 6px 16px; font-size: 13px; font-weight: 600; cursor: pointer;
+  }
+  .vote-details-send:hover { background: #3730a3; }
+  .vote-saved { font-size: 12px; color: #15803d; font-weight: 600; }
+
   .copi-pill {
     position: absolute; top: 24px; left: 32px;
     display: inline-flex; align-items: center; gap: 8px;
@@ -229,7 +269,7 @@
     <div class="title">{{ page_title }}</div>
     <div class="sub">{{ node_count }} {{ pi_label }} · {{ edge_count }} collaborating pairs · {{ proposal_count }} joint proposals {{ since_label }}</div>
     <div class="sub" style="font-size: 12px; color: #64748b; margin-top: 4px;">
-      hover for info, click an edge for the full proposal
+      hover for info · click a node to isolate it · click an edge for the full proposal
     </div>
   </div>
 </div>
@@ -263,6 +303,21 @@
     <div class="modal-pi"></div>
     <div class="modal-meta"></div>
     <div class="modal-body"></div>
+    <div class="modal-feedback" id="modal-feedback">
+      <div class="vote-prompt">What do you think of this collaboration?</div>
+      <div class="vote-row">
+        <button class="vote-btn vote-up" type="button"><span class="ic">✓</span> Great idea</button>
+        <button class="vote-btn vote-down" type="button"><span class="ic">✕</span> Pass</button>
+      </div>
+      <div class="vote-thanks" hidden>
+        <div class="thanks-line">Thanks for your feedback!</div>
+        <textarea class="vote-details" rows="2" placeholder="More details (optional)"></textarea>
+        <div class="vote-details-actions">
+          <button class="vote-details-send" type="button">Send</button>
+          <span class="vote-saved" hidden>Saved ✓</span>
+        </div>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -300,11 +355,30 @@
 
   const root = svg.append("g");
 
+  // Click-to-pin selection state. Clicking a node pins its neighborhood
+  // highlight so it persists; clicking the node again or empty canvas clears
+  // it. While pinned, only the pinned node's own edges stay clickable. Helps
+  // isolate one PI's collaborations now that the graph is dense.
+  let pinnedNode = null;
+  let zoomMoved = false;   // distinguishes a pan/zoom gesture from a bare click
+  let dragMoved = false;   // distinguishes a node drag from a node click
+
   svg.call(
     d3.zoom()
       .scaleExtent([0.3, 4])
-      .on("zoom", (event) => root.attr("transform", event.transform))
+      .on("start", () => { zoomMoved = false; })
+      .on("zoom", (event) => {
+        root.attr("transform", event.transform);
+        const t = event.sourceEvent && event.sourceEvent.type;
+        if (t === "mousemove" || t === "touchmove" || t === "wheel") zoomMoved = true;
+      })
   );
+
+  // A bare click on empty canvas (not a pan/zoom) clears the pinned selection.
+  svg.on("click", () => {
+    if (zoomMoved) { zoomMoved = false; return; }
+    unpinNode();
+  });
 
   const LINK_WIDTH = 3;
   const LINK_OPACITY = 0.65;
@@ -358,23 +432,25 @@
     .attr("stroke-linecap", "round")
     .style("cursor", (d) => (d.summary ? "pointer" : "default"))
     .on("mouseover", function (event, d) {
-      const [a, b] = edgePair(d);
-      link.filter((l) => l === d).classed("highlighted-link", true);
-      const teaser = d.summary ? truncate(stripFormatting(d.summary), 200) : "";
-      showTooltip(event,
-        `<div class="pi">${a.pi} ↔ ${b.pi}</div>` +
-        `<div class="meta">${d.weight} joint proposal${d.weight === 1 ? "" : "s"}</div>` +
-        (teaser ? `<div class="summary">"${escapeHtml(teaser)}"</div>` : "") +
-        (d.summary ? `<div class="meta" style="margin-top:6px;color:#a5b4fc;">Tap to read the full proposal</div>` : "")
-      );
+      // While a node is pinned, edges that don't touch it are inert.
+      if (pinnedNode) {
+        if (!edgeTouches(d, pinnedNode)) return;
+      } else {
+        link.filter((l) => l === d).classed("highlighted-link", true);
+      }
+      showEdgeTooltip(event, d);
     })
     .on("mousemove", moveTooltip)
     .on("mouseout", function (event, d) {
-      link.filter((l) => l === d).classed("highlighted-link", false);
+      // Don't strip a pinned highlight on hover-out.
+      if (!pinnedNode) link.filter((l) => l === d).classed("highlighted-link", false);
       hideTooltip();
     })
     .on("click", function (event, d) {
       if (!d.summary) return;
+      // While pinned, only the pinned node's own edges open a proposal; clicks
+      // on other (faded) edges fall through to the canvas handler, which unpins.
+      if (pinnedNode && !edgeTouches(d, pinnedNode)) return;
       event.stopPropagation();
       openModal(d);
     });
@@ -388,17 +464,18 @@
     .call(
       d3.drag()
         .on("start", (event, d) => {
+          dragMoved = false;
           if (!event.active) simulation.alphaTarget(0.3).restart();
           d.fx = d.x; d.fy = d.y;
         })
-        .on("drag", (event, d) => { d.fx = event.x; d.fy = event.y; })
+        .on("drag", (event, d) => { dragMoved = true; d.fx = event.x; d.fy = event.y; })
         .on("end", (event, d) => {
           if (!event.active) simulation.alphaTarget(0);
           d.fx = null; d.fy = null;
         })
     )
     .on("mouseover", (event, d) => {
-      highlightNeighborhood(d);
+      if (!pinnedNode) highlightNeighborhood(d);
       showTooltip(event,
         `<div class="pi">${d.pi}</div>` +
         `<div class="meta">${d.institution} · ${d.bot}</div>` +
@@ -407,8 +484,13 @@
     })
     .on("mousemove", moveTooltip)
     .on("mouseout", () => {
-      clearHighlight();
+      if (!pinnedNode) clearHighlight();
       hideTooltip();
+    })
+    .on("click", (event, d) => {
+      if (dragMoved) return;       // was a drag, not a click — leave selection alone
+      event.stopPropagation();      // keep the canvas-click handler from also unpinning
+      togglePin(d);
     });
 
   node.append("rect")
@@ -473,6 +555,52 @@
   function clearHighlight() {
     node.classed("faded", false).classed("is-active", false);
     link.classed("faded-link", false).classed("highlighted-link", false);
+  }
+
+  function edgeTouches(l, n) {
+    const sId = typeof l.source === "object" ? l.source.id : l.source;
+    const tId = typeof l.target === "object" ? l.target.id : l.target;
+    return sId === n.id || tId === n.id;
+  }
+
+  // Edges only afford a tap when clickable: any time nothing is pinned, or the
+  // pinned node's own edges. While pinned, the other edges' fat hit lines are
+  // made pointer-events:none so they can't intercept a click meant for a
+  // highlighted edge in a dense area (otherwise the click would fall through to
+  // the canvas handler and unpin). A click that misses every highlighted edge
+  // still reaches the canvas and unpins, as intended.
+  function refreshEdgeAffordance() {
+    const clickable = (d) => !pinnedNode || edgeTouches(d, pinnedNode);
+    linkHit
+      .style("pointer-events", (d) => (clickable(d) ? null : "none"))
+      .style("cursor", (d) => (d.summary && clickable(d) ? "pointer" : "default"));
+  }
+
+  function pinNode(d) {
+    pinnedNode = d;
+    highlightNeighborhood(d);
+    refreshEdgeAffordance();
+  }
+  function unpinNode() {
+    if (!pinnedNode) return;
+    pinnedNode = null;
+    clearHighlight();
+    refreshEdgeAffordance();
+  }
+  function togglePin(d) {
+    if (pinnedNode === d) unpinNode();
+    else pinNode(d);
+  }
+
+  function showEdgeTooltip(event, d) {
+    const [a, b] = edgePair(d);
+    const teaser = d.summary ? truncate(stripFormatting(d.summary), 200) : "";
+    showTooltip(event,
+      `<div class="pi">${a.pi} ↔ ${b.pi}</div>` +
+      `<div class="meta">${d.weight} joint proposal${d.weight === 1 ? "" : "s"}</div>` +
+      (teaser ? `<div class="summary">"${escapeHtml(teaser)}"</div>` : "") +
+      (d.summary ? `<div class="meta" style="margin-top:6px;color:#a5b4fc;">Tap to read the full proposal</div>` : "")
+    );
   }
 
   function showTooltip(event, html) {
@@ -570,6 +698,7 @@
     );
     // Full proposal text, rendered as sanitized GitHub-flavored markdown.
     modal.select(".modal-body").html(renderMarkdown(d.summary));
+    resetFeedback(d.decision_id);
     modal.node().querySelector(".modal-card").scrollTop = 0;
     modal.classed("show", true);
   }
@@ -578,6 +707,80 @@
     if (event.target === this || event.target.classList.contains("modal-close")) closeModal();
   });
   document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeModal(); });
+
+  // ---- Public proposal feedback (no login) -------------------------------
+  // A browser-stored anonymous id lets a visitor change their vote and attach
+  // optional details to the same record. Voting still works if storage is
+  // blocked — it just won't be de-duplicated per visitor.
+  let voterToken = null;
+  try {
+    voterToken = localStorage.getItem("copi-voter-token");
+    if (!voterToken) {
+      voterToken = (window.crypto && crypto.randomUUID)
+        ? crypto.randomUUID()
+        : String(Math.random()).slice(2) + Date.now();
+      localStorage.setItem("copi-voter-token", voterToken);
+    }
+  } catch (e) { /* storage unavailable */ }
+
+  const feedbackEl = modal.select("#modal-feedback");
+  let currentDecisionId = null;
+  let currentVoteId = null;
+
+  function resetFeedback(decisionId) {
+    currentDecisionId = decisionId || null;
+    currentVoteId = null;
+    feedbackEl.style("display", currentDecisionId ? null : "none");
+    feedbackEl.select(".vote-row").style("display", null);
+    feedbackEl.select(".vote-thanks").attr("hidden", true);
+    feedbackEl.select(".vote-details").property("value", "");
+    feedbackEl.select(".vote-saved").attr("hidden", true);
+  }
+
+  async function postJSON(url, body) {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) throw new Error("request failed: " + res.status);
+    return res.json();
+  }
+
+  async function castVote(vote) {
+    if (!currentDecisionId) return;
+    feedbackEl.select(".vote-row").style("display", "none");
+    feedbackEl.select(".vote-thanks").attr("hidden", null);
+    try {
+      const r = await postJSON("/api/proposal-vote", {
+        decision_id: currentDecisionId, vote: vote, voter_token: voterToken,
+      });
+      currentVoteId = r.id;
+    } catch (e) {
+      console.error("vote failed", e);  // keep the thank-you; best-effort
+    }
+  }
+
+  async function sendDetails() {
+    if (!currentVoteId) return;
+    const details = feedbackEl.select(".vote-details").property("value");
+    try {
+      await postJSON("/api/proposal-vote/" + currentVoteId + "/details", {
+        details: details, voter_token: voterToken,
+      });
+      feedbackEl.select(".vote-saved").attr("hidden", null);
+    } catch (e) { console.error("details failed", e); }
+  }
+
+  feedbackEl.select(".vote-up").on("click", () => castVote("up"));
+  feedbackEl.select(".vote-down").on("click", () => castVote("down"));
+  feedbackEl.select(".vote-details-send").on("click", sendDetails);
+  feedbackEl.select(".vote-details")
+    .on("input", () => feedbackEl.select(".vote-saved").attr("hidden", true))
+    .on("blur", () => {
+      // Auto-save on blur so details aren't lost if they skip the Send button.
+      if (feedbackEl.select(".vote-details").property("value").trim()) sendDetails();
+    });
 
   window.addEventListener("resize", () => {
     const w = window.innerWidth, h = window.innerHeight;
