@@ -302,3 +302,204 @@ Add to `/settings`:
 2. ProposalReview constraint relaxation for delegate reviews
 3. Delegate notification preferences (per-agent opt-out)
 4. Auto-downgrade final notice email
+
+---
+
+# Feature: Multiple Notification Categories
+
+## Motivation
+
+The system today exposes a **single** email control — `User.email_notification_frequency` — which governs exactly one activity: *proposal-review reminders*. The settings page presents one toggle + one frequency dropdown (`templates/settings.html`), and the worker (`check_and_send_notifications`) sends only that one kind of email.
+
+This feature generalizes the design from "one frequency for one activity" to **independent notification categories**, each with its own enable/disable state, its own delivery model (periodic vs. event-driven), and its own content. It introduces two new categories — **Status overview** and **New proposal** — alongside the existing reminder, which becomes the `proposal_review` category.
+
+## Concept: Notification Categories
+
+A **category** is a named class of email with three properties:
+
+| Property | Description |
+|---|---|
+| `key` | Stable identifier (`proposal_review`, `status_overview`, `new_proposal`) |
+| delivery model | `periodic_reminder`, `periodic_digest`, or `event_driven` |
+| user controls | `enabled` (on/off) + optional `frequency` (for periodic categories) |
+
+| Category | Delivery model | User controls | Source of content |
+|---|---|---|---|
+| `proposal_review` (existing) | periodic_reminder (one-at-a-time, frequency ladder) | on/off + frequency | Oldest unreviewed `ThreadDecision` |
+| `status_overview` (new) | periodic_digest (time-windowed summary) | on/off + frequency | Aggregated `ThreadDecision` + `ProposalReview` over the window |
+| `new_proposal` (new) | event_driven (one email per proposal, near-real-time) | on/off | The just-created `ThreadDecision` (its `summary_text`) |
+
+The existing engagement tracking / auto-downgrade ladder (`EmailEngagementTracker`) continues to apply **only** to `proposal_review` — it is a nudge mechanism for an action the user owes. `status_overview` and `new_proposal` are informational and are not auto-downgraded; they are simply on or off.
+
+## Data Model Changes
+
+### New table: `email_notification_preferences`
+
+Replaces the single `User.email_notification_frequency` field with one row per (user, category).
+
+| Field | Type | Notes |
+|---|---|---|
+| user_id | FK → User | Part of composite PK |
+| category | enum: proposal_review, status_overview, new_proposal | Part of composite PK |
+| enabled | boolean | Default per category (see below) |
+| frequency | enum: daily, twice_weekly, weekly, biweekly, monthly, off | Used by periodic categories; ignored by `new_proposal` |
+| created_at / updated_at | timestamp | |
+
+**Defaults for new/backfilled users:**
+- `proposal_review`: enabled, frequency = `weekly` (migrated from the existing `email_notification_frequency` value)
+- `status_overview`: enabled, frequency = `weekly`
+- `new_proposal`: **disabled** by default (event-driven email can be high-volume; opt-in)
+
+**Backward compatibility / migration (`alembic` follow-up to 0008):**
+1. Create `email_notification_preferences`.
+2. Backfill a `proposal_review` row for every user from their current `email_notification_frequency` (preserving `off`, and preserving `email_notifications_paused_by_system` semantics — a paused user gets `enabled=false`).
+3. Backfill `status_overview` (weekly, enabled) and `new_proposal` (disabled) rows.
+4. Keep `User.email_notification_frequency` as a **deprecated read-through** for one release, or drop it and have `proposal_review` be the source of truth. Recommended: keep the column nullable for one release, write to both, then drop.
+
+A thin accessor — `get_pref(user, category)` returning `(enabled, frequency)` with category defaults when no row exists — keeps call sites clean and avoids null-checks throughout the services.
+
+### Changes to `EmailNotification`
+
+Add a `category` column (enum, default `proposal_review`) so the table can log all three kinds of email, not just review reminders. The existing unique constraint `(user_id, thread_decision_id)` becomes `(user_id, thread_decision_id, category)` — a single proposal can legitimately produce both a `new_proposal` email and (later) a `proposal_review` reminder.
+
+For `status_overview` (which is not tied to a single proposal), `thread_decision_id` is nullable and a separate lightweight `digest_runs` row (or a `last_status_overview_sent_at` column on the preference row) tracks the window boundary.
+
+## Category: Status Overview
+
+A periodic **digest** summarizing the user's agent activity over a selectable window. Informational; no reply action required.
+
+### Trigger & windowing
+
+A worker loop (`check_and_send_status_overviews`, sibling of the existing notification loop) runs on schedule. For each user with `status_overview` enabled, when their frequency interval has elapsed since `last_status_overview_sent_at`, build and send a digest covering the window **[last sent → now]** (first-ever digest covers a sensible default, e.g. last 7 days). Frequency options: `daily`, `weekly`, `biweekly`, `monthly`, `off`.
+
+### Content
+
+Scoped to the agents the user has access to (own + delegated). All counts/lists are derived from `ThreadDecision` and `ProposalReview` within the window (`decided_at` in window), restricted to threads where `agent_a` or `agent_b` is one of the user's agents.
+
+| Element | Derivation |
+|---|---|
+| **Time period** | The window, e.g. "Jun 3 – Jun 10, 2026" |
+| **Ideas proposed** (count) | `ThreadDecision` with `outcome='proposal'` in window |
+| **Collaborators discussed with** (count + names) | Distinct counterpart agents across all of the user's threads in window (the `agent_a`/`agent_b` that is *not* the user's agent), resolved to bot/PI names via `AgentRegistry` |
+| **Successful proposals** (count) | Proposals with a `ProposalReview` rated **3–4** (promising / strong) |
+| **No-go ideas** (count) | Threads with `outcome='no_proposal'`, plus proposals rated **1–2** |
+| **Conversations** (count) | Distinct threads the agent participated in during the window |
+| **One-liner summaries** | For each proposal, a single-line condensation of `ThreadDecision.summary_text`. If `summary_text` is multi-paragraph, run a cheap Sonnet pass to compress to one line (batch all of a user's proposals into one LLM call). |
+
+**Example body (HTML, styled as a digest card):**
+
+```
+Your CoPI activity — Jun 3–10, 2026
+
+  3 ideas proposed   ·   5 collaborators   ·   2 promising   ·   1 no-go
+
+Ideas discussed:
+  • [CravattBot × NomuraBot] Activity-based profiling of ferroptosis
+    suppressor proteins  — rated Strong
+  • [CravattBot × KernBot] Allosteric covalent ligands for PTP1B
+    — awaiting your review
+  • [CravattBot × MinorBot] Lipid-gated ion channel chemoproteomics
+    — no proposal (diverged)
+
+Collaborators this week: NomuraBot (Nomura), KernBot (Kern), MinorBot (Minor)
+
+[ Review pending proposals ]   [ Manage notifications ]
+```
+
+Subject: `Your CoPI activity: 3 ideas, 5 collaborators this week`. The digest is **not** replyable for review (no reply token); review actions link to the web app. It honors the unsubscribe footer and `List-Unsubscribe` header like all categories.
+
+## Category: New Proposal
+
+An **event-driven** email sent once, near-real-time, each time the user's agent generates a new collaboration proposal. Distinct from `proposal_review`: this fires on *creation* (informational, "here's what your agent came up with"), whereas `proposal_review` is the periodic nudge to *act* on the unreviewed backlog.
+
+### Trigger
+
+When a `ThreadDecision` with `outcome='proposal'` is created for an agent whose owning user (and delegates with `notify_proposals=true`) has `new_proposal` enabled, send one email. Implementation: the same worker poll that drives reminders also scans for `proposal` decisions created since the last check that have no `EmailNotification` row with `category='new_proposal'` for that user, and sends immediately (independent of any frequency interval).
+
+### Content
+
+Kept deliberately simple for the first version — no LLM assessment, no Slack transcript:
+
+1. **Header** — "[BotName] proposed a collaboration with [OtherBotName]" + the channel and timestamp.
+2. **Proposal summary** — the existing `ThreadDecision.summary_text` (the `:memo:` text) rendered directly, with light styling. No separate strengths/weaknesses breakdown and no inline message transcript; `summary_text` already captures the gist of the proposal.
+
+`AgentMessage` stores only metadata (`message_length`, not the message body), so this version intentionally avoids fetching or embedding the thread — it relies solely on data already on the `ThreadDecision` row. Inline transcripts and a strengths/weaknesses breakdown can be added later (see "Future enhancements").
+
+**Styling sketch (HTML):**
+
+```
+┌─────────────────────────────────────────────┐
+│ 🧪 New proposal: CravattBot × NomuraBot       │
+│ #cabo-chemical-biology · Jun 10, 2:14pm       │
+├─────────────────────────────────────────────┤
+│ Proposal: jointly map FSP1 engagement of      │
+│ covalent ligands by combining ABPP with       │
+│ ferroptosis-suppressor genetics. Both labs     │
+│ have the required probes and cell lines...     │
+│ (full summary_text)                            │
+├─────────────────────────────────────────────┤
+│ [ Review this proposal ]   [ Manage emails ]   │
+└─────────────────────────────────────────────┘
+```
+
+Subject: `[BotName] proposed a collaboration with [OtherBotName]`. Because every new-proposal email includes a review CTA, it also carries a `review+{token}` Reply-To so the PI can rate or instruct by reply (reusing the existing inbound classifier) — this makes the immediate notification actionable, not just informational.
+
+**Future enhancements (out of scope for v1):** an LLM-generated strengths/weaknesses breakdown, and the full Slack discussion embedded inline (would require fetching the thread via `conversations.replies` since message bodies aren't persisted, plus `collab_private` membership checks).
+
+## Settings UI Changes
+
+`/settings` moves from one toggle to a **per-category list**. Each category renders a row with an on/off toggle, and — for periodic categories — a frequency dropdown that appears when enabled (the existing toggle JS generalizes to one instance per category).
+
+```
+Email Notifications
+
+  Proposal review reminders            [ on ●]   Frequency: [ Weekly ▾ ]
+    Nudges to review proposals waiting for your action.
+
+  Status overview                      [ on ●]   Frequency: [ Weekly ▾ ]
+    A periodic digest of your agent's activity.
+
+  New proposal                         [○ off]
+    An email the moment your agent generates a proposal,
+    with strengths/weaknesses and the full discussion.
+```
+
+`POST /settings/save` is extended to read a value per category (`{category}_on`, `{category}_frequency`) and upsert `email_notification_preferences` rows. `VALID_FREQUENCIES` gains `monthly`. The "paused by system" banner remains specific to `proposal_review`.
+
+## Worker Changes
+
+- Generalize the notification loop to iterate categories. Concretely, add two sibling functions in `email_notifications.py`:
+  - `check_and_send_status_overviews(session_factory)` — periodic digest builder.
+  - `check_and_send_new_proposal_emails(session_factory)` — event-driven scan for un-notified `proposal` decisions.
+- `src/worker/main.py` calls all three from its loop, each gated by its own interval (digest can run hourly and self-gate by frequency; new-proposal scan runs at the existing short cadence for near-real-time delivery).
+- All three paths funnel through the existing `is_allowed_recipient()` allowlist guard and the unsubscribe/`List-Unsubscribe` footer.
+
+## New Files / Touch Points
+
+| File | Change |
+|---|---|
+| `src/models/email_notification.py` | `EmailNotificationPreference` model; `category` column on `EmailNotification` |
+| `alembic/versions/0009_notification_categories.py` | New table, backfill, `category` column + constraint change |
+| `src/services/email_notifications.py` | `get_pref()` accessor; status-overview and new-proposal builders; per-category send helpers |
+| `prompts/status-overview-summary.md` (new) | Prompt for the one-line proposal summary compression used by the digest |
+| `src/routers/settings.py` | Per-category form handling; add `monthly` to `VALID_FREQUENCIES` |
+| `templates/settings.html` | Per-category rows (toggle + frequency) |
+| `templates/email/status_overview.html` (new) | Digest email template |
+| `templates/email/new_proposal.html` (new) | Styled email template rendering `summary_text` |
+
+## Implementation Priority
+
+### Phase 4: Category Framework
+1. `email_notification_preferences` table + migration with backfill from `email_notification_frequency`.
+2. `category` column on `EmailNotification` and constraint change.
+3. `get_pref()` accessor; refactor existing `proposal_review` send path to read it.
+4. Per-category settings UI and save handler.
+
+### Phase 5: Status Overview
+1. Window aggregation queries (ideas, collaborators, successful, no-go, conversations).
+2. One-line summary compression (batched Sonnet call).
+3. Digest template + `check_and_send_status_overviews` worker loop.
+
+### Phase 6: New Proposal
+1. Styled email template rendering `ThreadDecision.summary_text`.
+2. `check_and_send_new_proposal_emails` worker loop (scan for un-notified `proposal` decisions; with `review+{token}` Reply-To for actionability).
