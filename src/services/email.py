@@ -5,6 +5,16 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+def is_allowed_recipient(to_email: str | None) -> bool:
+    """Return False when an outbound allowlist is set and `to_email` is not on it."""
+    from src.config import get_settings
+    allow = get_settings().outbound_email_allowlist.strip()
+    if not allow:
+        return True
+    allowed = {e.strip().lower() for e in allow.split(",") if e.strip()}
+    return (to_email or "").lower() in allowed
+
+
 def send_delegate_invitation(
     to_email: str,
     pi_name: str,
@@ -14,6 +24,10 @@ def send_delegate_invitation(
     """Send a delegate invitation email via AWS SES. Returns True on success."""
     from src.config import get_settings
     settings = get_settings()
+
+    if not is_allowed_recipient(to_email):
+        logger.info("Delegate invite to %s suppressed by outbound allowlist", to_email)
+        return False
 
     subject = f"{pi_name} invited you to join their lab on CoPI"
 

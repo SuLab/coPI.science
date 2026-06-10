@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from itsdangerous import URLSafeTimedSerializer
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.orm import selectinload
 
 from src.config import get_settings
 from src.models import (
@@ -148,7 +149,9 @@ async def check_and_send_notifications(session_factory: async_sessionmaker) -> i
     async with session_factory() as db:
         # Get all users with email notifications enabled
         result = await db.execute(
-            select(User).where(
+            select(User)
+            .options(selectinload(User.agent))
+            .where(
                 User.email_notification_frequency != "off",
                 User.email_notifications_paused_by_system.is_(False),
                 User.email.isnot(None),
@@ -247,6 +250,15 @@ async def send_proposal_notification(
 ) -> bool:
     """Compose and send a proposal notification email. Returns True on success."""
     settings = get_settings()
+
+    from src.services.email import is_allowed_recipient
+    if not is_allowed_recipient(user.email):
+        logger.info(
+            "Proposal notification to %s suppressed by outbound allowlist (proposal %s)",
+            user.email,
+            thread_decision.id,
+        )
+        return False
 
     reply_token = secrets.token_urlsafe(48)  # 64-char base64
 

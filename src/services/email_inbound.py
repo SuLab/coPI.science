@@ -490,6 +490,10 @@ async def _send_help_email(user: User, notification: EmailNotification) -> None:
 def _send_simple_email(to_email: str, subject: str, text_body: str) -> bool:
     """Send a simple text email via SES."""
     settings = get_settings()
+    from src.services.email import is_allowed_recipient
+    if not is_allowed_recipient(to_email):
+        logger.info("Email to %s suppressed by outbound allowlist (subject=%r)", to_email, subject)
+        return False
     try:
         import boto3
 
