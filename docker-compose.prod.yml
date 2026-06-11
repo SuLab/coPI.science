@@ -126,6 +126,10 @@ services:
     ports:
       - "80:80"
       - "443:443"
+    # Lets the devel.copi.science vhost reach a service bound to the host's
+    # localhost:8858 (e.g. an SSH tunnel to a remote dev instance).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/templates/default.conf.template:ro
       - ./certbot/conf:/etc/letsencrypt:ro
