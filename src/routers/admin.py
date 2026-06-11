@@ -778,6 +778,7 @@ async def admin_agents(
     pending = [a for a in agents if a.status == "pending"]
     active = [a for a in agents if a.status == "active"]
     suspended = [a for a in agents if a.status == "suspended"]
+    inactive = [a for a in agents if a.status == "inactive"]
 
     return templates.TemplateResponse(
         request,
@@ -789,6 +790,7 @@ async def admin_agents(
             pending=pending,
             active=active,
             suspended=suspended,
+            inactive=inactive,
             user_map=user_map,
             all_users=all_users,
             env_token_agents=env_token_agents,

@@ -27,7 +27,7 @@ class AgentRegistry(Base):
     pi_name: Mapped[str] = mapped_column(String(255), nullable=False)
     status: Mapped[str] = mapped_column(
         String(20), nullable=False, default="pending"
-    )  # pending, active, suspended
+    )  # pending, active, suspended, inactive (parked: excluded from sim runs, reversible)
     slack_bot_token: Mapped[str | None] = mapped_column(Text, nullable=True)
     slack_user_id: Mapped[str | None] = mapped_column(String(50), nullable=True)
     delegate_slack_ids: Mapped[list[str] | None] = mapped_column(ARRAY(String), nullable=True)

@@ -36,9 +36,10 @@ def main(
     no_db: bool = typer.Option(False, "--no-db", help="Skip database logging"),
     fresh: bool = typer.Option(False, "--fresh", help="Wipe simulation data and start fresh"),
     reset_cursors: bool = typer.Option(False, "--reset-cursors", help="Reset scan cursors so agents re-read all posts"),
+    all_agents: bool = typer.Option(False, "--all-agents", help="Run every PILOT_LABS agent regardless of status (legacy behavior; default is status='active' only)"),
 ):
     """Run the turn-based agent simulation."""
-    asyncio.run(_run_simulation(max_runtime, budget, mock, no_db, fresh, reset_cursors))
+    asyncio.run(_run_simulation(max_runtime, budget, mock, no_db, fresh, reset_cursors, all_agents))
 
 
 async def _run_simulation(
@@ -48,14 +49,41 @@ async def _run_simulation(
     no_db: bool,
     fresh: bool,
     reset_cursors: bool = False,
+    all_agents: bool = False,
 ) -> None:
     settings = get_settings()
+
+    # Determine which agents participate. By default the run is scoped to agents
+    # with AgentRegistry.status == 'active' (intersected with PILOT_LABS + a valid
+    # token below). Pass --all-agents (or --no-db) to run every PILOT_LABS entry.
+    active_ids: set[str] | None = None
+    if not no_db and not all_agents:
+        from sqlalchemy import select as _select
+        from sqlalchemy.ext.asyncio import async_sessionmaker as _asm, create_async_engine as _cae
+        from src.models import AgentRegistry as _AR
+        _engine = _cae(settings.database_url)
+        try:
+            _sf = _asm(_engine, expire_on_commit=False)
+            async with _sf() as _db:
+                _rows = await _db.execute(_select(_AR.agent_id).where(_AR.status == "active"))
+                active_ids = {r[0] for r in _rows}
+        finally:
+            await _engine.dispose()
+        if not active_ids:
+            logger.warning("No agents with status='active' found — falling back to all PILOT_LABS agents")
+            active_ids = None
 
     # Create agent instances
     agents = [
         Agent(agent_id=lab["id"], bot_name=lab["name"], pi_name=lab["pi"])
         for lab in PILOT_LABS
+        if active_ids is None or lab["id"] in active_ids
     ]
+    logger.info(
+        "Agents selected: %d/%d (status filter %s)",
+        len(agents), len(PILOT_LABS),
+        "off (--all-agents/--no-db)" if active_ids is None else "active-only",
+    )
 
     # Set up Slack clients (Web API only, no Socket Mode)
     slack_clients = {}
