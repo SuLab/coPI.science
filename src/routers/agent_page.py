@@ -95,8 +95,10 @@ async def agent_landing(
         all_agents.append(own_agent)
     all_agents.extend(delegated_agents)
 
-    # Auto-redirect if exactly one agent and it's active
-    if len(all_agents) == 1 and all_agents[0].status == "active":
+    # Auto-redirect if exactly one agent and it can reach the dashboard.
+    # Inactive agents are included: their owner can still review existing
+    # proposals (the dashboard itself gates reopen + active-only settings).
+    if len(all_agents) == 1 and all_agents[0].status in ("active", "inactive"):
         return RedirectResponse(
             url=f"/agent/{all_agents[0].agent_id}/dashboard", status_code=302
         )
@@ -149,10 +151,17 @@ async def agent_dashboard(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Agent dashboard — shows stats, proposals, and settings."""
+    """Agent dashboard — shows stats, proposals, and settings.
+
+    Inactive agents are allowed in (read + rate existing proposals only): they
+    are parked from simulation runs but their owner should still be able to
+    review proposals generated before inactivation. ``pending``/``suspended``
+    agents stay gated out. The reopen action and the active-only settings are
+    gated separately (see ``reopen_proposal`` and the dashboard template).
+    """
     agent, is_owner = await get_agent_with_access(agent_id, db, current_user)
 
-    if agent.status != "active":
+    if agent.status not in ("active", "inactive"):
         return RedirectResponse(url="/agent", status_code=302)
 
     aid = agent.agent_id
@@ -376,11 +385,20 @@ async def review_proposal(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Rate a proposal (1-4)."""
+    """Rate a proposal (1-4).
+
+    Allowed for both ``active`` and ``inactive`` agents — rating is passive
+    (it only records a ``ProposalReview`` row, no Slack side effects), so an
+    inactive agent's owner can still review proposals generated before the
+    agent was parked.
+    """
     if rating < 1 or rating > 4:
         raise HTTPException(status_code=400, detail="Rating must be 1-4")
 
     agent, is_owner = await get_agent_with_access(agent_id, db, current_user)
+
+    if agent.status not in ("active", "inactive"):
+        raise HTTPException(status_code=403, detail="Agent is not active")
 
     td_result = await db.execute(
         select(ThreadDecision).where(ThreadDecision.id == thread_decision_id)
@@ -451,6 +469,18 @@ async def reopen_proposal(
         raise HTTPException(status_code=400, detail="Guidance text is required")
 
     agent, is_owner = await get_agent_with_access(agent_id, db, current_user)
+
+    # Reopening re-injects the agent into a live discussion (posts guidance to
+    # Slack / spins up a private refinement channel), so it is blocked while the
+    # agent is inactive — exactly the cross-cohort interaction inactivation is
+    # meant to stop. Reactivate the agent to reopen proposals for further
+    # discussion. (Unlike `review`, this requires status == 'active'.)
+    if agent.status != "active":
+        raise HTTPException(
+            status_code=403,
+            detail="This agent is inactive. Reactivate it to reopen proposals "
+            "for further discussion.",
+        )
 
     td_result = await db.execute(
         select(ThreadDecision).where(ThreadDecision.id == thread_decision_id)

@@ -155,7 +155,7 @@ async def process_inbound_email(raw_email: bytes, db: AsyncSession) -> None:
 
     if category == "instruction":
         instruction = classification.get("instruction", body)
-        await _handle_instruction(
+        reopened = await _handle_instruction(
             user=user,
             notification=notification,
             td=td,
@@ -164,7 +164,10 @@ async def process_inbound_email(raw_email: bytes, db: AsyncSession) -> None:
         )
         await record_engagement(user.id, db)
         await mark_notification_responded(user.id, td.id, "instruction", db)
-        await _send_instruction_confirmation(user, notification, td, db)
+        # Inactive agents can't reopen; _handle_instruction already emailed the
+        # PI an explanation, so skip the "will refine" confirmation.
+        if reopened:
+            await _send_instruction_confirmation(user, notification, td, db)
         return
 
     # Unparseable
@@ -336,12 +339,32 @@ async def _handle_instruction(
     td: ThreadDecision,
     instruction: str,
     db: AsyncSession,
-) -> None:
-    """Post PI guidance to the Slack thread, same as the web reopen_proposal flow."""
+) -> bool:
+    """Post PI guidance to the Slack thread, same as the web reopen_proposal flow.
+
+    Returns True if the proposal was reopened (guidance posted). Returns False
+    if the agent is inactive — reopening re-injects the agent into a live
+    discussion, which is blocked while parked, mirroring ``reopen_proposal`` in
+    the web router. The PI gets a notice email explaining how to proceed.
+    """
     agent_result = await db.execute(
         select(AgentRegistry).where(AgentRegistry.id == notification.agent_registry_id)
     )
     agent = agent_result.scalar_one()
+
+    if agent.status != "active":
+        logger.info(
+            "Agent %s is %s — not posting email reopen guidance for proposal %s",
+            agent.agent_id, agent.status, td.id,
+        )
+        _send_simple_email(
+            user.email,
+            f"{agent.bot_name} is inactive - couldn't reopen the proposal",
+            f"{agent.bot_name} is currently inactive, so it can't reopen this "
+            f"proposal for further discussion right now. Once it's reactivated, "
+            f"you can reopen the proposal from your dashboard at copi.science.",
+        )
+        return False
 
     try:
         from slack_sdk import WebClient
@@ -404,8 +427,11 @@ async def _handle_instruction(
             )
             db.add(review)
 
+        return True
+
     except Exception as exc:
         logger.error("Failed to post PI guidance to Slack: %s", exc)
+        return False
 
 
 async def _send_review_confirmation(

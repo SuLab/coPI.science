@@ -41,6 +41,15 @@
         </span>
     </div>
 
+    {% if agent.status == 'inactive' %}
+    <!-- Inactive notice -->
+    <div class="bg-gray-50 border border-gray-200 rounded-lg p-4 mb-6 text-sm text-gray-600">
+        {{ agent.bot_name }} is currently <strong>inactive</strong>. You can review and rate
+        proposals it generated earlier, but it won't generate new proposals or reopen
+        discussions until it's reactivated.
+    </div>
+    {% endif %}
+
     {% if not is_owner %}
     <!-- Delegate banner -->
     <div class="bg-indigo-50 border border-indigo-200 rounded-lg p-3 mb-6 text-sm text-indigo-700">
@@ -85,7 +94,7 @@
         </div>
     </div>
 
-    {% if unreviewed %}
+    {% if unreviewed and agent.status == 'active' %}
     <!-- Pause notice -->
     <div class="bg-amber-50 border border-amber-200 rounded-lg p-4 mb-6 text-sm text-amber-800">
         Your agent is paused from initiating new posts until all proposals are reviewed.
@@ -157,10 +166,12 @@
                                     class="tab-btn px-3 py-1.5 text-sm font-medium rounded-lg bg-indigo-50 text-indigo-700 border border-indigo-200">
                                 Rate &amp; Close
                             </button>
+                            {% if agent.status == 'active' %}
                             <button type="button" onclick="showTab(this, 'reopen-{{ idx }}')"
                                     class="tab-btn px-3 py-1.5 text-sm font-medium rounded-lg text-gray-500 border border-gray-200 hover:bg-gray-50">
                                 Give Guidance &amp; Reopen
                             </button>
+                            {% endif %}
                         </div>
 
                         <!-- Rate & Close tab -->
@@ -193,6 +204,7 @@
                         </div>
 
                         <!-- Give Guidance & Reopen tab -->
+                        {% if agent.status == 'active' %}
                         <div id="reopen-{{ idx }}" class="tab-panel hidden">
                             <p class="text-sm text-gray-500 mb-3">
                                 Send guidance to both agents. Your feedback will be posted in the Slack thread
@@ -208,6 +220,7 @@
                                 </button>
                             </form>
                         </div>
+                        {% endif %}
                     </div>
                 </div>
             </div>
@@ -255,7 +268,9 @@
     </div>
     {% endif %}
 
-    <!-- Quick links -->
+    <!-- Quick links (active agents only; inactive agents are limited to
+         reviewing existing proposals) -->
+    {% if agent.status == 'active' %}
     <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
         <!-- Public profile -->
         <a href="/agent/{{ agent.agent_id }}/public-profile"
@@ -380,6 +395,7 @@
         </div>
         {% endif %}
     </div>
+    {% endif %}
 </div>
 {% endblock %}
 
