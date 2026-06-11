@@ -333,6 +333,11 @@ def main():
         help="Slack workspace team ID (e.g. T012AB3CD) to pin OAuth URLs to the right workspace. "
              "Auto-detected from an existing bot token if not provided.",
     )
+    parser.add_argument(
+        "--only", nargs="+", metavar="AGENT_ID",
+        help="Only provision these agent_id(s), e.g. --only good. "
+             "Handy for testing the OAuth approval flow on a single bot.",
+    )
     args = parser.parse_args()
 
     redirect_uri = f"http://localhost:{args.port}{CALLBACK_PATH}"
@@ -361,6 +366,16 @@ def main():
     }
 
     missing = [lab for lab in pilot_labs if lab["id"] not in tokenized]
+
+    if args.only:
+        only = {a.lower() for a in args.only}
+        unknown = only - {lab["id"].lower() for lab in pilot_labs}
+        if unknown:
+            console.print(f"[yellow]--only: not in PILOT_LABS, ignoring: {', '.join(sorted(unknown))}[/yellow]")
+        already = only & tokenized
+        if already:
+            console.print(f"[yellow]--only: already have tokens, will skip: {', '.join(sorted(already))}[/yellow]")
+        missing = [lab for lab in missing if lab["id"].lower() in only]
 
     if not missing:
         console.print("[green]All bots already have tokens. Nothing to do.[/green]")
