@@ -33,6 +33,12 @@ logs/*.log
 profiles/public/*.md
 profiles/private/*.md
 profiles/memory/*.md
+profiles/**/*.md
+profiles/*.log
+
+# Generated/scratch data and static asset bundles (not source)
+data/
+static/
 
 # IDE
 .idea/
