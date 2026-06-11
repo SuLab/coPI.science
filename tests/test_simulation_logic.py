@@ -255,3 +255,74 @@ The actual message.
 </slack_message>"""
         data, msg = engine._parse_phase5_response(response)
         assert data["channel"] == "#structural-biology"
+
+
+# ---------------------------------------------------------------
+# _sync_profiles_from_disk
+# ---------------------------------------------------------------
+
+class TestSyncProfilesFromDisk:
+    """Per-turn reload of profiles edited from the web app (separate process)."""
+
+    @pytest.fixture
+    def setup(self, tmp_path, monkeypatch):
+        from src.agent.agent import Agent
+        import src.agent.simulation as sim
+
+        (tmp_path / "private").mkdir()
+        (tmp_path / "public").mkdir()
+        priv = tmp_path / "private" / "su.md"
+        priv.write_text("Focus on aging.")
+
+        # Point the sync method at the temp profiles tree.
+        monkeypatch.setattr(sim, "PROFILES_DIR", tmp_path)
+
+        agent = Agent("su", "SuBot", "Andrew Su")
+        # Count reload_profiles() calls without losing its real behavior.
+        calls = []
+        real_reload = agent.reload_profiles
+        def counting_reload():
+            calls.append(1)
+            real_reload()
+        agent.reload_profiles = counting_reload
+
+        engine = SimulationEngine(agents=[agent], slack_clients={})
+        return engine, agent, priv, calls
+
+    def test_first_observation_records_baseline_without_reload(self, setup):
+        engine, agent, _priv, calls = setup
+        engine._sync_profiles_from_disk()
+        assert calls == []                                  # no reload on first pass
+        assert "su" in engine._profile_mtimes              # baseline recorded
+
+    def test_unchanged_files_do_not_reload(self, setup):
+        engine, agent, _priv, calls = setup
+        engine._sync_profiles_from_disk()  # baseline
+        engine._sync_profiles_from_disk()  # nothing changed
+        assert calls == []
+
+    def test_external_edit_triggers_reload(self, setup):
+        import os
+        engine, agent, priv, calls = setup
+        engine._sync_profiles_from_disk()  # baseline
+
+        # Simulate the web app rewriting the file. Bump mtime explicitly so the
+        # test is robust to sub-second filesystem timestamp resolution.
+        priv.write_text("Switch focus to immunology.")
+        future = engine._profile_mtimes["su"] + 10
+        os.utime(priv, (future, future))
+
+        engine._sync_profiles_from_disk()
+        assert calls == [1]                                 # reloaded exactly once
+        assert engine._profile_mtimes["su"] == future       # watermark advanced
+
+        # A subsequent pass with no further change must not reload again.
+        engine._sync_profiles_from_disk()
+        assert calls == [1]
+
+    def test_missing_profile_files_are_tolerated(self, setup, tmp_path):
+        engine, agent, priv, calls = setup
+        priv.unlink()  # no profile files on disk at all
+        engine._sync_profiles_from_disk()  # must not raise
+        engine._sync_profiles_from_disk()
+        assert calls == []

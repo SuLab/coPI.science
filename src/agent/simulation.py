@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from src.agent.agent import Agent
+from src.agent.agent import PROFILES_DIR, Agent
 from src.agent.channels import SEEDED_CHANNELS
 from src.agent.foa_cache import extract_foa_number, format_foa_for_prompt
 from src.agent.funding_rules import (
@@ -280,6 +280,14 @@ class SimulationEngine:
         # to avoid re-processing on every turn.
         self._db_reopened_thread_ids: set[str] = set()
 
+        # Last-seen mtime of each agent's on-disk profile files (private +
+        # public), keyed by agent_id. The web editor runs in a separate process
+        # and writes profiles/{private,public}/{id}.md on a shared volume; this
+        # process caches profile content per Agent, so a per-turn mtime check
+        # tells us when an external edit happened and the cache must be
+        # invalidated. See _sync_profiles_from_disk.
+        self._profile_mtimes: dict[str, float] = {}
+
         # Last agent to make an LLM call — prevents the same agent from making
         # back-to-back LLM calls when it's the only active agent.
         self._last_llm_caller: str | None = None
@@ -389,6 +397,9 @@ class SimulationEngine:
             # the web app. Both are DB-driven, so a single tick picks them up.
             await self._sync_proposal_reviews_from_db()
             await self._sync_private_channels_from_db()
+
+            # Pick up profile edits made from the web app (separate process).
+            self._sync_profiles_from_disk()
 
             # Select agent
             agent = self._select_agent()
@@ -2645,6 +2656,42 @@ class SimulationEngine:
             logger.debug("Flushed %d LLM call logs to DB", len(batch))
         except Exception as exc:
             logger.warning("Failed to flush LLM call logs: %s", exc)
+
+    def _sync_profiles_from_disk(self) -> None:
+        """Reload any agent whose profile files changed on disk since last turn.
+
+        Private and public profiles can be edited from the web app, which runs
+        in a separate process and writes profiles/{private,public}/{id}.md on a
+        shared mounted volume. Each Agent caches its profile content in memory
+        and otherwise only invalidates that cache for in-process edits (the
+        Slack-DM path via Agent.update_private_profile). Without this check, a
+        web edit would not reach the running simulation until a restart.
+
+        Detection is by file mtime: cheap (two stat() calls per agent, no DB
+        round-trip) and tied to exactly what the agent reads. Re-reading the
+        same content after an in-process Slack-DM edit is harmless.
+        """
+        for agent in self.agents.values():
+            mtime = 0.0
+            for sub in ("private", "public"):
+                path = PROFILES_DIR / sub / f"{agent.agent_id}.md"
+                try:
+                    mtime = max(mtime, path.stat().st_mtime)
+                except OSError:
+                    continue  # file may not exist yet — agent falls back to default
+
+            prev = self._profile_mtimes.get(agent.agent_id)
+            if prev is None:
+                # First observation — record the baseline without reloading.
+                self._profile_mtimes[agent.agent_id] = mtime
+                continue
+            if mtime > prev:
+                agent.reload_profiles()
+                self._profile_mtimes[agent.agent_id] = mtime
+                logger.info(
+                    "[%s] Reloaded profiles from disk (external edit detected)",
+                    agent.agent_id,
+                )
 
     async def _sync_proposal_reviews_from_db(self) -> None:
         """Check DB for web-app proposal reviews and mark in-memory proposals as reviewed.
