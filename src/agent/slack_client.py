@@ -119,8 +119,10 @@ class AgentSlackClient:
             return
         try:
             self._client.conversations_join(channel=channel_id)
-        except SlackApiError:
-            pass
+        except Exception as exc:
+            # Best-effort: SlackApiError, socket TimeoutError, SSL/DNS issues
+            # must not crash the simulation. Next poll cycle will retry.
+            logger.debug("[%s] autojoin failed for %s: %s", self.agent_id, channel_id, exc)
 
     def connect(self) -> bool:
         """Authenticate and cache bot user ID. Returns True on success."""

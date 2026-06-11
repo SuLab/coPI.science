@@ -58,6 +58,19 @@ async def onboarding_start(
     )
     profile = profile_result.scalar_one_or_none()
 
+    # Self-heal: an allowed user with no job and no profile would otherwise
+    # spin on "Building Your Profile" forever (the template treats job_status
+    # 'none' the same as pending/processing and offers no retry).
+    if job is None and profile is None and current_user.access_status == "allowed":
+        job = Job(
+            type="generate_profile",
+            user_id=current_user.id,
+            payload={"user_id": str(current_user.id), "orcid": current_user.orcid},
+        )
+        db.add(job)
+        await db.commit()
+        logger.info("Auto-enqueued generate_profile for user %s on /onboarding", current_user.id)
+
     job_status = job.status if job else "none"
     progress = (job.payload or {}).get("progress", []) if job else []
 

@@ -52,14 +52,20 @@ Return your response as valid JSON matching the specified schema."""
     try:
         message = client.messages.create(
             model=settings.llm_profile_model,
-            max_tokens=2000,
+            max_tokens=4000,
             system=system_prompt,
             messages=[{"role": "user", "content": user_message}],
         )
         response_text = message.content[0].text
 
-        # Extract JSON from response
-        return _extract_json(response_text)
+        try:
+            return _extract_json(response_text)
+        except ValueError:
+            logger.error(
+                "Profile synthesis response for %s could not be parsed; full text:\n%s",
+                researcher_name, response_text,
+            )
+            raise
     except Exception as exc:
         logger.error("Failed to synthesize profile for %s: %s", researcher_name, exc)
         raise
@@ -117,10 +123,18 @@ def _extract_json(text: str) -> dict[str, Any]:
         start = text.find("```json") + 7
         end = text.find("```", start)
         if end > start:
+            block = text[start:end].strip()
             try:
-                return json.loads(text[start:end].strip())
+                return json.loads(block)
             except json.JSONDecodeError:
                 pass
+            # Claude sometimes drops the opening brace inside the fence — try
+            # wrapping when the block looks like the body of an object.
+            if block.startswith('"') and ":" in block:
+                try:
+                    return json.loads("{" + block.rstrip(", \n") + "}")
+                except json.JSONDecodeError:
+                    pass
 
     # Look for any JSON block
     if "```" in text:

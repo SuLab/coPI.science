@@ -161,6 +161,14 @@ _DOI_PUBLISHER_PATTERNS: dict[str, list[str]] = {
     "10.1016/j.cell": ["cell"],
     "10.7554/elife": ["elife"],
     "10.1083/jcb": ["journal of cell biology"],
+    # Cold Spring Harbor journals: more specific prefixes must come BEFORE
+    # the bare 10.1101/ so they win the first-match check. The generic
+    # 10.1101/ falls through to the bioRxiv/medRxiv preprint check.
+    "10.1101/cshperspect": ["cold spring harbor perspectives"],
+    "10.1101/gad": ["genes & development", "genes and development", "genes dev"],
+    "10.1101/gr.": ["genome research"],
+    "10.1101/sqb": ["cold spring harbor symposia"],
+    "10.1101/lm": ["learning & memory", "learning and memory"],
     "10.1101/": ["biorxiv", "medrxiv", "preprint"],
     "10.1074/jbc": ["journal of biological chemistry"],
     "10.1073/pnas": ["proceedings of the national academy"],
