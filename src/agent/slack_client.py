@@ -6,6 +6,7 @@ chat.postMessage for posting.
 
 import logging
 import re
+import secrets
 import time
 from typing import Any, Callable
 
@@ -67,6 +68,11 @@ def markdown_to_mrkdwn(text: str) -> str:
     return text
 
 MAX_RETRIES = 3
+
+# How many times to attempt private-channel creation. Attempt 0 uses a plain
+# timestamp suffix; later attempts add random entropy to survive the (extremely
+# rare) case of two channels minted in the same second. See create_private_channel.
+_MAX_PRIVATE_CHANNEL_ATTEMPTS = 3
 
 
 class AgentSlackClient:
@@ -478,22 +484,44 @@ class AgentSlackClient:
         invite_to_channel. See specs/privacy-and-channel-visibility.md for
         the full migration flow.
         """
-        if not self._client:
-            logger.info("[%s] MOCK create private channel: #%s", self.agent_id, name)
-            return {"id": f"mock_priv_{name}", "name": name, "is_private": True}
-        try:
-            result = self._call_with_retry(
-                self._client.conversations_create, name=name, is_private=True,
-            )
-            ch = result["channel"]
-            self._channel_name_to_id[ch["name"]] = ch["id"]
-            return ch
-        except SlackApiError as exc:
-            logger.error(
-                "[%s] Failed to create private channel %s: %s",
-                self.agent_id, name, exc.response.get("error"),
-            )
-            return None
+        # The reopen slug (priv-{a}-{b}-{origin}) is deterministic per agent
+        # pair + origin channel, so a second proposal between the same pair in
+        # the same channel produces an identical base name that Slack rejects
+        # with 'name_taken'. Append a UTC creation timestamp so each refinement
+        # gets a unique channel in one shot (no probe-and-increment loop) and
+        # records when it was opened. The endpoint's idempotency guard already
+        # blocks re-reopening the *same* proposal; the only residual collision
+        # — two *different* proposals for the same pair/channel reopened within
+        # the same second — is handled by retrying with random entropy.
+        # (Slack caps names at 80 chars, so the base is truncated to fit.)
+        ts = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
+        for attempt in range(_MAX_PRIVATE_CHANNEL_ATTEMPTS):
+            suffix = f"-{ts}" if attempt == 0 else f"-{ts}-{secrets.token_hex(2)}"
+            candidate = f"{name[: 80 - len(suffix)].rstrip('-')}{suffix}"
+            if not self._client:
+                logger.info("[%s] MOCK create private channel: #%s", self.agent_id, candidate)
+                return {"id": f"mock_priv_{candidate}", "name": candidate, "is_private": True}
+            try:
+                result = self._call_with_retry(
+                    self._client.conversations_create, name=candidate, is_private=True,
+                )
+                ch = result["channel"]
+                self._channel_name_to_id[ch["name"]] = ch["id"]
+                return ch
+            except SlackApiError as exc:
+                err = exc.response.get("error")
+                if err == "name_taken" and attempt < _MAX_PRIVATE_CHANNEL_ATTEMPTS - 1:
+                    logger.info(
+                        "[%s] Private channel '%s' name_taken — retrying with entropy",
+                        self.agent_id, candidate,
+                    )
+                    continue
+                logger.error(
+                    "[%s] Failed to create private channel %s: %s",
+                    self.agent_id, candidate, err,
+                )
+                return None
+        return None
 
     def invite_to_channel(self, channel_id: str, user_ids: list[str]) -> bool:
         """Invite one or more Slack user IDs (bots or humans) to a channel.
