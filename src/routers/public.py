@@ -610,6 +610,7 @@ async def _build_graph_payload(
                     summary_text
                 FROM thread_decisions
                 WHERE outcome = 'proposal'
+                  AND origin_visibility = 'public'
                   AND decided_at >= :decided_floor{window_end_clause}
                   AND thread_id IN (SELECT message_ts FROM cohort_posts)
             ),

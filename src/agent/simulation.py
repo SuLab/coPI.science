@@ -50,6 +50,29 @@ def _visibility_permits(origin: str, current: str) -> bool:
         return True
     return current == VISIBILITY_COLLAB_PRIVATE
 
+
+# Don't kick-start refinement for a handover older than this. A reopen is
+# meant to be picked up by the next sim run; if a migrated thread's handover is
+# this stale it was either already refined or abandoned, and re-seeding it on a
+# fresh process would risk re-posting to a long-dead channel. See
+# _seed_private_refinements.
+_PRIVATE_REFINEMENT_SEED_MAX_AGE_S = 14 * 24 * 3600  # 14 days
+
+# A private channel whose newest message is older than this is treated as
+# settled: the cursor rewind won't reach back into it. Without this, a single
+# stale sibling channel (e.g. an old refinement between the same pair) drags the
+# bot's global cursor months into the past. See _rewind_cursors_for_private_channels.
+_PRIVATE_CHANNEL_ACTIVE_WINDOW_S = 14 * 24 * 3600  # 14 days
+
+
+def _strip_reopen_prefix(comment: str) -> str:
+    """Strip the ``[Reopened]`` / ``[Reopened via email]`` marker the web/email
+    reopen routes prepend to the PI guidance stored in ProposalReview.comment."""
+    for prefix in ("[Reopened via email] ", "[Reopened] "):
+        if comment.startswith(prefix):
+            return comment[len(prefix):]
+    return comment
+
 # Pilot lab configurations
 PILOT_LABS = [
     # Scripps Research
@@ -280,6 +303,18 @@ class SimulationEngine:
         # to avoid re-processing on every turn.
         self._db_reopened_thread_ids: set[str] = set()
 
+        # Thread IDs whose private-channel refinement handover has already been
+        # seeded as a PI-priority interesting post, so we kick-start refinement
+        # exactly once per process. See _seed_private_refinements.
+        self._db_private_refined_thread_ids: set[str] = set()
+
+        # Names of collab_private channels whose refinement has converged on a
+        # recorded revised proposal. Bots stop posting there (Phase 5 skips
+        # them) and finalization is not re-run. Populated at startup from the DB
+        # and when a private refinement is finalized. See
+        # _finalize_private_proposal / _check_private_channel_outcome.
+        self._finalized_private_channels: set[str] = set()
+
         # Last-seen mtime of each agent's on-disk profile files (private +
         # public), keyed by agent_id. The web editor runs in a separate process
         # and writes profiles/{private,public}/{id}.md on a shared volume; this
@@ -436,9 +471,15 @@ class SimulationEngine:
             except Exception:
                 logger.exception("Error during turn for %s", agent.agent_id)
 
-            # Track last agent to make an LLM call
+            # Track last agent to make an LLM call. Clear it on an idle turn:
+            # the back-to-back guard only needs to block the agent that just
+            # *called*. If this turn did no work, leaving the flag set would
+            # perpetually skip the OTHER agent while this one idles — a 2-agent
+            # livelock. See project_two_agent_scheduler_livelock.
             if did_work:
                 self._last_llm_caller = agent.agent_id
+            else:
+                self._last_llm_caller = None
 
             # Update last_selected
             agent.state.last_selected = time.time()
@@ -1141,6 +1182,134 @@ class SimulationEngine:
                 other_event += f". Summary: {summary_text[:200]}"
             await self._update_agent_memory(other_agent, other_event)
 
+    async def _check_private_channel_outcome(
+        self, agent: Agent, channel: str, message_text: str,
+    ) -> None:
+        """Flat-channel analog of _check_thread_outcome for collab_private refinement.
+
+        Collab_private channels are flat (no ThreadState / threading), so the
+        threaded :memo:-Summary→✅ finalization never runs there. Here we detect
+        the same handshake on top-level posts: when this agent posts a ✅ that
+        confirms the *other* member's most recent :memo: Summary, we record the
+        refined proposal (see _finalize_private_proposal). A bare :memo: just
+        waits for the other bot's ✅.
+        """
+        if channel in self._finalized_private_channels:
+            return
+        if "✅" not in message_text and ":white_check_mark:" not in message_text:
+            return
+        cid = self._channel_id_map.get(channel)
+        if not cid:
+            return
+        other_id = next(
+            (m for m in self._private_channel_members.get(cid, set()) if m != agent.agent_id),
+            None,
+        )
+        if not other_id:
+            return
+        # Find the other member's most recent *revised* :memo: Summary in this
+        # channel. Skip the handover post: it embeds the ORIGINAL proposal
+        # summary (also marked :memo:), so without this a casual ✅ could
+        # finalize the un-revised proposal. The handover is identifiable by its
+        # header (see private_channels._build_handover_messages).
+        for entry in reversed(self.message_log._entries):
+            if entry.channel != channel:
+                continue
+            if entry.sender_agent_id != other_id or ":memo:" not in entry.content:
+                continue
+            if "Private refinement channel" in entry.content:
+                continue  # handover, not a revised summary
+            memo_idx = entry.content.find(":memo:")
+            summary_text = entry.content[memo_idx:].strip()
+            await self._finalize_private_proposal(
+                agent, other_id, channel, entry.ts, summary_text,
+            )
+            return
+
+    async def _finalize_private_proposal(
+        self,
+        agent: Agent,
+        other_id: str,
+        channel: str,
+        thread_id: str,
+        summary_text: str,
+    ) -> None:
+        """Record a refined proposal reached in a collab_private channel.
+
+        Writes a ThreadDecision with origin_visibility='collab_private' (kept out
+        of the public collaboration graph — see the visibility filter in
+        routers/public.py), blocks both bots pending review (a pending unreviewed
+        proposal), marks the channel finalized so refinement stops, and DMs the
+        PI. Idempotent: a private proposal already recorded for this channel is a
+        no-op. The PI reviews it through the normal dashboard/email flow (both
+        PIs are members of the channel).
+        """
+        if channel in self._finalized_private_channels:
+            return
+        if self.session_factory and self.simulation_run_id:
+            try:
+                from sqlalchemy import select as sa_select
+                async with self.session_factory() as db:
+                    existing = await db.execute(
+                        sa_select(ThreadDecision.id).where(
+                            ThreadDecision.channel == channel,
+                            ThreadDecision.origin_visibility == VISIBILITY_COLLAB_PRIVATE,
+                            ThreadDecision.outcome == "proposal",
+                        )
+                    )
+                    if existing.first() is None:
+                        db.add(ThreadDecision(
+                            simulation_run_id=self.simulation_run_id,
+                            thread_id=thread_id,
+                            channel=channel,
+                            agent_a=agent.agent_id,
+                            agent_b=other_id,
+                            outcome="proposal",
+                            summary_text=summary_text,
+                            origin_visibility=VISIBILITY_COLLAB_PRIVATE,
+                        ))
+                        await db.commit()
+            except Exception as exc:
+                logger.warning("Failed to record private refined proposal: %s", exc)
+                return
+
+        self._finalized_private_channels.add(channel)
+
+        # Block both bots pending review and reflect the proposal in their state.
+        for aid, other in ((agent.agent_id, other_id), (other_id, agent.agent_id)):
+            ag = self.agents.get(aid)
+            if not ag:
+                continue
+            ag.state.pending_proposals = [
+                p for p in ag.state.pending_proposals if p.thread_id != thread_id
+            ]
+            ag.state.pending_proposals.append(ProposalRef(
+                thread_id=thread_id,
+                channel=channel,
+                other_agent_id=other,
+                summary_text=summary_text,
+                proposed_at=time.time(),
+                reviewed=False,
+            ))
+
+        logger.info(
+            "[%s] Finalized revised proposal with %s in private #%s — recorded for PI review",
+            agent.agent_id, other_id, channel,
+        )
+
+        # DM the finalizing agent's PI (best-effort). The normal unreviewed-
+        # proposal email/dashboard flow surfaces it to both PIs for review.
+        if self._pi_handler:
+            try:
+                shim = ThreadState(
+                    thread_id=thread_id, channel=channel, other_agent_id=other_id,
+                )
+                await self._pi_handler.notify_thread_conclusion(
+                    agent.agent_id, shim, "proposal", summary_text,
+                )
+            except Exception as exc:
+                logger.debug("PI notify (private proposal) failed: %s", exc)
+
     def _evict_dead_thread(self, thread_id: str) -> None:
         """Remove a thread_id from every agent's in-memory state.
 
@@ -1269,20 +1438,31 @@ class SimulationEngine:
         self,
         only_channel_ids: list[str] | None = None,
     ) -> None:
-        """Ensure each private channel's member bots have a cursor that lets
-        them scan messages in that channel.
+        """Rewind member bots' cursors just enough to scan *unread* private-channel
+        messages, without dragging them back into settled channels.
 
         For every tracked collab_private channel (or the subset in
-        ``only_channel_ids`` when provided), find the oldest message in the
-        in-memory log for that channel and rewind each member bot's
-        last_seen_cursor to just before it. No-op when the log has no
-        messages for the channel yet (e.g., discovery fired before
-        rebuild/poll populated the log).
+        ``only_channel_ids``), and for each member bot, rewind the bot's
+        ``last_seen_cursor`` to just before the oldest message in that channel
+        that the bot has **not yet acted on** — i.e. the oldest message newer
+        than the bot's own most recent post there. Two key constraints keep the
+        rewind tight:
 
-        Call with ``only_channel_ids=None`` at startup, after rebuild, to
-        rewind cursors for all known private channels. For per-tick
-        discoveries, pass the list of newly-discovered channel IDs so that
-        already-scanned channels don't drag bot cursors backward.
+        - **Settled channels are skipped.** A channel whose newest message is
+          older than ``_PRIVATE_CHANNEL_ACTIVE_WINDOW_S`` is considered done;
+          rewinding into it would resurrect a long-dead conversation (this was
+          the bug: a 2-month-old sibling channel pulled the global cursor back
+          ~2 months, burying a fresh handover under a huge Phase-2 backlog).
+        - **Caught-up bots are skipped.** If a bot has already posted after the
+          newest message in a channel, it has nothing to scan there.
+
+        The cursor only ever moves backward, and only to the minimum needed
+        across the bot's active channels. No-op when the log has no messages
+        for a target channel yet (discovery fired before the poll populated it).
+
+        Call with ``only_channel_ids=None`` at startup, after rebuild, to cover
+        all known private channels. For per-tick discoveries, pass the list of
+        newly-discovered channel IDs so already-scanned channels aren't revisited.
         """
         if not self._private_channel_members:
             return
@@ -1293,32 +1473,42 @@ class SimulationEngine:
         if not target_ids:
             return
 
-        # channel_id -> oldest posted_at in the in-memory log (limited to targets).
-        oldest_in_channel: dict[str, float] = {}
+        # cid -> list of (posted_at, sender_agent_id) for target channels.
+        msgs_by_cid: dict[str, list[tuple[float, str | None]]] = {}
         for entry in self.message_log._entries:
             cid = self._channel_id_map.get(entry.channel)
             if not cid or cid not in target_ids:
                 continue
-            prev = oldest_in_channel.get(cid)
-            if prev is None or entry.posted_at < prev:
-                oldest_in_channel[cid] = entry.posted_at
+            msgs_by_cid.setdefault(cid, []).append((entry.posted_at, entry.sender_agent_id))
 
-        for cid in target_ids:
-            member_ids = self._private_channel_members.get(cid, set())
-            oldest = oldest_in_channel.get(cid)
-            if oldest is None:
-                continue
-            rewind_to = oldest - 0.001  # just before, so "> cursor" includes it
-            for aid in member_ids:
-                agent = self.agents.get(aid)
-                if not agent:
+        now = time.time()
+        # agent_id -> lowest rewind target across its active private channels.
+        rewind_targets: dict[str, float] = {}
+        for cid, msgs in msgs_by_cid.items():
+            newest = max(p for p, _ in msgs)
+            if now - newest > _PRIVATE_CHANNEL_ACTIVE_WINDOW_S:
+                continue  # settled channel — leave the cursor alone
+            for aid in self._private_channel_members.get(cid, set()):
+                if aid not in self.agents:
                     continue
-                if agent.state.last_seen_cursor > rewind_to:
-                    logger.info(
-                        "[%s] Rewinding last_seen_cursor %.3f -> %.3f to scan private channel",
-                        aid, agent.state.last_seen_cursor, rewind_to,
-                    )
-                    agent.state.last_seen_cursor = rewind_to
+                bot_last = max(
+                    (p for p, s in msgs if s == aid), default=float("-inf"),
+                )
+                unacted = [p for p, _ in msgs if p > bot_last]
+                if not unacted:
+                    continue  # bot has posted after everything here — caught up
+                target = min(unacted) - 0.001  # just before, so "> cursor" includes it
+                if aid not in rewind_targets or target < rewind_targets[aid]:
+                    rewind_targets[aid] = target
+
+        for aid, target in rewind_targets.items():
+            agent = self.agents[aid]
+            if agent.state.last_seen_cursor > target:
+                logger.info(
+                    "[%s] Rewinding last_seen_cursor %.3f -> %.3f to scan private channel",
+                    aid, agent.state.last_seen_cursor, target,
+                )
+                agent.state.last_seen_cursor = target
 
     def _resolve_channel_visibility(self, channel_name: str) -> str:
         """Look up the visibility class of a channel by its name.
@@ -1418,6 +1608,12 @@ class SimulationEngine:
                 self._channel_visibility.get(post.channel) == VISIBILITY_COLLAB_PRIVATE
             )
 
+            # A private channel whose refinement already converged on a recorded
+            # revised proposal is closed for further discussion — the proposal
+            # is now awaiting PI review. Don't keep refining it.
+            if post.channel in self._finalized_private_channels:
+                continue
+
             # PI-priority, funding, and private-channel posts bypass regular blocking
             if blocked_for_regular and not is_funding and not post.pi_priority and not is_private:
                 continue
@@ -1493,12 +1689,27 @@ class SimulationEngine:
                 if foa_text:
                     thread_foa_contexts[ts.foa_number] = foa_text
 
-        # Prior conversations for dedup — visibility-filtered per G3.
-        # Phase 5 in v1 always runs against public channels (private channels
-        # come into being via migration, not via Phase 5 new posts), so we pass
-        # VISIBILITY_PUBLIC here. When/if Phase 5 ever runs against a private
-        # channel, resolve the visibility from that channel's AgentChannel row.
-        current_visibility = VISIBILITY_PUBLIC
+        # Resolve the visibility context for the prompt. Phase 5 now also drives
+        # collab_private refinement (flat follow-ups). When the agent's only
+        # actionable posts are in a private channel, build the prompt in that
+        # channel's context so the Private Channel Rules — including the
+        # converge-on-a-revised-:memo:-Summary instruction — are injected and the
+        # dedup context is filtered for that visibility. Mixed/empty cases stay
+        # public (the default for new public posts).
+        private_available = [
+            p for p in available_posts
+            if self._channel_visibility.get(p.channel) == VISIBILITY_COLLAB_PRIVATE
+        ]
+        public_available = [
+            p for p in available_posts
+            if self._channel_visibility.get(p.channel) != VISIBILITY_COLLAB_PRIVATE
+        ]
+        private_channel_id = None
+        if private_available and not public_available:
+            current_visibility = VISIBILITY_COLLAB_PRIVATE
+            private_channel_id = self._channel_id_map.get(private_available[0].channel)
+        else:
+            current_visibility = VISIBILITY_PUBLIC
         prior_threads = self._get_prior_threads_for_agent(
             agent.agent_id, current_visibility=current_visibility,
         )
@@ -1521,6 +1732,7 @@ class SimulationEngine:
             funding_only=funding_only,
             funding_thread_summaries=funding_thread_summaries,
             visibility=current_visibility,
+            channel_id=private_channel_id,
         )
 
         # Restore
@@ -1713,6 +1925,15 @@ class SimulationEngine:
                         "[%s] Phase 5: New post in #%s",
                         agent.agent_id, channel,
                     )
+
+            # In a collab_private channel, a :memo: Summary + ✅ handshake
+            # finalizes the refined proposal (the flat path has no
+            # _check_thread_outcome). Runs for either action since both post flat.
+            if (
+                message_text
+                and self._channel_visibility.get(channel) == VISIBILITY_COLLAB_PRIVATE
+            ):
+                await self._check_private_channel_outcome(agent, channel, message_text)
 
         except Exception as exc:
             logger.error("[%s] Phase 5 failed: %s", agent.agent_id, exc)
@@ -2539,6 +2760,13 @@ class SimulationEngine:
                         if td_ts > ex_ts:
                             latest_by_key[key] = td
 
+                # A recorded collab_private proposal means that channel's
+                # refinement already converged — mark it finalized so bots don't
+                # re-open the discussion after a restart.
+                for td in proposals:
+                    if td.origin_visibility == VISIBILITY_COLLAB_PRIVATE and td.channel:
+                        self._finalized_private_channels.add(td.channel)
+
                 for (aid, _tid), td in latest_by_key.items():
                     agent = self.agents[aid]
                     is_reviewed = (td.id, aid) in reviewed_set
@@ -2745,13 +2973,22 @@ class SimulationEngine:
             reopen_guidance: dict[tuple[str, str], tuple[str, str]] = {}
             for r in rows:
                 if r.rating == 0 and r.comment and r.refined_in_channel is None:
-                    # Strip "[Reopened...] " prefix stored by the web/email route
-                    guidance = r.comment
-                    if guidance.startswith("[Reopened via email] "):
-                        guidance = guidance[len("[Reopened via email] "):]
-                    elif guidance.startswith("[Reopened] "):
-                        guidance = guidance[len("[Reopened] "):]
-                    reopen_guidance[(r.agent_id, r.thread_id)] = (guidance, r.channel)
+                    reopen_guidance[(r.agent_id, r.thread_id)] = (
+                        _strip_reopen_prefix(r.comment), r.channel,
+                    )
+
+            # Migrated reopens (refined_in_channel set) handle their guidance in
+            # the private channel, not the public thread. Collect the channel id
+            # + PI guidance per migrated thread so we can seed the handover as a
+            # PI-priority interesting post and actually kick off refinement.
+            migrated_info: dict[str, tuple[str, str]] = {}  # thread_id -> (refined_channel_id, guidance)
+            for r in rows:
+                if r.refined_in_channel is None:
+                    continue
+                guidance = _strip_reopen_prefix(r.comment) if (r.rating == 0 and r.comment) else ""
+                # Prefer a row that carries guidance if multiple reviews exist.
+                if r.thread_id not in migrated_info or guidance:
+                    migrated_info[r.thread_id] = (r.refined_in_channel, guidance)
 
             # Mark matching in-memory proposals as reviewed. A proposal is
             # considered reviewed for unblocking purposes if EITHER this agent
@@ -2852,8 +3089,113 @@ class SimulationEngine:
                     "[%s] PI guidance via web reopened thread %s with %s: %.60s",
                     agent.agent_id, thread_id, other_id, guidance[:60],
                 )
+
+            # Kick-start refinement for proposals migrated to a private channel.
+            self._seed_private_refinements(migrated_info)
         except Exception as exc:
             logger.debug("Proposal review sync failed: %s", exc)
+
+    def _seed_private_refinements(self, migrated_info: dict[str, tuple[str, str]]) -> None:
+        """Seed the private-channel handover as a PI-priority interesting post.
+
+        When a PI reopens a proposal it migrates to a collab_private channel and
+        the web flow posts the handover (proposal summary + PI guidance + a
+        "bots, please proceed" prompt). Unblocking the agents is not enough to
+        make them act: in the flat private-channel model refinement flows
+        through Phase 2 scan -> interesting_posts -> Phase 5, but the handover
+        is older than the agents' resumed cursor (and the cursor rewind can
+        overshoot to a stale sibling channel), so Phase 2 never surfaces it and
+        both bots skip Phase 5 forever.
+
+        We therefore inject the handover directly into the *responding* bot's
+        interesting_posts as a PI-priority post carrying the guidance as
+        pi_context — mirroring how the legacy public reopen force-seeds an
+        active_thread. pi_priority bypasses the random Phase 5 skip and the
+        unreviewed-proposal block; the existing private-channel turn-taking
+        (don't reply if we posted last) decides which bot goes first.
+
+        Fires once per thread per process (tracked in
+        _db_private_refined_thread_ids). No-ops until the channel is tracked and
+        its handover has been polled into the message log — so it self-heals on
+        a later tick if discovery/poll hasn't caught up yet.
+        """
+        if not migrated_info:
+            return
+        name_by_id = {cid: name for name, cid in self._channel_id_map.items()}
+        for thread_id, (refined_cid, guidance) in migrated_info.items():
+            if thread_id in self._db_private_refined_thread_ids:
+                continue
+            channel_name = name_by_id.get(refined_cid)
+            if not channel_name:
+                continue  # channel not tracked yet — retry next tick
+            if channel_name in self._finalized_private_channels:
+                self._db_private_refined_thread_ids.add(thread_id)
+                continue  # refinement already converged on a recorded proposal
+            # Anchor on the most recent top-level bot post in the channel (the
+            # handover). If none is in the log yet, the poll hasn't reached it.
+            anchor = next(
+                (
+                    e for e in reversed(self.message_log._entries)
+                    if e.channel == channel_name
+                    and e.thread_ts is None
+                    and e.is_bot
+                    and e.sender_agent_id
+                ),
+                None,
+            )
+            if anchor is None:
+                continue  # handover not polled in yet — retry next tick
+
+            # Recency guard: only kick-start refinements that are fresh. A stale
+            # handover was already refined or abandoned; re-seeding it on a
+            # fresh process would risk reviving a long-dead channel (the
+            # in-process dedup set is empty after a restart).
+            if time.time() - anchor.posted_at > _PRIVATE_REFINEMENT_SEED_MAX_AGE_S:
+                logger.debug(
+                    "Skipping stale private refinement #%s (thread %s, handover %.0fd old)",
+                    channel_name, thread_id,
+                    (time.time() - anchor.posted_at) / 86400,
+                )
+                self._db_private_refined_thread_ids.add(thread_id)
+                continue
+
+            last_poster = self.message_log.get_last_bot_sender_in_channel(channel_name)
+            members = self._private_channel_members.get(refined_cid, set())
+            for aid in members:
+                agent = self.agents.get(aid)
+                if not agent:
+                    continue
+                # Seed the bot whose turn it is to respond — the member who is
+                # NOT the most recent poster. This both kick-starts a fresh
+                # refinement (responder hasn't posted) and RE-engages an active
+                # one on resume (the bot owing a reply), since Phase 2 won't
+                # reliably re-surface the counterpart's last post on its own.
+                # Stale channels are excluded by the recency guard above and
+                # finalized ones by the check at the top, so re-seeding here only
+                # ever revives live, in-flight refinements.
+                if aid == last_poster:
+                    continue
+                if anchor.ts in agent.state.active_threads:
+                    continue
+                if any(p.post_id == anchor.ts for p in agent.state.interesting_posts):
+                    continue
+                agent.state.interesting_posts.append(PostRef(
+                    post_id=anchor.ts,
+                    channel=channel_name,
+                    sender_agent_id=anchor.sender_agent_id,
+                    content_snippet=(guidance or anchor.content)[:200],
+                    posted_at=anchor.posted_at,
+                    pi_priority=True,
+                    pi_context=guidance or None,
+                ))
+                logger.info(
+                    "[%s] Seeded private refinement in #%s (thread %s) as PI-priority post",
+                    aid, channel_name, thread_id,
+                )
+            # We had a real chance to seed (channel + handover present): don't
+            # retry this thread again, even if the only members were the last
+            # poster (the counterpart will be seeded once they're loaded).
+            self._db_private_refined_thread_ids.add(thread_id)
 
     async def _log_message(
         self,

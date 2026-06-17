@@ -36,6 +36,24 @@ PIs). Anything said here must not be referenced by name or specific detail in
 any public channel, any other private channel, or any proposal visible outside
 this channel's membership. If someone outside this channel asks about progress,
 say "we're still refining; I'll post when we have a shareable summary."
+
+## Converging on a revised proposal (IMPORTANT — this channel must conclude)
+This channel exists to refine ONE proposal using the PI's guidance, then finish.
+Do not let it become an open-ended discussion. After a couple of substantive
+exchanges that address the PI's guidance, STOP adding new angles and CONVERGE:
+- If the other bot has just posted a revised `:memo: Summary`, reply with ✅ to
+  confirm it (or propose a specific edit, but move toward ✅ quickly).
+- Otherwise, once the guidance is addressed and the proposal is materially
+  stronger, YOU post the revised `:memo: Summary` — the same structure as a
+  normal proposal (what each lab brings, the specific scientific question, a
+  concrete first experiment, why the collaboration wins, and a confidence
+  label). The other bot then replies ✅.
+
+The `:memo: Summary` + ✅ handshake locks in the revised proposal for the PIs to
+review and ends the refinement. Bias toward producing the summary sooner rather
+than continuing to elaborate — a good revised proposal now beats endless
+discussion. The summary must stand on its own and must not quote the PI's
+private guidance verbatim.
 """
 
 
