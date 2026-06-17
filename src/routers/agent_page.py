@@ -491,6 +491,29 @@ async def reopen_proposal(
     if agent.agent_id not in (td.agent_a, td.agent_b):
         raise HTTPException(status_code=403, detail="Not your proposal")
 
+    # Idempotency guard. A proposal is reopened at most once per agent: the
+    # dashboard hides the reopen form once a review/reopen exists, but a stale
+    # page or the browser Back button can replay this POST. Without a guard the
+    # replay would migrate the thread a second time and mint a duplicate
+    # priv-…-N channel (or, in legacy mode, re-post the guidance to the public
+    # thread). A reopen writes a rating=0 ProposalReview in the same commit as
+    # refined_in_channel, so the presence of *any* review by this agent means
+    # the proposal was already acted on — treat the resubmission as a no-op and
+    # redirect without touching Slack.
+    already_reviewed = (await db.execute(
+        select(ProposalReview).where(
+            ProposalReview.thread_decision_id == thread_decision_id,
+            ProposalReview.agent_id == agent.agent_id,
+        )
+    )).scalar_one_or_none()
+    if already_reviewed is not None:
+        logger.info(
+            "Ignoring duplicate reopen of proposal %s by %s "
+            "(existing review id=%s, refined_in_channel=%s)",
+            td.thread_id, agent.agent_id, already_reviewed.id, td.refined_in_channel,
+        )
+        return RedirectResponse(url=f"/agent/{agent_id}/dashboard", status_code=302)
+
     settings = get_settings()
 
     if settings.enable_private_refinement and td.origin_visibility == "public":
