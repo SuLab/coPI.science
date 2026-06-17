@@ -502,10 +502,10 @@ async def _send_help_email(user: User, notification: EmailNotification) -> None:
     text_body = (
         "I couldn't tell if you wanted to rate this proposal or give your agent instructions.\n\n"
         "To rate: reply with a number 1-4 and any comments.\n"
-        "  1 = Not interesting\n"
-        "  2 = Weak - unlikely to pursue\n"
-        "  3 = Promising - worth exploring further\n"
-        "  4 = Strong - let's pursue this\n\n"
+        "  1 = Not a good idea (not interesting, or multiple major weaknesses)\n"
+        "  2 = Good idea (medium interest, or one major weakness)\n"
+        "  3 = Great idea (high interest, minor weaknesses only)\n"
+        "  4 = Excellent idea (high interest, no notable weaknesses)\n\n"
         "To direct your agent: describe what you'd like changed (e.g., "
         '"focus on the mitochondrial angle instead").\n'
     )

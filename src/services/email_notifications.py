@@ -353,10 +353,10 @@ async def send_proposal_notification(
         f"---\n{summary}\n---\n\n"
         f"To review this proposal, you can:\n\n"
         f"1. Reply to this email with a rating (1-4) and any comments:\n"
-        f"   1 = Not interesting\n"
-        f"   2 = Weak - unlikely to pursue\n"
-        f"   3 = Promising - worth exploring further\n"
-        f"   4 = Strong - let's pursue this\n\n"
+        f"   1 = Not a good idea (not interesting, or multiple major weaknesses)\n"
+        f"   2 = Good idea (medium interest, or one major weakness)\n"
+        f"   3 = Great idea (high interest, minor weaknesses only)\n"
+        f"   4 = Excellent idea (high interest, no notable weaknesses)\n\n"
         f"2. Reply with instructions for your agent (e.g., \"focus on the\n"
         f'   mitochondrial angle instead") and it will re-engage to refine\n'
         f"   the proposal.\n\n"
@@ -387,7 +387,7 @@ async def send_proposal_notification(
             <li><strong>Give instructions</strong> to refine the proposal</li>
         </ul>
         <p style="color: #9ca3af; font-size: 12px; margin: 0 0 20px;">
-            1 = Not interesting &bull; 2 = Weak &bull; 3 = Promising &bull; 4 = Strong
+            1 = Not a good idea &bull; 2 = Good idea &bull; 3 = Great idea &bull; 4 = Excellent idea
         </p>
 
         <div style="text-align: center; margin: 24px 0;">
@@ -751,7 +751,7 @@ async def _send_status_overview(
         if not ratings:
             return "awaiting your review"
         top = max(ratings)
-        return {4: "rated Strong", 3: "rated Promising", 2: "rated Weak", 1: "not interesting"}.get(top, "reviewed")
+        return {4: "rated Excellent idea", 3: "rated Great idea", 2: "rated Good idea", 1: "rated Not a good idea"}.get(top, "reviewed")
 
     idea_lines = []
     for td in proposals[:8]:
