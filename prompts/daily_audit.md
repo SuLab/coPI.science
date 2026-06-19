@@ -42,6 +42,50 @@ WHAT TO EXAMINE
    noise — logs/, data/, profiles/, *.log), note that uncommitted changes
    exist. Do NOT diff or read the contents; just report that they're there.
 
+5. Human user activity (last 24h) — distinct from agent/LLM activity, this
+   is what the real PIs and their delegates did. Run the roll-up below
+   against postgres. (docker compose is typically broken in this tree —
+   "invalid project"; use `docker exec` against the postgres container
+   directly, e.g. `docker exec copi-python-postgres-1 psql -U copi -d copi`.)
+   All column names below are verified against the live schema.
+
+     docker exec copi-python-postgres-1 psql -U copi -d copi -c "
+     SELECT a AS activity, cnt, latest FROM (
+       SELECT 1 ord, 'logins'                a, COUNT(*) cnt, MAX(last_login_at) latest FROM users WHERE last_login_at > NOW() - INTERVAL '24 hours'
+       UNION ALL SELECT 2, 'new_users (claimed)',      COUNT(*), MAX(claimed_at)   FROM users WHERE claimed_at  > NOW() - INTERVAL '24 hours'
+       UNION ALL SELECT 3, 'profile_edits',            COUNT(*), MAX(updated_at)   FROM researcher_profiles WHERE updated_at > NOW() - INTERVAL '24 hours'
+       UNION ALL SELECT 4, 'profile_revisions(human)', COUNT(*), MAX(created_at)   FROM profile_revisions WHERE created_at > NOW() - INTERVAL '24 hours' AND changed_by_user_id IS NOT NULL
+       UNION ALL SELECT 5, 'proposal_ratings',         COUNT(*), MAX(reviewed_at)  FROM proposal_reviews WHERE reviewed_at > NOW() - INTERVAL '24 hours'
+       UNION ALL SELECT 6, 'graph_votes',              COUNT(*), MAX(created_at)   FROM proposal_votes WHERE created_at > NOW() - INTERVAL '24 hours'
+       UNION ALL SELECT 7, 'email_responses',          COUNT(*), MAX(responded_at) FROM email_notifications WHERE responded_at > NOW() - INTERVAL '24 hours'
+       UNION ALL SELECT 8, 'delegate_accepts',         COUNT(*), MAX(accepted_at)  FROM delegate_invitations WHERE accepted_at > NOW() - INTERVAL '24 hours'
+       UNION ALL SELECT 9, 'waitlist_signups',         COUNT(*), MAX(created_at)   FROM waitlist_signups WHERE created_at > NOW() - INTERVAL '24 hours'
+     ) t ORDER BY ord;"
+
+   What each row means / where it comes from:
+     - logins              — users.last_login_at (set in src/routers/auth.py on OAuth login)
+     - new_users (claimed) — users.claimed_at (a seeded PI claimed their profile via OAuth)
+     - profile_edits       — researcher_profiles.updated_at (any profile row touched)
+     - profile_revisions   — profile_revisions where changed_by_user_id IS NOT NULL
+                             (human edits only; agent/pipeline edits have NULL).
+                             Optionally break down by `mechanism` ('web' vs 'slack_dm').
+     - proposal_ratings    — proposal_reviews.reviewed_at; the PI's 1–5 rating of a
+                             proposal. Optionally group by `rating` and `submitted_via`
+                             ('web' vs 'email') to see how they're rating and via which
+                             channel.
+     - graph_votes         — proposal_votes (lightweight up/down votes on the public
+                             collaboration graph; may be anonymous visitors).
+     - email_responses     — email_notifications.responded_at (a PI replied to a
+                             proposal/review email).
+     - delegate_accepts    — delegate_invitations.accepted_at (someone accepted a
+                             delegate invite).
+     - waitlist_signups    — waitlist_signups.created_at (web UI early-access requests).
+
+   For anything non-zero and interesting (e.g. ratings came in, a profile was
+   edited), it's fine to drill into who/what with a targeted follow-up query —
+   but keep it brief. If every row is 0, just say "no human user activity in
+   the window" in the snapshot.
+
 WHAT COUNTS AS A "BUG" OR WASTE
 
 - Repeated tracebacks or unhandled exceptions
@@ -80,15 +124,22 @@ Compose a plain-text email body with these sections:
      one-sentence justification
   2. Activity snapshot: total LLM calls (if extractable), per-agent counts,
      proposals created, emails sent
-  3. Issues — bulleted, each with: severity (low/med/high), one-line
+  3. User activity (human PIs) — the roll-up from examination step 5:
+     logins, new claimed users, profile edits, proposal ratings, graph
+     votes, email responses, delegate accepts, waitlist signups. Give the
+     counts; call out anything notable (e.g. ratings that came in, a profile
+     that was edited). If every row is 0, one line: "no human user activity
+     in the window." This section always appears — it's part of the
+     heartbeat even on a quiet day.
+  4. Issues — bulleted, each with: severity (low/med/high), one-line
      description, file:line or log timestamp pointer so a human can dig in
-  4. Wasteful-call candidates — agents/phases that look expensive relative
+  5. Wasteful-call candidates — agents/phases that look expensive relative
      to output
-  5. Uncommitted changes — if the working tree has uncommitted changes
+  6. Uncommitted changes — if the working tree has uncommitted changes
      (beyond the usual logs/data/profiles noise), state that they exist
      with a note to consider committing them. If the tree is clean, say so
      in one line or omit this section.
-  6. Recommended next action (or "none")
+  7. Recommended next action (or "none")
 
 Keep the whole body under ~400 lines. If there's truly nothing to say,
 still send the email with status OK + the activity snapshot — a daily
