@@ -34,6 +34,29 @@ Usage
   # Re-run the OAuth step without recreating apps (useful if the server was
   # interrupted midway — re-uses credentials saved in .provision_state.json):
   python scripts/provision_slack_bots.py --skip-create
+
+Remote / no-browser workflow
+-----------------------------
+Use this when you don't have browser access to the Slack workspace and need
+to delegate the approval step to the workspace admin.
+
+  Step 1 — on your server, create the apps and export the OAuth URLs:
+    python scripts/provision_slack_bots.py --export-urls
+
+  This prints one URL per bot and writes them to oauth_urls.txt.
+  Send that file (or the printed URLs) to the workspace admin.
+
+  Step 2 — the admin opens each URL in a browser, clicks Allow, and lands on
+  httpbin.org showing JSON like:
+    {"args": {"code": "abc123", "state": "su"}, ...}
+  They copy each agent_id and code into a plain text file (one per line):
+    su:abc123
+    wiseman:def456
+    lotz:ghi789
+  and send the file back to you.
+
+  Step 3 — on your server, exchange the codes for tokens:
+    python scripts/provision_slack_bots.py --exchange-codes codes.txt
 """
 
 import argparse
@@ -57,6 +80,10 @@ from rich.table import Table
 SLACK_API = "https://slack.com/api"
 CALLBACK_PATH = "/oauth/callback"
 STATE_FILE = Path(".provision_state.json")
+
+# Used by --export-urls / --exchange-codes: Slack redirects the admin here after
+# approval and httpbin echoes the code + state as JSON so the admin can copy them.
+HTTPBIN_REDIRECT = "https://httpbin.org/get"
 
 # All scopes the bots actually use — derived from AgentSlackClient + routers/podcast
 BOT_SCOPES = [
@@ -307,6 +334,201 @@ class _CallbackHandler(BaseHTTPRequestHandler):
 # Main
 # ---------------------------------------------------------------------------
 
+def _run_export_urls(args: argparse.Namespace) -> None:
+    """Create Slack apps and export OAuth URLs for a remote admin to approve."""
+    pilot_labs = load_pilot_labs()
+    existing_env = dotenv_values(args.env_file)
+
+    tokenized = {
+        k[len("SLACK_BOT_TOKEN_"):].lower()
+        for k, v in existing_env.items()
+        if k.upper().startswith("SLACK_BOT_TOKEN_")
+        and v and not v.startswith("xoxb-placeholder")
+    }
+    missing = [lab for lab in pilot_labs if lab["id"] not in tokenized]
+
+    if not missing:
+        console.print("[green]All bots already have tokens. Nothing to do.[/green]")
+        return
+
+    config_token = existing_env.get("SLACK_CONFIG_TOKEN", "").strip()
+    refresh_token = existing_env.get("SLACK_CONFIG_REFRESH_TOKEN", "").strip()
+    if not config_token:
+        console.print("[bold red]SLACK_CONFIG_TOKEN is not set in .env[/bold red]")
+        sys.exit(1)
+
+    if refresh_token:
+        console.print("Rotating config token...")
+        try:
+            config_token, new_refresh = rotate_config_token(refresh_token)
+            set_key(args.env_file, "SLACK_CONFIG_TOKEN", config_token, quote_mode="never")
+            set_key(args.env_file, "SLACK_CONFIG_REFRESH_TOKEN", new_refresh, quote_mode="never")
+            console.print("[green]Config token rotated.[/green]")
+        except Exception as exc:
+            console.print(f"[yellow]Token rotation failed ({exc}); using existing token.[/yellow]")
+
+    team_id = args.team_id
+    if not team_id:
+        team_id = lookup_team_id(existing_env)
+
+    console.print(f"\nCreating {len(missing)} Slack app(s)...\n")
+    created: list[dict] = []
+    failed = 0
+    for i, lab in enumerate(missing):
+        try:
+            app = create_app(config_token, lab["id"], lab["name"], lab["pi"], HTTPBIN_REDIRECT)
+            created.append(app)
+            console.print(f"  [green]{i+1:2d}.[/green] [bold]{app['bot_name']}[/bold] (app {app['app_id']})")
+        except Exception as exc:
+            console.print(f"  [red]failed[/red]  {lab['name']}: {exc}")
+            failed += 1
+        if i < len(missing) - 1:
+            time.sleep(12)
+
+    if not created:
+        console.print("[red]No apps created. Exiting.[/red]")
+        sys.exit(1)
+
+    STATE_FILE.write_text(json.dumps(created, indent=2))
+    console.print(f"\n[green]Credentials saved to {STATE_FILE}[/green]")
+
+    def _oauth_url(app: dict) -> str:
+        extra = {"state": app["agent_id"], "redirect_uri": HTTPBIN_REDIRECT}
+        if team_id:
+            extra["team"] = team_id
+        return app["oauth_url"] + "&" + urllib.parse.urlencode(extra)
+
+    lines = []
+    console.print("\n[bold yellow]Send these URLs to the workspace admin.[/bold yellow]")
+    console.print("After clicking Allow, they will land on httpbin.org showing JSON like:")
+    console.print('  {"args": {"code": "abc123", "state": "su"}, ...}')
+    console.print("Ask them to send back a file with one [bold]agent_id:code[/bold] per line.\n")
+
+    for app in created:
+        url = _oauth_url(app)
+        lines.append(f"{app['bot_name']} ({app['agent_id']}):\n  {url}\n")
+        console.print(f"[cyan]{app['bot_name']}[/cyan] ({app['agent_id']}):")
+        console.print(f"  {url}\n")
+
+    out_file = Path("oauth_urls.txt")
+    out_file.write_text("\n".join(lines))
+    console.print(f"[green]URLs also saved to {out_file}[/green]")
+    if failed:
+        console.print(f"[yellow]{failed} app(s) failed — re-run to retry.[/yellow]")
+
+
+def _parse_codes_file(text: str) -> list[tuple[str, str]]:
+    """Parse a codes file into (agent_id, code) pairs.
+
+    Supports two formats (auto-detected):
+
+    1. Simple — one agent_id:code per line:
+         cline:10935961...
+         su:abc123...
+
+    2. httpbin JSON — the raw JSON response from httpbin.org/get, or multiple
+       responses separated by lines containing only '---':
+         {"args": {"code": "10935961...", "state": "cline"}, ...}
+         ---
+         {"args": {"code": "abc123...", "state": "su"}, ...}
+    """
+    text = text.strip()
+    pairs: list[tuple[str, str]] = []
+
+    # Split on --- separators to handle multiple httpbin blobs
+    blocks = [b.strip() for b in text.split("---") if b.strip()]
+
+    for block in blocks:
+        # Try JSON parse first (httpbin format)
+        if block.startswith("{"):
+            try:
+                data = json.loads(block)
+                args = data.get("args", {})
+                code = args.get("code", "").strip()
+                agent_id = args.get("state", "").strip()
+                if code and agent_id:
+                    pairs.append((agent_id, code))
+                    continue
+            except json.JSONDecodeError:
+                pass
+
+            # Fall back to line-by-line parsing (URL or agent_id:code)
+        for line in block.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            # httpbin URL: https://httpbin.org/get?code=...&state=...
+            if line.startswith("http"):
+                parsed = urllib.parse.urlparse(line)
+                params = dict(urllib.parse.parse_qsl(parsed.query))
+                code = params.get("code", "").strip()
+                agent_id = params.get("state", "").strip()
+                if code and agent_id:
+                    pairs.append((agent_id, code))
+                else:
+                    console.print(f"[yellow]Skipping URL with missing code/state: {line!r}[/yellow]")
+                continue
+            # Simple agent_id:code
+            if ":" not in line:
+                console.print(f"[yellow]Skipping malformed line (expected agent_id:code): {line!r}[/yellow]")
+                continue
+            agent_id, code = line.split(":", 1)
+            pairs.append((agent_id.strip(), code.strip()))
+
+    return pairs
+
+
+def _run_exchange_codes(codes_file: str, env_file: str) -> None:
+    """Read agent_id:code pairs from a file and exchange each for an xoxb- token."""
+    codes_path = Path(codes_file)
+    if not codes_path.exists():
+        console.print(f"[red]Codes file not found: {codes_file}[/red]")
+        sys.exit(1)
+    if not STATE_FILE.exists():
+        console.print(f"[red]{STATE_FILE} not found — run --export-urls first.[/red]")
+        sys.exit(1)
+
+    state: list[dict] = json.loads(STATE_FILE.read_text())
+    creds_by_id = {app["agent_id"]: app for app in state}
+
+    pairs = _parse_codes_file(codes_path.read_text())
+
+    if not pairs:
+        console.print("[red]No valid codes found in file.[/red]")
+        sys.exit(1)
+
+    console.print(f"\nExchanging {len(pairs)} code(s)...\n")
+    saved = 0
+    for agent_id, code in pairs:
+
+        app = creds_by_id.get(agent_id)
+        if not app:
+            console.print(f"[yellow]No credentials found for agent_id {agent_id!r} — skipping.[/yellow]")
+            continue
+
+        try:
+            token = exchange_code(app["client_id"], app["client_secret"], code, HTTPBIN_REDIRECT)
+        except Exception as exc:
+            console.print(f"[red]Failed to exchange code for {agent_id}: {exc}[/red]")
+            continue
+
+        env_key = f"SLACK_BOT_TOKEN_{agent_id.upper()}"
+        set_key(env_file, env_key, token, quote_mode="never")
+        console.print(f"[green]✓[/green] [bold]{app['bot_name']}[/bold] → {env_key}")
+        saved += 1
+
+    console.print(f"\n[bold]{saved}/{len(pairs)} token(s) saved to {env_file}[/bold]")
+    if saved == len(pairs):
+        STATE_FILE.unlink(missing_ok=True)
+        console.print("[green]All done! Restart the agent container to pick up the new tokens.[/green]")
+        console.print("  docker rm -f agent-run")
+        console.print("  docker compose up -d --build app worker")
+        console.print("  docker compose --profile agent run -d --name agent-run agent python -m src.agent.main --budget 0")
+    else:
+        console.print(f"[yellow]Some exchanges failed. Fix and re-run --exchange-codes with the remaining codes.[/yellow]")
+        console.print(f"  Credentials still in {STATE_FILE} — no need to re-run --export-urls.")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description=__doc__,
@@ -333,9 +555,55 @@ def main():
         help="Slack workspace team ID (e.g. T012AB3CD) to pin OAuth URLs to the right workspace. "
              "Auto-detected from an existing bot token if not provided.",
     )
+    parser.add_argument(
+        "--export-urls", action="store_true",
+        help=(
+            "Create Slack apps and export OAuth URLs for a remote admin to approve. "
+            f"Uses {HTTPBIN_REDIRECT} as the redirect URI so the admin sees the code "
+            "on-screen. URLs are printed and saved to oauth_urls.txt. "
+            "Run --exchange-codes after the admin returns the codes."
+        ),
+    )
+    parser.add_argument(
+        "--exchange-codes",
+        metavar="CODES_FILE",
+        help=(
+            "Exchange OAuth codes provided by a remote admin for bot tokens. "
+            "CODES_FILE must contain one 'agent_id:code' entry per line. "
+            f"Requires {STATE_FILE} from a previous --export-urls run."
+        ),
+    )
+    parser.add_argument(
+        "--exchange-urls",
+        metavar="URLS_FILE",
+        help=(
+            "Exchange OAuth codes extracted from httpbin redirect URLs. "
+            "URLS_FILE must contain one full httpbin URL per line, e.g.: "
+            "https://httpbin.org/get?code=...&state=su. "
+            f"Requires {STATE_FILE} from a previous --export-urls run."
+        ),
+    )
     args = parser.parse_args()
 
     redirect_uri = f"http://localhost:{args.port}{CALLBACK_PATH}"
+
+    # -----------------------------------------------------------------------
+    # --export-urls: create apps and write OAuth URLs for a remote admin
+    # -----------------------------------------------------------------------
+    if args.export_urls:
+        _run_export_urls(args)
+        return
+
+    # -----------------------------------------------------------------------
+    # --exchange-codes: exchange codes file returned by the admin for tokens
+    # -----------------------------------------------------------------------
+    if args.exchange_codes:
+        _run_exchange_codes(args.exchange_codes, args.env_file)
+        return
+
+    if args.exchange_urls:
+        _run_exchange_codes(args.exchange_urls, args.env_file)
+        return
 
     # -----------------------------------------------------------------------
     # 1. Determine which bots are missing tokens
