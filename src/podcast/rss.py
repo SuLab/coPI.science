@@ -63,7 +63,13 @@ def _build_item(
     agent_id: str | None = None,
     user_id: str | None = None,
 ) -> str:
-    """Build a single RSS <item> for a PodcastEpisode."""
+    """Build a single RSS <item> for a PodcastEpisode.
+
+    Audio URL and GUID are derived from the episode's own agent_id/user_id
+    fields so that a feed containing mixed-path episodes (e.g. a user feed
+    that surfaces their linked agent's episodes) generates correct enclosure
+    URLs for each item regardless of the feed-level agent_id/user_id.
+    """
     date_str = ep.episode_date.isoformat()
     pub_date = format_datetime(
         datetime(ep.episode_date.year, ep.episode_date.month, ep.episode_date.day,
@@ -73,12 +79,17 @@ def _build_item(
     description = _escape(ep.text_summary)
     pmid_url = getattr(ep, "paper_url", None) or f"https://pubmed.ncbi.nlm.nih.gov/{ep.pmid}/"
 
-    if agent_id:
-        guid = f"{agent_id}-{date_str}"
-        audio_url = f"{base_url}/podcast/{agent_id}/audio/{date_str}.mp3"
+    # Prefer episode-level fields; fall back to feed-level params for legacy callers.
+    ep_agent_id = getattr(ep, "agent_id", None) or agent_id
+    ep_user_id = getattr(ep, "user_id", None) or user_id
+
+    if ep_agent_id:
+        guid = f"{ep_agent_id}-{date_str}"
+        audio_url = f"{base_url}/podcast/{ep_agent_id}/audio/{date_str}.mp3"
     else:
-        guid = f"user-{user_id}-{date_str}"
-        audio_url = f"{base_url}/podcast/users/{user_id}/audio/{date_str}.mp3"
+        uid = str(ep_user_id)
+        guid = f"user-{uid}-{date_str}"
+        audio_url = f"{base_url}/podcast/users/{uid}/audio/{date_str}.mp3"
 
     enclosure_xml = ""
     duration_xml = ""
