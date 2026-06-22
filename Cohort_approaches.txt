@@ -1,0 +1,102 @@
+Cohort System — Approaches Considered
+======================================
+
+Approach A: Cohort as an Interaction Filter (Minimal)
+------------------------------------------------------
+Add a cohort_memberships table (agent_id, cohort_id). The engine stays structurally
+identical — one global turn loop, shared agent state. Before any interaction is
+permitted (Phase 3 activation, Phase 4 reply, Phase 5 tag), check: do these two
+agents share at least one cohort? If not, the post is invisible to them.
+
+Pros:
+- Tiny diff, backward compatible
+- Agents in multiple cohorts still have unified state
+
+Cons:
+- Turn rules (thread limits, proposal caps, budgets) remain global per agent —
+  cannot be scoped by cohort
+- Original form: no concurrency — cohorts still compete in a single sequential loop
+
+Revision (adopted): The concurrency gap is filled independently of cohorts using a
+global semaphore (N concurrent turns) + min-heap agent selection, keeping the cohort
+system as a pure interaction filter with no role in scheduling. See Chosen Direction.
+
+
+Approach B: Per-Cohort Agent State (Partitioned)
+-------------------------------------------------
+AgentState becomes dict[cohort_id, AgentState]. The main loop iterates cohorts in
+round-robin (or concurrently via asyncio.gather), each cohort running its own turn
+selection over its member agents. Thread limits, proposal counts, and budgets are
+tracked per (agent_id, cohort_id) — an agent in two cohorts has independent budgets
+in each. Interaction gating is automatic: Phase 4/5 only operate within a cohort's
+member set.
+
+Pros:
+- True per-cohort parallelism
+- Rules naturally scoped
+- Clean mental model
+
+Cons:
+- Meaningful refactor — AgentState, budget tracking, blocking logic all need the
+  cohort dimension
+- Agent working memory (profiles/memory/) would need cohort tagging or remain
+  shared across cohorts
+
+
+Approach C: Cohort-Sharded Engine Instances (Full Isolation)
+-------------------------------------------------------------
+Instantiate one SimulationEngine per cohort, each with only its member agents
+loaded. Run them as separate asyncio tasks (or even separate processes). Agents in
+multiple cohorts appear in multiple engines with independent state copies.
+
+Pros:
+- Complete isolation
+- Maximum parallelism
+- No cross-contamination of state
+
+Cons:
+- Agents in overlapping cohorts post from the same Slack bot token simultaneously —
+  requires serialization or per-cohort bot accounts
+- State diverges: memory written by cohort-A engine does not feed cohort-B engine
+- Most operationally complex of the three options
+
+
+Chosen Direction
+----------------
+Approach A (interaction filter) + global semaphore concurrency + min-heap selection.
+Cohorts have no role in scheduling — they only gate whether an agent acts on another
+agent's activity. Key decisions and findings:
+
+Requirements that shaped the design:
+- Limits are shared across cohorts (no state partitioning needed — rules Approach B)
+- Posts remain visible to all; cohort gates *acting*, not *seeing*
+- Cohort memberships are dynamic (admin-driven, can change mid-run)
+- Goal is purely practical: skip unnecessary LLM calls, not thematic isolation
+
+Why per-cohort async dispatch was rejected:
+- Cohort count is unbounded — N async tasks scales with cohorts, not with agents
+- Agents in many cohorts get selected proportionally more often (cohort-count bias)
+- Replaced by a fixed global semaphore (concurrent_turns, default = active_thread_threshold)
+  whose width is independent of cohort topology
+
+Turn selection — min-heap over weighted random:
+- Weighted random gives probabilistic fairness but can starve agents at large list sizes,
+  especially when phase5_skip_probability > 0 (fast no-op turns let agents re-enter
+  immediately)
+- Min-heap keyed by last_selected guarantees the longest-waiting eligible agent always
+  gets the next slot; O(log n) selection vs O(n)
+- concurrent_turns defaults to active_thread_threshold (both = 3) so the two levers
+  stay in proportion as the thread threshold is tuned
+
+turn_delay_seconds — repurposed from global pause to per-agent cooldown:
+- Investigation finding: in simulation.py:360-361, turn_delay_seconds is an asyncio.sleep
+  applied AFTER every productive turn, blocking the entire loop (no Slack polling, no other
+  agents). A global dead-weight pause — correct semantics for rate-limiting a single
+  sequential loop, wrong for any concurrent model.
+- New behavior: enforced as a per-agent eligibility check inside heap construction —
+  an agent is excluded from selection until (now - last_selected) >= turn_delay_seconds.
+  Other agents are unaffected. The global sleep is removed.
+- The existing _last_llm_caller guard (prevents same agent back-to-back calls) is
+  superseded by the min-heap + cooldown and removed from the concurrent path.
+
+See specs/cohort-system.md for the full implementation plan.
