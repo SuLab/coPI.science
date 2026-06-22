@@ -126,3 +126,9 @@ def create_app() -> FastAPI:
 
 
 app = create_app()
+
+
+@app.on_event("startup")
+async def _warmup_voice_registry() -> None:
+    from src.podcast.voice_registry import refresh_voices
+    await refresh_voices()

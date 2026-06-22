@@ -805,7 +805,6 @@ async def save_public_profile(
 MISTRAL_VOICES = [
     ("alex", "Alex — US English, male, neutral"),
     ("deedee", "Deedee — US English, female, bright"),
-    ("jasmine", "Jasmine — US English, female, warm"),
     ("laurel", "Laurel — US English, female, clear"),
     ("luna", "Luna — US English, female, soft"),
     ("rio", "Rio — US English, male, energetic"),
@@ -837,6 +836,9 @@ async def get_podcast_settings(
     )
     prefs = result.scalar_one_or_none()
 
+    from src.podcast.voice_registry import get_voices
+    voices = await get_voices()
+
     return templates.TemplateResponse(
         request,
         "agent/podcast_settings.html",
@@ -845,7 +847,7 @@ async def get_podcast_settings(
             agent=agent,
             is_owner=is_owner,
             prefs=prefs,
-            voices=MISTRAL_VOICES,
+            voices=voices,
             saved=saved,
         ),
     )

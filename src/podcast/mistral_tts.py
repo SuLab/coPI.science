@@ -18,6 +18,16 @@ MISTRAL_TTS_URL = "https://api.mistral.ai/v1/audio/speech"
 __all__ = ["generate_audio", "get_audio_duration_seconds"]
 
 
+def _get_default_voice() -> str:
+    """Return the configured default voice, falling back to the first cached voice."""
+    settings = get_settings()
+    if settings.mistral_tts_default_voice:
+        return settings.mistral_tts_default_voice
+    from src.podcast.voice_registry import get_cached_voices
+    cached = get_cached_voices("mistral")
+    return cached[0][0] if cached else "en_paul_neutral"
+
+
 def get_voice(agent_id: str, voice_override: str | None = None) -> str:
     """Return the TTS voice for an agent.
 
@@ -25,7 +35,6 @@ def get_voice(agent_id: str, voice_override: str | None = None) -> str:
     """
     if voice_override:
         return voice_override
-    settings = get_settings()
     if VOICES_FILE.exists():
         try:
             voices = json.loads(VOICES_FILE.read_text(encoding="utf-8"))
@@ -33,7 +42,7 @@ def get_voice(agent_id: str, voice_override: str | None = None) -> str:
                 return voices[agent_id]
         except Exception as exc:
             logger.warning("Failed to load podcast_voices.json: %s", exc)
-    return settings.mistral_tts_default_voice
+    return _get_default_voice()
 
 
 async def generate_audio(
@@ -63,6 +72,15 @@ async def generate_audio(
     try:
         async with httpx.AsyncClient(timeout=120) as client:
             resp = await client.post(MISTRAL_TTS_URL, json=payload, headers=headers)
+            default_voice = _get_default_voice()
+            if resp.status_code == 404 and voice != default_voice:
+                # Voice was removed or renamed; retry with the configured default
+                logger.warning(
+                    "Mistral TTS voice %r not found — retrying with default voice %r",
+                    voice, default_voice,
+                )
+                payload["voice"] = default_voice
+                resp = await client.post(MISTRAL_TTS_URL, json=payload, headers=headers)
             if not resp.is_success:
                 logger.error("Mistral TTS API error %s: %s", resp.status_code, resp.text)
             resp.raise_for_status()

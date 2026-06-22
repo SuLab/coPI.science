@@ -38,121 +38,11 @@ templates = Jinja2Templates(directory="templates")
 
 AUDIO_DIR = Path("data/podcast_audio")
 
-from src.routers.agent_page import MISTRAL_VOICES  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
-# Agent path — existing endpoints (unchanged behaviour)
-# ---------------------------------------------------------------------------
-
-@router.get("/{agent_id}/feed.xml", response_class=Response)
-async def podcast_feed(
-    agent_id: str,
-    db: AsyncSession = Depends(get_db),
-):
-    """RSS 2.0 podcast feed for a pilot-lab agent's daily research briefings."""
-    agent_result = await db.execute(
-        select(AgentRegistry).where(AgentRegistry.agent_id == agent_id)
-    )
-    agent = agent_result.scalar_one_or_none()
-    if not agent:
-        raise HTTPException(status_code=404, detail="Agent not found")
-
-    episodes_result = await db.execute(
-        select(PodcastEpisode)
-        .where(PodcastEpisode.agent_id == agent_id)
-        .order_by(PodcastEpisode.episode_date.desc())
-        .limit(30)
-    )
-    episodes = episodes_result.scalars().all()
-
-    settings = get_settings()
-    base_url = settings.podcast_base_url or settings.base_url
-
-    xml = build_feed(
-        pi_name=agent.pi_name,
-        episodes=episodes,
-        base_url=base_url,
-        agent_id=agent_id,
-    )
-    return Response(content=xml, media_type="application/rss+xml; charset=utf-8")
-
-
-@router.get("/{agent_id}/audio/{date}.mp3")
-async def podcast_audio(agent_id: str, date: str):
-    """Stream a podcast audio file for an agent."""
-    if "/" in date or ".." in date or not date.replace("-", "").isdigit():
-        raise HTTPException(status_code=400, detail="Invalid date format")
-
-    audio_path = AUDIO_DIR / agent_id / f"{date}.mp3"
-    if not audio_path.exists():
-        raise HTTPException(status_code=404, detail="Audio file not found")
-
-    return FileResponse(
-        path=str(audio_path),
-        media_type="audio/mpeg",
-        filename=f"{agent_id}-{date}.mp3",
-    )
-
-
-async def _run_pipeline_background(
-    agent_id: str, bot_name: str, pi_name: str, bot_token: str, slack_user_id: str | None
-) -> None:
-    """Run the agent podcast pipeline in a background task with its own DB session."""
-    from src.podcast.pipeline import run_pipeline_for_agent
-
-    session_factory = get_session_factory()
-    try:
-        async with session_factory() as db:
-            ok = await run_pipeline_for_agent(
-                agent_id=agent_id,
-                bot_name=bot_name,
-                pi_name=pi_name,
-                bot_token=bot_token,
-                slack_user_id=slack_user_id,
-                db_session=db,
-            )
-            await db.commit()
-            logger.info("On-demand podcast pipeline for %s: %s", agent_id, "produced" if ok else "no episode")
-    except Exception as exc:
-        logger.error("On-demand podcast pipeline failed for %s: %s", agent_id, exc, exc_info=True)
-
-
-@router.api_route("/{agent_id}/generate", methods=["GET", "POST"])
-async def podcast_generate(
-    agent_id: str,
-    db: AsyncSession = Depends(get_db),
-):
-    """Trigger on-demand podcast generation for an agent (returns immediately)."""
-    agent_result = await db.execute(
-        select(AgentRegistry).where(AgentRegistry.agent_id == agent_id)
-    )
-    agent = agent_result.scalar_one_or_none()
-    if not agent:
-        raise HTTPException(status_code=404, detail="Agent not found")
-
-    settings = get_settings()
-    slack_tokens = settings.get_slack_tokens()
-    bot_token = agent.slack_bot_token or slack_tokens.get(agent_id, {}).get("bot", "")
-
-    asyncio.create_task(
-        _run_pipeline_background(
-            agent_id=agent_id,
-            bot_name=agent.bot_name,
-            pi_name=agent.pi_name,
-            bot_token=bot_token,
-            slack_user_id=agent.slack_user_id,
-        )
-    )
-    return {
-        "status": "started",
-        "agent_id": agent_id,
-        "message": f"Podcast pipeline started for {agent.pi_name}. Check the RSS feed shortly.",
-    }
-
-
-# ---------------------------------------------------------------------------
-# User path — plain ORCID users (no agent required)
+# User path — plain ORCID users (registered before agent path to prevent
+# /user/generate and /users/... from being shadowed by /{agent_id}/...)
 # ---------------------------------------------------------------------------
 
 @router.get("/users/{user_id}/feed.xml", response_class=Response)
@@ -175,13 +65,37 @@ async def podcast_feed_for_user(
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    episodes_result = await db.execute(
+    # User-keyed episodes
+    user_eps_result = await db.execute(
         select(PodcastEpisode)
         .where(PodcastEpisode.user_id == uid)
         .order_by(PodcastEpisode.episode_date.desc())
         .limit(30)
     )
-    episodes = episodes_result.scalars().all()
+    user_episodes = user_eps_result.scalars().all()
+
+    # Also pull episodes from a linked active agent (scheduler delivers there
+    # when the user has an AgentRegistry entry, leaving user-keyed episodes empty).
+    agent_result = await db.execute(
+        select(AgentRegistry)
+        .where(AgentRegistry.user_id == uid, AgentRegistry.status == "active")
+        .limit(1)
+    )
+    linked_agent = agent_result.scalar_one_or_none()
+    agent_episodes = []
+    if linked_agent:
+        agent_eps_result = await db.execute(
+            select(PodcastEpisode)
+            .where(PodcastEpisode.agent_id == linked_agent.agent_id)
+            .order_by(PodcastEpisode.episode_date.desc())
+            .limit(30)
+        )
+        agent_episodes = agent_eps_result.scalars().all()
+
+    # Merge by date — user-keyed episode takes precedence if both exist for the same day.
+    by_date: dict = {ep.episode_date: ep for ep in agent_episodes}
+    by_date.update({ep.episode_date: ep for ep in user_episodes})
+    episodes = sorted(by_date.values(), key=lambda e: e.episode_date, reverse=True)[:30]
 
     settings = get_settings()
     base_url = settings.podcast_base_url or settings.base_url
@@ -266,6 +180,9 @@ async def get_podcast_settings_user(
 
     feed_path = f"/podcast/users/{current_user.id}/feed.xml"
 
+    from src.podcast.voice_registry import get_voices
+    voices = await get_voices()
+
     return templates.TemplateResponse(
         request,
         "podcast_settings.html",
@@ -274,7 +191,7 @@ async def get_podcast_settings_user(
             "current_user": current_user,
             "active_page": "podcast",
             "prefs": prefs,
-            "voices": MISTRAL_VOICES,
+            "voices": voices,
             "saved": saved,
             "feed_path": feed_path,
             "podcast_enabled": prefs.podcast_enabled if prefs else False,
@@ -408,3 +325,114 @@ async def podcast_generate_for_user(
         "user_id": str(current_user.id),
         "message": "Podcast pipeline started. Check your feed URL shortly.",
     }
+
+
+# ---------------------------------------------------------------------------
+# Agent path — existing endpoints
+# ---------------------------------------------------------------------------
+
+@router.get("/{agent_id}/feed.xml", response_class=Response)
+async def podcast_feed(
+    agent_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """RSS 2.0 podcast feed for a pilot-lab agent's daily research briefings."""
+    agent_result = await db.execute(
+        select(AgentRegistry).where(AgentRegistry.agent_id == agent_id)
+    )
+    agent = agent_result.scalar_one_or_none()
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    episodes_result = await db.execute(
+        select(PodcastEpisode)
+        .where(PodcastEpisode.agent_id == agent_id)
+        .order_by(PodcastEpisode.episode_date.desc())
+        .limit(30)
+    )
+    episodes = episodes_result.scalars().all()
+
+    settings = get_settings()
+    base_url = settings.podcast_base_url or settings.base_url
+
+    xml = build_feed(
+        pi_name=agent.pi_name,
+        episodes=episodes,
+        base_url=base_url,
+        agent_id=agent_id,
+    )
+    return Response(content=xml, media_type="application/rss+xml; charset=utf-8")
+
+
+@router.get("/{agent_id}/audio/{date}.mp3")
+async def podcast_audio(agent_id: str, date: str):
+    """Stream a podcast audio file for an agent."""
+    if "/" in date or ".." in date or not date.replace("-", "").isdigit():
+        raise HTTPException(status_code=400, detail="Invalid date format")
+
+    audio_path = AUDIO_DIR / agent_id / f"{date}.mp3"
+    if not audio_path.exists():
+        raise HTTPException(status_code=404, detail="Audio file not found")
+
+    return FileResponse(
+        path=str(audio_path),
+        media_type="audio/mpeg",
+        filename=f"{agent_id}-{date}.mp3",
+    )
+
+
+async def _run_pipeline_background(
+    agent_id: str, bot_name: str, pi_name: str, bot_token: str, slack_user_id: str | None
+) -> None:
+    """Run the agent podcast pipeline in a background task with its own DB session."""
+    from src.podcast.pipeline import run_pipeline_for_agent
+
+    session_factory = get_session_factory()
+    try:
+        async with session_factory() as db:
+            ok = await run_pipeline_for_agent(
+                agent_id=agent_id,
+                bot_name=bot_name,
+                pi_name=pi_name,
+                bot_token=bot_token,
+                slack_user_id=slack_user_id,
+                db_session=db,
+            )
+            await db.commit()
+            logger.info("On-demand podcast pipeline for %s: %s", agent_id, "produced" if ok else "no episode")
+    except Exception as exc:
+        logger.error("On-demand podcast pipeline failed for %s: %s", agent_id, exc, exc_info=True)
+
+
+@router.api_route("/{agent_id}/generate", methods=["GET", "POST"])
+async def podcast_generate(
+    agent_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """Trigger on-demand podcast generation for an agent (returns immediately)."""
+    agent_result = await db.execute(
+        select(AgentRegistry).where(AgentRegistry.agent_id == agent_id)
+    )
+    agent = agent_result.scalar_one_or_none()
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    settings = get_settings()
+    slack_tokens = settings.get_slack_tokens()
+    bot_token = agent.slack_bot_token or slack_tokens.get(agent_id, {}).get("bot", "")
+
+    asyncio.create_task(
+        _run_pipeline_background(
+            agent_id=agent_id,
+            bot_name=agent.bot_name,
+            pi_name=agent.pi_name,
+            bot_token=bot_token,
+            slack_user_id=agent.slack_user_id,
+        )
+    )
+    return {
+        "status": "started",
+        "agent_id": agent_id,
+        "message": f"Podcast pipeline started for {agent.pi_name}. Check the RSS feed shortly.",
+    }
+
