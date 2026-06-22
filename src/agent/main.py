@@ -55,11 +55,26 @@ async def _run_simulation(
 ) -> None:
     settings = get_settings()
 
-    # Create agent instances
+    # Create agent instances — filtered to only those with status='active' in the DB.
+    # Set an agent to 'suspended' in the agents table to exclude it without removing it.
+    from sqlalchemy import select
+    from src.database import get_session_factory
+    from src.models.agent_registry import AgentRegistry
+
+    _sf = get_session_factory()
+    async with _sf() as _db:
+        _res = await _db.execute(
+            select(AgentRegistry.agent_id).where(AgentRegistry.status == "active")
+        )
+        _active_ids = {row[0] for row in _res}
+
     agents = [
         Agent(agent_id=lab["id"], bot_name=lab["name"], pi_name=lab["pi"])
         for lab in PILOT_LABS
+        if lab["id"] in _active_ids
     ]
+    logger.info("Loaded %d active agents (of %d total): %s", len(agents), len(PILOT_LABS),
+                sorted(a.agent_id for a in agents))
 
     # Set up Slack clients (Web API only, no Socket Mode)
     slack_clients = {}
