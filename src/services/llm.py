@@ -18,6 +18,11 @@ logger = logging.getLogger(__name__)
 # keys from log_meta.
 _call_log_callback: Callable[[dict], None] | None = None
 
+# Tri-state: None = not yet tested, True = supported, False = not supported.
+# Set to False on the first 400 error caused by cache_control so subsequent
+# calls skip caching without retrying.
+_prompt_caching_supported: bool | None = None
+
 
 def set_call_log_callback(callback: Callable[[dict], None] | None) -> None:
     """Register (or clear) a callback that fires after every LLM call."""
@@ -27,7 +32,24 @@ def set_call_log_callback(callback: Callable[[dict], None] | None) -> None:
 
 def get_anthropic_client() -> anthropic.Anthropic:
     settings = get_settings()
-    return anthropic.Anthropic(api_key=settings.anthropic_api_key)
+    kwargs: dict = {"api_key": settings.anthropic_api_key}
+    if settings.anthropic_base_url:
+        kwargs["base_url"] = settings.anthropic_base_url
+    return anthropic.Anthropic(**kwargs)
+
+
+def _system_with_cache(text: str) -> str | list[dict]:
+    """Wrap a system prompt with cache_control when prompt caching is available.
+
+    Returns a plain string when caching is disabled (config flag or prior failure),
+    otherwise returns the list-of-blocks form required by the caching API.
+    Callers should treat a plain-string return as the no-cache path.
+    """
+    global _prompt_caching_supported
+    settings = get_settings()
+    if not settings.anthropic_prompt_caching or _prompt_caching_supported is False:
+        return text
+    return [{"type": "text", "text": text, "cache_control": {"type": "ephemeral"}}]
 
 
 async def synthesize_profile(context_text: str, researcher_name: str) -> dict[str, Any]:
@@ -453,20 +475,34 @@ async def generate_matchmaker_proposal(
 ### Recent Publications
 {publications_b or '(none available)'}"""
 
+    global _prompt_caching_supported
+
     client = get_anthropic_client()
+    system = _system_with_cache(system_prompt)
     t0 = time.monotonic()
-    message = client.messages.create(
-        model=model,
-        max_tokens=2000,
-        system=[
-            {
-                "type": "text",
-                "text": system_prompt,
-                "cache_control": {"type": "ephemeral"},
-            }
-        ],
-        messages=[{"role": "user", "content": user_message}],
-    )
+    try:
+        message = client.messages.create(
+            model=model,
+            max_tokens=2000,
+            system=system,
+            messages=[{"role": "user", "content": user_message}],
+        )
+        if isinstance(system, list):
+            _prompt_caching_supported = True
+    except anthropic.BadRequestError as exc:
+        if isinstance(system, list) and "cache" in str(exc).lower():
+            logger.warning(
+                "Prompt caching not supported by this endpoint — retrying without: %s", exc
+            )
+            _prompt_caching_supported = False
+            message = client.messages.create(
+                model=model,
+                max_tokens=2000,
+                system=system_prompt,
+                messages=[{"role": "user", "content": user_message}],
+            )
+        else:
+            raise
     latency_ms = (time.monotonic() - t0) * 1000
     logger.info(
         "Matchmaker LLM call: model=%s input=%d output=%d latency=%.0fms",
