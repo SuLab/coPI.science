@@ -21,6 +21,18 @@ router = APIRouter()
 templates = Jinja2Templates(directory="templates")
 
 
+def _maybe_send_welcome(user: User, was_complete: bool) -> None:
+    """Send the welcome email once, the first time a user completes onboarding.
+
+    No-op if onboarding was already complete or the user has no email. The send
+    catches its own errors, so a failure never blocks onboarding completion.
+    """
+    if was_complete or not user.email:
+        return
+    from src.services.email import send_welcome_email
+    send_welcome_email(user.email, name=user.name, user_id=str(user.id))
+
+
 def _template_context(request: Request, user: User, **kwargs) -> dict:
     impersonated = getattr(user, "_is_impersonated", False)
     real_admin = getattr(user, "_real_admin", None)
@@ -237,6 +249,7 @@ async def save_private_profile(
     profile.private_profile_seed = None  # Clear seed after user saves
 
     # Mark onboarding complete
+    was_complete = current_user.onboarding_complete
     current_user.onboarding_complete = True
 
     await db.commit()
@@ -265,6 +278,9 @@ async def save_private_profile(
         )
         await db.commit()
 
+    # Welcome the user the first time onboarding completes
+    _maybe_send_welcome(current_user, was_complete)
+
     # Check for pending invite token
     pending_token = request.session.pop("pending_invite_token", None)
     if pending_token:
@@ -280,8 +296,11 @@ async def complete_onboarding(
     current_user: User = Depends(get_current_user),
 ):
     """Mark onboarding as complete."""
+    was_complete = current_user.onboarding_complete
     current_user.onboarding_complete = True
     await db.commit()
+
+    _maybe_send_welcome(current_user, was_complete)
 
     pending_token = request.session.pop("pending_invite_token", None)
     if pending_token:

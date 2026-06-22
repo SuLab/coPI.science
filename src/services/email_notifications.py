@@ -44,6 +44,7 @@ MISSED_THRESHOLD = 3  # emails without engagement before downgrade
 CATEGORY_DEFAULTS = {
     "status_overview": {"enabled": True, "frequency": "weekly"},
     "new_proposal": {"enabled": False, "frequency": "off"},
+    "news_updates": {"enabled": True, "frequency": "off"},
 }
 
 # Only consider proposals decided within this window for new-proposal alerts,

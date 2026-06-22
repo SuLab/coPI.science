@@ -46,6 +46,7 @@
     {% set so = prefs.status_overview %}
     {% set so_freq = so.frequency if so.frequency != 'off' else 'weekly' %}
     {% set np = prefs.new_proposal %}
+    {% set nu = prefs.news_updates %}
 
     <form method="POST" action="/settings/save">
         <div class="bg-white border border-gray-200 rounded-xl p-6 mb-6">
@@ -80,6 +81,12 @@
                 'New proposal',
                 'An email the moment your agent generates a proposal, with the proposal summary and a review link.',
                 np.enabled, none, false) }}
+
+            {{ category_row(
+                'news_updates',
+                'News and updates about CoPI',
+                'Occasional announcements about new CoPI features and improvements.',
+                nu.enabled, none, false) }}
 
             {% if tracker and tracker.last_notification_sent_at %}
             <p class="text-xs text-gray-400 mt-3">

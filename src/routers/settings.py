@@ -32,7 +32,7 @@ FREQUENCY_LABELS = {
 }
 
 # Table-backed categories shown on the settings page (proposal_review is on User).
-PREF_CATEGORIES = ("status_overview", "new_proposal")
+PREF_CATEGORIES = ("status_overview", "new_proposal", "news_updates")
 
 
 def _template_context(request: Request, user: User, **kwargs) -> dict:
@@ -113,6 +113,8 @@ async def settings_save(
     status_overview_frequency: str = Form("weekly"),
     # new_proposal (table-backed, event-driven; no frequency)
     new_proposal_on: str = Form("0"),
+    # news_updates (table-backed, on/off; no frequency)
+    news_updates_on: str = Form("0"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -142,6 +144,10 @@ async def settings_save(
     # --- new_proposal (event-driven, no frequency) ---
     np_pref = await get_or_create_pref(current_user.id, "new_proposal", db)
     np_pref.enabled = new_proposal_on == "1"
+
+    # --- news_updates (on/off, no frequency) ---
+    news_pref = await get_or_create_pref(current_user.id, "news_updates", db)
+    news_pref.enabled = news_updates_on == "1"
 
     await db.commit()
 
