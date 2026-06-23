@@ -257,6 +257,21 @@ async def _process_user_notifications(user: User, db: AsyncSession) -> bool:
     td, agent = proposals[0]
     total_unreviewed = len(proposals)
 
+    # If the recipient is blocked by the outbound allowlist, advance the send
+    # clock anyway so this user is paced by their frequency instead of being
+    # retried (and re-suppressed) every worker cycle. No email is delivered, so
+    # we do NOT bump consecutive_missed — that would trigger a false downgrade.
+    from src.services.email import is_allowed_recipient
+    if not is_allowed_recipient(user.email):
+        tracker.last_notification_sent_at = datetime.now(timezone.utc)
+        logger.info(
+            "Proposal notification to %s suppressed by outbound allowlist; "
+            "advancing send clock to pace by frequency (proposal %s)",
+            user.email,
+            td.id,
+        )
+        return False
+
     # Determine the other agent in the proposal
     other_agent_id = td.agent_b if td.agent_a == agent.agent_id else td.agent_a
     other_result = await db.execute(
