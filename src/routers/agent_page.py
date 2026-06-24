@@ -38,14 +38,37 @@ SLACK_INVITE_URL = (
 
 
 def _extract_proposal_title(text: str | None) -> str:
+    """Best-effort one-line title for a proposal summary.
+
+    Proposal summaries open with a ":memo: Summary" header in many shapes
+    (``:memo: Summary``, ``:memo: **Summary**``, ``:memo: **Summary — Foo**``,
+    ``Summary:`` …). Strip that boilerplate so the dashboard shows the real
+    subject — the title following a ``Summary —`` separator, or the first real
+    content line — instead of the literal ":memo: Summary".
+    """
     if not text:
         return "Collaboration Proposal"
     for line in text.strip().splitlines():
         line = line.strip()
-        if line.startswith("#"):
-            return re.sub(r"^#+\s*", "", line).strip() or "Collaboration Proposal"
-        if line:
-            return line[:120]
+        if not line:
+            continue
+        # Drop a leading :memo: / 📝 marker, a markdown heading prefix, and
+        # surrounding bold markers.
+        line = re.sub(r"^\s*(?::memo:|📝)\s*", "", line)
+        line = re.sub(r"^#+\s*", "", line)
+        line = line.replace("**", "").strip()
+        if not line:
+            continue
+        # If this is the "Summary" header, use any title that follows a
+        # separator on the same line; otherwise treat the header as noise and
+        # keep scanning for the first real content line.
+        m = re.match(r"(?i)^summary\b\s*[—–\-:+.]*\s*(.*)$", line)
+        if m:
+            rest = m.group(1).strip()
+            if rest and re.search(r"\w", rest):
+                return rest[:120]
+            continue
+        return line[:120]
     return "Collaboration Proposal"
 
 
