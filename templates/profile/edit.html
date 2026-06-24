@@ -8,6 +8,16 @@
         <a href="/profile" class="text-gray-500 hover:text-gray-700 text-sm">← Back to Profile</a>
     </div>
 
+    {% if error %}
+    <div class="bg-red-50 border border-red-200 rounded-lg p-4 mb-6">
+        <p class="text-red-800 text-sm">
+            {% if error == 'invalid_email' %}Please enter a valid email address.
+            {% elif error == 'email_taken' %}That email address is already in use by another account.
+            {% else %}Something went wrong saving your changes. Please try again.{% endif %}
+        </p>
+    </div>
+    {% endif %}
+
     <form method="POST" action="/profile/save" id="profile-form">
 
         <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
@@ -17,6 +27,12 @@
                     <label class="block text-sm font-medium text-gray-700 mb-1">Display Name</label>
                     <input type="text" name="name" value="{{ user.name }}"
                            class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500">
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Email</label>
+                    <input type="email" name="email" value="{{ user.email or '' }}"
+                           class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500">
+                    <p class="text-xs text-gray-400 mt-1">Where CoPI sends collaboration proposals and notifications.</p>
                 </div>
                 <div>
                     <label class="block text-sm font-medium text-gray-700 mb-1">Institution</label>

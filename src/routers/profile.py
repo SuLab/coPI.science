@@ -1,6 +1,7 @@
 """Profile view and edit router."""
 
 import logging
+import re
 
 from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -15,6 +16,8 @@ from src.models import Job, Publication, ResearcherProfile, User
 logger = logging.getLogger(__name__)
 router = APIRouter()
 templates = Jinja2Templates(directory="templates")
+
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
 def _template_context(request: Request, user: User, **kwargs) -> dict:
@@ -76,6 +79,7 @@ async def profile_view(
 @router.get("/edit", response_class=HTMLResponse)
 async def profile_edit(
     request: Request,
+    error: str | None = None,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -96,7 +100,8 @@ async def profile_edit(
         request,
         "profile/edit.html",
         _template_context(
-            request, current_user, profile=profile, agent_registry=agent_reg
+            request, current_user, profile=profile, agent_registry=agent_reg,
+            error=error,
         ),
     )
 
@@ -105,6 +110,7 @@ async def profile_edit(
 async def profile_save(
     request: Request,
     name: str = Form(""),
+    email: str = Form(""),
     institution: str = Form(""),
     department: str = Form(""),
     research_summary: str = Form(""),
@@ -117,6 +123,26 @@ async def profile_save(
     current_user: User = Depends(get_current_user),
 ):
     """Save profile changes."""
+    # Validate the email up front so a bad value rejects the whole submission
+    # before anything is persisted.
+    email_clean = (email or "").strip().lower()
+    if email_clean != (current_user.email or ""):
+        if email_clean:
+            if not EMAIL_RE.match(email_clean):
+                return RedirectResponse(
+                    url="/profile/edit?error=invalid_email", status_code=302
+                )
+            existing = await db.execute(
+                select(User).where(
+                    User.email == email_clean, User.id != current_user.id
+                )
+            )
+            if existing.scalar_one_or_none():
+                return RedirectResponse(
+                    url="/profile/edit?error=email_taken", status_code=302
+                )
+        current_user.email = email_clean or None
+
     # Update user fields
     if name:
         current_user.name = name
