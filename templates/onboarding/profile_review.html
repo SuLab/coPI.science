@@ -14,6 +14,17 @@
         </div>
     </div>
 
+    {% if error %}
+    <div class="bg-red-50 border border-red-200 rounded-lg p-4 mb-6">
+        <p class="text-red-800 text-sm">
+            {% if error == 'email_required' %}Please enter your email address — it's required to continue.
+            {% elif error == 'invalid_email' %}Please enter a valid email address.
+            {% elif error == 'email_taken' %}That email address is already in use by another account.
+            {% else %}Something went wrong saving your changes. Please try again.{% endif %}
+        </p>
+    </div>
+    {% endif %}
+
     {% if job_status == 'pending' or job_status == 'processing' or job_status == 'none' %}
     <!-- Pipeline running or queued -->
     <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-8 text-center">
@@ -60,6 +71,15 @@
         </p>
 
         <form method="POST" action="/onboarding/save-profile" id="profile-form">
+            <!-- Email (required) -->
+            <div class="mb-6">
+                <label class="block text-sm font-medium text-gray-700 mb-2">Email <span class="text-red-500">*</span></label>
+                <input type="email" name="email" required value="{{ current_user.email or '' }}"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+                       placeholder="you@institution.edu">
+                <p class="text-xs text-gray-400 mt-1">Required. Where CoPI sends collaboration proposals and notifications.</p>
+            </div>
+
             <!-- Research Summary -->
             <div class="mb-6">
                 <label class="block text-sm font-medium text-gray-700 mb-2">Research Summary</label>

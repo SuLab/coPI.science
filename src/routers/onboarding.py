@@ -1,6 +1,7 @@
 """Onboarding flow router."""
 
 import logging
+import re
 
 from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -19,6 +20,8 @@ from src.services.profile_export import (
 logger = logging.getLogger(__name__)
 router = APIRouter()
 templates = Jinja2Templates(directory="templates")
+
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
 def _maybe_send_welcome(user: User, was_complete: bool) -> None:
@@ -49,6 +52,7 @@ def _template_context(request: Request, user: User, **kwargs) -> dict:
 @router.get("", response_class=HTMLResponse)
 async def onboarding_start(
     request: Request,
+    error: str | None = None,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -96,6 +100,7 @@ async def onboarding_start(
             job=job,
             job_status=job_status,
             progress=progress,
+            error=error,
         ),
     )
 
@@ -103,6 +108,7 @@ async def onboarding_start(
 @router.post("/save-profile")
 async def save_profile(
     request: Request,
+    email: str = Form(""),
     research_summary: str = Form(""),
     techniques: str = Form(""),
     experimental_models: str = Form(""),
@@ -113,6 +119,21 @@ async def save_profile(
     current_user: User = Depends(get_current_user),
 ):
     """Save profile edits from onboarding."""
+
+    # Email is required at onboarding. Validate before persisting anything so a
+    # bad value rejects the whole submission (mirrors profile_save on /profile).
+    email_clean = (email or "").strip().lower()
+    if not email_clean:
+        return RedirectResponse(url="/onboarding?error=email_required", status_code=302)
+    if not EMAIL_RE.match(email_clean):
+        return RedirectResponse(url="/onboarding?error=invalid_email", status_code=302)
+    if email_clean != (current_user.email or ""):
+        existing = await db.execute(
+            select(User).where(User.email == email_clean, User.id != current_user.id)
+        )
+        if existing.scalar_one_or_none():
+            return RedirectResponse(url="/onboarding?error=email_taken", status_code=302)
+        current_user.email = email_clean
 
     def parse_list(val: str) -> list[str]:
         return [s.strip() for s in val.split(",") if s.strip()]
