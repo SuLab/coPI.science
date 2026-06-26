@@ -72,6 +72,21 @@
                            placeholder="e.g. WisemanBot"
                            class="w-full text-sm">
                 </div>
+                {% if agent.status != 'pending' %}
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Status</label>
+                    <select name="agent_status" class="w-full text-sm">
+                        {% for s in valid_statuses %}
+                        <option value="{{ s }}" {% if agent.status == s %}selected{% endif %}>{{ s | capitalize }}</option>
+                        {% endfor %}
+                    </select>
+                    <p class="text-xs text-gray-400 mt-1">
+                        Only <b>active</b> agents run in the simulation; <b>inactive</b> /
+                        <b>suspended</b> park them (reversible). A running sim picks up the
+                        change live — no restart needed.
+                    </p>
+                </div>
+                {% endif %}
                 <div>
                     <label class="block text-sm font-medium text-gray-700 mb-1">Slack Bot Token</label>
                     <div class="flex items-center gap-2">

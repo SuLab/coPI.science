@@ -33,6 +33,11 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 templates = Jinja2Templates(directory="templates")
 
+# Valid AgentRegistry.status values (see src/models/agent_registry.py). Admins
+# can move an already-approved agent between these from the edit page; the sim
+# runs status=='active' agents (others are parked/excluded, reversibly).
+VALID_AGENT_STATUSES = ("active", "inactive", "suspended", "pending")
+
 
 def _template_context(
     request: Request, current_user: User, active_admin: str = "", **kwargs
@@ -827,6 +832,7 @@ async def admin_agent_detail(
             active_admin="agents",
             agent=agent,
             linked_user=linked_user,
+            valid_statuses=VALID_AGENT_STATUSES,
             slack_error=request.query_params.get("slack_error"),
             slack_ok=request.query_params.get("slack_ok"),
         ),
@@ -840,10 +846,18 @@ async def admin_approve_agent(
     agent_slug: str = Form(...),
     bot_name: str = Form(...),
     slack_bot_token: str = Form(""),
+    agent_status: str = Form(None),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_admin_user),
 ):
-    """Approve an agent request."""
+    """Approve a pending agent request, or save edits to an existing agent.
+
+    Pending agents are approved straight to ``active`` (stamping the approver),
+    matching the original one-click flow. For an agent that's already been
+    approved, the edit form's status dropdown drives ``status`` — letting an
+    admin park (``inactive``), ``suspended``, or re-``active``ate it. A running
+    simulation picks the change up live via ``_sync_roster_from_db``.
+    """
     result = await db.execute(
         select(AgentRegistry).where(AgentRegistry.id == agent_id)
     )
@@ -854,9 +868,14 @@ async def admin_approve_agent(
     agent.agent_id = agent_slug.strip().lower()
     agent.bot_name = bot_name.strip()
     agent.slack_bot_token = slack_bot_token.strip() or None
-    agent.status = "active"
-    agent.approved_at = datetime.now(timezone.utc)
-    agent.approved_by = current_user.id
+
+    if agent.status == "pending":
+        agent.status = "active"
+        agent.approved_at = datetime.now(timezone.utc)
+        agent.approved_by = current_user.id
+    elif agent_status in VALID_AGENT_STATUSES:
+        agent.status = agent_status
+
     await db.commit()
 
     return RedirectResponse(url="/admin/agents", status_code=302)

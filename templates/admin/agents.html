@@ -142,6 +142,7 @@
                 <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Agent ID</th>
                 <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Bot Name</th>
                 <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">PI Name</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Actions</th>
             </tr>
         </thead>
         <tbody class="divide-y divide-gray-100">
@@ -150,6 +151,42 @@
                 <td class="px-4 py-3 text-sm font-mono">{{ a.agent_id }}</td>
                 <td class="px-4 py-3 text-sm font-medium">{{ a.bot_name }}</td>
                 <td class="px-4 py-3 text-sm text-gray-600">{{ a.pi_name }}</td>
+                <td class="px-4 py-3">
+                    <a href="/admin/agents/{{ a.id }}"
+                       class="text-sm text-indigo-600 hover:text-indigo-800">Edit</a>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+
+{% if suspended %}
+<!-- Suspended agents -->
+<div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden mb-6">
+    <div class="px-6 py-4 border-b border-gray-200 bg-gray-50">
+        <h2 class="font-semibold text-gray-700">Suspended (excluded from simulation runs)</h2>
+    </div>
+    <table class="min-w-full divide-y divide-gray-200">
+        <thead class="bg-gray-50">
+            <tr>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Agent ID</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Bot Name</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">PI Name</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Actions</th>
+            </tr>
+        </thead>
+        <tbody class="divide-y divide-gray-100">
+            {% for a in suspended %}
+            <tr class="hover:bg-gray-50">
+                <td class="px-4 py-3 text-sm font-mono">{{ a.agent_id }}</td>
+                <td class="px-4 py-3 text-sm font-medium">{{ a.bot_name }}</td>
+                <td class="px-4 py-3 text-sm text-gray-600">{{ a.pi_name }}</td>
+                <td class="px-4 py-3">
+                    <a href="/admin/agents/{{ a.id }}"
+                       class="text-sm text-indigo-600 hover:text-indigo-800">Edit</a>
+                </td>
             </tr>
             {% endfor %}
         </tbody>
