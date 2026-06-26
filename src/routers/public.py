@@ -26,8 +26,9 @@ templates = Jinja2Templates(directory="templates")
 
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
-# Institution mapping for the Cabo collaboration graph. Mirrors the comment
-# groupings in src/agent/simulation.py PILOT_LABS.
+# Institution mapping for the Cabo collaboration graph. This is an independent
+# hardcoded grouping of agent_ids by institution (the agent roster itself now
+# lives in the AgentRegistry table).
 _SCRIPPS = {
     # Active Cabo cohort
     "su", "wiseman", "grotjahn", "ward", "briney", "forli", "lairson",
@@ -50,8 +51,8 @@ _OTHER_INST = {
 }
 
 # Cohort cutover for the Cabo retreat graph: matches commit 0ef4741
-# ("Reshape PILOT_LABS for Cabo retreat"). All proposals to date share a
-# single simulation_run_id, so date is the only way to isolate the new cohort.
+# (the Cabo retreat roster reshape). All proposals to date share a single
+# simulation_run_id, so date is the only way to isolate the new cohort.
 CABO_COHORT_START = datetime(2026, 3, 1, tzinfo=timezone.utc)
 
 # Schultz alumni pilot = the PIs seeded from newuserlist01.tsv + newuserlist02.tsv

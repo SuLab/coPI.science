@@ -27,7 +27,8 @@ Outputs:
   - DB rows
   - profiles/public/{agent_id}.md  (no private seed — see step 5)
   - audit CSV at scripts/_sparse_run_{timestamp}.csv
-  - PILOT_LABS snippet printed to stdout
+  - AgentRegistry rows are created status='pending' (the DB is the source of
+    truth — no PILOT_LABS edit needed; provision a token via the admin UI)
 """
 
 from __future__ import annotations
@@ -825,23 +826,6 @@ def _write_audit_csv(path: Path, audits: list[AuditRow]) -> None:
             ])
 
 
-def _print_pilot_labs_snippet(audits: list[AuditRow]) -> None:
-    persisted = [a for a in audits if a.persisted and a.agent_id]
-    if not persisted:
-        return
-    print("\n# Paste into src/agent/simulation.py PILOT_LABS:")
-    for a in persisted:
-        last = a.name.strip().split()[-1]
-        last_alpha = re.sub(r"[^A-Za-z]", "", last)
-        if a.agent_id.endswith(last.lower()):
-            bot = f"{last_alpha.capitalize()}Bot"
-        else:
-            # Collision-prefixed agent_id (e.g. pwu / PWuBot)
-            bot = f"{a.agent_id[0].upper()}{last_alpha.capitalize()}Bot"
-        print(f'    {{"id": "{a.agent_id}", "name": "{bot}", "pi": "{a.name}"}},')
-    print("\n# And add a SLACK_BOT_TOKEN_<AGENT_ID> for each to .env once Slack apps exist.")
-
-
 async def _run(tsv_path: Path, force: bool) -> int:
     settings = get_settings()
     engine = create_async_engine(settings.database_url)
@@ -876,8 +860,14 @@ async def _run(tsv_path: Path, force: bool) -> int:
     persisted = sum(1 for a in audits if a.persisted)
     skipped = len(audits) - persisted
     logger.info("Persisted: %d, skipped/failed: %d, total: %d", persisted, skipped, len(audits))
-
-    _print_pilot_labs_snippet(audits)
+    if persisted:
+        # DB (AgentRegistry) is the source of truth now — no PILOT_LABS edit.
+        # New rows are status='pending'; provision a Slack token from the admin
+        # approve page to activate them.
+        logger.info(
+            "Provision a Slack token from the admin approve page to activate "
+            "each newly-created agent.",
+        )
     return 0
 
 

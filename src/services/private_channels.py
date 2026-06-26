@@ -168,11 +168,10 @@ def _build_other_pi_dm(
     )
 
 
-async def _get_or_fail_bot_token(agent_id: str) -> str:
-    settings = get_settings()
-    env_tokens = settings.get_slack_tokens()
-    tok = env_tokens.get(agent_id, "")
-    if not tok or tok.startswith("xoxb-placeholder"):
+async def _get_or_fail_bot_token(db: AsyncSession, agent_id: str) -> str:
+    from src.services.slack_tokens import get_agent_bot_token
+    tok = await get_agent_bot_token(db, agent_id)
+    if not tok:
         raise RuntimeError(f"No valid Slack bot token for agent '{agent_id}'")
     return tok
 
@@ -245,8 +244,8 @@ async def migrate_public_thread_to_private(
     origin_channel_name = thread_decision.channel
 
     # --- Slack side-effects ------------------------------------------------
-    creator_token = await _get_or_fail_bot_token(creator_agent_id)
-    other_token = await _get_or_fail_bot_token(other_agent_id)
+    creator_token = await _get_or_fail_bot_token(db, creator_agent_id)
+    other_token = await _get_or_fail_bot_token(db, other_agent_id)
     creator_client = _make_client(creator_agent_id, creator_token)
     other_client = _make_client(other_agent_id, other_token)
 

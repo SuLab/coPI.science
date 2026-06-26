@@ -283,7 +283,10 @@ async def agent_dashboard(
     # Resolve delegate display names (legacy Slack-only delegates)
     delegates = []
     if agent.delegate_slack_ids:
-        delegates = _resolve_delegate_names(agent.delegate_slack_ids)
+        from src.services.slack_tokens import get_any_bot_token
+        delegates = _resolve_delegate_names(
+            agent.delegate_slack_ids, await get_any_bot_token(db)
+        )
 
     # Pending invitations (for PI view)
     from src.models import DelegateInvitation
@@ -582,9 +585,9 @@ async def reopen_proposal(
         try:
             from slack_sdk import WebClient
 
-            env_tokens = settings.get_slack_tokens()
-            bot_token = env_tokens.get(agent.agent_id, "")
-            if not bot_token or bot_token.startswith("xoxb-placeholder"):
+            from src.services.slack_tokens import token_for_agent_row
+            bot_token = token_for_agent_row(agent)
+            if not bot_token:
                 raise HTTPException(status_code=500, detail="No bot token available")
             client = WebClient(token=bot_token)
             channels_result = client.conversations_list(
@@ -908,16 +911,9 @@ async def connect_slack(
 
     try:
         from slack_sdk import WebClient
-        from src.config import get_settings
-        settings = get_settings()
-        env_tokens = settings.get_slack_tokens()
+        from src.services.slack_tokens import get_any_bot_token
 
-        bot_token = None
-        for t in env_tokens.values():
-            if t and not t.startswith("xoxb-placeholder"):
-                bot_token = t
-                break
-
+        bot_token = await get_any_bot_token(db)
         if not bot_token:
             error = "No Slack bot token available to perform lookup."
         else:
@@ -943,21 +939,9 @@ async def connect_slack(
     )
 
 
-def _get_bot_token() -> str | None:
-    """Get the first valid Slack bot token for API calls."""
-    from src.config import get_settings
-    settings = get_settings()
-    env_tokens = settings.get_slack_tokens()
-    for t in env_tokens.values():
-        if t and not t.startswith("xoxb-placeholder"):
-            return t
-    return None
-
-
-def _resolve_delegate_names(slack_ids: list[str]) -> list[dict]:
-    """Resolve Slack user IDs to display names."""
+def _resolve_delegate_names(slack_ids: list[str], bot_token: str | None) -> list[dict]:
+    """Resolve Slack user IDs to display names using the given bot token."""
     from slack_sdk import WebClient
-    bot_token = _get_bot_token()
     if not bot_token:
         return [{"slack_id": sid, "name": sid} for sid in slack_ids]
 
@@ -997,7 +981,8 @@ async def delegate_connect_slack(
     error = None
     try:
         from slack_sdk import WebClient
-        bot_token = _get_bot_token()
+        from src.services.slack_tokens import get_any_bot_token
+        bot_token = await get_any_bot_token(db)
         if not bot_token:
             error = "No Slack bot token available."
         else:
@@ -1184,7 +1169,8 @@ async def remove_delegate(
         if delegate.user.email and agent.delegate_slack_ids:
             try:
                 from slack_sdk import WebClient
-                bot_token = _get_bot_token()
+                from src.services.slack_tokens import get_any_bot_token
+                bot_token = await get_any_bot_token(db)
                 if bot_token:
                     client = WebClient(token=bot_token)
                     slack_result = client.users_lookupByEmail(email=delegate.user.email)

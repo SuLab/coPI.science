@@ -1,15 +1,22 @@
 #!/usr/bin/env python3
 """
-Provision Slack apps for all LabBots that don't yet have a bot token.
+Batch-provision Slack apps for LabBots that don't yet have a bot token.
+
+NOTE: single agents are now provisioned self-service from the admin approve page
+(Provision button → web OAuth callback → token saved to AgentRegistry). Use this
+script only for large batches.
 
 How it works
 ------------
-1. Reads PILOT_LABS to find bots without SLACK_BOT_TOKEN_<ID> in .env
+0. First run `scripts/export_agent_roster.py` IN THE CONTAINER to write
+   data/agent_roster.json (this host script can't reach postgres directly).
+1. Reads data/agent_roster.json to find active/pending bots without a token
 2. Creates a Slack app for each via the Manifest API (apps.manifest.create)
 3. Starts a local OAuth callback server on --port (default 8888)
 4. Prints authorize URLs — a workspace admin clicks each one in a browser
 5. Each click redirects back here; the code is exchanged for an xoxb- token
-6. Tokens are appended to .env as SLACK_BOT_TOKEN_<AGENT_ID>
+6. Tokens are appended to .env as SLACK_BOT_TOKEN_<AGENT_ID>; run
+   scripts/backfill_agent_tokens.py in-container to copy them into the DB
 
 Prerequisites (one-time, done by a workspace admin in a browser)
 -----------------------------------------------------------------
@@ -45,63 +52,64 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-import httpx
 from dotenv import dotenv_values, set_key
 from rich.console import Console
 from rich.table import Table
+
+# This script runs on the HOST as `python3 scripts/provision_slack_bots.py`, so
+# the project root isn't on sys.path by default. Add it so `src` is importable.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+# Shared provisioning helpers (transport-only; no heavy deps so this stays
+# importable on the host). See src/services/slack_provisioning.py.
+from src.services.slack_provisioning import (
+    create_app,
+    exchange_code,
+    lookup_team_id as _slack_lookup_team_id,
+    rotate_config_token,
+)
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
-SLACK_API = "https://slack.com/api"
 CALLBACK_PATH = "/oauth/callback"
 STATE_FILE = Path(".provision_state.json")
-
-# All scopes the bots actually use — derived from AgentSlackClient + routers/podcast
-BOT_SCOPES = [
-    "channels:history",   # conversations.history / conversations.replies
-    "channels:join",      # conversations.join
-    "channels:manage",    # conversations.create
-    "channels:read",      # conversations.list
-    "chat:write",         # chat.postMessage
-    "groups:history",     # threads in private channels
-    "groups:read",        # conversations.list private
-    "im:history",         # poll_dm_messages
-    "im:write",           # conversations.open (DMs)
-    "users:read",         # users.info
-    "users:read.email",   # users.lookupByEmail
-]
 
 console = Console()
 
 
 # ---------------------------------------------------------------------------
-# Parse PILOT_LABS from source without importing the module
-# (avoids pulling in SQLAlchemy and other heavy dependencies)
+# Load the agent roster from the DB export (data/agent_roster.json).
+# The roster is produced in-container by scripts/export_agent_roster.py — this
+# host script can't reach postgres directly. Only active/pending agents are
+# provisionable (inactive/suspended don't need new tokens).
 # ---------------------------------------------------------------------------
 
-def load_pilot_labs() -> list[dict]:
-    import ast
-    src = Path(__file__).parent.parent / "src" / "agent" / "simulation.py"
-    tree = ast.parse(src.read_text())
-    for node in ast.walk(tree):
-        if (
-            isinstance(node, ast.Assign)
-            and len(node.targets) == 1
-            and isinstance(node.targets[0], ast.Name)
-            and node.targets[0].id == "PILOT_LABS"
-        ):
-            return ast.literal_eval(node.value)
-    raise RuntimeError("PILOT_LABS not found in src/agent/simulation.py")
+ROSTER_PATH = Path("data/agent_roster.json")
+PROVISIONABLE_STATUSES = {"active", "pending"}
+
+
+def load_roster() -> list[dict]:
+    if not ROSTER_PATH.exists():
+        raise RuntimeError(
+            f"{ROSTER_PATH} not found. Generate it in the container first:\n"
+            f"  docker exec copi-python-app-1 python scripts/export_agent_roster.py"
+        )
+    roster = json.loads(ROSTER_PATH.read_text())
+    return [r for r in roster if r.get("status") in PROVISIONABLE_STATUSES]
 
 
 # ---------------------------------------------------------------------------
 # Slack API helpers
 # ---------------------------------------------------------------------------
+# create_app / exchange_code / rotate_config_token live in
+# src/services/slack_provisioning.py (shared with the admin UI). The only
+# script-local helper is the env-scanning team-id detector below.
+
 
 def lookup_team_id(existing_env: dict) -> str | None:
-    """Call auth.test on the first valid bot token to get the workspace team_id."""
+    """Detect the workspace team_id from the first valid bot token in .env."""
     for key, val in existing_env.items():
         if (
             key.upper().startswith("SLACK_BOT_TOKEN_")
@@ -109,117 +117,10 @@ def lookup_team_id(existing_env: dict) -> str | None:
             and val.startswith("xoxb-")
             and not val.startswith("xoxb-placeholder")
         ):
-            resp = httpx.post(
-                f"{SLACK_API}/auth.test",
-                headers={"Authorization": f"Bearer {val}"},
-                timeout=10,
-            )
-            data = resp.json()
-            if data.get("ok"):
-                return data.get("team_id")
+            team_id = _slack_lookup_team_id(val)
+            if team_id:
+                return team_id
     return None
-
-
-def rotate_config_token(refresh_token: str) -> tuple[str, str]:
-    """Rotate the app-config token. Returns (new_access_token, new_refresh_token)."""
-    resp = httpx.post(
-        f"{SLACK_API}/tooling.tokens.rotate",
-        data={"refresh_token": refresh_token},
-        timeout=15,
-    )
-    data = resp.json()
-    if not data.get("ok"):
-        raise RuntimeError(f"tooling.tokens.rotate failed: {data.get('error')}")
-    return data["token"], data["refresh_token"]
-
-
-def create_app(
-    config_token: str,
-    agent_id: str,
-    bot_name: str,
-    pi_name: str,
-    redirect_uri: str,
-    max_rate_limit_retries: int = 5,
-) -> dict:
-    """
-    Create one Slack app via the Manifest API.
-    Returns a dict with app_id, client_id, client_secret, oauth_url.
-    Retries on rate-limit responses only; all other errors raise immediately.
-    """
-    manifest = {
-        "display_information": {
-            "name": bot_name,
-            "description": f"LabBot agent for {pi_name}",
-        },
-        "features": {
-            "bot_user": {
-                "display_name": bot_name,
-                "always_online": False,
-            }
-        },
-        "oauth_config": {
-            "redirect_urls": [redirect_uri],
-            "scopes": {"bot": BOT_SCOPES},
-        },
-        "settings": {
-            "org_deploy_enabled": False,
-            "socket_mode_enabled": False,
-            "token_rotation_enabled": False,
-        },
-    }
-    for attempt in range(max_rate_limit_retries):
-        resp = httpx.post(
-            f"{SLACK_API}/apps.manifest.create",
-            headers={"Authorization": f"Bearer {config_token}"},
-            json={"manifest": manifest},
-            timeout=20,
-        )
-        data = resp.json()
-        if data.get("ok"):
-            creds = data["credentials"]
-            return {
-                "agent_id": agent_id,
-                "bot_name": bot_name,
-                "pi_name": pi_name,
-                "app_id": data["app_id"],
-                "client_id": creds["client_id"],
-                "client_secret": creds["client_secret"],
-                "oauth_url": data["oauth_authorize_url"],
-            }
-        if data.get("error") == "ratelimited":
-            wait = int(data.get("retry_after", 0) or resp.headers.get("Retry-After", 60))
-            console.print(f"  [yellow]rate limited — waiting {wait}s before retrying {bot_name}…[/yellow]")
-            time.sleep(wait)
-        else:
-            detail = data.get("errors") or data.get("error", "unknown")
-            raise RuntimeError(f"apps.manifest.create failed: {detail}")
-    raise RuntimeError(f"apps.manifest.create: still rate-limited after {max_rate_limit_retries} retries")
-
-
-def exchange_code(
-    client_id: str,
-    client_secret: str,
-    code: str,
-    redirect_uri: str,
-) -> str:
-    """Exchange a temporary OAuth code for a bot token. Returns xoxb-... string."""
-    resp = httpx.post(
-        f"{SLACK_API}/oauth.v2.access",
-        data={
-            "client_id": client_id,
-            "client_secret": client_secret,
-            "code": code,
-            "redirect_uri": redirect_uri,
-        },
-        timeout=15,
-    )
-    data = resp.json()
-    if not data.get("ok"):
-        raise RuntimeError(f"oauth.v2.access failed: {data.get('error')}")
-    token = data.get("access_token", "")
-    if not token.startswith("xoxb-"):
-        raise RuntimeError(f"Unexpected token format: {token[:20]}...")
-    return token
 
 
 # ---------------------------------------------------------------------------
@@ -345,7 +246,7 @@ def main():
     # -----------------------------------------------------------------------
     # 1. Determine which bots are missing tokens
     # -----------------------------------------------------------------------
-    pilot_labs = load_pilot_labs()
+    roster = load_roster()
     existing_env = dotenv_values(args.env_file)
 
     team_id = args.team_id
@@ -365,13 +266,18 @@ def main():
         and not v.startswith("xoxb-placeholder")
     }
 
-    missing = [lab for lab in pilot_labs if lab["id"] not in tokenized]
+    # An agent needs a token if it has neither a DB token (roster has_token) nor
+    # a token already in this .env.
+    missing = [
+        lab for lab in roster
+        if not lab.get("has_token") and lab["id"] not in tokenized
+    ]
 
     if args.only:
         only = {a.lower() for a in args.only}
-        unknown = only - {lab["id"].lower() for lab in pilot_labs}
+        unknown = only - {lab["id"].lower() for lab in roster}
         if unknown:
-            console.print(f"[yellow]--only: not in PILOT_LABS, ignoring: {', '.join(sorted(unknown))}[/yellow]")
+            console.print(f"[yellow]--only: not in agent roster, ignoring: {', '.join(sorted(unknown))}[/yellow]")
         already = only & tokenized
         if already:
             console.print(f"[yellow]--only: already have tokens, will skip: {', '.join(sorted(already))}[/yellow]")

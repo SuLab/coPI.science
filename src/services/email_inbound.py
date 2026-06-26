@@ -369,11 +369,10 @@ async def _handle_instruction(
     try:
         from slack_sdk import WebClient
 
-        settings = get_settings()
-        env_tokens = settings.get_slack_tokens()
-        bot_token = env_tokens.get(agent.agent_id, "")
+        from src.services.slack_tokens import token_for_agent_row
+        bot_token = token_for_agent_row(agent)
 
-        if not bot_token or bot_token.startswith("xoxb-placeholder"):
+        if not bot_token:
             logger.error("No bot token for agent %s", agent.agent_id)
             return
 

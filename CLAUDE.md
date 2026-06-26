@@ -41,11 +41,15 @@ docker compose up -d --build app worker
 docker compose --profile agent run -d --name agent-run agent python -m src.agent.main --budget 0
 ```
 
-**Note:** The agent-run container uses mounted source code but the Python process only loads modules at startup. Code changes require a container restart to take effect. **After any code change that affects the running agent process, flag this to the user so they can decide whether to restart.**
+**Note:** The agent-run container uses mounted source code but the Python process only loads modules at startup. **Code** changes require a container restart to take effect. **After any code change that affects the running agent process, flag this to the user so they can decide whether to restart.** (Roster changes — activating/inactivating agents or setting a new `slack_bot_token` in `AgentRegistry` — do NOT need a restart; they're picked up live by `_sync_roster_from_db`.)
 
 ## Adding New PIs
 
-Follow these steps in order. Steps 1-2 can be done immediately; steps 3-4 when ready to activate the agent.
+**The `AgentRegistry` table is the single source of truth for the agent roster.**
+There is no longer a `PILOT_LABS` list and no per-agent `config.py` token fields to
+edit. A running `agent-run` re-syncs the roster from the DB every ~30s
+(`_sync_roster_from_db`), so flipping an agent to `status='active'` (with a token on
+its row) makes it go live **without a restart**.
 
 ### 1. Create user records and generate profiles
 
@@ -59,39 +63,36 @@ This creates `User` rows and enqueues profile generation jobs (processed by the 
 
 ### 2. Create agent registry entries
 
-Each agent needs an `AgentRegistry` row with a unique `agent_id` (lowercase last name) and `bot_name` (`{LastName}Bot`).
+Each agent needs an `AgentRegistry` row with a unique `agent_id` (lowercase last name)
+and `bot_name` (`{LastName}Bot`), created `status='pending'`. Self-service signups
+(`src/routers/agent_page.py`) and the backfill scripts both create these automatically.
 
-**Last-name collisions:** If a last name is already taken (e.g., Chunlei Wu = `wu`), prefix with the first initial (e.g., Peng Wu = `pwu` / `PWuBot`). The web UI (`src/routers/agent_page.py`) applies this same logic automatically for self-service signups.
+**Last-name collisions:** If a last name is already taken (e.g., Chunlei Wu = `wu`), prefix with the first initial (e.g., Peng Wu = `pwu` / `PWuBot`). The web UI applies this logic automatically.
 
-New entries should have `status='pending'` until Slack tokens are configured.
+### 3. Provision the Slack bot + activate (admin UI)
 
-### 3. Create Slack bot tokens
+Go to **/admin/agents → the pending agent → Provision**. This creates the Slack app
+via the Manifest API and sends you to Slack's install screen; on approval you return to
+the page with the **bot token filled in and saved to `AgentRegistry.slack_bot_token`**.
+Click **Approve & Activate** to set `status='active'`. The running simulation picks the
+agent up on its next roster sync — no `.env` edit, no `config.py` edit, no restart.
 
-Run the provisioning script to create a Slack app + bot token per agent (reads
-`PILOT_LABS`, so do step 4 first or alongside):
+Requires `SLACK_CONFIG_TOKEN` / `SLACK_CONFIG_REFRESH_TOKEN` in the environment (the
+rotating pair is persisted in the `app_settings` KV table) and a public `base_url`.
+
+**Bulk provisioning** (many agents at once) still uses the host script. First export the
+roster from the container, then run the script on the host:
 
 ```bash
-python3 scripts/provision_slack_bots.py            # creates apps, prints OAuth URLs
+docker exec copi-python-app-1 python scripts/export_agent_roster.py   # writes data/agent_roster.json
+python3 scripts/provision_slack_bots.py                               # host: creates apps, prints OAuth URLs
 ```
 
-A workspace admin clicks each OAuth URL; tokens are written to `.env` as
-`SLACK_BOT_TOKEN_<AGENT_ID>`.
+The host script writes tokens to `.env`; import them into the DB column with:
 
-**Critical — the `.env` token is NOT enough.** `src/config.py` `Settings` uses
-`extra="ignore"`, and `get_slack_tokens()` returns a hardcoded dict, so each new
-agent ALSO needs, in `src/config.py`:
-1. a field declaration — `slack_bot_token_<id>: str = ""`
-2. a `get_slack_tokens()` dict entry — `"<id>": self.slack_bot_token_<id>,`
-
-Without these, the agent loads but logs `[<id>] No valid Slack token — skipping`
-even though the token is valid and present in the environment.
-
-### 4. Add to PILOT_LABS and restart simulation
-
-Add entries to `PILOT_LABS` in `src/agent/simulation.py`:
-
-```python
-{"id": "lastname", "name": "LastNameBot", "pi": "First Last"},
+```bash
+docker exec copi-python-app-1 python scripts/backfill_agent_tokens.py
 ```
 
-Then restart the simulation (see "Running the Agent Simulation" above).
+(`.env` + `config.py get_slack_tokens()` remain a read fallback, but the DB column is
+authoritative.)
