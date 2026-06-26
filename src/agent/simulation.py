@@ -73,131 +73,6 @@ def _strip_reopen_prefix(comment: str) -> str:
             return comment[len(prefix):]
     return comment
 
-# Pilot lab configurations
-PILOT_LABS = [
-    # Scripps Research
-    {"id": "su", "name": "SuBot", "pi": "Andrew Su"},
-    {"id": "wiseman", "name": "WisemanBot", "pi": "Luke Wiseman"},
-    {"id": "grotjahn", "name": "GrotjahnBot", "pi": "Danielle Grotjahn"},
-    {"id": "ward", "name": "WardBot", "pi": "Andrew Ward"},
-    {"id": "briney", "name": "BrineyBot", "pi": "Bryan Briney"},
-    {"id": "forli", "name": "ForliBot", "pi": "Stefano Forli"},
-    {"id": "lairson", "name": "LairsonBot", "pi": "Luke Lairson"},
-    {"id": "badran", "name": "BadranBot", "pi": "Ahmed Badran"},
-    {"id": "kern", "name": "KernBot", "pi": "Dorothee Kern"},
-    {"id": "lasker", "name": "LaskerBot", "pi": "Keren Lasker"},
-    {"id": "lippi", "name": "LippiBot", "pi": "Giordano Lippi"},
-    {"id": "maillie", "name": "MaillieBot", "pi": "Colleen Maillie"},
-    {"id": "millar", "name": "MillarBot", "pi": "David Millar"},
-    {"id": "miller", "name": "MillerBot", "pi": "Shannon Miller"},
-    {"id": "mravic", "name": "MravicBot", "pi": "Marco Mravic"},
-    {"id": "paulson", "name": "PaulsonBot", "pi": "James Paulson"},
-    {"id": "pwu", "name": "PWuBot", "pi": "Peng Wu"},
-    {"id": "seiple", "name": "SeipleBot", "pi": "Ian Seiple"},
-    {"id": "williamson", "name": "WilliamsonBot", "pi": "James Williamson"},
-    {"id": "wilson", "name": "WilsonBot", "pi": "Ian Wilson"},
-    # UCSF
-    {"id": "sali", "name": "SaliBot", "pi": "Andrej Šali"},
-    {"id": "larabell", "name": "LarabellBot", "pi": "Carolyn Larabell"},
-    {"id": "zaro", "name": "ZaroBot", "pi": "Balyn Zaro"},
-    {"id": "roe", "name": "RoeBot", "pi": "Leah Roe"},
-    {"id": "santi", "name": "SantiBot", "pi": "Dan Santi"},
-    {"id": "wells", "name": "WellsBot", "pi": "James Wells"},
-    {"id": "echeverria", "name": "EcheverriaBot", "pi": "Ignacia Echeverria"},
-    {"id": "fraser", "name": "FraserBot", "pi": "James Fraser"},
-    {"id": "craik", "name": "CraikBot", "pi": "Charles Craik"},
-    {"id": "stroud", "name": "StroudBot", "pi": "Robert Stroud"},
-    {"id": "minor", "name": "MinorBot", "pi": "Daniel Minor Jr."},
-    {"id": "manglik", "name": "ManglikBot", "pi": "Aashish Manglik"},
-    {"id": "susa", "name": "SusaBot", "pi": "Katherine Susa"},
-    {"id": "capra", "name": "CapraBot", "pi": "Tony Capra"},
-    # Additional PIs
-    {"id": "kim", "name": "KimBot", "pi": "Peter Kim"},               # Stanford
-    {"id": "azumaya", "name": "AzumayaBot", "pi": "Caleigh Azumaya"}, # Genentech
-    {"id": "nomura", "name": "NomuraBot", "pi": "Daniel Nomura"},     # UC Berkeley
-    {"id": "yeager", "name": "YeagerBot", "pi": "Mark Yeager"},
-    {"id": "moore", "name": "MooreBot", "pi": "Jonathan Moore"},
-    {"id": "young", "name": "YoungBot", "pi": "Travis Young"},
-    # Onboarding batch 2026-06 (newuserlist01/02) — backfilled agents, status='pending'
-    {"id": "achatterjee", "name": "AChatterjeeBot", "pi": "Abhishek Chatterjee"},
-    {"id": "ting", "name": "TingBot", "pi": "Alice Ting"},
-    {"id": "cochran", "name": "CochranBot", "pi": "Andrea Cochran"},
-    {"id": "mehta", "name": "MehtaBot", "pi": "Angad Mehta"},
-    {"id": "chatterjee", "name": "ChatterjeeBot", "pi": "Arnab Chatterjee"},
-    {"id": "good", "name": "GoodBot", "pi": "Benjamin Good"},
-    {"id": "cliu", "name": "CLiuBot", "pi": "Chang Liu"},
-    {"id": "ckim", "name": "CKimBot", "pi": "Chan Hyuk Kim"},
-    {"id": "diercks", "name": "DiercksBot", "pi": "Christian Diercks"},
-    {"id": "lyssiotis", "name": "LyssiotisBot", "pi": "Costas Lyssiotis"},
-    {"id": "corey", "name": "CoreyBot", "pi": "David Corey"},
-    {"id": "liu", "name": "LiuBot", "pi": "David Liu"},
-    {"id": "pei", "name": "PeiBot", "pi": "Dehua Pei"},
-    {"id": "lemke", "name": "LemkeBot", "pi": "Edward Lemke"},
-    {"id": "xiao", "name": "XiaoBot", "pi": "Han Xiao"},
-    {"id": "macrae", "name": "MacRaeBot", "pi": "Ian MacRae"},
-    {"id": "chin", "name": "ChinBot", "pi": "Jason Chin"},
-    {"id": "pezacki", "name": "PezackiBot", "pi": "John Paul Pezacki"},
-    {"id": "ellman", "name": "EllmanBot", "pi": "Jonathan Ellman"},
-    {"id": "johnsson", "name": "JohnssonBot", "pi": "Kai Johnsson"},
-    {"id": "shokat", "name": "ShokatBot", "pi": "Kevan Shokat"},
-    {"id": "wang", "name": "WangBot", "pi": "Lei Wang"},
-    {"id": "hsiehwilson", "name": "HsiehWilsonBot", "pi": "Linda Hsieh-Wilson"},
-    {"id": "bollong", "name": "BollongBot", "pi": "Michael Bollong"},
-    {"id": "williams", "name": "WilliamsBot", "pi": "Michael Williams"},
-    {"id": "gray", "name": "GrayBot", "pi": "Nathanael Gray"},
-    {"id": "winssinger", "name": "WinssingerBot", "pi": "Nicolas Winssinger"},
-    {"id": "chen", "name": "ChenBot", "pi": "Peng Chen"},
-    {"id": "schultz", "name": "SchultzBot", "pi": "Peter Schultz"},
-    {"id": "yang", "name": "YangBot", "pi": "Priscilla Yang"},
-    {"id": "ding", "name": "DingBot", "pi": "Sheng Ding"},
-    {"id": "schen", "name": "SChenBot", "pi": "Shuibing Chen"},
-    {"id": "shao", "name": "ShaoBot", "pi": "Sida Shao"},
-    {"id": "cornish", "name": "CornishBot", "pi": "Virginia Cornish"},
-    {"id": "wliu", "name": "WLiuBot", "pi": "Wenshe Liu"},
-    # Onboarding batch 3 — Schultz reunion attendees (newuserlist03) 2026-06-06.
-    # status='pending'; Eppinger held back pending identity verification.
-    {"id": "mcnamara", "name": "McnamaraBot", "pi": "Case McNamara"},
-    {"id": "watanabe", "name": "WatanabeBot", "pi": "Coran Watanabe"},
-    {"id": "summerer", "name": "SummererBot", "pi": "Daniel Summerer"},
-    {"id": "vranken", "name": "VrankenBot", "pi": "David Van Vranken"},
-    {"id": "wemmer", "name": "WemmerBot", "pi": "David Wemmer"},
-    {"id": "zhou", "name": "ZhouBot", "pi": "Demin Zhou"},
-    {"id": "dyoung", "name": "DYoungBot", "pi": "Douglas Young"},
-    {"id": "brustad", "name": "BrustadBot", "pi": "Eric Brustad"},
-    {"id": "gan", "name": "GanBot", "pi": "Fei Gan"},
-    {"id": "larman", "name": "LarmanBot", "pi": "Harry Larman"},
-    {"id": "wurdak", "name": "WurdakBot", "pi": "Heiko Wurdak"},
-    {"id": "ulrich", "name": "UlrichBot", "pi": "Helle Ulrich"},
-    {"id": "luesch", "name": "LueschBot", "pi": "Hendrik Luesch"},
-    {"id": "ai", "name": "AiBot", "pi": "Huiwang Ai"},
-    {"id": "gildersleeve", "name": "GildersleeveBot", "pi": "Jeffrey Gildersleeve"},
-    {"id": "mills", "name": "MillsBot", "pi": "Jeremy Mills"},
-    {"id": "xie", "name": "XieBot", "pi": "Jianming Xie"},
-    {"id": "guo", "name": "GuoBot", "pi": "Jiantao Guo"},
-    {"id": "liao", "name": "LiaoBot", "pi": "Jiayu Liao"},
-    {"id": "jwang", "name": "JWangBot", "pi": "Jingxin Wang"},
-    {"id": "hogenesch", "name": "HogeneschBot", "pi": "John Hogenesch"},
-    {"id": "lee", "name": "LeeBot", "pi": "Ki-Bum Lee"},
-    {"id": "alfonta", "name": "AlfontaBot", "pi": "Lital Alfonta"},
-    {"id": "meijler", "name": "MeijlerBot", "pi": "Michael Meijler"},
-    {"id": "koh", "name": "KohBot", "pi": "Minseob Koh"},
-    {"id": "goto", "name": "GotoBot", "pi": "Natalie Goto"},
-    {"id": "lin", "name": "LinBot", "pi": "Qing Lin"},
-    {"id": "zuckermann", "name": "ZuckermannBot", "pi": "Ronald Zuckermann"},
-    {"id": "rwang", "name": "RWangBot", "pi": "Rongsheng Wang"},
-    {"id": "mehl", "name": "MehlBot", "pi": "Ryan Mehl"},
-    {"id": "cherry", "name": "CherryBot", "pi": "Sara Cherry"},
-    {"id": "schiller", "name": "SchillerBot", "pi": "Stefan Schiller"},
-    {"id": "santoro", "name": "SantoroBot", "pi": "Stephen Santoro"},
-    {"id": "cropp", "name": "CroppBot", "pi": "Thomas Ashton Cropp"},
-    {"id": "scanlan", "name": "ScanlanBot", "pi": "Thomas Scanlan"},
-    {"id": "xchen", "name": "XChenBot", "pi": "Xiaoyuan Chen"},
-    {"id": "xwu", "name": "XWuBot", "pi": "Xu Wu"},
-    {"id": "zhang", "name": "ZhangBot", "pi": "Yong Zhang"},
-    {"id": "chang", "name": "ChangBot", "pi": "Young-Tae Chang"},
-    {"id": "yliu", "name": "YLiuBot", "pi": "Yuzhong Liu"},
-    {"id": "magliery", "name": "MaglieryBot", "pi": "Thomas Magliery"},
-]
 
 # Keywords for channel-profile matching
 _CHANNEL_KEYWORDS: dict[str, list[str]] = {
@@ -228,6 +103,7 @@ _UNIVERSAL_CHANNELS = {"general", "funding-opportunities"}
 # unnecessary; polling every turn was saturating one bot token's rate limit.
 CHANNEL_POLL_INTERVAL = 15.0   # seconds between conversations.history sweeps
 PROPOSAL_POLL_INTERVAL = 30.0  # seconds between conversations.replies sweeps
+ROSTER_POLL_INTERVAL = 30.0    # seconds between AgentRegistry roster re-syncs
 
 # Agents exempt from the unreviewed-proposal Phase-5 block — they keep making
 # new posts no matter how many of their proposals are awaiting review. Scoped to
@@ -332,6 +208,9 @@ class SimulationEngine:
         self._last_channel_poll: float = 0.0
         self._last_proposal_poll: float = 0.0
         self._poll_client_cursor: int = 0
+        # Last wall-clock time the AgentRegistry roster was re-synced (live
+        # add/remove of agents as their status flips). See _sync_roster_from_db.
+        self._last_roster_poll: float = 0.0
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -432,6 +311,10 @@ class SimulationEngine:
             # the web app. Both are DB-driven, so a single tick picks them up.
             await self._sync_proposal_reviews_from_db()
             await self._sync_private_channels_from_db()
+
+            # Pick up active/inactive flips (and newly-provisioned tokens) from
+            # the DB so the roster changes live, without a process restart.
+            await self._sync_roster_from_db()
 
             # Pick up profile edits made from the web app (separate process).
             self._sync_profiles_from_disk()
@@ -2920,6 +2803,93 @@ class SimulationEngine:
                     "[%s] Reloaded profiles from disk (external edit detected)",
                     agent.agent_id,
                 )
+
+    async def _sync_roster_from_db(self) -> None:
+        """Re-sync the live agent roster from AgentRegistry (status=='active').
+
+        Adds agents that have just been activated (and have a usable token) and
+        removes agents that have been inactivated/suspended — all without a
+        process restart. Tokens are read from the DB row (falling back to .env),
+        so a freshly provisioned token is picked up on the next tick too.
+
+        Mutates self.agents / self.slack_clients IN PLACE: PIHandler holds those
+        dicts by reference, so they must never be reassigned.
+        """
+        if not self.session_factory:
+            return
+        now = time.time()
+        if now - self._last_roster_poll < ROSTER_POLL_INTERVAL:
+            return
+        self._last_roster_poll = now
+
+        try:
+            from sqlalchemy import select as sa_select
+
+            from src.agent.slack_client import AgentSlackClient
+            from src.models import AgentRegistry
+            from src.services.slack_tokens import env_token, is_valid_token
+
+            async with self.session_factory() as db:
+                rows = (await db.execute(
+                    sa_select(
+                        AgentRegistry.agent_id,
+                        AgentRegistry.bot_name,
+                        AgentRegistry.pi_name,
+                        AgentRegistry.slack_bot_token,
+                    ).where(AgentRegistry.status == "active")
+                )).all()
+
+            desired = {r.agent_id: r for r in rows}
+            current = set(self.agents)
+            to_remove = current - set(desired)
+            to_add = set(desired) - current
+            if not to_remove and not to_add:
+                return
+
+            # --- Removals: agent no longer active ---------------------------
+            for aid in to_remove:
+                self.agents.pop(aid, None)
+                self.slack_clients.pop(aid, None)  # Web API only — no socket to close
+                self._dm_poll_cursors.pop(aid, None)
+                bot_name = next(
+                    (n for n, a in self._bot_name_to_id.items() if a == aid), None
+                )
+                if bot_name:
+                    self._bot_name_to_id.pop(bot_name, None)
+                logger.info("[roster] Removed inactive agent %s from live roster", aid)
+
+            # --- Additions: agent newly active ------------------------------
+            for aid in to_add:
+                r = desired[aid]
+                token = r.slack_bot_token if is_valid_token(r.slack_bot_token) else env_token(aid)
+                if not is_valid_token(token):
+                    logger.info(
+                        "[roster] Agent %s is active but has no usable token yet — "
+                        "skipping (will retry next sync once a token is set)", aid,
+                    )
+                    continue
+                client = AgentSlackClient(agent_id=aid, bot_token=token)
+                if not client.connect():
+                    logger.warning("[roster] Slack connect failed for new agent %s — skipping", aid)
+                    continue
+                agent = Agent(agent_id=aid, bot_name=r.bot_name, pi_name=r.pi_name)
+                # In-place inserts (PIHandler shares these dicts by reference).
+                self.agents[aid] = agent
+                self.slack_clients[aid] = client
+                self._bot_name_to_id[agent.bot_name.lower()] = aid
+                logger.info("[roster] Added newly-active agent %s to live roster", aid)
+
+            # Rebuild cross-agent derived structures after any membership change.
+            self._build_lab_directories()
+            self.message_log.set_bot_name_map(self._bot_name_to_id)
+            # Rebuild PI mappings from scratch (clear in place — PIHandler shares
+            # this dict by reference; _load_pi_mappings appends, so it must start
+            # empty to avoid accumulating duplicates).
+            self._pi_slack_id_to_agent_ids.clear()
+            await self._load_pi_mappings()
+        except Exception as exc:
+            # A transient DB hiccup must never crash the main loop.
+            logger.warning("[roster] roster sync failed: %s", exc)
 
     async def _sync_proposal_reviews_from_db(self) -> None:
         """Check DB for web-app proposal reviews and mark in-memory proposals as reviewed.

@@ -746,13 +746,10 @@ async def admin_agents(
     users_result = await db.execute(select(User).order_by(User.name))
     all_users = users_result.scalars().all()
 
-    # Check which agents have .env tokens
-    from src.config import get_settings
-    settings = get_settings()
-    env_tokens = settings.get_slack_tokens()
+    # Which agents have a usable bot token (DB column preferred, .env fallback).
+    from src.services.slack_tokens import token_for_agent_row
     env_token_agents = {
-        aid for aid, tok in env_tokens.items()
-        if tok and not tok.startswith("xoxb-placeholder")
+        a.agent_id for a in agents if token_for_agent_row(a)
     }
 
     # Count unreviewed proposals per agent
@@ -830,6 +827,8 @@ async def admin_agent_detail(
             active_admin="agents",
             agent=agent,
             linked_user=linked_user,
+            slack_error=request.query_params.get("slack_error"),
+            slack_ok=request.query_params.get("slack_ok"),
         ),
     )
 
@@ -882,6 +881,65 @@ async def admin_reject_agent(
     await db.commit()
 
     return RedirectResponse(url="/admin/agents", status_code=302)
+
+
+@router.post("/agents/{agent_id}/slack/provision")
+async def admin_provision_slack(
+    agent_id: uuid.UUID,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_admin_user),
+):
+    """Create a Slack app for this agent and redirect to Slack's install/consent
+    screen. Slack redirects back to the callback below, which saves the token."""
+    from src.services.admin_provisioning import ProvisioningError, start_provisioning
+
+    agent = (
+        await db.execute(select(AgentRegistry).where(AgentRegistry.id == agent_id))
+    ).scalar_one_or_none()
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    try:
+        oauth_url = await start_provisioning(db, agent)
+    except ProvisioningError as exc:
+        return RedirectResponse(
+            url=f"/admin/agents/{agent_id}?slack_error={str(exc)[:200]}",
+            status_code=302,
+        )
+    return RedirectResponse(url=oauth_url, status_code=302)
+
+
+@router.get("/agents/slack/callback")
+async def admin_provision_slack_callback(
+    request: Request,
+    code: str | None = Query(None),
+    state: str | None = Query(None),
+    error: str | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_admin_user),
+):
+    """OAuth redirect target: exchange the code for a bot token and store it on
+    the agent, then return to the agent's approve page with the token filled."""
+    from src.services.admin_provisioning import ProvisioningError, complete_provisioning
+
+    if error:
+        return RedirectResponse(
+            url=f"/admin/agents?slack_error=Slack returned: {error}", status_code=302
+        )
+    if not code or not state:
+        return RedirectResponse(
+            url="/admin/agents?slack_error=Missing code or state from Slack",
+            status_code=302,
+        )
+
+    try:
+        agent = await complete_provisioning(db, state, code)
+    except ProvisioningError as exc:
+        return RedirectResponse(
+            url=f"/admin/agents?slack_error={str(exc)[:200]}", status_code=302
+        )
+    return RedirectResponse(url=f"/admin/agents/{agent.id}?slack_ok=1", status_code=302)
 
 
 @router.post("/agents/{agent_id}/link")

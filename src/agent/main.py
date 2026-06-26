@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 import typer
 
 from src.agent.agent import Agent
-from src.agent.simulation import PILOT_LABS, SimulationEngine
+from src.agent.simulation import SimulationEngine
 from src.config import get_settings
 
 logging.basicConfig(
@@ -36,7 +36,7 @@ def main(
     no_db: bool = typer.Option(False, "--no-db", help="Skip database logging"),
     fresh: bool = typer.Option(False, "--fresh", help="Wipe simulation data and start fresh"),
     reset_cursors: bool = typer.Option(False, "--reset-cursors", help="Reset scan cursors so agents re-read all posts"),
-    all_agents: bool = typer.Option(False, "--all-agents", help="Run every PILOT_LABS agent regardless of status (legacy behavior; default is status='active' only)"),
+    all_agents: bool = typer.Option(False, "--all-agents", help="Run every AgentRegistry row regardless of status (default is status='active' only)"),
 ):
     """Run the turn-based agent simulation."""
     asyncio.run(_run_simulation(max_runtime, budget, mock, no_db, fresh, reset_cursors, all_agents))
@@ -53,46 +53,55 @@ async def _run_simulation(
 ) -> None:
     settings = get_settings()
 
-    # Determine which agents participate. By default the run is scoped to agents
-    # with AgentRegistry.status == 'active' (intersected with PILOT_LABS + a valid
-    # token below). Pass --all-agents (or --no-db) to run every PILOT_LABS entry.
-    active_ids: set[str] | None = None
-    if not no_db and not all_agents:
-        from sqlalchemy import select as _select
-        from sqlalchemy.ext.asyncio import async_sessionmaker as _asm, create_async_engine as _cae
-        from src.models import AgentRegistry as _AR
-        _engine = _cae(settings.database_url)
-        try:
-            _sf = _asm(_engine, expire_on_commit=False)
-            async with _sf() as _db:
-                _rows = await _db.execute(_select(_AR.agent_id).where(_AR.status == "active"))
-                active_ids = {r[0] for r in _rows}
-        finally:
-            await _engine.dispose()
-        if not active_ids:
-            logger.warning("No agents with status='active' found — falling back to all PILOT_LABS agents")
-            active_ids = None
+    # The roster is sourced entirely from the AgentRegistry table (the DB is the
+    # single source of truth). By default we run status=='active' agents; pass
+    # --all-agents to include every row regardless of status (the token gate
+    # below still drops anyone without a valid bot token). The roster read runs
+    # even under --no-db (it is independent of event logging).
+    from sqlalchemy import select as _select
+    from sqlalchemy.ext.asyncio import async_sessionmaker as _asm, create_async_engine as _cae
+    from src.models import AgentRegistry as _AR
 
-    # Create agent instances
-    agents = [
-        Agent(agent_id=lab["id"], bot_name=lab["name"], pi_name=lab["pi"])
-        for lab in PILOT_LABS
-        if active_ids is None or lab["id"] in active_ids
-    ]
+    roster_tokens: dict[str, str | None] = {}
+    _engine = _cae(settings.database_url)
+    try:
+        _sf = _asm(_engine, expire_on_commit=False)
+        async with _sf() as _db:
+            _stmt = _select(
+                _AR.agent_id, _AR.bot_name, _AR.pi_name, _AR.slack_bot_token
+            )
+            if not all_agents:
+                _stmt = _stmt.where(_AR.status == "active")
+            _rows = (await _db.execute(_stmt.order_by(_AR.agent_id))).all()
+    finally:
+        await _engine.dispose()
+
+    agents = [Agent(agent_id=r.agent_id, bot_name=r.bot_name, pi_name=r.pi_name) for r in _rows]
+    roster_tokens = {r.agent_id: r.slack_bot_token for r in _rows}
+
+    if not agents:
+        logger.error(
+            "No agents in roster (filter=%s) — nothing to run; exiting.",
+            "all statuses (--all-agents)" if all_agents else "status='active'",
+        )
+        return
+
     logger.info(
-        "Agents selected: %d/%d (status filter %s)",
-        len(agents), len(PILOT_LABS),
-        "off (--all-agents/--no-db)" if active_ids is None else "active-only",
+        "Roster: %d agents (%s)",
+        len(agents), "all statuses" if all_agents else "status='active'",
     )
 
-    # Set up Slack clients (Web API only, no Socket Mode)
+    # Set up Slack clients (Web API only, no Socket Mode). Tokens come from the
+    # AgentRegistry row, falling back to the legacy .env/config mapping.
     slack_clients = {}
     if not mock:
         from src.agent.slack_client import AgentSlackClient
-        slack_tokens = settings.get_slack_tokens()
+        from src.services.slack_tokens import env_token, is_valid_token
         for agent in agents:
-            bot_token = slack_tokens.get(agent.agent_id, "")
-            if bot_token and not bot_token.startswith("xoxb-placeholder"):
+            bot_token = roster_tokens.get(agent.agent_id)
+            if not is_valid_token(bot_token):
+                bot_token = env_token(agent.agent_id)
+            if is_valid_token(bot_token):
                 client = AgentSlackClient(
                     agent_id=agent.agent_id,
                     bot_token=bot_token,

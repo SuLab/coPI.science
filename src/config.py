@@ -27,6 +27,13 @@ class Settings(BaseSettings):
     base_url: str = "http://localhost:8000"
     allow_http_sessions: bool = True
 
+    # Slack app-configuration token (xoxe-...) used to create bot apps via the
+    # Manifest API during provisioning. These seed the first rotation; the
+    # rotated pair is persisted in the AppSetting KV table (Slack rotates the
+    # config token on every use). See src/services/slack_provisioning.py.
+    slack_config_token: str = ""
+    slack_config_refresh_token: str = ""
+
     # AWS SES
     aws_region: str = "us-east-2"
     ses_sender_email: str = "noreply@copi.science"
