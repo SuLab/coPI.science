@@ -18,6 +18,9 @@ class AccessAllowlist(Base):
     )
     orcid: Mapped[str] = mapped_column(String(50), unique=True, nullable=False)
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Fallback email used at registration when the ORCID public API exposes no
+    # email (private by default). See resolve_email() in src/routers/auth.py.
+    email: Mapped[str | None] = mapped_column(String(255), nullable=True)
     added_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("users.id", ondelete="SET NULL"),

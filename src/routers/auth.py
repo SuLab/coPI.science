@@ -104,11 +104,20 @@ async def auth_callback(
         logger.warning("Failed to fetch ORCID profile for %s: %s", orcid_id, exc)
         profile_data = {"orcid": orcid_id, "name": orcid_name}
 
-    # Check the allowlist — ORCIDs on it bypass the pre-release access gate
+    # Check the allowlist — ORCIDs on it bypass the pre-release access gate.
+    # Keep the row (not just a bool): it also carries a fallback email used when
+    # the ORCID public API exposes none (private by default).
     allowlist_result = await db.execute(
         select(AccessAllowlist).where(AccessAllowlist.orcid == orcid_id)
     )
-    is_allowlisted = allowlist_result.scalar_one_or_none() is not None
+    allowlist_entry = allowlist_result.scalar_one_or_none()
+    is_allowlisted = allowlist_entry is not None
+
+    # Resolve a best-effort email: prefer the ORCID-published address, else fall
+    # back to the allowlist hint. Structured so more strategies can chain later.
+    resolved_email = profile_data.get("email") or (
+        allowlist_entry.email if allowlist_entry else None
+    )
 
     # Find or create user
     result = await db.execute(select(User).where(User.orcid == orcid_id))
@@ -119,7 +128,7 @@ async def auth_callback(
         user = User(
             orcid=orcid_id,
             name=profile_data.get("name") or orcid_name,
-            email=profile_data.get("email"),
+            email=resolved_email,
             institution=profile_data.get("institution"),
             department=profile_data.get("department"),
             access_status="allowed" if is_allowlisted else "pending",
@@ -146,8 +155,8 @@ async def auth_callback(
             user.institution = profile_data["institution"]
         if not user.department and profile_data.get("department"):
             user.department = profile_data["department"]
-        if not user.email and profile_data.get("email"):
-            user.email = profile_data["email"]
+        if not user.email and resolved_email:
+            user.email = resolved_email
         # Allowlist can promote an existing pending user to allowed
         if is_allowlisted and user.access_status != "allowed":
             user.access_status = "allowed"
