@@ -160,13 +160,20 @@ async def unsubscribe(
     token: str,
     db: AsyncSession = Depends(get_db),
 ):
-    """One-click unsubscribe from email notifications. No auth required."""
+    """Show the unsubscribe confirmation page. No auth required.
+
+    This GET is intentionally read-only. Email-security scanners (Outlook
+    SafeLinks, Defender, Proofpoint, etc.) auto-fetch every link in a message,
+    so a state-mutating GET would silently unsubscribe recipients. The actual
+    change happens only on the POST below (confirmation button or RFC 8058
+    one-click). See specs/ and the project memory on the unsubscribe landmine.
+    """
     user_id_str = _verify_unsubscribe_token(token)
     if not user_id_str:
         return templates.TemplateResponse(
             request,
             "unsubscribe.html",
-            {"request": request, "success": False, "error": "Invalid or expired link."},
+            {"request": request, "state": "error", "error": "Invalid or expired link."},
         )
 
     result = await db.execute(select(User).where(User.id == user_id_str))
@@ -175,16 +182,13 @@ async def unsubscribe(
         return templates.TemplateResponse(
             request,
             "unsubscribe.html",
-            {"request": request, "success": False, "error": "User not found."},
+            {"request": request, "state": "error", "error": "User not found."},
         )
-
-    user.email_notification_frequency = "off"
-    await db.commit()
 
     return templates.TemplateResponse(
         request,
         "unsubscribe.html",
-        {"request": request, "success": True, "error": None},
+        {"request": request, "state": "confirm", "error": None, "token": token},
     )
 
 
@@ -194,17 +198,32 @@ async def unsubscribe_post(
     token: str,
     db: AsyncSession = Depends(get_db),
 ):
-    """RFC 8058 one-click unsubscribe via POST."""
+    """Perform the unsubscribe. Reached via the confirmation button on the GET
+    page or via RFC 8058 one-click (List-Unsubscribe-Post)."""
     user_id_str = _verify_unsubscribe_token(token)
     if not user_id_str:
-        return HTMLResponse("Invalid token", status_code=400)
+        return templates.TemplateResponse(
+            request,
+            "unsubscribe.html",
+            {"request": request, "state": "error", "error": "Invalid or expired link."},
+            status_code=400,
+        )
 
     result = await db.execute(select(User).where(User.id == user_id_str))
     user = result.scalar_one_or_none()
     if not user:
-        return HTMLResponse("User not found", status_code=404)
+        return templates.TemplateResponse(
+            request,
+            "unsubscribe.html",
+            {"request": request, "state": "error", "error": "User not found."},
+            status_code=404,
+        )
 
     user.email_notification_frequency = "off"
     await db.commit()
 
-    return HTMLResponse("Unsubscribed successfully", status_code=200)
+    return templates.TemplateResponse(
+        request,
+        "unsubscribe.html",
+        {"request": request, "state": "success", "error": None},
+    )

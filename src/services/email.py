@@ -9,6 +9,58 @@ logger = logging.getLogger(__name__)
 WELCOME_IMAGE_PATH = Path(__file__).resolve().parents[2] / "static" / "email" / "welcome_agent.png"
 WELCOME_IMAGE_CID = "copi_agent_screenshot"
 
+# Shared visual language for every CoPI email (aligned to the welcome email).
+FONT_STACK = "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif"
+FOOTER_TAGLINE = "CoPI — Research Collaboration Platform &bull; SU LAB, Scripps Research"
+
+
+def email_shell_open(subtitle: str = "Research Collaboration") -> str:
+    """Opening wrapper + branded header, matching the welcome email style.
+
+    Every CoPI email should wrap its card(s) between ``email_shell_open()`` and
+    ``email_shell_close()`` so headers, spacing, and background stay identical.
+    """
+    subtitle_html = (
+        f'<span style="margin-left: 8px; font-size: 14px; color: #6b7280;">{subtitle}</span>'
+        if subtitle
+        else ""
+    )
+    return (
+        f'<div style="font-family: {FONT_STACK}; max-width: 600px; margin: 0 auto; '
+        f'padding: 40px 20px; background: #f9fafb;">\n'
+        f'    <div style="text-align: center; margin-bottom: 28px;">\n'
+        f'        <span style="font-size: 24px; font-weight: 700; color: #4f46e5;">CoPI</span>\n'
+        f'        {subtitle_html}\n'
+        f'    </div>'
+    )
+
+
+def email_shell_close(
+    settings_url: str | None = None, unsubscribe_url: str | None = None
+) -> str:
+    """Shared footer (identical across all CoPI emails) plus the closing tag.
+
+    Renders the branded tagline always, then the "Manage email preferences" and
+    "Unsubscribe" links when their URLs are supplied (omitted for transactional
+    emails such as delegate invitations).
+    """
+    link_style = "color: #9ca3af; font-size: 12px; text-decoration: underline;"
+    links = []
+    if settings_url:
+        links.append(f'<a href="{settings_url}" style="{link_style}">Manage email preferences</a>')
+    if unsubscribe_url:
+        links.append(f'<a href="{unsubscribe_url}" style="{link_style}">Unsubscribe</a>')
+    links_html = '<span style="color: #d1d5db; margin: 0 8px;">|</span>'.join(links)
+    return (
+        f'\n    <div style="text-align: center; margin-top: 24px;">\n'
+        f'        <p style="color: #9ca3af; font-size: 12px; margin: 0 0 6px;">\n'
+        f'            {FOOTER_TAGLINE}\n'
+        f'        </p>\n'
+        f'        {links_html}\n'
+        f'    </div>\n'
+        f'</div>'
+    )
+
 
 def is_allowed_recipient(to_email: str | None) -> bool:
     """Return False when an outbound allowlist is set and `to_email` is not on it."""
@@ -45,11 +97,7 @@ def send_delegate_invitation(
         f"You'll sign in with your ORCID account.\n"
     )
 
-    html_body = f"""<div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 560px; margin: 0 auto; padding: 40px 20px;">
-    <div style="text-align: center; margin-bottom: 32px;">
-        <span style="font-size: 24px; font-weight: 700; color: #4f46e5;">CoPI</span>
-        <span style="margin-left: 8px; font-size: 14px; color: #6b7280;">Research Collaboration</span>
-    </div>
+    html_body = email_shell_open() + f"""
     <div style="background: #fff; border: 1px solid #e5e7eb; border-radius: 12px; padding: 32px;">
         <h2 style="margin: 0 0 16px; font-size: 18px; color: #111827;">You've been invited</h2>
         <p style="color: #374151; line-height: 1.6; margin: 0 0 16px;">
@@ -70,8 +118,7 @@ def send_delegate_invitation(
         <p style="color: #9ca3af; font-size: 13px; margin: 24px 0 0; text-align: center;">
             This invitation expires in 30 days. You'll sign in with your ORCID account.
         </p>
-    </div>
-</div>"""
+    </div>""" + email_shell_close()
 
     try:
         import boto3
@@ -116,15 +163,10 @@ def build_welcome_email(to_email: str, name: str | None = None, user_id: str | N
     unsubscribe_url = None
     if user_id:
         from src.services.email_notifications import _generate_unsubscribe_token
-        unsubscribe_url = f"{base}/unsubscribe/{_generate_unsubscribe_token(str(user_id))}"
+        unsubscribe_url = f"{base}/settings/unsubscribe/{_generate_unsubscribe_token(str(user_id))}"
 
-    # Pre-rendered unsubscribe snippets (omitted when no user_id is available).
+    # Plain-text unsubscribe snippet (omitted when no user_id is available).
     unsub_text = f"Unsubscribe from CoPI emails: {unsubscribe_url}" if unsubscribe_url else ""
-    unsub_html = (
-        f'<span style="color: #d1d5db; margin: 0 8px;">|</span>'
-        f'<a href="{unsubscribe_url}" style="color: #9ca3af; font-size: 12px; text-decoration: underline;">Unsubscribe</a>'
-        if unsubscribe_url else ""
-    )
 
     greeting_name = (name or "").strip().split(" ")[0] if name else ""
     greeting = f"Hi {greeting_name}," if greeting_name else "Hi there,"
@@ -173,11 +215,7 @@ Manage email preferences: {settings_url}
 {unsub_text}
 """
 
-    html_body = f"""<div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto; padding: 40px 20px; background: #f9fafb;">
-    <div style="text-align: center; margin-bottom: 28px;">
-        <span style="font-size: 24px; font-weight: 700; color: #4f46e5;">CoPI</span>
-        <span style="margin-left: 8px; font-size: 14px; color: #6b7280;">Research Collaboration</span>
-    </div>
+    html_body = email_shell_open() + f"""
 
     <div style="background: #fff; border: 1px solid #e5e7eb; border-radius: 12px; padding: 32px; margin-bottom: 16px;">
         <h1 style="margin: 0 0 8px; font-size: 22px; color: #111827;">Welcome to CoPI 🎉</h1>
@@ -265,16 +303,7 @@ Manage email preferences: {settings_url}
                 reviewing promptly keeps it active.
             </p>
         </div>
-    </div>
-
-    <div style="text-align: center; margin-top: 24px;">
-        <p style="color: #9ca3af; font-size: 12px; margin: 0 0 6px;">
-            CoPI — Research Collaboration Platform &bull; Scripps Research
-        </p>
-        <a href="{settings_url}" style="color: #9ca3af; font-size: 12px; text-decoration: underline;">Manage email preferences</a>
-        {unsub_html}
-    </div>
-</div>"""
+    </div>""" + email_shell_close(settings_url, unsubscribe_url)
 
     msg = email.mime.multipart.MIMEMultipart("related")
     msg["From"] = settings.ses_sender_email

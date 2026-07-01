@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import selectinload
 
 from src.config import get_settings
+from src.services.email import email_shell_open, email_shell_close
 from src.models import (
     AgentDelegate,
     AgentRegistry,
@@ -334,7 +335,7 @@ async def send_proposal_notification(
     reply_to = f"review+{reply_token}@{settings.ses_reply_domain}"
     dashboard_url = f"{settings.base_url}/agent/{agent.agent_id}/dashboard"
     unsubscribe_token = _generate_unsubscribe_token(str(user.id))
-    unsubscribe_url = f"{settings.base_url}/unsubscribe/{unsubscribe_token}"
+    unsubscribe_url = f"{settings.base_url}/settings/unsubscribe/{unsubscribe_token}"
     settings_url = f"{settings.base_url}/settings"
 
     summary = thread_decision.summary_text or "(No summary available)"
@@ -383,11 +384,7 @@ async def send_proposal_notification(
         f"Manage preferences: {settings_url}\n"
     )
 
-    html_body = f"""<div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto; padding: 40px 20px;">
-    <div style="text-align: center; margin-bottom: 32px;">
-        <span style="font-size: 24px; font-weight: 700; color: #4f46e5;">CoPI</span>
-        <span style="margin-left: 8px; font-size: 14px; color: #6b7280;">Research Collaboration</span>
-    </div>
+    html_body = email_shell_open() + f"""
     <div style="background: #fff; border: 1px solid #e5e7eb; border-radius: 12px; padding: 32px;">
         <h2 style="margin: 0 0 8px; font-size: 18px; color: #111827;">New collaboration proposal</h2>
         <p style="color: #6b7280; font-size: 14px; margin: 0 0 20px;">
@@ -414,13 +411,7 @@ async def send_proposal_notification(
         </div>
 
         {backlog_html}
-    </div>
-    <div style="text-align: center; margin-top: 24px;">
-        <a href="{unsubscribe_url}" style="color: #9ca3af; font-size: 12px; text-decoration: underline;">Unsubscribe</a>
-        <span style="color: #d1d5db; margin: 0 8px;">|</span>
-        <a href="{settings_url}" style="color: #9ca3af; font-size: 12px; text-decoration: underline;">Manage preferences</a>
-    </div>
-</div>"""
+    </div>""" + email_shell_close(settings_url, unsubscribe_url)
 
     try:
         import boto3
@@ -497,6 +488,7 @@ async def _send_paused_email(user: User) -> None:
     settings = get_settings()
     dashboard_url = f"{settings.base_url}/agent"
     settings_url = f"{settings.base_url}/settings"
+    unsubscribe_url = f"{settings.base_url}/settings/unsubscribe/{_generate_unsubscribe_token(str(user.id))}"
 
     subject = "CoPI proposal notifications paused"
 
@@ -507,10 +499,7 @@ async def _send_paused_email(user: User) -> None:
         f"You can adjust your notification frequency anytime in settings: {settings_url}\n"
     )
 
-    html_body = f"""<div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 560px; margin: 0 auto; padding: 40px 20px;">
-    <div style="text-align: center; margin-bottom: 32px;">
-        <span style="font-size: 24px; font-weight: 700; color: #4f46e5;">CoPI</span>
-    </div>
+    html_body = email_shell_open() + f"""
     <div style="background: #fff; border: 1px solid #e5e7eb; border-radius: 12px; padding: 32px;">
         <h2 style="margin: 0 0 16px; font-size: 18px; color: #111827;">Notifications paused</h2>
         <p style="color: #374151; line-height: 1.6; margin: 0 0 16px;">
@@ -526,13 +515,7 @@ async def _send_paused_email(user: User) -> None:
                 Review Proposals
             </a>
         </div>
-        <div style="text-align: center;">
-            <a href="{settings_url}" style="color: #6b7280; font-size: 13px; text-decoration: underline;">
-                Manage notification preferences
-            </a>
-        </div>
-    </div>
-</div>"""
+    </div>""" + email_shell_close(settings_url, unsubscribe_url)
 
     try:
         import boto3
@@ -780,7 +763,7 @@ async def _send_status_overview(
     period = f"{start.strftime('%b %d')} – {now.strftime('%b %d, %Y')}"
     dashboard_url = f"{settings.base_url}/agent"
     unsubscribe_token = _generate_unsubscribe_token(str(user.id))
-    unsubscribe_url = f"{settings.base_url}/unsubscribe/{unsubscribe_token}"
+    unsubscribe_url = f"{settings.base_url}/settings/unsubscribe/{unsubscribe_token}"
     settings_url = f"{settings.base_url}/settings"
 
     subject = (
@@ -819,11 +802,7 @@ async def _send_status_overview(
         for pair, summary, status in idea_lines
     ) or '<li style="color:#9ca3af;">No new proposals this period.</li>'
 
-    html_body = f"""<div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto; padding: 40px 20px;">
-    <div style="text-align: center; margin-bottom: 24px;">
-        <span style="font-size: 24px; font-weight: 700; color: #4f46e5;">CoPI</span>
-        <span style="margin-left: 8px; font-size: 14px; color: #6b7280;">Activity overview</span>
-    </div>
+    html_body = email_shell_open() + f"""
     <div style="background: #fff; border: 1px solid #e5e7eb; border-radius: 12px; padding: 32px;">
         <h2 style="margin: 0 0 4px; font-size: 18px; color: #111827;">Your CoPI activity</h2>
         <p style="color: #6b7280; font-size: 13px; margin: 0 0 20px;">{period}</p>
@@ -842,13 +821,7 @@ async def _send_status_overview(
         <div style="text-align:center;margin:24px 0;">
             <a href="{dashboard_url}" style="display:inline-block;padding:12px 32px;background:#4f46e5;color:#fff;text-decoration:none;border-radius:8px;font-weight:600;font-size:14px;">Review pending proposals</a>
         </div>
-    </div>
-    <div style="text-align:center;margin-top:24px;">
-        <a href="{unsubscribe_url}" style="color:#9ca3af;font-size:12px;text-decoration:underline;">Unsubscribe</a>
-        <span style="color:#d1d5db;margin:0 8px;">|</span>
-        <a href="{settings_url}" style="color:#9ca3af;font-size:12px;text-decoration:underline;">Manage preferences</a>
-    </div>
-</div>"""
+    </div>""" + email_shell_close(settings_url, unsubscribe_url)
 
     sent = _send_html_email(
         user.email, subject, text_body, html_body, unsubscribe_url=unsubscribe_url
@@ -983,7 +956,7 @@ async def _send_new_proposal_email(
     reply_to = f"review+{reply_token}@{settings.ses_reply_domain}"
     dashboard_url = f"{settings.base_url}/agent/{agent.agent_id}/dashboard"
     unsubscribe_token = _generate_unsubscribe_token(str(user.id))
-    unsubscribe_url = f"{settings.base_url}/unsubscribe/{unsubscribe_token}"
+    unsubscribe_url = f"{settings.base_url}/settings/unsubscribe/{unsubscribe_token}"
     settings_url = f"{settings.base_url}/settings"
 
     subject = f"{agent.bot_name} proposed a collaboration with {other_bot_name}"
@@ -998,11 +971,7 @@ async def _send_new_proposal_email(
         f"Manage preferences: {settings_url}\n"
     )
 
-    html_body = f"""<div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto; padding: 40px 20px;">
-    <div style="text-align: center; margin-bottom: 24px;">
-        <span style="font-size: 24px; font-weight: 700; color: #4f46e5;">CoPI</span>
-        <span style="margin-left: 8px; font-size: 14px; color: #6b7280;">New proposal</span>
-    </div>
+    html_body = email_shell_open() + f"""
     <div style="background: #fff; border: 1px solid #e5e7eb; border-radius: 12px; padding: 32px;">
         <h2 style="margin: 0 0 4px; font-size: 18px; color: #111827;">\U0001f9ea {agent.bot_name} × {other_bot_name}</h2>
         <p style="color: #6b7280; font-size: 13px; margin: 0 0 20px;">#{channel}</p>
@@ -1015,13 +984,7 @@ async def _send_new_proposal_email(
         <div style="text-align:center;margin:24px 0;">
             <a href="{dashboard_url}" style="display:inline-block;padding:12px 32px;background:#4f46e5;color:#fff;text-decoration:none;border-radius:8px;font-weight:600;font-size:14px;">Review this proposal</a>
         </div>
-    </div>
-    <div style="text-align:center;margin-top:24px;">
-        <a href="{unsubscribe_url}" style="color:#9ca3af;font-size:12px;text-decoration:underline;">Unsubscribe</a>
-        <span style="color:#d1d5db;margin:0 8px;">|</span>
-        <a href="{settings_url}" style="color:#9ca3af;font-size:12px;text-decoration:underline;">Manage preferences</a>
-    </div>
-</div>"""
+    </div>""" + email_shell_close(settings_url, unsubscribe_url)
 
     sent = _send_html_email(
         user.email, subject, text_body, html_body,

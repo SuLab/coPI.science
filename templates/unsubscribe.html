@@ -9,7 +9,7 @@
 <body class="bg-gray-50 min-h-screen flex items-center justify-center">
     <div class="max-w-md mx-auto text-center p-8">
         <span class="text-2xl font-bold text-indigo-600">CoPI</span>
-        {% if success %}
+        {% if state == "success" %}
         <div class="mt-8">
             <h1 class="text-xl font-semibold text-gray-900 mb-2">Unsubscribed</h1>
             <p class="text-gray-600 text-sm">
@@ -17,6 +17,19 @@
                 You can re-enable notifications anytime from your
                 <a href="/settings" class="text-indigo-600 hover:text-indigo-700 underline">settings</a>.
             </p>
+        </div>
+        {% elif state == "confirm" %}
+        <div class="mt-8">
+            <h1 class="text-xl font-semibold text-gray-900 mb-2">Unsubscribe from CoPI emails?</h1>
+            <p class="text-gray-600 text-sm mb-6">
+                Click below to stop receiving proposal notification emails.
+            </p>
+            <form method="post" action="/settings/unsubscribe/{{ token }}">
+                <button type="submit"
+                        class="bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-medium px-5 py-2 rounded-md">
+                    Confirm unsubscribe
+                </button>
+            </form>
         </div>
         {% else %}
         <div class="mt-8">
