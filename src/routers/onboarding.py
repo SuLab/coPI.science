@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.database import get_db
 from src.dependencies import get_current_user
+from src.routers.auth import pop_post_login_redirect
 from src.models import AgentRegistry, Job, ResearcherProfile, User
 from src.services.profile_export import (
     PRIVATE_PROFILES_DIR,
@@ -305,8 +306,13 @@ async def save_private_profile(
     # Check for pending invite token
     pending_token = request.session.pop("pending_invite_token", None)
     if pending_token:
+        request.session.pop("post_login_redirect", None)
         return RedirectResponse(url=f"/invite/{pending_token}", status_code=302)
 
+    # Resume the page the user originally requested before being sent to login.
+    next_url = pop_post_login_redirect(request)
+    if next_url:
+        return RedirectResponse(url=next_url, status_code=302)
     return RedirectResponse(url="/profile?onboarding_complete=1", status_code=302)
 
 
@@ -325,8 +331,13 @@ async def complete_onboarding(
 
     pending_token = request.session.pop("pending_invite_token", None)
     if pending_token:
+        request.session.pop("post_login_redirect", None)
         return RedirectResponse(url=f"/invite/{pending_token}", status_code=302)
 
+    # Resume the page the user originally requested before being sent to login.
+    next_url = pop_post_login_redirect(request)
+    if next_url:
+        return RedirectResponse(url=next_url, status_code=302)
     return RedirectResponse(url="/profile?onboarding_complete=1", status_code=302)
 
 

@@ -3,6 +3,7 @@
 import uuid
 import logging
 from typing import Annotated
+from urllib.parse import quote
 
 from fastapi import Cookie, Depends, HTTPException, Request, status
 from sqlalchemy import select
@@ -14,6 +15,24 @@ from src.database import get_db
 from src.models import User
 
 logger = logging.getLogger(__name__)
+
+
+def _login_location(request: Request) -> str:
+    """Build the /login redirect, remembering where the user was headed.
+
+    Only GET navigations to a real page are worth resuming after sign-in, so
+    we skip POSTs (replaying them as a GET would be wrong) and the login/root
+    pages (no point looping back to them). The destination is consumed and
+    re-validated in auth.py once the ORCID round-trip completes.
+    """
+    if request.method != "GET":
+        return "/login"
+    target = request.url.path
+    if request.url.query:
+        target += "?" + request.url.query
+    if target in ("/", "/login"):
+        return "/login"
+    return f"/login?next={quote(target, safe='')}"
 
 
 async def get_current_user(
@@ -28,7 +47,7 @@ async def get_current_user(
     if not user_id_str:
         raise HTTPException(
             status_code=status.HTTP_302_FOUND,
-            headers={"Location": "/login"},
+            headers={"Location": _login_location(request)},
         )
 
     try:
