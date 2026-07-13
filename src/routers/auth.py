@@ -2,12 +2,14 @@
 
 import logging
 from datetime import datetime, timezone
+from urllib.parse import urlsplit
 
 from authlib.integrations.httpx_client import AsyncOAuth2Client
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.routing import Match
 
 from fastapi.templating import Jinja2Templates
 
@@ -25,6 +27,78 @@ ORCID_AUTH_URL = "https://orcid.org/oauth/authorize"
 ORCID_TOKEN_URL = "https://orcid.org/oauth/token"
 ORCID_SCOPE = "/authenticate"
 
+# Session key holding the path to resume after a successful login.
+POST_LOGIN_KEY = "post_login_redirect"
+
+# GET routes that resolve fine but must never be a post-login destination:
+# the auth/session flow itself, and state-mutating GET links (e.g. the
+# one-click unsubscribe). Matched as path prefixes.
+_POST_LOGIN_DENY_PREFIXES = (
+    "/login",
+    "/logout",
+    "/auth/",
+    "/settings/unsubscribe/",
+)
+
+
+def _resolves_to_get_page(request: Request, path: str) -> bool:
+    """True if ``path`` maps to a registered route that accepts GET.
+
+    Delegates URL matching (including path params and mounts) to Starlette's
+    own router so we accept exactly the pages the app actually serves, rather
+    than guessing with string rules.
+    """
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": path,
+        "path_params": {},
+        "headers": [],
+        "query_string": b"",
+        "root_path": "",
+        "app": request.app,
+    }
+    for route in request.app.router.routes:
+        match, _ = route.matches(scope)
+        if match == Match.FULL:
+            return True
+    return False
+
+
+def is_safe_next_url(request: Request, target: object) -> bool:
+    """Guard a post-login redirect target.
+
+    Two layers:
+      1. Open-redirect defense — the value must be a purely relative,
+         same-origin path. ``urlsplit`` does the parsing, so protocol-relative
+         (``//host``), absolute (``https://host``) and scheme-only forms all
+         surface a scheme/netloc and get rejected without hand-rolled string
+         tricks. Backslashes (which some browsers fold to ``/``) and control
+         chars are rejected outright.
+      2. Valid-page check — the path must resolve to a real GET route and not
+         be one of the auth/state-changing endpoints in the deny list.
+    """
+    if not isinstance(target, str) or not target or len(target) > 2000:
+        return False
+    if any(c in target for c in ("\r", "\n", "\x00", "\\")):
+        return False
+
+    parts = urlsplit(target)
+    if parts.scheme or parts.netloc:
+        return False
+    if not parts.path.startswith("/") or parts.path.startswith("//"):
+        return False
+    if any(parts.path.startswith(p) for p in _POST_LOGIN_DENY_PREFIXES):
+        return False
+
+    return _resolves_to_get_page(request, parts.path)
+
+
+def pop_post_login_redirect(request: Request) -> str | None:
+    """Return the stored post-login destination if present and safe."""
+    target = request.session.pop(POST_LOGIN_KEY, None)
+    return target if is_safe_next_url(request, target) else None
+
 
 def _get_oauth_client() -> AsyncOAuth2Client:
     settings = get_settings()
@@ -41,6 +115,11 @@ async def login(request: Request):
     """Show the login landing page."""
     if request.session.get("user_id"):
         return RedirectResponse(url="/", status_code=302)
+    # Remember where the user was headed so we can resume after ORCID auth.
+    # Stashing in the (signed) session survives the external OAuth round-trip.
+    next_url = request.query_params.get("next")
+    if is_safe_next_url(request, next_url):
+        request.session[POST_LOGIN_KEY] = next_url
     error = request.query_params.get("error")
     return templates.TemplateResponse(request, "login.html", {"error": error})
 
@@ -200,12 +279,17 @@ async def auth_callback(
     # Check for pending invite token — skip onboarding, go straight to acceptance
     pending_token = request.session.pop("pending_invite_token", None)
     if pending_token:
+        request.session.pop(POST_LOGIN_KEY, None)
         return RedirectResponse(url=f"/invite/{pending_token}", status_code=302)
 
-    # Redirect based on onboarding status
+    # New users go through onboarding first; the saved destination is left in
+    # the session and consumed when onboarding completes.
     if not user.onboarding_complete:
         return RedirectResponse(url="/onboarding", status_code=302)
-    return RedirectResponse(url="/profile", status_code=302)
+
+    # Resume the page the user originally requested, if any.
+    next_url = pop_post_login_redirect(request)
+    return RedirectResponse(url=next_url or "/profile", status_code=302)
 
 
 @router.post("/logout")
