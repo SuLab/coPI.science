@@ -205,6 +205,16 @@ class Settings(BaseSettings):
     max_abstracts_other_per_thread: int = 10
     max_full_text_per_thread: int = 2
 
+    # Cohort isolation — when True, an agent only acts on posts/threads/tags from
+    # agents that share at least one cohort with it (uncohorted agents are
+    # isolated). When False (default), the roster is all-vs-all as before.
+    # See specs/cohort-system.md.
+    cohort_isolation_enabled: bool = False
+    # Reactive-priority scheduler: after this many consecutive turns given to
+    # agents that owe a thread reply, force a normal (proactive) selection so
+    # new-conversation formation isn't starved. See _select_agent.
+    max_consecutive_reactive_turns: int = 8
+
     # Privacy rollout — when True (default), POST /agent/{id}/proposals/{tid}/reopen
     # migrates the thread into a new collab_private channel instead of posting
     # the PI's guidance text into the origin public thread. Can be set to False

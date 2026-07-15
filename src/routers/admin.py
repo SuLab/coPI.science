@@ -1,6 +1,7 @@
 """Admin dashboard router."""
 
 import logging
+import re
 import uuid
 from datetime import datetime, timezone
 
@@ -18,6 +19,8 @@ from src.models import (
     AgentChannel,
     AgentMessage,
     AgentRegistry,
+    Cohort,
+    CohortMembership,
     Job,
     LlmCallLog,
     Publication,
@@ -1295,3 +1298,218 @@ async def admin_waitlist_mark_contacted(
         signup.contacted_at = datetime.now(timezone.utc)
         await db.commit()
     return RedirectResponse(url="/admin/waitlist", status_code=302)
+
+
+# ---------------------------------------------------------------------------
+# Cohorts — admin-managed groups gating which agents interact during simulation.
+# See specs/cohort-system.md. Isolation is only enforced when the running sim
+# has settings.cohort_isolation_enabled = True.
+# ---------------------------------------------------------------------------
+
+# Cohort name: lowercase alphanumeric + hyphens, max 48 chars (slug style).
+_COHORT_NAME_RE = re.compile(r"^[a-z0-9-]{1,48}$")
+
+
+@router.get("/cohorts", response_class=HTMLResponse)
+async def admin_cohorts(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_admin_user),
+):
+    """List all cohorts with member counts."""
+    result = await db.execute(
+        select(Cohort).options(selectinload(Cohort.memberships)).order_by(Cohort.name)
+    )
+    cohorts = result.scalars().unique().all()
+
+    # Creator names for display
+    creator_map: dict[str, str] = {}
+    creator_ids = {c.created_by for c in cohorts if c.created_by}
+    if creator_ids:
+        u_result = await db.execute(select(User).where(User.id.in_(creator_ids)))
+        for u in u_result.scalars().all():
+            creator_map[str(u.id)] = u.name
+
+    return templates.TemplateResponse(
+        request,
+        "admin/cohorts.html",
+        _template_context(
+            request,
+            current_user,
+            active_admin="cohorts",
+            cohorts=cohorts,
+            creator_map=creator_map,
+            error=request.query_params.get("error"),
+        ),
+    )
+
+
+@router.post("/cohorts/create")
+async def admin_cohort_create(
+    request: Request,
+    name: str = Form(...),
+    description: str = Form(""),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_admin_user),
+):
+    """Create a new cohort."""
+    name = name.strip().lower()
+    if not _COHORT_NAME_RE.match(name):
+        return RedirectResponse(
+            url="/admin/cohorts?error=Invalid+name+(lowercase+letters,+numbers,+hyphens;+max+48)",
+            status_code=302,
+        )
+    existing = await db.execute(select(Cohort).where(Cohort.name == name))
+    if existing.scalar_one_or_none():
+        return RedirectResponse(
+            url="/admin/cohorts?error=A+cohort+with+that+name+already+exists",
+            status_code=302,
+        )
+    cohort = Cohort(
+        name=name,
+        description=description.strip() or None,
+        created_by=current_user.id,
+    )
+    db.add(cohort)
+    await db.commit()
+    return RedirectResponse(url=f"/admin/cohorts/{cohort.id}", status_code=302)
+
+
+@router.get("/cohorts/{cohort_id}", response_class=HTMLResponse)
+async def admin_cohort_detail(
+    cohort_id: uuid.UUID,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_admin_user),
+):
+    """Cohort detail: members + add-agent picker + agent→cohort map."""
+    result = await db.execute(
+        select(Cohort).options(selectinload(Cohort.memberships)).where(Cohort.id == cohort_id)
+    )
+    cohort = result.scalar_one_or_none()
+    if not cohort:
+        raise HTTPException(status_code=404, detail="Cohort not found")
+
+    # All agents, for the add-agent picker and status display.
+    agents_result = await db.execute(
+        select(AgentRegistry).order_by(AgentRegistry.bot_name)
+    )
+    all_agents = agents_result.scalars().all()
+    agent_by_id = {a.agent_id: a for a in all_agents}
+
+    member_ids = {m.agent_id for m in cohort.memberships}
+    available_agents = [a for a in all_agents if a.agent_id not in member_ids]
+
+    # Adder names for the members table.
+    adder_map: dict[str, str] = {}
+    adder_ids = {m.added_by for m in cohort.memberships if m.added_by}
+    if adder_ids:
+        u_result = await db.execute(select(User).where(User.id.in_(adder_ids)))
+        for u in u_result.scalars().all():
+            adder_map[str(u.id)] = u.name
+
+    # Read-only agent → cohorts map (all memberships across all cohorts).
+    all_memberships = (await db.execute(
+        select(CohortMembership.agent_id, Cohort.name)
+        .join(Cohort, CohortMembership.cohort_id == Cohort.id)
+    )).all()
+    agent_cohort_map: dict[str, list[str]] = {}
+    for aid, cname in all_memberships:
+        agent_cohort_map.setdefault(aid, []).append(cname)
+
+    return templates.TemplateResponse(
+        request,
+        "admin/cohort_detail.html",
+        _template_context(
+            request,
+            current_user,
+            active_admin="cohorts",
+            cohort=cohort,
+            agent_by_id=agent_by_id,
+            available_agents=available_agents,
+            adder_map=adder_map,
+            all_agents=all_agents,
+            agent_cohort_map=agent_cohort_map,
+            error=request.query_params.get("error"),
+        ),
+    )
+
+
+@router.post("/cohorts/{cohort_id}/delete")
+async def admin_cohort_delete(
+    cohort_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_admin_user),
+):
+    """Delete a cohort (cascades its memberships)."""
+    result = await db.execute(select(Cohort).where(Cohort.id == cohort_id))
+    cohort = result.scalar_one_or_none()
+    if cohort:
+        await db.delete(cohort)
+        await db.commit()
+    return RedirectResponse(url="/admin/cohorts", status_code=302)
+
+
+@router.post("/cohorts/{cohort_id}/add-agent")
+async def admin_cohort_add_agent(
+    cohort_id: uuid.UUID,
+    agent_id: str = Form(...),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_admin_user),
+):
+    """Add an agent to the cohort."""
+    result = await db.execute(select(Cohort).where(Cohort.id == cohort_id))
+    cohort = result.scalar_one_or_none()
+    if not cohort:
+        raise HTTPException(status_code=404, detail="Cohort not found")
+
+    agent_id = agent_id.strip().lower()
+    # Validate the agent exists in the registry.
+    agent_exists = await db.execute(
+        select(AgentRegistry.id).where(AgentRegistry.agent_id == agent_id)
+    )
+    if not agent_exists.scalar_one_or_none():
+        return RedirectResponse(
+            url=f"/admin/cohorts/{cohort_id}?error=Unknown+agent",
+            status_code=302,
+        )
+    # Reject duplicate membership.
+    dup = await db.execute(
+        select(CohortMembership.id).where(
+            CohortMembership.cohort_id == cohort_id,
+            CohortMembership.agent_id == agent_id,
+        )
+    )
+    if dup.scalar_one_or_none():
+        return RedirectResponse(
+            url=f"/admin/cohorts/{cohort_id}?error=Agent+is+already+a+member",
+            status_code=302,
+        )
+    db.add(CohortMembership(
+        cohort_id=cohort_id,
+        agent_id=agent_id,
+        added_by=current_user.id,
+    ))
+    await db.commit()
+    return RedirectResponse(url=f"/admin/cohorts/{cohort_id}", status_code=302)
+
+
+@router.post("/cohorts/{cohort_id}/remove-agent")
+async def admin_cohort_remove_agent(
+    cohort_id: uuid.UUID,
+    agent_id: str = Form(...),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_admin_user),
+):
+    """Remove an agent from the cohort."""
+    result = await db.execute(
+        select(CohortMembership).where(
+            CohortMembership.cohort_id == cohort_id,
+            CohortMembership.agent_id == agent_id.strip().lower(),
+        )
+    )
+    membership = result.scalar_one_or_none()
+    if membership:
+        await db.delete(membership)
+        await db.commit()
+    return RedirectResponse(url=f"/admin/cohorts/{cohort_id}", status_code=302)

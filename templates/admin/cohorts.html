@@ -1,0 +1,80 @@
+{% extends "base.html" %}
+{% block title %}Admin — Cohorts — CoPI{% endblock %}
+
+{% block content %}
+<div class="flex justify-between items-center mb-2">
+    <h1 class="text-2xl font-bold text-gray-900">Cohorts</h1>
+    <button type="button" onclick="document.getElementById('new-cohort-form').classList.toggle('hidden')"
+            class="text-sm bg-indigo-600 hover:bg-indigo-700 text-white font-medium px-4 py-2 rounded">
+        New Cohort
+    </button>
+</div>
+<p class="text-sm text-gray-500 mb-6">
+    A cohort groups agents permitted to interact during simulation. Isolation is
+    only enforced when the running simulation has <code>cohort_isolation_enabled</code>
+    turned on; otherwise cohorts are recorded but not applied.
+</p>
+
+{% if error %}
+<div class="mb-4 rounded-md bg-red-50 border border-red-200 px-4 py-3 text-sm text-red-700">{{ error }}</div>
+{% endif %}
+
+<form id="new-cohort-form" method="POST" action="/admin/cohorts/create"
+      class="hidden bg-white rounded-xl border border-gray-200 p-4 mb-8 space-y-3">
+    <div>
+        <label class="block text-sm font-medium text-gray-700">Name</label>
+        <input type="text" name="name" required pattern="[a-z0-9-]{1,48}"
+               placeholder="pilot-wave-1"
+               class="mt-1 block w-full rounded-md border-gray-300 shadow-sm text-sm">
+        <p class="text-xs text-gray-400 mt-1">Lowercase letters, numbers, hyphens. Max 48 chars.</p>
+    </div>
+    <div>
+        <label class="block text-sm font-medium text-gray-700">Description (optional)</label>
+        <textarea name="description" rows="2"
+                  class="mt-1 block w-full rounded-md border-gray-300 shadow-sm text-sm"></textarea>
+    </div>
+    <button type="submit" class="text-sm bg-indigo-600 hover:bg-indigo-700 text-white font-medium px-4 py-2 rounded">
+        Create Cohort
+    </button>
+</form>
+
+<div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+    {% if cohorts %}
+    <table class="min-w-full divide-y divide-gray-200">
+        <thead class="bg-gray-50">
+            <tr>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Name</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Description</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Members</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Created by</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Created</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Actions</th>
+            </tr>
+        </thead>
+        <tbody class="divide-y divide-gray-100">
+            {% for c in cohorts %}
+            <tr class="hover:bg-gray-50">
+                <td class="px-4 py-3 text-sm font-medium">
+                    <a href="/admin/cohorts/{{ c.id }}" class="text-indigo-600 hover:underline">{{ c.name }}</a>
+                </td>
+                <td class="px-4 py-3 text-sm text-gray-600 max-w-xs">
+                    {% if c.description %}<span title="{{ c.description }}">{{ c.description[:80] }}{% if c.description | length > 80 %}…{% endif %}</span>{% else %}—{% endif %}
+                </td>
+                <td class="px-4 py-3 text-sm text-gray-600">{{ c.memberships | length }}</td>
+                <td class="px-4 py-3 text-sm text-gray-600">{{ creator_map.get(c.created_by | string, '—') }}</td>
+                <td class="px-4 py-3 text-xs text-gray-500" data-utc="{{ c.created_at.isoformat() }}" data-utc-fmt="short">{{ c.created_at.strftime('%b %d') }}</td>
+                <td class="px-4 py-3 text-sm">
+                    <form method="POST" action="/admin/cohorts/{{ c.id }}/delete"
+                          onsubmit="return confirm('Delete cohort “{{ c.name }}” and its {{ c.memberships | length }} membership(s)?');">
+                        <button type="submit" class="text-red-600 hover:underline">Delete</button>
+                    </form>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p class="text-sm text-gray-500 px-6 py-8 text-center">No cohorts yet. Create one above.</p>
+    {% endif %}
+</div>
+{% endblock %}

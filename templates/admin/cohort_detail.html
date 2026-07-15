@@ -1,0 +1,118 @@
+{% extends "base.html" %}
+{% block title %}Admin — Cohort {{ cohort.name }} — CoPI{% endblock %}
+
+{% block content %}
+<div class="mb-2">
+    <a href="/admin/cohorts" class="text-sm text-gray-500 hover:text-gray-700">← All cohorts</a>
+</div>
+
+<div class="flex justify-between items-start mb-6">
+    <div>
+        <h1 class="text-2xl font-bold text-gray-900">{{ cohort.name }}</h1>
+        {% if cohort.description %}<p class="text-sm text-gray-500 mt-1">{{ cohort.description }}</p>{% endif %}
+    </div>
+    <form method="POST" action="/admin/cohorts/{{ cohort.id }}/delete"
+          onsubmit="return confirm('Delete cohort “{{ cohort.name }}” and its {{ cohort.memberships | length }} membership(s)?');">
+        <button type="submit" class="text-sm bg-red-600 hover:bg-red-700 text-white font-medium px-4 py-2 rounded">
+            Delete Cohort
+        </button>
+    </form>
+</div>
+
+{% if error %}
+<div class="mb-4 rounded-md bg-red-50 border border-red-200 px-4 py-3 text-sm text-red-700">{{ error }}</div>
+{% endif %}
+
+<!-- Members -->
+<h2 class="text-lg font-semibold text-gray-900 mb-3">Members ({{ cohort.memberships | length }})</h2>
+<div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden mb-8">
+    {% if cohort.memberships %}
+    <table class="min-w-full divide-y divide-gray-200">
+        <thead class="bg-gray-50">
+            <tr>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Agent ID</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Bot Name</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">PI Name</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Added by</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Added</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Actions</th>
+            </tr>
+        </thead>
+        <tbody class="divide-y divide-gray-100">
+            {% for m in cohort.memberships %}
+            {% set agent = agent_by_id.get(m.agent_id) %}
+            <tr class="hover:bg-gray-50">
+                <td class="px-4 py-3 text-sm font-medium text-gray-900">{{ m.agent_id }}</td>
+                <td class="px-4 py-3 text-sm text-gray-600">{{ agent.bot_name if agent else '—' }}</td>
+                <td class="px-4 py-3 text-sm text-gray-600">{{ agent.pi_name if agent else '—' }}</td>
+                <td class="px-4 py-3 text-sm">
+                    {% if agent %}
+                    <span class="inline-block px-2 py-0.5 rounded text-xs
+                        {% if agent.status == 'active' %}bg-green-100 text-green-700
+                        {% elif agent.status == 'suspended' %}bg-red-100 text-red-700
+                        {% else %}bg-gray-100 text-gray-600{% endif %}">{{ agent.status }}</span>
+                    {% else %}
+                    <span class="text-xs text-amber-600" title="No AgentRegistry row for this slug">unknown</span>
+                    {% endif %}
+                </td>
+                <td class="px-4 py-3 text-sm text-gray-600">{{ adder_map.get(m.added_by | string, '—') }}</td>
+                <td class="px-4 py-3 text-xs text-gray-500" data-utc="{{ m.added_at.isoformat() }}" data-utc-fmt="short">{{ m.added_at.strftime('%b %d') }}</td>
+                <td class="px-4 py-3 text-sm">
+                    <form method="POST" action="/admin/cohorts/{{ cohort.id }}/remove-agent">
+                        <input type="hidden" name="agent_id" value="{{ m.agent_id }}">
+                        <button type="submit" class="text-red-600 hover:underline">Remove</button>
+                    </form>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p class="text-sm text-gray-500 px-6 py-8 text-center">No members yet. Add one below.</p>
+    {% endif %}
+</div>
+
+<!-- Add agent -->
+<h2 class="text-lg font-semibold text-gray-900 mb-3">Add Agent</h2>
+<form method="POST" action="/admin/cohorts/{{ cohort.id }}/add-agent"
+      class="bg-white rounded-xl border border-gray-200 p-4 mb-8 flex items-end gap-3">
+    <div class="flex-1 max-w-md">
+        <label class="block text-sm font-medium text-gray-700">Agent</label>
+        <select name="agent_id" required class="mt-1 block w-full rounded-md border-gray-300 shadow-sm text-sm">
+            <option value="" disabled selected>Select agent…</option>
+            {% for a in available_agents %}
+            <option value="{{ a.agent_id }}">{{ a.bot_name }} — {{ a.pi_name }} ({{ a.status }})</option>
+            {% endfor %}
+        </select>
+    </div>
+    <button type="submit" class="text-sm bg-indigo-600 hover:bg-indigo-700 text-white font-medium px-4 py-2 rounded">
+        Add to Cohort
+    </button>
+</form>
+
+<!-- Read-only agent → cohort map -->
+<h2 class="text-lg font-semibold text-gray-900 mb-3">Agent Cohort Map</h2>
+<p class="text-sm text-gray-500 mb-3">All agents and the cohorts they currently belong to (read-only; manage membership from each cohort's page).</p>
+<div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+    <table class="min-w-full divide-y divide-gray-200">
+        <thead class="bg-gray-50">
+            <tr>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Agent</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Cohorts</th>
+            </tr>
+        </thead>
+        <tbody class="divide-y divide-gray-100">
+            {% for a in all_agents %}
+            <tr class="hover:bg-gray-50">
+                <td class="px-4 py-3 text-sm font-medium text-gray-900">{{ a.bot_name }}</td>
+                <td class="px-4 py-3 text-sm text-gray-600">
+                    {% set names = agent_cohort_map.get(a.agent_id) %}
+                    {% if names %}{{ names | join(', ') }}{% else %}<span class="text-gray-400 italic">(none)</span>{% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}

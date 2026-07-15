@@ -15,6 +15,7 @@ from src.models.agent_activity import (
     VISIBILITY_PUBLIC,
 )
 from src.models.agent_registry import AgentRegistry, ProposalReview
+from src.models.cohort import Cohort, CohortMembership
 from src.models.delegate import AgentDelegate, DelegateInvitation
 from src.models.email_notification import (
     EmailEngagementTracker,
@@ -45,6 +46,8 @@ __all__ = [
     "VISIBILITY_COLLAB_PRIVATE",
     "AgentRegistry",
     "ProposalReview",
+    "Cohort",
+    "CohortMembership",
     "ProposalVote",
     "VOTE_UP",
     "VOTE_DOWN",
