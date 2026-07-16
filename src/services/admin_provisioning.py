@@ -152,7 +152,18 @@ async def complete_provisioning(db: AsyncSession, state: str, code: str) -> Agen
             prov.client_id, prov.client_secret, code, _redirect_uri()
         )
     except Exception as exc:
-        raise ProvisioningError(f"Token exchange failed: {exc}")
+        # Delete the bridge row on failure: it holds the app client_secret and a
+        # reusable OAuth state (no TTL), so leaving it behind is a standing
+        # secret + replay surface. Log details server-side only; surface a
+        # generic message so no token/secret fragment reaches the redirect URL
+        # or access logs. See SEC-9.
+        logger.error(
+            "Token exchange failed for agent %s (provision %s): %s",
+            prov.agent_registry_id, prov.id, exc,
+        )
+        await db.delete(prov)
+        await db.commit()
+        raise ProvisioningError("Token exchange with Slack failed. Please retry provisioning.")
 
     agent.slack_bot_token = token
     await db.delete(prov)

@@ -79,6 +79,21 @@ STATE_FILE = Path(".provision_state.json")
 console = Console()
 
 
+def _write_state(created: list[dict]) -> None:
+    """Persist created-app credentials to STATE_FILE with owner-only perms.
+
+    The file holds Slack app client_secrets, so it is chmod 0600 (was created
+    world-readable at 0644) and is gitignored — never commit it. Written after
+    each app is created so an interrupted run can be resumed with --skip-create
+    without recreating apps or losing already-issued secrets. See SEC-9.
+    """
+    STATE_FILE.write_text(json.dumps(created, indent=2))
+    try:
+        STATE_FILE.chmod(0o600)
+    except OSError:
+        pass
+
+
 # ---------------------------------------------------------------------------
 # Load the agent roster from the DB export (data/agent_roster.json).
 # The roster is produced in-container by scripts/export_agent_roster.py — this
@@ -376,6 +391,9 @@ def main():
             try:
                 app = create_app(config_token, lab["id"], lab["name"], lab["pi"], redirect_uri)
                 created.append(app)
+                # Persist immediately (0600) so an interruption mid-run doesn't
+                # lose the client_secret we just minted.
+                _write_state(created)
                 _CallbackHandler.pending[app["agent_id"]] = {
                     "bot_name": app["bot_name"],
                     "client_id": app["client_id"],
@@ -391,7 +409,7 @@ def main():
                 time.sleep(12)
 
         if created:
-            STATE_FILE.write_text(json.dumps(created, indent=2))
+            _write_state(created)
         if failed_count:
             console.print(f"[yellow]{failed_count} app(s) failed to create — fix errors and re-run.[/yellow]")
 

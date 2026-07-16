@@ -152,5 +152,7 @@ def exchange_code(
         raise RuntimeError(f"oauth.v2.access failed: {data.get('error')}")
     token = data.get("access_token", "")
     if not token.startswith("xoxb-"):
-        raise RuntimeError(f"Unexpected token format: {token[:20]}...")
+        # Do NOT echo any part of the token — this message can surface in logs
+        # and a user-facing ?slack_error= redirect. See SEC-9.
+        raise RuntimeError("Unexpected token format from Slack (expected xoxb-...)")
     return token

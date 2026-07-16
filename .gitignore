@@ -65,3 +65,7 @@ data/agent_roster.json
 
 # Local scratch notes
 .notes/
+
+# Slack provisioning state — holds app client_secrets during a bulk provisioning
+# run (scripts/provision_slack_bots.py). Must never be committed.
+.provision_state.json
