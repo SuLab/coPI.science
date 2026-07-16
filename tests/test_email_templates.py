@@ -89,6 +89,34 @@ def test_delegate_invitation_uses_shared_branding(monkeypatch):
     assert "Unsubscribe" not in html
 
 
+def test_delegate_invitation_escapes_untrusted_names(monkeypatch):
+    """PI-chosen pi_name/bot_name must be HTML-escaped in the invite body (SEC-13)."""
+    captured = {}
+
+    class _FakeSES:
+        def send_email(self, **kwargs):
+            captured["html"] = kwargs["Message"]["Body"]["Html"]["Data"]
+            captured["subject"] = kwargs["Message"]["Subject"]["Data"]
+
+    import boto3
+
+    monkeypatch.setattr(boto3, "client", lambda *a, **k: _FakeSES())
+
+    assert send_delegate_invitation(
+        "colleague@example.com",
+        '<img src=x onerror=alert(1)>',
+        '<script>alert(2)</script>',
+        "https://copi.science/invite/abc",
+    )
+    html = captured["html"]
+    assert "<img src=x onerror=alert(1)>" not in html
+    assert "<script>alert(2)</script>" not in html
+    assert "&lt;img src=x onerror=alert(1)&gt;" in html
+    assert "&lt;script&gt;alert(2)&lt;/script&gt;" in html
+    # Subject is plain text (not HTML), but must not carry injected newlines.
+    assert "\n" not in captured["subject"] and "\r" not in captured["subject"]
+
+
 @pytest.mark.asyncio
 async def test_new_proposal_email_uses_shared_footer(monkeypatch):
     """A DB-backed notification email also renders the shared footer."""

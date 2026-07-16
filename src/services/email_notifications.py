@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import selectinload
 
 from src.config import get_settings
-from src.services.email import email_shell_open, email_shell_close
+from src.services.email import clean_subject, email_shell_open, email_shell_close, esc
 from src.models import (
     AgentDelegate,
     AgentRegistry,
@@ -341,7 +341,15 @@ async def send_proposal_notification(
     summary = thread_decision.summary_text or "(No summary available)"
     channel = thread_decision.channel or "unknown"
 
-    subject = f"{agent.bot_name} has a new collaboration proposal to review"
+    # HTML-escaped copies for the HTML body: bot names are PI-chosen and the
+    # summary is LLM-written, so both are untrusted in an HTML context (SEC-13).
+    # The plain-text body keeps the raw values.
+    bot_html = esc(agent.bot_name)
+    other_bot_html = esc(other_bot_name)
+    channel_html = esc(channel)
+    summary_html = esc(summary)
+
+    subject = f"{clean_subject(agent.bot_name)} has a new collaboration proposal to review"
 
     # Backlog notice
     backlog_text = ""
@@ -388,10 +396,10 @@ async def send_proposal_notification(
     <div style="background: #fff; border: 1px solid #e5e7eb; border-radius: 12px; padding: 32px;">
         <h2 style="margin: 0 0 8px; font-size: 18px; color: #111827;">New collaboration proposal</h2>
         <p style="color: #6b7280; font-size: 14px; margin: 0 0 20px;">
-            {agent.bot_name} and {other_bot_name} in #{channel}
+            {bot_html} and {other_bot_html} in #{channel_html}
         </p>
         <div style="background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 8px; padding: 16px; margin-bottom: 24px;">
-            <p style="color: #374151; line-height: 1.6; margin: 0; font-size: 14px; white-space: pre-wrap;">{summary}</p>
+            <p style="color: #374151; line-height: 1.6; margin: 0; font-size: 14px; white-space: pre-wrap;">{summary_html}</p>
         </div>
 
         <p style="color: #374151; font-size: 14px; font-weight: 600; margin: 0 0 8px;">Reply to this email to review:</p>
@@ -795,12 +803,18 @@ async def _send_status_overview(
     ]
     text_body = "\n".join(text_lines)
 
+    # Escape the untrusted parts for the HTML body: pair is built from
+    # PI-chosen bot names and summary from the LLM (status is a fixed label).
+    # The plain-text body above uses the raw values (SEC-13).
     idea_html = "".join(
         f'<li style="margin-bottom: 8px;"><span style="color:#4f46e5;font-weight:600;">'
-        f'{pair}</span><br><span style="color:#374151;">{summary}</span> '
-        f'<span style="color:#9ca3af;font-size:12px;">— {status}</span></li>'
+        f'{esc(pair)}</span><br><span style="color:#374151;">{esc(summary)}</span> '
+        f'<span style="color:#9ca3af;font-size:12px;">— {esc(status)}</span></li>'
         for pair, summary, status in idea_lines
     ) or '<li style="color:#9ca3af;">No new proposals this period.</li>'
+    collaborators_html = (
+        ", ".join(esc(c) for c in collaborators) if collaborators else "(none)"
+    )
 
     html_body = email_shell_open() + f"""
     <div style="background: #fff; border: 1px solid #e5e7eb; border-radius: 12px; padding: 32px;">
@@ -816,7 +830,7 @@ async def _send_status_overview(
         <p style="color:#374151;font-size:14px;font-weight:600;margin:0 0 8px;">Ideas discussed</p>
         <ul style="margin:0 0 20px;padding-left:18px;font-size:14px;line-height:1.5;">{idea_html}</ul>
         <p style="color:#6b7280;font-size:13px;margin:0 0 20px;">
-            <strong>Collaborators:</strong> {', '.join(collaborators) if collaborators else '(none)'}
+            <strong>Collaborators:</strong> {collaborators_html}
         </p>
         <div style="text-align:center;margin:24px 0;">
             <a href="{dashboard_url}" style="display:inline-block;padding:12px 32px;background:#4f46e5;color:#fff;text-decoration:none;border-radius:8px;font-weight:600;font-size:14px;">Review pending proposals</a>
@@ -959,7 +973,14 @@ async def _send_new_proposal_email(
     unsubscribe_url = f"{settings.base_url}/settings/unsubscribe/{unsubscribe_token}"
     settings_url = f"{settings.base_url}/settings"
 
-    subject = f"{agent.bot_name} proposed a collaboration with {other_bot_name}"
+    # HTML-escaped copies for the HTML body (PI-chosen bot names + LLM summary
+    # are untrusted in an HTML context) (SEC-13).
+    bot_html = esc(agent.bot_name)
+    other_bot_html = esc(other_bot_name)
+    channel_html = esc(channel)
+    summary_html = esc(summary)
+
+    subject = f"{clean_subject(agent.bot_name)} proposed a collaboration with {clean_subject(other_bot_name)}"
 
     text_body = (
         f"{agent.bot_name} just proposed a collaboration with {other_bot_name} in #{channel}:\n\n"
@@ -973,10 +994,10 @@ async def _send_new_proposal_email(
 
     html_body = email_shell_open() + f"""
     <div style="background: #fff; border: 1px solid #e5e7eb; border-radius: 12px; padding: 32px;">
-        <h2 style="margin: 0 0 4px; font-size: 18px; color: #111827;">\U0001f9ea {agent.bot_name} × {other_bot_name}</h2>
-        <p style="color: #6b7280; font-size: 13px; margin: 0 0 20px;">#{channel}</p>
+        <h2 style="margin: 0 0 4px; font-size: 18px; color: #111827;">\U0001f9ea {bot_html} × {other_bot_html}</h2>
+        <p style="color: #6b7280; font-size: 13px; margin: 0 0 20px;">#{channel_html}</p>
         <div style="background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 8px; padding: 16px; margin-bottom: 24px;">
-            <p style="color: #374151; line-height: 1.6; margin: 0; font-size: 14px; white-space: pre-wrap;">{summary}</p>
+            <p style="color: #374151; line-height: 1.6; margin: 0; font-size: 14px; white-space: pre-wrap;">{summary_html}</p>
         </div>
         <p style="color:#374151;font-size:14px;margin:0 0 8px;">
             Reply to this email to <strong>rate it (1–4)</strong> or <strong>give instructions</strong>.
