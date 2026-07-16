@@ -32,6 +32,17 @@ templates = Jinja2Templates(directory="templates")
 # through the graph, tight enough to blunt scripted vote-spam (SEC-7).
 _vote_limiter = SlidingWindowRateLimiter(max_events=30, window_seconds=60)
 
+# Per-IP throttle for the public waitlist form. A real signup happens once;
+# this caps scripted row-spam on the unauthenticated endpoint (SEC-17).
+_waitlist_limiter = SlidingWindowRateLimiter(max_events=10, window_seconds=3600)
+
+# Field caps for the public waitlist write, applied before persisting so
+# oversized input is truncated rather than raising a DB DataError -> 500
+# (name/institution are String(255); note is unbounded Text) (SEC-17).
+_WAITLIST_NAME_MAX = 255
+_WAITLIST_INSTITUTION_MAX = 255
+_WAITLIST_NOTE_MAX = 2000
+
 
 def _graph_csp(nonce: str) -> str:
     """Content-Security-Policy for the standalone collaboration-graph pages.
@@ -441,6 +452,9 @@ async def waitlist_submit(
     db: AsyncSession = Depends(get_db),
 ):
     """Accept a waitlist signup. Upserts on email."""
+    if not _waitlist_limiter.allow(client_ip(request)):
+        raise HTTPException(status_code=429, detail="too many requests")
+
     email_clean = (email or "").strip().lower()
     if not is_valid_email(email_clean):
         return templates.TemplateResponse(
@@ -459,22 +473,29 @@ async def waitlist_submit(
             status_code=400,
         )
 
+    # Truncate to the column limits before persisting: name/institution are
+    # String(255) (oversized -> DataError -> 500) and note is unbounded Text
+    # (an uncapped public write) (SEC-17).
+    name_clean = name.strip()[:_WAITLIST_NAME_MAX]
+    institution_clean = institution.strip()[:_WAITLIST_INSTITUTION_MAX]
+    note_clean = note.strip()[:_WAITLIST_NOTE_MAX]
+
     result = await db.execute(
         select(WaitlistSignup).where(WaitlistSignup.email == email_clean)
     )
     existing = result.scalar_one_or_none()
 
     if existing:
-        existing.name = name.strip() or existing.name
-        existing.institution = institution.strip() or existing.institution
-        existing.note = note.strip() or existing.note
+        existing.name = name_clean or existing.name
+        existing.institution = institution_clean or existing.institution
+        existing.note = note_clean or existing.note
     else:
         db.add(
             WaitlistSignup(
                 email=email_clean,
-                name=name.strip() or None,
-                institution=institution.strip() or None,
-                note=note.strip() or None,
+                name=name_clean or None,
+                institution=institution_clean or None,
+                note=note_clean or None,
             )
         )
     await db.commit()
