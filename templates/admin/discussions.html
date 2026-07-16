@@ -3,6 +3,8 @@
 
 {% block extra_head %}
 <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"></script>
+<script src="/static/js/markdown.js"></script>
 <style>
     .proposal-md h2 { font-weight: 600; font-size: 1rem; margin-top: 0.75rem; margin-bottom: 0.25rem; }
     .proposal-md h3 { font-weight: 600; font-size: 0.875rem; margin-top: 0.75rem; margin-bottom: 0.25rem; }
@@ -185,12 +187,6 @@
 {% endblock %}
 
 {% block scripts %}
-<script>
-document.addEventListener('DOMContentLoaded', function() {
-    document.querySelectorAll('[data-markdown]').forEach(function(el) {
-        var md = el.getAttribute('data-markdown');
-        if (md) { el.innerHTML = marked.parse(md); }
-    });
-});
-</script>
+<!-- [data-markdown] rendering is handled by the shared sanitizing renderer
+     (/static/js/markdown.js, loaded in extra_head) — see SEC-2. -->
 {% endblock %}
