@@ -8,6 +8,7 @@ from typing import Any
 
 from src.agent.agent import Agent
 from src.agent.message_log import LogEntry, MessageLog
+from src.agent.prompt_safety import delimit
 from src.agent.state import PostRef
 from src.config import get_settings
 from src.services.llm import generate_agent_response
@@ -228,7 +229,10 @@ class PIHandler:
         if interesting:
             lines = []
             for p in interesting[:10]:
-                lines.append(f"- #{p.channel} from {p.sender_agent_id}: {p.content_snippet[:80]}...")
+                lines.append(
+                    f"- #{p.channel} from {p.sender_agent_id}: "
+                    f"{delimit(p.content_snippet[:80], 'post_content')}..."
+                )
             suffix = f"\n({len(interesting) - 10} more)" if len(interesting) > 10 else ""
             parts.append(f"**Interesting posts ({len(interesting)}):**\n" + "\n".join(lines) + suffix)
         else:
@@ -242,7 +246,10 @@ class PIHandler:
                 other = self.agents.get(p.other_agent_id)
                 other_name = other.bot_name if other else p.other_agent_id
                 status = "reviewed" if p.reviewed else "awaiting review"
-                lines.append(f"- #{p.channel} with {other_name} ({status}): {p.summary_text[:80]}...")
+                lines.append(
+                    f"- #{p.channel} with {other_name} ({status}): "
+                    f"{delimit(p.summary_text[:80], 'proposal_summary')}..."
+                )
             parts.append(f"**Pending proposals ({len(proposals)}):**\n" + "\n".join(lines))
         else:
             parts.append("**Pending proposals:** None")
@@ -253,7 +260,10 @@ class PIHandler:
             parts.append(f"**Subscribed channels:** {', '.join(f'#{c}' for c in sorted(channels))}")
 
         # Standing instructions (from private profile)
-        parts.append(f"**Private profile (standing instructions):**\n{agent.private_profile[:500]}")
+        parts.append(
+            "**Private profile (standing instructions):**\n"
+            + delimit(agent.private_profile[:500], "standing_instructions")
+        )
 
         # API budget
         parts.append(f"**API calls used:** {agent.api_call_count}")

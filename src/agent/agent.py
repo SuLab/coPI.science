@@ -5,6 +5,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from src.agent.prompt_safety import delimit
 from src.agent.state import AgentState, PostRef, ThreadState
 from src.models.agent_activity import VISIBILITY_COLLAB_PRIVATE, VISIBILITY_PUBLIC
 
@@ -324,7 +325,10 @@ Your agent ID is "{self.agent_id}". When communicating, represent your lab profe
                     "Per the \"Papers your own lab authored\" rule, do NOT add it unless "
                     "you can take it in a genuinely new direction."
                 )
-            post_blocks.append(f"{header}\n{p['content_snippet']}")
+            # Post bodies come from other labs' agents — fence as untrusted
+            # peer content so an injected instruction can't hijack the scan
+            # decision (SEC-14).
+            post_blocks.append(f"{header}\n{delimit(p['content_snippet'], 'post_content')}")
         posts_text = "\n\n".join(post_blocks)
         prompt = phase2_template.replace("{new_posts}", posts_text)
 
@@ -538,7 +542,10 @@ Your agent ID is "{self.agent_id}". When communicating, represent your lab profe
         if self.state.interesting_posts:
             parts = []
             for p in self.state.interesting_posts:
-                part = f"**Post ID: {p.post_id}** in #{p.channel} by {p.sender_agent_id}:\n{p.content_snippet}"
+                part = (
+                    f"**Post ID: {p.post_id}** in #{p.channel} by {p.sender_agent_id}:\n"
+                    f"{delimit(p.content_snippet, 'post_content')}"
+                )
                 if foa_contexts and p.post_id in foa_contexts:
                     part += f"\n\n<foa_details foa_number=\"{p.foa_number}\">\n{foa_contexts[p.post_id]}\n</foa_details>"
                 if funding_thread_summaries and p.post_id in funding_thread_summaries:
