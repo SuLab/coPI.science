@@ -3,6 +3,7 @@
 import json
 import logging
 import re
+import secrets
 import unicodedata
 import uuid
 from collections import Counter
@@ -25,6 +26,49 @@ router = APIRouter()
 templates = Jinja2Templates(directory="templates")
 
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def _graph_csp(nonce: str) -> str:
+    """Content-Security-Policy for the standalone collaboration-graph pages.
+
+    These templates carry an inline <script> plus inline styles and load
+    D3/marked/DOMPurify/Tailwind from CDNs, so the policy pins those hosts and
+    requires a per-request nonce for the inline executable script (defense in
+    depth behind the |tojson/escapeHtml output encoding). 'unsafe-eval' is
+    present only because the Tailwind Play CDN JIT-compiles utilities in the
+    browser; vendoring a compiled Tailwind build (SEC-18) lets it be dropped.
+    """
+    return "; ".join(
+        [
+            "default-src 'self'",
+            "base-uri 'self'",
+            "object-src 'none'",
+            "frame-ancestors 'none'",
+            "img-src 'self' data:",
+            "font-src 'self' data:",
+            "connect-src 'self'",
+            "style-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com",
+            (
+                f"script-src 'self' 'nonce-{nonce}' 'unsafe-eval' "
+                "https://cdn.tailwindcss.com https://d3js.org https://cdn.jsdelivr.net"
+            ),
+        ]
+    )
+
+
+def _render_graph(request: Request, context: dict) -> HTMLResponse:
+    """Render cabo_graph.html with a fresh CSP nonce and the matching header.
+
+    ``graph_json``/``color_map`` in ``context`` must be raw Python objects — the
+    template serializes them with the |tojson filter, which escapes ``<``/``>``/
+    ``&`` so attacker-controlled fields (PI name, institution, LLM summary text)
+    cannot break out of the <script> block.
+    """
+    nonce = secrets.token_urlsafe(16)
+    context["csp_nonce"] = nonce
+    response = templates.TemplateResponse(request, "cabo_graph.html", context)
+    response.headers["Content-Security-Policy"] = _graph_csp(nonce)
+    return response
 
 # Institution mapping for the Cabo collaboration graph. This is an independent
 # hardcoded grouping of agent_ids by institution (the agent roster itself now
@@ -724,19 +768,18 @@ async def cabo_graph(request: Request, db: AsyncSession = Depends(get_db)):
         window_start=datetime(2026, 4, 27, tzinfo=timezone.utc),
         window_end=datetime(2026, 5, 8, tzinfo=timezone.utc),  # exclusive: through May 7
     )
-    return templates.TemplateResponse(
+    return _render_graph(
         request,
-        "cabo_graph.html",
         {
             "request": request,
-            "graph_json": json.dumps({"nodes": nodes, "links": links}),
+            "graph_json": {"nodes": nodes, "links": links},
             "node_count": len(nodes),
             "edge_count": len(links),
             "proposal_count": sum(link["weight"] for link in links),
             "page_title": "Cabo collaboration network",
             "pi_label": "PIs",
             "legend": _LEGACY_LEGEND,
-            "color_map": json.dumps(_LEGACY_COLOR_MAP),
+            "color_map": _LEGACY_COLOR_MAP,
             "since_label": "during April 27 – May 7, 2026",
         },
     )
@@ -746,19 +789,18 @@ async def cabo_graph(request: Request, db: AsyncSession = Depends(get_db)):
 async def scripps_graph(request: Request, db: AsyncSession = Depends(get_db)):
     """Scripps-only slice of the collaboration network."""
     nodes, links = await _build_graph_payload(db, scripps_only=True)
-    return templates.TemplateResponse(
+    return _render_graph(
         request,
-        "cabo_graph.html",
         {
             "request": request,
-            "graph_json": json.dumps({"nodes": nodes, "links": links}),
+            "graph_json": {"nodes": nodes, "links": links},
             "node_count": len(nodes),
             "edge_count": len(links),
             "proposal_count": sum(link["weight"] for link in links),
             "page_title": "Scripps Research collaboration network",
             "pi_label": "Scripps PIs",
             "legend": [],
-            "color_map": json.dumps(_LEGACY_COLOR_MAP),
+            "color_map": _LEGACY_COLOR_MAP,
             "since_label": "since March 1, 2026",
         },
     )
@@ -782,19 +824,18 @@ async def schultz_alumni_pilot(request: Request, db: AsyncSession = Depends(get_
         largest_component_only=False,
     )
     legend, color_map = _institution_legend(nodes)
-    return templates.TemplateResponse(
+    return _render_graph(
         request,
-        "cabo_graph.html",
         {
             "request": request,
-            "graph_json": json.dumps({"nodes": nodes, "links": links}),
+            "graph_json": {"nodes": nodes, "links": links},
             "node_count": len(nodes),
             "edge_count": len(links),
             "proposal_count": sum(link["weight"] for link in links),
             "page_title": "Schultz Alumni Pilot collaboration network",
             "pi_label": "PIs",
             "legend": legend,
-            "color_map": json.dumps(color_map),
+            "color_map": color_map,
             "since_label": "during June 1 – June 4, 2026",
         },
     )
@@ -820,19 +861,18 @@ async def schultz_group_alumni(request: Request, db: AsyncSession = Depends(get_
         largest_component_only=False,
     )
     legend, color_map = _institution_legend(nodes)
-    return templates.TemplateResponse(
+    return _render_graph(
         request,
-        "cabo_graph.html",
         {
             "request": request,
-            "graph_json": json.dumps({"nodes": nodes, "links": links}),
+            "graph_json": {"nodes": nodes, "links": links},
             "node_count": len(nodes),
             "edge_count": len(links),
             "proposal_count": sum(link["weight"] for link in links),
             "page_title": "Schultz Group Alumni collaboration network",
             "pi_label": "PIs",
             "legend": legend,
-            "color_map": json.dumps(color_map),
+            "color_map": color_map,
             "since_label": "during June 5 – June 10, 2026",
         },
     )
