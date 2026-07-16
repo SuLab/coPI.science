@@ -20,10 +20,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.database import get_db
 from src.models import VOTE_DOWN, VOTE_UP, ProposalVote, User, WaitlistSignup
+from src.services.rate_limit import SlidingWindowRateLimiter, client_ip
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 templates = Jinja2Templates(directory="templates")
+
+# Per-IP throttle for the anonymous proposal-feedback endpoints (defense in
+# depth behind the nginx edge limits). Generous enough for a human clicking
+# through the graph, tight enough to blunt scripted vote-spam (SEC-7).
+_vote_limiter = SlidingWindowRateLimiter(max_events=30, window_seconds=60)
 
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
@@ -908,17 +914,33 @@ def _clean_details(details: str | None) -> str | None:
 
 @router.post("/api/proposal-vote")
 async def submit_proposal_vote(
-    payload: ProposalVoteIn, db: AsyncSession = Depends(get_db)
+    request: Request, payload: ProposalVoteIn, db: AsyncSession = Depends(get_db)
 ):
     """Record (or update) an anonymous vote on a proposal. Returns the vote id."""
+    if not _vote_limiter.allow(client_ip(request)):
+        raise HTTPException(status_code=429, detail="too many requests")
+
     if payload.vote not in (VOTE_UP, VOTE_DOWN):
         raise HTTPException(status_code=422, detail="vote must be 'up' or 'down'")
 
+    # Require a browser token: without one, every request inserts a fresh row
+    # (the unique (decision, token) constraint can't dedup NULL tokens), which
+    # is an unbounded-storage vector on this public endpoint (SEC-7).
+    token = _clean_token(payload.voter_token)
+    if token is None:
+        raise HTTPException(status_code=422, detail="voter_token required")
+
+    # Only allow votes on proposals that are actually shown on the public graph
+    # (the same outcome/visibility predicate _build_graph_payload uses). This
+    # keeps the endpoint from writing rows for — or confirming the existence of —
+    # private or non-proposal thread_decisions.
     decision = (
         await db.execute(
             text(
                 "SELECT thread_id, agent_a, agent_b FROM thread_decisions "
-                "WHERE id = :id"
+                "WHERE id = :id "
+                "  AND outcome = 'proposal' "
+                "  AND origin_visibility = 'public'"
             ),
             {"id": str(payload.decision_id)},
         )
@@ -926,7 +948,6 @@ async def submit_proposal_vote(
     if decision is None:
         raise HTTPException(status_code=404, detail="unknown proposal")
 
-    token = _clean_token(payload.voter_token)
     details = _clean_details(payload.details)
 
     # One vote per (proposal, browser token): update in place if they revote.
@@ -982,11 +1003,15 @@ async def submit_proposal_vote(
 
 @router.post("/api/proposal-vote/{vote_id}/details")
 async def update_proposal_vote_details(
+    request: Request,
     vote_id: uuid.UUID,
     payload: ProposalVoteDetailsIn,
     db: AsyncSession = Depends(get_db),
 ):
     """Attach / update the optional free-text details on an existing vote."""
+    if not _vote_limiter.allow(client_ip(request)):
+        raise HTTPException(status_code=429, detail="too many requests")
+
     vote_obj = (
         await db.execute(select(ProposalVote).where(ProposalVote.id == vote_id))
     ).scalar_one_or_none()

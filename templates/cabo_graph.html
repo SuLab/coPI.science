@@ -712,16 +712,24 @@
   // A browser-stored anonymous id lets a visitor change their vote and attach
   // optional details to the same record. Voting still works if storage is
   // blocked — it just won't be de-duplicated per visitor.
+  // Always generate a token (the server now requires one). Persist it when
+  // storage is available so a returning visitor can update their own vote;
+  // fall back to an in-memory token when storage is blocked so voting still
+  // works — it just won't be de-duplicated across page loads.
+  function newVoterToken() {
+    return (window.crypto && crypto.randomUUID)
+      ? crypto.randomUUID()
+      : String(Math.random()).slice(2) + Date.now();
+  }
   let voterToken = null;
   try {
     voterToken = localStorage.getItem("copi-voter-token");
     if (!voterToken) {
-      voterToken = (window.crypto && crypto.randomUUID)
-        ? crypto.randomUUID()
-        : String(Math.random()).slice(2) + Date.now();
+      voterToken = newVoterToken();
       localStorage.setItem("copi-voter-token", voterToken);
     }
   } catch (e) { /* storage unavailable */ }
+  if (!voterToken) voterToken = newVoterToken();
 
   const feedbackEl = modal.select("#modal-feedback");
   let currentDecisionId = null;
