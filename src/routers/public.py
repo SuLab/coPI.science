@@ -1,9 +1,11 @@
 """Public-facing routes: landing page, waitlist, access-pending."""
 
+import asyncio
 import json
 import logging
 import re
 import secrets
+import time
 import unicodedata
 import uuid
 from collections import Counter
@@ -782,13 +784,48 @@ def _largest_component(nodes, links):
     return filtered_nodes, filtered_links
 
 
+# ---------------------------------------------------------------------------
+# Graph-payload cache. The four public graph routes take only Depends(get_db)
+# — no auth — and each builds its payload by sequential-scanning the two
+# largest tables and running O(V^2 * L^2) institution clustering. Left uncached
+# that is an unauthenticated DB-backed DoS (SEC-15). We memoize the payload per
+# parameter set for a short TTL, and serialize concurrent misses under a lock
+# so a burst of N requests triggers at most one DB build per TTL window (the
+# per-worker complement to the nginx edge limits in nginx.conf).
+# ---------------------------------------------------------------------------
+_GRAPH_CACHE: dict[tuple, tuple[float, tuple]] = {}
+_GRAPH_CACHE_TTL = 60.0  # seconds
+_GRAPH_CACHE_LOCK = asyncio.Lock()
+
+
+async def _cached_graph_payload(db: AsyncSession, **kwargs):
+    """TTL-cached wrapper around :func:`_build_graph_payload`.
+
+    The cache key is the (keyword-only, hashable) parameter set; there are only
+    a handful of distinct combinations across the four routes.
+    """
+    key = tuple(sorted(kwargs.items()))
+    now = time.monotonic()
+    cached = _GRAPH_CACHE.get(key)
+    if cached and now - cached[0] < _GRAPH_CACHE_TTL:
+        return cached[1]
+    async with _GRAPH_CACHE_LOCK:
+        # Re-check under the lock: a concurrent request may have just filled it.
+        cached = _GRAPH_CACHE.get(key)
+        if cached and time.monotonic() - cached[0] < _GRAPH_CACHE_TTL:
+            return cached[1]
+        payload = await _build_graph_payload(db, **kwargs)
+        _GRAPH_CACHE[key] = (time.monotonic(), payload)
+        return payload
+
+
 @router.get("/cabo-graph", response_class=HTMLResponse)
 async def cabo_graph(request: Request, db: AsyncSession = Depends(get_db)):
     """PI collaboration network for the Cabo retreat: all active PIs.
 
     Scoped to proposals decided during the retreat week (Apr 27 – May 7, 2026).
     """
-    nodes, links = await _build_graph_payload(
+    nodes, links = await _cached_graph_payload(
         db,
         all_agents=True,  # Cabo roster is no longer status='active' (reunion run flipped it)
         window_start=datetime(2026, 4, 27, tzinfo=timezone.utc),
@@ -814,7 +851,7 @@ async def cabo_graph(request: Request, db: AsyncSession = Depends(get_db)):
 @router.get("/scripps-graph", response_class=HTMLResponse)
 async def scripps_graph(request: Request, db: AsyncSession = Depends(get_db)):
     """Scripps-only slice of the collaboration network."""
-    nodes, links = await _build_graph_payload(db, scripps_only=True)
+    nodes, links = await _cached_graph_payload(db, scripps_only=True)
     return _render_graph(
         request,
         {
@@ -840,7 +877,7 @@ async def schultz_alumni_pilot(request: Request, db: AsyncSession = Depends(get_
     edges limited to proposals decided June 1–4, 2026. Nodes are colored by
     profile institution. (Formerly /cohort001-graph.)
     """
-    nodes, links = await _build_graph_payload(
+    nodes, links = await _cached_graph_payload(
         db,
         orcids=SCHULTZ_PILOT_ORCIDS,
         cohort_start=JUNE_POST_START,
@@ -877,7 +914,7 @@ async def schultz_group_alumni(request: Request, db: AsyncSession = Depends(get_
     after a later run flips the active roster. Nodes are colored by profile
     institution. (Formerly /schultz-alumni-graph.)
     """
-    nodes, links = await _build_graph_payload(
+    nodes, links = await _cached_graph_payload(
         db,
         all_agents=True,
         cohort_start=JUNE_POST_START,
