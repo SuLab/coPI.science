@@ -1,12 +1,30 @@
 """Application configuration from environment variables using Pydantic Settings."""
 
+import logging
 from functools import lru_cache
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+logger = logging.getLogger(__name__)
+
+# Stock development secret. It signs BOTH session cookies (src/main.py) and
+# unsubscribe tokens (src/services/email_notifications.py), so shipping it to a
+# real deployment yields forgeable admin sessions and unsubscribe links. The
+# validator below refuses to start with it (or an empty value) outside dev.
+INSECURE_SECRET_KEY = "insecure-dev-key-change-me"
+
+# ENVIRONMENT values treated as non-production (the insecure default secret is
+# tolerated with a warning). Anything else fails fast.
+_DEV_ENVIRONMENTS = {"development", "dev", "local", "test"}
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+
+    # Deployment environment. "development" (default) tolerates the insecure
+    # default SECRET_KEY; any other value (e.g. "production") fails fast.
+    environment: str = "development"
 
     # ORCID OAuth
     orcid_client_id: str = ""
@@ -23,9 +41,12 @@ class Settings(BaseSettings):
     ncbi_api_key: str = ""
 
     # App
-    secret_key: str = "insecure-dev-key-change-me"
+    secret_key: str = INSECURE_SECRET_KEY
     base_url: str = "http://localhost:8000"
-    allow_http_sessions: bool = True
+    # Secure by default: session cookies carry the Secure flag (https_only), so
+    # they are never sent over plain HTTP. Local HTTP development must opt in
+    # explicitly with ALLOW_HTTP_SESSIONS=true.
+    allow_http_sessions: bool = False
 
     # Slack app-configuration token (xoxe-...) used to create bot apps via the
     # Manifest API during provisioning. These seed the first rotation; the
@@ -212,6 +233,31 @@ class Settings(BaseSettings):
     # See specs/privacy-and-channel-visibility.md and specs/pi-interaction.md
     # §"PI Reopens a Proposal".
     enable_private_refinement: bool = True
+
+    @model_validator(mode="after")
+    def _guard_secret_key(self) -> "Settings":
+        """Fail fast when the insecure default secret would be used in prod.
+
+        The default (or an empty) SECRET_KEY signs forgeable session cookies and
+        unsubscribe tokens. Outside a development environment this raises at
+        startup so a misconfigured deploy never comes up; in development it is
+        tolerated with a warning so local runs stay friction-free.
+        """
+        if not self.secret_key or self.secret_key == INSECURE_SECRET_KEY:
+            if self.environment.strip().lower() not in _DEV_ENVIRONMENTS:
+                raise ValueError(
+                    "SECRET_KEY is missing or set to the insecure development "
+                    f"default while ENVIRONMENT={self.environment!r}. Generate a "
+                    "strong random value (e.g. `python -c \"import secrets; "
+                    "print(secrets.token_urlsafe(48))\"`) and set SECRET_KEY "
+                    "before deploying — see .env.example."
+                )
+            logger.warning(
+                "Using the insecure default SECRET_KEY (ENVIRONMENT=%s). "
+                "Acceptable for local development only.",
+                self.environment,
+            )
+        return self
 
     def get_slack_tokens(self) -> dict[str, str]:
         """Return slack bot tokens keyed by agent_id."""
