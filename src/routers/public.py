@@ -68,7 +68,7 @@ def _graph_csp(nonce: str) -> str:
             "style-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com",
             (
                 f"script-src 'self' 'nonce-{nonce}' 'unsafe-eval' "
-                "https://cdn.tailwindcss.com https://d3js.org https://cdn.jsdelivr.net"
+                "https://cdn.tailwindcss.com https://cdn.jsdelivr.net"
             ),
         ]
     )
