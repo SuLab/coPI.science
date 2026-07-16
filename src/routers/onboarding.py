@@ -353,13 +353,19 @@ async def onboarding_done(
     )
 
 
-@router.get("/retry")
+@router.post("/retry")
 async def retry_pipeline(
     request: Request,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Re-enqueue profile generation job."""
+    """Re-enqueue profile generation job.
+
+    POST-only: this creates and commits a Job, so over GET it was a
+    cross-site request-forgery target (a forged navigation could enqueue work
+    on the victim's behalf). SameSite=lax on the session cookie blocks forged
+    cross-site POSTs, so the "Try Again" control posts this form. (SEC-8)
+    """
     job = Job(
         type="generate_profile",
         user_id=current_user.id,

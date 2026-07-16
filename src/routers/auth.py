@@ -302,16 +302,14 @@ async def auth_callback(
 
 @router.post("/logout")
 async def logout(request: Request):
-    """Clear session and redirect to login."""
-    request.session.clear()
-    response = RedirectResponse(url="/login", status_code=302)
-    response.delete_cookie("copi-impersonate")
-    return response
+    """Clear session and redirect to login.
 
-
-@router.get("/logout")
-async def logout_get(request: Request):
-    """GET logout for easy browser navigation."""
+    POST-only: logout mutates session state, so exposing it over GET made it a
+    cross-site request-forgery target (a third-party page could log a victim
+    out via an <img>/<a> to /logout). SameSite=lax on the session cookie blocks
+    forged cross-site POSTs, so the "Sign out" control posts this form
+    (see base.html). (SEC-8)
+    """
     request.session.clear()
     response = RedirectResponse(url="/login", status_code=302)
     response.delete_cookie("copi-impersonate")
