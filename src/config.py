@@ -18,6 +18,11 @@ INSECURE_SECRET_KEY = "insecure-dev-key-change-me"
 # tolerated with a warning). Anything else fails fast.
 _DEV_ENVIRONMENTS = {"development", "dev", "local", "test"}
 
+# Field-name substrings that mark a setting as a credential. Any such field with
+# a non-empty value is masked in repr()/str() of the Settings object so an
+# accidental log line or `repr(settings)` can't dump the ~130 secrets (SEC-19).
+_SECRET_NAME_HINTS = ("secret", "token", "key", "password")
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
@@ -233,6 +238,22 @@ class Settings(BaseSettings):
     # See specs/privacy-and-channel-visibility.md and specs/pi-interaction.md
     # §"PI Reopens a Proposal".
     enable_private_refinement: bool = True
+
+    def __repr_args__(self):
+        """Redact credential-valued fields in repr()/str().
+
+        Pydantic v2 routes both ``repr(settings)`` and ``str(settings)`` through
+        ``__repr_args__``, so masking here closes the only described leak path
+        for SEC-19 (an accidental log/repr of the settings object) with no
+        change to how any field is *read*. Fields keep their plain ``str`` type,
+        avoiding a ``.get_secret_value()`` churn across ~130 call sites; a
+        deliberate reader of a specific attribute still gets the real value.
+        """
+        for name, value in super().__repr_args__():
+            if value and any(h in str(name).lower() for h in _SECRET_NAME_HINTS):
+                yield name, "***REDACTED***"
+            else:
+                yield name, value
 
     @model_validator(mode="after")
     def _guard_secret_key(self) -> "Settings":
