@@ -151,10 +151,18 @@ async def auth_callback(
     if not code:
         return RedirectResponse(url="/login?error=no_code", status_code=302)
 
-    # Verify state
+    # Verify state — FAIL CLOSED. The callback must present a state parameter
+    # that matches the random value stashed in the (signed) session by
+    # /login/start. Previously the check was skipped whenever the session held
+    # no stored state, so a fresh/forged session hitting
+    # /auth/callback?code=X&state=FORGED would sail through and log the victim
+    # into the ATTACKER's ORCID identity (login CSRF). We now reject when the
+    # stored state is missing, the inbound state is missing, or they differ.
+    # ORCID's OAuth does not support PKCE (ORCID-Source#5977), so this state
+    # parameter is the authorization-code CSRF defense.
     stored_state = request.session.pop("oauth_state", None)
-    if stored_state and state != stored_state:
-        logger.warning("OAuth state mismatch")
+    if not stored_state or not state or state != stored_state:
+        logger.warning("OAuth state missing or mismatched — rejecting callback")
         return RedirectResponse(url="/login?error=state_mismatch", status_code=302)
 
     settings = get_settings()
