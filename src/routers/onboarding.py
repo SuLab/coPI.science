@@ -1,7 +1,6 @@
 """Onboarding flow router."""
 
 import logging
-import re
 
 from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -17,12 +16,11 @@ from src.services.profile_export import (
     PRIVATE_PROFILES_DIR,
     export_private_profile,
 )
+from src.services.validators import is_valid_email
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 templates = Jinja2Templates(directory="templates")
-
-EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
 def _maybe_send_welcome(user: User, was_complete: bool) -> None:
@@ -126,7 +124,7 @@ async def save_profile(
     email_clean = (email or "").strip().lower()
     if not email_clean:
         return RedirectResponse(url="/onboarding?error=email_required", status_code=302)
-    if not EMAIL_RE.match(email_clean):
+    if not is_valid_email(email_clean):
         return RedirectResponse(url="/onboarding?error=invalid_email", status_code=302)
     if email_clean != (current_user.email or ""):
         existing = await db.execute(

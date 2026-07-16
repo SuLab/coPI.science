@@ -25,6 +25,7 @@ from src.models import (
     User,
 )
 from src.services.profile_export import export_private_profile, export_profile_to_markdown
+from src.services.validators import is_valid_email
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -1048,8 +1049,8 @@ async def invite_delegate(
     errors = []
     sent_count = 0
     for email in email_list:
-        # Basic validation
-        if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email):
+        # Basic validation (length-capped to avoid ReDoS; see SEC-16)
+        if not is_valid_email(email):
             errors.append(f"Invalid email: {email}")
             continue
 

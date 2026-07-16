@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.database import get_db
 from src.models import VOTE_DOWN, VOTE_UP, ProposalVote, User, WaitlistSignup
 from src.services.rate_limit import SlidingWindowRateLimiter, client_ip
+from src.services.validators import is_valid_email
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -30,8 +31,6 @@ templates = Jinja2Templates(directory="templates")
 # depth behind the nginx edge limits). Generous enough for a human clicking
 # through the graph, tight enough to blunt scripted vote-spam (SEC-7).
 _vote_limiter = SlidingWindowRateLimiter(max_events=30, window_seconds=60)
-
-EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
 def _graph_csp(nonce: str) -> str:
@@ -443,7 +442,7 @@ async def waitlist_submit(
 ):
     """Accept a waitlist signup. Upserts on email."""
     email_clean = (email or "").strip().lower()
-    if not EMAIL_RE.match(email_clean):
+    if not is_valid_email(email_clean):
         return templates.TemplateResponse(
             request,
             "landing.html",
@@ -515,7 +514,7 @@ async def access_pending_email(
         return RedirectResponse(url="/", status_code=302)
 
     email_clean = (email or "").strip().lower()
-    if not EMAIL_RE.match(email_clean):
+    if not is_valid_email(email_clean):
         return templates.TemplateResponse(
             request,
             "access_pending.html",
