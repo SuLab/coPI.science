@@ -335,7 +335,7 @@ def main():
     if refresh_token:
         console.print("Rotating config token...")
         try:
-            config_token, new_refresh = rotate_config_token(refresh_token)
+            config_token, new_refresh, _exp = rotate_config_token(refresh_token)
             set_key(args.env_file, "SLACK_CONFIG_TOKEN", config_token, quote_mode="never")
             set_key(args.env_file, "SLACK_CONFIG_REFRESH_TOKEN", new_refresh, quote_mode="never")
             console.print("[green]Config token rotated and saved.[/green]")
