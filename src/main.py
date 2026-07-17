@@ -28,15 +28,34 @@ class AgentBadgeMiddleware(BaseHTTPMiddleware):
         request.state.posthog_api_key = get_settings().posthog_api_key
         request.state.agent_badge_count = 0
         user_id_str = request.session.get("user_id") if "session" in request.scope else None
-        # Use impersonated user if applicable
-        impersonate_id = request.cookies.get("copi-impersonate") if user_id_str else None
-        effective_user_id = impersonate_id or user_id_str
-        if effective_user_id:
+        if user_id_str:
             try:
-                from src.models import AgentDelegate, AgentRegistry, ProposalReview, ThreadDecision
+                from src.models import (
+                    AgentDelegate,
+                    AgentRegistry,
+                    ProposalReview,
+                    ThreadDecision,
+                    User,
+                )
                 session_factory = get_session_factory()
                 async with session_factory() as db:
-                    uid = uuid.UUID(effective_user_id)
+                    uid = uuid.UUID(user_id_str)
+
+                    # Honor the impersonate cookie only for admins — it is an
+                    # unsigned client cookie, so without this gate any logged-in
+                    # user could read another user's badge count (SEC-12). This
+                    # mirrors the is_admin check in get_current_user. The extra
+                    # query runs only when the cookie is actually present.
+                    impersonate_id = request.cookies.get("copi-impersonate")
+                    if impersonate_id:
+                        is_admin = await db.scalar(
+                            select(User.is_admin).where(User.id == uid)
+                        )
+                        if is_admin:
+                            try:
+                                uid = uuid.UUID(impersonate_id)
+                            except ValueError:
+                                pass
 
                     # Get all agent_ids the user has access to (own + delegated)
                     own_result = await db.execute(

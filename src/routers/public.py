@@ -1,8 +1,11 @@
 """Public-facing routes: landing page, waitlist, access-pending."""
 
+import asyncio
 import json
 import logging
 import re
+import secrets
+import time
 import unicodedata
 import uuid
 from collections import Counter
@@ -19,12 +22,71 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.database import get_db
 from src.models import VOTE_DOWN, VOTE_UP, ProposalVote, User, WaitlistSignup
+from src.services.rate_limit import SlidingWindowRateLimiter, client_ip
+from src.services.validators import is_valid_email
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 templates = Jinja2Templates(directory="templates")
 
-EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+# Per-IP throttle for the anonymous proposal-feedback endpoints (defense in
+# depth behind the nginx edge limits). Generous enough for a human clicking
+# through the graph, tight enough to blunt scripted vote-spam (SEC-7).
+_vote_limiter = SlidingWindowRateLimiter(max_events=30, window_seconds=60)
+
+# Per-IP throttle for the public waitlist form. A real signup happens once;
+# this caps scripted row-spam on the unauthenticated endpoint (SEC-17).
+_waitlist_limiter = SlidingWindowRateLimiter(max_events=10, window_seconds=3600)
+
+# Field caps for the public waitlist write, applied before persisting so
+# oversized input is truncated rather than raising a DB DataError -> 500
+# (name/institution are String(255); note is unbounded Text) (SEC-17).
+_WAITLIST_NAME_MAX = 255
+_WAITLIST_INSTITUTION_MAX = 255
+_WAITLIST_NOTE_MAX = 2000
+
+
+def _graph_csp(nonce: str) -> str:
+    """Content-Security-Policy for the standalone collaboration-graph pages.
+
+    These templates carry an inline <script> plus inline styles and load
+    D3/marked/DOMPurify/Tailwind from CDNs, so the policy pins those hosts and
+    requires a per-request nonce for the inline executable script (defense in
+    depth behind the |tojson/escapeHtml output encoding). 'unsafe-eval' is
+    present only because the Tailwind Play CDN JIT-compiles utilities in the
+    browser; vendoring a compiled Tailwind build (SEC-18) lets it be dropped.
+    """
+    return "; ".join(
+        [
+            "default-src 'self'",
+            "base-uri 'self'",
+            "object-src 'none'",
+            "frame-ancestors 'none'",
+            "img-src 'self' data:",
+            "font-src 'self' data:",
+            "connect-src 'self'",
+            "style-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com",
+            (
+                f"script-src 'self' 'nonce-{nonce}' 'unsafe-eval' "
+                "https://cdn.tailwindcss.com https://cdn.jsdelivr.net"
+            ),
+        ]
+    )
+
+
+def _render_graph(request: Request, context: dict) -> HTMLResponse:
+    """Render cabo_graph.html with a fresh CSP nonce and the matching header.
+
+    ``graph_json``/``color_map`` in ``context`` must be raw Python objects — the
+    template serializes them with the |tojson filter, which escapes ``<``/``>``/
+    ``&`` so attacker-controlled fields (PI name, institution, LLM summary text)
+    cannot break out of the <script> block.
+    """
+    nonce = secrets.token_urlsafe(16)
+    context["csp_nonce"] = nonce
+    response = templates.TemplateResponse(request, "cabo_graph.html", context)
+    response.headers["Content-Security-Policy"] = _graph_csp(nonce)
+    return response
 
 # Institution mapping for the Cabo collaboration graph. This is an independent
 # hardcoded grouping of agent_ids by institution (the agent roster itself now
@@ -392,8 +454,11 @@ async def waitlist_submit(
     db: AsyncSession = Depends(get_db),
 ):
     """Accept a waitlist signup. Upserts on email."""
+    if not _waitlist_limiter.allow(client_ip(request)):
+        raise HTTPException(status_code=429, detail="too many requests")
+
     email_clean = (email or "").strip().lower()
-    if not EMAIL_RE.match(email_clean):
+    if not is_valid_email(email_clean):
         return templates.TemplateResponse(
             request,
             "landing.html",
@@ -410,22 +475,29 @@ async def waitlist_submit(
             status_code=400,
         )
 
+    # Truncate to the column limits before persisting: name/institution are
+    # String(255) (oversized -> DataError -> 500) and note is unbounded Text
+    # (an uncapped public write) (SEC-17).
+    name_clean = name.strip()[:_WAITLIST_NAME_MAX]
+    institution_clean = institution.strip()[:_WAITLIST_INSTITUTION_MAX]
+    note_clean = note.strip()[:_WAITLIST_NOTE_MAX]
+
     result = await db.execute(
         select(WaitlistSignup).where(WaitlistSignup.email == email_clean)
     )
     existing = result.scalar_one_or_none()
 
     if existing:
-        existing.name = name.strip() or existing.name
-        existing.institution = institution.strip() or existing.institution
-        existing.note = note.strip() or existing.note
+        existing.name = name_clean or existing.name
+        existing.institution = institution_clean or existing.institution
+        existing.note = note_clean or existing.note
     else:
         db.add(
             WaitlistSignup(
                 email=email_clean,
-                name=name.strip() or None,
-                institution=institution.strip() or None,
-                note=note.strip() or None,
+                name=name_clean or None,
+                institution=institution_clean or None,
+                note=note_clean or None,
             )
         )
     await db.commit()
@@ -465,7 +537,7 @@ async def access_pending_email(
         return RedirectResponse(url="/", status_code=302)
 
     email_clean = (email or "").strip().lower()
-    if not EMAIL_RE.match(email_clean):
+    if not is_valid_email(email_clean):
         return templates.TemplateResponse(
             request,
             "access_pending.html",
@@ -712,31 +784,65 @@ def _largest_component(nodes, links):
     return filtered_nodes, filtered_links
 
 
+# ---------------------------------------------------------------------------
+# Graph-payload cache. The four public graph routes take only Depends(get_db)
+# — no auth — and each builds its payload by sequential-scanning the two
+# largest tables and running O(V^2 * L^2) institution clustering. Left uncached
+# that is an unauthenticated DB-backed DoS (SEC-15). We memoize the payload per
+# parameter set for a short TTL, and serialize concurrent misses under a lock
+# so a burst of N requests triggers at most one DB build per TTL window (the
+# per-worker complement to the nginx edge limits in nginx.conf).
+# ---------------------------------------------------------------------------
+_GRAPH_CACHE: dict[tuple, tuple[float, tuple]] = {}
+_GRAPH_CACHE_TTL = 60.0  # seconds
+_GRAPH_CACHE_LOCK = asyncio.Lock()
+
+
+async def _cached_graph_payload(db: AsyncSession, **kwargs):
+    """TTL-cached wrapper around :func:`_build_graph_payload`.
+
+    The cache key is the (keyword-only, hashable) parameter set; there are only
+    a handful of distinct combinations across the four routes.
+    """
+    key = tuple(sorted(kwargs.items()))
+    now = time.monotonic()
+    cached = _GRAPH_CACHE.get(key)
+    if cached and now - cached[0] < _GRAPH_CACHE_TTL:
+        return cached[1]
+    async with _GRAPH_CACHE_LOCK:
+        # Re-check under the lock: a concurrent request may have just filled it.
+        cached = _GRAPH_CACHE.get(key)
+        if cached and time.monotonic() - cached[0] < _GRAPH_CACHE_TTL:
+            return cached[1]
+        payload = await _build_graph_payload(db, **kwargs)
+        _GRAPH_CACHE[key] = (time.monotonic(), payload)
+        return payload
+
+
 @router.get("/cabo-graph", response_class=HTMLResponse)
 async def cabo_graph(request: Request, db: AsyncSession = Depends(get_db)):
     """PI collaboration network for the Cabo retreat: all active PIs.
 
     Scoped to proposals decided during the retreat week (Apr 27 – May 7, 2026).
     """
-    nodes, links = await _build_graph_payload(
+    nodes, links = await _cached_graph_payload(
         db,
         all_agents=True,  # Cabo roster is no longer status='active' (reunion run flipped it)
         window_start=datetime(2026, 4, 27, tzinfo=timezone.utc),
         window_end=datetime(2026, 5, 8, tzinfo=timezone.utc),  # exclusive: through May 7
     )
-    return templates.TemplateResponse(
+    return _render_graph(
         request,
-        "cabo_graph.html",
         {
             "request": request,
-            "graph_json": json.dumps({"nodes": nodes, "links": links}),
+            "graph_json": {"nodes": nodes, "links": links},
             "node_count": len(nodes),
             "edge_count": len(links),
             "proposal_count": sum(link["weight"] for link in links),
             "page_title": "Cabo collaboration network",
             "pi_label": "PIs",
             "legend": _LEGACY_LEGEND,
-            "color_map": json.dumps(_LEGACY_COLOR_MAP),
+            "color_map": _LEGACY_COLOR_MAP,
             "since_label": "during April 27 – May 7, 2026",
         },
     )
@@ -745,20 +851,19 @@ async def cabo_graph(request: Request, db: AsyncSession = Depends(get_db)):
 @router.get("/scripps-graph", response_class=HTMLResponse)
 async def scripps_graph(request: Request, db: AsyncSession = Depends(get_db)):
     """Scripps-only slice of the collaboration network."""
-    nodes, links = await _build_graph_payload(db, scripps_only=True)
-    return templates.TemplateResponse(
+    nodes, links = await _cached_graph_payload(db, scripps_only=True)
+    return _render_graph(
         request,
-        "cabo_graph.html",
         {
             "request": request,
-            "graph_json": json.dumps({"nodes": nodes, "links": links}),
+            "graph_json": {"nodes": nodes, "links": links},
             "node_count": len(nodes),
             "edge_count": len(links),
             "proposal_count": sum(link["weight"] for link in links),
             "page_title": "Scripps Research collaboration network",
             "pi_label": "Scripps PIs",
             "legend": [],
-            "color_map": json.dumps(_LEGACY_COLOR_MAP),
+            "color_map": _LEGACY_COLOR_MAP,
             "since_label": "since March 1, 2026",
         },
     )
@@ -772,7 +877,7 @@ async def schultz_alumni_pilot(request: Request, db: AsyncSession = Depends(get_
     edges limited to proposals decided June 1–4, 2026. Nodes are colored by
     profile institution. (Formerly /cohort001-graph.)
     """
-    nodes, links = await _build_graph_payload(
+    nodes, links = await _cached_graph_payload(
         db,
         orcids=SCHULTZ_PILOT_ORCIDS,
         cohort_start=JUNE_POST_START,
@@ -782,19 +887,18 @@ async def schultz_alumni_pilot(request: Request, db: AsyncSession = Depends(get_
         largest_component_only=False,
     )
     legend, color_map = _institution_legend(nodes)
-    return templates.TemplateResponse(
+    return _render_graph(
         request,
-        "cabo_graph.html",
         {
             "request": request,
-            "graph_json": json.dumps({"nodes": nodes, "links": links}),
+            "graph_json": {"nodes": nodes, "links": links},
             "node_count": len(nodes),
             "edge_count": len(links),
             "proposal_count": sum(link["weight"] for link in links),
             "page_title": "Schultz Alumni Pilot collaboration network",
             "pi_label": "PIs",
             "legend": legend,
-            "color_map": json.dumps(color_map),
+            "color_map": color_map,
             "since_label": "during June 1 – June 4, 2026",
         },
     )
@@ -810,7 +914,7 @@ async def schultz_group_alumni(request: Request, db: AsyncSession = Depends(get_
     after a later run flips the active roster. Nodes are colored by profile
     institution. (Formerly /schultz-alumni-graph.)
     """
-    nodes, links = await _build_graph_payload(
+    nodes, links = await _cached_graph_payload(
         db,
         all_agents=True,
         cohort_start=JUNE_POST_START,
@@ -820,19 +924,18 @@ async def schultz_group_alumni(request: Request, db: AsyncSession = Depends(get_
         largest_component_only=False,
     )
     legend, color_map = _institution_legend(nodes)
-    return templates.TemplateResponse(
+    return _render_graph(
         request,
-        "cabo_graph.html",
         {
             "request": request,
-            "graph_json": json.dumps({"nodes": nodes, "links": links}),
+            "graph_json": {"nodes": nodes, "links": links},
             "node_count": len(nodes),
             "edge_count": len(links),
             "proposal_count": sum(link["weight"] for link in links),
             "page_title": "Schultz Group Alumni collaboration network",
             "pi_label": "PIs",
             "legend": legend,
-            "color_map": json.dumps(color_map),
+            "color_map": color_map,
             "since_label": "during June 5 – June 10, 2026",
         },
     )
@@ -868,17 +971,33 @@ def _clean_details(details: str | None) -> str | None:
 
 @router.post("/api/proposal-vote")
 async def submit_proposal_vote(
-    payload: ProposalVoteIn, db: AsyncSession = Depends(get_db)
+    request: Request, payload: ProposalVoteIn, db: AsyncSession = Depends(get_db)
 ):
     """Record (or update) an anonymous vote on a proposal. Returns the vote id."""
+    if not _vote_limiter.allow(client_ip(request)):
+        raise HTTPException(status_code=429, detail="too many requests")
+
     if payload.vote not in (VOTE_UP, VOTE_DOWN):
         raise HTTPException(status_code=422, detail="vote must be 'up' or 'down'")
 
+    # Require a browser token: without one, every request inserts a fresh row
+    # (the unique (decision, token) constraint can't dedup NULL tokens), which
+    # is an unbounded-storage vector on this public endpoint (SEC-7).
+    token = _clean_token(payload.voter_token)
+    if token is None:
+        raise HTTPException(status_code=422, detail="voter_token required")
+
+    # Only allow votes on proposals that are actually shown on the public graph
+    # (the same outcome/visibility predicate _build_graph_payload uses). This
+    # keeps the endpoint from writing rows for — or confirming the existence of —
+    # private or non-proposal thread_decisions.
     decision = (
         await db.execute(
             text(
                 "SELECT thread_id, agent_a, agent_b FROM thread_decisions "
-                "WHERE id = :id"
+                "WHERE id = :id "
+                "  AND outcome = 'proposal' "
+                "  AND origin_visibility = 'public'"
             ),
             {"id": str(payload.decision_id)},
         )
@@ -886,7 +1005,6 @@ async def submit_proposal_vote(
     if decision is None:
         raise HTTPException(status_code=404, detail="unknown proposal")
 
-    token = _clean_token(payload.voter_token)
     details = _clean_details(payload.details)
 
     # One vote per (proposal, browser token): update in place if they revote.
@@ -942,11 +1060,15 @@ async def submit_proposal_vote(
 
 @router.post("/api/proposal-vote/{vote_id}/details")
 async def update_proposal_vote_details(
+    request: Request,
     vote_id: uuid.UUID,
     payload: ProposalVoteDetailsIn,
     db: AsyncSession = Depends(get_db),
 ):
     """Attach / update the optional free-text details on an existing vote."""
+    if not _vote_limiter.allow(client_ip(request)):
+        raise HTTPException(status_code=429, detail="too many requests")
+
     vote_obj = (
         await db.execute(select(ProposalVote).where(ProposalVote.id == vote_id))
     ).scalar_one_or_none()

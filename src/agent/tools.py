@@ -4,6 +4,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from src.agent.prompt_safety import delimit
 from src.services.pubmed import fetch_abstract, fetch_full_text
 
 logger = logging.getLogger(__name__)
@@ -181,7 +182,8 @@ async def _execute_retrieve_profile(agent_id: str) -> str:
     """Read a public profile from disk."""
     profile_path = PROFILES_DIR / "public" / f"{agent_id}.md"
     try:
-        return profile_path.read_text(encoding="utf-8")
+        # Profiles are user-editable text — fence as untrusted data (SEC-14).
+        return delimit(profile_path.read_text(encoding="utf-8"), "agent_profile")
     except FileNotFoundError:
         return f"No public profile found for agent '{agent_id}'."
 
@@ -191,12 +193,13 @@ async def _execute_retrieve_abstract(pmid_or_doi: str) -> str:
     result = await fetch_abstract(pmid_or_doi)
     if "error" in result:
         return result["error"]
+    # Title/abstract come from PubMed — untrusted external text (SEC-14).
     parts = [
-        f"Title: {result['title']}",
+        f"Title: {delimit(result['title'], 'paper_title')}",
         f"Journal: {result.get('journal', 'Unknown')} ({result.get('year', '?')})",
         f"PMID: {result['pmid']}",
         "",
-        f"Abstract: {result.get('abstract', 'No abstract available.')}",
+        f"Abstract: {delimit(result.get('abstract', 'No abstract available.'), 'paper_abstract')}",
     ]
     return "\n".join(parts)
 
@@ -206,18 +209,19 @@ async def _execute_retrieve_full_text(pmid_or_doi: str) -> str:
     result = await fetch_full_text(pmid_or_doi)
     if "error" in result:
         return result["error"]
+    # Title/abstract/methods come from PubMed/PMC — untrusted external text (SEC-14).
     parts = [
-        f"Title: {result['title']}",
+        f"Title: {delimit(result['title'], 'paper_title')}",
         f"Journal: {result.get('journal', 'Unknown')} ({result.get('year', '?')})",
         f"PMID: {result['pmid']}",
     ]
     if result.get("pmcid"):
         parts.append(f"PMCID: {result['pmcid']}")
     parts.append("")
-    parts.append(f"Abstract: {result.get('abstract', 'No abstract available.')}")
+    parts.append(f"Abstract: {delimit(result.get('abstract', 'No abstract available.'), 'paper_abstract')}")
     if result.get("methods"):
         parts.append("")
-        parts.append(f"Methods: {result['methods'][:3000]}")
+        parts.append(f"Methods: {delimit(result['methods'][:3000], 'paper_methods')}")
     elif result.get("note"):
         parts.append("")
         parts.append(f"Note: {result['note']}")

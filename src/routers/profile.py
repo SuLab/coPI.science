@@ -1,7 +1,6 @@
 """Profile view and edit router."""
 
 import logging
-import re
 
 from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -12,12 +11,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.database import get_db
 from src.dependencies import get_current_user
 from src.models import Job, Publication, ResearcherProfile, User
+from src.services.validators import is_valid_email
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 templates = Jinja2Templates(directory="templates")
-
-EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
 def _template_context(request: Request, user: User, **kwargs) -> dict:
@@ -128,7 +126,7 @@ async def profile_save(
     email_clean = (email or "").strip().lower()
     if email_clean != (current_user.email or ""):
         if email_clean:
-            if not EMAIL_RE.match(email_clean):
+            if not is_valid_email(email_clean):
                 return RedirectResponse(
                     url="/profile/edit?error=invalid_email", status_code=302
                 )

@@ -151,10 +151,18 @@ async def auth_callback(
     if not code:
         return RedirectResponse(url="/login?error=no_code", status_code=302)
 
-    # Verify state
+    # Verify state — FAIL CLOSED. The callback must present a state parameter
+    # that matches the random value stashed in the (signed) session by
+    # /login/start. Previously the check was skipped whenever the session held
+    # no stored state, so a fresh/forged session hitting
+    # /auth/callback?code=X&state=FORGED would sail through and log the victim
+    # into the ATTACKER's ORCID identity (login CSRF). We now reject when the
+    # stored state is missing, the inbound state is missing, or they differ.
+    # ORCID's OAuth does not support PKCE (ORCID-Source#5977), so this state
+    # parameter is the authorization-code CSRF defense.
     stored_state = request.session.pop("oauth_state", None)
-    if stored_state and state != stored_state:
-        logger.warning("OAuth state mismatch")
+    if not stored_state or not state or state != stored_state:
+        logger.warning("OAuth state missing or mismatched — rejecting callback")
         return RedirectResponse(url="/login?error=state_mismatch", status_code=302)
 
     settings = get_settings()
@@ -294,16 +302,14 @@ async def auth_callback(
 
 @router.post("/logout")
 async def logout(request: Request):
-    """Clear session and redirect to login."""
-    request.session.clear()
-    response = RedirectResponse(url="/login", status_code=302)
-    response.delete_cookie("copi-impersonate")
-    return response
+    """Clear session and redirect to login.
 
-
-@router.get("/logout")
-async def logout_get(request: Request):
-    """GET logout for easy browser navigation."""
+    POST-only: logout mutates session state, so exposing it over GET made it a
+    cross-site request-forgery target (a third-party page could log a victim
+    out via an <img>/<a> to /logout). SameSite=lax on the session cookie blocks
+    forged cross-site POSTs, so the "Sign out" control posts this form
+    (see base.html). (SEC-8)
+    """
     request.session.clear()
     response = RedirectResponse(url="/login", status_code=302)
     response.delete_cookie("copi-impersonate")

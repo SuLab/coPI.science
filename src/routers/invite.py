@@ -16,6 +16,24 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 templates = Jinja2Templates(directory="templates")
 
+_INVITE_EMAIL_MISMATCH_MSG = (
+    "This invitation was sent to a different email address. Please sign in with "
+    "the ORCID account whose email matches the invitation."
+)
+
+
+def _invite_matches_user(invitation: DelegateInvitation, user: User) -> bool:
+    """True only if the logged-in user's email matches the invited email.
+
+    Binds acceptance to the invited address so a forwarded or leaked invite link
+    cannot let a different logged-in account claim delegate access (read/write on
+    the PI's proposals and profile). Fails closed when either address is missing.
+    See SEC-6.
+    """
+    invited = (invitation.email or "").strip().lower()
+    account = (getattr(user, "email", None) or "").strip().lower()
+    return bool(invited) and bool(account) and invited == account
+
 
 @router.get("/invite/{token}", response_class=HTMLResponse)
 async def accept_invite(
@@ -75,6 +93,19 @@ async def accept_invite(
     if not user:
         request.session["pending_invite_token"] = token
         return RedirectResponse(url="/login/start", status_code=302)
+
+    # Bind the invite to the address it was sent to — a forwarded/leaked link
+    # opened by a different account must not reach the acceptance page.
+    if not _invite_matches_user(invitation, user):
+        logger.warning(
+            "Invite %s (for %r) opened by user %s (%r) — email mismatch",
+            invitation.id, invitation.email, user.id, user.email,
+        )
+        return templates.TemplateResponse(
+            request,
+            "invite/error.html",
+            {"request": request, "error": _INVITE_EMAIL_MISMATCH_MSG},
+        )
 
     # Show confirmation page (no onboarding required for delegates)
     agent_result = await db.execute(
@@ -140,8 +171,22 @@ async def _accept_invitation(
     user: User,
     db: AsyncSession,
     request: Request,
-) -> RedirectResponse:
+) -> HTMLResponse | RedirectResponse:
     """Create the delegation relationship and mark invitation accepted."""
+    # Enforce the email binding at the mutation chokepoint (defense in depth
+    # behind the GET-side check): never grant delegate access to an account
+    # whose email differs from the invited address. See SEC-6.
+    if not _invite_matches_user(invitation, user):
+        logger.warning(
+            "Rejecting invite acceptance: invitation %s for %r, user %s has %r",
+            invitation.id, invitation.email, user.id, user.email,
+        )
+        return templates.TemplateResponse(
+            request,
+            "invite/error.html",
+            {"request": request, "error": _INVITE_EMAIL_MISMATCH_MSG},
+        )
+
     # Check if already a delegate
     existing = await db.execute(
         select(AgentDelegate).where(

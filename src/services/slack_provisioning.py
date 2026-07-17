@@ -48,10 +48,14 @@ def lookup_team_id(bot_token: str) -> str | None:
     return data.get("team_id") if data.get("ok") else None
 
 
-def rotate_config_token(refresh_token: str) -> tuple[str, str]:
-    """Rotate the app-config token. Returns (new_access_token, new_refresh_token).
+def rotate_config_token(refresh_token: str) -> tuple[str, str, int]:
+    """Rotate the app-config token.
 
-    Slack rotates the refresh token too, so the caller MUST persist both.
+    Returns ``(new_access_token, new_refresh_token, exp)`` where ``exp`` is the
+    access token's expiry (unix seconds; 0 if Slack omits it). Slack rotates the
+    refresh token too and it is single-use, so the caller MUST persist the new
+    pair atomically. ``exp`` lets callers cache the access token and avoid
+    rotating on every use (see admin_provisioning; SEC-10).
     """
     resp = httpx.post(
         f"{SLACK_API}/tooling.tokens.rotate",
@@ -61,7 +65,7 @@ def rotate_config_token(refresh_token: str) -> tuple[str, str]:
     data = resp.json()
     if not data.get("ok"):
         raise RuntimeError(f"tooling.tokens.rotate failed: {data.get('error')}")
-    return data["token"], data["refresh_token"]
+    return data["token"], data["refresh_token"], int(data.get("exp", 0) or 0)
 
 
 def create_app(
@@ -152,5 +156,7 @@ def exchange_code(
         raise RuntimeError(f"oauth.v2.access failed: {data.get('error')}")
     token = data.get("access_token", "")
     if not token.startswith("xoxb-"):
-        raise RuntimeError(f"Unexpected token format: {token[:20]}...")
+        # Do NOT echo any part of the token — this message can surface in logs
+        # and a user-facing ?slack_error= redirect. See SEC-9.
+        raise RuntimeError("Unexpected token format from Slack (expected xoxb-...)")
     return token

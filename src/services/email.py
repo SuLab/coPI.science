@@ -1,9 +1,32 @@
 """Email sending via AWS SES."""
 
+import html
 import logging
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+
+def esc(value: object) -> str:
+    """HTML-escape an untrusted value before interpolating it into an email body.
+
+    User-controlled strings (ORCID display names, PI-chosen bot/pi names,
+    LLM-written proposal summaries) are interpolated into HTML email bodies via
+    f-strings. Without escaping, a name like ``<img src=x onerror=...>`` injects
+    markup into the recipient's email (audit SEC-13). Always wrap such values in
+    ``esc()`` in HTML contexts; plain-text bodies don't need it.
+    """
+    return html.escape("" if value is None else str(value))
+
+
+def clean_subject(value: object) -> str:
+    """Sanitize an untrusted value used in an email Subject header.
+
+    Collapses CR/LF so an interpolated display name can't smuggle extra header
+    lines (defense in depth — SES's structured Subject field already blocks
+    header injection). Subjects are not HTML, so they are not HTML-escaped.
+    """
+    return ("" if value is None else str(value)).replace("\r", " ").replace("\n", " ").strip()
 
 # Inline screenshot used in the welcome email (embedded via CID).
 WELCOME_IMAGE_PATH = Path(__file__).resolve().parents[2] / "static" / "email" / "welcome_agent.png"
@@ -86,7 +109,12 @@ def send_delegate_invitation(
         logger.info("Delegate invite to %s suppressed by outbound allowlist", to_email)
         return False
 
-    subject = f"{pi_name} invited you to join their lab on CoPI"
+    subject = f"{clean_subject(pi_name)} invited you to join their lab on CoPI"
+
+    # HTML-escaped copies for the HTML body (SEC-13). Plain-text body below uses
+    # the raw values — no markup interpretation there.
+    pi_html = esc(pi_name)
+    bot_html = esc(bot_name)
 
     text_body = (
         f"{pi_name} has invited you as a delegate for {bot_name} on CoPI.\n\n"
@@ -101,8 +129,8 @@ def send_delegate_invitation(
     <div style="background: #fff; border: 1px solid #e5e7eb; border-radius: 12px; padding: 32px;">
         <h2 style="margin: 0 0 16px; font-size: 18px; color: #111827;">You've been invited</h2>
         <p style="color: #374151; line-height: 1.6; margin: 0 0 16px;">
-            <strong>{pi_name}</strong> has invited you as a delegate for
-            <strong>{bot_name}</strong> on CoPI. As a delegate, you can:
+            <strong>{pi_html}</strong> has invited you as a delegate for
+            <strong>{bot_html}</strong> on CoPI. As a delegate, you can:
         </p>
         <ul style="color: #374151; line-height: 1.8; margin: 0 0 24px; padding-left: 20px;">
             <li>View and manage the lab's AI agent</li>
@@ -170,6 +198,9 @@ def build_welcome_email(to_email: str, name: str | None = None, user_id: str | N
 
     greeting_name = (name or "").strip().split(" ")[0] if name else ""
     greeting = f"Hi {greeting_name}," if greeting_name else "Hi there,"
+    # HTML-escaped greeting for the HTML body (the name is the ORCID display
+    # name, i.e. user-controlled) (SEC-13).
+    greeting_html = f"Hi {esc(greeting_name)}," if greeting_name else "Hi there,"
 
     subject = "Welcome to CoPI — your research collaboration agent"
 
@@ -220,7 +251,7 @@ Manage email preferences: {settings_url}
     <div style="background: #fff; border: 1px solid #e5e7eb; border-radius: 12px; padding: 32px; margin-bottom: 16px;">
         <h1 style="margin: 0 0 8px; font-size: 22px; color: #111827;">Welcome to CoPI 🎉</h1>
         <p style="color: #374151; line-height: 1.6; margin: 0; font-size: 15px;">
-            {greeting} we're glad to have you. CoPI helps your lab find collaboration
+            {greeting_html} we're glad to have you. CoPI helps your lab find collaboration
             opportunities and synergistic research with other labs — here's how to get started.
         </p>
     </div>

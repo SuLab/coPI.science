@@ -50,9 +50,11 @@
         <div class="text-red-500 text-4xl mb-4">⚠️</div>
         <h2 class="text-xl font-semibold text-gray-800 mb-2">Profile Generation Failed</h2>
         <p class="text-gray-600 mb-4">We encountered an error generating your profile. Please try again.</p>
-        <a href="/onboarding/retry" class="bg-indigo-600 text-white px-6 py-2 rounded-lg hover:bg-indigo-700">
-            Try Again
-        </a>
+        <form action="/onboarding/retry" method="post" class="inline">
+            <button type="submit" class="bg-indigo-600 text-white px-6 py-2 rounded-lg hover:bg-indigo-700">
+                Try Again
+            </button>
+        </form>
     </div>
 
     {% elif profile %}

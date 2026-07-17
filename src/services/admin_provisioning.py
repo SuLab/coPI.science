@@ -11,8 +11,9 @@ Wraps the shared ``slack_provisioning`` helpers with web-flow concerns:
 
 import logging
 import secrets
+import time
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.config import get_settings
@@ -27,7 +28,22 @@ logger = logging.getLogger(__name__)
 
 _KEY_TOKEN = "slack_config_token"
 _KEY_REFRESH = "slack_config_refresh_token"
+_KEY_TOKEN_EXP = "slack_config_token_exp"
 CALLBACK_PATH = "/admin/agents/slack/callback"
+
+# Refresh the access token this many seconds before its stated expiry.
+_TOKEN_EXP_MARGIN = 120
+
+# Slack API error slugs that indicate the config token itself is bad (as
+# opposed to a manifest/validation error) — the only case worth rotating and
+# retrying create_app for (SEC-10).
+_AUTH_ERRORS = (
+    "not_authed",
+    "invalid_auth",
+    "token_expired",
+    "token_revoked",
+    "account_inactive",
+)
 
 
 class ProvisioningError(RuntimeError):
@@ -50,28 +66,49 @@ async def _kv_set(db: AsyncSession, key: str, value: str) -> None:
         db.add(AppSetting(key=key, value=value))
 
 
-async def _get_rotated_config_token(db: AsyncSession) -> str:
-    """Return a usable app-config token, rotating + persisting the pair.
+async def _config_token(db: AsyncSession, *, force_rotate: bool = False) -> str:
+    """Return a usable app-config access token.
 
-    Slack rotates the refresh token on every use, so the new pair MUST be saved.
-    Seeds from ``Settings`` (``.env``) on first use, then the KV row is
+    Slack's config refresh token is single-use and rotated on every call, and a
+    crash between the Slack-side rotate and our local commit would strand the
+    new pair. To keep those single-use rotations rare, we cache the access token
+    with its expiry and reuse it until it is about to expire (or ``force_rotate``
+    is set after an auth failure). Only then do we rotate and persist the new
+    ``(token, refresh, exp)`` triple atomically before returning (SEC-10).
+
+    Seeds from ``Settings`` (``.env``) on first use; thereafter the KV rows are
     authoritative.
     """
     settings = get_settings()
+
+    if not force_rotate:
+        cached = await _kv_get(db, _KEY_TOKEN)
+        exp_raw = await _kv_get(db, _KEY_TOKEN_EXP)
+        if cached and exp_raw:
+            try:
+                if int(exp_raw) - time.time() > _TOKEN_EXP_MARGIN:
+                    return cached
+            except ValueError:
+                pass  # unparseable expiry -> fall through and rotate
+
     refresh = await _kv_get(db, _KEY_REFRESH) or settings.slack_config_refresh_token
-    token = await _kv_get(db, _KEY_TOKEN) or settings.slack_config_token
 
     if refresh:
         try:
             from src.services.slack_provisioning import rotate_config_token
-            new_token, new_refresh = rotate_config_token(refresh)
+            new_token, new_refresh, exp = rotate_config_token(refresh)
         except Exception as exc:
             raise ProvisioningError(f"Could not rotate the Slack config token: {exc}")
+        # Persist the whole new triple atomically: the refresh we just consumed
+        # is now dead, so the new pair must land together.
         await _kv_set(db, _KEY_TOKEN, new_token)
         await _kv_set(db, _KEY_REFRESH, new_refresh)
+        await _kv_set(db, _KEY_TOKEN_EXP, str(exp))
         await db.commit()
         return new_token
 
+    # No refresh token at all — fall back to a statically-configured access token.
+    token = await _kv_get(db, _KEY_TOKEN) or settings.slack_config_token
     if token:
         return token
     raise ProvisioningError(
@@ -90,19 +127,43 @@ async def start_provisioning(db: AsyncSession, agent: AgentRegistry) -> str:
     Persists a ``SlackAppProvision`` row keyed by a random ``state`` so the
     callback can finish the exchange.
     """
-    config_token = await _get_rotated_config_token(db)
     redirect_uri = _redirect_uri()
 
-    try:
-        app = create_app(
-            config_token=config_token,
+    def _create(token: str) -> dict:
+        return create_app(
+            config_token=token,
             agent_id=agent.agent_id,
             bot_name=agent.bot_name,
             pi_name=agent.pi_name,
             redirect_uri=redirect_uri,
         )
+
+    # Use the cached access token; only rotate (consuming a single-use refresh)
+    # if create_app fails specifically because the token is bad. This keeps
+    # rotations rare and means a rotation is never "spent" on a manifest error
+    # (SEC-10).
+    config_token = await _config_token(db)
+    try:
+        app = _create(config_token)
     except Exception as exc:
-        raise ProvisioningError(f"Could not create the Slack app: {exc}")
+        if any(slug in str(exc) for slug in _AUTH_ERRORS):
+            logger.info("Config token rejected (%s) — rotating and retrying", exc)
+            config_token = await _config_token(db, force_rotate=True)
+            try:
+                app = _create(config_token)
+            except Exception as exc2:
+                raise ProvisioningError(f"Could not create the Slack app: {exc2}")
+        else:
+            raise ProvisioningError(f"Could not create the Slack app: {exc}")
+
+    # Idempotency: a prior "Provision" click for this agent may have left a
+    # pending bridge row (holding a client_secret + reusable state). Drop any
+    # such rows so there is at most one live provisioning per agent (SEC-10).
+    await db.execute(
+        delete(SlackAppProvision).where(
+            SlackAppProvision.agent_registry_id == agent.id
+        )
+    )
 
     state = secrets.token_urlsafe(32)
     db.add(SlackAppProvision(
@@ -152,7 +213,18 @@ async def complete_provisioning(db: AsyncSession, state: str, code: str) -> Agen
             prov.client_id, prov.client_secret, code, _redirect_uri()
         )
     except Exception as exc:
-        raise ProvisioningError(f"Token exchange failed: {exc}")
+        # Delete the bridge row on failure: it holds the app client_secret and a
+        # reusable OAuth state (no TTL), so leaving it behind is a standing
+        # secret + replay surface. Log details server-side only; surface a
+        # generic message so no token/secret fragment reaches the redirect URL
+        # or access logs. See SEC-9.
+        logger.error(
+            "Token exchange failed for agent %s (provision %s): %s",
+            prov.agent_registry_id, prov.id, exc,
+        )
+        await db.delete(prov)
+        await db.commit()
+        raise ProvisioningError("Token exchange with Slack failed. Please retry provisioning.")
 
     agent.slack_bot_token = token
     await db.delete(prov)

@@ -4,10 +4,19 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>CoPI · {{ page_title }}</title>
+<!-- Tailwind Play CDN: the JIT build is unversioned and cannot carry an SRI
+     hash; kept behind the page CSP. Vendoring a compiled build (SEC-18) is
+     deferred. The pinned libraries below use Subresource Integrity. -->
 <script src="https://cdn.tailwindcss.com"></script>
-<script src="https://d3js.org/d3.v7.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js"
+        integrity="sha384-CjloA8y00+1SDAUkjs099PVfnY2KmDC2BZnws9kh8D/lX1s46w6EPhpXdqMfjK6i"
+        crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"
+        integrity="sha384-/TQbtLCAerC3jgaim+N78RZSDYV7ryeoBCVqTuzRrFec2akfBkHS7ACQ3PQhvMVi"
+        crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"
+        integrity="sha384-+VfUPEb0PdtChMwmBcBmykRMDd+v6D/oFmB3rZM/puCMDYcIvF968OimRh4KQY9a"
+        crossorigin="anonymous"></script>
 <style>
   html, body { height: 100%; margin: 0; }
   body {
@@ -321,9 +330,9 @@
   </div>
 </div>
 
-<script id="graph-data" type="application/json">{{ graph_json|safe }}</script>
-<script id="color-map" type="application/json">{{ color_map|safe }}</script>
-<script>
+<script id="graph-data" type="application/json" nonce="{{ csp_nonce }}">{{ graph_json|tojson }}</script>
+<script id="color-map" type="application/json" nonce="{{ csp_nonce }}">{{ color_map|tojson }}</script>
+<script nonce="{{ csp_nonce }}">
 (function() {
   const data = JSON.parse(document.getElementById("graph-data").textContent);
   const svg = d3.select("#viz");
@@ -477,8 +486,8 @@
     .on("mouseover", (event, d) => {
       if (!pinnedNode) highlightNeighborhood(d);
       showTooltip(event,
-        `<div class="pi">${d.pi}</div>` +
-        `<div class="meta">${d.institution} · ${d.bot}</div>` +
+        `<div class="pi">${escapeHtml(d.pi)}</div>` +
+        `<div class="meta">${escapeHtml(d.institution)} · ${escapeHtml(d.bot)}</div>` +
         `<div class="meta">${d.proposals} proposal${d.proposals === 1 ? "" : "s"} · ${d.degree} collaborator${d.degree === 1 ? "" : "s"}</div>`
       );
     })
@@ -596,7 +605,7 @@
     const [a, b] = edgePair(d);
     const teaser = d.summary ? truncate(stripFormatting(d.summary), 200) : "";
     showTooltip(event,
-      `<div class="pi">${a.pi} ↔ ${b.pi}</div>` +
+      `<div class="pi">${escapeHtml(a.pi)} ↔ ${escapeHtml(b.pi)}</div>` +
       `<div class="meta">${d.weight} joint proposal${d.weight === 1 ? "" : "s"}</div>` +
       (teaser ? `<div class="summary">"${escapeHtml(teaser)}"</div>` : "") +
       (d.summary ? `<div class="meta" style="margin-top:6px;color:#a5b4fc;">Tap to read the full proposal</div>` : "")
@@ -629,7 +638,7 @@
     return parts[parts.length - 1];
   }
   function escapeHtml(s) {
-    return s.replace(/[&<>"']/g, (c) => ({
+    return String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({
       "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
     }[c]));
   }
@@ -712,16 +721,24 @@
   // A browser-stored anonymous id lets a visitor change their vote and attach
   // optional details to the same record. Voting still works if storage is
   // blocked — it just won't be de-duplicated per visitor.
+  // Always generate a token (the server now requires one). Persist it when
+  // storage is available so a returning visitor can update their own vote;
+  // fall back to an in-memory token when storage is blocked so voting still
+  // works — it just won't be de-duplicated across page loads.
+  function newVoterToken() {
+    return (window.crypto && crypto.randomUUID)
+      ? crypto.randomUUID()
+      : String(Math.random()).slice(2) + Date.now();
+  }
   let voterToken = null;
   try {
     voterToken = localStorage.getItem("copi-voter-token");
     if (!voterToken) {
-      voterToken = (window.crypto && crypto.randomUUID)
-        ? crypto.randomUUID()
-        : String(Math.random()).slice(2) + Date.now();
+      voterToken = newVoterToken();
       localStorage.setItem("copi-voter-token", voterToken);
     }
   } catch (e) { /* storage unavailable */ }
+  if (!voterToken) voterToken = newVoterToken();
 
   const feedbackEl = modal.select("#modal-feedback");
   let currentDecisionId = null;

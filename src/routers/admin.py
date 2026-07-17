@@ -28,6 +28,7 @@ from src.models import (
     WaitlistSignup,
 )
 from src.services.orcid import fetch_orcid_profile
+from src.services.validators import csv_safe_cell
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -1262,12 +1263,15 @@ async def admin_waitlist_export(
     writer = csv.writer(buf)
     writer.writerow(["email", "name", "institution", "note", "created_at", "contacted_at"])
     for s in signups:
+        # All four text fields are attacker-controlled (public waitlist form),
+        # so neutralize CSV formula/DDE injection before export (SEC-20). The
+        # timestamps are app-generated ISO strings and safe as-is.
         writer.writerow(
             [
-                s.email,
-                s.name or "",
-                s.institution or "",
-                (s.note or "").replace("\n", " "),
+                csv_safe_cell(s.email),
+                csv_safe_cell(s.name or ""),
+                csv_safe_cell(s.institution or ""),
+                csv_safe_cell((s.note or "").replace("\n", " ")),
                 s.created_at.isoformat() if s.created_at else "",
                 s.contacted_at.isoformat() if s.contacted_at else "",
             ]

@@ -14,6 +14,7 @@ from typing import Any
 from src.agent.agent import PROFILES_DIR, Agent
 from src.agent.channels import SEEDED_CHANNELS
 from src.agent.foa_cache import extract_foa_number, format_foa_for_prompt
+from src.agent.prompt_safety import delimit
 from src.agent.funding_rules import (
     format_funding_thread_summary,
     format_your_prior_messages,
@@ -1055,14 +1056,17 @@ class SimulationEngine:
                 logger.debug("Failed to notify PI of thread conclusion: %s", exc)
 
         # Update working memory for both agents
+        # summary_text is derived from a cross-agent conversation, so fence it
+        # as untrusted before it lands in working memory (which is later fed
+        # back into prompts) (SEC-14).
         event = f"Thread in #{thread.channel} with {thread.other_agent_id} closed: {outcome}"
         if summary_text:
-            event += f". Summary: {summary_text[:200]}"
+            event += f". Summary: {delimit(summary_text[:200], 'proposal_summary')}"
         await self._update_agent_memory(agent, event)
         if other_agent:
             other_event = f"Thread in #{thread.channel} with {agent.agent_id} closed: {outcome}"
             if summary_text:
-                other_event += f". Summary: {summary_text[:200]}"
+                other_event += f". Summary: {delimit(summary_text[:200], 'proposal_summary')}"
             await self._update_agent_memory(other_agent, other_event)
 
     async def _check_private_channel_outcome(
