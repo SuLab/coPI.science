@@ -1,4 +1,13 @@
 # serializer version: 1
+# name: test_profile_pipeline_doi_correction_stores_authoritative
+  dict({
+    'orcid_candidate_doi': '10.1000/orcid-wrong',
+    'pubmed_authoritative_doi': '10.1000/pubmed-authoritative',
+    'stored_doi': '10.1000/pubmed-authoritative',
+    'stored_is_authoritative': True,
+    'stored_is_not_orcid_candidate': True,
+  })
+# ---
 # name: test_profile_pipeline_golden_master
   dict({
     'disease_areas': list([
@@ -79,5 +88,16 @@
     'raw_abstracts_hash_is_set': True,
     'research_summary': None,
     'techniques': None,
+  })
+# ---
+# name: test_profile_pipeline_rerun_increments_version_and_updates_pubs
+  dict({
+    'first_version': 1,
+    'llm_calls_total': 3,
+    'pub_count_after_two_runs': 2,
+    'same_profile_row': True,
+    'second_version': 2,
+    'seed_set_after_first_run': True,
+    'seed_unchanged_on_rerun': True,
   })
 # ---

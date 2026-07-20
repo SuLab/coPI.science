@@ -224,3 +224,121 @@ async def test_profile_pipeline_llm_failure_leaves_fields_unset(db_session, monk
         "raw_abstracts_hash_is_set": profile.raw_abstracts_hash is not None,
     }
     assert result == snapshot
+
+
+async def test_profile_pipeline_doi_correction_stores_authoritative(
+    db_session, monkeypatch, snapshot
+):
+    """DOI-gate 'corrected' branch, end-to-end. When the ORCID-curated DOI for a
+    PMID disagrees with the DOI PubMed has on record for that SAME PMID,
+    reconcile_pub_doi returns the authoritative (PubMed) DOI, and the pipeline must
+    store that — not the ORCID candidate. Pins the bad-link-incident guard through
+    the pipeline (reconcile_pub_doi is left REAL). The happy-path GM only exercises
+    the matching 'ok' branch, so this covers the security-relevant mismatch path."""
+
+    async def fake_fetch_orcid_profile(orcid_id):
+        return {"name": "Ada Lovelace", "orcid": orcid_id}
+
+    async def fake_fetch_orcid_grants(orcid_id):
+        return []
+
+    async def fake_fetch_orcid_works(orcid_id):
+        # ORCID lists a DOI that points at the WRONG paper for this PMID.
+        return [{"pmid": "2001", "doi": "10.1000/orcid-wrong", "title": "T", "year": 1843}]
+
+    async def fake_convert_dois_to_pmids(dois):
+        return {}
+
+    async def fake_fetch_pubmed_records(pmids):
+        # PubMed's record for the SAME PMID carries the authoritative DOI.
+        return [
+            {
+                "pmid": "2001",
+                "doi": "10.1000/pubmed-authoritative",
+                "title": "On the Analytical Engine",
+                "abstract": "We describe the analytical engine.",
+                "journal": "Memoirs",
+                "year": 1843,
+                "pub_types": ["Journal Article"],
+                "pmcid": None,
+            }
+        ]
+
+    async def fake_convert_pmids_to_pmcids(pmids):
+        return {}
+
+    async def fake_fetch_pmc_methods(pmcid):
+        return ""
+
+    monkeypatch.setattr(profile_pipeline, "fetch_orcid_profile", fake_fetch_orcid_profile)
+    monkeypatch.setattr(profile_pipeline, "fetch_orcid_grants", fake_fetch_orcid_grants)
+    monkeypatch.setattr(profile_pipeline, "fetch_orcid_works", fake_fetch_orcid_works)
+    monkeypatch.setattr(profile_pipeline, "convert_dois_to_pmids", fake_convert_dois_to_pmids)
+    monkeypatch.setattr(profile_pipeline, "fetch_pubmed_records", fake_fetch_pubmed_records)
+    monkeypatch.setattr(profile_pipeline, "convert_pmids_to_pmcids", fake_convert_pmids_to_pmcids)
+    monkeypatch.setattr(profile_pipeline, "fetch_pmc_methods", fake_fetch_pmc_methods)
+    fake_llm = FakeAnthropic([json.dumps(_VALID_PROFILE), _PRIVATE_SEED])
+    monkeypatch.setattr("src.services.llm.get_anthropic_client", lambda: fake_llm)
+
+    user = await factories.make_user(
+        db_session, name="Ada Lovelace", orcid="0000-0002-1825-0099",
+    )
+    await profile_pipeline.run_profile_pipeline(user.id, db_session)
+
+    pub = (
+        await db_session.execute(select(Publication).where(Publication.user_id == user.id))
+    ).scalar_one()
+
+    result = {
+        "orcid_candidate_doi": "10.1000/orcid-wrong",
+        "pubmed_authoritative_doi": "10.1000/pubmed-authoritative",
+        "stored_doi": pub.doi,
+        "stored_is_authoritative": pub.doi == "10.1000/pubmed-authoritative",
+        "stored_is_not_orcid_candidate": pub.doi != "10.1000/orcid-wrong",
+    }
+    assert result == snapshot
+    # Crux, asserted explicitly so a careless --snapshot-update cannot silently
+    # bless a regression that starts persisting the wrong (ORCID) DOI again.
+    assert pub.doi == "10.1000/pubmed-authoritative"
+
+
+async def test_profile_pipeline_rerun_increments_version_and_updates_pubs(
+    db_session, monkeypatch, snapshot
+):
+    """Re-run / idempotency. A second run for the same user increments
+    profile_version (1 -> 2), UPDATES the existing publications instead of
+    duplicating them (count stays 2), and does NOT regenerate the private seed
+    (that only happens when no seed exists yet). Three LLM calls total: public
+    synthesis on each run + one private-seed generation on the first run only."""
+    _install_fakes(monkeypatch)
+    # Script the LLM for two runs: run 1 = public JSON + private seed; run 2 =
+    # public JSON only (the seed step is skipped once a seed already exists).
+    fake_llm = FakeAnthropic(
+        [json.dumps(_VALID_PROFILE), _PRIVATE_SEED, json.dumps(_VALID_PROFILE)]
+    )
+    monkeypatch.setattr("src.services.llm.get_anthropic_client", lambda: fake_llm)
+
+    user = await factories.make_user(
+        db_session, name="Ada Lovelace", orcid="0000-0002-1825-0100",
+    )
+
+    first = await profile_pipeline.run_profile_pipeline(user.id, db_session)
+    first_version = first.profile_version  # capture the int before the second run mutates it
+    first_seed = first.private_profile_seed
+
+    second = await profile_pipeline.run_profile_pipeline(user.id, db_session)
+
+    pubs = (
+        await db_session.execute(select(Publication).where(Publication.user_id == user.id))
+    ).scalars().all()
+
+    result = {
+        "first_version": first_version,
+        "second_version": second.profile_version,
+        "same_profile_row": first.id == second.id,
+        "pub_count_after_two_runs": len(pubs),
+        "seed_set_after_first_run": first_seed is not None,
+        "seed_unchanged_on_rerun": second.private_profile_seed == first_seed,
+        "llm_calls_total": len(fake_llm.calls),
+    }
+    assert result == snapshot
