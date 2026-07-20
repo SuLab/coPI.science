@@ -18,7 +18,7 @@ import pytest
 import pytest_asyncio
 from httpx import ASGITransport
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 from testcontainers.postgres import PostgresContainer
 
@@ -87,10 +87,21 @@ async def db_session(engine):
 
 
 @pytest_asyncio.fixture
-async def client(db_session):
-    """ASGI TestClient over create_app() with get_db routed to the rolled-back session."""
+async def client(db_session, engine, monkeypatch):
+    """ASGI TestClient over create_app() with get_db routed to the rolled-back session.
+
+    Also repoints AgentBadgeMiddleware's session factory at the test engine. The
+    middleware (src/main.py) calls src.database.get_session_factory() directly rather
+    than the injected get_db, so on an authenticated request it would otherwise open a
+    session against the real configured DB — unreachable here — and hang the request.
+    That factory yields its own committed connection (not the rolled-back db_session),
+    which is fine: it only reads for badge computation and tolerates missing rows.
+    """
     from src.database import get_db
     from src.main import create_app
+
+    badge_factory = async_sessionmaker(engine, expire_on_commit=False)
+    monkeypatch.setattr("src.main.get_session_factory", lambda: badge_factory)
 
     app = create_app()
 
