@@ -645,3 +645,25 @@ class TestPrivateChannelFinalization:
         assert self.NAME in engine._finalized_private_channels
         props = [p for p in lairson.state.pending_proposals if p.thread_id == "200.000002"]
         assert len(props) == 1
+
+
+# ---------------------------------------------------------------
+# mint_ts — monotonic, unique, ts-shaped ids (DB-primary store)
+# ---------------------------------------------------------------
+
+class TestMintTs:
+    def test_monotonic_and_unique_under_tight_loop(self):
+        engine = SimulationEngine(agents=[], slack_clients={})
+        ids = [engine.mint_ts() for _ in range(1000)]
+        floats = [float(x) for x in ids]
+        # Strictly increasing (so posted_at=float(ts) ordering is preserved)
+        assert all(b > a for a, b in zip(floats, floats[1:]))
+        # All unique
+        assert len(set(ids)) == len(ids)
+
+    def test_seeded_high_water_mark_sorts_after_history(self):
+        engine = SimulationEngine(agents=[], slack_clients={})
+        # Simulate a rebuild that saw a far-future max(posted_at).
+        engine._last_mint_ts = 9_999_999_999.0
+        first = float(engine.mint_ts())
+        assert first > 9_999_999_999.0

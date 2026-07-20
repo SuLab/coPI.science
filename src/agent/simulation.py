@@ -213,6 +213,14 @@ class SimulationEngine:
         # add/remove of agents as their status flips). See _sync_roster_from_db.
         self._last_roster_poll: float = 0.0
 
+        # DB persistence buffer for the message log. MessageLog.append fires a
+        # sync callback that enqueues here; _flush_persisted() batch-writes to
+        # agent_messages once per main-loop tick. This makes the DB the primary
+        # conversation store. See specs/local-db-conversations.md.
+        self._pending_persist: list[LogEntry] = []
+        # Monotonic id minter high-water mark (seeded at DB rebuild). See mint_ts.
+        self._last_mint_ts: float = 0.0
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -271,6 +279,7 @@ class SimulationEngine:
 
         # Setup
         self._ensure_seeded_channels()
+        await self._persist_seeded_channels()
         # Load any collab_private channels created via the web-UI reopen flow
         # BEFORE rebuilding state so the rebuild's history-fetch loop covers
         # them too — otherwise the handover message wouldn't land in the
@@ -278,7 +287,14 @@ class SimulationEngine:
         await self._sync_private_channels_from_db()
         self._build_lab_directories()
         await self._load_pi_mappings()
+        # The DB is the primary conversation store. Register the persist hook,
+        # hydrate the log from the DB, then (only when Slack is connected)
+        # reconcile with Slack history, and finally reconstruct per-agent state
+        # from the combined log. This whole sequence runs with Slack fully off.
+        self.message_log.set_persist_callback(self._enqueue_persist)
+        await self._rebuild_state_from_db()
         await self._rebuild_state_from_slack()
+        await self._rebuild_agent_state()
         # Rebuild advanced last_seen_cursor to max(all_messages), which can
         # overshoot messages in private channels (typically older than the
         # latest public chatter). Rewind member-bot cursors so Phase 2 can
@@ -387,7 +403,8 @@ class SimulationEngine:
             elif settings.turn_delay_seconds > 0:
                 await asyncio.sleep(settings.turn_delay_seconds)
 
-            # Flush LLM logs periodically
+            # Flush buffered message-log entries + LLM logs periodically
+            await self._flush_persisted()
             if self._llm_log_buffer:
                 await self._flush_llm_logs()
 
@@ -397,6 +414,7 @@ class SimulationEngine:
         """Stop the simulation gracefully."""
         self._running = False
         set_call_log_callback(None)
+        await self._flush_persisted()
         await self._flush_llm_logs()
         logger.info("Simulation stopping...")
 
@@ -2249,6 +2267,20 @@ class SimulationEngine:
     # Message posting
     # ------------------------------------------------------------------
 
+    def mint_ts(self) -> str:
+        """Return a monotonic, unique, ts-shaped id (decimal seconds string).
+
+        The canonical message/channel id when there is no Slack ts (Slack-off,
+        or a DB-origin message). Monotonicity preserves the posted_at=float(ts)
+        ordering the engine relies on; _last_mint_ts is seeded from the rebuild's
+        max(posted_at) so new ids always sort after restored history. Uniqueness
+        is what makes the idempotent MessageLog.append safe.
+        See specs/local-db-conversations.md.
+        """
+        val = max(time.time(), self._last_mint_ts + 1e-6)
+        self._last_mint_ts = val
+        return f"{val:.6f}"
+
     async def _post_message(
         self,
         agent_id: str,
@@ -2281,7 +2313,15 @@ class SimulationEngine:
         else:
             logger.info("[%s] MOCK post to #%s: %s...", agent_id, channel, text[:60])
 
-        ts = result.get("ts", str(time.time())) if result else str(time.time())
+        # Canonical id: the Slack ts when a connected client posted, else a
+        # locally-minted ts. Slack ts (when present) is also recorded as the
+        # mirror mapping on the entry.
+        slack_ts = result.get("ts") if result else None
+        ts = slack_ts or self.mint_ts()
+        try:
+            posted_at = float(ts)
+        except (TypeError, ValueError):
+            posted_at = time.time()
 
         # Add to message log
         entry = LogEntry(
@@ -2291,22 +2331,12 @@ class SimulationEngine:
             sender_name=agent.bot_name if agent else f"{agent_id}Bot",
             content=text,
             thread_ts=thread_ts,
-            posted_at=float(ts) if ts else time.time(),
+            posted_at=posted_at,
             is_bot=True,
         )
+        # Persisted to agent_messages via the MessageLog append callback
+        # (_enqueue_persist → _flush_persisted). The DB is the primary store.
         self.message_log.append(entry)
-
-        # Log to database
-        if self.session_factory and self.simulation_run_id:
-            await self._log_message(
-                agent_id=agent_id,
-                channel_id=result.get("channel", channel) if result else channel,
-                channel_name=channel,
-                message_ts=ts,
-                thread_ts=thread_ts,
-                message_length=len(text),
-                phase="thread_reply" if thread_ts else "new_post",
-            )
 
     # ------------------------------------------------------------------
     # Setup helpers
@@ -2349,8 +2379,9 @@ class SimulationEngine:
         """Create any missing seeded channels and join relevant bots."""
         client = next(iter(self.slack_clients.values()), None)
         if not client or not client.is_connected:
-            # Mock mode — populate channel map with fake IDs
-            self._channel_id_map = {ch: f"mock_{ch}" for ch in SEEDED_CHANNELS}
+            # Slack off — channels are DB-native with stable local: ids that
+            # can't collide with Slack C…/G… ids. See specs/local-db-conversations.md.
+            self._channel_id_map = {ch: f"local:{ch}" for ch in SEEDED_CHANNELS}
             # All seeded channels are public.
             self._channel_visibility = {ch: VISIBILITY_PUBLIC for ch in SEEDED_CHANNELS}
             return
@@ -2380,6 +2411,45 @@ class SimulationEngine:
         # Share channel map across all clients
         for c in self.slack_clients.values():
             c._channel_name_to_id.update(existing)
+
+    async def _persist_seeded_channels(self) -> None:
+        """Record seeded channels in agent_channels for this run (idempotent).
+
+        Keeps channel existence in the DB so the workspace is reconstructable
+        without Slack (and so the admin UI can count channels). Uses the current
+        _channel_id_map (Slack ids when on, local: ids when off).
+        """
+        if not self.session_factory or not self.simulation_run_id:
+            return
+        from sqlalchemy import select as sa_select
+        from src.agent.channels import record_channel_created
+        try:
+            async with self.session_factory() as db:
+                existing_names = set(
+                    (await db.execute(
+                        sa_select(AgentChannel.channel_name).where(
+                            AgentChannel.simulation_run_id == self.simulation_run_id
+                        )
+                    )).scalars().all()
+                )
+                created = 0
+                for ch_name in SEEDED_CHANNELS:
+                    if ch_name in existing_names:
+                        continue
+                    await record_channel_created(
+                        db,
+                        simulation_run_id=self.simulation_run_id,
+                        channel_id=self._channel_id_map.get(ch_name, f"local:{ch_name}"),
+                        channel_name=ch_name,
+                        channel_type="thematic",
+                        created_by_agent="system",
+                    )
+                    created += 1
+                if created:
+                    await db.commit()
+                    logger.info("Persisted %d seeded channels to agent_channels", created)
+        except Exception as exc:
+            logger.warning("Failed to persist seeded channels: %s", exc)
 
     def _build_lab_directories(self) -> None:
         """Build a condensed publications directory for each agent (excluding their own lab)."""
@@ -2431,11 +2501,155 @@ class SimulationEngine:
         except Exception as exc:
             logger.warning("FOA cache backfill failed: %s", exc)
 
+    async def _rebuild_state_from_db(self) -> None:
+        """Hydrate the MessageLog from agent_messages — the primary store.
+
+        Loads message bodies (available since migration 0019) via the
+        callback-bypassing path so restored rows aren't re-persisted. Seeds the
+        mint_ts high-water mark and, for rows that were mirrored to Slack, the
+        Slack poll cursors so a later Slack reconcile only fetches newer messages.
+        See specs/local-db-conversations.md.
+        """
+        if not self.session_factory or not self.simulation_run_id:
+            logger.info("No DB session — skipping DB rebuild")
+            return
+        from sqlalchemy import select as sa_select
+        try:
+            async with self.session_factory() as db:
+                result = await db.execute(
+                    sa_select(AgentMessage)
+                    .where(AgentMessage.simulation_run_id == self.simulation_run_id)
+                    .order_by(AgentMessage.posted_at.asc(), AgentMessage.created_at.asc())
+                )
+                rows = result.scalars().all()
+        except Exception as exc:
+            logger.warning("DB rebuild failed: %s", exc)
+            return
+
+        loaded = 0
+        max_posted = 0.0
+        for r in rows:
+            # Pre-0019 rows carry only metadata (empty body): skip them. They
+            # hold no conversational signal, and if Slack is on the reconcile
+            # pass re-adds them with content. Stage 7 backfills legacy content.
+            if not r.content or not r.message_ts:
+                continue
+            entry = LogEntry(
+                ts=r.message_ts,
+                channel=r.channel_name,
+                sender_agent_id=r.agent_id,
+                sender_name=r.sender_name or "",
+                content=r.content,
+                thread_ts=r.thread_ts,
+                posted_at=r.posted_at or 0.0,
+                is_bot=r.is_bot,
+                visibility=r.visibility,
+            )
+            self.message_log.load_entry(entry)
+            loaded += 1
+            if entry.posted_at > max_posted:
+                max_posted = entry.posted_at
+            # Advance the Slack poll cursor for rows that were mirrored, so the
+            # optional reconcile only fetches genuinely newer Slack messages.
+            if r.slack_ts and r.slack_channel_id:
+                cur = self._poll_cursors.get(r.slack_channel_id, "0")
+                if r.slack_ts > cur:
+                    self._poll_cursors[r.slack_channel_id] = r.slack_ts
+        self._last_mint_ts = max(self._last_mint_ts, max_posted)
+        logger.info("Rebuilt MessageLog from DB: %d messages", loaded)
+
+    async def _flush_persisted(self) -> None:
+        """Batch-upsert buffered message-log entries into agent_messages.
+
+        Uses ON CONFLICT (simulation_run_id, message_ts) so it is safe to run
+        alongside legacy rows, transitional double-writes, and repeated restarts.
+        Drops the buffer when there is no DB so it can't grow unbounded.
+        """
+        if not self._pending_persist:
+            return
+        if not self.session_factory or not self.simulation_run_id:
+            self._pending_persist.clear()
+            return
+        entries = self._pending_persist
+        self._pending_persist = []
+        # Dedup by canonical id within the batch — a single ON CONFLICT statement
+        # cannot touch the same row twice.
+        by_ts: dict[str, dict] = {}
+        for e in entries:
+            if not e.ts:
+                continue
+            channel_id = self._channel_id_map.get(e.channel) or f"local:{e.channel}"
+            by_ts[e.ts] = {
+                "simulation_run_id": self.simulation_run_id,
+                "agent_id": e.sender_agent_id,
+                "channel_id": channel_id,
+                "channel_name": e.channel,
+                "message_ts": e.ts,
+                "message_length": len(e.content or ""),
+                "thread_ts": e.thread_ts,
+                "phase": "thread_reply" if e.thread_ts else "new_post",
+                "visibility": e.visibility,
+                "content": e.content or "",
+                "sender_name": e.sender_name or "",
+                "is_bot": e.is_bot,
+                "posted_at": e.posted_at,
+            }
+        rows = list(by_ts.values())
+        if not rows:
+            return
+        from sqlalchemy import func as sa_func
+        from sqlalchemy import select as sa_select
+        from sqlalchemy.dialects.postgresql import insert as pg_insert
+        try:
+            async with self.session_factory() as db:
+                stmt = pg_insert(AgentMessage.__table__).values(rows)
+                stmt = stmt.on_conflict_do_update(
+                    constraint="uq_agent_messages_run_ts",
+                    set_={
+                        "content": stmt.excluded.content,
+                        "sender_name": stmt.excluded.sender_name,
+                        "is_bot": stmt.excluded.is_bot,
+                        "posted_at": stmt.excluded.posted_at,
+                        "message_length": stmt.excluded.message_length,
+                        "visibility": stmt.excluded.visibility,
+                        "thread_ts": stmt.excluded.thread_ts,
+                        "channel_id": stmt.excluded.channel_id,
+                        "channel_name": stmt.excluded.channel_name,
+                        "agent_id": stmt.excluded.agent_id,
+                    },
+                )
+                await db.execute(stmt)
+                # Keep the run's message total accurate (bulk upsert can't easily
+                # distinguish inserts from updates, so recompute the count).
+                run = (await db.execute(
+                    sa_select(SimulationRun).where(SimulationRun.id == self.simulation_run_id)
+                )).scalar_one_or_none()
+                if run:
+                    total = (await db.execute(
+                        sa_select(sa_func.count(AgentMessage.id)).where(
+                            AgentMessage.simulation_run_id == self.simulation_run_id
+                        )
+                    )).scalar_one()
+                    run.total_messages = total
+                    run.total_api_calls = sum(a.api_call_count for a in self.agents.values())
+                await db.commit()
+        except Exception as exc:
+            logger.warning("Failed to flush %d messages: %s", len(rows), exc)
+
+    def _enqueue_persist(self, entry: LogEntry) -> None:
+        """MessageLog persist callback — buffer a new entry for the next flush."""
+        self._pending_persist.append(entry)
+
     async def _rebuild_state_from_slack(self) -> None:
-        """Rebuild MessageLog and agent state from Slack history + DB."""
+        """Reconcile the MessageLog with Slack history (Slack-on only).
+
+        The DB is the primary store (_rebuild_state_from_db); this pass only
+        adds messages that exist on Slack but not yet in the log — via the
+        idempotent append, which also persists them to the DB.
+        """
         default_client = next(iter(self.slack_clients.values()), None)
         if not default_client or not default_client.is_connected:
-            logger.info("No Slack client available — skipping state rebuild")
+            logger.info("No Slack client available — skipping Slack reconcile")
             return
 
         # Build a mapping of bot_user_id -> agent_id
@@ -2524,11 +2738,18 @@ class SimulationEngine:
                         total_messages += 1
 
         logger.info(
-            "Rebuilt MessageLog: %d messages across %d channels, %d threads",
+            "Slack reconcile: appended %d messages across %d channels, %d threads",
             total_messages, len(polled_ids), total_threads,
         )
 
-        # 2. Rebuild active_threads per agent
+    async def _rebuild_agent_state(self) -> None:
+        """Reconstruct per-agent state from the message log + DB.
+
+        Runs after both the DB rebuild and the optional Slack reconcile, so it
+        behaves identically with Slack on or off. Reads only self.message_log,
+        thread_decisions, proposal_reviews and llm_call_logs — no Slack calls.
+        """
+        # Rebuild active_threads per agent.
         # Get all closed thread IDs and prior thread summaries from thread_decisions
         closed_thread_ids: set[str] = set()
         if self.session_factory:
@@ -3021,14 +3242,15 @@ class SimulationEngine:
 
                 # Create a synthetic log entry for the PI guidance so it appears
                 # in thread history and the agents can see it
+                minted = self.mint_ts()
                 pi_entry = LogEntry(
-                    ts=str(time.time()),
+                    ts=minted,
                     channel=channel,
                     sender_agent_id=None,
                     sender_name="PI (via web)",
                     content=guidance,
                     thread_ts=thread_id,
-                    posted_at=time.time(),
+                    posted_at=float(minted),
                     is_bot=False,
                 )
                 self.message_log.append(pi_entry)
@@ -3170,49 +3392,6 @@ class SimulationEngine:
             # retry this thread again, even if the only members were the last
             # poster (the counterpart will be seeded once they're loaded).
             self._db_private_refined_thread_ids.add(thread_id)
-
-    async def _log_message(
-        self,
-        agent_id: str,
-        channel_id: str,
-        channel_name: str,
-        message_ts: str | None,
-        thread_ts: str | None,
-        message_length: int,
-        phase: str,
-    ) -> None:
-        """Log an agent message to the database."""
-        if not self.session_factory or not self.simulation_run_id:
-            return
-        try:
-            async with self.session_factory() as db:
-                record = AgentMessage(
-                    simulation_run_id=self.simulation_run_id,
-                    agent_id=agent_id,
-                    channel_id=channel_id,
-                    channel_name=channel_name,
-                    message_ts=message_ts,
-                    thread_ts=thread_ts,
-                    message_length=message_length,
-                    phase=phase,
-                )
-                db.add(record)
-                # Update run totals
-                from sqlalchemy import select
-                run_result = await db.execute(
-                    select(SimulationRun).where(
-                        SimulationRun.id == self.simulation_run_id
-                    )
-                )
-                run = run_result.scalar_one_or_none()
-                if run:
-                    run.total_messages = (run.total_messages or 0) + 1
-                    run.total_api_calls = sum(
-                        a.api_call_count for a in self.agents.values()
-                    )
-                await db.commit()
-        except Exception as exc:
-            logger.warning("Failed to log message: %s", exc)
 
     # ------------------------------------------------------------------
     # Post-simulation

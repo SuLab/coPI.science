@@ -208,3 +208,35 @@ class TestLastBotSenderInChannel:
         )
         log.append(human)
         assert log.get_last_bot_sender_in_channel("priv-x") == "su"
+
+
+# ---------------------------------------------------------------
+# Idempotent append + persist callback (DB-primary store)
+# ---------------------------------------------------------------
+
+class TestAppendIdempotencyAndPersist:
+    def test_append_returns_true_then_false_on_duplicate_ts(self, log):
+        assert log.append(_post("1", "general", "su", "SuBot", "first")) is True
+        # Same ts: skipped, returns False, no duplicate stored.
+        assert log.append(_post("1", "general", "su", "SuBot", "dup")) is False
+        assert len(log) == 1
+        # The original content is retained (the duplicate is dropped).
+        assert log.get_entry("1").content == "first"
+
+    def test_persist_callback_fires_once_per_new_append(self, log):
+        seen = []
+        log.set_persist_callback(lambda e: seen.append(e.ts))
+        log.append(_post("1", "general", "su", "SuBot", "a"))
+        log.append(_post("1", "general", "su", "SuBot", "a-dup"))  # skipped
+        log.append(_post("2", "general", "wiseman", "WisemanBot", "b"))
+        assert seen == ["1", "2"]
+
+    def test_load_entry_bypasses_callback(self, log):
+        seen = []
+        log.set_persist_callback(lambda e: seen.append(e.ts))
+        log.load_entry(_post("1", "general", "su", "SuBot", "restored"))
+        assert len(log) == 1
+        assert seen == []  # rebuild path must not re-persist
+        # Still idempotent on ts.
+        log.load_entry(_post("1", "general", "su", "SuBot", "again"))
+        assert len(log) == 1

@@ -3,7 +3,7 @@
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
 
@@ -45,13 +45,46 @@ class MessageLog:
         self._by_ts: dict[str, LogEntry] = {}  # ts -> entry for fast lookup
         # Map bot_name (lowercase) -> agent_id, set by SimulationEngine
         self._bot_name_to_id: dict[str, str] = {}
+        # Optional persistence hook, invoked once per *new* append. The engine
+        # registers this to mirror the log into the DB (the primary store).
+        # Kept as a plain callback so this module stays DB-agnostic. See
+        # specs/local-db-conversations.md.
+        self._persist_cb: Callable[[LogEntry], None] | None = None
 
     def set_bot_name_map(self, mapping: dict[str, str]) -> None:
         """Register bot_name -> agent_id mapping (lowercase keys)."""
         self._bot_name_to_id = dict(mapping)
 
-    def append(self, entry: LogEntry) -> None:
-        """Add a message to the log."""
+    def set_persist_callback(self, cb: Callable[[LogEntry], None] | None) -> None:
+        """Register a callback fired after each new append (for DB persistence)."""
+        self._persist_cb = cb
+
+    def append(self, entry: LogEntry) -> bool:
+        """Add a message to the log.
+
+        Idempotent: if an entry with this ts is already present, the append is
+        skipped (both the in-memory add and the persist callback) and False is
+        returned. This unifies the previously scattered ``get_entry`` guards and
+        keeps the DB persist hook from double-writing during Slack reconciliation.
+        Safe because ids are unique (Slack ts or a minted ts; see mint_ts).
+        Returns True when a new entry was added.
+        """
+        if entry.ts in self._by_ts:
+            return False
+        self._entries.append(entry)
+        self._by_ts[entry.ts] = entry
+        if self._persist_cb is not None:
+            self._persist_cb(entry)
+        return True
+
+    def load_entry(self, entry: LogEntry) -> None:
+        """Append a restored entry WITHOUT firing the persist callback.
+
+        Used by the DB-rebuild path so rows just read from the DB are not
+        re-persisted. Still idempotent on ts.
+        """
+        if entry.ts in self._by_ts:
+            return
         self._entries.append(entry)
         self._by_ts[entry.ts] = entry
 

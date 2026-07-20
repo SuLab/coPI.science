@@ -367,8 +367,12 @@ class AgentSlackClient:
     ) -> dict | None:
         """Post a message to a Slack channel (accepts name or ID)."""
         if not self._client:
+            # Not connected: report "not posted" so the engine mints a unique
+            # canonical id via mint_ts (a hardcoded ts here would collide and,
+            # under idempotent append, drop real messages). See
+            # specs/local-db-conversations.md.
             logger.info("[%s] MOCK post to #%s: %s", self.agent_id, channel, text[:80])
-            return {"ts": "mock_ts", "channel": channel}
+            return None
 
         channel_id = self._resolve_channel_id(channel)
         # Ensure bot is in the channel. Skipped for private channels, which
@@ -466,7 +470,7 @@ class AgentSlackClient:
         """Create a new Slack channel."""
         if not self._client:
             logger.info("[%s] MOCK create channel: #%s", self.agent_id, name)
-            return {"id": f"mock_{name}", "name": name}
+            return {"id": f"local:{name}", "name": name}
         try:
             result = self._client.conversations_create(name=name)
             ch = result["channel"]
@@ -500,7 +504,7 @@ class AgentSlackClient:
             candidate = f"{name[: 80 - len(suffix)].rstrip('-')}{suffix}"
             if not self._client:
                 logger.info("[%s] MOCK create private channel: #%s", self.agent_id, candidate)
-                return {"id": f"mock_priv_{candidate}", "name": candidate, "is_private": True}
+                return {"id": f"local:{candidate}", "name": candidate, "is_private": True}
             try:
                 result = self._call_with_retry(
                     self._client.conversations_create, name=candidate, is_private=True,

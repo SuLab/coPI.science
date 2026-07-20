@@ -209,15 +209,16 @@ class TestCreatePrivateChannel:
         # Mock mode applies the same timestamp suffix as the live path.
         assert ch["name"].startswith("priv-test-")
         assert ch["is_private"] is True
-        assert ch["id"].startswith("mock_priv_")
+        # Slack-off channels use the DB-native 'local:' id scheme.
+        assert ch["id"].startswith("local:")
 
     def test_public_create_channel_still_works(self, mock_client):
         """Don't regress the existing create_channel behavior."""
         ch = mock_client.create_channel("general")
         assert ch is not None
         assert ch["name"] == "general"
-        # Mock public channels use the 'mock_' prefix (no 'priv_').
-        assert ch["id"] == "mock_general"
+        # Slack-off channels use the DB-native 'local:' id scheme.
+        assert ch["id"] == "local:general"
 
 
 class _FakeSlack:

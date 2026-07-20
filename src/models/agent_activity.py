@@ -3,7 +3,21 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import CheckConstraint, DateTime, Enum, Float, ForeignKey, Index, Integer, String, Text, func
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    Enum,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+    text,
+)
 from sqlalchemy.dialects.postgresql import JSON, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -62,9 +76,14 @@ class AgentMessage(Base):
         ForeignKey("simulation_runs.id", ondelete="CASCADE"),
         nullable=False,
     )
-    agent_id: Mapped[str] = mapped_column(String(50), nullable=False)
+    # Nullable: the sender's agent_id, or NULL for human/PI messages
+    # (mirrors LogEntry.sender_agent_id). Every reader filters for a specific
+    # agent_id, so NULL rows are naturally excluded. See specs/local-db-conversations.md.
+    agent_id: Mapped[str | None] = mapped_column(String(50), nullable=True)
     channel_id: Mapped[str] = mapped_column(String(100), nullable=False)
     channel_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    # Canonical message id: a locally-minted ts-shaped string (Slack-off) or the
+    # Slack ts (Slack-on). Unique within a run.
     message_ts: Mapped[str | None] = mapped_column(String(50), nullable=True)
     message_length: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     thread_ts: Mapped[str | None] = mapped_column(String(50), nullable=True)
@@ -72,8 +91,31 @@ class AgentMessage(Base):
     visibility: Mapped[str] = mapped_column(
         String(20), nullable=False, default=VISIBILITY_PUBLIC,
     )  # denormalized from agent_channels.visibility; see specs/privacy-and-channel-visibility.md §G1/G2
+    # Content columns (DB is now the primary conversation store, not Slack).
+    content: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    sender_name: Mapped[str] = mapped_column(String(100), nullable=False, server_default="")
+    is_bot: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
+    posted_at: Mapped[float] = mapped_column(Float, nullable=False, server_default="0")
+    # Slack mirror mapping (NULL when Slack is off / message is DB-origin).
+    slack_ts: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    slack_channel_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    slack_thread_ts: Mapped[str | None] = mapped_column(String(50), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        UniqueConstraint("simulation_run_id", "message_ts", name="uq_agent_messages_run_ts"),
+        Index("ix_agent_messages_run_posted", "simulation_run_id", "posted_at"),
+        Index(
+            "ix_agent_messages_run_channel_posted",
+            "simulation_run_id", "channel_name", "posted_at",
+        ),
+        Index(
+            "ix_agent_messages_run_slack_ts",
+            "simulation_run_id", "slack_ts",
+            postgresql_where=text("slack_ts IS NOT NULL"),
+        ),
     )
 
     # Relationships
