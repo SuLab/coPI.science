@@ -688,7 +688,22 @@ async def agent_conversations(
     run_id = await get_latest_run_id(db)
     channels: list[str] = []
     messages: list[dict] = []
+    dms: list[dict] = []
     if run_id:
+        from src.models import PiDmMessage
+        dm_rows = await db.execute(
+            select(PiDmMessage)
+            .where(
+                PiDmMessage.simulation_run_id == run_id,
+                PiDmMessage.agent_id == aid,
+            )
+            .order_by(PiDmMessage.posted_at.desc())
+            .limit(20)
+        )
+        dms = [
+            {"direction": d.direction, "sender": d.sender_name or "", "content": d.content}
+            for d in reversed(dm_rows.scalars().all())
+        ]
         # Channels this agent participates in (has authored a message in).
         ch_rows = await db.execute(
             select(distinct(AgentMessage.channel_name)).where(
@@ -726,7 +741,8 @@ async def agent_conversations(
         "agent/conversations.html",
         _template_context(
             request, current_user, agent=agent, is_owner=is_owner,
-            channels=channels, messages=messages, has_run=run_id is not None,
+            channels=channels, messages=messages, dms=dms,
+            has_run=run_id is not None,
             posted=request.query_params.get("posted"),
         ),
     )
@@ -776,6 +792,40 @@ async def post_agent_message(
     )
     await db.commit()
     logger.info("[%s] PI %s posted a web message to #%s", agent_id, current_user.name, channel_name)
+    return RedirectResponse(url=f"/agent/{agent_id}/conversations?posted=1", status_code=302)
+
+
+@router.post("/{agent_id}/dm")
+async def send_agent_dm(
+    agent_id: str,
+    request: Request,
+    content: str = Form(...),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Send a DM directive to the agent's bot (standing instruction / question).
+
+    Writes an inbound pi_dm_messages row; the sim processes it via
+    _poll_pi_dms_from_db (same path as a Slack DM). See specs/local-db-conversations.md.
+    """
+    from src.services.pi_inbox import get_latest_run_id, record_pi_dm, web_pi_user_id
+
+    agent, is_owner = await get_agent_with_access(agent_id, db, current_user)
+    if agent.status != "active":
+        raise HTTPException(status_code=403, detail="Agent is not active")
+    text = content.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Message cannot be empty")
+    run_id = await get_latest_run_id(db)
+    if not run_id:
+        raise HTTPException(status_code=409, detail="No simulation run yet")
+    await record_pi_dm(
+        db, run_id=run_id, agent_id=agent_id,
+        pi_user_id=web_pi_user_id(current_user.id), direction="inbound",
+        content=text, sender_name=f"{current_user.name} (PI)",
+    )
+    await db.commit()
+    logger.info("[%s] PI %s sent a web DM directive", agent_id, current_user.name)
     return RedirectResponse(url=f"/agent/{agent_id}/conversations?posted=1", status_code=302)
 
 

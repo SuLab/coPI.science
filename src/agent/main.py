@@ -140,7 +140,7 @@ async def _run_simulation(
     if not no_db:
         from sqlalchemy import select
         from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-        from src.models import AgentChannel, AgentMessage, SimulationRun
+        from src.models import AgentChannel, AgentMessage, PiDmMessage, SimulationRun
         engine = create_async_engine(settings.database_url)
         session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
@@ -151,6 +151,7 @@ async def _run_simulation(
             async with session_factory() as db:
                 await db.execute(AgentMessage.__table__.delete())
                 await db.execute(AgentChannel.__table__.delete())
+                await db.execute(PiDmMessage.__table__.delete())
                 await db.commit()
             logger.info("Simulation data wiped.")
 

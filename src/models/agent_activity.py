@@ -293,3 +293,47 @@ class PrivateChannelMember(Base):
     def __repr__(self) -> str:
         who = f"agent={self.agent_id}" if self.agent_id else f"user={self.user_id}"
         return f"<PrivateChannelMember channel={self.agent_channel_id} {who} role={self.role}>"
+
+
+class PiDmMessage(Base):
+    """A direct message between a PI (human) and their agent's bot.
+
+    DMs never enter the shared MessageLog, so they get their own durable home
+    here (the DB is the primary store, not Slack). Inbound rows (direction=
+    'inbound') are written by the Slack DM poller or the PI web interface and
+    ingested by SimulationEngine._poll_pi_dms_from_db; outbound rows record
+    what the bot sent back. See specs/local-db-conversations.md.
+    """
+
+    __tablename__ = "pi_dm_messages"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    simulation_run_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("simulation_runs.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    agent_id: Mapped[str] = mapped_column(String(50), nullable=False)
+    # PI identity: Slack user id (Slack-on) or "local:<users.id>" (Slack-off).
+    pi_user_id: Mapped[str] = mapped_column(String(50), nullable=False)
+    direction: Mapped[str] = mapped_column(
+        Enum("inbound", "outbound", name="pi_dm_direction_enum"), nullable=False
+    )
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    sender_name: Mapped[str] = mapped_column(String(100), nullable=False, server_default="")
+    ts: Mapped[str] = mapped_column(String(50), nullable=False)  # canonical id
+    slack_ts: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    posted_at: Mapped[float] = mapped_column(Float, nullable=False, server_default="0")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        Index("ix_pi_dm_run_agent_posted", "simulation_run_id", "agent_id", "posted_at"),
+        Index("ix_pi_dm_run_direction_posted", "simulation_run_id", "direction", "posted_at"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<PiDmMessage agent={self.agent_id} dir={self.direction}>"

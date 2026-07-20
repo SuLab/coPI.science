@@ -28,6 +28,7 @@ class PIHandler:
         pi_slack_id_to_agent_ids: dict[str, list[str]],
         message_log: MessageLog,
         session_factory=None,
+        simulation_run_id=None,
     ):
         self.agents = agents
         self.slack_clients = slack_clients
@@ -40,6 +41,7 @@ class PIHandler:
         }
         self.message_log = message_log
         self.session_factory = session_factory
+        self.simulation_run_id = simulation_run_id
 
     # ------------------------------------------------------------------
     # DM handling
@@ -369,12 +371,33 @@ class PIHandler:
     # ------------------------------------------------------------------
 
     async def _send_dm(self, agent_id: str, pi_slack_id: str, text: str) -> None:
-        """Send a DM from the agent's bot to the PI."""
+        """Send a DM from the agent's bot to the PI (Slack + DB record).
+
+        Persists an outbound row so the DM is durable and visible in the web UI
+        even when Slack is off. See specs/local-db-conversations.md.
+        """
         client = self.slack_clients.get(agent_id)
+        slack_ts = None
         if client and client.is_connected:
-            client.send_dm(pi_slack_id, text)
+            result = client.send_dm(pi_slack_id, text)
+            if isinstance(result, dict):
+                slack_ts = result.get("ts")
         else:
-            logger.debug("[%s] Cannot send DM — no connected client", agent_id)
+            logger.debug("[%s] Cannot send DM via Slack — recording to DB only", agent_id)
+
+        if self.session_factory and self.simulation_run_id:
+            try:
+                from src.services.pi_inbox import record_pi_dm
+                agent = self.agents.get(agent_id)
+                async with self.session_factory() as db:
+                    await record_pi_dm(
+                        db, run_id=self.simulation_run_id, agent_id=agent_id,
+                        pi_user_id=pi_slack_id, direction="outbound", content=text,
+                        sender_name=agent.bot_name if agent else agent_id, slack_ts=slack_ts,
+                    )
+                    await db.commit()
+            except Exception as exc:
+                logger.debug("[%s] Could not record outbound DM: %s", agent_id, exc)
 
     @staticmethod
     def _parse_json(text: str) -> dict:

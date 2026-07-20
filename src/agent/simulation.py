@@ -234,6 +234,9 @@ class SimulationEngine:
         # if a DB-origin message was later mirrored to Slack). Lets the Slack
         # reconcile skip a message it already has. See _rebuild_state_from_slack.
         self._known_slack_ts: set[str] = set()
+        # High-water mark (posted_at) for the DB DM inbox poller (Slack-off /
+        # web PI DMs). See _poll_pi_dms_from_db.
+        self._pi_dm_cursor: float = 0.0
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -309,6 +312,7 @@ class SimulationEngine:
         await self._rebuild_state_from_db()
         await self._rebuild_state_from_slack()
         await self._rebuild_agent_state()
+        await self._seed_pi_dm_cursor()
         # Rebuild advanced last_seen_cursor to max(all_messages), which can
         # overshoot messages in private channels (typically older than the
         # latest public chatter). Rewind member-bot cursors so Phase 2 can
@@ -327,6 +331,7 @@ class SimulationEngine:
             pi_slack_id_to_agent_ids=self._pi_slack_id_to_agent_ids,
             message_log=self.message_log,
             session_factory=self.session_factory,
+            simulation_run_id=self.simulation_run_id,
         )
 
         # Main loop
@@ -343,6 +348,9 @@ class SimulationEngine:
             # web interface, private-channel handover). Runs regardless of Slack,
             # and is how PIs interact when Slack is off.
             await self._poll_inbound_from_db()
+            # DB-native PI DM processing (Slack DMs recorded by _poll_pi_dms and
+            # web DMs both converge here).
+            await self._poll_pi_dms_from_db()
 
             # Sync proposal reviews and any newly-created private channels from
             # the web app. Both are DB-driven, so a single tick picks them up.
@@ -2216,12 +2224,20 @@ class SimulationEngine:
         logger.info("[%s] PI reopened closed thread %s with %s", agent_id, thread_ts, other_id)
 
     async def _poll_pi_dms(self) -> None:
-        """Poll for DMs from PIs and process them via PIHandler."""
-        if not self._pi_handler or not self._pi_slack_id_to_agent_ids:
+        """Poll Slack for PI DMs and record them as inbound rows.
+
+        Processing is unified through the DB: this method only persists inbound
+        Slack DMs to pi_dm_messages; _poll_pi_dms_from_db is the single place
+        that runs them through PIHandler (so Slack and web DMs are handled
+        identically and never double-processed). See specs/local-db-conversations.md.
+        """
+        if not self._pi_slack_id_to_agent_ids or not self.session_factory or not self.simulation_run_id:
             return
 
         # Default cursor to simulation start time — only process DMs sent after we started
         default_cursor = str(self._start_time.timestamp()) if self._start_time else "0"
+
+        from src.services.pi_inbox import record_pi_dm
 
         for pi_slack_id, agent_ids in self._pi_slack_id_to_agent_ids.items():
             for agent_id in agent_ids:
@@ -2237,25 +2253,77 @@ class SimulationEngine:
                     text = msg.get("text", "").strip()
                     if not text:
                         continue
-
                     logger.info("[%s] PI DM from %s: %s", agent_id, pi_slack_id, text[:80])
-
                     try:
-                        await self._pi_handler.handle_dm(agent_id, pi_slack_id, text)
-                        # PI DMs deliberately do not update public working memory:
-                        # standing instructions are persisted to the private profile
-                        # by _handle_standing_instruction; other DM categories are
-                        # handled in-band. has_pi_directive still flips so Phase 5
-                        # runs this turn.
-                        agent = self.agents.get(agent_id)
-                        if agent:
-                            agent.state.has_pi_directive = True
+                        async with self.session_factory() as db:
+                            await record_pi_dm(
+                                db, run_id=self.simulation_run_id, agent_id=agent_id,
+                                pi_user_id=pi_slack_id, direction="inbound", content=text,
+                                sender_name="PI", slack_ts=ts or None,
+                            )
+                            await db.commit()
                     except Exception as exc:
-                        logger.error("[%s] Failed to handle PI DM: %s", agent_id, exc, exc_info=True)
-
-                    # Update cursor to this message
+                        logger.error("[%s] Failed to record PI DM: %s", agent_id, exc)
                     if ts > oldest:
                         self._dm_poll_cursors[agent_id] = ts
+
+    async def _seed_pi_dm_cursor(self) -> None:
+        """Start the DM poller past existing inbound DMs (don't replay history)."""
+        if not self.session_factory or not self.simulation_run_id:
+            return
+        from sqlalchemy import func as sa_func
+        from sqlalchemy import select as sa_select
+        from src.models import PiDmMessage
+        try:
+            async with self.session_factory() as db:
+                mx = (await db.execute(
+                    sa_select(sa_func.max(PiDmMessage.posted_at)).where(
+                        PiDmMessage.simulation_run_id == self.simulation_run_id,
+                        PiDmMessage.direction == "inbound",
+                    )
+                )).scalar_one_or_none()
+            if mx:
+                self._pi_dm_cursor = max(self._pi_dm_cursor, mx)
+        except Exception as exc:
+            logger.debug("PI DM cursor seed failed: %s", exc)
+
+    async def _poll_pi_dms_from_db(self) -> None:
+        """Process inbound PI DMs recorded in the DB (Slack or web-originated).
+
+        The single processor for PI DMs: reads new inbound pi_dm_messages rows
+        and runs each through PIHandler.handle_dm (classify → standing
+        instruction / feedback / question), then flips has_pi_directive so
+        Phase 5 runs. Works with Slack off. See specs/local-db-conversations.md.
+        """
+        if not self._pi_handler or not self.session_factory or not self.simulation_run_id:
+            return
+        from sqlalchemy import select as sa_select
+        from src.models import PiDmMessage
+        try:
+            async with self.session_factory() as db:
+                rows = (await db.execute(
+                    sa_select(PiDmMessage)
+                    .where(
+                        PiDmMessage.simulation_run_id == self.simulation_run_id,
+                        PiDmMessage.direction == "inbound",
+                        PiDmMessage.posted_at > self._pi_dm_cursor,
+                    )
+                    .order_by(PiDmMessage.posted_at.asc())
+                )).scalars().all()
+        except Exception as exc:
+            logger.debug("PI DM inbox poll failed: %s", exc)
+            return
+
+        for r in rows:
+            if r.posted_at > self._pi_dm_cursor:
+                self._pi_dm_cursor = r.posted_at
+            if r.agent_id not in self.agents:
+                continue
+            try:
+                await self._pi_handler.handle_dm(r.agent_id, r.pi_user_id, r.content)
+                self.agents[r.agent_id].state.has_pi_directive = True
+            except Exception as exc:
+                logger.error("[%s] Failed to handle PI DM (DB): %s", r.agent_id, exc)
 
     async def _poll_proposal_threads_for_pi(self) -> None:
         """Poll unreviewed proposal threads for PI replies.

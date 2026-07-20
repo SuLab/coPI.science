@@ -13,7 +13,7 @@ import uuid
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.models import AgentChannel, AgentMessage, SimulationRun
+from src.models import AgentChannel, AgentMessage, PiDmMessage, SimulationRun
 
 
 async def get_latest_run_id(db: AsyncSession) -> uuid.UUID | None:
@@ -76,3 +76,36 @@ async def record_pi_message(
     )
     db.add(msg)
     return msg
+
+
+async def record_pi_dm(
+    db: AsyncSession,
+    *,
+    run_id: uuid.UUID,
+    agent_id: str,
+    pi_user_id: str,
+    direction: str,               # 'inbound' (PI→bot) or 'outbound' (bot→PI)
+    content: str,
+    sender_name: str = "",
+    slack_ts: str | None = None,
+) -> PiDmMessage:
+    """Persist a PI<->bot direct message. Does not commit."""
+    ts = f"{time.time():.6f}"
+    dm = PiDmMessage(
+        simulation_run_id=run_id,
+        agent_id=agent_id,
+        pi_user_id=pi_user_id,
+        direction=direction,
+        content=content,
+        sender_name=sender_name,
+        ts=ts,
+        slack_ts=slack_ts,
+        posted_at=float(ts),
+    )
+    db.add(dm)
+    return dm
+
+
+def web_pi_user_id(user_id: uuid.UUID) -> str:
+    """Stable pi_user_id for a web (Slack-off) PI: ``local:<users.id>``."""
+    return f"local:{user_id}"
