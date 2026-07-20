@@ -653,6 +653,120 @@ async def reopen_proposal(
 # --------------------------------------------------------------------------
 
 
+@router.get("/{agent_id}/conversations", response_class=HTMLResponse)
+async def agent_conversations(
+    agent_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Read view of the agent's recent conversations + a form to post a message.
+
+    This is the Slack-independent way for a PI to see what their agent is
+    discussing and to inject a message/tag — it writes to the DB inbox, which
+    the running simulation ingests. See specs/local-db-conversations.md.
+    """
+    from src.services.pi_inbox import get_latest_run_id
+
+    agent, is_owner = await get_agent_with_access(agent_id, db, current_user)
+    if agent.status not in ("active", "inactive"):
+        return RedirectResponse(url="/agent", status_code=302)
+    aid = agent.agent_id
+
+    run_id = await get_latest_run_id(db)
+    channels: list[str] = []
+    messages: list[dict] = []
+    if run_id:
+        # Channels this agent participates in (has authored a message in).
+        ch_rows = await db.execute(
+            select(distinct(AgentMessage.channel_name)).where(
+                AgentMessage.simulation_run_id == run_id,
+                AgentMessage.agent_id == aid,
+            )
+        )
+        channels = sorted({r[0] for r in ch_rows} | {"general"})
+        # Recent messages in those channels (content is now stored in the DB).
+        msg_rows = await db.execute(
+            select(AgentMessage)
+            .where(
+                AgentMessage.simulation_run_id == run_id,
+                AgentMessage.channel_name.in_(channels),
+            )
+            .order_by(AgentMessage.posted_at.desc())
+            .limit(100)
+        )
+        messages = [
+            {
+                "channel": m.channel_name,
+                "sender": m.sender_name or (m.agent_id or "PI"),
+                "is_bot": m.is_bot,
+                "content": m.content,
+                "thread_ts": m.thread_ts,
+                "posted_at": m.posted_at,
+            }
+            for m in reversed(msg_rows.scalars().all())
+        ]
+    else:
+        channels = ["general"]
+
+    return templates.TemplateResponse(
+        request,
+        "agent/conversations.html",
+        _template_context(
+            request, current_user, agent=agent, is_owner=is_owner,
+            channels=channels, messages=messages, has_run=run_id is not None,
+            posted=request.query_params.get("posted"),
+        ),
+    )
+
+
+@router.post("/{agent_id}/message")
+async def post_agent_message(
+    agent_id: str,
+    request: Request,
+    channel_name: str = Form(...),
+    content: str = Form(...),
+    thread_ts: str = Form(""),
+    tag_bot: str = Form(""),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Write a PI-authored message into the DB inbox for the agent's workspace.
+
+    Ingested by the running simulation via _poll_inbound_from_db — the
+    Slack-independent equivalent of a PI posting in a Slack channel.
+    """
+    from src.services.pi_inbox import get_latest_run_id, record_pi_message
+
+    agent, is_owner = await get_agent_with_access(agent_id, db, current_user)
+    if agent.status != "active":
+        raise HTTPException(status_code=403, detail="Agent is not active")
+
+    text = content.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Message cannot be empty")
+    # Optionally address the PI's own bot so it engages (same @BotName convention
+    # the Slack path uses; the engine's tag detection is identical).
+    if tag_bot and f"@{agent.bot_name.lower()}" not in text.lower():
+        text = f"@{agent.bot_name} {text}"
+
+    run_id = await get_latest_run_id(db)
+    if not run_id:
+        raise HTTPException(status_code=409, detail="No simulation run to post into yet")
+
+    await record_pi_message(
+        db,
+        run_id=run_id,
+        channel_name=channel_name.strip() or "general",
+        content=text,
+        sender_name=f"{current_user.name} (PI)",
+        thread_ts=thread_ts.strip() or None,
+    )
+    await db.commit()
+    logger.info("[%s] PI %s posted a web message to #%s", agent_id, current_user.name, channel_name)
+    return RedirectResponse(url=f"/agent/{agent_id}/conversations?posted=1", status_code=302)
+
+
 @router.get("/{agent_id}/profile", response_class=HTMLResponse)
 async def view_private_profile(
     agent_id: str,
