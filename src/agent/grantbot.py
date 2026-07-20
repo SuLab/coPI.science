@@ -156,6 +156,30 @@ def _has_sufficient_lead_time(close_date_raw: str, now: datetime, min_days: int)
     return cd >= now + timedelta(days=min_days)
 
 
+async def _post_funding_to_db(session: AsyncSession, channel_name: str, full_post: str) -> None:
+    """Write a GrantBot funding post to agent_messages (Slack-off path).
+
+    Authored by the 'grantbot' identity as a top-level post so agents scan it in
+    Phase 2 and can start funding threads (funding threads are open to all).
+    """
+    import time as _time
+
+    from src.models import AgentMessage
+    from src.services.pi_inbox import get_latest_run_id
+
+    run_id = await get_latest_run_id(session)
+    if not run_id:
+        raise RuntimeError("No simulation run to post funding opportunity into")
+    ts = f"{_time.time():.6f}"
+    session.add(AgentMessage(
+        simulation_run_id=run_id, agent_id="grantbot",
+        channel_id=f"local:{channel_name}", channel_name=channel_name,
+        message_ts=ts, phase="new_post", visibility="public",
+        content=full_post, sender_name="GrantBot", is_bot=True, posted_at=float(ts),
+    ))
+    await session.flush()
+
+
 async def _load_posted_numbers(session: AsyncSession) -> set[str]:
     """Return the set of already-posted FOA numbers from Postgres."""
     result = await session.execute(select(GrantbotPostedFoa.foa_number))
@@ -497,19 +521,25 @@ async def _run_grantbot_with_session(
 
     logger.info("Drafted %d posts, posting %d (max %d per channel)", len(drafted), len(to_post), max_per_channel)
 
-    # 6. Post to Slack (or dry-run)
+    # 6. Post to Slack, or (Slack off) write straight to the DB, or dry-run.
     posted_list: list[dict] = []
     slack_client = None
+    slack_on = False
 
     if not dry_run:
-        from slack_sdk import WebClient
-        bot_token = getattr(settings, "slack_bot_token_grantbot", "")
-        if not bot_token or bot_token.startswith("xoxb-placeholder"):
-            bot_token = settings.slack_bot_token_su
-            logger.info("No grantbot Slack token — using SuBot's token as fallback")
-        if bot_token and not bot_token.startswith("xoxb-placeholder"):
-            slack_client = WebClient(token=bot_token)
-            _ensure_channel_membership(slack_client, {item.get("channel", channel) for item in to_post})
+        from src.services.slack_tokens import slack_globally_enabled
+        slack_on = await slack_globally_enabled(session)
+        if slack_on:
+            from slack_sdk import WebClient
+            bot_token = getattr(settings, "slack_bot_token_grantbot", "")
+            if not bot_token or bot_token.startswith("xoxb-placeholder"):
+                bot_token = settings.slack_bot_token_su
+                logger.info("No grantbot Slack token — using SuBot's token as fallback")
+            if bot_token and not bot_token.startswith("xoxb-placeholder"):
+                slack_client = WebClient(token=bot_token)
+                _ensure_channel_membership(slack_client, {item.get("channel", channel) for item in to_post})
+        else:
+            logger.info("Slack disabled — GrantBot posting funding opportunities to the DB")
 
     for item in to_post:
         opp = item["opportunity"]
@@ -536,9 +566,22 @@ async def _run_grantbot_with_session(
             logger.info("Skipping FOA %s — already claimed by another run", opp_num)
             continue
 
+        if not slack_on:
+            # Slack off — write the funding post straight to agent_messages so
+            # the sim scans it (funding threads are open to all). Keep the claim.
+            try:
+                await _post_funding_to_db(session, target_channel, full_post)
+                logger.info("Posted opportunity %s to #%s (DB)", opp_num, target_channel)
+            except Exception as exc:
+                logger.error("Failed to persist %s to #%s: %s", opp_num, target_channel, exc)
+                await _release_foa(session, opp_num)
+                continue
+            posted_list.append({"number": opp_num, "title": title, "channel": target_channel})
+            continue
+
         if not slack_client:
-            # No Slack client available (no token configured). Release the claim
-            # so a future run with credentials can post this FOA.
+            # Slack on but no usable token/client. Release the claim so a future
+            # run with credentials can post this FOA.
             await _release_foa(session, opp_num)
             continue
 

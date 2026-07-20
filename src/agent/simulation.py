@@ -230,6 +230,10 @@ class SimulationEngine:
         # interface, private-channel handover) enter the simulation. See
         # _poll_inbound_from_db.
         self._pi_inbox_cursor: float = 0.0
+        # Slack ts values already represented in the DB (canonical id may differ
+        # if a DB-origin message was later mirrored to Slack). Lets the Slack
+        # reconcile skip a message it already has. See _rebuild_state_from_slack.
+        self._known_slack_ts: set[str] = set()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -2428,7 +2432,8 @@ class SimulationEngine:
         except (TypeError, ValueError):
             posted_at = time.time()
 
-        # Add to message log
+        # Add to message log. When Slack posted this, record the mirror mapping
+        # (in pure Slack-on mode slack_ts == ts).
         entry = LogEntry(
             ts=ts,
             channel=channel,
@@ -2438,6 +2443,8 @@ class SimulationEngine:
             thread_ts=thread_ts,
             posted_at=posted_at,
             is_bot=True,
+            slack_ts=slack_ts,
+            slack_channel_id=(result.get("channel") if result else None),
         )
         # Persisted to agent_messages via the MessageLog append callback
         # (_enqueue_persist → _flush_persisted). The DB is the primary store.
@@ -2654,12 +2661,14 @@ class SimulationEngine:
             loaded += 1
             if entry.posted_at > max_posted:
                 max_posted = entry.posted_at
-            # Advance the Slack poll cursor for rows that were mirrored, so the
-            # optional reconcile only fetches genuinely newer Slack messages.
-            if r.slack_ts and r.slack_channel_id:
-                cur = self._poll_cursors.get(r.slack_channel_id, "0")
-                if r.slack_ts > cur:
-                    self._poll_cursors[r.slack_channel_id] = r.slack_ts
+            # Track the Slack mapping so the reconcile can dedup, and advance
+            # the Slack poll cursor so it only fetches genuinely newer messages.
+            if r.slack_ts:
+                self._known_slack_ts.add(r.slack_ts)
+                if r.slack_channel_id:
+                    cur = self._poll_cursors.get(r.slack_channel_id, "0")
+                    if r.slack_ts > cur:
+                        self._poll_cursors[r.slack_channel_id] = r.slack_ts
         self._last_mint_ts = max(self._last_mint_ts, max_posted)
         # Start the inbox poller past all restored history so it only picks up
         # genuinely new web-written PI messages.
@@ -2701,6 +2710,9 @@ class SimulationEngine:
                 "sender_name": e.sender_name or "",
                 "is_bot": e.is_bot,
                 "posted_at": e.posted_at,
+                "slack_ts": e.slack_ts,
+                "slack_channel_id": e.slack_channel_id,
+                "slack_thread_ts": e.thread_ts if e.slack_ts else None,
             }
         rows = list(by_ts.values())
         if not rows:
@@ -2724,6 +2736,9 @@ class SimulationEngine:
                         "channel_id": stmt.excluded.channel_id,
                         "channel_name": stmt.excluded.channel_name,
                         "agent_id": stmt.excluded.agent_id,
+                        "slack_ts": stmt.excluded.slack_ts,
+                        "slack_channel_id": stmt.excluded.slack_channel_id,
+                        "slack_thread_ts": stmt.excluded.slack_thread_ts,
                     },
                 )
                 await db.execute(stmt)
@@ -2797,6 +2812,13 @@ class SimulationEngine:
                 if is_bot and user_id:
                     sender_agent_id = bot_uid_to_agent.get(user_id)
 
+                # Skip messages already represented in the DB (dedup a message
+                # that was DB-origin then mirrored to Slack, whose canonical id
+                # differs from this Slack ts).
+                if ts and ts in self._known_slack_ts:
+                    if ts:
+                        self._poll_cursors[ch_id] = ts
+                    continue
                 sender_name = msg.get("username", "") or user_id
                 entry = LogEntry(
                     ts=ts,
@@ -2808,9 +2830,13 @@ class SimulationEngine:
                     posted_at=float(ts) if ts else 0.0,
                     is_bot=is_bot,
                     visibility=ch_visibility,
+                    slack_ts=ts or None,
+                    slack_channel_id=ch_id,
                 )
-                self.message_log.append(entry)
-                total_messages += 1
+                if self.message_log.append(entry):
+                    total_messages += 1
+                if ts:
+                    self._known_slack_ts.add(ts)
 
                 # Update poll cursor to latest
                 if ts:
@@ -2828,6 +2854,8 @@ class SimulationEngine:
                         rts = reply.get("ts", "")
                         if rts == ts:
                             continue  # skip parent (already added)
+                        if rts and rts in self._known_slack_ts:
+                            continue
                         r_user_id = reply.get("user", "")
                         r_is_bot = bool(reply.get("bot_id")) or reply.get("subtype") == "bot_message"
                         r_agent_id = bot_uid_to_agent.get(r_user_id) if r_is_bot else None
@@ -2841,9 +2869,13 @@ class SimulationEngine:
                             posted_at=float(rts) if rts else 0.0,
                             is_bot=r_is_bot,
                             visibility=ch_visibility,
+                            slack_ts=rts or None,
+                            slack_channel_id=ch_id,
                         )
-                        self.message_log.append(r_entry)
-                        total_messages += 1
+                        if self.message_log.append(r_entry):
+                            total_messages += 1
+                        if rts:
+                            self._known_slack_ts.add(rts)
 
         logger.info(
             "Slack reconcile: appended %d messages across %d channels, %d threads",

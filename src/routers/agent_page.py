@@ -583,41 +583,53 @@ async def reopen_proposal(
         # Legacy fallback: flag is off → post guidance verbatim to the origin
         # public thread. This reproduces the pre-refactor behavior and is the
         # same code as before; kept gated so rollback is a config change.
-        try:
-            from slack_sdk import WebClient
+        from src.services.slack_tokens import slack_globally_enabled, token_for_agent_row
 
-            from src.services.slack_tokens import token_for_agent_row
-            bot_token = token_for_agent_row(agent)
-            if not bot_token:
-                raise HTTPException(status_code=500, detail="No bot token available")
-            client = WebClient(token=bot_token)
-            channels_result = client.conversations_list(
-                types="public_channel,private_channel", limit=200,
-            )
-            channel_id = None
-            for ch in channels_result.get("channels", []):
-                if ch["name"] == td.channel:
-                    channel_id = ch["id"]
-                    break
-            if not channel_id:
-                raise HTTPException(status_code=500, detail=f"Channel #{td.channel} not found")
-            client.chat_postMessage(
-                channel=channel_id,
-                text=f"*PI guidance from {current_user.name}:*\n\n{guidance}",
-                thread_ts=td.thread_id,
-            )
-            logger.warning(
-                "LEGACY PATH: PI %s posted guidance in proposal thread %s via %s "
-                "(enable_private_refinement=False)",
-                current_user.name, td.thread_id, agent.agent_id,
-            )
-        except HTTPException:
-            raise
-        except Exception as exc:
-            logger.error("Failed to post PI guidance to Slack: %s", exc)
-            raise HTTPException(
-                status_code=500, detail=f"Failed to post to Slack: {str(exc)[:100]}",
-            )
+        if not await slack_globally_enabled(db):
+            # Slack off → write the guidance to the DB inbox on the origin thread.
+            from src.services.pi_inbox import get_latest_run_id, record_pi_message
+            run_id = await get_latest_run_id(db)
+            if run_id:
+                await record_pi_message(
+                    db, run_id=run_id, channel_name=td.channel,
+                    content=f"PI guidance from {current_user.name}: {guidance}",
+                    sender_name=f"{current_user.name} (PI)", thread_ts=td.thread_id,
+                )
+            logger.info("Reopen guidance for %s written to DB inbox (Slack off)", td.thread_id)
+        else:
+            try:
+                from slack_sdk import WebClient
+                bot_token = token_for_agent_row(agent)
+                if not bot_token:
+                    raise HTTPException(status_code=500, detail="No bot token available")
+                client = WebClient(token=bot_token)
+                channels_result = client.conversations_list(
+                    types="public_channel,private_channel", limit=200,
+                )
+                channel_id = None
+                for ch in channels_result.get("channels", []):
+                    if ch["name"] == td.channel:
+                        channel_id = ch["id"]
+                        break
+                if not channel_id:
+                    raise HTTPException(status_code=500, detail=f"Channel #{td.channel} not found")
+                client.chat_postMessage(
+                    channel=channel_id,
+                    text=f"*PI guidance from {current_user.name}:*\n\n{guidance}",
+                    thread_ts=td.thread_id,
+                )
+                logger.warning(
+                    "LEGACY PATH: PI %s posted guidance in proposal thread %s via %s "
+                    "(enable_private_refinement=False)",
+                    current_user.name, td.thread_id, agent.agent_id,
+                )
+            except HTTPException:
+                raise
+            except Exception as exc:
+                logger.error("Failed to post PI guidance to Slack: %s", exc)
+                raise HTTPException(
+                    status_code=500, detail=f"Failed to post to Slack: {str(exc)[:100]}",
+                )
 
     existing = await db.execute(
         select(ProposalReview).where(

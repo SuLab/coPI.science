@@ -25,6 +25,11 @@ class LogEntry:
     # memory segment. Default 'public' is safe for all existing callers.
     # See specs/privacy-and-channel-visibility.md §G2.
     visibility: str = "public"
+    # Slack-mirror mapping — set when this message was posted to (or came from)
+    # Slack. In pure Slack-on mode slack_ts == ts. Persisted to the DB row so the
+    # reconcile pass can dedup a mirrored message. See specs/local-db-conversations.md.
+    slack_ts: str | None = None
+    slack_channel_id: str | None = None
 
 
 def is_funding_post(content: str) -> bool:
