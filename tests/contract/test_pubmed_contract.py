@@ -77,14 +77,16 @@ async def test_fetch_pubmed_records_empty_input_no_http():
 
 @respx.mock
 async def test_fetch_pubmed_records_swallows_non_200_returns_empty():
-    respx.get(f"{EUTILS}/efetch.fcgi").mock(return_value=httpx.Response(500, text="err"))
+    route = respx.get(f"{EUTILS}/efetch.fcgi").mock(return_value=httpx.Response(500, text="err"))
     assert await pubmed.fetch_pubmed_records(["31000000"]) == []
+    assert route.called  # fail if the mocked URL drifts — the swallowed error would otherwise hide it
 
 
 @respx.mock
 async def test_fetch_pubmed_records_malformed_xml_returns_empty():
-    respx.get(f"{EUTILS}/efetch.fcgi").mock(return_value=httpx.Response(200, text="<not-xml"))
+    route = respx.get(f"{EUTILS}/efetch.fcgi").mock(return_value=httpx.Response(200, text="<not-xml"))
     assert await pubmed.fetch_pubmed_records(["31000000"]) == []
+    assert route.called
 
 
 @respx.mock
@@ -111,8 +113,9 @@ async def test_fetch_authoritative_dois_empty_input_no_http():
 
 @respx.mock
 async def test_fetch_authoritative_dois_swallows_non_200_returns_empty():
-    respx.get(f"{EUTILS}/esummary.fcgi").mock(return_value=httpx.Response(502))
+    route = respx.get(f"{EUTILS}/esummary.fcgi").mock(return_value=httpx.Response(502))
     assert await pubmed.fetch_authoritative_dois(["31000000"]) == {}
+    assert route.called
 
 
 @respx.mock

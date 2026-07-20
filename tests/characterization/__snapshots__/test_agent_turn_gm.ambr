@@ -2798,7 +2798,7 @@
     ''',
     'posted': dict({
       'channel': 'collab-cellbio',
-      'text': "Here's a concrete first experiment: **combine** your assay with our screen.",
+      'text': "Here's a concrete first experiment: *combine* your assay with our screen.",
       'thread_ts': '1700000000.000300',
     }),
     'returned': "Here's a concrete first experiment: **combine** your assay with our screen.",

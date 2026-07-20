@@ -34,6 +34,17 @@ from tests.fakes import FakeAnthropic, FakeSlackClient
 pytestmark = pytest.mark.characterization
 
 
+@pytest.fixture(autouse=True)
+def _hermetic_profiles(tmp_path, monkeypatch):
+    """Prompt assembly reads public/private profile + working memory from PROFILES_DIR
+    (= Path("profiles"), relative to CWD) with on-disk fallbacks. The dockerized
+    agent-run writes profiles/memory/<agent>/*.md, so without pinning this to an empty
+    dir these snapshots would silently depend on repo state and start failing after any
+    real run. Force the deterministic fallbacks. (PROMPTS_DIR is left alone — the
+    committed prompts/*.md ARE the behavior we want pinned.)"""
+    monkeypatch.setattr("src.agent.agent.PROFILES_DIR", tmp_path)
+
+
 def _agent() -> Agent:
     return Agent(agent_id="su", bot_name="SuBot", pi_name="Andrew Su")
 

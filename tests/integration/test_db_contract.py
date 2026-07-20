@@ -17,6 +17,7 @@ from src.models import (
     AgentRegistry,
     LlmCallLog,
     PrivateChannelMember,
+    ProposalReview,
     ResearcherProfile,
     SimulationRun,
     ThreadDecision,
@@ -237,6 +238,14 @@ async def test_simulation_run_delete_cascades_children(db_session):
     await factories.make_agent_channel(db_session, run=run)
     await factories.make_llm_call_log(db_session, run=run)
 
+    # Children must exist BEFORE the delete, else the post-delete 0-count is
+    # vacuous (a factory regression that stopped persisting would pass silently).
+    for model in (AgentMessage, AgentChannel, LlmCallLog):
+        n = await db_session.scalar(
+            select(func.count()).select_from(model).where(model.simulation_run_id == run.id)
+        )
+        assert n == 1, f"{model.__name__} not persisted pre-delete"
+
     await db_session.execute(
         text("DELETE FROM simulation_runs WHERE id = :id"), {"id": run.id}
     )
@@ -262,11 +271,47 @@ async def test_dat1_deleting_pi_member_user_violates_pcm_check(db_session):
     await factories.make_private_channel_member(
         db_session, channel=ch, agent_id=None, user_id=u.id, role="pi"
     )
-    with pytest.raises(IntegrityError):
+    with pytest.raises(IntegrityError) as ei:
         async with db_session.begin_nested():
             await db_session.execute(
                 text("DELETE FROM users WHERE id = :id"), {"id": u.id}
             )
+    # Lock the SPECIFIC constraint that fires, so a future schema change that makes a
+    # different IntegrityError fire first can't silently re-point what "DAT-1" pins.
+    assert "pcm_exactly_one_of_agent_or_user" in str(ei.value)
+
+
+async def test_user_delete_cascades_researcher_profile(db_session):
+    # researcher_profiles.user_id FK is ondelete=CASCADE (0001) — deleting the user
+    # removes the profile at the DB level (raw DELETE pins the rule, not ORM cascade).
+    u = await factories.make_user(db_session)
+    p = await factories.make_profile(db_session, user=u)
+    before = await db_session.scalar(
+        select(func.count()).select_from(ResearcherProfile).where(ResearcherProfile.id == p.id)
+    )
+    assert before == 1
+    await db_session.execute(text("DELETE FROM users WHERE id = :id"), {"id": u.id})
+    after = await db_session.scalar(
+        select(func.count()).select_from(ResearcherProfile).where(ResearcherProfile.id == p.id)
+    )
+    assert after == 0
+
+
+async def test_proposal_review_unique_per_thread_and_agent(db_session):
+    # uq_proposal_reviews_decision_agent (0004): one review per (thread_decision, agent).
+    run = await factories.make_simulation_run(db_session)
+    td = await factories.make_thread_decision(db_session, run=run)
+    u = await factories.make_user(db_session)
+    db_session.add(
+        ProposalReview(thread_decision_id=td.id, agent_id="su", user_id=u.id, rating=4)
+    )
+    await db_session.flush()
+    with pytest.raises(IntegrityError):
+        async with db_session.begin_nested():
+            db_session.add(
+                ProposalReview(thread_decision_id=td.id, agent_id="su", user_id=u.id, rating=5)
+            )
+            await db_session.flush()
 
 
 async def test_dat1_deleting_added_by_user_is_safe(db_session):
@@ -278,7 +323,14 @@ async def test_dat1_deleting_added_by_user_is_safe(db_session):
         db_session, channel=ch, agent_id="bot-x", added_by_user_id=adder.id
     )
     await db_session.execute(text("DELETE FROM users WHERE id = :id"), {"id": adder.id})
-    row_uid = await db_session.scalar(
+    # Row must SURVIVE (SET NULL, not CASCADE) AND have the column nulled. A bare
+    # `scalar(select(added_by_user_id))` can't tell these apart — it returns None both
+    # when the row survives with a nulled column and when the row was deleted.
+    survived = await db_session.scalar(
+        select(func.count()).select_from(PrivateChannelMember).where(PrivateChannelMember.id == m.id)
+    )
+    assert survived == 1
+    nulled = await db_session.scalar(
         select(PrivateChannelMember.added_by_user_id).where(PrivateChannelMember.id == m.id)
     )
-    assert row_uid is None
+    assert nulled is None

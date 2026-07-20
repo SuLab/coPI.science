@@ -132,8 +132,11 @@ async def test_fetch_opportunity_detail_synopsis_non_dict_is_blank():
 async def test_search_for_researchers_dedups_by_number_and_tags_keyword():
     hit = {"id": 1, "number": "N1", "title": "T1", "agencyCode": "NSF",
            "openDate": "", "closeDate": "", "description": ""}
-    respx.post(SEARCH_URL).mock(return_value=httpx.Response(200, json=_search_payload([hit])))
+    route = respx.post(SEARCH_URL).mock(return_value=httpx.Response(200, json=_search_payload([hit])))
     out = await grants.search_for_researchers({"agent1": ["kw-a", "kw-b"]})
+    # Both keywords were actually searched (not short-circuited) — without this, a bug
+    # that searched only kw-a would still yield len==1/matched=="kw-a" and pass.
+    assert route.call_count == 2
     # same opp number returned for both keywords -> deduped to one, tagged with first
     assert len(out["agent1"]) == 1
     assert out["agent1"][0]["matched_keyword"] == "kw-a"
@@ -141,6 +144,7 @@ async def test_search_for_researchers_dedups_by_number_and_tags_keyword():
 
 @respx.mock
 async def test_search_for_researchers_swallows_search_errors():
-    respx.post(SEARCH_URL).mock(return_value=httpx.Response(500))
+    route = respx.post(SEARCH_URL).mock(return_value=httpx.Response(500))
     out = await grants.search_for_researchers({"agent1": ["kw-a"]})
     assert out == {"agent1": []}
+    assert route.called  # fail if the mocked URL drifts — the swallowed error would otherwise hide it

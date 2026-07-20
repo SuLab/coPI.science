@@ -16,6 +16,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from src.agent.slack_client import markdown_to_mrkdwn
+
 
 @dataclass
 class _Usage:
@@ -27,6 +29,11 @@ class _Usage:
 class _TextBlock:
     text: str
     type: str = "text"
+
+    def model_dump(self) -> dict:
+        # Real anthropic text blocks expose model_dump(); generate_with_tools()
+        # serializes every content block, so a mixed text+tool_use turn needs this.
+        return {"type": "text", "text": self.text}
 
 
 @dataclass
@@ -61,6 +68,11 @@ def tool_use_response(
         blocks.append(_TextBlock(text=text))
     blocks.append(_ToolUseBlock(id=block_id, name=tool_name, input=tool_input))
     return _Message(content=blocks, stop_reason="tool_use")
+
+
+def empty_response(*, stop_reason: str = "end_turn") -> _Message:
+    """An assistant message with no content blocks (Claude occasionally returns this)."""
+    return _Message(content=[], stop_reason=stop_reason)
 
 
 class _Messages:
@@ -138,7 +150,10 @@ class FakeSlackClient:
 
     def post_message(self, channel: str, text: str, thread_ts: str | None = None) -> dict:
         ts = self._next_ts()
-        rec = {"channel": channel, "text": text, "thread_ts": thread_ts, "ts": ts}
+        # Mirror the real AgentSlackClient, which converts markdown -> Slack mrkdwn
+        # before posting (slack_client.py), so posted[..]["text"] reflects what Slack
+        # actually receives (e.g. **bold** -> *bold*), not the pre-conversion text.
+        rec = {"channel": channel, "text": markdown_to_mrkdwn(text), "thread_ts": thread_ts, "ts": ts}
         self.posted.append(rec)
         return {"ts": ts, "channel": channel}
 

@@ -152,23 +152,27 @@ async def test_fetch_orcid_record_raises_on_malformed_json():
 
 @respx.mock
 async def test_fetch_orcid_grants_swallows_non_200_returns_empty():
-    respx.get(f"{BASE}/{OID}/fundings").mock(return_value=httpx.Response(503))
+    route = respx.get(f"{BASE}/{OID}/fundings").mock(return_value=httpx.Response(503))
     assert await orcid.fetch_orcid_grants(OID) == []
+    assert route.called  # fail if the mocked URL drifts — the swallowed error would otherwise hide it
 
 
 @respx.mock
 async def test_fetch_orcid_grants_swallows_timeout_returns_empty():
-    respx.get(f"{BASE}/{OID}/fundings").mock(side_effect=httpx.TimeoutException("t"))
+    route = respx.get(f"{BASE}/{OID}/fundings").mock(side_effect=httpx.TimeoutException("t"))
     assert await orcid.fetch_orcid_grants(OID) == []
+    assert route.called
 
 
 @respx.mock
 async def test_fetch_orcid_works_swallows_non_200_returns_empty():
-    respx.get(f"{BASE}/{OID}/works").mock(return_value=httpx.Response(500))
+    route = respx.get(f"{BASE}/{OID}/works").mock(return_value=httpx.Response(500))
     assert await orcid.fetch_orcid_works(OID) == []
+    assert route.called
 
 
 @respx.mock
 async def test_fetch_orcid_works_swallows_timeout_returns_empty():
-    respx.get(f"{BASE}/{OID}/works").mock(side_effect=httpx.TimeoutException("t"))
+    route = respx.get(f"{BASE}/{OID}/works").mock(side_effect=httpx.TimeoutException("t"))
     assert await orcid.fetch_orcid_works(OID) == []
+    assert route.called
