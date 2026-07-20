@@ -225,9 +225,10 @@ class SimulationEngine:
         self._pending_persist: list[LogEntry] = []
         # Monotonic id minter high-water mark (seeded at DB rebuild). See mint_ts.
         self._last_mint_ts: float = 0.0
-        # High-water mark (posted_at) for the DB inbox poller — the Slack-
-        # independent path by which human/PI messages written by the web app
-        # enter the simulation. See _poll_pi_inbox_from_db.
+        # High-water mark (posted_at) for the DB inbound poller — the Slack-
+        # independent path by which messages written by other processes (PI web
+        # interface, private-channel handover) enter the simulation. See
+        # _poll_inbound_from_db.
         self._pi_inbox_cursor: float = 0.0
 
     # ------------------------------------------------------------------
@@ -334,9 +335,10 @@ class SimulationEngine:
             await self._poll_pi_dms()
             await self._poll_proposal_threads_for_pi()
 
-            # DB-native inbound path: human/PI messages written by the web app.
-            # Runs regardless of Slack, and is how PIs interact when Slack is off.
-            await self._poll_pi_inbox_from_db()
+            # DB-native inbound path: messages written by other processes (PI
+            # web interface, private-channel handover). Runs regardless of Slack,
+            # and is how PIs interact when Slack is off.
+            await self._poll_inbound_from_db()
 
             # Sync proposal reviews and any newly-created private channels from
             # the web app. Both are DB-driven, so a single tick picks them up.
@@ -2060,16 +2062,15 @@ class SimulationEngine:
             except Exception as exc:
                 logger.debug("Polling error for #%s: %s", ch_name, exc)
 
-    async def _poll_pi_inbox_from_db(self) -> None:
-        """Ingest human/PI messages written to the DB by the web app.
+    async def _poll_inbound_from_db(self) -> None:
+        """Ingest messages written to the DB by other processes.
 
-        This is the Slack-independent inbound path (and the convergence point
-        for the Slack mirror's inbound side): the PI web interface inserts rows
-        into agent_messages with is_bot=false, and this poller appends any it
-        hasn't seen to the MessageLog and routes them through the same PI
-        handling the Slack poller uses — proposal-review clearing, thread
-        reopen, pi_context, and @bot tags. Runs whether or not Slack is enabled.
-        See specs/local-db-conversations.md.
+        The DB is the primary store, so any message this process hasn't seen —
+        PI messages and bot-authored handover posts written by the web app, and
+        (later) the Slack mirror's inbound side — must be pulled into the live
+        MessageLog. Human/PI messages are additionally routed through PI handling
+        (proposal-review clearing, thread reopen, pi_context, @bot tags). Runs
+        every tick regardless of Slack. See specs/local-db-conversations.md.
         """
         if not self.session_factory or not self.simulation_run_id:
             return
@@ -2080,38 +2081,38 @@ class SimulationEngine:
                     sa_select(AgentMessage)
                     .where(
                         AgentMessage.simulation_run_id == self.simulation_run_id,
-                        AgentMessage.is_bot.is_(False),
                         AgentMessage.posted_at > self._pi_inbox_cursor,
                     )
                     .order_by(AgentMessage.posted_at.asc())
                 )).scalars().all()
         except Exception as exc:
-            logger.debug("PI inbox poll failed: %s", exc)
+            logger.debug("Inbound DB poll failed: %s", exc)
             return
 
         for r in rows:
             if r.posted_at > self._pi_inbox_cursor:
                 self._pi_inbox_cursor = r.posted_at
             if not r.message_ts or self.message_log.get_entry(r.message_ts):
-                # Already known (e.g. the engine itself appended it) — skip
-                # re-processing, but the cursor has still advanced past it.
+                # Already known (the engine itself appended and flushed it) —
+                # skip re-processing, but the cursor has still advanced past it.
                 continue
             entry = LogEntry(
                 ts=r.message_ts,
                 channel=r.channel_name,
-                sender_agent_id=None,
-                sender_name=r.sender_name or "PI",
+                sender_agent_id=r.agent_id,
+                sender_name=r.sender_name or ("PI" if not r.is_bot else r.agent_id or "bot"),
                 content=r.content or "",
                 thread_ts=r.thread_ts,
                 posted_at=r.posted_at or 0.0,
-                is_bot=False,
+                is_bot=r.is_bot,
                 visibility=r.visibility,
             )
             self.message_log.append(entry)
-            logger.info(
-                "PI (web) message in #%s: %.60s", entry.channel, entry.content[:60]
-            )
-            await self._handle_pi_inbound_entry(entry)
+            if r.is_bot:
+                logger.info("External bot message in #%s: %.60s", entry.channel, entry.content[:60])
+            else:
+                logger.info("PI (web) message in #%s: %.60s", entry.channel, entry.content[:60])
+                await self._handle_pi_inbound_entry(entry)
 
     async def _handle_pi_inbound_entry(self, entry: LogEntry) -> None:
         """Apply PI-message side effects, derived from the thread (no Slack map).

@@ -29,6 +29,7 @@ after Slack succeeds, we log — the orphan Slack channel can be archived manual
 from __future__ import annotations
 
 import logging
+import time
 import uuid
 from dataclasses import dataclass
 
@@ -40,6 +41,7 @@ from src.agent.slack_client import AgentSlackClient
 from src.config import get_settings
 from src.models import (
     AgentChannel,
+    AgentMessage,
     AgentRegistry,
     PrivateChannelMember,
     SimulationRun,
@@ -215,6 +217,108 @@ async def _resolve_other_pi(
     return reg, user
 
 
+async def _slack_enabled_for_migration(
+    db: AsyncSession, creator_agent_id: str, other_agent_id: str,
+) -> bool:
+    """Resolve whether the migration should use Slack.
+
+    Explicit SLACK_ENABLED wins; otherwise auto-detect: Slack is used only when
+    both participating bots have usable tokens. See specs/local-db-conversations.md.
+    """
+    settings = get_settings()
+    if settings.slack_enabled is not None:
+        return settings.slack_enabled
+    from src.services.slack_tokens import get_agent_bot_token
+    creator_tok = await get_agent_bot_token(db, creator_agent_id)
+    other_tok = await get_agent_bot_token(db, other_agent_id)
+    return bool(creator_tok and other_tok)
+
+
+async def _migrate_offline(
+    db: AsyncSession,
+    *,
+    thread_decision: ThreadDecision,
+    creator_agent_id: str,
+    creator_pi_user: User,
+    guidance_text: str,
+    a: str,
+    b: str,
+    other_agent_id: str,
+    origin_channel_name: str,
+) -> MigrationResult:
+    """Slack-off migration: DB-only, no Slack calls.
+
+    Creates the collab_private AgentChannel and members exactly as the Slack
+    path, but with a local: channel id, and writes the handover posts and the
+    origin-thread ⏸️ close marker as agent_messages rows so the running sim (and
+    the next rebuild) pick them up through _poll_inbound_from_db.
+    """
+    base_slug = _build_slug(a, b, origin_channel_name)
+    stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
+    new_channel_name = normalize_channel_name(f"{base_slug[: 80 - len(stamp) - 1]}-{stamp}")
+    new_channel_id = f"local:{new_channel_name}"
+    origin_channel_id = f"local:{origin_channel_name}"
+
+    simulation_run_id = await _latest_simulation_run_id(db)
+
+    ac = AgentChannel(
+        simulation_run_id=simulation_run_id,
+        channel_id=new_channel_id,
+        channel_name=new_channel_name,
+        channel_type="collaboration",
+        visibility=VISIBILITY_COLLAB_PRIVATE,
+        created_by_agent=creator_agent_id,
+        migrated_from_channel_id=origin_channel_id,
+    )
+    db.add(ac)
+    await db.flush()
+
+    db.add(PrivateChannelMember(agent_channel_id=ac.id, agent_id=creator_agent_id, role="bot"))
+    db.add(PrivateChannelMember(agent_channel_id=ac.id, agent_id=other_agent_id, role="bot"))
+    db.add(PrivateChannelMember(
+        agent_channel_id=ac.id, user_id=creator_pi_user.id, role="pi",
+        added_by_user_id=creator_pi_user.id,
+    ))
+
+    # Handover posts, authored by the creator bot, written straight to the DB
+    # (visibility=collab_private) so they stay within the channel's membership.
+    handover_posts = _build_handover_messages(
+        creator_pi_name=creator_pi_user.name,
+        proposal_summary=thread_decision.summary_text,
+        guidance_text=guidance_text,
+        origin_channel_name=origin_channel_name,
+    )
+    now = time.time()
+    for i, post in enumerate(handover_posts):
+        ts = f"{now + i * 1e-6:.6f}"
+        db.add(AgentMessage(
+            simulation_run_id=simulation_run_id, agent_id=creator_agent_id,
+            channel_id=new_channel_id, channel_name=new_channel_name,
+            message_ts=ts, phase="new_post", visibility=VISIBILITY_COLLAB_PRIVATE,
+            content=post, sender_name=f"{creator_agent_id}Bot", is_bot=True,
+            posted_at=float(ts),
+        ))
+    # Neutral close marker in the origin (public) thread — no PI text echoed.
+    close_ts = f"{now + len(handover_posts) * 1e-6:.6f}"
+    db.add(AgentMessage(
+        simulation_run_id=simulation_run_id, agent_id=creator_agent_id,
+        channel_id=origin_channel_id, channel_name=origin_channel_name,
+        message_ts=close_ts, thread_ts=thread_decision.thread_id,
+        phase="thread_reply", visibility="public",
+        content="⏸️ continuing this discussion off-channel.",
+        sender_name=f"{creator_agent_id}Bot", is_bot=True, posted_at=float(close_ts),
+    ))
+
+    thread_decision.refined_in_channel = new_channel_id
+    logger.info("Slack-off migration: created private channel %s (DB-only)", new_channel_name)
+    return MigrationResult(
+        channel_id=new_channel_id,
+        channel_name=new_channel_name,
+        agent_channel_id=ac.id,
+        invited_other_pi=False,
+    )
+
+
 async def migrate_public_thread_to_private(
     db: AsyncSession,
     *,
@@ -242,6 +346,20 @@ async def migrate_public_thread_to_private(
     other_agent_id = b if creator_agent_id == a else a
 
     origin_channel_name = thread_decision.channel
+
+    # Slack-off: DB-only migration (no channel/invite/post/DM). The handover is
+    # written straight to agent_messages for the sim to ingest.
+    if not await _slack_enabled_for_migration(db, creator_agent_id, other_agent_id):
+        return await _migrate_offline(
+            db,
+            thread_decision=thread_decision,
+            creator_agent_id=creator_agent_id,
+            creator_pi_user=creator_pi_user,
+            guidance_text=guidance_text,
+            a=a, b=b,
+            other_agent_id=other_agent_id,
+            origin_channel_name=origin_channel_name,
+        )
 
     # --- Slack side-effects ------------------------------------------------
     creator_token = await _get_or_fail_bot_token(db, creator_agent_id)
