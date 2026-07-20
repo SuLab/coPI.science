@@ -70,3 +70,7 @@ data/agent_roster.json
 # run (scripts/provision_slack_bots.py). Must never be committed.
 .provision_state.json
 .venv-test/
+
+# mutmut 2.x results cache (scripts/mutation.sh)
+.mutmut-cache
+mutants/
