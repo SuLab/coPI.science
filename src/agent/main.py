@@ -91,16 +91,31 @@ async def _run_simulation(
         len(agents), "all statuses" if all_agents else "status='active'",
     )
 
-    # Set up Slack clients (Web API only, no Socket Mode). Tokens come from the
-    # AgentRegistry row, falling back to the legacy .env/config mapping.
+    # Resolve whether Slack is enabled. --mock forces it off; an explicit
+    # SLACK_ENABLED env setting wins next; otherwise auto-detect from whether
+    # any agent has a usable bot token. When off, the DB is the sole store and
+    # no Slack API calls are made. See specs/local-db-conversations.md.
+    from src.services.slack_tokens import env_token, is_valid_token
+
+    def _token_for(agent_id: str) -> str | None:
+        tok = roster_tokens.get(agent_id)
+        return tok if is_valid_token(tok) else env_token(agent_id)
+
+    if mock:
+        slack_enabled = False
+    elif settings.slack_enabled is not None:
+        slack_enabled = settings.slack_enabled
+    else:
+        slack_enabled = any(is_valid_token(_token_for(a.agent_id)) for a in agents)
+
+    # Set up transports. When Slack is on, each agent gets a Web-API client
+    # (Web API only, no Socket Mode); when off, a NullTransport that no-ops all
+    # Slack calls so the engine runs identically against the DB.
     slack_clients = {}
-    if not mock:
+    if slack_enabled:
         from src.agent.slack_client import AgentSlackClient
-        from src.services.slack_tokens import env_token, is_valid_token
         for agent in agents:
-            bot_token = roster_tokens.get(agent.agent_id)
-            if not is_valid_token(bot_token):
-                bot_token = env_token(agent.agent_id)
+            bot_token = _token_for(agent.agent_id)
             if is_valid_token(bot_token):
                 client = AgentSlackClient(
                     agent_id=agent.agent_id,
@@ -112,6 +127,11 @@ async def _run_simulation(
                     logger.warning("[%s] Slack connection failed — skipping", agent.agent_id)
             else:
                 logger.warning("[%s] No valid Slack token — skipping", agent.agent_id)
+    else:
+        from src.agent.transport import NullTransport
+        for agent in agents:
+            slack_clients[agent.agent_id] = NullTransport(agent_id=agent.agent_id)
+        logger.info("Slack disabled — running DB-only (NullTransport for %d agents)", len(agents))
 
     # Set up database session factory
     session_factory = None
@@ -195,6 +215,7 @@ async def _run_simulation(
         session_factory=session_factory,
         simulation_run_id=simulation_run_id,
         reset_cursors=reset_cursors,
+        slack_enabled=slack_enabled,
     )
 
     # Handle shutdown signals

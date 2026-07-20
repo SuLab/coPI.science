@@ -128,6 +128,7 @@ class SimulationEngine:
         session_factory=None,
         simulation_run_id: uuid.UUID | None = None,
         reset_cursors: bool = False,
+        slack_enabled: bool = True,
     ):
         self.agents = {a.agent_id: a for a in agents}
         self.slack_clients = slack_clients
@@ -136,6 +137,10 @@ class SimulationEngine:
         self.session_factory = session_factory
         self.simulation_run_id = simulation_run_id
         self._reset_cursors = reset_cursors
+        # When False, the local DB is the sole conversation store and no Slack
+        # API calls are made (transports are NullTransport). Drives the roster
+        # gate and the DB inbox poller. See specs/local-db-conversations.md.
+        self.slack_enabled = slack_enabled
 
         self._start_time: datetime | None = None
         self._running = False
@@ -220,6 +225,10 @@ class SimulationEngine:
         self._pending_persist: list[LogEntry] = []
         # Monotonic id minter high-water mark (seeded at DB rebuild). See mint_ts.
         self._last_mint_ts: float = 0.0
+        # High-water mark (posted_at) for the DB inbox poller — the Slack-
+        # independent path by which human/PI messages written by the web app
+        # enter the simulation. See _poll_pi_inbox_from_db.
+        self._pi_inbox_cursor: float = 0.0
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -319,10 +328,15 @@ class SimulationEngine:
         turn_count = 0
         consecutive_idle = 0
         while self._running and self.is_within_time_limit:
-            # Poll Slack for PI messages (channels, DMs, and proposal threads)
+            # Poll Slack for PI messages (channels, DMs, and proposal threads).
+            # No-ops when Slack is off (NullTransport / no connected clients).
             await self._poll_slack_for_pi_messages()
             await self._poll_pi_dms()
             await self._poll_proposal_threads_for_pi()
+
+            # DB-native inbound path: human/PI messages written by the web app.
+            # Runs regardless of Slack, and is how PIs interact when Slack is off.
+            await self._poll_pi_inbox_from_db()
 
             # Sync proposal reviews and any newly-created private channels from
             # the web app. Both are DB-driven, so a single tick picks them up.
@@ -2046,6 +2060,96 @@ class SimulationEngine:
             except Exception as exc:
                 logger.debug("Polling error for #%s: %s", ch_name, exc)
 
+    async def _poll_pi_inbox_from_db(self) -> None:
+        """Ingest human/PI messages written to the DB by the web app.
+
+        This is the Slack-independent inbound path (and the convergence point
+        for the Slack mirror's inbound side): the PI web interface inserts rows
+        into agent_messages with is_bot=false, and this poller appends any it
+        hasn't seen to the MessageLog and routes them through the same PI
+        handling the Slack poller uses — proposal-review clearing, thread
+        reopen, pi_context, and @bot tags. Runs whether or not Slack is enabled.
+        See specs/local-db-conversations.md.
+        """
+        if not self.session_factory or not self.simulation_run_id:
+            return
+        from sqlalchemy import select as sa_select
+        try:
+            async with self.session_factory() as db:
+                rows = (await db.execute(
+                    sa_select(AgentMessage)
+                    .where(
+                        AgentMessage.simulation_run_id == self.simulation_run_id,
+                        AgentMessage.is_bot.is_(False),
+                        AgentMessage.posted_at > self._pi_inbox_cursor,
+                    )
+                    .order_by(AgentMessage.posted_at.asc())
+                )).scalars().all()
+        except Exception as exc:
+            logger.debug("PI inbox poll failed: %s", exc)
+            return
+
+        for r in rows:
+            if r.posted_at > self._pi_inbox_cursor:
+                self._pi_inbox_cursor = r.posted_at
+            if not r.message_ts or self.message_log.get_entry(r.message_ts):
+                # Already known (e.g. the engine itself appended it) — skip
+                # re-processing, but the cursor has still advanced past it.
+                continue
+            entry = LogEntry(
+                ts=r.message_ts,
+                channel=r.channel_name,
+                sender_agent_id=None,
+                sender_name=r.sender_name or "PI",
+                content=r.content or "",
+                thread_ts=r.thread_ts,
+                posted_at=r.posted_at or 0.0,
+                is_bot=False,
+                visibility=r.visibility,
+            )
+            self.message_log.append(entry)
+            logger.info(
+                "PI (web) message in #%s: %.60s", entry.channel, entry.content[:60]
+            )
+            await self._handle_pi_inbound_entry(entry)
+
+    async def _handle_pi_inbound_entry(self, entry: LogEntry) -> None:
+        """Apply PI-message side effects, derived from the thread (no Slack map).
+
+        Clears pending-proposal blocks, reopens closed threads, sets pi_context
+        on active threads, and honors @bot tags — using the thread's own
+        participants rather than a Slack user→agent mapping, so it works with
+        Slack off.
+        """
+        # Clears any pending proposal on this thread (keyed purely by thread id).
+        self._check_pi_proposal_review(entry)
+
+        thread_ts = entry.thread_ts
+        if thread_ts:
+            # Reopen a closed thread for its participants.
+            if thread_ts in self._closed_thread_ids:
+                history = self.message_log.get_thread_history(thread_ts)
+                participants = [
+                    h.sender_agent_id for h in history
+                    if h.sender_agent_id and h.sender_agent_id in self.agents
+                ]
+                if participants:
+                    await self._reopen_thread(participants[0], thread_ts, entry)
+            else:
+                # Active thread → treat the PI message as authoritative context.
+                for agent in self.agents.values():
+                    thread = agent.state.active_threads.get(thread_ts)
+                    if thread:
+                        thread.pi_context = entry.content
+                        thread.has_pending_reply = True
+                        agent.state.has_pi_directive = True
+
+        # @bot tag → route to the tagged agent (same as the Slack path).
+        tagged_id = self.message_log._extract_tagged_agent(entry.content)
+        if tagged_id and tagged_id in self.agents and self._pi_handler:
+            self.agents[tagged_id].state.has_pi_directive = True
+            await self._pi_handler.handle_channel_tag(tagged_id, entry)
+
     def _check_pi_proposal_review(self, entry: LogEntry) -> None:
         """Check if a PI message clears a pending proposal for any agent."""
         thread_ts = entry.thread_ts
@@ -2556,6 +2660,9 @@ class SimulationEngine:
                 if r.slack_ts > cur:
                     self._poll_cursors[r.slack_channel_id] = r.slack_ts
         self._last_mint_ts = max(self._last_mint_ts, max_posted)
+        # Start the inbox poller past all restored history so it only picks up
+        # genuinely new web-written PI messages.
+        self._pi_inbox_cursor = max(self._pi_inbox_cursor, max_posted)
         logger.info("Rebuilt MessageLog from DB: %d messages", loaded)
 
     async def _flush_persisted(self) -> None:
@@ -3086,17 +3193,23 @@ class SimulationEngine:
             # --- Additions: agent newly active ------------------------------
             for aid in to_add:
                 r = desired[aid]
-                token = r.slack_bot_token if is_valid_token(r.slack_bot_token) else env_token(aid)
-                if not is_valid_token(token):
-                    logger.info(
-                        "[roster] Agent %s is active but has no usable token yet — "
-                        "skipping (will retry next sync once a token is set)", aid,
-                    )
-                    continue
-                client = AgentSlackClient(agent_id=aid, bot_token=token)
-                if not client.connect():
-                    logger.warning("[roster] Slack connect failed for new agent %s — skipping", aid)
-                    continue
+                if self.slack_enabled:
+                    token = r.slack_bot_token if is_valid_token(r.slack_bot_token) else env_token(aid)
+                    if not is_valid_token(token):
+                        logger.info(
+                            "[roster] Agent %s is active but has no usable token yet — "
+                            "skipping (will retry next sync once a token is set)", aid,
+                        )
+                        continue
+                    client = AgentSlackClient(agent_id=aid, bot_token=token)
+                    if not client.connect():
+                        logger.warning("[roster] Slack connect failed for new agent %s — skipping", aid)
+                        continue
+                else:
+                    # Slack off: admit the agent with a no-op transport (never
+                    # gate on a token/connection that doesn't apply in DB-only mode).
+                    from src.agent.transport import NullTransport
+                    client = NullTransport(agent_id=aid)
                 agent = Agent(agent_id=aid, bot_name=r.bot_name, pi_name=r.pi_name)
                 # In-place inserts (PIHandler shares these dicts by reference).
                 self.agents[aid] = agent
