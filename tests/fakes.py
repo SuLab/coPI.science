@@ -12,8 +12,9 @@ hands back deterministic ts/channel ids, so agent-turn golden-master tests never
 touch the network.
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any
 
 
 @dataclass

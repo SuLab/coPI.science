@@ -1,6 +1,6 @@
 """Tests for grantbot's minimum-lead-time filter."""
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from src.agent.grantbot import (
     MIN_LEAD_DAYS,
@@ -8,16 +8,15 @@ from src.agent.grantbot import (
     _parse_close_date,
 )
 
-
-NOW = datetime(2026, 5, 3, tzinfo=timezone.utc)
+NOW = datetime(2026, 5, 3, tzinfo=UTC)
 
 
 def test_parse_close_date_mdy():
-    assert _parse_close_date("05/04/2026") == datetime(2026, 5, 4, tzinfo=timezone.utc)
+    assert _parse_close_date("05/04/2026") == datetime(2026, 5, 4, tzinfo=UTC)
 
 
 def test_parse_close_date_iso():
-    assert _parse_close_date("2026-05-04") == datetime(2026, 5, 4, tzinfo=timezone.utc)
+    assert _parse_close_date("2026-05-04") == datetime(2026, 5, 4, tzinfo=UTC)
 
 
 def test_parse_close_date_empty_returns_none():

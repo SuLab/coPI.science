@@ -1,7 +1,6 @@
 """Tests for G1-G3 privacy scoping: per-channel prompts, partitioned memory,
 visibility-filtered deduplication. See specs/privacy-and-channel-visibility.md."""
 
-from pathlib import Path
 
 import pytest
 
@@ -10,7 +9,6 @@ from src.agent.agent import Agent
 from src.agent.message_log import LogEntry
 from src.agent.simulation import SimulationEngine, _visibility_permits
 from src.models.agent_activity import VISIBILITY_COLLAB_PRIVATE, VISIBILITY_PUBLIC
-
 
 # ---------------------------------------------------------------------------
 # G3: visibility ordering primitive
