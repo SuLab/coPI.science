@@ -7,7 +7,7 @@ pytestmark = pytest.mark.integration
 async def test_container_is_migrated(engine):
     async with engine.connect() as conn:
         v = (await conn.execute(text("SELECT version_num FROM alembic_version"))).scalar_one()
-        assert v == "0018"
+        assert v == "0020"  # bumped by db-primary-conversations migrations 0019 + 0020
 
 
 async def test_writes_are_rolled_back_part1(db_session):

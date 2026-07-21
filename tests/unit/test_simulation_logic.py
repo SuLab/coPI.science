@@ -656,7 +656,7 @@ class TestMintTs:
         ids = [engine.mint_ts() for _ in range(1000)]
         floats = [float(x) for x in ids]
         # Strictly increasing (so posted_at=float(ts) ordering is preserved)
-        assert all(b > a for a, b in zip(floats, floats[1:]))
+        assert all(b > a for a, b in zip(floats, floats[1:], strict=False))
         # All unique
         assert len(set(ids)) == len(ids)
 
