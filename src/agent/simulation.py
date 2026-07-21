@@ -2030,6 +2030,8 @@ class SimulationEngine:
                         posted_at=float(ts) if ts else 0.0,
                         is_bot=False,
                         visibility=ch_visibility,
+                        slack_ts=ts or None,
+                        slack_channel_id=ch_id,
                     )
                     self.message_log.append(entry)
                     logger.info(
@@ -2415,6 +2417,8 @@ class SimulationEngine:
                     thread_ts=thread_id,
                     posted_at=float(ts) if ts else 0.0,
                     is_bot=False,
+                    slack_ts=ts or None,
+                    slack_channel_id=ch_id,
                 )
 
                 # Avoid re-processing messages already in the log
