@@ -27,7 +27,7 @@ from src.agent.slack_client import ThreadNotFound
 from src.agent.state import PostRef, ProposalRef, ThreadState
 from src.agent.tools import TOOL_DEFINITIONS, execute_tool
 from src.config import get_settings
-from src.models import AgentMessage, LlmCallLog, ProposalReview, SimulationRun, ThreadDecision
+from src.models import AgentChannel, AgentMessage, LlmCallLog, ProposalReview, SimulationRun, ThreadDecision
 from src.models.agent_activity import VISIBILITY_COLLAB_PRIVATE, VISIBILITY_PUBLIC
 from src.services.llm import (
     generate_agent_response,
