@@ -2,12 +2,9 @@
 
 import secrets
 import uuid
-from datetime import datetime, timedelta, timezone
-
-import pytest
+from datetime import UTC, datetime, timedelta
 
 from src.models.delegate import AgentDelegate, DelegateInvitation
-
 
 # ---------------------------------------------------------------
 # DelegateInvitation model
@@ -23,7 +20,7 @@ class TestDelegateInvitation:
             email="test@example.com",
             token=secrets.token_urlsafe(48),
             status="pending",
-            expires_at=datetime.now(timezone.utc) + timedelta(days=30),
+            expires_at=datetime.now(UTC) + timedelta(days=30),
         )
         assert inv.status == "pending"
         assert inv.email == "test@example.com"
@@ -38,7 +35,7 @@ class TestDelegateInvitation:
             email="test@example.com",
             token=secrets.token_urlsafe(48),
             status="pending",
-            expires_at=datetime.now(timezone.utc) + timedelta(days=30),
+            expires_at=datetime.now(UTC) + timedelta(days=30),
         )
         assert inv.status == "pending"
 
@@ -49,7 +46,7 @@ class TestDelegateInvitation:
             email="test@example.com",
             token="abc123",
             status="pending",
-            expires_at=datetime.now(timezone.utc) + timedelta(days=30),
+            expires_at=datetime.now(UTC) + timedelta(days=30),
         )
         assert "test@example.com" in repr(inv)
         assert "pending" in repr(inv)
@@ -104,9 +101,9 @@ class TestInvitationExpiry:
             email="test@example.com",
             token=secrets.token_urlsafe(48),
             status="pending",
-            expires_at=datetime.now(timezone.utc) + timedelta(days=30),
+            expires_at=datetime.now(UTC) + timedelta(days=30),
         )
-        assert inv.expires_at > datetime.now(timezone.utc)
+        assert inv.expires_at > datetime.now(UTC)
 
     def test_expired(self):
         """Invitation with past expires_at is expired."""
@@ -116,9 +113,9 @@ class TestInvitationExpiry:
             email="test@example.com",
             token=secrets.token_urlsafe(48),
             status="pending",
-            expires_at=datetime.now(timezone.utc) - timedelta(days=1),
+            expires_at=datetime.now(UTC) - timedelta(days=1),
         )
-        assert inv.expires_at < datetime.now(timezone.utc)
+        assert inv.expires_at < datetime.now(UTC)
 
 
 # ---------------------------------------------------------------
@@ -155,7 +152,7 @@ class TestEmailService:
 class TestInviteRouter:
     def test_imports(self):
         """Invite router is importable."""
-        from src.routers.invite import router, accept_invite
+        from src.routers.invite import accept_invite, router
         assert router is not None
         assert callable(accept_invite)
 

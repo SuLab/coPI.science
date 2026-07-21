@@ -1,0 +1,103 @@
+# serializer version: 1
+# name: test_profile_pipeline_doi_correction_stores_authoritative
+  dict({
+    'orcid_candidate_doi': '10.1000/orcid-wrong',
+    'pubmed_authoritative_doi': '10.1000/pubmed-authoritative',
+    'stored_doi': '10.1000/pubmed-authoritative',
+    'stored_is_authoritative': True,
+    'stored_is_not_orcid_candidate': True,
+  })
+# ---
+# name: test_profile_pipeline_golden_master
+  dict({
+    'disease_areas': list([
+      'computational theory',
+    ]),
+    'experimental_models': list([
+      'analytical engine',
+      'difference engine',
+    ]),
+    'grant_titles': list([
+      'Difference Engine Program',
+      'Analytical Engine Grant',
+    ]),
+    'key_targets': list([
+      'Bernoulli numbers',
+    ]),
+    'keywords': list([
+      'computing',
+      'mathematics',
+      'engines',
+    ]),
+    'private_profile_md': None,
+    'private_profile_seed': '''
+      # Private Profile
+      
+      ## Collaboration Preferences
+      Prefers rigorous, mathematically grounded collaborators.
+      
+      ## Communication Style
+      Precise and formal; values worked examples.
+      
+      ## Topic Priorities
+      Programmable computation; symbolic manipulation.
+      
+      ## Criteria to Always Explore
+      Whether a method generalizes beyond numbers.
+    ''',
+    'profile_version': 1,
+    'publications': list([
+      dict({
+        'abstract': 'We describe the analytical engine and its operation on Bernoulli numbers.',
+        'doi': '10.1000/aaa',
+        'journal': "Taylor's Scientific Memoirs",
+        'pmcid': None,
+        'pmid': '1001',
+        'title': 'On the Analytical Engine',
+        'year': 1843,
+      }),
+      dict({
+        'abstract': 'A method for computing Bernoulli numbers with the engine.',
+        'doi': '10.1000/bbb',
+        'journal': 'Memoirs',
+        'pmcid': None,
+        'pmid': '1002',
+        'title': 'Notes on Bernoulli',
+        'year': 1842,
+      }),
+    ]),
+    'raw_abstracts_hash': '66d887a29c4b61aa02e65852fb24d28cd464bede0c2950fbaf2f76ee13b9e42b',
+    'research_summary': 'This laboratory investigates programmable mechanical computation and the mathematical foundations that make general-purpose calculation possible. The central line of work formalizes how a sequence of operations can be encoded on punched cards and executed by an analytical engine, turning an abstract algorithm into a repeatable physical process. A recurring theme is the computation of Bernoulli numbers, used as a demanding proving ground for loop control, intermediate storage, and the reuse of partial results. The group connects nineteenth-century engine architecture to modern notions of symbolic manipulation, arguing that the machine could act on entities other than numbers when those entities obey formal rules. Methodologically the work spans analytical derivation, stepwise numerical verification, and the careful design of operation tables that other researchers can follow and reproduce.',
+    'techniques': list([
+      'mechanical computation',
+      'algorithm design',
+      'numerical analysis',
+      'punch-card programming',
+    ]),
+  })
+# ---
+# name: test_profile_pipeline_llm_failure_leaves_fields_unset
+  dict({
+    'disease_areas': None,
+    'grant_titles': list([
+      'Difference Engine Program',
+      'Analytical Engine Grant',
+    ]),
+    'private_profile_seed': None,
+    'profile_version': 0,
+    'raw_abstracts_hash_is_set': True,
+    'research_summary': None,
+    'techniques': None,
+  })
+# ---
+# name: test_profile_pipeline_rerun_increments_version_and_updates_pubs
+  dict({
+    'first_version': 1,
+    'llm_calls_total': 3,
+    'pub_count_after_two_runs': 2,
+    'same_profile_row': True,
+    'second_version': 2,
+    'seed_set_after_first_run': True,
+    'seed_unchanged_on_rerun': True,
+  })
+# ---

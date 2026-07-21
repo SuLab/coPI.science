@@ -9,7 +9,6 @@ from src.agent.simulation import (
     _strip_llm_preamble,
 )
 
-
 # ---------------------------------------------------------------
 # _extract_slack_message
 # ---------------------------------------------------------------
@@ -266,8 +265,8 @@ class TestSyncProfilesFromDisk:
 
     @pytest.fixture
     def setup(self, tmp_path, monkeypatch):
-        from src.agent.agent import Agent
         import src.agent.simulation as sim
+        from src.agent.agent import Agent
 
         (tmp_path / "private").mkdir()
         (tmp_path / "public").mkdir()

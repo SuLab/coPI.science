@@ -1,7 +1,7 @@
 """SEC-6: delegate invite acceptance must be bound to the invited email."""
 
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from src.models.delegate import DelegateInvitation
 from src.models.user import User
@@ -15,7 +15,7 @@ def _inv(email: str) -> DelegateInvitation:
         email=email,
         token="tok",
         status="pending",
-        expires_at=datetime.now(timezone.utc) + timedelta(days=30),
+        expires_at=datetime.now(UTC) + timedelta(days=30),
     )
 
 

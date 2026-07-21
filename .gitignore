@@ -69,3 +69,8 @@ data/agent_roster.json
 # Slack provisioning state — holds app client_secrets during a bulk provisioning
 # run (scripts/provision_slack_bots.py). Must never be committed.
 .provision_state.json
+.venv-test/
+
+# mutmut 2.x results cache (scripts/mutation.sh)
+.mutmut-cache
+mutants/
