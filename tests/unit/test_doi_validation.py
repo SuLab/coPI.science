@@ -4,10 +4,8 @@ Guards the fix for the bad-paper-link incident (GitHub issue #5): a stored DOI
 must never disagree with the DOI registered for its PMID.
 """
 
-import pytest
 
 from src.services.pubmed import _parse_pubmed_xml, normalize_doi, reconcile_pub_doi
-
 
 # A PubMed record whose <ReferenceList> cites a paper with its own DOI/PMCID.
 # The article's real DOI is 10.1126/scitranslmed.adn2601; the cited reference

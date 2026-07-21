@@ -28,6 +28,20 @@ def test_rejects_over_length():
     assert not is_valid_email(over)
 
 
+def test_length_boundary_is_254_inclusive():
+    # RFC 5321 caps an address at exactly 254 chars (SEC-16). Hard-code the boundary
+    # here — do NOT derive the lengths from MAX_EMAIL_LENGTH — so this pins the actual
+    # value: a bumped constant or a `>` -> `>=` slip is caught (mutation-tested).
+    suffix = "@example.com"
+    at_254 = "a" * (254 - len(suffix)) + suffix
+    at_255 = "a" * (255 - len(suffix)) + suffix
+    assert len(at_254) == 254
+    assert len(at_255) == 255
+    assert is_valid_email(at_254) is True   # exactly at the cap is accepted
+    assert is_valid_email(at_255) is False  # one over is rejected
+    assert MAX_EMAIL_LENGTH == 254
+
+
 def test_length_cap_prevents_redos():
     # A dot-heavy payload that makes the underlying regex backtrack
     # superlinearly. With the length cap it must return promptly regardless.

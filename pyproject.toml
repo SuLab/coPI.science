@@ -33,6 +33,15 @@ dev = [
     "pytest>=8.2.0",
     "pytest-asyncio>=0.23.0",
     "ruff>=0.4.0",
+    "testcontainers[postgres]>=4.0.0",
+    "respx>=0.21.0",
+    "syrupy>=4.6.0",
+    "coverage[toml]>=7.5.0",
+    "pytest-cov>=5.0.0",
+    "factory-boy>=3.3.0",
+    # mutmut 3.x's instrumentation trampoline rejects this repo's `src.`-prefixed
+    # module names; 2.x mutates files directly and works with the src/ layout.
+    "mutmut>=2.4,<3",
 ]
 
 [project.scripts]
@@ -52,3 +61,19 @@ ignore = ["E501"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+markers = [
+    "integration: needs a real Postgres (testcontainers) + Docker",
+    "characterization: golden-master snapshot test",
+    "contract: respx-mocked external HTTP",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["src"]
+
+[tool.coverage.report]
+show_missing = false
+precision = 0
+
+# Mutation-testing scope lives in scripts/mutation.sh (CLI flags), not here — mutmut
+# 2.x reads setup.cfg/CLI rather than pyproject's [tool.mutmut].

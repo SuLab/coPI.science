@@ -8,7 +8,6 @@ import pytest
 from src.agent.simulation import SimulationEngine
 from src.services import slack_tokens
 
-
 # ---------------------------------------------------------------
 # Token resolution helpers (src.services.slack_tokens)
 # ---------------------------------------------------------------
