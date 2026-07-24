@@ -17,7 +17,7 @@ Slack fully off. See specs/local-db-conversations.md.
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable, Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +51,10 @@ class Transport(Protocol):
     def join_channel(self, channel_id: str) -> None: ...
     def list_channels(self, include_private: bool = False) -> dict[str, str]: ...
     def get_channel_id(self, channel_name: str) -> str | None: ...
+    # Channel name→id cache. The engine seeds this so post_message can resolve a
+    # channel passed by name (see _ensure_seeded_channels / private-channel sync).
+    # Part of the contract: a backend that omits it crashes the engine at setup.
+    def cache_channel_ids(self, mapping: dict[str, str]) -> None: ...
 
     # Inbound
     def poll_channel_messages(self, channel_id: str, oldest: str = "0", limit: int = 100) -> list[dict[str, Any]]: ...
@@ -94,9 +98,6 @@ class NullTransport:
     def is_bot_user(self, user_id: str) -> bool:
         return False
 
-    def set_visibility_lookup(self, lookup: Callable[[str], str | None]) -> None:
-        return None
-
     # Outbound — no external side effects
     def post_message(self, channel: str, text: str, thread_ts: str | None = None) -> dict | None:
         return None
@@ -124,6 +125,9 @@ class NullTransport:
 
     def get_channel_id(self, channel_name: str) -> str | None:
         return self._channel_name_to_id.get(channel_name)
+
+    def cache_channel_ids(self, mapping: dict[str, str]) -> None:
+        self._channel_name_to_id.update(mapping)
 
     # Inbound — nothing arrives via Slack; PI input comes from the DB inbox
     def poll_channel_messages(self, channel_id: str, oldest: str = "0", limit: int = 100) -> list[dict[str, Any]]:

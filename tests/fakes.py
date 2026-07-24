@@ -128,10 +128,6 @@ class FakeSlackClient:
         self.created_channels: list[dict] = []
         self.invites: list[dict] = []
         self._ts = 1_700_000_000
-        self._visibility_lookup: Callable[[str], str | None] | None = None
-
-    def set_visibility_lookup(self, lookup: Callable[[str], str | None]) -> None:
-        self._visibility_lookup = lookup
 
     def connect(self) -> bool:
         return True

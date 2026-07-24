@@ -99,10 +99,6 @@ class AgentSlackClient:
         # channels they weren't invited to. See specs/agent-system.md.
         self._visibility_lookup = visibility_lookup
 
-    def set_visibility_lookup(self, lookup: Callable[[str], str | None]) -> None:
-        """Install/replace the visibility lookup after construction."""
-        self._visibility_lookup = lookup
-
     def _is_private_channel(self, channel_id: str) -> bool:
         """True only if we positively know the channel is collab_private."""
         if self._visibility_lookup is None:
@@ -623,3 +619,7 @@ class AgentSlackClient:
             return self._channel_name_to_id[channel_name]
         self.list_channels()
         return self._channel_name_to_id.get(channel_name)
+
+    def cache_channel_ids(self, mapping: dict[str, str]) -> None:
+        """Seed the name→id cache (engine shares discovered channel ids here)."""
+        self._channel_name_to_id.update(mapping)

@@ -1388,7 +1388,7 @@ class SimulationEngine:
                     # Share channel name↔id with every client cache so post_message
                     # can resolve the name if one is passed.
                     for c in self.slack_clients.values():
-                        c._channel_name_to_id[ac.channel_name] = ac.channel_id
+                        c.cache_channel_ids({ac.channel_name: ac.channel_id})
 
             # Cursor rewind — scoped to the channels discovered in THIS pass.
             # A broad rewind across all known private channels would drag
@@ -2669,7 +2669,7 @@ class SimulationEngine:
 
         # Share channel map across all clients
         for c in self.slack_clients.values():
-            c._channel_name_to_id.update(existing)
+            c.cache_channel_ids(existing)
 
     async def _persist_seeded_channels(self) -> None:
         """Record seeded channels in agent_channels for this run (idempotent).
