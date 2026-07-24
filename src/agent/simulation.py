@@ -119,6 +119,21 @@ ROSTER_POLL_INTERVAL = 30.0    # seconds between AgentRegistry roster re-syncs
 # far above any realistic write-to-commit latency.
 PI_INBOX_LOOKBACK_S = 300.0
 
+# The run's total_messages / total_api_calls are cosmetic counters shown in the
+# admin UI. Recomputing total_messages with a full COUNT(*) on every flush is
+# wasteful once a run accumulates many rows (B1), so refresh the run-stats row at
+# most this often (a final refresh is forced on shutdown). The message rows
+# themselves are still upserted every flush.
+RUN_STATS_UPDATE_INTERVAL = 30.0
+
+# Startup rebuild window (B2): the MessageLog is hydrated with messages from the
+# last REBUILD_WINDOW_S plus the full history of any still-undecided thread, so
+# RAM/startup cost grows with recent + live volume rather than all-time history.
+# Old *closed* threads are left in the DB and hydrated on demand if a PI reopens
+# one (see _hydrate_thread_from_db). Sized to comfortably cover any active
+# conversation's lifetime.
+REBUILD_WINDOW_S = 14 * 24 * 3600  # 14 days
+
 # Agents exempt from the unreviewed-proposal Phase-5 block — they keep making
 # new posts no matter how many of their proposals are awaiting review. Scoped to
 # SchultzBot (the reunion host) so he stays active without a human reviewer.
@@ -254,6 +269,10 @@ class SimulationEngine:
         # so a DM is processed exactly once even though the query re-scans a
         # window behind the cursor (H2). Pruned to the lookback window each poll.
         self._pi_dm_seen: dict[str, float] = {}
+        # Wall-clock of the last cosmetic run-stats refresh (total_messages /
+        # total_api_calls), throttled to RUN_STATS_UPDATE_INTERVAL. See
+        # _flush_persisted (B1).
+        self._last_run_stats_update: float = 0.0
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -459,7 +478,7 @@ class SimulationEngine:
         """Stop the simulation gracefully."""
         self._running = False
         set_call_log_callback(None)
-        await self._flush_persisted()
+        await self._flush_persisted(force_stats=True)
         await self._flush_llm_logs()
         logger.info("Simulation stopping...")
 
@@ -2164,6 +2183,9 @@ class SimulationEngine:
         if thread_ts:
             # Reopen a closed thread for its participants.
             if thread_ts in self._closed_thread_ids:
+                # Old closed threads may have been windowed out of the log at
+                # startup (B2) — pull the history back so participants resolve.
+                await self._hydrate_thread_from_db(thread_ts)
                 history = self.message_log.get_thread_history(thread_ts)
                 participants = [
                     h.sender_agent_id for h in history
@@ -2208,6 +2230,10 @@ class SimulationEngine:
         if not agent:
             return
 
+        # An old closed thread may have been windowed out of the log at startup
+        # (B2); pull its history so the other-agent lookup and reply budget below
+        # see the real conversation.
+        await self._hydrate_thread_from_db(thread_ts)
         # Find the other agent from thread history
         history = self.message_log.get_thread_history(thread_ts)
         other_id = None
@@ -2746,12 +2772,29 @@ class SimulationEngine:
         if not self.session_factory or not self.simulation_run_id:
             logger.info("No DB session — skipping DB rebuild")
             return
+        from sqlalchemy import func as sa_func
+        from sqlalchemy import or_
         from sqlalchemy import select as sa_select
+        # Bound the load (B2): recent messages, plus the full history of any
+        # thread that has no ThreadDecision (still undecided/active). Active-thread
+        # reconstruction only needs undecided threads; old closed-thread bodies
+        # would just bloat RAM and startup. A PI reopening an old closed thread
+        # hydrates it on demand (_hydrate_thread_from_db).
+        recent_floor = time.time() - REBUILD_WINDOW_S
+        closed_thread_ids_subq = sa_select(ThreadDecision.thread_id)
         try:
             async with self.session_factory() as db:
                 result = await db.execute(
                     sa_select(AgentMessage)
-                    .where(AgentMessage.simulation_run_id == self.simulation_run_id)
+                    .where(
+                        AgentMessage.simulation_run_id == self.simulation_run_id,
+                        or_(
+                            AgentMessage.posted_at > recent_floor,
+                            sa_func.coalesce(
+                                AgentMessage.thread_ts, AgentMessage.message_ts
+                            ).notin_(closed_thread_ids_subq),
+                        ),
+                    )
                     .order_by(AgentMessage.posted_at.asc(), AgentMessage.created_at.asc())
                 )
                 rows = result.scalars().all()
@@ -2796,7 +2839,51 @@ class SimulationEngine:
         self._pi_inbox_cursor = max(self._pi_inbox_cursor, max_posted)
         logger.info("Rebuilt MessageLog from DB: %d messages", loaded)
 
-    async def _flush_persisted(self) -> None:
+    async def _hydrate_thread_from_db(self, thread_ts: str) -> None:
+        """Load one thread's messages into the log if not already present.
+
+        The startup rebuild windows out old *closed*-thread bodies (B2), but a PI
+        can still reopen such a thread, and the reopen paths derive participants /
+        reply budget from the in-memory thread history. This pulls a specific
+        thread's full history on demand. Idempotent (load_entry dedups on ts) and
+        index-backed (run + message_ts/thread_ts).
+        """
+        if not self.session_factory or not self.simulation_run_id or not thread_ts:
+            return
+        from sqlalchemy import or_
+        from sqlalchemy import select as sa_select
+        try:
+            async with self.session_factory() as db:
+                rows = (await db.execute(
+                    sa_select(AgentMessage)
+                    .where(
+                        AgentMessage.simulation_run_id == self.simulation_run_id,
+                        or_(
+                            AgentMessage.message_ts == thread_ts,
+                            AgentMessage.thread_ts == thread_ts,
+                        ),
+                    )
+                    .order_by(AgentMessage.posted_at.asc())
+                )).scalars().all()
+        except Exception as exc:
+            logger.warning("Thread hydrate failed for %s: %s", thread_ts, exc)
+            return
+        for r in rows:
+            if not r.content or not r.message_ts:
+                continue
+            self.message_log.load_entry(LogEntry(
+                ts=r.message_ts,
+                channel=r.channel_name,
+                sender_agent_id=r.agent_id,
+                sender_name=r.sender_name or "",
+                content=r.content,
+                thread_ts=r.thread_ts,
+                posted_at=r.posted_at or 0.0,
+                is_bot=r.is_bot,
+                visibility=r.visibility,
+            ))
+
+    async def _flush_persisted(self, force_stats: bool = False) -> None:
         """Batch-upsert buffered message-log entries into agent_messages.
 
         Uses ON CONFLICT (simulation_run_id, message_ts) so it is safe to run
@@ -2874,19 +2961,25 @@ class SimulationEngine:
                     ),
                 )
                 await db.execute(stmt)
-                # Keep the run's message total accurate (bulk upsert can't easily
-                # distinguish inserts from updates, so recompute the count).
-                run = (await db.execute(
-                    sa_select(SimulationRun).where(SimulationRun.id == self.simulation_run_id)
-                )).scalar_one_or_none()
-                if run:
-                    total = (await db.execute(
-                        sa_select(sa_func.count(AgentMessage.id)).where(
-                            AgentMessage.simulation_run_id == self.simulation_run_id
-                        )
-                    )).scalar_one()
-                    run.total_messages = total
-                    run.total_api_calls = sum(a.api_call_count for a in self.agents.values())
+                # Refresh the run's cosmetic counters at most every
+                # RUN_STATS_UPDATE_INTERVAL (a full COUNT every flush is wasteful
+                # at scale — B1). The bulk upsert can't cheaply tell inserts from
+                # updates, so total_messages is a recomputed count; slight
+                # staleness between refreshes is fine for a display counter.
+                now = time.time()
+                if force_stats or now - self._last_run_stats_update >= RUN_STATS_UPDATE_INTERVAL:
+                    self._last_run_stats_update = now
+                    run = (await db.execute(
+                        sa_select(SimulationRun).where(SimulationRun.id == self.simulation_run_id)
+                    )).scalar_one_or_none()
+                    if run:
+                        total = (await db.execute(
+                            sa_select(sa_func.count(AgentMessage.id)).where(
+                                AgentMessage.simulation_run_id == self.simulation_run_id
+                            )
+                        )).scalar_one()
+                        run.total_messages = total
+                        run.total_api_calls = sum(a.api_call_count for a in self.agents.values())
                 await db.commit()
         except Exception as exc:
             # Re-queue the failed batch instead of dropping it. The DB is now the
@@ -3527,6 +3620,11 @@ class SimulationEngine:
                         break
                 if not channel:
                     continue
+
+                # Old closed threads may have been windowed out of the log at
+                # startup (B2); hydrate so the reply-budget offset below counts
+                # the real prior history rather than 0.
+                await self._hydrate_thread_from_db(thread_id)
 
                 # Create a synthetic log entry for the PI guidance so it appears
                 # in thread history and the agents can see it

@@ -5,12 +5,18 @@ Exercised against the real migrated Postgres so the actual ON CONFLICT upsert
 See specs/local-db-conversations.md.
 """
 
+import time
+
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from src.agent.agent import Agent
 from src.agent.message_log import LogEntry
-from src.agent.simulation import PI_INBOX_LOOKBACK_S, SimulationEngine
+from src.agent.simulation import (
+    PI_INBOX_LOOKBACK_S,
+    REBUILD_WINDOW_S,
+    SimulationEngine,
+)
 from src.models import AgentMessage, PiDmMessage
 from tests import factories
 
@@ -223,3 +229,108 @@ async def test_seed_pi_dm_cursor_prevents_replay_on_restart(db_session):
     assert ts in engine._pi_dm_seen
     await engine._poll_pi_dms_from_db()
     assert handler.calls == []
+
+
+# ---------------------------------------------------------------
+# B1 — the cosmetic run-stats COUNT is throttled, not run every flush.
+# ---------------------------------------------------------------
+
+async def _count_messages(session, run_id):
+    return (await session.execute(
+        select(func.count(AgentMessage.id)).where(
+            AgentMessage.simulation_run_id == run_id
+        )
+    )).scalar_one()
+
+
+async def test_flush_throttles_run_stats_count(db_session):
+    run = await factories.make_simulation_run(db_session)
+    engine = _engine_for(db_session, run.id)
+
+    def _enqueue(ts, content):
+        engine._pending_persist = [LogEntry(
+            ts=ts, channel="general", sender_agent_id="su",
+            sender_name="SuBot", content=content, posted_at=float(ts), is_bot=True,
+        )]
+
+    # First flush refreshes the counter.
+    _enqueue("100000001.000000", "a")
+    await engine._flush_persisted()
+    assert run.total_messages == 1
+
+    # Second flush within the interval inserts a row but does NOT recount — the
+    # counter is intentionally stale (throttled) even though 2 rows now exist.
+    _enqueue("100000002.000000", "b")
+    await engine._flush_persisted()
+    assert await _count_messages(db_session, run.id) == 2
+    assert run.total_messages == 1
+
+    # force_stats (used on shutdown) recomputes immediately.
+    _enqueue("100000003.000000", "c")
+    await engine._flush_persisted(force_stats=True)
+    assert run.total_messages == 3
+
+
+# ---------------------------------------------------------------
+# B2 — the startup rebuild loads a bounded window (recent + undecided threads),
+# and old closed threads are hydrated on demand.
+# ---------------------------------------------------------------
+
+async def test_rebuild_windows_recent_and_undecided_only(db_session):
+    run = await factories.make_simulation_run(db_session)
+    old = time.time() - REBUILD_WINDOW_S - 100_000
+    now = time.time()
+
+    # Old + closed (has a ThreadDecision) → windowed out.
+    await factories.make_agent_message(
+        db_session, run=run, agent_id="su", is_bot=True,
+        channel_id="local:general", channel_name="general",
+        message_ts="OLDCLOSED", thread_ts=None, posted_at=old, content="old closed root",
+    )
+    await factories.make_thread_decision(db_session, run=run, thread_id="OLDCLOSED")
+
+    # Old + undecided (no ThreadDecision) → loaded in full.
+    await factories.make_agent_message(
+        db_session, run=run, agent_id="su", is_bot=True,
+        channel_id="local:general", channel_name="general",
+        message_ts="OLDLIVE", thread_ts=None, posted_at=old, content="old live root",
+    )
+    # Recent → loaded.
+    await factories.make_agent_message(
+        db_session, run=run, agent_id="su", is_bot=True,
+        channel_id="local:general", channel_name="general",
+        message_ts="RECENT", thread_ts=None, posted_at=now, content="recent",
+    )
+
+    engine = _engine_for(db_session, run.id)
+    await engine._rebuild_state_from_db()
+
+    assert engine.message_log.get_entry("OLDCLOSED") is None
+    assert engine.message_log.get_entry("OLDLIVE") is not None
+    assert engine.message_log.get_entry("RECENT") is not None
+
+
+async def test_hydrate_thread_loads_windowed_out_thread(db_session):
+    run = await factories.make_simulation_run(db_session)
+    old = time.time() - REBUILD_WINDOW_S - 100_000
+    await factories.make_agent_message(
+        db_session, run=run, agent_id="su", is_bot=True,
+        channel_id="local:general", channel_name="general",
+        message_ts="THR", thread_ts=None, posted_at=old, content="root",
+    )
+    await factories.make_agent_message(
+        db_session, run=run, agent_id="lairson", is_bot=True,
+        channel_id="local:general", channel_name="general",
+        message_ts="THR-r1", thread_ts="THR", posted_at=old + 1, content="reply",
+    )
+
+    engine = _engine_for(db_session, run.id)
+    assert engine.message_log.get_entry("THR") is None  # not yet loaded
+
+    await engine._hydrate_thread_from_db("THR")
+    assert engine.message_log.get_entry("THR") is not None
+    assert len(engine.message_log.get_thread_history("THR")) == 2
+
+    # Idempotent — a second hydrate doesn't duplicate.
+    await engine._hydrate_thread_from_db("THR")
+    assert len(engine.message_log.get_thread_history("THR")) == 2
