@@ -2829,7 +2829,17 @@ class SimulationEngine:
                     run.total_api_calls = sum(a.api_call_count for a in self.agents.values())
                 await db.commit()
         except Exception as exc:
-            logger.warning("Failed to flush %d messages: %s", len(rows), exc)
+            # Re-queue the failed batch instead of dropping it. The DB is now the
+            # source of truth for conversations, so a silently-dropped flush is
+            # unrecoverable — a restart rebuilds from the DB and these messages
+            # would be gone for good. New entries may have been enqueued while we
+            # were awaiting the (failed) commit; put the failed batch back in
+            # front to preserve chronological order for the next flush attempt.
+            self._pending_persist[0:0] = entries
+            logger.warning(
+                "Failed to flush %d messages, re-queued for retry: %s",
+                len(rows), exc,
+            )
 
     def _enqueue_persist(self, entry: LogEntry) -> None:
         """MessageLog persist callback — buffer a new entry for the next flush."""

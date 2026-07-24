@@ -666,3 +666,83 @@ class TestMintTs:
         engine._last_mint_ts = 9_999_999_999.0
         first = float(engine.mint_ts())
         assert first > 9_999_999_999.0
+
+
+# ---------------------------------------------------------------
+# _flush_persisted — a failed flush must NOT drop conversation content
+# (H1). The DB is the primary store, so a dropped batch is unrecoverable.
+# ---------------------------------------------------------------
+
+class TestFlushPersistedFailure:
+    def _entry(self, ts, content):
+        from src.agent.message_log import LogEntry
+
+        return LogEntry(
+            ts=ts,
+            channel="general",
+            sender_agent_id="su",
+            sender_name="subot",
+            content=content,
+            posted_at=float(ts),
+        )
+
+    @pytest.mark.asyncio
+    async def test_failed_flush_requeues_batch(self):
+        import uuid
+
+        def failing_factory():
+            raise RuntimeError("transient DB error")
+
+        engine = SimulationEngine(
+            agents=[],
+            slack_clients={},
+            session_factory=failing_factory,
+            simulation_run_id=uuid.uuid4(),
+        )
+        engine._pending_persist = [
+            self._entry("100.000001", "first"),
+            self._entry("100.000002", "second"),
+        ]
+
+        await engine._flush_persisted()
+
+        # The batch must survive for the next attempt, not vanish.
+        assert len(engine._pending_persist) == 2
+        assert [e.ts for e in engine._pending_persist] == ["100.000001", "100.000002"]
+
+    @pytest.mark.asyncio
+    async def test_requeued_batch_preserves_order_ahead_of_new_entries(self):
+        import uuid
+
+        def failing_factory():
+            raise RuntimeError("transient DB error")
+
+        engine = SimulationEngine(
+            agents=[],
+            slack_clients={},
+            session_factory=failing_factory,
+            simulation_run_id=uuid.uuid4(),
+        )
+        engine._pending_persist = [
+            self._entry("100.000001", "old-1"),
+            self._entry("100.000002", "old-2"),
+        ]
+        await engine._flush_persisted()
+        # A newer entry arrives after the failed flush re-queued the old batch;
+        # the re-queued batch must remain chronologically ahead of it.
+        engine._pending_persist.append(self._entry("100.000003", "new"))
+
+        assert [e.ts for e in engine._pending_persist] == [
+            "100.000001",
+            "100.000002",
+            "100.000003",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_no_db_clears_buffer(self):
+        # Without a session_factory the buffer is intentionally dropped so it
+        # can't grow unbounded — the re-queue path must not change that.
+        engine = SimulationEngine(agents=[], slack_clients={})
+        engine._pending_persist = [self._entry("100.000001", "x")]
+        await engine._flush_persisted()
+        assert engine._pending_persist == []
