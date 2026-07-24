@@ -8,9 +8,10 @@ See specs/local-db-conversations.md.
 import pytest
 from sqlalchemy import select
 
+from src.agent.agent import Agent
 from src.agent.message_log import LogEntry
-from src.agent.simulation import SimulationEngine
-from src.models import AgentMessage
+from src.agent.simulation import PI_INBOX_LOOKBACK_S, SimulationEngine
+from src.models import AgentMessage, PiDmMessage
 from tests import factories
 
 pytestmark = pytest.mark.integration
@@ -38,12 +39,22 @@ class _FixtureSessionFactory:
         return False
 
 
-def _engine_for(session, run_id):
+def _engine_for(session, run_id, agents=None):
     return SimulationEngine(
-        agents=[], slack_clients={},
+        agents=agents or [], slack_clients={},
         session_factory=_FixtureSessionFactory(session),
         simulation_run_id=run_id,
     )
+
+
+class _RecordingPiHandler:
+    """Minimal PIHandler stand-in that records handle_dm calls."""
+
+    def __init__(self):
+        self.calls = []
+
+    async def handle_dm(self, agent_id, pi_user_id, content):
+        self.calls.append((agent_id, pi_user_id, content))
 
 
 async def test_flush_upsert_does_not_clobber_human_row_with_bot(db_session):
@@ -120,3 +131,95 @@ async def test_flush_upsert_allows_human_reflush(db_session):
     ))).scalar_one()
     assert row.content == "edited"
     assert row.is_bot is False
+
+
+# ---------------------------------------------------------------
+# H2 — the inbox pollers must not skip a row that committed below the cursor
+# (posted_at is stamped at creation, so a late-committing PI row lands below a
+# cursor already advanced past its timestamp).
+# ---------------------------------------------------------------
+
+async def test_inbound_poller_ingests_pi_row_committed_below_cursor(db_session):
+    run = await factories.make_simulation_run(db_session)
+    engine = _engine_for(db_session, run.id)
+    # The cursor has already advanced (engine flushed its own later message).
+    engine._pi_inbox_cursor = 1700000200.0
+    # A PI row whose creation-time posted_at is *below* the cursor but within the
+    # lookback window — the H2 race. The old `posted_at > cursor` filter skipped
+    # it forever.
+    below_ts = "1700000150.000000"
+    await factories.make_agent_message(
+        db_session, run=run, agent_id=None, is_bot=False,
+        channel_id="local:general", channel_name="general",
+        message_ts=below_ts, posted_at=float(below_ts),
+        content="late-committed PI message", sender_name="PI",
+    )
+    await engine._poll_inbound_from_db()
+
+    entry = engine.message_log.get_entry(below_ts)
+    assert entry is not None
+    assert entry.content == "late-committed PI message"
+
+
+async def test_inbound_poller_skips_row_older_than_lookback(db_session):
+    # Bounds the re-scan: a row far below the lookback floor is not re-queried.
+    run = await factories.make_simulation_run(db_session)
+    engine = _engine_for(db_session, run.id)
+    engine._pi_inbox_cursor = 1700000200.0
+    ancient_ts = f"{1700000200.0 - PI_INBOX_LOOKBACK_S - 100:.6f}"
+    await factories.make_agent_message(
+        db_session, run=run, agent_id=None, is_bot=False,
+        channel_id="local:general", channel_name="general",
+        message_ts=ancient_ts, posted_at=float(ancient_ts),
+        content="ancient", sender_name="PI",
+    )
+    await engine._poll_inbound_from_db()
+    assert engine.message_log.get_entry(ancient_ts) is None
+
+
+async def test_dm_poller_ingests_below_cursor_then_dedups(db_session):
+    run = await factories.make_simulation_run(db_session)
+    agent = Agent("su", "SuBot", "Andrew Su")
+    engine = _engine_for(db_session, run.id, agents=[agent])
+    handler = _RecordingPiHandler()
+    engine._pi_handler = handler
+    engine._pi_dm_cursor = 1700000200.0
+
+    below_ts = "1700000150.000000"
+    db_session.add(PiDmMessage(
+        simulation_run_id=run.id, agent_id="su", pi_user_id="local:x",
+        direction="inbound", content="standing instruction",
+        sender_name="PI", ts=below_ts, posted_at=float(below_ts),
+    ))
+    await db_session.flush()
+
+    # First poll ingests the below-cursor row (H2)...
+    await engine._poll_pi_dms_from_db()
+    assert handler.calls == [("su", "local:x", "standing instruction")]
+
+    # ...and the lookback re-scan on the next poll does NOT re-process it.
+    await engine._poll_pi_dms_from_db()
+    assert len(handler.calls) == 1
+
+
+async def test_seed_pi_dm_cursor_prevents_replay_on_restart(db_session):
+    # Seeding the seen-set (not just the cursor) means the first poll's lookback
+    # re-scan doesn't replay recent history through handle_dm after a restart.
+    run = await factories.make_simulation_run(db_session)
+    ts = "1700000150.000000"
+    db_session.add(PiDmMessage(
+        simulation_run_id=run.id, agent_id="su", pi_user_id="local:x",
+        direction="inbound", content="old directive",
+        sender_name="PI", ts=ts, posted_at=float(ts),
+    ))
+    await db_session.flush()
+
+    agent = Agent("su", "SuBot", "Andrew Su")
+    engine = _engine_for(db_session, run.id, agents=[agent])
+    handler = _RecordingPiHandler()
+    engine._pi_handler = handler
+
+    await engine._seed_pi_dm_cursor()
+    assert ts in engine._pi_dm_seen
+    await engine._poll_pi_dms_from_db()
+    assert handler.calls == []

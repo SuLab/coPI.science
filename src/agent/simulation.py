@@ -107,6 +107,18 @@ CHANNEL_POLL_INTERVAL = 15.0   # seconds between conversations.history sweeps
 PROPOSAL_POLL_INTERVAL = 30.0  # seconds between conversations.replies sweeps
 ROSTER_POLL_INTERVAL = 30.0    # seconds between AgentRegistry roster re-syncs
 
+# The DB inbox pollers bound their query to recent rows for performance, but
+# posted_at is stamped at row *creation* (mint time), not commit. A row written
+# by another process (a PI web message) can therefore become visible only after
+# this process has already advanced its cursor past that timestamp — a
+# read-committed visibility race that would silently, permanently skip the row
+# (PR #19 review H2). To close it, the pollers query a lookback window behind the
+# cursor and dedup by identity (the message log for channels, a seen-set for
+# DMs), so a late-committing row is re-queried within the window and ingested
+# exactly once. Polls are LLM-paced, so the re-scan is cheap; the window is sized
+# far above any realistic write-to-commit latency.
+PI_INBOX_LOOKBACK_S = 300.0
+
 # Agents exempt from the unreviewed-proposal Phase-5 block — they keep making
 # new posts no matter how many of their proposals are awaiting review. Scoped to
 # SchultzBot (the reunion host) so he stays active without a human reviewer.
@@ -238,6 +250,10 @@ class SimulationEngine:
         # High-water mark (posted_at) for the DB DM inbox poller (Slack-off /
         # web PI DMs). See _poll_pi_dms_from_db.
         self._pi_dm_cursor: float = 0.0
+        # Identity dedup for the DM poller's lookback re-scan (ts -> posted_at),
+        # so a DM is processed exactly once even though the query re-scans a
+        # window behind the cursor (H2). Pruned to the lookback window each poll.
+        self._pi_dm_seen: dict[str, float] = {}
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -2096,20 +2112,24 @@ class SimulationEngine:
                     sa_select(AgentMessage)
                     .where(
                         AgentMessage.simulation_run_id == self.simulation_run_id,
-                        AgentMessage.posted_at > self._pi_inbox_cursor,
+                        # Lookback behind the cursor so a row that committed after
+                        # the cursor advanced past its posted_at is still caught
+                        # (H2). Re-scanned rows are free — the log dedup below
+                        # skips anything already ingested.
+                        AgentMessage.posted_at > self._pi_inbox_cursor - PI_INBOX_LOOKBACK_S,
                     )
                     .order_by(AgentMessage.posted_at.asc())
                 )).scalars().all()
         except Exception as exc:
-            logger.debug("Inbound DB poll failed: %s", exc)
+            logger.warning("Inbound DB poll failed: %s", exc)
             return
 
         for r in rows:
             if r.posted_at > self._pi_inbox_cursor:
                 self._pi_inbox_cursor = r.posted_at
             if not r.message_ts or self.message_log.get_entry(r.message_ts):
-                # Already known (the engine itself appended and flushed it) —
-                # skip re-processing, but the cursor has still advanced past it.
+                # Already known (the engine itself appended and flushed it, or a
+                # prior poll ingested it) — skip re-processing.
                 continue
             entry = LogEntry(
                 ts=r.message_ts,
@@ -2271,7 +2291,12 @@ class SimulationEngine:
                         self._dm_poll_cursors[agent_id] = ts
 
     async def _seed_pi_dm_cursor(self) -> None:
-        """Start the DM poller past existing inbound DMs (don't replay history)."""
+        """Start the DM poller past existing inbound DMs (don't replay history).
+
+        Seeds both the cursor (max posted_at) and the seen-set (ts of inbound DMs
+        within the lookback window), so the first poll's lookback re-scan doesn't
+        re-process history through handle_dm on restart.
+        """
         if not self.session_factory or not self.simulation_run_id:
             return
         from sqlalchemy import func as sa_func
@@ -2285,10 +2310,20 @@ class SimulationEngine:
                         PiDmMessage.direction == "inbound",
                     )
                 )).scalar_one_or_none()
-            if mx:
-                self._pi_dm_cursor = max(self._pi_dm_cursor, mx)
+                if mx:
+                    self._pi_dm_cursor = max(self._pi_dm_cursor, mx)
+                    seen = (await db.execute(
+                        sa_select(PiDmMessage.ts, PiDmMessage.posted_at).where(
+                            PiDmMessage.simulation_run_id == self.simulation_run_id,
+                            PiDmMessage.direction == "inbound",
+                            PiDmMessage.posted_at > self._pi_dm_cursor - PI_INBOX_LOOKBACK_S,
+                        )
+                    )).all()
+                    for ts, posted_at in seen:
+                        if ts:
+                            self._pi_dm_seen[ts] = posted_at or 0.0
         except Exception as exc:
-            logger.debug("PI DM cursor seed failed: %s", exc)
+            logger.warning("PI DM cursor seed failed: %s", exc)
 
     async def _poll_pi_dms_from_db(self) -> None:
         """Process inbound PI DMs recorded in the DB (Slack or web-originated).
@@ -2302,6 +2337,7 @@ class SimulationEngine:
             return
         from sqlalchemy import select as sa_select
         from src.models import PiDmMessage
+        floor = self._pi_dm_cursor - PI_INBOX_LOOKBACK_S
         try:
             async with self.session_factory() as db:
                 rows = (await db.execute(
@@ -2309,24 +2345,38 @@ class SimulationEngine:
                     .where(
                         PiDmMessage.simulation_run_id == self.simulation_run_id,
                         PiDmMessage.direction == "inbound",
-                        PiDmMessage.posted_at > self._pi_dm_cursor,
+                        # Lookback + seen-set dedup below, mirroring the channel
+                        # poller, so a late-committing DM row isn't skipped (H2).
+                        PiDmMessage.posted_at > floor,
                     )
                     .order_by(PiDmMessage.posted_at.asc())
                 )).scalars().all()
         except Exception as exc:
-            logger.debug("PI DM inbox poll failed: %s", exc)
+            logger.warning("PI DM inbox poll failed: %s", exc)
             return
 
         for r in rows:
             if r.posted_at > self._pi_dm_cursor:
                 self._pi_dm_cursor = r.posted_at
+            if r.ts and r.ts in self._pi_dm_seen:
+                continue  # already processed (lookback re-scan)
             if r.agent_id not in self.agents:
                 continue
+            if r.ts:
+                self._pi_dm_seen[r.ts] = r.posted_at or 0.0
             try:
                 await self._pi_handler.handle_dm(r.agent_id, r.pi_user_id, r.content)
                 self.agents[r.agent_id].state.has_pi_directive = True
             except Exception as exc:
                 logger.error("[%s] Failed to handle PI DM (DB): %s", r.agent_id, exc)
+
+        # Prune the seen-set to the lookback window — anything at or below the new
+        # floor won't be re-queried, so it no longer needs tracking.
+        prune_floor = self._pi_dm_cursor - PI_INBOX_LOOKBACK_S
+        if self._pi_dm_seen:
+            self._pi_dm_seen = {
+                ts: pa for ts, pa in self._pi_dm_seen.items() if pa > prune_floor
+            }
 
     async def _poll_proposal_threads_for_pi(self) -> None:
         """Poll unreviewed proposal threads for PI replies.
