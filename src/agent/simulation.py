@@ -14,6 +14,7 @@ from typing import Any
 from src.agent.agent import PROFILES_DIR, Agent
 from src.agent.channels import SEEDED_CHANNELS
 from src.agent.foa_cache import extract_foa_number, format_foa_for_prompt
+from src.agent.ids import TsMinter
 from src.agent.prompt_safety import delimit
 from src.agent.funding_rules import (
     format_funding_thread_summary,
@@ -223,8 +224,8 @@ class SimulationEngine:
         # agent_messages once per main-loop tick. This makes the DB the primary
         # conversation store. See specs/local-db-conversations.md.
         self._pending_persist: list[LogEntry] = []
-        # Monotonic id minter high-water mark (seeded at DB rebuild). See mint_ts.
-        self._last_mint_ts: float = 0.0
+        # Monotonic, unique ts-shaped id minter (seeded at DB rebuild). See mint_ts.
+        self._ts_minter = TsMinter()
         # High-water mark (posted_at) for the DB inbound poller — the Slack-
         # independent path by which messages written by other processes (PI web
         # interface, private-channel handover) enter the simulation. See
@@ -2453,14 +2454,12 @@ class SimulationEngine:
 
         The canonical message/channel id when there is no Slack ts (Slack-off,
         or a DB-origin message). Monotonicity preserves the posted_at=float(ts)
-        ordering the engine relies on; _last_mint_ts is seeded from the rebuild's
-        max(posted_at) so new ids always sort after restored history. Uniqueness
-        is what makes the idempotent MessageLog.append safe.
-        See specs/local-db-conversations.md.
+        ordering the engine relies on; the minter's high-water mark is seeded from
+        the rebuild's max(posted_at) so new ids always sort after restored
+        history. Uniqueness is what makes the idempotent MessageLog.append safe.
+        See src/agent/ids.py and specs/local-db-conversations.md.
         """
-        val = max(time.time(), self._last_mint_ts + 1e-6)
-        self._last_mint_ts = val
-        return f"{val:.6f}"
+        return self._ts_minter.mint()
 
     async def _post_message(
         self,
@@ -2741,7 +2740,7 @@ class SimulationEngine:
                     cur = self._poll_cursors.get(r.slack_channel_id, "0")
                     if r.slack_ts > cur:
                         self._poll_cursors[r.slack_channel_id] = r.slack_ts
-        self._last_mint_ts = max(self._last_mint_ts, max_posted)
+        self._ts_minter.seed_floor(max_posted)
         # Start the inbox poller past all restored history so it only picks up
         # genuinely new web-written PI messages.
         self._pi_inbox_cursor = max(self._pi_inbox_cursor, max_posted)
@@ -2790,6 +2789,7 @@ class SimulationEngine:
         if not rows:
             return
         from sqlalchemy import func as sa_func
+        from sqlalchemy import or_
         from sqlalchemy import select as sa_select
         from sqlalchemy.dialects.postgresql import insert as pg_insert
         try:
@@ -2812,6 +2812,16 @@ class SimulationEngine:
                         "slack_channel_id": stmt.excluded.slack_channel_id,
                         "slack_thread_ts": stmt.excluded.slack_thread_ts,
                     },
+                    # M1a guard: never let a bot message clobber an existing human
+                    # (PI) row on a cross-process canonical-id collision. Allow the
+                    # update only when the existing row is itself a bot row, or the
+                    # incoming row is human (re-flush of an ingested PI message /
+                    # slack mirror). A blocked conflict is left untouched, like
+                    # DO NOTHING for that row. See PR #19 review M1.
+                    where=or_(
+                        AgentMessage.__table__.c.is_bot.is_(True),
+                        stmt.excluded.is_bot.is_(False),
+                    ),
                 )
                 await db.execute(stmt)
                 # Keep the run's message total accurate (bulk upsert can't easily

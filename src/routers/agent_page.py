@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import distinct, func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -782,15 +783,34 @@ async def post_agent_message(
     if not run_id:
         raise HTTPException(status_code=409, detail="No simulation run to post into yet")
 
-    await record_pi_message(
-        db,
-        run_id=run_id,
-        channel_name=channel_name.strip() or "general",
-        content=text,
-        sender_name=f"{current_user.name} (PI)",
-        thread_ts=thread_ts.strip() or None,
-    )
-    await db.commit()
+    async def _write() -> None:
+        await record_pi_message(
+            db,
+            run_id=run_id,
+            channel_name=channel_name.strip() or "general",
+            content=text,
+            sender_name=f"{current_user.name} (PI)",
+            thread_ts=thread_ts.strip() or None,
+        )
+        await db.commit()
+
+    # M1b guard: the canonical id can collide with another process (the sim)
+    # minting the same microsecond for this run, which hits the
+    # uq_agent_messages_run_ts constraint and would otherwise surface as a raw
+    # 500. Roll back and retry once — record_pi_message mints a fresh, monotonic
+    # id, so the retry gets a new ts. See PR #19 review M1.
+    try:
+        await _write()
+    except IntegrityError:
+        await db.rollback()
+        try:
+            await _write()
+        except IntegrityError:
+            await db.rollback()
+            raise HTTPException(
+                status_code=409,
+                detail="Message could not be saved due to a conflict, please retry",
+            )
     logger.info("[%s] PI %s posted a web message to #%s", agent_id, current_user.name, channel_name)
     return RedirectResponse(url=f"/agent/{agent_id}/conversations?posted=1", status_code=302)
 

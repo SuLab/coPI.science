@@ -655,17 +655,29 @@ class TestMintTs:
         engine = SimulationEngine(agents=[], slack_clients={})
         ids = [engine.mint_ts() for _ in range(1000)]
         floats = [float(x) for x in ids]
-        # Strictly increasing (so posted_at=float(ts) ordering is preserved)
+        # Strictly increasing (so posted_at=float(ts) ordering is preserved).
+        # This is the regression guard for the float-precision bug: at the
+        # current epoch magnitude the old f"{time.time():.6f}" scheme produced
+        # ids that were equal (or non-increasing) once round-tripped to float.
         assert all(b > a for a, b in zip(floats, floats[1:], strict=False))
         # All unique
         assert len(set(ids)) == len(ids)
 
-    def test_seeded_high_water_mark_sorts_after_history(self):
+    def test_ids_are_ts_shaped_with_six_decimal_microseconds(self):
         engine = SimulationEngine(agents=[], slack_clients={})
-        # Simulate a rebuild that saw a far-future max(posted_at).
-        engine._last_mint_ts = 9_999_999_999.0
-        first = float(engine.mint_ts())
-        assert first > 9_999_999_999.0
+        ts = engine.mint_ts()
+        secs, _, micros = ts.partition(".")
+        assert secs.isdigit()
+        assert len(micros) == 6 and micros.isdigit()
+
+    def test_seeded_high_water_mark_sorts_after_history(self):
+        import time
+
+        engine = SimulationEngine(agents=[], slack_clients={})
+        # Simulate a rebuild that saw history slightly ahead of the wall clock.
+        future = time.time() + 3600
+        engine._ts_minter.seed_floor(future)
+        assert float(engine.mint_ts()) > future
 
 
 # ---------------------------------------------------------------

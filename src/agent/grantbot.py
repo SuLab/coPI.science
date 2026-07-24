@@ -162,15 +162,14 @@ async def _post_funding_to_db(session: AsyncSession, channel_name: str, full_pos
     Authored by the 'grantbot' identity as a top-level post so agents scan it in
     Phase 2 and can start funding threads (funding threads are open to all).
     """
-    import time as _time
-
+    from src.agent.ids import mint_local_ts
     from src.models import AgentMessage
     from src.services.pi_inbox import get_latest_run_id
 
     run_id = await get_latest_run_id(session)
     if not run_id:
         raise RuntimeError("No simulation run to post funding opportunity into")
-    ts = f"{_time.time():.6f}"
+    ts = mint_local_ts()
     session.add(AgentMessage(
         simulation_run_id=run_id, agent_id="grantbot",
         channel_id=f"local:{channel_name}", channel_name=channel_name,

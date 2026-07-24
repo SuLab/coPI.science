@@ -7,12 +7,12 @@ equivalent of the Slack channel-message path. See specs/local-db-conversations.m
 
 from __future__ import annotations
 
-import time
 import uuid
 
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.agent.ids import mint_local_ts
 from src.models import AgentChannel, AgentMessage, PiDmMessage, SimulationRun
 
 
@@ -59,7 +59,7 @@ async def record_pi_message(
     transaction.
     """
     channel_id, visibility = await _resolve_channel(db, run_id, channel_name)
-    ts = f"{time.time():.6f}"
+    ts = mint_local_ts()
     msg = AgentMessage(
         simulation_run_id=run_id,
         agent_id=None,               # human/PI sender
@@ -90,7 +90,7 @@ async def record_pi_dm(
     slack_ts: str | None = None,
 ) -> PiDmMessage:
     """Persist a PI<->bot direct message. Does not commit."""
-    ts = f"{time.time():.6f}"
+    ts = mint_local_ts()
     dm = PiDmMessage(
         simulation_run_id=run_id,
         agent_id=agent_id,

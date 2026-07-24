@@ -27,13 +27,23 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 
 @pytest.fixture(scope="session")
 def _pg_container():
+    # Allow pointing the suite at an already-running Postgres via TEST_DATABASE_URL
+    # (an asyncpg DSN for a throwaway DB). This avoids requiring a Docker socket for
+    # testcontainers — e.g. when running inside the app container, which has none.
+    # Default behavior (ephemeral container) is unchanged when the var is unset.
+    if os.environ.get("TEST_DATABASE_URL"):
+        yield None
+        return
     with PostgresContainer("postgres:15", dbname="copi_test") as pg:
         yield pg
 
 
 @pytest.fixture(scope="session")
 def pg_url(_pg_container):
-    """asyncpg DSN for the ephemeral container (creds come from the container, not hardcoded)."""
+    """asyncpg DSN for the test DB (creds come from the container/env, not hardcoded)."""
+    env_url = os.environ.get("TEST_DATABASE_URL")
+    if env_url:
+        return env_url
     return (
         f"postgresql+asyncpg://{_pg_container.username}:{_pg_container.password}"
         f"@{_pg_container.get_container_host_ip()}:{_pg_container.get_exposed_port(5432)}"
