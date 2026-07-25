@@ -34,6 +34,17 @@ by **reusing the existing schema** wherever possible.
    `ThreadState.thread_id`, `_poll_cursors`, `ThreadDecision.thread_id`,
    `MessageLog._by_ts`) is unchanged.
 
+   **Corollary: never hand a canonical id to Slack.** Slack threads on the
+   *root's* `ts`, which equals the canonical `thread_ts` only when the root was
+   born on Slack. `_slack_parent_ts()` translates canonical → Slack via the root
+   entry's `slack_ts`, and `_post_message` skips the mirror entirely (DB-only,
+   with a warning) when the root has no Slack presence, rather than posting
+   against an id Slack has never seen. This is what makes enabling Slack
+   mid-conversation degrade safely instead of detaching or erroring. The mapping
+   is restored on rebuild — including inferred for pre-Stage-6 rows, where a real
+   Slack `channel_id` with a NULL `slack_ts` implies the canonical id *is* the
+   Slack ts — so it survives a restart.
+
 2. **`mint_ts()` is monotonic and unique — across processes, not just within
    one.** Ids are carried as integer microseconds (never round-tripped through a
    float, which cannot hold microsecond precision at current epoch magnitudes)

@@ -30,6 +30,12 @@ class LogEntry:
     # reconcile pass can dedup a mirrored message. See specs/local-db-conversations.md.
     slack_ts: str | None = None
     slack_channel_id: str | None = None
+    # The *root's* Slack ts for a mirrored reply. Distinct from thread_ts, which
+    # is the canonical (possibly locally-minted) root id: a thread that started
+    # Slack-off has a minted root, which is not a valid Slack ts. None means this
+    # entry has no Slack parent — either it is not a reply, or its thread has no
+    # Slack presence. See SimulationEngine._slack_parent_ts.
+    slack_thread_ts: str | None = None
 
 
 def is_funding_post(content: str) -> bool:
@@ -121,9 +127,23 @@ class MessageLog:
         return results
 
     def get_thread_history(self, thread_ts: str) -> list[LogEntry]:
-        """Return all messages in a thread (including the root post), ordered by time."""
+        """Return all messages in a thread (including the root post), ordered by time.
+
+        Ordered by ``posted_at``, not by log-insertion order. Appends from a
+        single process arrive roughly in time order, but the DB inbound poller
+        and the Slack reconcile append entries whose posted_at can predate
+        messages already in the log — so insertion order would hand the LLM a
+        subtly scrambled thread, unlike the Slack-primary rebuild which fetched
+        in ts order. The sort is stable, so entries sharing a posted_at keep
+        their insertion order. The root is pinned first regardless: it is the
+        thread's parent by definition, even if a reply carries an earlier
+        posted_at (a writer's clock can run behind — see PI_INBOX_LOOKBACK_S).
+        """
         root = self._by_ts.get(thread_ts)
-        replies = [e for e in self._entries if e.thread_ts == thread_ts]
+        replies = sorted(
+            (e for e in self._entries if e.thread_ts == thread_ts),
+            key=lambda e: e.posted_at,
+        )
         result = []
         if root:
             result.append(root)

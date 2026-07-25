@@ -137,6 +137,39 @@ class TestGetThreadHistory:
         history = log.get_thread_history("999")
         assert history == []
 
+    def test_orders_replies_by_posted_at_not_insertion_order(self, log):
+        # A reply ingested late by the DB poller or the Slack reconcile is
+        # appended after entries that came *after* it in real time. Insertion
+        # order would hand the LLM a scrambled thread.
+        log.append(_post("1", "general", "su", "SuBot", "Root"))
+        log.append(_post("30", "general", "wiseman", "WisemanBot", "third", thread_ts="1"))
+        log.append(_post("20", "general", "su", "SuBot", "second", thread_ts="1"))
+        log.append(_post("10", "general", "wiseman", "WisemanBot", "first", thread_ts="1"))
+
+        history = log.get_thread_history("1")
+        assert [e.content for e in history] == ["Root", "first", "second", "third"]
+
+    def test_root_stays_first_even_if_a_reply_predates_it(self, log):
+        # A writer whose clock runs behind can stamp a reply below the root's
+        # posted_at; the root is still the thread's parent.
+        log.append(_post("100", "general", "su", "SuBot", "Root"))
+        log.append(_post("50", "general", "wiseman", "WisemanBot", "skewed", thread_ts="100"))
+        log.append(_post("200", "general", "su", "SuBot", "later", thread_ts="100"))
+
+        history = log.get_thread_history("100")
+        assert [e.content for e in history] == ["Root", "skewed", "later"]
+
+    def test_equal_posted_at_keeps_insertion_order(self, log):
+        # Stable sort: nothing reshuffles when timestamps tie.
+        log.append(_post("1", "general", "su", "SuBot", "Root"))
+        for i, content in enumerate(("a", "b", "c")):
+            entry = _post(f"{i + 2}", "general", "wiseman", "WisemanBot", content, thread_ts="1")
+            entry.posted_at = 5.0
+            log.append(entry)
+
+        history = log.get_thread_history("1")
+        assert [e.content for e in history] == ["Root", "a", "b", "c"]
+
 
 # ---------------------------------------------------------------
 # get_tags_for_agent

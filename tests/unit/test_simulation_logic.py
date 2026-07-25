@@ -830,3 +830,87 @@ class TestGracefulShutdown:
             ts=ts, channel="general", sender_agent_id="su",
             sender_name="subot", content=content, posted_at=float(ts),
         )
+
+
+# ---------------------------------------------------------------
+# Slack thread-parent translation. Slack threads on the *root's Slack ts*; the
+# canonical thread_ts is only the same thing when the root was born on Slack. A
+# thread started with Slack off has a minted root id, which Slack has never seen
+# — mirroring a reply into it detaches the message or errors.
+# ---------------------------------------------------------------
+
+class TestSlackParentTranslation:
+    def _engine_with_client(self):
+        from src.agent.agent import Agent
+        from tests.fakes import FakeSlackClient
+
+        agent = Agent("su", "SuBot", "Andrew Su")
+        client = FakeSlackClient(agent_id="su")
+        return SimulationEngine(agents=[agent], slack_clients={"su": client}), client
+
+    def _root(self, ts, *, slack_ts=None):
+        from src.agent.message_log import LogEntry
+
+        return LogEntry(
+            ts=ts, channel="general", sender_agent_id="su", sender_name="SuBot",
+            content="root", posted_at=float(ts), is_bot=True, slack_ts=slack_ts,
+        )
+
+    def test_resolves_a_slack_backed_root_to_its_slack_ts(self):
+        engine, _ = self._engine_with_client()
+        # DB-origin root later mirrored: canonical id != Slack ts.
+        engine.message_log.append(self._root("1700000000.000000", slack_ts="1700009999.111111"))
+        assert engine._slack_parent_ts("1700000000.000000") == "1700009999.111111"
+
+    def test_returns_none_for_a_db_origin_root(self):
+        engine, _ = self._engine_with_client()
+        engine.message_log.append(self._root("1700000000.000000"))  # never mirrored
+        assert engine._slack_parent_ts("1700000000.000000") is None
+
+    def test_falls_back_to_the_canonical_id_when_the_root_is_unknown(self):
+        # Root windowed out by the B2 rebuild bound: preserve pure-Slack-on
+        # behaviour, where the canonical id *is* the Slack ts.
+        engine, _ = self._engine_with_client()
+        assert engine._slack_parent_ts("1700000000.000000") == "1700000000.000000"
+
+    def test_top_level_post_has_no_parent(self):
+        engine, _ = self._engine_with_client()
+        assert engine._slack_parent_ts(None) is None
+
+    @pytest.mark.asyncio
+    async def test_reply_is_mirrored_against_the_roots_slack_ts(self):
+        engine, client = self._engine_with_client()
+        engine.message_log.append(self._root("1700000000.000000", slack_ts="1700009999.111111"))
+
+        await engine._post_message("su", "general", "a reply", thread_ts="1700000000.000000")
+
+        assert len(client.posted) == 1
+        # Slack receives the root's Slack ts, never the minted canonical id.
+        assert client.posted[0]["thread_ts"] == "1700009999.111111"
+
+    @pytest.mark.asyncio
+    async def test_reply_into_a_slackless_thread_is_not_mirrored(self):
+        # The mid-life-toggle case: thread started Slack-off, Slack now on.
+        engine, client = self._engine_with_client()
+        engine.message_log.append(self._root("1700000000.000000"))
+
+        await engine._post_message("su", "general", "a reply", thread_ts="1700000000.000000")
+
+        assert client.posted == []  # no bogus thread_ts sent to Slack
+        # ...but the message is still recorded in the DB-primary log.
+        replies = [e for e in engine.message_log._entries if e.thread_ts == "1700000000.000000"]
+        assert len(replies) == 1
+        assert replies[0].content == "a reply"
+        assert replies[0].slack_ts is None
+        assert replies[0].slack_thread_ts is None
+
+    @pytest.mark.asyncio
+    async def test_mirrored_reply_records_the_slack_parent_mapping(self):
+        engine, _ = self._engine_with_client()
+        engine.message_log.append(self._root("1700000000.000000", slack_ts="1700009999.111111"))
+
+        await engine._post_message("su", "general", "a reply", thread_ts="1700000000.000000")
+
+        reply = [e for e in engine.message_log._entries if e.thread_ts == "1700000000.000000"][0]
+        assert reply.slack_thread_ts == "1700009999.111111"
+        assert reply.thread_ts == "1700000000.000000"  # canonical id unchanged

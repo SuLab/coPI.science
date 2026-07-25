@@ -76,6 +76,23 @@ def _strip_reopen_prefix(comment: str) -> str:
     return comment
 
 
+def _restored_slack_ts(row: AgentMessage) -> str | None:
+    """Slack ts for a restored ``agent_messages`` row, or None if it has none.
+
+    Restoring this mapping is what lets ``_slack_parent_ts`` tell a Slack-backed
+    thread from a DB-origin one after a restart. Stage 6 began recording the
+    mapping in ``slack_ts``; older rows have it NULL even when the message came
+    from Slack. A row stored against a real Slack channel id was born on Slack,
+    so its canonical id *is* its Slack ts; a row in a ``local:`` channel is
+    DB-origin and has no Slack ts at all.
+    """
+    if row.slack_ts:
+        return row.slack_ts
+    if row.channel_id and not row.channel_id.startswith("local:"):
+        return row.message_ts
+    return None
+
+
 # Keywords for channel-profile matching
 _CHANNEL_KEYWORDS: dict[str, list[str]] = {
     "drug-repurposing": [
@@ -2121,6 +2138,9 @@ class SimulationEngine:
                         visibility=ch_visibility,
                         slack_ts=ts or None,
                         slack_channel_id=ch_id,
+                        # Slack-origin: the canonical id is the Slack ts, so the
+                        # thread parent is already a Slack ts.
+                        slack_thread_ts=msg.get("thread_ts"),
                     )
                     self.message_log.append(entry)
                     logger.info(
@@ -2555,6 +2575,9 @@ class SimulationEngine:
                     is_bot=False,
                     slack_ts=ts or None,
                     slack_channel_id=ch_id,
+                    # Slack-origin (polled from a Slack proposal thread), so the
+                    # canonical thread id is already the Slack parent ts.
+                    slack_thread_ts=thread_id,
                 )
 
                 # Avoid re-processing messages already in the log
@@ -2612,14 +2635,28 @@ class SimulationEngine:
         client = self.slack_clients.get(agent_id)
         agent = self.agents.get(agent_id)
 
+        # Slack threads on the *root's Slack ts*, which equals the canonical
+        # thread_ts only when the root was born on Slack. A thread started
+        # Slack-off has a minted root id — passing that to Slack detaches the
+        # reply or errors — so such a reply is kept DB-only rather than mirrored.
+        slack_parent = self._slack_parent_ts(thread_ts)
+        can_mirror = thread_ts is None or slack_parent is not None
+
         result = None
-        if client and client.is_connected:
+        if client and client.is_connected and not can_mirror:
+            logger.warning(
+                "[%s] Not mirroring reply to #%s: thread %s has no Slack root "
+                "(started with Slack off). The message is still recorded in the DB.",
+                agent_id, channel, thread_ts,
+            )
+        elif client and client.is_connected:
             try:
-                result = client.post_message(channel, text, thread_ts=thread_ts)
+                result = client.post_message(channel, text, thread_ts=slack_parent)
             except ThreadNotFound:
                 # Parent was deleted. post_message already cleaned up the
                 # orphan top-level post on Slack. Purge the dead thread_ts
-                # from state so no one replies to it again.
+                # from state so no one replies to it again. Keyed by the
+                # canonical id, which is what the engine's state uses.
                 if thread_ts:
                     self._evict_dead_thread(thread_ts)
                 logger.warning(
@@ -2653,10 +2690,29 @@ class SimulationEngine:
             is_bot=True,
             slack_ts=slack_ts,
             slack_channel_id=(result.get("channel") if result else None),
+            slack_thread_ts=(slack_parent if slack_ts else None),
         )
         # Persisted to agent_messages via the MessageLog append callback
         # (_enqueue_persist → _flush_persisted). The DB is the primary store.
         self.message_log.append(entry)
+
+    def _slack_parent_ts(self, thread_ts: str | None) -> str | None:
+        """Resolve a canonical thread id to the Slack ts Slack must thread on.
+
+        Returns None when the thread has no Slack presence (a DB-origin root
+        minted while Slack was off), so callers can skip the mirror instead of
+        posting against an id Slack has never seen. Falls back to the canonical
+        id when the root is not in the log at all (windowed out by the B2 rebuild
+        bound), which preserves the pure-Slack-on behaviour where the canonical
+        id *is* the Slack ts. The rebuild populates slack_ts on restored entries,
+        so this survives a restart. See specs/local-db-conversations.md.
+        """
+        if not thread_ts:
+            return None
+        root = self.message_log.get_entry(thread_ts)
+        if root is None:
+            return thread_ts
+        return root.slack_ts
 
     # ------------------------------------------------------------------
     # Setup helpers
@@ -2881,6 +2937,12 @@ class SimulationEngine:
                 posted_at=r.posted_at or 0.0,
                 is_bot=r.is_bot,
                 visibility=r.visibility,
+                # Restore the Slack mirror mapping, not just the content: a reply
+                # posted after this restart needs the root's Slack ts to thread
+                # on, and its absence is how a DB-origin thread is recognised.
+                slack_ts=_restored_slack_ts(r),
+                slack_channel_id=r.slack_channel_id,
+                slack_thread_ts=r.slack_thread_ts,
             )
             self.message_log.load_entry(entry)
             loaded += 1
@@ -2968,6 +3030,9 @@ class SimulationEngine:
                 posted_at=r.posted_at or 0.0,
                 is_bot=r.is_bot,
                 visibility=r.visibility,
+                slack_ts=_restored_slack_ts(r),
+                slack_channel_id=r.slack_channel_id,
+                slack_thread_ts=r.slack_thread_ts,
             ))
 
     async def _flush_persisted(self, force_stats: bool = False) -> None:
@@ -3007,7 +3072,10 @@ class SimulationEngine:
                 "posted_at": e.posted_at,
                 "slack_ts": e.slack_ts,
                 "slack_channel_id": e.slack_channel_id,
-                "slack_thread_ts": e.thread_ts if e.slack_ts else None,
+                # The root's *Slack* ts, not the canonical thread_ts — they differ
+                # whenever the thread started Slack-off. Only meaningful when this
+                # entry is itself on Slack. See _slack_parent_ts.
+                "slack_thread_ts": e.slack_thread_ts if e.slack_ts else None,
             }
         rows = list(by_ts.values())
         if not rows:
@@ -3154,6 +3222,11 @@ class SimulationEngine:
                     visibility=ch_visibility,
                     slack_ts=ts or None,
                     slack_channel_id=ch_id,
+                    # Slack-origin: canonical id == Slack ts, so the thread
+                    # parent needs no translation.
+                    slack_thread_ts=(
+                        msg.get("thread_ts") if msg.get("thread_ts") != ts else None
+                    ),
                 )
                 if self.message_log.append(entry):
                     total_messages += 1
@@ -3193,6 +3266,7 @@ class SimulationEngine:
                             visibility=ch_visibility,
                             slack_ts=rts or None,
                             slack_channel_id=ch_id,
+                            slack_thread_ts=ts,  # Slack-origin: canonical == Slack ts
                         )
                         if self.message_log.append(r_entry):
                             total_messages += 1

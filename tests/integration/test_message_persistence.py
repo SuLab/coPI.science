@@ -426,3 +426,53 @@ async def test_hydrate_thread_loads_windowed_out_thread(db_session):
     # Idempotent — a second hydrate doesn't duplicate.
     await engine._hydrate_thread_from_db("THR")
     assert len(engine.message_log.get_thread_history("THR")) == 2
+
+
+# ---------------------------------------------------------------
+# The Slack mirror mapping has to survive a restart, otherwise the engine
+# cannot tell a Slack-backed thread from a DB-origin one and would mirror
+# replies against an id Slack has never seen.
+# ---------------------------------------------------------------
+
+async def test_rebuild_restores_the_slack_mapping(db_session):
+    run = await factories.make_simulation_run(db_session)
+    now = time.time()
+    await factories.make_agent_message(
+        db_session, run=run, agent_id="su", is_bot=True,
+        channel_id="C0SLACK", channel_name="general",
+        message_ts="MIRRORED", posted_at=now, content="db-origin, then mirrored",
+        slack_ts="1700009999.111111", slack_channel_id="C0SLACK",
+    )
+    await factories.make_agent_message(
+        db_session, run=run, agent_id="su", is_bot=True,
+        channel_id="local:general", channel_name="general",
+        message_ts="DBONLY", posted_at=now, content="never mirrored",
+    )
+
+    engine = _engine_for(db_session, run.id)
+    await engine._rebuild_state_from_db()
+
+    assert engine.message_log.get_entry("MIRRORED").slack_ts == "1700009999.111111"
+    assert engine._slack_parent_ts("MIRRORED") == "1700009999.111111"
+    # A DB-origin root has no Slack presence — replies to it must not be mirrored.
+    assert engine.message_log.get_entry("DBONLY").slack_ts is None
+    assert engine._slack_parent_ts("DBONLY") is None
+
+
+async def test_rebuild_infers_the_slack_ts_of_a_pre_stage6_row(db_session):
+    # Rows written before the mirror mapping was recorded have slack_ts NULL, but
+    # a message stored against a real Slack channel id was born on Slack — its
+    # canonical id IS its Slack ts. Without this, a restart would stop mirroring
+    # replies into every legacy Slack thread.
+    run = await factories.make_simulation_run(db_session)
+    await factories.make_agent_message(
+        db_session, run=run, agent_id="su", is_bot=True,
+        channel_id="C0LEGACY", channel_name="general",
+        message_ts="1700000000.000000", posted_at=time.time(),
+        content="legacy slack row", slack_ts=None,
+    )
+
+    engine = _engine_for(db_session, run.id)
+    await engine._rebuild_state_from_db()
+
+    assert engine._slack_parent_ts("1700000000.000000") == "1700000000.000000"
