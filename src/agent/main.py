@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 import typer
 
 from src.agent.agent import Agent
+from src.agent.ids import WRITER_ENGINE_AUX, set_default_writer_id
 from src.agent.simulation import SimulationEngine
 from src.config import get_settings
 
@@ -39,6 +40,10 @@ def main(
     all_agents: bool = typer.Option(False, "--all-agents", help="Run every AgentRegistry row regardless of status (default is status='active' only)"),
 ):
     """Run the turn-based agent simulation."""
+    # Claim this process's canonical-id writer slot before anything mints. The
+    # engine's own minter owns WRITER_ENGINE; the module default is used here
+    # only for PI DM rows, so it takes the aux slot (R1).
+    set_default_writer_id(WRITER_ENGINE_AUX)
     asyncio.run(_run_simulation(max_runtime, budget, mock, no_db, fresh, reset_cursors, all_agents))
 
 
@@ -223,8 +228,12 @@ async def _run_simulation(
     loop = asyncio.get_event_loop()
 
     def shutdown():
+        # Only flip the stop flag here. The flush must not run in a
+        # fire-and-forget task: the main loop can return first, and asyncio.run
+        # then cancels the still-pending task mid-await, losing the in-flight
+        # turn's messages. It is awaited in the finally-block below instead (R2).
         logger.info("Received shutdown signal")
-        asyncio.ensure_future(sim_engine.stop())
+        sim_engine.request_stop()
 
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, shutdown)
@@ -239,6 +248,15 @@ async def _run_simulation(
     except Exception:
         logger.exception("Simulation engine raised an exception")
     finally:
+        # Durably flush buffered messages/LLM logs before anything else. The DB
+        # is the primary conversation store, so anything still in the in-memory
+        # buffer at exit is otherwise unrecoverable. Runs on every exit path
+        # (signal, time limit, budget exhaustion, crash).
+        try:
+            await sim_engine.stop()
+        except Exception:
+            logger.exception("Final flush on shutdown failed")
+
         # Update simulation run status
         if session_factory and simulation_run_id:
             async with session_factory() as db:

@@ -758,3 +758,75 @@ class TestFlushPersistedFailure:
         engine._pending_persist = [self._entry("100.000001", "x")]
         await engine._flush_persisted()
         assert engine._pending_persist == []
+
+
+# ---------------------------------------------------------------
+# Graceful shutdown (R2). A hard kill loses the in-flight turn's messages
+# because the DB — not Slack — is now the durable store, so the SIGTERM path
+# must (a) cut short the idle backoff and (b) leave the flush awaitable on the
+# main coroutine rather than in a cancellable fire-and-forget task.
+# ---------------------------------------------------------------
+
+class TestGracefulShutdown:
+    @pytest.mark.asyncio
+    async def test_request_stop_ends_the_loop_and_does_no_io(self):
+        engine = SimulationEngine(agents=[], slack_clients={})
+        engine._running = True
+        engine.request_stop()
+        assert engine._running is False
+        assert engine._stop_event.is_set()
+
+    @pytest.mark.asyncio
+    async def test_sleep_returns_early_once_stop_is_requested(self):
+        import asyncio
+        import time
+
+        engine = SimulationEngine(agents=[], slack_clients={})
+
+        async def stop_soon():
+            await asyncio.sleep(0.01)
+            engine.request_stop()
+
+        started = time.monotonic()
+        # 30s is the longest idle backoff the main loop uses; without the
+        # stop-event wakeup this would outlast the container's stop grace period.
+        await asyncio.gather(engine._sleep(30), stop_soon())
+        assert time.monotonic() - started < 1.0
+
+    @pytest.mark.asyncio
+    async def test_sleep_is_a_no_op_after_stop(self):
+        import time
+
+        engine = SimulationEngine(agents=[], slack_clients={})
+        engine.request_stop()
+        started = time.monotonic()
+        await engine._sleep(30)
+        assert time.monotonic() - started < 0.5
+
+    @pytest.mark.asyncio
+    async def test_stop_flushes_the_pending_buffer(self):
+        # stop() must drain the buffer, not just flip the flag — it is the last
+        # chance to persist the in-flight turn.
+        engine = SimulationEngine(agents=[], slack_clients={})
+        flushed = []
+
+        async def fake_flush(force_stats=False):
+            flushed.append(force_stats)
+            engine._pending_persist.clear()
+
+        engine._flush_persisted = fake_flush
+        engine._pending_persist = [self._entry("100.000001", "in-flight")]
+
+        await engine.stop()
+
+        assert flushed == [True]  # forced final stats refresh
+        assert engine._pending_persist == []
+        assert engine._running is False
+
+    def _entry(self, ts, content):
+        from src.agent.message_log import LogEntry
+
+        return LogEntry(
+            ts=ts, channel="general", sender_agent_id="su",
+            sender_name="subot", content=content, posted_at=float(ts),
+        )

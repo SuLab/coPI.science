@@ -7,14 +7,14 @@ import random
 import re
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 from src.agent.agent import PROFILES_DIR, Agent
 from src.agent.channels import SEEDED_CHANNELS
 from src.agent.foa_cache import extract_foa_number, format_foa_for_prompt
-from src.agent.ids import TsMinter
+from src.agent.ids import WRITER_ENGINE, TsMinter
 from src.agent.prompt_safety import delimit
 from src.agent.funding_rules import (
     format_funding_thread_summary,
@@ -107,17 +107,30 @@ CHANNEL_POLL_INTERVAL = 15.0   # seconds between conversations.history sweeps
 PROPOSAL_POLL_INTERVAL = 30.0  # seconds between conversations.replies sweeps
 ROSTER_POLL_INTERVAL = 30.0    # seconds between AgentRegistry roster re-syncs
 
-# The DB inbox pollers bound their query to recent rows for performance, but
-# posted_at is stamped at row *creation* (mint time), not commit. A row written
-# by another process (a PI web message) can therefore become visible only after
-# this process has already advanced its cursor past that timestamp — a
-# read-committed visibility race that would silently, permanently skip the row
-# (PR #19 review H2). To close it, the pollers query a lookback window behind the
-# cursor and dedup by identity (the message log for channels, a seen-set for
-# DMs), so a late-committing row is re-queried within the window and ingested
-# exactly once. Polls are LLM-paced, so the re-scan is cheap; the window is sized
-# far above any realistic write-to-commit latency.
+# The DB inbox pollers bound their query to recent rows for performance, but the
+# timestamp is stamped at row *creation*, not commit. A row written by another
+# process (a PI web message) can therefore become visible only after this process
+# has already advanced its cursor past that timestamp — a read-committed
+# visibility race that would silently, permanently skip the row (PR #19 review
+# H2). To close it, the pollers query a lookback window behind the cursor and
+# dedup by identity (the message log for channels, a seen-set for DMs), so a
+# late-committing row is re-queried within the window and ingested exactly once.
+# Polls are LLM-paced, so the re-scan is cheap; the window is sized far above any
+# realistic write-to-commit latency.
+#
+# The cursor axis is ``created_at``, not ``posted_at`` (R3). posted_at derives
+# from the *writing process's* clock (it is float(minted ts)), so a cursor over it
+# only works while every writer's clock agrees with the engine's to within this
+# window — true on one host, not guaranteed across hosts, and a skewed writer's
+# messages would be dropped silently and forever. created_at is
+# ``server_default=now()``, i.e. stamped by the single Postgres server, so the
+# window depends on one clock only. posted_at remains the *ordering* key for
+# conversation content; it is just no longer the delivery cursor.
 PI_INBOX_LOOKBACK_S = 300.0
+PI_INBOX_LOOKBACK = timedelta(seconds=PI_INBOX_LOOKBACK_S)
+
+# Cursor value meaning "nothing seen yet" — every real created_at sorts after it.
+EPOCH_UTC = datetime.fromtimestamp(0, tz=timezone.utc)
 
 # The run's total_messages / total_api_calls are cosmetic counters shown in the
 # admin UI. Recomputing total_messages with a full COUNT(*) on every flush is
@@ -251,28 +264,37 @@ class SimulationEngine:
         # agent_messages once per main-loop tick. This makes the DB the primary
         # conversation store. See specs/local-db-conversations.md.
         self._pending_persist: list[LogEntry] = []
-        # Monotonic, unique ts-shaped id minter (seeded at DB rebuild). See mint_ts.
-        self._ts_minter = TsMinter()
-        # High-water mark (posted_at) for the DB inbound poller — the Slack-
+        # Monotonic ts-shaped id minter, seeded at DB rebuild. Owns the engine's
+        # writer slot so its ids can never collide with the web app's or
+        # GrantBot's, which mint into the same agent_messages table from other
+        # processes (R1). See mint_ts and src/agent/ids.py.
+        self._ts_minter = TsMinter(WRITER_ENGINE)
+        # High-water mark (created_at — the DB server's clock, not any writer's;
+        # see PI_INBOX_LOOKBACK_S / R3) for the DB inbound poller: the Slack-
         # independent path by which messages written by other processes (PI web
         # interface, private-channel handover) enter the simulation. See
         # _poll_inbound_from_db.
-        self._pi_inbox_cursor: float = 0.0
+        self._pi_inbox_cursor: datetime = EPOCH_UTC
         # Slack ts values already represented in the DB (canonical id may differ
         # if a DB-origin message was later mirrored to Slack). Lets the Slack
         # reconcile skip a message it already has. See _rebuild_state_from_slack.
         self._known_slack_ts: set[str] = set()
-        # High-water mark (posted_at) for the DB DM inbox poller (Slack-off /
+        # High-water mark (created_at) for the DB DM inbox poller (Slack-off /
         # web PI DMs). See _poll_pi_dms_from_db.
-        self._pi_dm_cursor: float = 0.0
-        # Identity dedup for the DM poller's lookback re-scan (ts -> posted_at),
+        self._pi_dm_cursor: datetime = EPOCH_UTC
+        # Identity dedup for the DM poller's lookback re-scan (ts -> created_at),
         # so a DM is processed exactly once even though the query re-scans a
         # window behind the cursor (H2). Pruned to the lookback window each poll.
-        self._pi_dm_seen: dict[str, float] = {}
+        self._pi_dm_seen: dict[str, datetime] = {}
         # Wall-clock of the last cosmetic run-stats refresh (total_messages /
         # total_api_calls), throttled to RUN_STATS_UPDATE_INTERVAL. See
         # _flush_persisted (B1).
         self._last_run_stats_update: float = 0.0
+        # Set by request_stop() (the signal handler's sync entry point) to both
+        # end the main loop and cut short an in-progress idle-backoff sleep, so
+        # the final flush happens well inside the container's stop grace period.
+        # See _sleep / request_stop (R2).
+        self._stop_event = asyncio.Event()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -423,7 +445,7 @@ class SimulationEngine:
                     "[%s] Skipped: was last LLM caller (idle backoff: %ds)",
                     agent.agent_id, delay,
                 )
-                await asyncio.sleep(delay)
+                await self._sleep(delay)
                 continue
 
             logger.info("=== Turn %d: %s ===", turn_count + 1, agent.agent_id)
@@ -463,9 +485,9 @@ class SimulationEngine:
                 else:
                     delay = 30
                 logger.debug("Idle backoff: %ds (idle streak: %d)", delay, consecutive_idle)
-                await asyncio.sleep(delay)
+                await self._sleep(delay)
             elif settings.turn_delay_seconds > 0:
-                await asyncio.sleep(settings.turn_delay_seconds)
+                await self._sleep(settings.turn_delay_seconds)
 
             # Flush buffered message-log entries + LLM logs periodically
             await self._flush_persisted()
@@ -474,9 +496,40 @@ class SimulationEngine:
 
         logger.info("Main loop exited after %d turns", turn_count)
 
-    async def stop(self) -> None:
-        """Stop the simulation gracefully."""
+    def request_stop(self) -> None:
+        """Ask the main loop to exit — safe to call from a signal handler.
+
+        Deliberately does no I/O: it only flips the flag and wakes any in-flight
+        idle-backoff sleep. The flush is done by ``stop()`` on the main
+        coroutine's own path (see src/agent/main.py), so it can be awaited to
+        completion rather than left in a fire-and-forget task that the
+        interpreter may cancel at shutdown (R2).
+        """
         self._running = False
+        self._stop_event.set()
+
+    async def _sleep(self, delay: float) -> None:
+        """Sleep for ``delay`` seconds, returning early once a stop is requested.
+
+        The idle backoff sleeps up to 30 s; a plain ``asyncio.sleep`` there would
+        burn most of the container's (default 10 s) stop grace period before the
+        loop noticed SIGTERM, and the final flush would never run (R2).
+        """
+        if self._stop_event.is_set():
+            return
+        try:
+            await asyncio.wait_for(self._stop_event.wait(), timeout=delay)
+        except asyncio.TimeoutError:
+            pass
+
+    async def stop(self) -> None:
+        """Stop the simulation and durably flush everything still buffered.
+
+        Awaited from the entry point's finally-block so a graceful shutdown
+        cannot lose the in-flight turn's messages. Idempotent.
+        """
+        self._running = False
+        self._stop_event.set()
         set_call_log_callback(None)
         await self._flush_persisted(force_stats=True)
         await self._flush_llm_logs()
@@ -2131,21 +2184,24 @@ class SimulationEngine:
                     sa_select(AgentMessage)
                     .where(
                         AgentMessage.simulation_run_id == self.simulation_run_id,
-                        # Lookback behind the cursor so a row that committed after
-                        # the cursor advanced past its posted_at is still caught
-                        # (H2). Re-scanned rows are free — the log dedup below
-                        # skips anything already ingested.
-                        AgentMessage.posted_at > self._pi_inbox_cursor - PI_INBOX_LOOKBACK_S,
+                        # Cursor over created_at (the DB server's clock), with a
+                        # lookback so a row that committed after the cursor
+                        # advanced past its stamp is still caught (H2). Re-scanned
+                        # rows are free — the log dedup below skips anything
+                        # already ingested. See PI_INBOX_LOOKBACK_S (H2 + R3).
+                        AgentMessage.created_at > self._pi_inbox_cursor - PI_INBOX_LOOKBACK,
                     )
-                    .order_by(AgentMessage.posted_at.asc())
+                    # Ingest in the DB's arrival order; posted_at remains the
+                    # ordering key for the conversation content itself.
+                    .order_by(AgentMessage.created_at.asc())
                 )).scalars().all()
         except Exception as exc:
             logger.warning("Inbound DB poll failed: %s", exc)
             return
 
         for r in rows:
-            if r.posted_at > self._pi_inbox_cursor:
-                self._pi_inbox_cursor = r.posted_at
+            if r.created_at and r.created_at > self._pi_inbox_cursor:
+                self._pi_inbox_cursor = r.created_at
             if not r.message_ts or self.message_log.get_entry(r.message_ts):
                 # Already known (the engine itself appended and flushed it, or a
                 # prior poll ingested it) — skip re-processing.
@@ -2319,9 +2375,10 @@ class SimulationEngine:
     async def _seed_pi_dm_cursor(self) -> None:
         """Start the DM poller past existing inbound DMs (don't replay history).
 
-        Seeds both the cursor (max posted_at) and the seen-set (ts of inbound DMs
-        within the lookback window), so the first poll's lookback re-scan doesn't
-        re-process history through handle_dm on restart.
+        Seeds both the cursor (max created_at — the DB server's clock, see R3)
+        and the seen-set (ts of inbound DMs within the lookback window), so the
+        first poll's lookback re-scan doesn't re-process history through
+        handle_dm on restart.
         """
         if not self.session_factory or not self.simulation_run_id:
             return
@@ -2331,7 +2388,7 @@ class SimulationEngine:
         try:
             async with self.session_factory() as db:
                 mx = (await db.execute(
-                    sa_select(sa_func.max(PiDmMessage.posted_at)).where(
+                    sa_select(sa_func.max(PiDmMessage.created_at)).where(
                         PiDmMessage.simulation_run_id == self.simulation_run_id,
                         PiDmMessage.direction == "inbound",
                     )
@@ -2339,15 +2396,15 @@ class SimulationEngine:
                 if mx:
                     self._pi_dm_cursor = max(self._pi_dm_cursor, mx)
                     seen = (await db.execute(
-                        sa_select(PiDmMessage.ts, PiDmMessage.posted_at).where(
+                        sa_select(PiDmMessage.ts, PiDmMessage.created_at).where(
                             PiDmMessage.simulation_run_id == self.simulation_run_id,
                             PiDmMessage.direction == "inbound",
-                            PiDmMessage.posted_at > self._pi_dm_cursor - PI_INBOX_LOOKBACK_S,
+                            PiDmMessage.created_at > self._pi_dm_cursor - PI_INBOX_LOOKBACK,
                         )
                     )).all()
-                    for ts, posted_at in seen:
+                    for ts, created_at in seen:
                         if ts:
-                            self._pi_dm_seen[ts] = posted_at or 0.0
+                            self._pi_dm_seen[ts] = created_at or EPOCH_UTC
         except Exception as exc:
             logger.warning("PI DM cursor seed failed: %s", exc)
 
@@ -2363,7 +2420,7 @@ class SimulationEngine:
             return
         from sqlalchemy import select as sa_select
         from src.models import PiDmMessage
-        floor = self._pi_dm_cursor - PI_INBOX_LOOKBACK_S
+        floor = self._pi_dm_cursor - PI_INBOX_LOOKBACK
         try:
             async with self.session_factory() as db:
                 rows = (await db.execute(
@@ -2373,23 +2430,25 @@ class SimulationEngine:
                         PiDmMessage.direction == "inbound",
                         # Lookback + seen-set dedup below, mirroring the channel
                         # poller, so a late-committing DM row isn't skipped (H2).
-                        PiDmMessage.posted_at > floor,
+                        # created_at, not posted_at, so the window doesn't depend
+                        # on the writing process's clock (R3).
+                        PiDmMessage.created_at > floor,
                     )
-                    .order_by(PiDmMessage.posted_at.asc())
+                    .order_by(PiDmMessage.created_at.asc())
                 )).scalars().all()
         except Exception as exc:
             logger.warning("PI DM inbox poll failed: %s", exc)
             return
 
         for r in rows:
-            if r.posted_at > self._pi_dm_cursor:
-                self._pi_dm_cursor = r.posted_at
+            if r.created_at and r.created_at > self._pi_dm_cursor:
+                self._pi_dm_cursor = r.created_at
             if r.ts and r.ts in self._pi_dm_seen:
                 continue  # already processed (lookback re-scan)
             if r.agent_id not in self.agents:
                 continue
             if r.ts:
-                self._pi_dm_seen[r.ts] = r.posted_at or 0.0
+                self._pi_dm_seen[r.ts] = r.created_at or EPOCH_UTC
             try:
                 await self._pi_handler.handle_dm(r.agent_id, r.pi_user_id, r.content)
                 self.agents[r.agent_id].state.has_pi_directive = True
@@ -2398,10 +2457,10 @@ class SimulationEngine:
 
         # Prune the seen-set to the lookback window — anything at or below the new
         # floor won't be re-queried, so it no longer needs tracking.
-        prune_floor = self._pi_dm_cursor - PI_INBOX_LOOKBACK_S
+        prune_floor = self._pi_dm_cursor - PI_INBOX_LOOKBACK
         if self._pi_dm_seen:
             self._pi_dm_seen = {
-                ts: pa for ts, pa in self._pi_dm_seen.items() if pa > prune_floor
+                ts: ca for ts, ca in self._pi_dm_seen.items() if ca > prune_floor
             }
 
     async def _poll_proposal_threads_for_pi(self) -> None:
@@ -2532,7 +2591,9 @@ class SimulationEngine:
         or a DB-origin message). Monotonicity preserves the posted_at=float(ts)
         ordering the engine relies on; the minter's high-water mark is seeded from
         the rebuild's max(posted_at) so new ids always sort after restored
-        history. Uniqueness is what makes the idempotent MessageLog.append safe.
+        history. Uniqueness is what makes the idempotent MessageLog.append safe,
+        and it holds across processes too: this minter owns the engine's writer
+        slot, disjoint from the web app's and GrantBot's (R1).
         See src/agent/ids.py and specs/local-db-conversations.md.
         """
         return self._ts_minter.mint()
@@ -2834,10 +2895,36 @@ class SimulationEngine:
                     if r.slack_ts > cur:
                         self._poll_cursors[r.slack_channel_id] = r.slack_ts
         self._ts_minter.seed_floor(max_posted)
-        # Start the inbox poller past all restored history so it only picks up
-        # genuinely new web-written PI messages.
-        self._pi_inbox_cursor = max(self._pi_inbox_cursor, max_posted)
+        # Start the inbox poller past everything already in the DB so it only
+        # picks up genuinely new web-written PI messages. Taken from MAX over the
+        # whole run rather than the loaded rows: the rebuild is windowed (B2), and
+        # the cursor's job is "don't replay what is already stored", which covers
+        # windowed-out rows too (a PI reopening one of those hydrates it instead).
+        await self._seed_pi_inbox_cursor()
         logger.info("Rebuilt MessageLog from DB: %d messages", loaded)
+
+    async def _seed_pi_inbox_cursor(self) -> None:
+        """Advance the inbound-poll cursor past all stored messages for this run.
+
+        Cursor axis is created_at (the DB server's clock) — see
+        PI_INBOX_LOOKBACK_S / R3.
+        """
+        if not self.session_factory or not self.simulation_run_id:
+            return
+        from sqlalchemy import func as sa_func
+        from sqlalchemy import select as sa_select
+        try:
+            async with self.session_factory() as db:
+                mx = (await db.execute(
+                    sa_select(sa_func.max(AgentMessage.created_at)).where(
+                        AgentMessage.simulation_run_id == self.simulation_run_id,
+                    )
+                )).scalar_one_or_none()
+        except Exception as exc:
+            logger.warning("PI inbox cursor seed failed: %s", exc)
+            return
+        if mx:
+            self._pi_inbox_cursor = max(self._pi_inbox_cursor, mx)
 
     async def _hydrate_thread_from_db(self, thread_ts: str) -> None:
         """Load one thread's messages into the log if not already present.

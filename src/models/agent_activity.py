@@ -107,6 +107,10 @@ class AgentMessage(Base):
     __table_args__ = (
         UniqueConstraint("simulation_run_id", "message_ts", name="uq_agent_messages_run_ts"),
         Index("ix_agent_messages_run_posted", "simulation_run_id", "posted_at"),
+        # Backs the inbound poller's cursor, which pages over created_at (the DB
+        # server's clock) rather than the writer-clock-derived posted_at. See
+        # SimulationEngine._poll_inbound_from_db / PI_INBOX_LOOKBACK_S (R3).
+        Index("ix_agent_messages_run_created", "simulation_run_id", "created_at"),
         Index(
             "ix_agent_messages_run_channel_posted",
             "simulation_run_id", "channel_name", "posted_at",
@@ -333,6 +337,8 @@ class PiDmMessage(Base):
     __table_args__ = (
         Index("ix_pi_dm_run_agent_posted", "simulation_run_id", "agent_id", "posted_at"),
         Index("ix_pi_dm_run_direction_posted", "simulation_run_id", "direction", "posted_at"),
+        # Backs the DM poller's created_at cursor (R3), as above.
+        Index("ix_pi_dm_run_direction_created", "simulation_run_id", "direction", "created_at"),
     )
 
     def __repr__(self) -> str:

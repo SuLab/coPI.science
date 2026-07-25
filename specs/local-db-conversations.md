@@ -34,10 +34,20 @@ by **reusing the existing schema** wherever possible.
    `ThreadState.thread_id`, `_poll_cursors`, `ThreadDecision.thread_id`,
    `MessageLog._by_ts`) is unchanged.
 
-2. **`mint_ts()` is monotonic and unique.** `val = max(time.time(),
-   _last_mint_ts + 1e-6)`, `_last_mint_ts` seeded at rebuild from `max(posted_at)`
-   so minted ids sort after restored history. This preserves `posted_at =
-   float(ts)` ordering.
+2. **`mint_ts()` is monotonic and unique — across processes, not just within
+   one.** Ids are carried as integer microseconds (never round-tripped through a
+   float, which cannot hold microsecond precision at current epoch magnitudes)
+   and strictly advance; the high-water mark is seeded at rebuild from
+   `max(posted_at)` so minted ids sort after restored history. This preserves
+   `posted_at = float(ts)` ordering. Three processes mint into the same run — the
+   engine, the web app and GrantBot — so each minter also owns a **writer slot**:
+   ids are quantized to `WRITER_SLOT_MODULUS` (100 µs) and the writer id occupies
+   the low microsecond digits, giving every writer its own residue class. Without
+   this, two processes minting in the same microsecond produce the identical id,
+   and the `uq_agent_messages_run_ts` conflict handler resolves it by *dropping*
+   one message — unrecoverable now that the DB is the only durable store. Writer
+   ids are claimed at process entry with `set_default_writer_id()`
+   (`src/agent/ids.py`). The DB constraint remains the backstop.
 
 3. **Persist at the single chokepoint `MessageLog.append`.** Peer, human/PI, and
    reopen messages reach state only via `append`. A persist callback there

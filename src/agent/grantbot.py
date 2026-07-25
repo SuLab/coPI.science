@@ -29,6 +29,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from src.agent.ids import WRITER_GRANTBOT, set_default_writer_id
 from src.config import get_settings
 from src.models import GrantbotPostedFoa
 from src.services.grants import fetch_opportunity_detail, list_posted_opportunities
@@ -629,6 +630,7 @@ def main(
     max_per_channel: int = typer.Option(1, "--max-per-channel", help="Max opportunities to post per channel per run"),
 ):
     """Search for funding opportunities and post relevant ones to Slack."""
+    set_default_writer_id(WRITER_GRANTBOT)
     results = asyncio.run(run_grantbot(
         channel=channel,
         dry_run=dry_run,
@@ -660,6 +662,8 @@ def scheduler(
     """
     import time
 
+    # Claim this process's canonical-id writer slot before the first post (R1).
+    set_default_writer_id(WRITER_GRANTBOT)
     logger.info("GrantBot scheduler started (run_hour=%d UTC, check every %ds)", run_hour, check_interval)
 
     while True:

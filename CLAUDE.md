@@ -31,8 +31,12 @@ docker compose --profile agent run -d --name agent-run agent python -m src.agent
 docker logs agent-run > logs/run_$(date +%s).log 2>&1
 ls -t logs/run_*.log | tail -n +11 | xargs rm -f
 
-# 2. Stop the old container
-docker rm -f agent-run
+# 2. Stop the old container — GRACEFULLY. `docker rm -f` sends SIGKILL, which
+#    skips the shutdown flush and permanently loses the in-flight turn's
+#    messages (the DB, not Slack, is the durable store). `docker stop` sends
+#    SIGTERM; -t 30 leaves room for an in-flight LLM call to finish.
+docker stop -t 30 agent-run
+docker rm agent-run
 
 # 3. Rebuild app + worker (picks up code changes)
 docker compose up -d --build app worker

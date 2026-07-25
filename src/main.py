@@ -9,6 +9,7 @@ from sqlalchemy import func, select
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 
+from src.agent.ids import WRITER_WEB, set_default_writer_id
 from src.config import get_settings
 from src.database import get_session_factory
 from src.routers import admin, agent_page, auth, invite, onboarding, profile, public
@@ -99,6 +100,11 @@ class AgentBadgeMiddleware(BaseHTTPMiddleware):
 
 def create_app() -> FastAPI:
     settings = get_settings()
+
+    # Claim the web process's canonical-id writer slot, so PI messages and DMs
+    # written here can never collide with ids minted by the engine or GrantBot
+    # processes (R1). See src/agent/ids.py.
+    set_default_writer_id(WRITER_WEB)
 
     application = FastAPI(
         title="CoPI / LabAgent",

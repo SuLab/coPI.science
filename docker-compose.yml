@@ -46,6 +46,11 @@ services:
   agent:
     build: .
     command: python -m src.agent.main
+    # On SIGTERM the engine finishes the current turn and flushes buffered
+    # messages to Postgres (the durable store). The 10s default can cut that
+    # short mid-LLM-call, so give it room. Baked into the container's
+    # StopTimeout, so a bare `docker stop agent-run` gets it too.
+    stop_grace_period: 30s
     env_file: .env
     volumes:
       - .:/app
