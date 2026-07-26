@@ -41,12 +41,22 @@ by **reusing the existing schema** wherever possible.
    with a warning) when the root has no Slack presence, rather than posting
    against an id Slack has never seen. This is what makes enabling Slack
    mid-conversation degrade safely instead of detaching or erroring. The mapping
-   is restored on rebuild — including inferred for pre-Stage-6 rows, where a real
-   Slack `channel_id` with a NULL `slack_ts` implies the canonical id *is* the
-   Slack ts — so it survives a restart. The web process has no `MessageLog`, so
-   `private_channels._slack_parent_ts_from_db()` performs the same translation
-   from `agent_messages` (same inference, same DB-only fallback) for the
-   private-channel migration's origin-thread close marker.
+   is restored on rebuild, so it survives a restart. The web process has no
+   `MessageLog`, so `private_channels._slack_parent_ts_from_db()` performs the
+   same translation from `agent_messages` for the private-channel migration's
+   origin-thread close marker.
+
+   **`slack_ts` is the only evidence of Slack presence; a NULL means "not on
+   Slack".** It is never inferred from the channel id. Inferring ("a row in a
+   real Slack channel was born on Slack, so its canonical id is its Slack ts")
+   looks reasonable for pre-Stage-6 history but is unsound: a DB-origin message
+   can carry a real Slack `channel_id` too — a PI message from the web inbox
+   resolves it from the `agent_channels` row, and so does an agent post whose
+   mirror failed. Both mint a *local* id, and inferring promotes it to a Slack ts
+   Slack never issued, which then goes out as a `chat.postMessage` `thread_ts`
+   and orphans the reply. Legacy rows are repaired once by
+   `scripts/backfill_slack_ts.py`, which asks Slack which timestamps exist rather
+   than assuming; run it before deploying on a workspace with pre-Stage-6 history.
 
 2. **`mint_ts()` is monotonic and unique — across processes, not just within
    one.** Ids are carried as integer microseconds (never round-tripped through a

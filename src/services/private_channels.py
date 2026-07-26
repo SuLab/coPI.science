@@ -218,12 +218,12 @@ async def _slack_parent_ts_from_db(
     MessageLog, so the root's mapping is read from ``agent_messages``. Returns None
     when the thread has no Slack presence (a root minted while Slack was off), so
     the caller can skip the mirror instead of posting against an id Slack has never
-    seen. A row stored against a real Slack channel id but with a NULL ``slack_ts``
-    predates Stage 6, and its canonical id *is* its Slack ts (same inference as
-    ``simulation._restored_slack_ts``). See specs/local-db-conversations.md.
+    seen. ``slack_ts`` is the only evidence — a NULL means not on Slack; see
+    ``simulation._restored_slack_ts`` for why a missing mapping is no longer
+    inferred from the channel id. See specs/local-db-conversations.md.
     """
     row = (await db.execute(
-        select(AgentMessage.slack_ts, AgentMessage.channel_id)
+        select(AgentMessage.slack_ts)
         .where(
             AgentMessage.simulation_run_id == run_id,
             AgentMessage.message_ts == thread_ts,
@@ -235,12 +235,7 @@ async def _slack_parent_ts_from_db(
         # back to the canonical id, preserving pure-Slack-on behaviour where the
         # canonical id and the Slack ts are the same string.
         return thread_ts
-    slack_ts, channel_id = row
-    if slack_ts:
-        return slack_ts
-    if channel_id and not channel_id.startswith("local:"):
-        return thread_ts
-    return None
+    return row[0]
 
 
 def _add_handover_message(

@@ -459,23 +459,33 @@ async def test_rebuild_restores_the_slack_mapping(db_session):
     assert engine._slack_parent_ts("DBONLY") is None
 
 
-async def test_rebuild_infers_the_slack_ts_of_a_pre_stage6_row(db_session):
-    # Rows written before the mirror mapping was recorded have slack_ts NULL, but
-    # a message stored against a real Slack channel id was born on Slack — its
-    # canonical id IS its Slack ts. Without this, a restart would stop mirroring
-    # replies into every legacy Slack thread.
+async def test_rebuild_never_infers_a_slack_ts_from_the_channel_id(db_session):
+    """A NULL slack_ts means "not on Slack", even in a real Slack channel.
+
+    The rebuild used to infer the mapping for such a row, on the theory that it
+    predated Stage 6. But a DB-origin message can carry a real Slack channel id
+    too — a PI message written through the web inbox resolves channel_id from the
+    agent_channels row, and so does an agent post whose mirror failed. Inferring
+    hands _slack_parent_ts a canonical id Slack never issued, which then goes out
+    as a chat.postMessage thread_ts and orphans the reply. Legacy rows are
+    repaired by scripts/backfill_slack_ts.py, which asks Slack instead of guessing.
+    """
     run = await factories.make_simulation_run(db_session)
+    # Exactly the shape that used to be mis-inferred: web-written PI message,
+    # locally-minted canonical id, stored against the channel's real Slack id.
     await factories.make_agent_message(
-        db_session, run=run, agent_id="su", is_bot=True,
-        channel_id="C0LEGACY", channel_name="general",
-        message_ts="1700000000.000000", posted_at=time.time(),
-        content="legacy slack row", slack_ts=None,
+        db_session, run=run, agent_id=None, is_bot=False,
+        channel_id="C0SLACK", channel_name="general",
+        message_ts="1800000000.000001", posted_at=1800000000.000001,
+        content="@SuBot a PI message written from the web", slack_ts=None,
+        sender_name="Dr Human (PI)",
     )
 
     engine = _engine_for(db_session, run.id)
     await engine._rebuild_state_from_db()
 
-    assert engine._slack_parent_ts("1700000000.000000") == "1700000000.000000"
+    assert engine.message_log.get_entry("1800000000.000001").slack_ts is None
+    assert engine._slack_parent_ts("1800000000.000001") is None
 
 
 # ---------------------------------------------------------------

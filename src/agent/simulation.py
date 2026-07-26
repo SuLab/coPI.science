@@ -80,17 +80,26 @@ def _restored_slack_ts(row: AgentMessage) -> str | None:
     """Slack ts for a restored ``agent_messages`` row, or None if it has none.
 
     Restoring this mapping is what lets ``_slack_parent_ts`` tell a Slack-backed
-    thread from a DB-origin one after a restart. Stage 6 began recording the
-    mapping in ``slack_ts``; older rows have it NULL even when the message came
-    from Slack. A row stored against a real Slack channel id was born on Slack,
-    so its canonical id *is* its Slack ts; a row in a ``local:`` channel is
-    DB-origin and has no Slack ts at all.
+    thread from a DB-origin one after a restart. The column is the only evidence:
+    a NULL means the message is not on Slack.
+
+    This used to *infer* a missing mapping — "a row stored against a real Slack
+    ``channel_id`` was born on Slack, so its canonical id is its Slack ts" — to
+    cover pre-Stage-6 rows written before the mapping was recorded. That
+    inference is unsound, because a DB-origin message can also carry a real Slack
+    channel id: a PI message written through the web inbox resolves ``channel_id``
+    from the ``agent_channels`` row (Slack's id when Slack is on), and so does an
+    agent post whose Slack mirror failed. Both mint a *local* canonical id, and
+    inferring turns that id into a Slack ts Slack never issued — which
+    ``_slack_parent_ts`` then hands to ``chat.postMessage`` as a ``thread_ts``,
+    producing an orphan post, a ``ThreadNotFound`` and an evicted thread. Nothing
+    in the row distinguishes the two cases, so the guess is now refused.
+
+    Legacy rows are repaired by ``scripts/backfill_slack_ts.py``, a one-time pass
+    that asks Slack which timestamps actually exist rather than assuming. Run it
+    before deploying this change on a workspace with pre-Stage-6 history.
     """
-    if row.slack_ts:
-        return row.slack_ts
-    if row.channel_id and not row.channel_id.startswith("local:"):
-        return row.message_ts
-    return None
+    return row.slack_ts
 
 
 # Keywords for channel-profile matching
