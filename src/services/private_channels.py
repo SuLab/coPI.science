@@ -37,7 +37,8 @@ from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.agent.channels import normalize_channel_name
-from src.agent.slack_client import AgentSlackClient
+from src.agent.ids import mint_local_ts
+from src.agent.slack_client import AgentSlackClient, ThreadNotFound
 from src.config import get_settings
 from src.models import (
     AgentChannel,
@@ -48,9 +49,14 @@ from src.models import (
     ThreadDecision,
     User,
     VISIBILITY_COLLAB_PRIVATE,
+    VISIBILITY_PUBLIC,
 )
 
 logger = logging.getLogger(__name__)
+
+# Neutral marker closing the origin public thread. Deliberately carries none of
+# the PI's guidance text — that stays inside the private channel (§G6).
+_CLOSE_MARKER_TEXT = "⏸️ continuing this discussion off-channel."
 
 
 @dataclass
@@ -203,6 +209,87 @@ async def _latest_simulation_run_id(db: AsyncSession) -> uuid.UUID:
     return run_id
 
 
+async def _slack_parent_ts_from_db(
+    db: AsyncSession, run_id: uuid.UUID, thread_ts: str,
+) -> str | None:
+    """Resolve a canonical thread id to the Slack ts Slack must thread on.
+
+    The DB-side twin of ``SimulationEngine._slack_parent_ts``: this process has no
+    MessageLog, so the root's mapping is read from ``agent_messages``. Returns None
+    when the thread has no Slack presence (a root minted while Slack was off), so
+    the caller can skip the mirror instead of posting against an id Slack has never
+    seen. A row stored against a real Slack channel id but with a NULL ``slack_ts``
+    predates Stage 6, and its canonical id *is* its Slack ts (same inference as
+    ``simulation._restored_slack_ts``). See specs/local-db-conversations.md.
+    """
+    row = (await db.execute(
+        select(AgentMessage.slack_ts, AgentMessage.channel_id)
+        .where(
+            AgentMessage.simulation_run_id == run_id,
+            AgentMessage.message_ts == thread_ts,
+        )
+        .limit(1)
+    )).first()
+    if row is None:
+        # Root not stored at all (a run that predates content persistence). Fall
+        # back to the canonical id, preserving pure-Slack-on behaviour where the
+        # canonical id and the Slack ts are the same string.
+        return thread_ts
+    slack_ts, channel_id = row
+    if slack_ts:
+        return slack_ts
+    if channel_id and not channel_id.startswith("local:"):
+        return thread_ts
+    return None
+
+
+def _add_handover_message(
+    db: AsyncSession,
+    *,
+    simulation_run_id: uuid.UUID,
+    agent_id: str,
+    channel_id: str,
+    channel_name: str,
+    content: str,
+    visibility: str,
+    result: dict | None = None,
+    thread_ts: str | None = None,
+    slack_thread_ts: str | None = None,
+) -> None:
+    """Record one handover message in ``agent_messages`` — the primary store.
+
+    Used by both migration paths, so a handover exists in the DB whether or not
+    Slack is in play. The canonical id is the Slack ts when the mirror post landed,
+    else a locally-minted one — the same rule as ``SimulationEngine._post_message``,
+    which means a failed (or skipped) Slack post still leaves the message durable
+    and visible to the running simulation. The ``slack_*`` columns are only
+    populated when the post actually landed. See specs/local-db-conversations.md.
+    """
+    slack_ts = (result or {}).get("ts")
+    ts = slack_ts or mint_local_ts()
+    db.add(AgentMessage(
+        simulation_run_id=simulation_run_id,
+        agent_id=agent_id,
+        channel_id=channel_id,
+        channel_name=channel_name,
+        message_ts=ts,
+        message_length=len(content),
+        thread_ts=thread_ts,
+        phase="thread_reply" if thread_ts else "new_post",
+        visibility=visibility,
+        content=content,
+        sender_name=f"{agent_id}Bot",
+        is_bot=True,
+        posted_at=float(ts),
+        slack_ts=slack_ts,
+        slack_channel_id=(result or {}).get("channel"),
+        # Only meaningful for a message that is itself on Slack, and it is the
+        # root's *Slack* ts — not the canonical thread_ts, which differ whenever
+        # the thread started Slack-off.
+        slack_thread_ts=slack_thread_ts if slack_ts else None,
+    ))
+
+
 async def _resolve_other_pi(
     db: AsyncSession, other_agent_id: str,
 ) -> tuple[AgentRegistry | None, User | None]:
@@ -288,26 +375,24 @@ async def _migrate_offline(
         guidance_text=guidance_text,
         origin_channel_name=origin_channel_name,
     )
-    now = time.time()
-    for i, post in enumerate(handover_posts):
-        ts = f"{now + i * 1e-6:.6f}"
-        db.add(AgentMessage(
-            simulation_run_id=simulation_run_id, agent_id=creator_agent_id,
+    # No Slack post to mirror, so _add_handover_message mints each canonical id
+    # from the process-wide minter (never a hand-rolled f"{time.time():.6f}": that
+    # carries no writer slot, so it can collide with an id minted by the engine or
+    # GrantBot, and it round-trips microseconds through a float, which cannot hold
+    # them at current epoch magnitudes — see src/agent/ids.py).
+    for post in handover_posts:
+        _add_handover_message(
+            db, simulation_run_id=simulation_run_id, agent_id=creator_agent_id,
             channel_id=new_channel_id, channel_name=new_channel_name,
-            message_ts=ts, phase="new_post", visibility=VISIBILITY_COLLAB_PRIVATE,
-            content=post, sender_name=f"{creator_agent_id}Bot", is_bot=True,
-            posted_at=float(ts),
-        ))
+            content=post, visibility=VISIBILITY_COLLAB_PRIVATE,
+        )
     # Neutral close marker in the origin (public) thread — no PI text echoed.
-    close_ts = f"{now + len(handover_posts) * 1e-6:.6f}"
-    db.add(AgentMessage(
-        simulation_run_id=simulation_run_id, agent_id=creator_agent_id,
+    _add_handover_message(
+        db, simulation_run_id=simulation_run_id, agent_id=creator_agent_id,
         channel_id=origin_channel_id, channel_name=origin_channel_name,
-        message_ts=close_ts, thread_ts=thread_decision.thread_id,
-        phase="thread_reply", visibility="public",
-        content="⏸️ continuing this discussion off-channel.",
-        sender_name=f"{creator_agent_id}Bot", is_bot=True, posted_at=float(close_ts),
-    ))
+        content=_CLOSE_MARKER_TEXT, visibility=VISIBILITY_PUBLIC,
+        thread_ts=thread_decision.thread_id,
+    )
 
     thread_decision.refined_in_channel = new_channel_id
     logger.info("Slack-off migration: created private channel %s (DB-only)", new_channel_name)
@@ -361,6 +446,11 @@ async def migrate_public_thread_to_private(
             origin_channel_name=origin_channel_name,
         )
 
+    # Resolved up front, before any Slack side-effect: the handover messages are
+    # recorded against this run, and failing here *after* creating the Slack
+    # channel would leave an orphan channel behind.
+    simulation_run_id = await _latest_simulation_run_id(db)
+
     # --- Slack side-effects ------------------------------------------------
     creator_token = await _get_or_fail_bot_token(db, creator_agent_id)
     other_token = await _get_or_fail_bot_token(db, other_agent_id)
@@ -408,15 +498,42 @@ async def migrate_public_thread_to_private(
         guidance_text=guidance_text,
         origin_channel_name=origin_channel_name,
     )
-    for post in handover_posts:
-        creator_client.post_message(new_channel_id, post)
+    # Each Slack result is kept so the DB rows below can carry the canonical id
+    # Slack assigned (and the mirror mapping). The DB is the primary conversation
+    # store — a handover that existed only on Slack would be invisible to a
+    # Slack-off restart and to the web conversation view.
+    handover_results: list[tuple[str, dict | None]] = [
+        (post, creator_client.post_message(new_channel_id, post))
+        for post in handover_posts
+    ]
 
-    # Close the origin thread with a neutral marker — NO PI text echoed.
-    creator_client.post_message(
-        origin_channel_id,
-        "⏸️ continuing this discussion off-channel.",
-        thread_ts=thread_decision.thread_id,
+    # Close the origin thread with a neutral marker — NO PI text echoed. Slack
+    # threads on the root's *Slack* ts, which equals the canonical thread id only
+    # when the root was born on Slack, so translate first and keep the marker
+    # DB-only when the thread has no Slack presence.
+    slack_parent = await _slack_parent_ts_from_db(
+        db, simulation_run_id, thread_decision.thread_id,
     )
+    close_result = None
+    if slack_parent is None:
+        logger.warning(
+            "Not mirroring the close marker for thread %s: its root has no Slack "
+            "presence (started with Slack off). The marker is still recorded in the DB.",
+            thread_decision.thread_id,
+        )
+    else:
+        try:
+            close_result = creator_client.post_message(
+                origin_channel_id, _CLOSE_MARKER_TEXT, thread_ts=slack_parent,
+            )
+        except ThreadNotFound:
+            # Origin root was deleted on Slack. post_message already cleaned up the
+            # orphan top-level post; the DB marker below still records the close, so
+            # the migration completes rather than aborting a PI-initiated action.
+            logger.warning(
+                "Origin thread %s no longer exists on Slack — close marker recorded "
+                "in the DB only", thread_decision.thread_id,
+            )
 
     # Invite the other PI via DM from their own bot. Best-effort — if this
     # fails (no claimed PI, no Slack ID, DM not allowed), refinement still
@@ -442,7 +559,6 @@ async def migrate_public_thread_to_private(
             )
 
     # --- DB writes ---------------------------------------------------------
-    simulation_run_id = await _latest_simulation_run_id(db)
     ac = AgentChannel(
         simulation_run_id=simulation_run_id,
         channel_id=new_channel_id,
@@ -471,6 +587,24 @@ async def migrate_public_thread_to_private(
     ))
     # The other PI is deliberately not added as a member here — they only
     # become a member when they accept the Slack invite. No DB write until then.
+
+    # Mirror the handover into agent_messages. Same rows as the Slack-off path,
+    # additionally carrying the slack_* mapping, so the running simulation picks
+    # them up via _poll_inbound_from_db and a rebuild reconstructs the channel
+    # from the DB alone rather than depending on Slack history.
+    for post, result in handover_results:
+        _add_handover_message(
+            db, simulation_run_id=simulation_run_id, agent_id=creator_agent_id,
+            channel_id=new_channel_id, channel_name=new_channel_name,
+            content=post, visibility=VISIBILITY_COLLAB_PRIVATE, result=result,
+        )
+    _add_handover_message(
+        db, simulation_run_id=simulation_run_id, agent_id=creator_agent_id,
+        channel_id=origin_channel_id, channel_name=origin_channel_name,
+        content=_CLOSE_MARKER_TEXT, visibility=VISIBILITY_PUBLIC,
+        result=close_result, thread_ts=thread_decision.thread_id,
+        slack_thread_ts=slack_parent,
+    )
 
     # Record the refinement destination on the thread_decision
     thread_decision.refined_in_channel = new_channel_id

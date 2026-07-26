@@ -476,3 +476,229 @@ async def test_rebuild_infers_the_slack_ts_of_a_pre_stage6_row(db_session):
     await engine._rebuild_state_from_db()
 
     assert engine._slack_parent_ts("1700000000.000000") == "1700000000.000000"
+
+
+# ---------------------------------------------------------------
+# R1 (residual) — every canonical id must come from the shared minter, so it
+# carries its process's writer slot. The Slack-off private-channel handover was
+# the last site formatting ids straight off time.time().
+# ---------------------------------------------------------------
+
+
+async def test_offline_migration_mints_ids_in_its_own_writer_slot(db_session, monkeypatch):
+    import time as time_mod
+
+    from src.agent.ids import (
+        WRITER_ENGINE,
+        WRITER_SLOT_MODULUS,
+        WRITER_WEB,
+        TsMinter,
+        set_default_writer_id,
+    )
+    from src.services.private_channels import _migrate_offline
+
+    run = await factories.make_simulation_run(db_session)
+    pi_user = await factories.make_user(db_session)
+    td = await factories.make_thread_decision(
+        db_session, run=run, agent_a="su", agent_b="wiseman",
+        channel="general", summary_text="A joint proposal.",
+    )
+
+    # Freeze BOTH clocks the two id schemes read (time_ns for the minter,
+    # time for the old hand-rolled format), so the engine and the migration mint
+    # at the identical microsecond — the case that used to collide.
+    monkeypatch.setattr(time_mod, "time_ns", lambda: 1_800_000_000_000_000_000)
+    monkeypatch.setattr(time_mod, "time", lambda: 1_800_000_000.0)
+
+    engine = _engine_for(db_session, run.id)
+    engine._ts_minter = TsMinter(WRITER_ENGINE)
+    set_default_writer_id(WRITER_WEB)
+
+    bot_ts = engine.mint_ts()
+    engine._pending_persist = [LogEntry(
+        ts=bot_ts, channel="general", sender_agent_id="su",
+        sender_name="SuBot", content="BOT MESSAGE",
+        posted_at=float(bot_ts), is_bot=True,
+    )]
+    await engine._flush_persisted()
+
+    # The web process writes the handover at that same frozen instant. Under the
+    # old scheme its first id was f"{time.time():.6f}" == the engine's id, so the
+    # ORM insert below hit uq_agent_messages_run_ts.
+    await _migrate_offline(
+        db_session,
+        thread_decision=td,
+        creator_agent_id="su",
+        creator_pi_user=pi_user,
+        guidance_text="Narrow the aim to one assay.",
+        a="su", b="wiseman",
+        other_agent_id="wiseman",
+        origin_channel_name="general",
+    )
+    await db_session.flush()
+
+    rows = (await db_session.execute(select(AgentMessage).where(
+        AgentMessage.simulation_run_id == run.id,
+    ))).scalars().all()
+    assert "BOT MESSAGE" in {r.content for r in rows}
+
+    handover = [r for r in rows if r.message_ts != bot_ts]
+    # 2+ handover posts in the new private channel, plus the origin-thread marker.
+    assert len(handover) >= 3
+    assert any(r.thread_ts == td.thread_id for r in handover)
+
+    # Every handover id sits in the web writer's residue class, so it can never
+    # coincide with an engine- or GrantBot-minted id ...
+    for r in handover:
+        assert int(r.message_ts.partition(".")[2]) % WRITER_SLOT_MODULUS == WRITER_WEB
+    # ... and they stay distinct and float-ordered (posted_at == float(ts)).
+    minted = sorted(r.message_ts for r in handover)
+    assert len(set(minted)) == len(minted)
+    floats = [float(t) for t in minted]
+    assert all(b > a for a, b in zip(floats, floats[1:], strict=False))
+    assert all(r.posted_at == float(r.message_ts) for r in handover)
+
+
+# ---------------------------------------------------------------
+# The Slack-*on* migration used to post the handover to Slack without recording
+# it in agent_messages — the last place a message existed on Slack before it
+# existed in the primary store.
+# ---------------------------------------------------------------
+
+
+def _patch_slack_migration(monkeypatch, clients: dict):
+    """Route private_channels' Slack surface at FakeSlackClient instances."""
+    from src.services import private_channels as pc
+    from tests.fakes import FakeSlackClient
+
+    async def _enabled(*args, **kwargs):
+        return True
+
+    async def _token(db, agent_id):
+        return f"xoxb-fake-{agent_id}"
+
+    async def _other_pi(db, agent_id):
+        return None, None  # no claimed PI on the other side — skips the DM branch
+
+    def _client(agent_id, token):
+        return clients.setdefault(agent_id, FakeSlackClient(agent_id=agent_id))
+
+    monkeypatch.setattr(pc, "_slack_enabled_for_migration", _enabled)
+    monkeypatch.setattr(pc, "_get_or_fail_bot_token", _token)
+    monkeypatch.setattr(pc, "_resolve_other_pi", _other_pi)
+    monkeypatch.setattr(pc, "_make_client", _client)
+    return pc
+
+
+async def test_slack_migration_mirrors_the_handover_into_the_db(db_session, monkeypatch):
+    clients: dict = {}
+    pc = _patch_slack_migration(monkeypatch, clients)
+
+    run = await factories.make_simulation_run(db_session)
+    pi_user = await factories.make_user(db_session)
+    # A Slack-born origin root: stored against a real Slack channel, so its
+    # canonical id is also its Slack ts.
+    await factories.make_agent_message(
+        db_session, run=run, agent_id="su", is_bot=True,
+        channel_id="C0ORIGIN", channel_name="general",
+        message_ts="1700000000.000500", posted_at=1700000000.0005,
+        content="origin root", slack_ts="1700000000.000500",
+    )
+    td = await factories.make_thread_decision(
+        db_session, run=run, agent_a="su", agent_b="wiseman",
+        channel="general", thread_id="1700000000.000500",
+        summary_text="A joint proposal.",
+    )
+
+    result = await pc.migrate_public_thread_to_private(
+        db_session, thread_decision=td, creator_agent_id="su",
+        creator_pi_user=pi_user, guidance_text="Narrow the aim to one assay.",
+    )
+    await db_session.flush()
+
+    rows = (await db_session.execute(select(AgentMessage).where(
+        AgentMessage.simulation_run_id == run.id,
+        AgentMessage.content != "origin root",
+    ))).scalars().all()
+
+    # Sorted by canonical id, which is post order here (the fake ts increments).
+    private_rows = sorted(
+        (r for r in rows if r.channel_name == result.channel_name),
+        key=lambda r: r.message_ts,
+    )
+    close_rows = [r for r in rows if r.channel_name == "general"]
+    assert len(private_rows) >= 2      # the handover posts
+    assert len(close_rows) == 1        # the origin-thread close marker
+
+    # Slack-on parity (design rule 1): the canonical id IS the Slack ts, and the
+    # mirror mapping is recorded so a later reconcile dedups instead of duplicating.
+    posted_ts = {p["ts"] for p in clients["su"].posted}
+    for r in private_rows + close_rows:
+        assert r.slack_ts == r.message_ts
+        assert r.message_ts in posted_ts
+        assert r.posted_at == float(r.message_ts)
+        assert r.is_bot is True
+        assert r.sender_name == "suBot"
+    assert all(r.visibility == "collab_private" for r in private_rows)
+    # Stored content is the handover text itself (pre-mrkdwn), not a placeholder.
+    expected = pc._build_handover_messages(
+        creator_pi_name=pi_user.name,
+        proposal_summary="A joint proposal.",
+        guidance_text="Narrow the aim to one assay.",
+        origin_channel_name="general",
+    )
+    assert [r.content for r in private_rows] == expected
+    assert any("one assay" in r.content for r in private_rows)
+
+    # The close marker threads on the root's Slack ts, in the origin channel, and
+    # carries no PI guidance text.
+    marker = close_rows[0]
+    assert marker.visibility == "public"
+    assert marker.thread_ts == "1700000000.000500"
+    assert marker.slack_thread_ts == "1700000000.000500"
+    assert "one assay" not in marker.content
+    # ... and that is what Slack was actually asked to thread on.
+    threaded = [p for p in clients["su"].posted if p["thread_ts"]]
+    assert [p["thread_ts"] for p in threaded] == ["1700000000.000500"]
+
+
+async def test_slack_migration_keeps_the_close_marker_db_only_for_a_db_origin_root(
+    db_session, monkeypatch,
+):
+    """A thread started Slack-off has a minted root id Slack has never seen.
+
+    The marker must not be posted against it (that detaches or errors), but it
+    still has to land in the DB — the store the simulation actually reads.
+    """
+    clients: dict = {}
+    pc = _patch_slack_migration(monkeypatch, clients)
+
+    run = await factories.make_simulation_run(db_session)
+    pi_user = await factories.make_user(db_session)
+    await factories.make_agent_message(
+        db_session, run=run, agent_id="su", is_bot=True,
+        channel_id="local:general", channel_name="general",
+        message_ts="1800000000.000100", posted_at=1800000000.0001,
+        content="db-origin root", slack_ts=None,
+    )
+    td = await factories.make_thread_decision(
+        db_session, run=run, agent_a="su", agent_b="wiseman",
+        channel="general", thread_id="1800000000.000100",
+    )
+
+    await pc.migrate_public_thread_to_private(
+        db_session, thread_decision=td, creator_agent_id="su",
+        creator_pi_user=pi_user, guidance_text="Keep going.",
+    )
+    await db_session.flush()
+
+    # Nothing was posted into a thread on Slack ...
+    assert [p for p in clients["su"].posted if p["thread_ts"]] == []
+    # ... but the marker exists in the DB, unmirrored, on the canonical thread.
+    marker = (await db_session.execute(select(AgentMessage).where(
+        AgentMessage.simulation_run_id == run.id,
+        AgentMessage.thread_ts == "1800000000.000100",
+    ))).scalars().one()
+    assert marker.slack_ts is None
+    assert marker.slack_thread_ts is None
+    assert marker.channel_name == "general"

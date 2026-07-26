@@ -178,3 +178,9 @@ class FakeSlackClient:
 
     def list_channels(self, include_private: bool = False) -> dict:
         return {}
+
+    def _resolve_channel_id(self, channel: str) -> str:
+        """Name -> id, mirroring AgentSlackClient (ids pass through unchanged)."""
+        if channel.startswith(("C", "G")):
+            return channel
+        return f"C_{channel}"

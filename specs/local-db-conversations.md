@@ -43,7 +43,10 @@ by **reusing the existing schema** wherever possible.
    mid-conversation degrade safely instead of detaching or erroring. The mapping
    is restored on rebuild — including inferred for pre-Stage-6 rows, where a real
    Slack `channel_id` with a NULL `slack_ts` implies the canonical id *is* the
-   Slack ts — so it survives a restart.
+   Slack ts — so it survives a restart. The web process has no `MessageLog`, so
+   `private_channels._slack_parent_ts_from_db()` performs the same translation
+   from `agent_messages` (same inference, same DB-only fallback) for the
+   private-channel migration's origin-thread close marker.
 
 2. **`mint_ts()` is monotonic and unique — across processes, not just within
    one.** Ids are carried as integer microseconds (never round-tripped through a
@@ -140,7 +143,10 @@ is `AgentRegistry.user_id` rather than `slack_user_id`.
    `_rebuild_state_from_slack` to a Slack-gated reconcile).
 2. Local id minting (`mint_ts`, remove `mock_ts` constant, `local:` channel ids).
 3. Transport abstraction + `slack_enabled` + `_poll_pi_inbox_from_db`.
-4. Slack-less private-channel migration branch.
+4. Slack-less private-channel migration branch. Both branches persist the handover
+   (posts + origin-thread close marker) through one helper,
+   `private_channels._add_handover_message`, so the refinement channel is
+   reconstructable from the DB alone whether or not Slack was involved.
 5. PI web interface.
 6. Secondary Slack posters guarded by `slack_enabled`; outbound mirror write-back
    (records `slack_ts`; reconcile dedups on `slack_ts`).
