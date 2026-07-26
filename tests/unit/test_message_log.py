@@ -273,3 +273,55 @@ class TestAppendIdempotencyAndPersist:
         # Still idempotent on ts.
         log.load_entry(_post("1", "general", "su", "SuBot", "again"))
         assert len(log) == 1
+
+
+# ---------------------------------------------------------------
+# Insertion order is not time order: the DB inbound poller and the Slack
+# reconcile append entries whose posted_at predates what is already stored, so
+# every "most recent" query must key on posted_at, not on the tail of _entries.
+# ---------------------------------------------------------------
+
+class TestOrderingIsByPostedAtNotInsertion:
+    def test_latest_timestamp_is_the_max_not_the_last_appended(self, log):
+        log.append(_post("100", "general", "su", "SuBot", "newest"))
+        # Ingested afterwards, but older — a tail read would move the cursor back.
+        log.append(_post("40", "general", "wiseman", "WisemanBot", "older, late"))
+        assert log.latest_timestamp == 100.0
+
+    def test_latest_timestamp_is_zero_on_an_empty_log(self, log):
+        assert log.latest_timestamp == 0.0
+
+    def test_latest_timestamp_counts_restored_entries(self, log):
+        log.load_entry(_post("70", "general", "su", "SuBot", "restored"))
+        assert log.latest_timestamp == 70.0
+
+    def test_agent_posts_slice_keeps_the_newest_by_posted_at(self, log):
+        # Newest post first, then two older ones ingested late. With limit=2 an
+        # insertion-order slice would drop "newest" — the post the Phase 5 dedup
+        # context and the daily cap most need to see.
+        log.append(_post("300", "general", "su", "SuBot", "newest"))
+        log.append(_post("100", "general", "su", "SuBot", "old-a"))
+        log.append(_post("200", "general", "su", "SuBot", "old-b"))
+        got = log.get_agent_top_level_posts("su", limit=2)
+        assert [e.content for e in got] == ["old-b", "newest"]  # oldest first
+
+    def test_agent_posts_still_exclude_replies_and_other_agents(self, log):
+        log.append(_post("10", "general", "su", "SuBot", "root"))
+        log.append(_post("20", "general", "su", "SuBot", "reply", thread_ts="10"))
+        log.append(_post("30", "general", "wiseman", "WisemanBot", "other"))
+        assert [e.content for e in log.get_agent_top_level_posts("su")] == ["root"]
+
+    def test_last_bot_sender_ignores_a_late_appended_older_message(self, log):
+        log.append(_post("10", "priv-x", "wiseman", "WisemanBot", "first"))
+        log.append(_post("20", "priv-x", "su", "SuBot", "second — the real latest"))
+        # Reconcile pulls in a message that predates both; scanning the log
+        # backwards would name wiseman the last poster and hand su another turn.
+        log.append(_post("5", "priv-x", "wiseman", "WisemanBot", "older, late"))
+        assert log.get_last_bot_sender_in_channel("priv-x") == "su"
+
+    def test_last_bot_sender_breaks_posted_at_ties_by_insertion(self, log):
+        log.append(_post("10", "priv-x", "wiseman", "WisemanBot", "a"))
+        tie = _post("10", "priv-x", "su", "SuBot", "b")
+        tie.ts = "10-b"  # distinct id, identical posted_at
+        log.append(tie)
+        assert log.get_last_bot_sender_in_channel("priv-x") == "su"
