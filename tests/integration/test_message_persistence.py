@@ -702,3 +702,68 @@ async def test_slack_migration_keeps_the_close_marker_db_only_for_a_db_origin_ro
     assert marker.slack_ts is None
     assert marker.slack_thread_ts is None
     assert marker.channel_name == "general"
+
+
+# ---------------------------------------------------------------
+# The channel poller's bot branch dropped the Slack mirror mapping, so a thread
+# rooted at a polled bot post (GrantBot's funding posts) looked DB-origin and
+# every reply to it was kept off Slack.
+# ---------------------------------------------------------------
+
+
+class _HistoryClient:
+    """Connected transport that returns one canned bot message from history."""
+
+    def __init__(self, messages):
+        self.agent_id = "su"
+        self._messages = messages
+
+    @property
+    def is_connected(self):
+        return True
+
+    def is_bot_user(self, user_id):
+        return False
+
+    def poll_channel_messages(self, channel_id, oldest="0", limit=100):
+        return list(self._messages)
+
+    def resolve_user_name(self, user_id):
+        return user_id
+
+
+async def test_polled_bot_message_keeps_its_slack_mapping(db_session):
+    run = await factories.make_simulation_run(db_session)
+    client = _HistoryClient([{
+        "ts": "1700000123.456789",
+        "bot_id": "B0GRANT",
+        "username": "GrantBot",
+        "text": ":moneybag: *Funding Opportunity* R01 something",
+    }])
+
+    engine = _engine_for(db_session, run.id)
+    engine.slack_clients = {"su": client}
+    engine._channel_id_map = {"funding-opportunities": "C0FUNDING"}
+    engine._channel_visibility = {"funding-opportunities": "public"}
+    # start() registers this; the poller's append has to reach the DB buffer.
+    engine.message_log.set_persist_callback(engine._enqueue_persist)
+
+    await engine._poll_slack_for_pi_messages()
+
+    entry = engine.message_log.get_entry("1700000123.456789")
+    assert entry is not None
+    # The mapping is what makes a reply mirrorable: without it _slack_parent_ts
+    # reports "no Slack root" and _post_message keeps the reply DB-only.
+    assert entry.slack_ts == "1700000123.456789"
+    assert entry.slack_channel_id == "C0FUNDING"
+    assert engine._slack_parent_ts("1700000123.456789") == "1700000123.456789"
+
+    # And it survives the flush into the primary store.
+    await engine._flush_persisted()
+    row = (await db_session.execute(select(AgentMessage).where(
+        AgentMessage.simulation_run_id == run.id,
+        AgentMessage.message_ts == "1700000123.456789",
+    ))).scalars().one()
+    assert row.slack_ts == "1700000123.456789"
+    assert row.slack_channel_id == "C0FUNDING"
+    assert row.is_bot is True

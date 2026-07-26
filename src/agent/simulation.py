@@ -2116,6 +2116,18 @@ class SimulationEngine:
                             posted_at=float(ts) if ts else 0.0,
                             is_bot=True,
                             visibility=ch_visibility,
+                            # This message came *from* Slack, so record the mirror
+                            # mapping exactly as the human branch below does. Without
+                            # it the entry looks DB-origin, and _slack_parent_ts then
+                            # reports "no Slack root" for any thread rooted here —
+                            # silently keeping every reply off Slack. The roots this
+                            # branch ingests are another workspace bot's posts, i.e.
+                            # GrantBot's funding posts, whose threads are open to all
+                            # agents. Slack-origin ⇒ canonical id *is* the Slack ts,
+                            # so the thread parent needs no translation.
+                            slack_ts=ts or None,
+                            slack_channel_id=ch_id,
+                            slack_thread_ts=msg.get("thread_ts"),
                         )
                         if not self.message_log.get_entry(ts):
                             self.message_log.append(entry)
