@@ -504,9 +504,25 @@ async def _handle_instruction(
         else:
             # Legacy fallback: flag off → post guidance verbatim to the origin
             # public thread (same behavior as the web legacy path).
-            from slack_sdk import WebClient
+            from src.services.slack_tokens import slack_globally_enabled, token_for_agent_row
 
-            from src.services.slack_tokens import token_for_agent_row
+            # Slack off → write the guidance to the DB inbox on the origin thread
+            # instead of posting to Slack.
+            if not await slack_globally_enabled(db):
+                from src.services.pi_inbox import get_latest_run_id, record_pi_message
+                run_id = await get_latest_run_id(db)
+                if run_id:
+                    await record_pi_message(
+                        db, run_id=run_id, channel_name=td.channel,
+                        content=f"PI guidance from {user.name} (via email): {instruction}",
+                        sender_name=f"{user.name} (PI)", thread_ts=td.thread_id,
+                    )
+                    logger.info("Email guidance for %s written to DB inbox (Slack off)", td.thread_id)
+                    return True
+                logger.error("No simulation run to record email guidance for %s", td.thread_id)
+                return False
+
+            from slack_sdk import WebClient
             bot_token = token_for_agent_row(agent)
             if not bot_token:
                 logger.error("No bot token for agent %s", agent.agent_id)

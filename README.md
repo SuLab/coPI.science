@@ -71,7 +71,8 @@ Before restarting, save logs and rebuild:
 ```bash
 docker logs agent-run > logs/run_$(date +%s).log 2>&1
 ls -t logs/run_*.log | tail -n +11 | xargs rm -f
-docker rm -f agent-run
+docker stop -t 30 agent-run   # SIGTERM: lets the engine flush before exit
+docker rm agent-run
 docker compose up -d --build app worker
 docker compose --profile agent run -d --name agent-run agent \
   python -m src.agent.main --budget 0

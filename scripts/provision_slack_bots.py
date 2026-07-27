@@ -442,7 +442,8 @@ def main():
         if STATE_FILE.exists():
             STATE_FILE.unlink()
         console.print(f"[green]All done! Restart the agent container to pick up the new tokens.[/green]")
-        console.print("  docker rm -f agent-run")
+        console.print("  docker stop -t 30 agent-run  # SIGTERM so the engine flushes")
+        console.print("  docker rm agent-run")
         console.print("  docker compose up -d --build app worker")
         console.print("  docker compose --profile agent run -d --name agent-run agent python -m src.agent.main --budget 0")
 

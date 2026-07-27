@@ -3,7 +3,7 @@
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +25,17 @@ class LogEntry:
     # memory segment. Default 'public' is safe for all existing callers.
     # See specs/privacy-and-channel-visibility.md §G2.
     visibility: str = "public"
+    # Slack-mirror mapping — set when this message was posted to (or came from)
+    # Slack. In pure Slack-on mode slack_ts == ts. Persisted to the DB row so the
+    # reconcile pass can dedup a mirrored message. See specs/local-db-conversations.md.
+    slack_ts: str | None = None
+    slack_channel_id: str | None = None
+    # The *root's* Slack ts for a mirrored reply. Distinct from thread_ts, which
+    # is the canonical (possibly locally-minted) root id: a thread that started
+    # Slack-off has a minted root, which is not a valid Slack ts. None means this
+    # entry has no Slack parent — either it is not a reply, or its thread has no
+    # Slack presence. See SimulationEngine._slack_parent_ts.
+    slack_thread_ts: str | None = None
 
 
 def is_funding_post(content: str) -> bool:
@@ -45,15 +56,63 @@ class MessageLog:
         self._by_ts: dict[str, LogEntry] = {}  # ts -> entry for fast lookup
         # Map bot_name (lowercase) -> agent_id, set by SimulationEngine
         self._bot_name_to_id: dict[str, str] = {}
+        # Optional persistence hook, invoked once per *new* append. The engine
+        # registers this to mirror the log into the DB (the primary store).
+        # Kept as a plain callback so this module stays DB-agnostic. See
+        # specs/local-db-conversations.md.
+        self._persist_cb: Callable[[LogEntry], None] | None = None
+        # High-water mark over posted_at, maintained on every add. Insertion
+        # order is NOT time order (see _record), so latest_timestamp cannot read
+        # the tail of _entries.
+        self._max_posted_at: float = 0.0
 
     def set_bot_name_map(self, mapping: dict[str, str]) -> None:
         """Register bot_name -> agent_id mapping (lowercase keys)."""
         self._bot_name_to_id = dict(mapping)
 
-    def append(self, entry: LogEntry) -> None:
-        """Add a message to the log."""
+    def set_persist_callback(self, cb: Callable[[LogEntry], None] | None) -> None:
+        """Register a callback fired after each new append (for DB persistence)."""
+        self._persist_cb = cb
+
+    def append(self, entry: LogEntry) -> bool:
+        """Add a message to the log.
+
+        Idempotent: if an entry with this ts is already present, the append is
+        skipped (both the in-memory add and the persist callback) and False is
+        returned. This unifies the previously scattered ``get_entry`` guards and
+        keeps the DB persist hook from double-writing during Slack reconciliation.
+        Safe because ids are unique (Slack ts or a minted ts; see mint_ts).
+        Returns True when a new entry was added.
+        """
+        if entry.ts in self._by_ts:
+            return False
+        self._record(entry)
+        if self._persist_cb is not None:
+            self._persist_cb(entry)
+        return True
+
+    def load_entry(self, entry: LogEntry) -> None:
+        """Append a restored entry WITHOUT firing the persist callback.
+
+        Used by the DB-rebuild path so rows just read from the DB are not
+        re-persisted. Still idempotent on ts.
+        """
+        if entry.ts in self._by_ts:
+            return
+        self._record(entry)
+
+    def _record(self, entry: LogEntry) -> None:
+        """Store an entry and advance the posted_at high-water mark.
+
+        The log is append-only in *insertion* order, which is not time order: the
+        DB inbound poller and the Slack reconcile append entries whose posted_at
+        can predate messages already stored. Every "most recent" query therefore
+        has to key on posted_at rather than on the tail of ``_entries``.
+        """
         self._entries.append(entry)
         self._by_ts[entry.ts] = entry
+        if entry.posted_at > self._max_posted_at:
+            self._max_posted_at = entry.posted_at
 
     def get_entry(self, ts: str) -> LogEntry | None:
         """Look up a single entry by its timestamp."""
@@ -83,9 +142,23 @@ class MessageLog:
         return results
 
     def get_thread_history(self, thread_ts: str) -> list[LogEntry]:
-        """Return all messages in a thread (including the root post), ordered by time."""
+        """Return all messages in a thread (including the root post), ordered by time.
+
+        Ordered by ``posted_at``, not by log-insertion order. Appends from a
+        single process arrive roughly in time order, but the DB inbound poller
+        and the Slack reconcile append entries whose posted_at can predate
+        messages already in the log — so insertion order would hand the LLM a
+        subtly scrambled thread, unlike the Slack-primary rebuild which fetched
+        in ts order. The sort is stable, so entries sharing a posted_at keep
+        their insertion order. The root is pinned first regardless: it is the
+        thread's parent by definition, even if a reply carries an earlier
+        posted_at (a writer's clock can run behind — see PI_INBOX_LOOKBACK_S).
+        """
         root = self._by_ts.get(thread_ts)
-        replies = [e for e in self._entries if e.thread_ts == thread_ts]
+        replies = sorted(
+            (e for e in self._entries if e.thread_ts == thread_ts),
+            key=lambda e: e.posted_at,
+        )
         result = []
         if root:
             result.append(root)
@@ -99,11 +172,20 @@ class MessageLog:
         return count
 
     def get_agent_top_level_posts(self, agent_id: str, limit: int = 10) -> list[LogEntry]:
-        """Return the agent's own top-level posts, most recent first."""
-        posts = [
-            e for e in self._entries
-            if e.sender_agent_id == agent_id and e.thread_ts is None
-        ]
+        """Return the agent's ``limit`` newest top-level posts, oldest first.
+
+        "Newest" is by ``posted_at``, not by position in the log: a late append of
+        older history (DB poll / Slack reconcile — see _record) would otherwise
+        push a genuinely recent post out of the slice, which silently weakens both
+        callers — the Phase 5 dedup context and the daily post cap.
+        """
+        posts = sorted(
+            (
+                e for e in self._entries
+                if e.sender_agent_id == agent_id and e.thread_ts is None
+            ),
+            key=lambda e: e.posted_at,
+        )
         return posts[-limit:]
 
     def get_last_bot_sender_in_channel(self, channel_name: str) -> str | None:
@@ -112,15 +194,21 @@ class MessageLog:
         Returns None if no bot has posted there yet. Used to enforce
         turn-taking in flat collab_private channels (a bot shouldn't post
         back-to-back there without the other bot responding first).
+
+        "Most recent" is by ``posted_at``. Scanning ``reversed(_entries)`` instead
+        would let a late-appended *older* message answer as the last poster and
+        hand the turn to the wrong bot. Ties keep the later insertion, matching
+        the previous behaviour when posted_at values collide.
         """
-        for entry in reversed(self._entries):
+        best: LogEntry | None = None
+        for entry in self._entries:
             if entry.channel != channel_name:
                 continue
-            if not entry.is_bot:
+            if not entry.is_bot or not entry.sender_agent_id:
                 continue
-            if entry.sender_agent_id:
-                return entry.sender_agent_id
-        return None
+            if best is None or entry.posted_at >= best.posted_at:
+                best = entry
+        return best.sender_agent_id if best else None
 
     def get_replies_to_agent_posts(
         self,
@@ -238,10 +326,14 @@ class MessageLog:
 
     @property
     def latest_timestamp(self) -> float:
-        """Return the timestamp of the most recent entry, or 0."""
-        if not self._entries:
-            return 0.0
-        return self._entries[-1].posted_at
+        """Return the highest posted_at in the log, or 0.0 when it is empty.
+
+        The maximum, not ``_entries[-1].posted_at``: the last-inserted entry is
+        not the newest one whenever the DB poller or the Slack reconcile has
+        appended older history (see _record). A cursor taken from the tail could
+        therefore move *backwards*.
+        """
+        return self._max_posted_at
 
     def __len__(self) -> int:
         return len(self._entries)

@@ -49,6 +49,20 @@ async def get_agent_bot_token(db: AsyncSession, agent_id: str) -> str | None:
     return env_token(agent_id)
 
 
+async def slack_globally_enabled(db: AsyncSession) -> bool:
+    """Whether Slack integration is on for this deployment.
+
+    Explicit SLACK_ENABLED wins; otherwise auto-detect (on iff at least one
+    usable bot token exists anywhere). Used to gate secondary Slack posters
+    (GrantBot, the email→Slack relay, web-triggered posts) so they no-op in
+    DB-only mode. See specs/local-db-conversations.md.
+    """
+    setting = get_settings().slack_enabled
+    if setting is not None:
+        return setting
+    return await get_any_bot_token(db) is not None
+
+
 async def get_any_bot_token(db: AsyncSession) -> str | None:
     """Any valid bot token, for workspace-wide lookups (e.g. users.lookupByEmail).
 

@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import distinct, func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -583,41 +584,53 @@ async def reopen_proposal(
         # Legacy fallback: flag is off → post guidance verbatim to the origin
         # public thread. This reproduces the pre-refactor behavior and is the
         # same code as before; kept gated so rollback is a config change.
-        try:
-            from slack_sdk import WebClient
+        from src.services.slack_tokens import slack_globally_enabled, token_for_agent_row
 
-            from src.services.slack_tokens import token_for_agent_row
-            bot_token = token_for_agent_row(agent)
-            if not bot_token:
-                raise HTTPException(status_code=500, detail="No bot token available")
-            client = WebClient(token=bot_token)
-            channels_result = client.conversations_list(
-                types="public_channel,private_channel", limit=200,
-            )
-            channel_id = None
-            for ch in channels_result.get("channels", []):
-                if ch["name"] == td.channel:
-                    channel_id = ch["id"]
-                    break
-            if not channel_id:
-                raise HTTPException(status_code=500, detail=f"Channel #{td.channel} not found")
-            client.chat_postMessage(
-                channel=channel_id,
-                text=f"*PI guidance from {current_user.name}:*\n\n{guidance}",
-                thread_ts=td.thread_id,
-            )
-            logger.warning(
-                "LEGACY PATH: PI %s posted guidance in proposal thread %s via %s "
-                "(enable_private_refinement=False)",
-                current_user.name, td.thread_id, agent.agent_id,
-            )
-        except HTTPException:
-            raise
-        except Exception as exc:
-            logger.error("Failed to post PI guidance to Slack: %s", exc)
-            raise HTTPException(
-                status_code=500, detail=f"Failed to post to Slack: {str(exc)[:100]}",
-            )
+        if not await slack_globally_enabled(db):
+            # Slack off → write the guidance to the DB inbox on the origin thread.
+            from src.services.pi_inbox import get_latest_run_id, record_pi_message
+            run_id = await get_latest_run_id(db)
+            if run_id:
+                await record_pi_message(
+                    db, run_id=run_id, channel_name=td.channel,
+                    content=f"PI guidance from {current_user.name}: {guidance}",
+                    sender_name=f"{current_user.name} (PI)", thread_ts=td.thread_id,
+                )
+            logger.info("Reopen guidance for %s written to DB inbox (Slack off)", td.thread_id)
+        else:
+            try:
+                from slack_sdk import WebClient
+                bot_token = token_for_agent_row(agent)
+                if not bot_token:
+                    raise HTTPException(status_code=500, detail="No bot token available")
+                client = WebClient(token=bot_token)
+                channels_result = client.conversations_list(
+                    types="public_channel,private_channel", limit=200,
+                )
+                channel_id = None
+                for ch in channels_result.get("channels", []):
+                    if ch["name"] == td.channel:
+                        channel_id = ch["id"]
+                        break
+                if not channel_id:
+                    raise HTTPException(status_code=500, detail=f"Channel #{td.channel} not found")
+                client.chat_postMessage(
+                    channel=channel_id,
+                    text=f"*PI guidance from {current_user.name}:*\n\n{guidance}",
+                    thread_ts=td.thread_id,
+                )
+                logger.warning(
+                    "LEGACY PATH: PI %s posted guidance in proposal thread %s via %s "
+                    "(enable_private_refinement=False)",
+                    current_user.name, td.thread_id, agent.agent_id,
+                )
+            except HTTPException:
+                raise
+            except Exception as exc:
+                logger.error("Failed to post PI guidance to Slack: %s", exc)
+                raise HTTPException(
+                    status_code=500, detail=f"Failed to post to Slack: {str(exc)[:100]}",
+                )
 
     existing = await db.execute(
         select(ProposalReview).where(
@@ -651,6 +664,189 @@ async def reopen_proposal(
 # --------------------------------------------------------------------------
 # Private profile view/edit
 # --------------------------------------------------------------------------
+
+
+@router.get("/{agent_id}/conversations", response_class=HTMLResponse)
+async def agent_conversations(
+    agent_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Read view of the agent's recent conversations + a form to post a message.
+
+    This is the Slack-independent way for a PI to see what their agent is
+    discussing and to inject a message/tag — it writes to the DB inbox, which
+    the running simulation ingests. See specs/local-db-conversations.md.
+    """
+    from src.services.pi_inbox import get_latest_run_id
+
+    agent, is_owner = await get_agent_with_access(agent_id, db, current_user)
+    if agent.status not in ("active", "inactive"):
+        return RedirectResponse(url="/agent", status_code=302)
+    aid = agent.agent_id
+
+    run_id = await get_latest_run_id(db)
+    channels: list[str] = []
+    messages: list[dict] = []
+    dms: list[dict] = []
+    if run_id:
+        from src.models import PiDmMessage
+        dm_rows = await db.execute(
+            select(PiDmMessage)
+            .where(
+                PiDmMessage.simulation_run_id == run_id,
+                PiDmMessage.agent_id == aid,
+            )
+            .order_by(PiDmMessage.posted_at.desc())
+            .limit(20)
+        )
+        dms = [
+            {"direction": d.direction, "sender": d.sender_name or "", "content": d.content}
+            for d in reversed(dm_rows.scalars().all())
+        ]
+        # Channels this agent participates in (has authored a message in).
+        ch_rows = await db.execute(
+            select(distinct(AgentMessage.channel_name)).where(
+                AgentMessage.simulation_run_id == run_id,
+                AgentMessage.agent_id == aid,
+            )
+        )
+        channels = sorted({r[0] for r in ch_rows} | {"general"})
+        # Recent messages in those channels (content is now stored in the DB).
+        msg_rows = await db.execute(
+            select(AgentMessage)
+            .where(
+                AgentMessage.simulation_run_id == run_id,
+                AgentMessage.channel_name.in_(channels),
+            )
+            .order_by(AgentMessage.posted_at.desc())
+            .limit(100)
+        )
+        messages = [
+            {
+                "channel": m.channel_name,
+                "sender": m.sender_name or (m.agent_id or "PI"),
+                "is_bot": m.is_bot,
+                "content": m.content,
+                "thread_ts": m.thread_ts,
+                "posted_at": m.posted_at,
+            }
+            for m in reversed(msg_rows.scalars().all())
+        ]
+    else:
+        channels = ["general"]
+
+    return templates.TemplateResponse(
+        request,
+        "agent/conversations.html",
+        _template_context(
+            request, current_user, agent=agent, is_owner=is_owner,
+            channels=channels, messages=messages, dms=dms,
+            has_run=run_id is not None,
+            posted=request.query_params.get("posted"),
+        ),
+    )
+
+
+@router.post("/{agent_id}/message")
+async def post_agent_message(
+    agent_id: str,
+    request: Request,
+    channel_name: str = Form(...),
+    content: str = Form(...),
+    thread_ts: str = Form(""),
+    tag_bot: str = Form(""),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Write a PI-authored message into the DB inbox for the agent's workspace.
+
+    Ingested by the running simulation via _poll_inbound_from_db — the
+    Slack-independent equivalent of a PI posting in a Slack channel.
+    """
+    from src.services.pi_inbox import get_latest_run_id, record_pi_message
+
+    agent, is_owner = await get_agent_with_access(agent_id, db, current_user)
+    if agent.status != "active":
+        raise HTTPException(status_code=403, detail="Agent is not active")
+
+    text = content.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Message cannot be empty")
+    # Optionally address the PI's own bot so it engages (same @BotName convention
+    # the Slack path uses; the engine's tag detection is identical).
+    if tag_bot and f"@{agent.bot_name.lower()}" not in text.lower():
+        text = f"@{agent.bot_name} {text}"
+
+    run_id = await get_latest_run_id(db)
+    if not run_id:
+        raise HTTPException(status_code=409, detail="No simulation run to post into yet")
+
+    async def _write() -> None:
+        await record_pi_message(
+            db,
+            run_id=run_id,
+            channel_name=channel_name.strip() or "general",
+            content=text,
+            sender_name=f"{current_user.name} (PI)",
+            thread_ts=thread_ts.strip() or None,
+        )
+        await db.commit()
+
+    # M1b guard: the canonical id can collide with another process (the sim)
+    # minting the same microsecond for this run, which hits the
+    # uq_agent_messages_run_ts constraint and would otherwise surface as a raw
+    # 500. Roll back and retry once — record_pi_message mints a fresh, monotonic
+    # id, so the retry gets a new ts. See PR #19 review M1.
+    try:
+        await _write()
+    except IntegrityError:
+        await db.rollback()
+        try:
+            await _write()
+        except IntegrityError:
+            await db.rollback()
+            raise HTTPException(
+                status_code=409,
+                detail="Message could not be saved due to a conflict, please retry",
+            )
+    logger.info("[%s] PI %s posted a web message to #%s", agent_id, current_user.name, channel_name)
+    return RedirectResponse(url=f"/agent/{agent_id}/conversations?posted=1", status_code=302)
+
+
+@router.post("/{agent_id}/dm")
+async def send_agent_dm(
+    agent_id: str,
+    request: Request,
+    content: str = Form(...),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Send a DM directive to the agent's bot (standing instruction / question).
+
+    Writes an inbound pi_dm_messages row; the sim processes it via
+    _poll_pi_dms_from_db (same path as a Slack DM). See specs/local-db-conversations.md.
+    """
+    from src.services.pi_inbox import get_latest_run_id, record_pi_dm, web_pi_user_id
+
+    agent, is_owner = await get_agent_with_access(agent_id, db, current_user)
+    if agent.status != "active":
+        raise HTTPException(status_code=403, detail="Agent is not active")
+    text = content.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Message cannot be empty")
+    run_id = await get_latest_run_id(db)
+    if not run_id:
+        raise HTTPException(status_code=409, detail="No simulation run yet")
+    await record_pi_dm(
+        db, run_id=run_id, agent_id=agent_id,
+        pi_user_id=web_pi_user_id(current_user.id), direction="inbound",
+        content=text, sender_name=f"{current_user.name} (PI)",
+    )
+    await db.commit()
+    logger.info("[%s] PI %s sent a web DM directive", agent_id, current_user.name)
+    return RedirectResponse(url=f"/agent/{agent_id}/conversations?posted=1", status_code=302)
 
 
 @router.get("/{agent_id}/profile", response_class=HTMLResponse)

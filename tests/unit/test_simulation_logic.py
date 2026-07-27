@@ -644,3 +644,273 @@ class TestPrivateChannelFinalization:
         assert self.NAME in engine._finalized_private_channels
         props = [p for p in lairson.state.pending_proposals if p.thread_id == "200.000002"]
         assert len(props) == 1
+
+
+# ---------------------------------------------------------------
+# mint_ts — monotonic, unique, ts-shaped ids (DB-primary store)
+# ---------------------------------------------------------------
+
+class TestMintTs:
+    def test_monotonic_and_unique_under_tight_loop(self):
+        engine = SimulationEngine(agents=[], slack_clients={})
+        ids = [engine.mint_ts() for _ in range(1000)]
+        floats = [float(x) for x in ids]
+        # Strictly increasing (so posted_at=float(ts) ordering is preserved).
+        # This is the regression guard for the float-precision bug: at the
+        # current epoch magnitude the old f"{time.time():.6f}" scheme produced
+        # ids that were equal (or non-increasing) once round-tripped to float.
+        assert all(b > a for a, b in zip(floats, floats[1:], strict=False))
+        # All unique
+        assert len(set(ids)) == len(ids)
+
+    def test_ids_are_ts_shaped_with_six_decimal_microseconds(self):
+        engine = SimulationEngine(agents=[], slack_clients={})
+        ts = engine.mint_ts()
+        secs, _, micros = ts.partition(".")
+        assert secs.isdigit()
+        assert len(micros) == 6 and micros.isdigit()
+
+    def test_seeded_high_water_mark_sorts_after_history(self):
+        import time
+
+        engine = SimulationEngine(agents=[], slack_clients={})
+        # Simulate a rebuild that saw history slightly ahead of the wall clock.
+        future = time.time() + 3600
+        engine._ts_minter.seed_floor(future)
+        assert float(engine.mint_ts()) > future
+
+
+# ---------------------------------------------------------------
+# _flush_persisted — a failed flush must NOT drop conversation content
+# (H1). The DB is the primary store, so a dropped batch is unrecoverable.
+# ---------------------------------------------------------------
+
+class TestFlushPersistedFailure:
+    def _entry(self, ts, content):
+        from src.agent.message_log import LogEntry
+
+        return LogEntry(
+            ts=ts,
+            channel="general",
+            sender_agent_id="su",
+            sender_name="subot",
+            content=content,
+            posted_at=float(ts),
+        )
+
+    @pytest.mark.asyncio
+    async def test_failed_flush_requeues_batch(self):
+        import uuid
+
+        def failing_factory():
+            raise RuntimeError("transient DB error")
+
+        engine = SimulationEngine(
+            agents=[],
+            slack_clients={},
+            session_factory=failing_factory,
+            simulation_run_id=uuid.uuid4(),
+        )
+        engine._pending_persist = [
+            self._entry("100.000001", "first"),
+            self._entry("100.000002", "second"),
+        ]
+
+        await engine._flush_persisted()
+
+        # The batch must survive for the next attempt, not vanish.
+        assert len(engine._pending_persist) == 2
+        assert [e.ts for e in engine._pending_persist] == ["100.000001", "100.000002"]
+
+    @pytest.mark.asyncio
+    async def test_requeued_batch_preserves_order_ahead_of_new_entries(self):
+        import uuid
+
+        def failing_factory():
+            raise RuntimeError("transient DB error")
+
+        engine = SimulationEngine(
+            agents=[],
+            slack_clients={},
+            session_factory=failing_factory,
+            simulation_run_id=uuid.uuid4(),
+        )
+        engine._pending_persist = [
+            self._entry("100.000001", "old-1"),
+            self._entry("100.000002", "old-2"),
+        ]
+        await engine._flush_persisted()
+        # A newer entry arrives after the failed flush re-queued the old batch;
+        # the re-queued batch must remain chronologically ahead of it.
+        engine._pending_persist.append(self._entry("100.000003", "new"))
+
+        assert [e.ts for e in engine._pending_persist] == [
+            "100.000001",
+            "100.000002",
+            "100.000003",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_no_db_clears_buffer(self):
+        # Without a session_factory the buffer is intentionally dropped so it
+        # can't grow unbounded — the re-queue path must not change that.
+        engine = SimulationEngine(agents=[], slack_clients={})
+        engine._pending_persist = [self._entry("100.000001", "x")]
+        await engine._flush_persisted()
+        assert engine._pending_persist == []
+
+
+# ---------------------------------------------------------------
+# Graceful shutdown (R2). A hard kill loses the in-flight turn's messages
+# because the DB — not Slack — is now the durable store, so the SIGTERM path
+# must (a) cut short the idle backoff and (b) leave the flush awaitable on the
+# main coroutine rather than in a cancellable fire-and-forget task.
+# ---------------------------------------------------------------
+
+class TestGracefulShutdown:
+    @pytest.mark.asyncio
+    async def test_request_stop_ends_the_loop_and_does_no_io(self):
+        engine = SimulationEngine(agents=[], slack_clients={})
+        engine._running = True
+        engine.request_stop()
+        assert engine._running is False
+        assert engine._stop_event.is_set()
+
+    @pytest.mark.asyncio
+    async def test_sleep_returns_early_once_stop_is_requested(self):
+        import asyncio
+        import time
+
+        engine = SimulationEngine(agents=[], slack_clients={})
+
+        async def stop_soon():
+            await asyncio.sleep(0.01)
+            engine.request_stop()
+
+        started = time.monotonic()
+        # 30s is the longest idle backoff the main loop uses; without the
+        # stop-event wakeup this would outlast the container's stop grace period.
+        await asyncio.gather(engine._sleep(30), stop_soon())
+        assert time.monotonic() - started < 1.0
+
+    @pytest.mark.asyncio
+    async def test_sleep_is_a_no_op_after_stop(self):
+        import time
+
+        engine = SimulationEngine(agents=[], slack_clients={})
+        engine.request_stop()
+        started = time.monotonic()
+        await engine._sleep(30)
+        assert time.monotonic() - started < 0.5
+
+    @pytest.mark.asyncio
+    async def test_stop_flushes_the_pending_buffer(self):
+        # stop() must drain the buffer, not just flip the flag — it is the last
+        # chance to persist the in-flight turn.
+        engine = SimulationEngine(agents=[], slack_clients={})
+        flushed = []
+
+        async def fake_flush(force_stats=False):
+            flushed.append(force_stats)
+            engine._pending_persist.clear()
+
+        engine._flush_persisted = fake_flush
+        engine._pending_persist = [self._entry("100.000001", "in-flight")]
+
+        await engine.stop()
+
+        assert flushed == [True]  # forced final stats refresh
+        assert engine._pending_persist == []
+        assert engine._running is False
+
+    def _entry(self, ts, content):
+        from src.agent.message_log import LogEntry
+
+        return LogEntry(
+            ts=ts, channel="general", sender_agent_id="su",
+            sender_name="subot", content=content, posted_at=float(ts),
+        )
+
+
+# ---------------------------------------------------------------
+# Slack thread-parent translation. Slack threads on the *root's Slack ts*; the
+# canonical thread_ts is only the same thing when the root was born on Slack. A
+# thread started with Slack off has a minted root id, which Slack has never seen
+# — mirroring a reply into it detaches the message or errors.
+# ---------------------------------------------------------------
+
+class TestSlackParentTranslation:
+    def _engine_with_client(self):
+        from src.agent.agent import Agent
+        from tests.fakes import FakeSlackClient
+
+        agent = Agent("su", "SuBot", "Andrew Su")
+        client = FakeSlackClient(agent_id="su")
+        return SimulationEngine(agents=[agent], slack_clients={"su": client}), client
+
+    def _root(self, ts, *, slack_ts=None):
+        from src.agent.message_log import LogEntry
+
+        return LogEntry(
+            ts=ts, channel="general", sender_agent_id="su", sender_name="SuBot",
+            content="root", posted_at=float(ts), is_bot=True, slack_ts=slack_ts,
+        )
+
+    def test_resolves_a_slack_backed_root_to_its_slack_ts(self):
+        engine, _ = self._engine_with_client()
+        # DB-origin root later mirrored: canonical id != Slack ts.
+        engine.message_log.append(self._root("1700000000.000000", slack_ts="1700009999.111111"))
+        assert engine._slack_parent_ts("1700000000.000000") == "1700009999.111111"
+
+    def test_returns_none_for_a_db_origin_root(self):
+        engine, _ = self._engine_with_client()
+        engine.message_log.append(self._root("1700000000.000000"))  # never mirrored
+        assert engine._slack_parent_ts("1700000000.000000") is None
+
+    def test_falls_back_to_the_canonical_id_when_the_root_is_unknown(self):
+        # Root windowed out by the B2 rebuild bound: preserve pure-Slack-on
+        # behaviour, where the canonical id *is* the Slack ts.
+        engine, _ = self._engine_with_client()
+        assert engine._slack_parent_ts("1700000000.000000") == "1700000000.000000"
+
+    def test_top_level_post_has_no_parent(self):
+        engine, _ = self._engine_with_client()
+        assert engine._slack_parent_ts(None) is None
+
+    @pytest.mark.asyncio
+    async def test_reply_is_mirrored_against_the_roots_slack_ts(self):
+        engine, client = self._engine_with_client()
+        engine.message_log.append(self._root("1700000000.000000", slack_ts="1700009999.111111"))
+
+        await engine._post_message("su", "general", "a reply", thread_ts="1700000000.000000")
+
+        assert len(client.posted) == 1
+        # Slack receives the root's Slack ts, never the minted canonical id.
+        assert client.posted[0]["thread_ts"] == "1700009999.111111"
+
+    @pytest.mark.asyncio
+    async def test_reply_into_a_slackless_thread_is_not_mirrored(self):
+        # The mid-life-toggle case: thread started Slack-off, Slack now on.
+        engine, client = self._engine_with_client()
+        engine.message_log.append(self._root("1700000000.000000"))
+
+        await engine._post_message("su", "general", "a reply", thread_ts="1700000000.000000")
+
+        assert client.posted == []  # no bogus thread_ts sent to Slack
+        # ...but the message is still recorded in the DB-primary log.
+        replies = [e for e in engine.message_log._entries if e.thread_ts == "1700000000.000000"]
+        assert len(replies) == 1
+        assert replies[0].content == "a reply"
+        assert replies[0].slack_ts is None
+        assert replies[0].slack_thread_ts is None
+
+    @pytest.mark.asyncio
+    async def test_mirrored_reply_records_the_slack_parent_mapping(self):
+        engine, _ = self._engine_with_client()
+        engine.message_log.append(self._root("1700000000.000000", slack_ts="1700009999.111111"))
+
+        await engine._post_message("su", "general", "a reply", thread_ts="1700000000.000000")
+
+        reply = [e for e in engine.message_log._entries if e.thread_ts == "1700000000.000000"][0]
+        assert reply.slack_thread_ts == "1700009999.111111"
+        assert reply.thread_ts == "1700000000.000000"  # canonical id unchanged

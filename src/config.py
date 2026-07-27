@@ -60,6 +60,12 @@ class Settings(BaseSettings):
     slack_config_token: str = ""
     slack_config_refresh_token: str = ""
 
+    # Master switch for all Slack integration. None = auto-detect (Slack is on
+    # iff at least one agent has a usable bot token); set SLACK_ENABLED=false to
+    # force the DB-only mode where the local database is the sole conversation
+    # store and no Slack API calls are made. See specs/local-db-conversations.md.
+    slack_enabled: bool | None = None
+
     # AWS SES
     aws_region: str = "us-east-2"
     ses_sender_email: str = "noreply@copi.science"

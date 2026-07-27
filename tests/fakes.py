@@ -128,10 +128,6 @@ class FakeSlackClient:
         self.created_channels: list[dict] = []
         self.invites: list[dict] = []
         self._ts = 1_700_000_000
-        self._visibility_lookup: Callable[[str], str | None] | None = None
-
-    def set_visibility_lookup(self, lookup: Callable[[str], str | None]) -> None:
-        self._visibility_lookup = lookup
 
     def connect(self) -> bool:
         return True
@@ -182,3 +178,9 @@ class FakeSlackClient:
 
     def list_channels(self, include_private: bool = False) -> dict:
         return {}
+
+    def _resolve_channel_id(self, channel: str) -> str:
+        """Name -> id, mirroring AgentSlackClient (ids pass through unchanged)."""
+        if channel.startswith(("C", "G")):
+            return channel
+        return f"C_{channel}"
