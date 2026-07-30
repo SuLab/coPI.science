@@ -1002,3 +1002,102 @@ async def test_activating_an_agent_mid_run_gives_it_a_gate(live20, monkeypatch):
     gate = eng.agents["wu"].allowed_sender_ids
     assert gate is not None, "a newly added agent arrived with NO gate — an open hole"
     assert gate == set(AGENT_IDS_20[10:]), gate
+
+
+# ===========================================================================
+# §6.3 — forward-only cursor semantics
+# ===========================================================================
+
+
+async def test_filtering_is_forward_only(live, monkeypatch):
+    """A message the gate suppressed stays suppressed after the sender becomes a
+    cohort-mate, because the reading agent's cursor has already moved past it.
+
+    This is documented in §6.3 as the reason a membership change never replays
+    backlog, and nothing tested it. The control is the third leg: a message posted
+    AFTER the change must be visible — otherwise a gate that simply never reopened
+    would satisfy the "no replay" assertion and the test would prove nothing.
+    """
+    factory, run_id = live
+    await _topology(factory, {"alpha": ["su"], "beta": ["cravatt"]})
+    _cfg(monkeypatch, enabled=True, policy="isolated")
+    eng = _engine(factory, run_id)
+    await eng._recompute_allowed_sender_ids()
+
+    su = eng.agents["su"]
+    su.state.subscribed_channels = {"general"}
+
+    await _write_message(factory, run_id, agent_id="cravatt", sender_name="CravattBot",
+                         content="BEFORE the membership change",
+                         message_ts="2000.0001", posted_at=2000.0001)
+    await eng._poll_inbound_from_db()
+    assert len(eng.message_log) == 1, "ingestion is never gated"
+    assert eng.message_log.get_new_top_level_posts(
+        since=0, channels={"general"}, exclude_agent_id="su",
+        allowed_sender_ids=su.allowed_sender_ids,
+    ) == [], "precondition: the message must start out suppressed"
+
+    # The turn advances the cursor past everything it was shown, as start() does.
+    su.state.last_seen_cursor = 2000.5
+
+    await _topology(factory, {"alpha": ["su", "cravatt"]})
+    await eng._recompute_allowed_sender_ids()
+    assert "cravatt" in su.allowed_sender_ids, "the gate must have reopened"
+
+    visible = eng.message_log.get_new_top_level_posts(
+        since=su.state.last_seen_cursor, channels={"general"},
+        exclude_agent_id="su", allowed_sender_ids=su.allowed_sender_ids,
+    )
+    assert [e.content for e in visible] == [], (
+        "the backlog must NOT be replayed — filtering is forward-only"
+    )
+
+    await _write_message(factory, run_id, agent_id="cravatt", sender_name="CravattBot",
+                         content="AFTER the membership change",
+                         message_ts="2001.0001", posted_at=2001.0001)
+    await eng._poll_inbound_from_db()
+    visible = eng.message_log.get_new_top_level_posts(
+        since=su.state.last_seen_cursor, channels={"general"},
+        exclude_agent_id="su", allowed_sender_ids=su.allowed_sender_ids,
+    )
+    assert [e.content for e in visible] == ["AFTER the membership change"], (
+        "control leg failed: the gate never actually opened, so the forward-only "
+        "assertion above proves nothing"
+    )
+
+
+async def test_a_rewound_cursor_does_replay_and_the_gate_still_applies(live, monkeypatch):
+    """The other half of forward-only: the gate is not a one-shot stamp on the entry.
+
+    If an agent's cursor is rewound (a resumed run rebuilding state, a bug, an admin),
+    the suppressed message becomes visible again — because the filter is evaluated per
+    read against the CURRENT gate, not baked into the log at ingest. The corollary
+    matters more: rewinding under a still-closed gate must NOT leak.
+    """
+    factory, run_id = live
+    await _topology(factory, {"alpha": ["su"], "beta": ["cravatt"]})
+    _cfg(monkeypatch, enabled=True, policy="isolated")
+    eng = _engine(factory, run_id)
+    await eng._recompute_allowed_sender_ids()
+    su = eng.agents["su"]
+    su.state.subscribed_channels = {"general"}
+
+    await _write_message(factory, run_id, agent_id="cravatt", sender_name="CravattBot",
+                         content="suppressed at first", message_ts="2100.0001",
+                         posted_at=2100.0001)
+    await eng._poll_inbound_from_db()
+
+    def _read(since):
+        return [e.content for e in eng.message_log.get_new_top_level_posts(
+            since=since, channels={"general"}, exclude_agent_id="su",
+            allowed_sender_ids=su.allowed_sender_ids,
+        )]
+
+    # Rewound cursor, gate still closed: still nothing.
+    assert _read(0) == [], "rewinding the cursor must not bypass the gate"
+
+    # Gate opens, cursor rewound: the entry is re-evaluated and now passes. This is
+    # what proves the filter is per-read rather than stamped at ingest.
+    await _topology(factory, {"alpha": ["su", "cravatt"]})
+    await eng._recompute_allowed_sender_ids()
+    assert _read(0) == ["suppressed at first"]
