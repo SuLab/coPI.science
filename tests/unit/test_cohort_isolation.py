@@ -214,15 +214,61 @@ class TestComputeGates:
         assert all(g is None for g in gates.values())
 
     def test_open_policy_uncohorted_agent_is_unrestricted(self):
+        """Under `open`, unrestricted has to mean both directions.
+
+        This assertion originally read `gates["su"] == {"su", "wiseman"}`, which pinned
+        a bug: it left the uncohorted agent reachable by nobody, so it could react and
+        never be replied to. See test_open_policy_is_symmetric_with_uncohorted_agents.
+        """
         c1 = uuid.uuid4()
         gates, _ = compute_gates(
             membership_rows=[(c1, "su"), (c1, "wiseman")],
             agent_ids=["su", "wiseman", "cravatt"],
             isolation_enabled=True, policy=POLICY_OPEN, cohort_count=1,
         )
-        assert gates["su"] == {"su", "wiseman"}
-        assert gates["wiseman"] == {"su", "wiseman"}
+        assert gates["su"] == {"su", "wiseman", "cravatt"}
+        assert gates["wiseman"] == {"su", "wiseman", "cravatt"}
         assert gates["cravatt"] is None, "uncohorted agent must not be silenced"
+
+    def test_open_policy_is_symmetric_with_uncohorted_agents(self):
+        """Regression: under policy=open an uncohorted agent must be reachable, not
+        merely able to reach.
+
+        Its own gate is None so it may act on anyone; but a cohorted agent's gate is
+        the union of its co-members, which would not contain it. The result was an
+        agent that could react and never be replied to — it could not hold a
+        conversation, which is the opposite of "unrestricted", and it contradicts the
+        §5.1 row "`A` has no cohort memberships, policy = open -> Yes".
+
+        Found by a real multi-turn run: the uncohorted agent opened two threads and no
+        cohorted agent ever replied. Every gate-computation test passed, and the
+        symmetry test skipped the case because it only compared pairs where both gates
+        were sets.
+        """
+        c1 = uuid.uuid4()
+        gates, _ = compute_gates(
+            membership_rows=[(c1, "su"), (c1, "wiseman")],
+            agent_ids=["su", "wiseman", "cravatt"],
+            isolation_enabled=True, policy=POLICY_OPEN, cohort_count=1,
+        )
+        assert gates["cravatt"] is None, "the uncohorted agent stays unrestricted"
+        assert "cravatt" in gates["su"], (
+            "a cohorted agent must be able to act on an uncohorted one under "
+            f"policy=open, else they can never converse. su gate={gates['su']}"
+        )
+        assert "cravatt" in gates["wiseman"]
+
+    def test_isolated_policy_does_not_add_uncohorted_agents(self):
+        """The fix must not leak into policy=isolated, where uncohorted means excluded."""
+        c1 = uuid.uuid4()
+        gates, _ = compute_gates(
+            membership_rows=[(c1, "su"), (c1, "wiseman")],
+            agent_ids=["su", "wiseman", "cravatt"],
+            isolation_enabled=True, policy=POLICY_ISOLATED, cohort_count=1,
+        )
+        assert gates["su"] == {"su", "wiseman"}
+        assert "cravatt" not in gates["su"]
+        assert gates["cravatt"] == set()
 
     def test_isolated_policy_uncohorted_agent_gets_empty_set(self):
         c1 = uuid.uuid4()

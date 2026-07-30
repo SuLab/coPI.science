@@ -2935,6 +2935,22 @@ class SimulationEngine:
 
         # Add to message log. When Slack posted this, record the mirror mapping
         # (in pure Slack-on mode slack_ts == ts).
+        #
+        # `visibility` is stamped from the channel's class. It was previously omitted,
+        # so every agent-authored message defaulted to "public" even in a
+        # collab_private channel — including the ones written into a PI-created
+        # refinement channel. Two readers depend on this field:
+        #
+        #   - the cohort gate's private-channel exemption (_entry_allowed), which is
+        #     how a PI pairing outranks an admin cohort grouping — with the field
+        #     unset the exemption never fired, and two agents in different cohorts
+        #     could not converse in the channel the PI made for them;
+        #   - the G2 memory-synthesis filter, which is meant to keep private-channel
+        #     content out of the public memory segment.
+        #
+        # Found by a real multi-turn run: the private-channel messages persisted with
+        # visibility='public' while the AgentChannel row said collab_private.
+        # See .notes/cohort-system-v2.md §7.
         entry = LogEntry(
             ts=ts,
             channel=channel,
@@ -2944,6 +2960,7 @@ class SimulationEngine:
             thread_ts=thread_ts,
             posted_at=posted_at,
             is_bot=True,
+            visibility=self._channel_visibility.get(channel, VISIBILITY_PUBLIC),
             slack_ts=slack_ts,
             slack_channel_id=(result.get("channel") if result else None),
             slack_thread_ts=(slack_parent if slack_ts else None),

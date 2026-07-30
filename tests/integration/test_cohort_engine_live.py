@@ -201,10 +201,12 @@ EXPECTED_OPEN = {
     ("one_empty_cohort", "open"): {a: None for a in AGENT_IDS},
     ("offline_member_only", "open"): {a: None for a in AGENT_IDS},
     ("single_solo", "open"): {
-        "su": {"su"}, "wiseman": None, "cravatt": None, "lotz": None,
+        "su": {"su", "wiseman", "cravatt", "lotz"},
+        "wiseman": None, "cravatt": None, "lotz": None,
     },
     ("one_pair", "open"): {
-        "su": {"su", "wiseman"}, "wiseman": {"su", "wiseman"},
+        "su": {"su", "wiseman", "cravatt", "lotz"},
+        "wiseman": {"su", "wiseman", "cravatt", "lotz"},
         "cravatt": None, "lotz": None,
     },
     ("two_disjoint_pairs", "open"): {
@@ -212,17 +214,19 @@ EXPECTED_OPEN = {
         "cravatt": {"cravatt", "lotz"}, "lotz": {"cravatt", "lotz"},
     },
     ("overlapping", "open"): {
-        "su": {"su", "wiseman", "cravatt"}, "wiseman": {"su", "wiseman"},
-        "cravatt": {"su", "cravatt"}, "lotz": None,
+        "su": {"su", "wiseman", "cravatt", "lotz"},
+        "wiseman": {"su", "wiseman", "lotz"},
+        "cravatt": {"su", "cravatt", "lotz"}, "lotz": None,
     },
     ("one_big_cohort", "open"): {a: set(AGENT_IDS) for a in AGENT_IDS},
-    ("hub_in_all", "open"): {
+    ("hub_in_all", "open"): {   # every agent is cohorted, so nothing to add
         "su": {"su", "wiseman", "cravatt", "lotz"},
         "wiseman": {"su", "wiseman"}, "cravatt": {"su", "cravatt"},
         "lotz": {"su", "lotz"},
     },
     ("partial", "open"): {
-        "su": {"su", "wiseman"}, "wiseman": {"su", "wiseman"},
+        "su": {"su", "wiseman", "cravatt", "lotz"},
+        "wiseman": {"su", "wiseman", "cravatt", "lotz"},
         "cravatt": None, "lotz": None,
     },
 }
@@ -276,12 +280,22 @@ async def test_gate_relation_is_symmetric_for_every_topology(live, monkeypatch):
         _cfg(monkeypatch, enabled=True, policy="isolated")
         eng = _engine(factory, run_id)
         await eng._recompute_allowed_sender_ids()
+        def _may_act(viewer, target_id):
+            """None means unrestricted, so it may act on anyone."""
+            g = viewer.allowed_sender_ids
+            return True if g is None else target_id in g
+
         for a_id, a in eng.agents.items():
             for b_id, b in eng.agents.items():
-                if a.allowed_sender_ids is None or b.allowed_sender_ids is None:
+                if a_id == b_id:
                     continue
-                assert (b_id in a.allowed_sender_ids) == (a_id in b.allowed_sender_ids), (
-                    f"{name}: asymmetric gate between {a_id} and {b_id}"
+                # Deliberately NOT skipping the None-vs-set case. The earlier version
+                # of this test skipped it, and that is precisely how it missed the
+                # policy=open asymmetry: an uncohorted agent (gate None) could act on
+                # a cohorted one, but not the reverse, so the two could never converse.
+                assert _may_act(a, b_id) == _may_act(b, a_id), (
+                    f"{name}: asymmetric gate between {a_id} and {b_id} — "
+                    f"{a_id} gate={a.allowed_sender_ids}, {b_id} gate={b.allowed_sender_ids}"
                 )
 
 
@@ -797,3 +811,53 @@ async def test_empty_topology_fails_open_not_closed(live, monkeypatch):
         "an empty topology must fail OPEN — a transient write window must never "
         "silence the roster"
     )
+
+
+async def test_post_message_stamps_private_channel_visibility(live, monkeypatch):
+    """A message posted into a collab_private channel must persist as collab_private.
+
+    Regression for a defect that made the §7 exemption dead code. `_post_message`
+    omitted `visibility` when constructing the LogEntry, so every agent-authored
+    message defaulted to "public" — even in a PI-created refinement channel. The gate's
+    private-channel exemption reads that field, so it never fired: two agents in
+    different cohorts could not converse in the channel the PI made for them.
+
+    The existing §7 test could not catch this because it writes the AgentMessage row
+    directly with the visibility already set, exercising only the read path. This one
+    goes through `_post_message` and reads back what actually landed.
+    """
+    factory, run_id = live
+    await _topology(factory, {"alpha": ["su"], "beta": ["cravatt"]})
+    _cfg(monkeypatch, enabled=True, policy="isolated")
+    eng = _engine(factory, run_id)
+    await eng._recompute_allowed_sender_ids()
+
+    priv = "collab-priv-su-cravatt"
+    eng._channel_visibility[priv] = VISIBILITY_COLLAB_PRIVATE
+    eng._channel_id_map[priv] = f"local:{priv}"
+
+    await eng._post_message("cravatt", priv, "my angle on the refinement")
+    await eng._post_message("su", "general", "a public post")
+    await eng._flush_persisted()
+
+    async with factory() as db:
+        rows = {
+            r.channel_name: r.visibility
+            for r in (await db.execute(
+                select(AgentMessage).where(AgentMessage.simulation_run_id == run_id)
+            )).scalars().all()
+        }
+    assert rows[priv] == VISIBILITY_COLLAB_PRIVATE, (
+        "a message posted into a collab_private channel persisted as "
+        f"{rows[priv]!r} — the §7 exemption keys on this field and would never fire"
+    )
+    assert rows["general"] == VISIBILITY_PUBLIC
+
+    # And the exemption now actually fires: su is maximally gated, yet sees the message.
+    su = eng.agents["su"]
+    su.state.subscribed_channels = {priv}
+    visible = eng.message_log.get_new_top_level_posts(
+        since=0, channels={priv}, exclude_agent_id="su",
+        allowed_sender_ids=su.allowed_sender_ids,
+    )
+    assert [e.content for e in visible] == ["my angle on the refinement"]

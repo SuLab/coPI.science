@@ -365,7 +365,9 @@ async def test_preview_matches_the_engine_semantics(
         membership_rows=rows, agent_ids=["cravatt", "su", "wiseman"],
         isolation_enabled=True, policy="open", cohort_count=1,
     )
-    assert gates["su"] == {"su", "wiseman"}
+    # Under policy=open the uncohorted agent is included in su's gate, so the two can
+    # actually converse (both directions). See the unit-level regression test.
+    assert gates["su"] == {"su", "wiseman", "cravatt"}
     assert gates["cravatt"] is None
 
     r = await client.get("/admin/cohorts/topology", headers=_auth(admin.id))

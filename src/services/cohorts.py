@@ -125,6 +125,25 @@ def compute_gates(
         return {aid: None for aid in agent_ids}, reason
 
     isolate_uncohorted = policy == POLICY_ISOLATED
+
+    # Under policy "open", an uncohorted agent is unrestricted — and that has to hold
+    # in BOTH directions. Its own gate is None, so it may act on anyone; but a cohorted
+    # agent's gate is the union of its co-members, which would never contain it. The
+    # result was an agent that could react and never be replied to: it could not hold a
+    # conversation, which is the opposite of "unrestricted". Adding the uncohorted
+    # agents to every cohorted agent's mate set implements the §5.1 row
+    # ("`A` has no cohort memberships, and policy = open -> Yes") and makes the
+    # relation symmetric.
+    #
+    # Found by a real multi-turn run: an uncohorted agent opened two threads and no
+    # cohorted agent ever replied. The gate-computation tests all passed, and the
+    # symmetry test skipped the case (it compared only pairs where BOTH gates were
+    # sets). See v2 §5.2.
+    unrestricted: set[str] = (
+        set() if isolate_uncohorted
+        else {aid for aid in agent_ids if not cohorts_by_agent.get(aid)}
+    )
+
     gates: dict[str, set[str] | None] = {}
     for aid in agent_ids:
         cohort_ids = cohorts_by_agent.get(aid)
@@ -136,7 +155,7 @@ def compute_gates(
         mates: set[str] = set()
         for cid in cohort_ids:
             mates |= members_by_cohort.get(cid, set())
-        gates[aid] = mates
+        gates[aid] = mates | unrestricted
     return gates, None
 
 
