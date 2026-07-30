@@ -58,20 +58,46 @@ def _post(ts, agent_id, name, content):
     )
 
 
+# A profile that makes the EXCLUDED post directly relevant and the INCLUDED post
+# clearly irrelevant. Without this the scan has nothing to latch onto: an agent with
+# no profile selects no posts either way, and the test passes vacuously — measured.
+SU_PROFILE = """# Su Lab
+
+We run genome-scale CRISPR functional-genomics screens and build chemical-probe
+pipelines. We are actively seeking collaborators in **activity-based protein
+profiling** and **covalent ligand discovery** to turn screen hits into chemical
+probes. We are NOT currently working on spatial transcriptomics or imaging.
+"""
+
+# Irrelevant to SU_PROFILE — the post the gate lets through.
+POST_IRRELEVANT = (
+    "We built a spatial transcriptomics imaging atlas of tumour microenvironments "
+    "and are looking for an imaging-analysis partner."
+)
+# Directly relevant to SU_PROFILE — the post the gate removes.
+POST_RELEVANT = (
+    "We run activity-based protein profiling and want a functional-genomics "
+    "collaborator to pair covalent ligand discovery with CRISPR screen hits."
+)
+
+
 @pytest.fixture
 def log():
     ml = MessageLog()
     ml.set_bot_name_map({"subot": "su", "wisemanbot": "wiseman", "cravattbot": "cravatt"})
-    ml.append(_post("1000.0001", "wiseman", "WisemanBot",
-                    "We have a spatial multiomics platform for tumour microenvironments "
-                    "and are looking for a functional-genomics partner."))
-    ml.append(_post("1000.0002", "cravatt", "CravattBot",
-                    "ZEBRAFINCH-MARKER: we run activity-based protein profiling and want "
-                    "a chemistry collaborator for covalent ligand discovery."))
+    ml.append(_post("1000.0001", "wiseman", "WisemanBot", POST_IRRELEVANT))
+    ml.append(_post("1000.0002", "cravatt", "CravattBot", POST_RELEVANT))
     return ml
 
 
+def _profiled_agent():
+    a = _agent()
+    a._public_profile = SU_PROFILE   # the cached-profile seam; avoids disk I/O
+    return a
+
+
 async def _call(system_prompt, messages, model=None):
+    """One real API call. Sonnet (what Phase 2 uses) with a hard token cap."""
     from src.config import get_settings
     from src.services import llm
 
@@ -85,52 +111,78 @@ async def _call(system_prompt, messages, model=None):
     )
 
 
-async def test_real_model_never_sees_a_gated_out_post(log):
-    """The gate removes the post before the prompt is built, so a real model cannot
-    reference it. The marker string is the proof: if it appears in the response, the
-    excluded content reached the model."""
-    a = _agent()
+def _post_dicts(posts):
+    """Exactly the shape _phase2_scan_filter builds (note: content_snippet)."""
+    return [
+        {"post_id": p.ts, "sender": p.sender_name, "channel": p.channel,
+         "content_snippet": p.content}
+        for p in posts
+    ]
+
+
+def _selected_ids(response: str) -> set[str] | None:
+    """Parse selected_post_ids out of a real Phase 2 response."""
+    import json
+    import re
+
+    m = re.search(r"\{.*\}", response, re.S)
+    if not m:
+        return None
+    try:
+        data = json.loads(m.group(0))
+    except json.JSONDecodeError:
+        return None
+    return set(map(str, data.get("selected_post_ids") or []))
+
+
+async def test_real_model_would_have_acted_on_the_post_the_gate_removes(log):
+    """The claim the whole feature rests on, measured on a real model.
+
+    Two real Phase 2 calls with the same profile and the same log, differing only in
+    whether the gate is applied:
+
+    - ungated, the model **selects** the excluded agent's post and explains why —
+      i.e. it would have opened a thread and spent Opus calls on it;
+    - gated, that post is absent from the prompt, so the model cannot select it.
+
+    A fake LLM can only show the prompt lacks the text. Only a real call shows the
+    model's *decision* changes — which is what "the gate saves calls" actually means.
+    Asserting on both halves is deliberate: without the ungated leg, a model that
+    selects nothing regardless would make the gated leg pass for the wrong reason.
+    """
+    a = _profiled_agent()
+
+    ungated = log.get_new_top_level_posts(
+        since=0, channels={"general"}, exclude_agent_id="su", allowed_sender_ids=None,
+    )
+    assert {p.ts for p in ungated} == {"1000.0001", "1000.0002"}
+    sys_u, msg_u = a.build_phase2_scan_prompt(_post_dicts(ungated))
+    assert POST_RELEVANT[:40] in sys_u + str(msg_u)
+    selected_ungated = _selected_ids(await _call(sys_u, msg_u))
+    assert selected_ungated is not None, "real Phase 2 response did not parse"
+    assert "1000.0002" in selected_ungated, (
+        "control leg failed: the model did not act on the relevant post even with the "
+        f"gate off, so the gated leg proves nothing. selected={selected_ungated}"
+    )
+
     gated = log.get_new_top_level_posts(
         since=0, channels={"general"}, exclude_agent_id="su",
         allowed_sender_ids={"su", "wiseman"},
     )
-    assert {p.sender_agent_id for p in gated} == {"wiseman"}
-
-    post_dicts = [
-        {"post_id": p.ts, "sender": p.sender_name, "channel": p.channel,
-         "content": p.content}
-        for p in gated
-    ]
-    system, messages = a.build_phase2_scan_prompt(post_dicts)
-    assert "ZEBRAFINCH-MARKER" not in system + str(messages)
-
-    response = await _call(system, messages)
-    assert response, "the real API returned nothing"
-    assert "ZEBRAFINCH-MARKER" not in response, (
-        "the model echoed content the gate removed — impossible unless the prompt "
-        "leaked it"
+    assert {p.ts for p in gated} == {"1000.0001"}
+    sys_g, msg_g = a.build_phase2_scan_prompt(_post_dicts(gated))
+    assert POST_RELEVANT[:40] not in sys_g + str(msg_g)
+    selected_gated = _selected_ids(await _call(sys_g, msg_g))
+    assert selected_gated is not None, "real Phase 2 response did not parse"
+    assert "1000.0002" not in selected_gated, (
+        "the model selected a post the gate removed — impossible unless the prompt "
+        f"leaked it. selected={selected_gated}"
     )
 
-
-async def test_real_model_sees_the_post_when_ungated(log):
-    """Control: with the gate off the same call DOES carry the excluded content, so
-    the previous test is measuring the gate and not a model quirk."""
-    a = _agent()
-    ungated = log.get_new_top_level_posts(
-        since=0, channels={"general"}, exclude_agent_id="su", allowed_sender_ids=None,
+    assert selected_ungated != selected_gated, (
+        "the gate produced no measurable change in the model's decision: "
+        f"{selected_ungated} vs {selected_gated}"
     )
-    assert len(ungated) == 2
-    post_dicts = [
-        {"post_id": p.ts, "sender": p.sender_name, "channel": p.channel,
-         "content": p.content}
-        for p in ungated
-    ]
-    system, messages = a.build_phase2_scan_prompt(post_dicts)
-    assert "ZEBRAFINCH-MARKER" in system + str(messages), (
-        "the control prompt must contain the marker"
-    )
-    response = await _call(system, messages)
-    assert response, "the real API returned nothing"
 
 
 async def test_real_model_prose_gets_its_cross_cohort_mention_stripped(monkeypatch):
@@ -190,7 +242,7 @@ async def test_real_scan_response_parses_under_an_active_gate(log):
     import json
     import re
 
-    a = _agent()
+    a = _profiled_agent()
     gated = log.get_new_top_level_posts(
         since=0, channels={"general"}, exclude_agent_id="su",
         allowed_sender_ids={"su", "wiseman"},
@@ -198,7 +250,7 @@ async def test_real_scan_response_parses_under_an_active_gate(log):
     allowed_ids = {p.ts for p in gated}
     post_dicts = [
         {"post_id": p.ts, "sender": p.sender_name, "channel": p.channel,
-         "content": p.content}
+         "content_snippet": p.content}
         for p in gated
     ]
     system, messages = a.build_phase2_scan_prompt(post_dicts)
