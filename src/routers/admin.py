@@ -4,22 +4,31 @@ import logging
 import re
 import uuid
 from datetime import datetime, timezone
+from typing import Any
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, status
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
+from sqlalchemy import delete as sa_delete
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from src.config import get_settings
 from src.database import get_db
 from src.dependencies import get_admin_user, get_current_user
 from src.models import (
+    COHORT_ACTION_AGENT_ADDED,
+    COHORT_ACTION_AGENT_REMOVED,
+    COHORT_ACTION_CREATED,
+    COHORT_ACTION_DELETED,
+    COHORT_ACTION_TOPOLOGY_SNAPSHOT,
     AccessAllowlist,
     AgentChannel,
     AgentMessage,
     AgentRegistry,
     Cohort,
+    CohortAuditEvent,
     CohortMembership,
     Job,
     LlmCallLog,
@@ -29,6 +38,11 @@ from src.models import (
     ThreadDecision,
     User,
     WaitlistSignup,
+)
+from src.services.cohorts import (
+    compute_gates,
+    record_cohort_audit_event,
+    summarise_gates,
 )
 from src.services.orcid import fetch_orcid_profile
 from src.services.validators import csv_safe_cell
@@ -1306,12 +1320,73 @@ async def admin_waitlist_mark_contacted(
 
 # ---------------------------------------------------------------------------
 # Cohorts — admin-managed groups gating which agents interact during simulation.
-# See specs/cohort-system.md. Isolation is only enforced when the running sim
-# has settings.cohort_isolation_enabled = True.
+#
+# The gate is an agent-BEHAVIOUR filter, never access control: it changes what an
+# agent acts on, never what a human can read. Nothing in this section may be reused
+# to scope a PI-facing view. See .notes/cohort-system-v2.md §6.2.
+#
+# Enforcement only happens in the running simulation, and only when
+# settings.cohort_isolation_enabled is True. Membership edits are picked up live on
+# the engine's roster-sync cadence (~30s) — no restart. Filtering is forward-only:
+# adding an agent to a cohort does not reveal the backlog it missed while excluded,
+# because the agent's cursor has already advanced past it (v2 §6.3).
 # ---------------------------------------------------------------------------
 
 # Cohort name: lowercase alphanumeric + hyphens, max 48 chars (slug style).
 _COHORT_NAME_RE = re.compile(r"^[a-z0-9-]{1,48}$")
+
+
+async def _cohort_gate_context(db: AsyncSession) -> dict[str, Any]:
+    """Preview of the gate the engine will compute from the current topology.
+
+    Uses the same ``compute_gates`` the engine uses, so the preview cannot drift from
+    the behaviour. The roster is AgentRegistry's *active* agents — what the engine
+    loads — so an inactive agent shows as absent rather than as unrestricted.
+    See v2 §12.
+    """
+    settings = get_settings()
+    active = (await db.execute(
+        select(AgentRegistry.agent_id, AgentRegistry.bot_name)
+        .where(AgentRegistry.status == "active")
+        .order_by(AgentRegistry.bot_name)
+    )).all()
+    agent_ids = [r.agent_id for r in active]
+    rows = (await db.execute(
+        select(CohortMembership.cohort_id, CohortMembership.agent_id)
+    )).all()
+    cohort_count = (await db.execute(
+        select(func.count()).select_from(Cohort)
+    )).scalar() or 0
+
+    gates, preflight_error = compute_gates(
+        membership_rows=[(r[0], r[1]) for r in rows],
+        agent_ids=agent_ids,
+        isolation_enabled=settings.cohort_isolation_enabled,
+        policy=settings.cohort_default_policy,
+        cohort_count=cohort_count,
+        has_db=True,
+    )
+
+    # Most recent topology snapshot written by a running engine — the only way this
+    # process can see the engine's in-memory counters (v2 §9.4 / §13.1).
+    snapshot = (await db.execute(
+        select(CohortAuditEvent)
+        .where(CohortAuditEvent.action == COHORT_ACTION_TOPOLOGY_SNAPSHOT)
+        .order_by(CohortAuditEvent.created_at.desc())
+        .limit(1)
+    )).scalar_one_or_none()
+
+    return {
+        "isolation_enabled": settings.cohort_isolation_enabled,
+        "default_policy": settings.cohort_default_policy,
+        "preflight_error": preflight_error,
+        "preview": {
+            aid: (None if g is None else sorted(g)) for aid, g in gates.items()
+        },
+        "summary": summarise_gates(gates),
+        "bot_names": {r.agent_id: r.bot_name for r in active},
+        "snapshot": snapshot,
+    }
 
 
 @router.get("/cohorts", response_class=HTMLResponse)
@@ -1320,7 +1395,7 @@ async def admin_cohorts(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_admin_user),
 ):
-    """List all cohorts with member counts."""
+    """List all cohorts with member counts, plus the live gate preview."""
     result = await db.execute(
         select(Cohort).options(selectinload(Cohort.memberships)).order_by(Cohort.name)
     )
@@ -1344,6 +1419,8 @@ async def admin_cohorts(
             cohorts=cohorts,
             creator_map=creator_map,
             error=request.query_params.get("error"),
+            notice=request.query_params.get("notice"),
+            gate=await _cohort_gate_context(db),
         ),
     )
 
@@ -1375,8 +1452,145 @@ async def admin_cohort_create(
         created_by=current_user.id,
     )
     db.add(cohort)
+    await db.flush()
+    await record_cohort_audit_event(
+        db,
+        action=COHORT_ACTION_CREATED,
+        cohort_id=cohort.id,
+        cohort_name=cohort.name,
+        actor=current_user,
+    )
     await db.commit()
     return RedirectResponse(url=f"/admin/cohorts/{cohort.id}", status_code=302)
+
+
+@router.get("/cohorts/topology", response_class=HTMLResponse)
+async def admin_cohort_topology(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_admin_user),
+):
+    """Agent x cohort matrix — edit the whole topology in one pass.
+
+    Granular control: every (agent, cohort) pair is a checkbox, so an admin can move
+    several agents across several cohorts in one save instead of walking the
+    per-cohort add/remove forms. The resulting per-agent gate is shown alongside,
+    computed with the engine's own logic. See v2 §12.
+
+    Registered before /cohorts/{cohort_id} so "topology" is not swallowed as a UUID
+    path parameter.
+    """
+    cohorts = (await db.execute(
+        select(Cohort).order_by(Cohort.name)
+    )).scalars().all()
+    agents = (await db.execute(
+        select(AgentRegistry).order_by(AgentRegistry.bot_name)
+    )).scalars().all()
+    rows = (await db.execute(
+        select(CohortMembership.cohort_id, CohortMembership.agent_id)
+    )).all()
+    membership_set = {f"{c}:{a}" for c, a in rows}
+
+    return templates.TemplateResponse(
+        request,
+        "admin/cohort_topology.html",
+        _template_context(
+            request,
+            current_user,
+            active_admin="cohorts",
+            cohorts=cohorts,
+            agents=agents,
+            membership_set=membership_set,
+            error=request.query_params.get("error"),
+            notice=request.query_params.get("notice"),
+            gate=await _cohort_gate_context(db),
+        ),
+    )
+
+
+@router.post("/cohorts/topology")
+async def admin_cohort_topology_save(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_admin_user),
+):
+    """Apply a whole-matrix edit as a diff against the cells that were rendered.
+
+    The form posts one ``cell`` value per ticked box (``{cohort_id}:{agent_id}``) and
+    one ``present`` value per rendered cell. Diffing against ``present`` rather than
+    against the whole table means a stale or partial form can never delete
+    memberships for a cohort or agent it did not display — the usual
+    checkbox-matrix data-loss bug. Unknown cohort/agent ids are ignored, never
+    written. Every add and remove is audited individually.
+    """
+    form = await request.form()
+    ticked = {v for v in form.getlist("cell") if isinstance(v, str)}
+    rendered = {v for v in form.getlist("present") if isinstance(v, str)}
+    if not rendered:
+        return RedirectResponse(
+            url="/admin/cohorts/topology?error=Nothing+to+save", status_code=302
+        )
+    if ticked - rendered:
+        return RedirectResponse(
+            url="/admin/cohorts/topology?error=Malformed+submission", status_code=302
+        )
+
+    cohorts_by_id = {
+        str(c.id): c for c in (await db.execute(select(Cohort))).scalars().all()
+    }
+    valid_agents = {
+        r[0] for r in (await db.execute(select(AgentRegistry.agent_id))).all()
+    }
+    existing = {
+        (str(cid), aid): mid
+        for mid, cid, aid in (await db.execute(
+            select(CohortMembership.id, CohortMembership.cohort_id,
+                   CohortMembership.agent_id)
+        )).all()
+    }
+
+    added = removed = 0
+    for cell in sorted(rendered):
+        cid, _, aid = cell.partition(":")
+        if not cid or not aid or cid not in cohorts_by_id or aid not in valid_agents:
+            continue  # stale form referencing something that no longer exists
+        want = cell in ticked
+        have = (cid, aid) in existing
+        if want and not have:
+            db.add(CohortMembership(
+                cohort_id=uuid.UUID(cid), agent_id=aid, added_by=current_user.id,
+            ))
+            await record_cohort_audit_event(
+                db,
+                action=COHORT_ACTION_AGENT_ADDED,
+                cohort_id=uuid.UUID(cid),
+                cohort_name=cohorts_by_id[cid].name,
+                agent_id=aid,
+                actor=current_user,
+            )
+            added += 1
+        elif have and not want:
+            await db.execute(
+                sa_delete(CohortMembership).where(
+                    CohortMembership.id == existing[(cid, aid)]
+                )
+            )
+            await record_cohort_audit_event(
+                db,
+                action=COHORT_ACTION_AGENT_REMOVED,
+                cohort_id=uuid.UUID(cid),
+                cohort_name=cohorts_by_id[cid].name,
+                agent_id=aid,
+                actor=current_user,
+            )
+            removed += 1
+
+    if added or removed:
+        await db.commit()
+    return RedirectResponse(
+        url=f"/admin/cohorts/topology?notice={added}+added,+{removed}+removed",
+        status_code=302,
+    )
 
 
 @router.get("/cohorts/{cohort_id}", response_class=HTMLResponse)
@@ -1386,7 +1600,7 @@ async def admin_cohort_detail(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_admin_user),
 ):
-    """Cohort detail: members + add-agent picker + agent→cohort map."""
+    """Cohort detail: members, add-agent picker, agent->cohort map, audit log."""
     result = await db.execute(
         select(Cohort).options(selectinload(Cohort.memberships)).where(Cohort.id == cohort_id)
     )
@@ -1412,7 +1626,7 @@ async def admin_cohort_detail(
         for u in u_result.scalars().all():
             adder_map[str(u.id)] = u.name
 
-    # Read-only agent → cohorts map (all memberships across all cohorts).
+    # Read-only agent -> cohorts map (all memberships across all cohorts).
     all_memberships = (await db.execute(
         select(CohortMembership.agent_id, Cohort.name)
         .join(Cohort, CohortMembership.cohort_id == Cohort.id)
@@ -1420,6 +1634,16 @@ async def admin_cohort_detail(
     agent_cohort_map: dict[str, list[str]] = {}
     for aid, cname in all_memberships:
         agent_cohort_map.setdefault(aid, []).append(cname)
+
+    # Audit log for this cohort. Matched on cohort_id, which outlives the cohort
+    # row; a recreated cohort with the same name gets a new id and so a fresh
+    # trail, which is the honest reading.
+    audit_events = (await db.execute(
+        select(CohortAuditEvent)
+        .where(CohortAuditEvent.cohort_id == cohort_id)
+        .order_by(CohortAuditEvent.created_at.desc())
+        .limit(200)
+    )).scalars().all()
 
     return templates.TemplateResponse(
         request,
@@ -1434,7 +1658,10 @@ async def admin_cohort_detail(
             adder_map=adder_map,
             all_agents=all_agents,
             agent_cohort_map=agent_cohort_map,
+            audit_events=audit_events,
             error=request.query_params.get("error"),
+            notice=request.query_params.get("notice"),
+            gate=await _cohort_gate_context(db),
         ),
     )
 
@@ -1445,13 +1672,38 @@ async def admin_cohort_delete(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_admin_user),
 ):
-    """Delete a cohort (cascades its memberships)."""
-    result = await db.execute(select(Cohort).where(Cohort.id == cohort_id))
+    """Delete a cohort. Refused while it still has members.
+
+    A server-side guard, not just a disabled button: deleting a populated cohort
+    cascades its memberships away, silently reshaping the interaction topology of a
+    running simulation. Remove the members first so each removal is an audited,
+    individually reversible step. See v2 §12.
+    """
+    result = await db.execute(
+        select(Cohort).options(selectinload(Cohort.memberships)).where(Cohort.id == cohort_id)
+    )
     cohort = result.scalar_one_or_none()
-    if cohort:
-        await db.delete(cohort)
-        await db.commit()
-    return RedirectResponse(url="/admin/cohorts", status_code=302)
+    if not cohort:
+        return RedirectResponse(url="/admin/cohorts", status_code=302)
+    if cohort.memberships:
+        return RedirectResponse(
+            url=f"/admin/cohorts/{cohort_id}?error=Remove+all+"
+                f"{len(cohort.memberships)}+members+before+deleting+this+cohort",
+            status_code=302,
+        )
+    name = cohort.name
+    await record_cohort_audit_event(
+        db,
+        action=COHORT_ACTION_DELETED,
+        cohort_id=cohort_id,
+        cohort_name=name,
+        actor=current_user,
+    )
+    await db.delete(cohort)
+    await db.commit()
+    return RedirectResponse(
+        url=f"/admin/cohorts?notice=Deleted+cohort+{name}", status_code=302
+    )
 
 
 @router.post("/cohorts/{cohort_id}/add-agent")
@@ -1494,6 +1746,14 @@ async def admin_cohort_add_agent(
         agent_id=agent_id,
         added_by=current_user.id,
     ))
+    await record_cohort_audit_event(
+        db,
+        action=COHORT_ACTION_AGENT_ADDED,
+        cohort_id=cohort_id,
+        cohort_name=cohort.name,
+        agent_id=agent_id,
+        actor=current_user,
+    )
     await db.commit()
     return RedirectResponse(url=f"/admin/cohorts/{cohort_id}", status_code=302)
 
@@ -1506,6 +1766,9 @@ async def admin_cohort_remove_agent(
     current_user: User = Depends(get_admin_user),
 ):
     """Remove an agent from the cohort."""
+    cohort = (await db.execute(
+        select(Cohort).where(Cohort.id == cohort_id)
+    )).scalar_one_or_none()
     result = await db.execute(
         select(CohortMembership).where(
             CohortMembership.cohort_id == cohort_id,
@@ -1514,6 +1777,14 @@ async def admin_cohort_remove_agent(
     )
     membership = result.scalar_one_or_none()
     if membership:
+        await record_cohort_audit_event(
+            db,
+            action=COHORT_ACTION_AGENT_REMOVED,
+            cohort_id=cohort_id,
+            cohort_name=cohort.name if cohort else "?",
+            agent_id=membership.agent_id,
+            actor=current_user,
+        )
         await db.delete(membership)
         await db.commit()
     return RedirectResponse(url=f"/admin/cohorts/{cohort_id}", status_code=302)

@@ -5,10 +5,13 @@
 # GitHub-side hooks by design — this script is the whole gate, and it runs on push.
 #
 # Steps:
-#   1. ruff lint of the test suite. (New test code is kept clean. Legacy src/ carries
+#   1. Alembic sanity: exactly one head, no duplicate revision ids. Cheap, offline,
+#      and first because it catches the one class of breakage that a clean `git merge`
+#      and a fully green test suite both miss. See .notes/cohort-system-v2.md §14.
+#   2. ruff lint of the test suite. (New test code is kept clean. Legacy src/ carries
 #      pre-existing style debt — out of scope for this behavior-pinning gate; lint it
 #      separately with `ruff check src` when you're ready to pay that down.)
-#   2. Full pytest run — unit + integration + characterization + contract — with
+#   3. Full pytest run — unit + integration + characterization + contract — with
 #      branch coverage over src/, failing under COV_MIN (a ratchet floor: raise it as
 #      coverage grows, never lower it).
 #
@@ -41,6 +44,32 @@ if ! docker info >/dev/null 2>&1; then
   echo "suites need it (testcontainers spins an ephemeral Postgres). Start Docker and retry." >&2
   exit 1
 fi
+
+echo "==> alembic (single head, no duplicate revision ids)"
+# Two migrations sharing a revision id is invisible to git and to pytest: the merge
+# is clean, every test passes, and Alembic only warns. The damage shows up at deploy
+# — `alembic upgrade head` dies on multiple heads, and a targeted `upgrade <rev>`
+# silently applies whichever duplicate sorts last while stamping the DB as fully
+# migrated. Assign revision ids at merge, never at branch.
+dupes="$(grep -h '^revision' alembic/versions/*.py | sort | uniq -d || true)"
+if [ -n "$dupes" ]; then
+  echo "ERROR: duplicate alembic revision ids:" >&2
+  echo "$dupes" >&2
+  grep -l "^revision" alembic/versions/*.py | while read -r f; do
+    printf '  %s -> %s\n' "$f" "$(grep -m1 '^revision' "$f")" >&2
+  done
+  exit 1
+fi
+# `alembic heads` reads only the script directory — no database needed.
+heads_out="$("$VENV_PY" -m alembic heads 2>/dev/null || true)"
+heads_n="$(printf '%s\n' "$heads_out" | grep -c '[^[:space:]]' || true)"
+if [ "$heads_n" -ne 1 ]; then
+  echo "ERROR: expected exactly 1 alembic head, found ${heads_n}:" >&2
+  printf '%s\n' "$heads_out" >&2
+  echo "Renumber the newer migration onto the current head before merging." >&2
+  exit 1
+fi
+echo "    single head: $(printf '%s\n' "$heads_out" | tr -d '\n')"
 
 echo "==> ruff (test-suite lint)"
 "$VENV_PY" -m ruff check "${LINT_TARGETS[@]}"

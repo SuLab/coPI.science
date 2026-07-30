@@ -16,7 +16,17 @@ from src.models.agent_activity import (
     VISIBILITY_PUBLIC,
 )
 from src.models.agent_registry import AgentRegistry, ProposalReview
-from src.models.cohort import Cohort, CohortMembership
+from src.models.cohort import (
+    COHORT_ACTION_AGENT_ADDED,
+    COHORT_ACTION_AGENT_REMOVED,
+    COHORT_ACTION_CREATED,
+    COHORT_ACTION_DELETED,
+    COHORT_ACTION_TOPOLOGY_SNAPSHOT,
+    COHORT_NAME_ALL,
+    Cohort,
+    CohortAuditEvent,
+    CohortMembership,
+)
 from src.models.delegate import AgentDelegate, DelegateInvitation
 from src.models.email_notification import (
     EmailEngagementTracker,
@@ -49,7 +59,14 @@ __all__ = [
     "AgentRegistry",
     "ProposalReview",
     "Cohort",
+    "CohortAuditEvent",
     "CohortMembership",
+    "COHORT_ACTION_CREATED",
+    "COHORT_ACTION_DELETED",
+    "COHORT_ACTION_AGENT_ADDED",
+    "COHORT_ACTION_AGENT_REMOVED",
+    "COHORT_ACTION_TOPOLOGY_SNAPSHOT",
+    "COHORT_NAME_ALL",
     "ProposalVote",
     "VOTE_UP",
     "VOTE_DOWN",

@@ -92,7 +92,7 @@ def _render_graph(request: Request, context: dict) -> HTMLResponse:
 # hardcoded grouping of agent_ids by institution (the agent roster itself now
 # lives in the AgentRegistry table).
 _SCRIPPS = {
-    # Active Cabo cohort
+    # Active Cabo run window
     "su", "wiseman", "grotjahn", "ward", "briney", "forli", "lairson",
     "badran", "kern", "lasker", "lippi", "maillie", "millar", "miller",
     "mravic", "paulson", "pwu", "seiple", "williamson", "wilson",
@@ -112,13 +112,13 @@ _OTHER_INST = {
     "nomura": "UC Berkeley",
 }
 
-# Cohort cutover for the Cabo retreat graph: matches commit 0ef4741
+# Run-window cutover for the Cabo retreat graph: matches commit 0ef4741
 # (the Cabo retreat roster reshape). All proposals to date share a single
-# simulation_run_id, so date is the only way to isolate the new cohort.
-CABO_COHORT_START = datetime(2026, 3, 1, tzinfo=timezone.utc)
+# simulation_run_id, so date is the only way to isolate the new run window.
+CABO_WINDOW_START = datetime(2026, 3, 1, tzinfo=timezone.utc)
 
 # Schultz alumni pilot = the PIs seeded from newuserlist01.tsv + newuserlist02.tsv
-# (formerly "cohort 001"). These are matched by ORCID (the identifier the lists
+# (formerly "cohort 001" — the run-window naming below supersedes it). These are matched by ORCID (the identifier the lists
 # are keyed on) rather than agent_id, since agent_id collision-prefixing
 # (cliu/liu, schen/chen, ckim/kim, wliu/wu, achatterjee/chatterjee) makes
 # hand-deriving IDs fragile. The last three entries of newuserlist02.tsv had a
@@ -164,18 +164,18 @@ SCHULTZ_PILOT_ORCIDS = frozenset({
     "SPARSE-1527BF6A",      # Sida Shao       (null ORCID in TSV; resolved from DB)
 })
 
-# Three time-scoped cohorts of the same long-running simulation. Edges are
+# Three time-scoped run windows of the same long-running simulation. Edges are
 # bounded by proposal *decided_at* (window_end exclusive). The post-creation
-# join boundary (cohort_start) sits EARLIER than the decision window, because a
+# join boundary (window_start_bound) sits EARLIER than the decision window, because a
 # thread can be opened a couple days before its proposal lands (e.g. the group
 # proposals decided Jun 6 came from posts created Jun 4). Bounding posts to the
 # decision window would silently drop those edges. See memory
-# project_graph_cohort_windows.
+# the window constants below.
 #
-# Cabo cohort:            Apr 27 – May  7, 2026 (inlined in the /cabo-graph route)
+# Cabo window:            Apr 27 – May  7, 2026 (inlined in the /cabo-graph route)
 # Schultz alumni pilot:   Jun  1 – Jun  4, 2026
 # Schultz group alumni:   Jun  5 – Jun 10, 2026
-JUNE_POST_START = datetime(2026, 6, 1, tzinfo=timezone.utc)  # post boundary for both June cohorts
+JUNE_POST_START = datetime(2026, 6, 1, tzinfo=timezone.utc)  # post boundary for both June windows
 SCHULTZ_PILOT_START = datetime(2026, 6, 1, tzinfo=timezone.utc)
 SCHULTZ_PILOT_END = datetime(2026, 6, 5, tzinfo=timezone.utc)  # exclusive: through Jun 4
 SCHULTZ_GROUP_START = datetime(2026, 6, 5, tzinfo=timezone.utc)
@@ -191,7 +191,7 @@ def _institution_for(agent_id: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Institution canonicalization for the cohort views.
+# Institution canonicalization for the run-window views.
 #
 # Profiles store free-text institutions ("Scripps Research", "The Scripps
 # Research Institute", "UCSF Medical Center", ...). We group them so the same
@@ -576,7 +576,7 @@ async def _build_graph_payload(
     scripps_only: bool = False,
     all_agents: bool = False,
     orcids: frozenset[str] | None = None,
-    cohort_start: datetime = CABO_COHORT_START,
+    window_start_bound: datetime = CABO_WINDOW_START,
     window_start: datetime | None = None,
     window_end: datetime | None = None,
     use_profile_institution: bool = False,
@@ -596,12 +596,12 @@ async def _build_graph_payload(
       actually appear in an in-window edge.
     - otherwise: active agents only.
 
-    ``cohort_start`` bounds which *posts* count (their ``created_at``), keeping
-    edges inside the right cohort/run.
+    ``window_start_bound`` bounds which *posts* count (their ``created_at``), keeping
+    edges inside the right run window.
 
     ``window_start`` / ``window_end`` bound when a proposal was *decided*,
     letting a caller scope to an arbitrary date range (e.g. a single retreat
-    week). ``window_start`` defaults to ``cohort_start``; ``window_end`` is
+    week). ``window_start`` defaults to ``window_start_bound``; ``window_end`` is
     exclusive and unbounded when ``None``. The window is applied to
     ``decided_at`` only — not to post creation — so a proposal decided in the
     window still counts even if its thread was opened earlier.
@@ -612,7 +612,7 @@ async def _build_graph_payload(
 
     ``largest_component_only`` (default True) trims the result to the single
     largest connected component — sensible for a dense graph, but it hides
-    isolated proposal dyads, so pass False early in a cohort when proposals are
+    isolated proposal dyads, so pass False early in a window when proposals are
     still disconnected pairs.
     """
     if orcids is not None:
@@ -656,8 +656,8 @@ async def _build_graph_payload(
     else:
         institution_of = lambda row: _institution_for(row.agent_id)  # noqa: E731
 
-    decided_floor = window_start or cohort_start
-    params = {"cohort_start": cohort_start, "decided_floor": decided_floor}
+    decided_floor = window_start or window_start_bound
+    params = {"window_start_bound": window_start_bound, "decided_floor": decided_floor}
     window_end_clause = ""
     if window_end is not None:
         window_end_clause = " AND decided_at < :window_end"
@@ -666,11 +666,11 @@ async def _build_graph_payload(
     edges_result = await db.execute(
         text(
             f"""
-            WITH cohort_posts AS (
+            WITH window_posts AS (
                 SELECT message_ts
                 FROM agent_messages
                 WHERE phase = 'new_post'
-                  AND created_at >= :cohort_start
+                  AND created_at >= :window_start_bound
                   AND message_ts IS NOT NULL
             ),
             pairs AS (
@@ -685,7 +685,7 @@ async def _build_graph_payload(
                 WHERE outcome = 'proposal'
                   AND origin_visibility = 'public'
                   AND decided_at >= :decided_floor{window_end_clause}
-                  AND thread_id IN (SELECT message_ts FROM cohort_posts)
+                  AND thread_id IN (SELECT message_ts FROM window_posts)
             ),
             -- The agent-only proposal for a thread is the FIRST one the bots
             -- reached. Any later row on the same thread is a re-proposal after a
@@ -880,7 +880,7 @@ async def schultz_alumni_pilot(request: Request, db: AsyncSession = Depends(get_
     nodes, links = await _cached_graph_payload(
         db,
         orcids=SCHULTZ_PILOT_ORCIDS,
-        cohort_start=JUNE_POST_START,
+        window_start_bound=JUNE_POST_START,
         window_start=SCHULTZ_PILOT_START,
         window_end=SCHULTZ_PILOT_END,
         use_profile_institution=True,
@@ -917,7 +917,7 @@ async def schultz_group_alumni(request: Request, db: AsyncSession = Depends(get_
     nodes, links = await _cached_graph_payload(
         db,
         all_agents=True,
-        cohort_start=JUNE_POST_START,
+        window_start_bound=JUNE_POST_START,
         window_start=SCHULTZ_GROUP_START,
         window_end=SCHULTZ_GROUP_END,
         use_profile_institution=True,

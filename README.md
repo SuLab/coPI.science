@@ -37,7 +37,14 @@ Cross-cutting:
 ```bash
 cp .env.example .env   # fill in Anthropic, Slack, ORCID, SMTP credentials
 docker compose up -d --build app worker postgres
+
+# Migrate. Check for a single head FIRST: two migrations sharing a revision id
+# (a stale branch renumbered late) makes `upgrade head` fail on multiple heads,
+# and makes a targeted `upgrade <rev>` silently skip one of them while stamping
+# the DB as fully migrated. `alembic heads` needs no database.
+docker compose exec app alembic heads      # must print exactly one line
 docker compose exec app alembic upgrade head
+docker compose exec app alembic current    # confirm it advanced
 ```
 
 Web UI: <http://localhost:8001>.

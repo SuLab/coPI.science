@@ -34,6 +34,14 @@ class ThreadState:
     foa_number: str | None = None  # FOA number for funding threads
     funding_reject_count: int = 0  # drafts rejected by funding-rules validators
     empty_response_count: int = 0  # consecutive empty/unparseable Phase 4 replies
+    # Cohort gate: True when `other_agent_id` is no longer a permitted sender for
+    # the owning agent (membership changed, or — on every resumed run — the DB
+    # state rebuild reconstructed the thread before the first gate recompute).
+    # A grandfathered thread still gets Phase 4 replies so the conversation can
+    # conclude, but it is barred from the reactive-priority tier so it cannot
+    # outrank gate-compliant work. Cleared if the partner becomes permitted again.
+    # See .notes/cohort-system-v2.md §8.
+    grandfathered: bool = False
 
 
 @dataclass

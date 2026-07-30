@@ -26,6 +26,7 @@ from src.agent.funding_rules import (
 from src.agent.message_log import LogEntry, MessageLog, is_funding_post
 from src.agent.slack_client import ThreadNotFound
 from src.agent.state import PostRef, ProposalRef, ThreadState
+from src.services.cohorts import compute_gates, summarise_gates
 from src.agent.tools import TOOL_DEFINITIONS, execute_tool
 from src.config import get_settings
 from src.models import AgentChannel, AgentMessage, LlmCallLog, ProposalReview, SimulationRun, ThreadDecision
@@ -132,6 +133,11 @@ _UNIVERSAL_CHANNELS = {"general", "funding-opportunities"}
 CHANNEL_POLL_INTERVAL = 15.0   # seconds between conversations.history sweeps
 PROPOSAL_POLL_INTERVAL = 30.0  # seconds between conversations.replies sweeps
 ROSTER_POLL_INTERVAL = 30.0    # seconds between AgentRegistry roster re-syncs
+
+# How often to log the reactive:proactive selection split. Starvation under the
+# reactive-priority tier should be observable, not inferred.
+# See .notes/cohort-system-v2.md §10.3.
+SELECTION_RATIO_LOG_EVERY = 100
 
 # The DB inbox pollers bound their query to recent rows for performance, but the
 # timestamp is stamped at row *creation*, not commit. A row written by another
@@ -281,6 +287,25 @@ class SimulationEngine:
         # long owed-reply draining can starve new-conversation formation. See
         # _select_agent and settings.max_consecutive_reactive_turns.
         self._reactive_streak: int = 0
+        # Running reactive/proactive selection tallies. Logged every
+        # SELECTION_RATIO_LOG_EVERY selections so starvation is observable rather
+        # than inferred. See .notes/cohort-system-v2.md §10.3.
+        self._reactive_selections: int = 0
+        self._proactive_selections: int = 0
+
+        # --- Cohort gate bookkeeping (.notes/cohort-system-v2.md) -------------
+        # True once a recompute has actually applied a gate to at least one agent.
+        self._cohort_gate_active: bool = False
+        # Set to the preflight refusal reason while isolation is being forced off
+        # (§5.3); None when clean. Surfaced on /admin/cohorts.
+        self._cohort_preflight_error: str | None = None
+        # Last logged (cohorts, memberships, gated, isolated) signature, so the
+        # per-resync INFO line fires on change rather than every 30s.
+        self._cohort_log_signature: tuple | None = None
+        # Per-agent count of outbound @mentions stripped because the target was
+        # outside the sender's cohort (§9). Exposed in the admin UI: a high rate
+        # means the topology disagrees with what the agents want to do.
+        self._cohort_tags_stripped: dict[str, int] = {}
 
         # Wall-clock throttles for Slack pollers + round-robin cursor over
         # connected clients, so one agent's token doesn't carry all poll load.
@@ -410,6 +435,18 @@ class SimulationEngine:
         self._rewind_cursors_for_private_channels()
         set_call_log_callback(self._on_llm_call)
 
+        # Compute the cohort gate BEFORE the first turn. The rebuild above is
+        # deliberately gate-blind (it populates the log and state that every agent
+        # shares), so on a resumed run this is where cross-cohort threads inherited
+        # from the previous process get grandfathered and stale banked posts get
+        # pruned. The loop's roster sync would also reach it (_last_roster_poll
+        # starts at 0.0), but doing it here means no turn can ever run with an
+        # unset gate while isolation is on. See .notes/cohort-system-v2.md §8.
+        await self._recompute_allowed_sender_ids()
+        # Record which topology this run actually started with, so the run's output
+        # stays attributable to its configuration (v2 §13.1).
+        await self._record_topology_snapshot()
+
         # Backfill FOA cache for any previously posted opportunities
         await self._backfill_foa_cache()
 
@@ -518,8 +555,12 @@ class SimulationEngine:
                     delay = 30
                 logger.debug("Idle backoff: %ds (idle streak: %d)", delay, consecutive_idle)
                 await self._sleep(delay)
-            elif settings.turn_delay_seconds > 0:
-                await self._sleep(settings.turn_delay_seconds)
+            # turn_delay_seconds is NOT slept on here. It is a *per-agent* tempo
+            # throttle, enforced at selection time in _turn_eligible: the agent that
+            # just ran becomes ineligible for the delay while every other agent
+            # stays selectable. Sleeping the loop instead stalled Slack polling, DB
+            # ingestion and every other agent for one agent's cooldown.
+            # See .notes/cohort-system-v2.md §10.3.
 
             # Flush buffered message-log entries + LLM logs periodically
             await self._flush_persisted()
@@ -579,16 +620,47 @@ class SimulationEngine:
         agent that owes a reply should be selected ahead of the staleness-weighted
         proactive pool, so 1:1 conversations conclude promptly rather than waiting
         for a random re-selection. Reuses the same primitive Phase 4 uses.
+
+        Two cohort rules apply here and nowhere else (v2 §8):
+
+        - **Grandfathered threads are skipped.** A thread whose partner has left the
+          cohort still gets answered by Phase 4 so it can conclude, but it must not
+          jump the queue ahead of gate-compliant work. Without this the gate and the
+          scheduler contradict each other and the scheduler wins.
+        - **The remaining threads are read through the agent's gate.** Threads are
+          not always two-party — a funding thread is open to all
+          (``get_thread_allowed_agents`` returns None) — so a non-cohort third party
+          posting into an otherwise legal thread would otherwise manufacture
+          reactive priority for a sender the agent is not supposed to act on.
         """
         cursor = agent.state.last_seen_cursor
         for thread in agent.state.active_threads.values():
             if thread.status != "active":
                 continue
+            if thread.grandfathered:
+                continue
             if thread.has_pending_reply or self.message_log.has_new_reply_from_other(
-                thread.thread_id, agent.agent_id, cursor
+                thread.thread_id, agent.agent_id, cursor,
+                allowed_sender_ids=agent.allowed_sender_ids,
             ):
                 return True
         return False
+
+    def _turn_eligible(self, agent: Agent, now: float) -> bool:
+        """Selection eligibility for one agent.
+
+        - within its LLM budget;
+        - past its per-agent cooldown. ``turn_delay_seconds`` throttles an
+          individual agent's tempo; enforcing it here (rather than as a global
+          ``asyncio.sleep`` after every productive turn) leaves the rest of the
+          roster free to act while one agent sits out. See v2 §10.3.
+        """
+        if not self._agent_within_budget(agent):
+            return False
+        delay = get_settings().turn_delay_seconds
+        if delay > 0 and (now - agent.state.last_selected) < delay:
+            return False
+        return True
 
     def _select_agent(self) -> Agent | None:
         """Select the next agent to take a turn (sequential — one at a time).
@@ -599,18 +671,20 @@ class SimulationEngine:
            per turn instead of waiting on random re-selection. The just-called
            agent (`_last_llm_caller`) is excluded so the A→B→A→B baton alternates
            without a wasted skip-tick. A fairness valve
-           (`max_consecutive_reactive_turns`) forces a proactive turn after a run
-           of reactive ones so new-conversation formation isn't starved.
+           (`max_consecutive_reactive_turns`, default 3) forces a proactive turn
+           after a run of reactive ones so new-conversation formation isn't
+           starved — at the original default of 8, a single live pair took 24 of
+           27 turns. See .notes/cohort-system-v2.md §10.3.
         2. **Proactive** — the original weighted-random selection:
            P(agent) ∝ (now - last_selected), with a penalty for agents that have
            repeatedly skipped Phase 5 (weight /= 2^(skips-2) once skips >= 3).
+
+        Both tiers draw from the same eligibility pool (`_turn_eligible`): budget
+        plus the per-agent `turn_delay_seconds` cooldown.
         """
         settings = get_settings()
         now = time.time()
-        candidates = [
-            a for a in self.agents.values()
-            if self._agent_within_budget(a)
-        ]
+        candidates = [a for a in self.agents.values() if self._turn_eligible(a, now)]
         if not candidates:
             return None
 
@@ -622,10 +696,14 @@ class SimulationEngine:
             ]
             if owed:
                 self._reactive_streak += 1
+                self._reactive_selections += 1
+                self._log_selection_ratio()
                 return min(owed, key=lambda a: a.state.last_selected)
 
         # --- Proactive tier: staleness-weighted random ---------------------
         self._reactive_streak = 0
+        self._proactive_selections += 1
+        self._log_selection_ratio()
         weights = []
         for a in candidates:
             w = max(now - a.state.last_selected, 1.0)
@@ -634,6 +712,18 @@ class SimulationEngine:
                 w /= 2 ** (skips - 2)
             weights.append(w)
         return random.choices(candidates, weights=weights, k=1)[0]
+
+    def _log_selection_ratio(self) -> None:
+        """Log the reactive:proactive split every SELECTION_RATIO_LOG_EVERY picks."""
+        total = self._reactive_selections + self._proactive_selections
+        if total and total % SELECTION_RATIO_LOG_EVERY == 0:
+            logger.info(
+                "[sched] selections: %d reactive / %d proactive (%.0f%% reactive, "
+                "valve=%d)",
+                self._reactive_selections, self._proactive_selections,
+                100.0 * self._reactive_selections / total,
+                get_settings().max_consecutive_reactive_turns,
+            )
 
     # ------------------------------------------------------------------
     # Turn execution (5 phases)
@@ -953,9 +1043,16 @@ class SimulationEngine:
             # handle those flat.
             if self._channel_visibility.get(thread.channel) == VISIBILITY_COLLAB_PRIVATE:
                 continue
-            # Check if there's a new reply from the other agent
+            # Check if there's a new reply from the other agent. Read UNGATED
+            # (allowed_sender_ids=None) on purpose: this thread is already open, so
+            # it is entitled to conclude even if the partner has since dropped out
+            # of the cohort — abandoning it mid-flight would waste every call
+            # already spent on it, and thread participation rules already bound who
+            # may post here. What a grandfathered thread does NOT get is reactive
+            # *priority*; that is enforced in _owes_reply. See v2 §8.
             has_new = self.message_log.has_new_reply_from_other(
                 thread.thread_id, agent.agent_id, agent.state.last_seen_cursor,
+                allowed_sender_ids=None,
             )
             if has_new:
                 # Genuine new reply from the other agent — reset empty-response
@@ -1923,10 +2020,10 @@ class SimulationEngine:
             if self._llm_log_buffer:
                 self._llm_log_buffer[-1]["channel"] = channel
 
-            # Cohort gate (defense-in-depth): strip any @tag toward a non-cohort
-            # agent before posting. The receiving side already filters such tags
-            # in Phase 3; this avoids emitting a dangling tag. No-op when
-            # isolation is disabled. See specs/cohort-system.md.
+            # Cross-cohort mention stripping now happens in _post_message, which
+            # covers every outbound path instead of only this one. Phase 5 still
+            # needs the *cleaned* text locally, though: the tagged_agent decision
+            # and _check_private_channel_outcome below both read message_text.
             message_text = self._strip_disallowed_tags(message_text, agent)
 
             if action == "reply" and target_post_id:
@@ -2048,26 +2145,73 @@ class SimulationEngine:
         """Remove @BotName mentions of non-cohort agents from an outbound message.
 
         Defense-in-depth for the cohort gate: the receiving agent already filters
-        tags from non-cohort senders (Phase 3), but this prevents emitting a
-        dangling tag toward an agent that will never respond. No-op when isolation
-        is disabled (allowed_sender_ids is None). See specs/cohort-system.md.
+        tags from non-cohort senders (Phase 3), but emitting a tag toward an agent
+        that will never respond leaves a dangling ask in the channel. No-op when
+        the gate is off for this agent (``allowed_sender_ids is None``).
+
+        Applied from ``_post_message``, so it covers **every** outbound path —
+        Phase 4 replies, Phase 5 posts, private-channel messages — rather than just
+        the one call site Phase 5 used to have.
+
+        Three deliberate behaviours (.notes/cohort-system-v2.md §9):
+
+        - The whole mention is removed and the surrounding whitespace normalised.
+          Keeping the bare name ("Great point WisemanBot") reads like an addressed
+          message that isn't one.
+        - An unknown bot name is left alone and logged at WARNING. A name missing
+          from ``_bot_name_to_id`` means the roster is lagging, which is an
+          operational problem, not a policy decision — fail open, loudly (§5.1).
+        - Self-mentions are never stripped.
+
+        Strips are counted per agent and surfaced in the admin UI: a high rate means
+        the cohort topology disagrees with what the agents are trying to do.
         """
         allowed = agent.allowed_sender_ids
         if allowed is None or not message_text:
             return message_text
 
+        stripped = 0
+
         def _repl(m: "re.Match[str]") -> str:
+            nonlocal stripped
             bot_name = m.group(1)
             target_id = self._bot_name_to_id.get(bot_name.lower())
-            if target_id and target_id != agent.agent_id and target_id not in allowed:
-                logger.debug(
-                    "[%s] Phase 5: stripped cross-cohort tag @%s",
+            if target_id is None:
+                logger.warning(
+                    "[%s] cohort gate: unknown bot name @%s in outbound text — "
+                    "leaving the mention in place (roster may be lagging)",
                     agent.agent_id, bot_name,
                 )
-                return bot_name  # drop the '@' but keep the name so text still reads
-            return m.group(0)
+                return m.group(0)
+            if target_id == agent.agent_id or target_id in allowed:
+                return m.group(0)
+            stripped += 1
+            logger.debug(
+                "[%s] cohort gate: stripped cross-cohort mention @%s",
+                agent.agent_id, bot_name,
+            )
+            return ""
 
-        return re.sub(r"@(\w+[Bb]ot)\b", _repl, message_text)
+        # The pattern swallows any run of spaces/tabs immediately BEFORE the
+        # mention, so "Great point @CravattBot, shall we?" collapses cleanly to
+        # "Great point, shall we?" without a global reflow. The lookbehind requires
+        # the '@' to start a token, the way a real Slack mention does — without it,
+        # "a@subot.example" or a URL path ending in a bot name would be mangled, and
+        # this strip now runs on EVERY outbound message.
+        cleaned = re.sub(r"[ \t]*(?<![\w./@-])@(\w+[Bb]ot)\b", _repl, message_text)
+        if not stripped:
+            return message_text
+
+        self._cohort_tags_stripped[agent.agent_id] = (
+            self._cohort_tags_stripped.get(agent.agent_id, 0) + stripped
+        )
+        # Targeted tidy-up only. Deliberately NOT a global whitespace normalisation:
+        # stripping leading indentation would mangle the code blocks and bullet lists
+        # agents put in messages. Collapse interior runs only after a non-space, and
+        # trim end-of-line space; never touch line-leading whitespace.
+        cleaned = re.sub(r"(?<=\S)[ \t]{2,}", " ", cleaned)
+        cleaned = re.sub(r"(?m)[ \t]+$", "", cleaned)
+        return cleaned.lstrip(" \t") if cleaned[:1] in (" ", "\t") else cleaned
 
     def _parse_phase5_response(self, response: str) -> tuple[dict | None, str | None]:
         """Parse Phase 5 response into (json_data, message_text).
@@ -2738,6 +2882,14 @@ class SimulationEngine:
 
         client = self.slack_clients.get(agent_id)
         agent = self.agents.get(agent_id)
+
+        # Cohort gate, outbound side. Placed here rather than in a phase so it
+        # covers every caller — Phase 4 replies, Phase 5 posts, private-channel
+        # messages — and cannot be bypassed by a new call site. Idempotent, so the
+        # extra Phase 5 pass (which needs the cleaned text locally) is harmless.
+        # No-op when the gate is off for this agent. See v2 §9.
+        if agent is not None:
+            text = self._strip_disallowed_tags(text, agent) or text
 
         # Slack threads on the *root's Slack ts*, which equals the canonical
         # thread_ts only when the root was born on Slack. A thread started
@@ -3768,52 +3920,255 @@ class SimulationEngine:
             # A transient DB hiccup must never crash the main loop.
             logger.warning("[roster] roster sync failed: %s", exc)
 
+    def _disable_all_gates(self) -> None:
+        """Set every agent's gate to None (no filtering). See v2 §5.4."""
+        for agent in self.agents.values():
+            agent.allowed_sender_ids = None
+
     async def _recompute_allowed_sender_ids(self) -> None:
         """Recompute each live agent's cohort-mate set for the interaction gate.
 
-        When ``cohort_isolation_enabled`` is False, every agent's
-        ``allowed_sender_ids`` is None (no filtering — all-vs-all). When True,
-        each agent's set is the union of co-members across every cohort it
-        belongs to; an agent in no cohort gets an empty set (isolated — sees only
-        human PI messages, which the MessageLog filter always allows). Called on
-        the roster-sync cadence. See specs/cohort-system.md.
+        Called on the roster-sync cadence (ROSTER_POLL_INTERVAL) and once in setup
+        before the first turn, so no turn can run with an unset gate while isolation
+        is on.
+
+        The decision logic lives in ``src.services.cohorts.compute_gates`` so the
+        engine and the admin UI's preview cannot drift — the whole point of v2 is
+        that a documented rule and the running code agreed. This method is the I/O
+        and side-effect wrapper: read memberships, apply the computed gates, log on
+        change, then reconcile in-memory state (§8 grandfathering, §6.1 pruning).
+
+        On a transient DB error the existing gates are left in place: flapping the
+        gate open on every blip would be worse than a briefly stale topology.
         """
         settings = get_settings()
         if not settings.cohort_isolation_enabled:
-            for agent in self.agents.values():
-                agent.allowed_sender_ids = None
+            self._cohort_preflight_error = None
+            self._disable_all_gates()
+            self._cohort_gate_active = False
+            self._cohort_log_signature = None
+            # Reconcile state even on the disabled path: turning isolation off must
+            # clear grandfathered flags, or threads stay permanently deprioritised
+            # after the gate that demoted them is gone.
+            self._apply_cohort_gate_to_state()
             return
-        if not self.session_factory:
+
+        rows: list[tuple[Any, str]] = []
+        cohort_count = 0
+        if self.session_factory:
+            try:
+                from sqlalchemy import func as sa_func
+                from sqlalchemy import select as sa_select
+
+                from src.models import Cohort, CohortMembership
+
+                async with self.session_factory() as db:
+                    rows = list((await db.execute(
+                        sa_select(CohortMembership.cohort_id, CohortMembership.agent_id)
+                    )).all())
+                    cohort_count = (await db.execute(
+                        sa_select(sa_func.count()).select_from(Cohort)
+                    )).scalar() or 0
+            except Exception as exc:
+                logger.warning("[cohort] membership sync failed: %s", exc)
+                return
+
+        gates, reason = compute_gates(
+            membership_rows=rows,
+            agent_ids=list(self.agents),
+            isolation_enabled=True,
+            policy=settings.cohort_default_policy,
+            cohort_count=cohort_count,
+            has_db=self.session_factory is not None,
+        )
+
+        if reason is not None:
+            if self._cohort_preflight_error != reason:
+                logger.error("[cohort] isolation forced OFF: %s", reason)
+            self._cohort_preflight_error = reason
+            self._disable_all_gates()
+            self._cohort_gate_active = False
+            self._apply_cohort_gate_to_state()
+            return
+        if self._cohort_preflight_error is not None:
+            logger.info("[cohort] preflight now clean — isolation active")
+            self._cohort_preflight_error = None
+
+        for aid, gate in gates.items():
+            agent = self.agents.get(aid)
+            if agent is not None:
+                agent.allowed_sender_ids = gate
+
+        summary = summarise_gates(gates)
+        self._cohort_gate_active = summary["gated"] > 0
+        signature = (
+            cohort_count, len(rows), summary["gated"], tuple(summary["isolated"]),
+        )
+        if signature != self._cohort_log_signature:
+            logger.info(
+                "[cohort] gate: %d cohorts, %d memberships, %d/%d agents gated, "
+                "%d isolated%s",
+                cohort_count, len(rows), summary["gated"], summary["total"],
+                len(summary["isolated"]),
+                (" (" + ", ".join(summary["isolated"]) + ")")
+                if summary["isolated"] else "",
+            )
+            if summary["isolated"]:
+                logger.warning(
+                    "[cohort] uncohorted agents isolated by policy: %s",
+                    ", ".join(summary["isolated"]),
+                )
+            topology_changed = self._cohort_log_signature is not None
+            self._cohort_log_signature = signature
+        else:
+            topology_changed = False
+
+        self._apply_cohort_gate_to_state()
+        if topology_changed:
+            # The topology moved mid-run — snapshot the new one so the run stays
+            # attributable to every configuration it actually ran under (v2 §13.1).
+            await self._record_topology_snapshot()
+
+    def _apply_cohort_gate_to_state(self) -> None:
+        """Reconcile in-memory agent state with the freshly computed gate.
+
+        Two jobs, both required because the gate is a *read-time* filter and state
+        outlives a membership change:
+
+        1. **Grandfather** active threads whose partner is no longer permitted
+           (v2 §8). They still get Phase 4 replies — an open conversation is
+           entitled to conclude rather than waste the calls already spent — but
+           they are barred from the reactive-priority tier so they cannot outrank
+           gate-compliant work. This is also the path that marks a *resumed* run's
+           threads: the DB rebuild runs before the first recompute, so every
+           restart reconstructs its open partnerships gate-blind.
+        2. **Prune** banked ``interesting_posts`` whose author is no longer
+           permitted (v2 §6.1). Read-time filtering never removes posts that were
+           already accepted, so without this a membership change leaves stale posts
+           driving Phase 5 forever.
+        """
+        newly_grandfathered = 0
+        pruned_total = 0
+        for agent in self.agents.values():
+            allowed = agent.allowed_sender_ids
+            if allowed is None:
+                # Gate off for this agent: nothing to grandfather, and a partner
+                # that becomes permitted again is un-grandfathered.
+                for thread in agent.state.active_threads.values():
+                    if thread.grandfathered:
+                        thread.grandfathered = False
+                continue
+
+            for thread in agent.state.active_threads.values():
+                other = thread.other_agent_id
+                permitted = bool(other) and other in allowed
+                if permitted:
+                    if thread.grandfathered:
+                        logger.info(
+                            "[cohort] %s: thread %s with %s is permitted again "
+                            "(un-grandfathered)",
+                            agent.agent_id, thread.thread_id, other,
+                        )
+                        thread.grandfathered = False
+                    continue
+                if self._channel_visibility.get(thread.channel) == VISIBILITY_COLLAB_PRIVATE:
+                    # PI-created pairing outranks the gate (v2 §7) — never
+                    # grandfather a private-channel collaboration.
+                    thread.grandfathered = False
+                    continue
+                if not thread.grandfathered:
+                    thread.grandfathered = True
+                    newly_grandfathered += 1
+                    logger.info(
+                        "[cohort] %s: thread %s with %s grandfathered — partner is "
+                        "outside the cohort; it may conclude but loses reactive "
+                        "priority",
+                        agent.agent_id, thread.thread_id, other,
+                    )
+
+            before = len(agent.state.interesting_posts)
+            if before:
+                agent.state.interesting_posts = [
+                    p for p in agent.state.interesting_posts
+                    if not p.sender_agent_id or p.sender_agent_id in allowed
+                ]
+                dropped = before - len(agent.state.interesting_posts)
+                if dropped:
+                    pruned_total += dropped
+                    logger.debug(
+                        "[cohort] %s: pruned %d banked interesting_posts from "
+                        "non-cohort senders", agent.agent_id, dropped,
+                    )
+
+        if newly_grandfathered or pruned_total:
+            logger.info(
+                "[cohort] state reconciled: %d threads grandfathered, %d stale posts pruned",
+                newly_grandfathered, pruned_total,
+            )
+
+    def cohort_topology_snapshot(self) -> dict[str, Any]:
+        """Serialise the gate configuration and its observed effects.
+
+        Written to cohort_audit_events at run start and on every mid-run topology
+        change, so a finished run stays attributable to every configuration it
+        actually ran under (v2 §13.1). Derived from the live in-memory gate rather
+        than re-querying, so it records what the engine actually applied — including
+        a preflight override.
+
+        Also carries the counters the admin UI cannot otherwise see: they live in
+        this process's memory, and the web app is a different process (v2 §9.4/§13).
+        """
+        settings = get_settings()
+        grandfathered = sorted(
+            f"{aid}:{t.thread_id}"
+            for aid, a in self.agents.items()
+            for t in a.state.active_threads.values()
+            if t.grandfathered
+        )
+        return {
+            "cohort_isolation_enabled": settings.cohort_isolation_enabled,
+            "cohort_default_policy": settings.cohort_default_policy,
+            "max_consecutive_reactive_turns": settings.max_consecutive_reactive_turns,
+            "gate_active": self._cohort_gate_active,
+            "preflight_error": self._cohort_preflight_error,
+            "agents": {
+                aid: (
+                    None if a.allowed_sender_ids is None
+                    else sorted(a.allowed_sender_ids)
+                )
+                for aid, a in sorted(self.agents.items())
+            },
+            "counters": {
+                "tags_stripped": dict(sorted(self._cohort_tags_stripped.items())),
+                "grandfathered_threads": grandfathered,
+                "reactive_selections": self._reactive_selections,
+                "proactive_selections": self._proactive_selections,
+            },
+        }
+
+    async def _record_topology_snapshot(self) -> None:
+        """Persist a topology snapshot for this run.
+
+        Called once in setup and again whenever the gate signature changes mid-run.
+        Never raises: provenance is valuable but not worth failing a run over.
+        """
+        if not self.session_factory or not self.simulation_run_id:
             return
         try:
-            from sqlalchemy import select as sa_select
-
-            from src.models import CohortMembership
+            from src.models import COHORT_ACTION_TOPOLOGY_SNAPSHOT, COHORT_NAME_ALL
+            from src.services.cohorts import record_cohort_audit_event
 
             async with self.session_factory() as db:
-                rows = (await db.execute(
-                    sa_select(CohortMembership.cohort_id, CohortMembership.agent_id)
-                )).all()
+                await record_cohort_audit_event(
+                    db,
+                    action=COHORT_ACTION_TOPOLOGY_SNAPSHOT,
+                    cohort_name=COHORT_NAME_ALL,
+                    simulation_run_id=self.simulation_run_id,
+                    topology=self.cohort_topology_snapshot(),
+                    commit=True,
+                )
         except Exception as exc:
-            # Leave existing gates in place on a transient DB hiccup.
-            logger.warning("[cohort] membership sync failed: %s", exc)
-            return
-
-        members_by_cohort: dict[Any, set[str]] = {}
-        cohorts_by_agent: dict[str, set[Any]] = {}
-        for cohort_id, agent_id in rows:
-            members_by_cohort.setdefault(cohort_id, set()).add(agent_id)
-            cohorts_by_agent.setdefault(agent_id, set()).add(cohort_id)
-
-        for aid, agent in self.agents.items():
-            cohort_ids = cohorts_by_agent.get(aid)
-            if not cohort_ids:
-                agent.allowed_sender_ids = set()  # uncohorted → isolated
-                continue
-            mates: set[str] = set()
-            for cid in cohort_ids:
-                mates |= members_by_cohort.get(cid, set())
-            agent.allowed_sender_ids = mates
+            logger.warning("[cohort] topology snapshot failed: %s", exc)
 
     async def _sync_proposal_reviews_from_db(self) -> None:
         """Check DB for web-app proposal reviews and mark in-memory proposals as reviewed.

@@ -500,9 +500,13 @@ async def reopen_proposal(
 
     # Reopening re-injects the agent into a live discussion (posts guidance to
     # Slack / spins up a private refinement channel), so it is blocked while the
-    # agent is inactive — exactly the cross-cohort interaction inactivation is
+    # agent is inactive — exactly the interaction that inactivating an agent is
     # meant to stop. Reactivate the agent to reopen proposals for further
     # discussion. (Unlike `review`, this requires status == 'active'.)
+    #
+    # Note: the reopen flow creates a collab_private channel, and the cohort gate
+    # deliberately exempts those — a PI explicitly pairing two agents outranks an
+    # admin-level cohort grouping. See .notes/cohort-system-v2.md §7.
     if agent.status != "active":
         raise HTTPException(
             status_code=403,

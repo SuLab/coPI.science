@@ -2,6 +2,7 @@
 
 import logging
 from functools import lru_cache
+from typing import Literal
 
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -238,14 +239,29 @@ class Settings(BaseSettings):
     max_full_text_per_thread: int = 2
 
     # Cohort isolation — when True, an agent only acts on posts/threads/tags from
-    # agents that share at least one cohort with it (uncohorted agents are
-    # isolated). When False (default), the roster is all-vs-all as before.
-    # See specs/cohort-system.md.
+    # agents that share at least one cohort with it. When False (default), the
+    # roster is all-vs-all as before. Humans, PI-created private channels and
+    # already-open threads always pass the gate.
+    # See .notes/cohort-system-v2.md §5.
     cohort_isolation_enabled: bool = False
+    # What happens to an agent that belongs to no cohort while isolation is on:
+    #   "open"     — unrestricted (default). Enabling isolation is then safe even
+    #                with zero cohorts defined: nothing changes until an admin
+    #                actually builds a topology.
+    #   "isolated" — the agent sees only humans. Cohort membership becomes
+    #                mandatory to participate. Guarded by the startup preflight
+    #                (_cohort_preflight): with zero cohorts defined this policy
+    #                would silence the entire roster, so it is refused and
+    #                isolation is forced off with an ERROR.
+    # See .notes/cohort-system-v2.md §5.2 / §5.3.
+    cohort_default_policy: Literal["open", "isolated"] = "open"
     # Reactive-priority scheduler: after this many consecutive turns given to
     # agents that owe a thread reply, force a normal (proactive) selection so
-    # new-conversation formation isn't starved. See _select_agent.
-    max_consecutive_reactive_turns: int = 8
+    # new-conversation formation isn't starved. Default matches
+    # active_thread_threshold so the two levers stay in proportion — at the
+    # original 8 a single live pair took 24 of 27 turns. See _select_agent and
+    # .notes/cohort-system-v2.md §10.3.
+    max_consecutive_reactive_turns: int = 3
 
     # Privacy rollout — when True (default), POST /agent/{id}/proposals/{tid}/reopen
     # migrates the thread into a new collab_private channel instead of posting

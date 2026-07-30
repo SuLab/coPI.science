@@ -27,8 +27,11 @@ from src.database import Base
 # Channel visibility classes. See specs/privacy-and-channel-visibility.md.
 # 'public' — all bots and PIs; seeded and agent-created thematic channels.
 # 'collab_private' — 2 bots + up to 2 PIs; Slack is_private=true.
-VISIBILITY_PUBLIC = "public"
-VISIBILITY_COLLAB_PRIVATE = "collab_private"
+#
+# Defined in src/visibility.py (dependency-free) and re-exported here so the
+# in-memory message log can use them without importing the ORM, while every
+# existing `from src.models.agent_activity import VISIBILITY_*` keeps working.
+from src.visibility import VISIBILITY_COLLAB_PRIVATE, VISIBILITY_PUBLIC  # noqa: E402
 
 
 class SimulationRun(Base):
