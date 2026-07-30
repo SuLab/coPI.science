@@ -2960,7 +2960,7 @@ class SimulationEngine:
             thread_ts=thread_ts,
             posted_at=posted_at,
             is_bot=True,
-            visibility=self._channel_visibility.get(channel, VISIBILITY_PUBLIC),
+            visibility=self._resolve_channel_visibility(channel),
             slack_ts=slack_ts,
             slack_channel_id=(result.get("channel") if result else None),
             slack_thread_ts=(slack_parent if slack_ts else None),

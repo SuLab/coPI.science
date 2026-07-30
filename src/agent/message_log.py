@@ -220,7 +220,8 @@ class MessageLog:
         their insertion order. The root is pinned first regardless: it is the
         thread's parent by definition, even if a reply carries an earlier
         posted_at (a writer's clock can run behind — see PI_INBOX_LOOKBACK_S).
-                COHORT-GATE: UNGATED by design — once a thread is open its full history
+
+        COHORT-GATE: UNGATED by design — once a thread is open its full history
         is context, including a partner who has since left the cohort (v2 §8).
         """
         root = self._by_ts.get(thread_ts)

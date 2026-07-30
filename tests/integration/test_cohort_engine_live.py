@@ -1101,3 +1101,132 @@ async def test_a_rewound_cursor_does_replay_and_the_gate_still_applies(live, mon
     await _topology(factory, {"alpha": ["su", "cravatt"]})
     await eng._recompute_allowed_sender_ids()
     assert _read(0) == ["suppressed at first"]
+
+
+# ===========================================================================
+# §7 — the private-channel exemption, through the writers
+# ===========================================================================
+
+
+async def test_private_exemption_holds_for_every_write_path(live, monkeypatch):
+    """§7 driven through the write paths rather than by constructing the row.
+
+    Rule B: the earlier §7 test wrote the AgentMessage row with `visibility` already
+    set, exercising only the read side — which is exactly how it missed that
+    `_post_message` never stamped the field at all. Every message here reaches the log
+    through a real writer.
+
+    Three ways a private-channel message arrives: this engine posting it, another
+    process's row being ingested, and (below) a reply inside the channel.
+    """
+    factory, run_id = live
+    await _topology(factory, {"alpha": ["su"], "beta": ["cravatt"]})
+    _cfg(monkeypatch, enabled=True, policy="isolated")
+    eng = _engine(factory, run_id)
+    await eng._recompute_allowed_sender_ids()
+    assert eng.agents["su"].allowed_sender_ids == {"su"}, "maximally gated"
+
+    priv = "collab-priv-su-cravatt"
+    eng._channel_visibility[priv] = VISIBILITY_COLLAB_PRIVATE
+    eng._channel_id_map[priv] = f"local:{priv}"
+
+    # (a) this engine posts into the private channel
+    await eng._post_message("cravatt", priv, "posted by the engine")
+    # (b) another process writes a private-channel row, then it is ingested
+    await _write_message(factory, run_id, agent_id="cravatt", sender_name="CravattBot",
+                         content="written by another process", message_ts="3000.0002",
+                         posted_at=3000.0002, channel_name=priv,
+                         channel_id=f"local:{priv}",
+                         visibility=VISIBILITY_COLLAB_PRIVATE)
+    await eng._flush_persisted()
+    await eng._poll_inbound_from_db()
+
+    su = eng.agents["su"]
+    su.state.subscribed_channels = {priv}
+    seen = {e.content for e in eng.message_log.get_new_top_level_posts(
+        since=0, channels={priv}, exclude_agent_id="su",
+        allowed_sender_ids=su.allowed_sender_ids,
+    )}
+    assert seen == {"posted by the engine", "written by another process"}, seen
+
+    # (c) a threaded reply inside the private channel, checked through the GATED
+    # reply detector rather than get_thread_history (which is UNGATED by design, so
+    # asserting on it would prove nothing about the exemption).
+    root_ts = next(
+        e.ts for e in eng.message_log.get_new_top_level_posts(
+            since=0, channels={priv}, exclude_agent_id="su",
+            allowed_sender_ids=su.allowed_sender_ids,
+        ) if e.content == "posted by the engine"
+    )
+    await eng._post_message("cravatt", priv, "a reply in-thread", thread_ts=root_ts)
+    await eng._flush_persisted()
+    assert eng.message_log.has_new_reply_from_other(
+        root_ts, "su", since=0.0, allowed_sender_ids=su.allowed_sender_ids,
+    ) is True, "a private-channel reply from a non-mate must still register (§7)"
+
+    # Control: the SAME sender doing the SAME two things in a PUBLIC channel is
+    # filtered, so the exemption is scoped to the channel class and the gate is
+    # demonstrably still on. Without this leg the results above are also explained by
+    # the gate simply being off.
+    await eng._post_message("su", "general", "public root")
+    await eng._flush_persisted()
+    pub_root_ts = next(
+        e.ts for e in eng.message_log.get_new_top_level_posts(
+            since=0, channels={"general"}, exclude_agent_id="cravatt",
+            allowed_sender_ids=None,
+        ) if e.content == "public root"
+    )
+    await eng._post_message("cravatt", "general", "public post")
+    await eng._post_message("cravatt", "general", "public reply", thread_ts=pub_root_ts)
+    await eng._flush_persisted()
+
+    pub = [e.content for e in eng.message_log.get_new_top_level_posts(
+        since=0, channels={"general"}, exclude_agent_id="su",
+        allowed_sender_ids=su.allowed_sender_ids,
+    )]
+    assert pub == [], (
+        f"control leg failed: the gate is not filtering public traffic ({pub}), so the "
+        "private-channel result above proves nothing"
+    )
+    assert eng.message_log.has_new_reply_from_other(
+        pub_root_ts, "su", since=0.0, allowed_sender_ids=su.allowed_sender_ids,
+    ) is False, "control leg failed: a public non-mate reply must NOT register"
+
+
+async def test_every_outbound_channel_class_is_stamped(live, monkeypatch):
+    """Regression guard for the defect that made §7 dead code.
+
+    `_post_message` must stamp `visibility` for every channel class it can post into,
+    including one it has never seen — which must default to public rather than NULL.
+    """
+    factory, run_id = live
+    await _topology(factory, {"alpha": ["su"]})
+    _cfg(monkeypatch, enabled=True, policy="isolated")
+    eng = _engine(factory, run_id)
+    await eng._recompute_allowed_sender_ids()
+
+    eng._channel_visibility["priv-a"] = VISIBILITY_COLLAB_PRIVATE
+    eng._channel_id_map["priv-a"] = "local:priv-a"
+    eng._channel_visibility["pub-a"] = VISIBILITY_PUBLIC
+    eng._channel_id_map["pub-a"] = "local:pub-a"
+
+    await eng._post_message("su", "priv-a", "private")
+    await eng._post_message("su", "pub-a", "explicitly public")
+    await eng._post_message("su", "not-registered", "unregistered channel")
+    await eng._flush_persisted()
+
+    async with factory() as db:
+        got = {
+            r.channel_name: r.visibility
+            for r in (await db.execute(
+                select(AgentMessage).where(AgentMessage.simulation_run_id == run_id)
+            )).scalars().all()
+        }
+    assert got["priv-a"] == VISIBILITY_COLLAB_PRIVATE
+    assert got["pub-a"] == VISIBILITY_PUBLIC
+    assert got["not-registered"] == VISIBILITY_PUBLIC, (
+        "an unknown channel must default to public, not to NULL or a crash"
+    )
+    # Control on the assertion set: the three values are not all the same, so a writer
+    # that hardcoded one constant could not pass.
+    assert len(set(got.values())) == 2, got
