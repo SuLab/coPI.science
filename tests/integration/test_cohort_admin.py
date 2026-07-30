@@ -411,3 +411,188 @@ async def test_pi_facing_thread_view_is_never_cohort_filtered(
     await db_session.flush()
     r = await client.get("/admin/discussions", headers=_auth(admin.id))
     assert r.status_code == 200
+
+
+# --- §11: what takes effect immediately and what needs a restart ------------
+
+
+def _ticked_cells(html: str) -> set[str]:
+    """The cells the matrix rendered as already-checked.
+
+    Matches one whole ``<input>`` tag at a time. A regex that let the ``checked``
+    lookahead run past the end of the tag picks up the column-toggle JavaScript's
+    ``b.checked`` for whichever agent happens to render last.
+    """
+    import re
+
+    out = set()
+    for tag in re.finditer(r"<input\b[^>]*>", html):
+        t = tag.group(0)
+        if 'name="cell"' not in t:
+            continue
+        value = re.search(r'value="([^"]*)"', t)
+        if value and re.search(r"\bchecked\b", t):
+            out.add(value.group(1))
+    return out
+
+
+def test_ticked_cells_helper_distinguishes_checked_from_unchecked():
+    """Control for the helper the live test depends on. An extractor that returned
+    every cell (or none) would make the assertion below meaningless."""
+    html = (
+        '<input type="checkbox" name="cell" value="c1:su" class="x" checked>'
+        '<input type="checkbox" name="cell" value="c1:wiseman" class="x">'
+        '<input type="hidden" name="present" value="c1:cravatt">'
+        "<script>boxes.forEach(function (b) { b.checked = true; });</script>"
+    )
+    assert _ticked_cells(html) == {"c1:su"}
+
+
+async def test_membership_is_live_but_settings_are_cached(client, db_session, admin, roster):
+    """§11's asymmetry, both halves, so neither can pass alone.
+
+    A topology edit takes effect on the engine's next roster sync (~30s, no restart).
+    The flag and the policy do not, because get_settings() is lru_cached — that is why
+    the admin banner says "restart required" for those and not for membership. If the
+    caching half ever stops being true, the banner is lying.
+    """
+    import os
+
+    from src.config import Settings, get_settings
+
+    c = await _cohort(db_session, "alpha", admin)
+    before = get_settings().cohort_isolation_enabled
+
+    os.environ["COHORT_ISOLATION_ENABLED"] = "true" if not before else "false"
+    try:
+        assert get_settings().cohort_isolation_enabled is before, (
+            "get_settings() is no longer cached — §11 and the admin banner's "
+            "'restart required' wording are both wrong"
+        )
+        # Control: a FRESH Settings() DOES see the env var. Without this leg the
+        # assertion above is also satisfied by an env var that never took effect.
+        assert Settings().cohort_isolation_enabled is not before, (
+            "control leg failed: the env var had no effect even on a fresh Settings(), "
+            "so the caching assertion above proves nothing"
+        )
+    finally:
+        os.environ.pop("COHORT_ISOLATION_ENABLED", None)
+
+    # Positive: a membership change IS visible to the very next request, no restart.
+    r = await client.post(
+        f"/admin/cohorts/{c.id}/add-agent", data={"agent_id": "su"},
+        headers=_auth(admin.id),
+    )
+    assert r.status_code == 302
+    page = await client.get("/admin/cohorts/topology", headers=_auth(admin.id))
+    assert page.status_code == 200
+    assert _ticked_cells(page.text) == {f"{c.id}:su"}, (
+        "the membership edit is not reflected in the matrix"
+    )
+
+
+async def test_matrix_save_is_one_transaction(client, db_session, admin, roster):
+    """A mid-loop commit would expose an empty topology to a concurrent recompute.
+
+    The engine reads cohort_memberships in a separate session. A save that committed
+    per row would let a recompute landing between commits see a partial — or, at the
+    instant every delete has landed and no insert has, an EMPTY — topology, which
+    under policy=isolated silences the whole roster. Structural rather than timing
+    based on purpose: a sleep-and-race test would be flaky and would not say why.
+    """
+    import inspect
+
+    from src.routers import admin as admin_mod
+
+    src = inspect.getsource(admin_mod.admin_cohort_topology_save)
+    assert src.count("await db.commit()") == 1, (
+        "the matrix save must commit exactly once; a per-row commit exposes an "
+        "empty-topology window to a concurrent gate recompute"
+    )
+    assert "for cell in sorted(rendered)" in src
+    assert src.index("for cell in sorted(rendered)") < src.index("await db.commit()"), (
+        "the commit must come after the whole diff loop"
+    )
+
+
+async def test_matrix_save_never_touches_an_unrendered_cohort(
+    client, db_session, admin, roster
+):
+    """The classic checkbox-matrix data-loss bug, asserted from the outside.
+
+    A form that rendered only alpha's cells must not delete beta's memberships, even
+    though beta's rows are absent from the submission and therefore look "unticked".
+    """
+    a = await _cohort(db_session, "alpha", admin, members=["su"])
+    b = await _cohort(db_session, "beta", admin, members=["cravatt"])
+    await db_session.commit()
+
+    present = [f"{a.id}:{x}" for x in ("su", "wiseman", "cravatt")]
+    r = await client.post(
+        "/admin/cohorts/topology", data={"present": present}, headers=_auth(admin.id)
+    )
+    assert r.status_code == 302
+
+    rows = {
+        (str(m.cohort_id), m.agent_id)
+        for m in (await db_session.execute(select(CohortMembership))).scalars().all()
+    }
+    assert rows == {(str(b.id), "cravatt")}, (
+        f"a form that did not render beta must not delete beta's memberships. "
+        f"rows={rows}"
+    )
+    # Control: alpha's rendered-and-unticked cell WAS removed, so the diff did run.
+    assert (str(a.id), "su") not in rows, (
+        "control leg failed: the save did nothing at all, so the beta assertion "
+        "above proves nothing"
+    )
+
+
+async def test_matrix_save_ignores_a_cell_for_a_deleted_cohort(
+    client, db_session, admin, roster
+):
+    """A stale form must not resurrect or crash on a cohort that no longer exists."""
+    a = await _cohort(db_session, "alpha", admin, members=["su"])
+    ghost = uuid.uuid4()
+    await db_session.commit()
+
+    r = await client.post(
+        "/admin/cohorts/topology",
+        data={
+            "present": [f"{a.id}:su", f"{ghost}:wiseman"],
+            "cell": [f"{a.id}:su", f"{ghost}:wiseman"],
+        },
+        headers=_auth(admin.id),
+    )
+    assert r.status_code == 302, "a stale cell must not 500"
+
+    rows = {
+        (str(m.cohort_id), m.agent_id)
+        for m in (await db_session.execute(select(CohortMembership))).scalars().all()
+    }
+    assert rows == {(str(a.id), "su")}, f"the ghost cell was written: {rows}"
+
+
+async def test_matrix_save_ignores_a_cell_for_an_unknown_agent(
+    client, db_session, admin, roster
+):
+    """Same for an agent id that is not in AgentRegistry — a membership naming a
+    nonexistent agent would be invisible in the UI and would survive forever."""
+    a = await _cohort(db_session, "alpha", admin)
+    await db_session.commit()
+
+    r = await client.post(
+        "/admin/cohorts/topology",
+        data={
+            "present": [f"{a.id}:su", f"{a.id}:nobody"],
+            "cell": [f"{a.id}:su", f"{a.id}:nobody"],
+        },
+        headers=_auth(admin.id),
+    )
+    assert r.status_code == 302
+
+    rows = {
+        (str(m.cohort_id), m.agent_id)
+        for m in (await db_session.execute(select(CohortMembership))).scalars().all()
+    }
+    assert rows == {(str(a.id), "su")}, f"an unknown agent id was written: {rows}"
