@@ -74,3 +74,6 @@ data/agent_roster.json
 # mutmut 2.x results cache (scripts/mutation.sh)
 .mutmut-cache
 mutants/
+
+# Playwright MCP browser artifacts (console logs, page snapshots)
+.playwright-mcp/
