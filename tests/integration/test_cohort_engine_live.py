@@ -1230,3 +1230,144 @@ async def test_every_outbound_channel_class_is_stamped(live, monkeypatch):
     # Control on the assertion set: the three values are not all the same, so a writer
     # that hardcoded one constant could not pass.
     assert len(set(got.values())) == 2, got
+
+
+# ===========================================================================
+# §8 grandfathering + §13.1 provenance, through the real startup path
+# ===========================================================================
+
+
+async def test_grandfathered_thread_concludes_but_loses_priority(live, monkeypatch):
+    """§8's two halves in one test, so neither can pass on its own.
+
+    "Loses reactive priority" is an absence: _owes_reply going False would also be
+    satisfied by a thread that had simply gone quiet. So the same thread is asserted to
+    still receive a Phase 4 reply, with the LLM call as the witness — that is what
+    "concludes rather than being abandoned" means.
+    """
+    from src.agent.state import ThreadState
+    from tests.fakes import FakeAnthropic
+
+    factory, run_id = live
+    await _topology(factory, {"alpha": ["su", "cravatt"]})
+    _cfg(monkeypatch, enabled=True, policy="isolated")
+    fake = FakeAnthropic(["<slack_message>Wrapping this up.</slack_message>"])
+    monkeypatch.setattr("src.services.llm.get_anthropic_client", lambda: fake)
+
+    eng = _engine(factory, run_id)
+    await eng._recompute_allowed_sender_ids()
+    await _write_message(factory, run_id, agent_id="su", sender_name="SuBot",
+                         content="root", message_ts="4000.0001", posted_at=4000.0001)
+    await _write_message(factory, run_id, agent_id="cravatt", sender_name="CravattBot",
+                         content="a reply", message_ts="4000.0002",
+                         posted_at=4000.0002, thread_ts="4000.0001")
+    await eng._poll_inbound_from_db()
+
+    su = eng.agents["su"]
+    su.state.subscribed_channels = {"general"}
+    su.state.last_seen_cursor = 0.0
+    su.state.active_threads["4000.0001"] = ThreadState(
+        thread_id="4000.0001", channel="general", other_agent_id="cravatt",
+        message_count=2,
+    )
+
+    # Positive leg BEFORE the split: the thread owes a reply and wins priority.
+    assert eng._owes_reply(su) is True, (
+        "precondition failed: the thread does not owe a reply even in-cohort, so the "
+        "post-split assertion would prove nothing"
+    )
+
+    await _topology(factory, {"alpha": ["su"], "beta": ["cravatt"]})
+    await eng._recompute_allowed_sender_ids()
+    thread = su.state.active_threads["4000.0001"]
+    assert thread.grandfathered is True, "the open cross-cohort thread must be marked"
+
+    # Absence: it no longer jumps the queue.
+    assert eng._owes_reply(su) is False
+
+    # Presence: Phase 4 still replies, so it can conclude.
+    replied = await eng._phase4_reply_threads(su)
+    assert "4000.0001" in replied, (
+        "a grandfathered thread must still be answered so it can conclude"
+    )
+    assert fake.calls, "Phase 4 made no LLM call — the thread stalled, not concluded"
+
+
+async def test_start_computes_the_gate_and_records_a_snapshot(live, monkeypatch):
+    """§13.1 and the §8 pre-loop recompute through `start()` itself.
+
+    Every other test in this module calls `_recompute_allowed_sender_ids()` directly,
+    so the ordering inside `start()` — gate computed and snapshot written BEFORE the
+    first turn — has never actually been exercised. `request_stop()` is triggered from
+    a setup step that runs after both, which is the least invasive way to let setup
+    complete and skip the loop.
+    """
+    factory, run_id = live
+    await _topology(factory, {"alpha": ["su", "wiseman"]})
+    _cfg(monkeypatch, enabled=True, policy="isolated")
+    eng = _engine(factory, run_id)
+
+    original = eng._backfill_foa_cache
+    order = []
+
+    async def _stop_after_setup():
+        # By the time this runs, start() has computed the gate and written the
+        # snapshot. Record what the gate looked like at that instant.
+        order.append({a: x.allowed_sender_ids for a, x in eng.agents.items()})
+        eng.request_stop()
+        return await original()
+
+    monkeypatch.setattr(eng, "_backfill_foa_cache", _stop_after_setup)
+    await eng.start()
+
+    assert order, "setup never reached _backfill_foa_cache — start() aborted early"
+    assert order[0]["su"] == {"su", "wiseman"}, (
+        f"the gate was not in force before the loop: {order[0]}"
+    )
+    assert order[0]["cravatt"] == set()
+
+    async with factory() as db:
+        snaps = (await db.execute(
+            select(CohortAuditEvent).where(
+                CohortAuditEvent.action == COHORT_ACTION_TOPOLOGY_SNAPSHOT,
+                CohortAuditEvent.simulation_run_id == run_id,
+            )
+        )).scalars().all()
+    assert len(snaps) == 1, (
+        f"start() must record exactly one startup snapshot, got {len(snaps)}"
+    )
+    topo = snaps[0].topology
+    assert topo["agents"]["su"] == ["su", "wiseman"]
+    assert topo["cohort_default_policy"] == "isolated"
+    assert topo["cohort_isolation_enabled"] is True
+
+
+async def test_start_records_a_snapshot_even_when_the_gate_is_off(live, monkeypatch):
+    """Control for the test above: provenance is unconditional.
+
+    If the snapshot were only written when isolation is on, a run's output would be
+    unattributable in exactly the case an auditor cares about — "was the gate on?".
+    """
+    factory, run_id = live
+    await _topology(factory, {"alpha": ["su", "wiseman"]})
+    _cfg(monkeypatch, enabled=False)
+    eng = _engine(factory, run_id)
+
+    original = eng._backfill_foa_cache
+
+    async def _stop_after_setup():
+        eng.request_stop()
+        return await original()
+
+    monkeypatch.setattr(eng, "_backfill_foa_cache", _stop_after_setup)
+    await eng.start()
+
+    async with factory() as db:
+        snaps = (await db.execute(
+            select(CohortAuditEvent).where(
+                CohortAuditEvent.action == COHORT_ACTION_TOPOLOGY_SNAPSHOT,
+                CohortAuditEvent.simulation_run_id == run_id,
+            )
+        )).scalars().all()
+    assert len(snaps) == 1, "a gate-off run must still record its topology"
+    assert snaps[0].topology["cohort_isolation_enabled"] is False
