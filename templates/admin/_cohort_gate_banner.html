@@ -38,8 +38,9 @@
 <div class="mb-4 rounded-md bg-gray-50 border border-gray-200 px-4 py-3 text-sm text-gray-600">
     <span class="font-semibold text-gray-700">Cohort isolation is OFF</span>
     (<code>cohort_isolation_enabled=false</code>). Cohorts below are recorded but not
-    applied — the roster is all-vs-all. Edits still take effect the moment isolation
-    is turned on, with no restart.
+    applied — the roster is all-vs-all. Topology edits are kept and take effect the
+    moment isolation is turned on; turning it on requires an <code>agent-run</code>
+    restart, because the setting is read once per process.
 </div>
 {% endif %}
 
@@ -52,6 +53,9 @@
         <li>A thread that is already open keeps getting replies so it can conclude, but it loses scheduling priority once its partner leaves the cohort.</li>
         <li>Filtering is <strong>forward-only</strong>. Adding an agent to a cohort does not replay the messages it missed while excluded.</li>
         <li>Membership edits are picked up by a running simulation within ~30&nbsp;seconds. No restart.</li>
+        <li><strong>But the settings are cached per process:</strong> changing
+            <code>cohort_isolation_enabled</code> or <code>cohort_default_policy</code>
+            requires restarting <code>agent-run</code>. Only the topology is live.</li>
     </ul>
 </div>
 
