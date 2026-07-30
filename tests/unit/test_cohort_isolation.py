@@ -189,6 +189,48 @@ class TestGateHelper:
         assert _entry_allowed(_post("1", "c", "su", "SuBot", "hi"), set()) is False
 
 
+# The whole of §5.1 as data, so a failure names the row rather than the assertion, and
+# so the table itself can be checked for polarity (see the control below).
+DECISION_TABLE = [
+    # (row name, _post kwargs, gate, expected_visible)
+    ("gate off",              dict(agent_id="z"),                              None,   True),
+    ("human",                 dict(agent_id=None, is_bot=False),               set(),  True),
+    ("human with agent_id",   dict(agent_id="su", is_bot=False),               set(),  True),
+    ("private channel",       dict(agent_id="z",
+                                   visibility=VISIBILITY_COLLAB_PRIVATE),      set(),  True),
+    ("cohort mate",           dict(agent_id="su"),                            {"su"},  True),
+    ("non-mate",              dict(agent_id="z"),                             {"su"},  False),
+    ("empty gate blocks bot", dict(agent_id="su"),                             set(),  False),
+    ("bot, NULL agent_id",    dict(agent_id=None, is_bot=True),               {"su"},  False),
+    ("bot, empty agent_id",   dict(agent_id="", is_bot=True),                 {"su"},  False),
+    ("unknown visibility",    dict(agent_id="z", visibility="other"),         {"su"},  False),
+]
+
+
+@pytest.mark.parametrize(
+    "name,kwargs,gate,expected", DECISION_TABLE, ids=[r[0] for r in DECISION_TABLE]
+)
+def test_decision_table_row(name, kwargs, gate, expected):
+    """Every §5.1 row, asserted in the direction the table states."""
+    base = dict(ts="1", channel="c", agent_id="x", name="X", content="")
+    base.update(kwargs)
+    entry = _post(**base)
+    assert _entry_allowed(entry, gate) is expected, name
+
+
+def test_decision_table_has_both_polarities():
+    """Control for the table itself.
+
+    A table of all-True rows would pass against a gate that never filters; a table of
+    all-False rows against one that filters everything. Neither would be noticed by the
+    parametrised test above, which is why this exists.
+    """
+    outcomes = {row[3] for row in DECISION_TABLE}
+    assert outcomes == {True, False}, (
+        f"the decision table must exercise both polarities, got {outcomes}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # §5.2 — policy semantics (the rule v1 documented and the code inverted)
 # ---------------------------------------------------------------------------
@@ -323,6 +365,100 @@ class TestComputeGates:
 # ---------------------------------------------------------------------------
 # §5.3 — preflight: never silently silence a roster
 # ---------------------------------------------------------------------------
+
+
+PREFLIGHT_CASES = [
+    # (name, isolation, policy, cohort_count, has_db, live_members, refuses)
+    ("disabled always fine",      False, POLICY_ISOLATED, 0, False, 0, False),
+    ("disabled, no db, isolated", False, POLICY_ISOLATED, 0, False, 0, False),
+    ("no db",                     True,  POLICY_OPEN,     3, False, 3, True),
+    ("no db, isolated",           True,  POLICY_ISOLATED, 3, False, 3, True),
+    ("isolated, zero cohorts",    True,  POLICY_ISOLATED, 0, True,  0, True),
+    ("isolated, empty cohort",    True,  POLICY_ISOLATED, 1, True,  0, True),
+    ("isolated, offline member",  True,  POLICY_ISOLATED, 1, True,  0, True),
+    ("isolated, one member",      True,  POLICY_ISOLATED, 1, True,  1, False),
+    ("isolated, many members",    True,  POLICY_ISOLATED, 4, True,  9, False),
+    ("open, zero cohorts",        True,  POLICY_OPEN,     0, True,  0, False),
+    ("open, empty cohort",        True,  POLICY_OPEN,     1, True,  0, False),
+    ("open, members",             True,  POLICY_OPEN,     2, True,  5, False),
+]
+
+
+@pytest.mark.parametrize(
+    "name,iso,policy,n_cohorts,has_db,live,refuses",
+    PREFLIGHT_CASES, ids=[c[0] for c in PREFLIGHT_CASES],
+)
+def test_preflight_matrix(name, iso, policy, n_cohorts, has_db, live, refuses):
+    """Every combination of the four inputs preflight actually branches on."""
+    reason = preflight_reason(
+        isolation_enabled=iso, policy=policy, cohort_count=n_cohorts,
+        has_db=has_db, live_members=live,
+    )
+    assert (reason is not None) is refuses, f"{name}: reason={reason!r}"
+
+
+def test_preflight_matrix_has_both_polarities():
+    """Control: the matrix must contain refusing AND allowing rows. A matrix of one
+    polarity would pass against a preflight that always (or never) refused."""
+    assert {c[6] for c in PREFLIGHT_CASES} == {True, False}
+
+
+def test_preflight_allows_when_a_live_member_exists():
+    """Positive control for the refusal cases.
+
+    The refusals above are all assertions that isolation gets forced OFF. On their own
+    they would also be satisfied by a preflight that refused unconditionally. This shows
+    the same shape of input with one live member produces no refusal AND a gate that
+    actually filters.
+    """
+    c1 = uuid.uuid4()
+    gates, reason = compute_gates(
+        membership_rows=[(c1, "su")], agent_ids=["su", "wiseman"],
+        isolation_enabled=True, policy=POLICY_ISOLATED, cohort_count=1,
+    )
+    assert reason is None
+    assert gates["su"] == {"su"}
+    assert gates["wiseman"] == set(), "isolation is in force, not forced off"
+
+
+def test_open_policy_never_emits_an_empty_gate():
+    """§5.4: under `open`, an empty set is a bug — it would silence the agent.
+
+    Swept over every topology shape rather than one example, because the shapes differ
+    in which branch of compute_gates they take (uncohorted, solo, overlapping, offline
+    member).
+    """
+    c1, c2 = uuid.uuid4(), uuid.uuid4()
+    shapes = [
+        [],
+        [(c1, "su")],
+        [(c1, "su"), (c1, "wiseman")],
+        [(c1, "su"), (c2, "wiseman")],
+        [(c1, "su"), (c1, "wiseman"), (c2, "su"), (c2, "cravatt")],
+        [(c1, "ghost")],                      # member not on the roster
+    ]
+    for rows in shapes:
+        gates, reason = compute_gates(
+            membership_rows=rows, agent_ids=["su", "wiseman", "cravatt"],
+            isolation_enabled=True, policy=POLICY_OPEN,
+            cohort_count=len({r[0] for r in rows}),
+        )
+        assert reason is None, rows
+        for aid, g in gates.items():
+            assert g is None or g, f"{rows} produced an empty gate for {aid}"
+
+
+def test_isolated_policy_does_emit_empty_gates():
+    """Control for the test above: `isolated` is the policy where an empty gate is the
+    intended outcome. Without this, a compute_gates that never returned an empty set
+    would satisfy the no-empty-gate invariant for the wrong reason."""
+    c1 = uuid.uuid4()
+    gates, reason = compute_gates(
+        membership_rows=[(c1, "su")], agent_ids=["su", "wiseman", "cravatt"],
+        isolation_enabled=True, policy=POLICY_ISOLATED, cohort_count=1,
+    )
+    assert reason is None
+    assert gates["wiseman"] == set() and gates["cravatt"] == set()
 
 
 class TestPreflight:
