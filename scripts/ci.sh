@@ -71,6 +71,20 @@ if [ "$heads_n" -ne 1 ]; then
 fi
 echo "    single head: $(printf '%s\n' "$heads_out" | tr -d '\n')"
 
+# Optional round trip against a THROWAWAY database. Off by default so the gate stays
+# offline and fast; the unit tests already pin the static properties (single head, no
+# duplicate ids, every drop guarded with if_exists). What this adds is the one thing
+# static analysis cannot show: that upgrade -> downgrade -> upgrade actually runs
+# clean, including a downgrade from a head that a partial upgrade never fully applied.
+# NEVER point CI_MIGRATION_DB at a database with data you want.
+if [ -n "${CI_MIGRATION_DB:-}" ]; then
+  echo "==> alembic round trip against $CI_MIGRATION_DB"
+  DATABASE_URL="$CI_MIGRATION_DB" "$VENV_PY" -m alembic upgrade head
+  DATABASE_URL="$CI_MIGRATION_DB" "$VENV_PY" -m alembic downgrade 0021
+  DATABASE_URL="$CI_MIGRATION_DB" "$VENV_PY" -m alembic upgrade head
+  echo "    round trip clean"
+fi
+
 echo "==> ruff (test-suite lint)"
 "$VENV_PY" -m ruff check "${LINT_TARGETS[@]}"
 

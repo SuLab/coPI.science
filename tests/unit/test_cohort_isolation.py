@@ -1281,3 +1281,34 @@ class TestMigrationHygiene:
         assert downgrade.count("if_exists=True") == len(drops), (
             "every drop in the cohort downgrade needs if_exists=True"
         )
+
+    def test_head_is_the_expected_revision(self):
+        """Positive control for the single-head and no-duplicates assertions.
+
+        Both of those are absences. An empty versions directory, or a parser whose
+        regex stopped matching the file format, would satisfy "exactly one head" and
+        "no duplicates" trivially. This pins what the parser actually found.
+        """
+        revs = self._revisions()
+        assert len(revs) >= 22, (
+            f"only {len(revs)} revisions parsed from {self.VERSIONS} — the regex has "
+            "probably stopped matching, which would make every other assertion in "
+            "this class vacuous"
+        )
+        assert "0022" in revs
+        assert revs["0022"] == ["0022_add_cohorts.py"]
+
+    def test_ci_script_gates_on_alembic_before_running_tests(self):
+        """The durable fix for the collision is the gate, not the one renumbered file.
+
+        A future branch that assigns its revision id at branch time rather than at
+        merge time reintroduces the whole failure — clean git merge, green pytest,
+        broken deploy. Only the gate catches that, so the gate itself is pinned here.
+        """
+        ci = (pathlib.Path(__file__).resolve().parents[2] / "scripts" / "ci.sh").read_text()
+        assert "alembic heads" in ci, "the single-head check is missing from scripts/ci.sh"
+        assert "uniq -d" in ci, "the duplicate-revision-id check is missing"
+        # Order matters: a broken migration chain must be reported in seconds, not
+        # after the full suite (which passes regardless — that is the whole problem).
+        assert ci.index("uniq -d") < ci.index("-m pytest")
+        assert ci.index("alembic heads") < ci.index("-m pytest")
