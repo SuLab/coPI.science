@@ -143,6 +143,42 @@ async def _write_message(factory, run_id, **kw):
         await db.commit()
 
 
+# A roster the size of the intended pilot. Kept separate from AGENT_IDS so the
+# four-agent tests — which is most of this module — stay fast.
+AGENT_IDS_20 = (
+    "su", "wiseman", "cravatt", "lotz", "racki", "schultz", "wolan", "paegel",
+    "joseph", "ward", "lairson", "bollong", "shen", "chatterjee", "kelly",
+    "hull", "baran", "sharpless", "nolan", "wu",
+)
+
+
+@pytest.fixture
+async def live20(engine):
+    """20 active agents, same contract as `live`."""
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    run_id = uuid.uuid4()
+
+    async with factory() as db:
+        db.add(SimulationRun(id=run_id, status="running"))
+        for aid in AGENT_IDS_20:
+            db.add(AgentRegistry(
+                agent_id=aid, bot_name=f"{aid.capitalize()}Bot",
+                pi_name=f"PI {aid}", status="active",
+            ))
+        await db.commit()
+
+    yield factory, run_id
+
+    async with factory() as db:
+        await db.execute(delete(CohortAuditEvent))
+        await db.execute(delete(CohortMembership))
+        await db.execute(delete(Cohort))
+        await db.execute(delete(AgentMessage).where(AgentMessage.simulation_run_id == run_id))
+        await db.execute(delete(AgentRegistry).where(AgentRegistry.agent_id.in_(AGENT_IDS_20)))
+        await db.execute(delete(SimulationRun).where(SimulationRun.id == run_id))
+        await db.commit()
+
+
 # ===========================================================================
 # The topology matrix — every shape, both policies, through the real engine
 # ===========================================================================
@@ -861,3 +897,108 @@ async def test_post_message_stamps_private_channel_visibility(live, monkeypatch)
         allowed_sender_ids=su.allowed_sender_ids,
     )
     assert [e.content for e in visible] == ["my angle on the refinement"]
+
+
+# ===========================================================================
+# Scale + roster churn (v2 §14.6)
+# ===========================================================================
+
+
+async def test_gate_is_correct_and_affordable_at_20_agents(live20, monkeypatch):
+    """The pilot-scale recompute, with correctness as the control.
+
+    A timing bound on its own is satisfied by a recompute that returns empty gates
+    instantly — which is the failure mode that actually matters here, since an empty
+    gate silences an agent. So the same gates are checked for being non-empty,
+    symmetric, and self-inclusive before the timing assertion runs.
+    """
+    import statistics
+    import time
+
+    factory, run_id = live20
+    # 100 cohorts x 5 members, rotating through the roster: dense overlap, 500 rows.
+    mapping = {
+        f"c{i:03d}": [AGENT_IDS_20[(i * 5 + j) % 20] for j in range(5)]
+        for i in range(100)
+    }
+    await _topology(factory, mapping)
+    _cfg(monkeypatch, enabled=True, policy="isolated")
+    eng = _engine(factory, run_id, agent_ids=AGENT_IDS_20)
+
+    timings = []
+    for _ in range(10):
+        t0 = time.perf_counter()
+        await eng._recompute_allowed_sender_ids()
+        timings.append(time.perf_counter() - t0)
+
+    gates = {a: x.allowed_sender_ids for a, x in eng.agents.items()}
+    assert len(gates) == 20
+    assert eng._cohort_preflight_error is None
+    assert all(g for g in gates.values()), (
+        f"an agent ended up with an empty gate: "
+        f"{[a for a, g in gates.items() if not g]}"
+    )
+    for a, ga in gates.items():
+        assert a in ga, f"{a} cannot see its own messages"
+        for b in ga:
+            assert a in gates[b], f"asymmetric gate {a} -> {b}"
+
+    p50 = statistics.median(timings)
+    assert p50 < 0.5, (
+        f"recompute p50 {p50 * 1000:.0f}ms at 100 cohorts / 500 memberships / 20 agents"
+    )
+
+
+async def test_deactivating_an_agent_mid_run_updates_roster_and_gate(live20, monkeypatch):
+    """A suspended agent leaves the live roster on the next sync, and the surviving
+    agents keep working gates rather than being reset to None or empty."""
+    factory, run_id = live20
+    await _topology(
+        factory, {"alpha": list(AGENT_IDS_20[:10]), "beta": list(AGENT_IDS_20[10:])}
+    )
+    _cfg(monkeypatch, enabled=True, policy="isolated")
+    eng = _engine(factory, run_id, agent_ids=AGENT_IDS_20)
+    await eng._recompute_allowed_sender_ids()
+    assert "wu" in eng.agents
+    assert "wu" in eng.agents["nolan"].allowed_sender_ids
+
+    async with factory() as db:
+        reg = (await db.execute(
+            select(AgentRegistry).where(AgentRegistry.agent_id == "wu")
+        )).scalar_one()
+        reg.status = "suspended"
+        await db.commit()
+
+    eng._last_roster_poll = 0.0
+    await eng._sync_roster_from_db()
+
+    assert "wu" not in eng.agents, "a suspended agent must leave the live roster"
+    # Control: the remaining agents still have real gates. A sync that wiped every gate
+    # would also satisfy the assertion above.
+    assert eng.agents["su"].allowed_sender_ids, "the gate was cleared by the sync"
+    assert "wiseman" in eng.agents["su"].allowed_sender_ids
+    assert "su" not in eng.agents["nolan"].allowed_sender_ids, (
+        "cross-cohort isolation must survive a roster sync"
+    )
+
+
+async def test_activating_an_agent_mid_run_gives_it_a_gate(live20, monkeypatch):
+    """The mirror case. A newly activated agent must arrive WITH a gate applied, not
+    with allowed_sender_ids left at None — that would be a hole that opens itself."""
+    factory, run_id = live20
+    await _topology(
+        factory, {"alpha": list(AGENT_IDS_20[:10]), "beta": list(AGENT_IDS_20[10:])}
+    )
+    _cfg(monkeypatch, enabled=True, policy="isolated")
+    # Start with 19 agents; "wu" exists in the registry but is not in the process.
+    eng = _engine(factory, run_id, agent_ids=AGENT_IDS_20[:19])
+    await eng._recompute_allowed_sender_ids()
+    assert "wu" not in eng.agents
+
+    eng._last_roster_poll = 0.0
+    await eng._sync_roster_from_db()
+
+    assert "wu" in eng.agents, "an active registry row must join the live roster"
+    gate = eng.agents["wu"].allowed_sender_ids
+    assert gate is not None, "a newly added agent arrived with NO gate — an open hole"
+    assert gate == set(AGENT_IDS_20[10:]), gate
