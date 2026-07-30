@@ -76,6 +76,10 @@ class Agent:
         self.api_call_count: int = 0
         self.message_count: int = 0
         self.state = AgentState()
+        # Cohort interaction gate: set of agent_ids this agent may act on (its
+        # cohort-mates), or None when isolation is disabled (all-vs-all).
+        # Recomputed each roster sync by SimulationEngine. See specs/cohort-system.md.
+        self.allowed_sender_ids: set[str] | None = None
 
     # ------------------------------------------------------------------
     # Profile properties (cached, loaded from disk)

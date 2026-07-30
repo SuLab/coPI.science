@@ -43,6 +43,22 @@ def is_funding_post(content: str) -> bool:
     return ":moneybag:" in content
 
 
+def _sender_allowed(sender_agent_id: str | None, allowed_sender_ids: set[str] | None) -> bool:
+    """Cohort gate for a log entry's author.
+
+    Returns True (entry is visible) when:
+    - `allowed_sender_ids is None` — isolation disabled/uncohorted, no filtering;
+    - the sender is a human PI (`sender_agent_id is None`) — always shown;
+    - the sender shares a cohort with the viewing agent.
+    See specs/cohort-system.md.
+    """
+    if allowed_sender_ids is None:
+        return True
+    if sender_agent_id is None:
+        return True
+    return sender_agent_id in allowed_sender_ids
+
+
 class MessageLog:
     """
     Append-only in-memory message log.
@@ -123,10 +139,14 @@ class MessageLog:
         since: float,
         channels: set[str],
         exclude_agent_id: str,
+        allowed_sender_ids: set[str] | None = None,
     ) -> list[LogEntry]:
         """
         Return top-level posts (thread_ts is None) in the given channels,
         posted after `since`, excluding posts from `exclude_agent_id`.
+
+        When `allowed_sender_ids` is provided, only posts from those agents (plus
+        human PI posts) are returned — the cohort gate (see specs/cohort-system.md).
         """
         results = []
         for entry in self._entries:
@@ -137,6 +157,8 @@ class MessageLog:
             if entry.channel not in channels:
                 continue
             if entry.sender_agent_id == exclude_agent_id:
+                continue
+            if not _sender_allowed(entry.sender_agent_id, allowed_sender_ids):
                 continue
             results.append(entry)
         return results
@@ -214,10 +236,14 @@ class MessageLog:
         self,
         agent_id: str,
         since: float,
+        allowed_sender_ids: set[str] | None = None,
     ) -> list[LogEntry]:
         """
         Find replies (since cursor) to top-level posts authored by agent_id,
         where the reply is from a different agent.
+
+        When `allowed_sender_ids` is provided, replies from non-cohort agents are
+        excluded (the cohort gate; human PI replies always pass).
         """
         # First, find all top-level posts by this agent
         agent_post_ts = {
@@ -232,6 +258,8 @@ class MessageLog:
                 continue
             if entry.sender_agent_id == agent_id:
                 continue
+            if not _sender_allowed(entry.sender_agent_id, allowed_sender_ids):
+                continue
             results.append(entry)
         return results
 
@@ -239,15 +267,21 @@ class MessageLog:
         self,
         agent_bot_name: str,
         since: float,
+        allowed_sender_ids: set[str] | None = None,
     ) -> list[LogEntry]:
         """
         Find posts/replies that mention (tag) the given agent bot name,
         posted since the given cursor.
+
+        When `allowed_sender_ids` is provided, tags authored by non-cohort agents
+        are excluded (the cohort gate; human PI tags always pass).
         """
         tag = f"@{agent_bot_name}".lower()
         results = []
         for entry in self._entries:
             if entry.posted_at <= since:
+                continue
+            if not _sender_allowed(entry.sender_agent_id, allowed_sender_ids):
                 continue
             if tag in entry.content.lower():
                 results.append(entry)
