@@ -65,6 +65,7 @@ markers = [
     "integration: needs a real Postgres (testcontainers) + Docker",
     "characterization: golden-master snapshot test",
     "contract: respx-mocked external HTTP",
+    "real_llm: spends real Anthropic tokens; skipped unless ANTHROPIC_API_KEY is set",
 ]
 
 [tool.coverage.run]

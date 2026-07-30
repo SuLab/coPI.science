@@ -747,3 +747,53 @@ async def test_pi_dm_path_is_unaffected_by_any_topology(live, monkeypatch):
         "a PI DM must reach the agent under every cohort configuration"
     )
     assert eng.agents["su"].state.has_pi_directive is True
+
+
+# ===========================================================================
+# Concurrency: membership writes must be atomic
+# ===========================================================================
+
+
+async def test_matrix_save_writes_memberships_atomically(live, monkeypatch):
+    """A wipe committed separately from the re-insert transiently opens the gate.
+
+    Measured: with a two-transaction writer, ~57% of concurrent gate recomputes
+    landed in the preflight-refused state under `policy="isolated"` — i.e. the gate
+    was fully OPEN for those ticks — because a reader in the gap sees zero
+    memberships and the preflight correctly (but unhelpfully) refuses. With a
+    single-transaction writer it was 0 of ~4,500.
+
+    The shipped `/admin/cohorts/topology` route is safe because it accumulates every
+    add and delete and commits once. This test pins that, because the dependency is
+    invisible: a future bulk importer that truncates and then inserts would silently
+    un-gate the roster about half the time.
+    """
+    import inspect
+
+    from src.routers import admin
+
+    src = inspect.getsource(admin.admin_cohort_topology_save)
+    # Exactly one commit, and it is the last statement of the write path.
+    assert src.count("await db.commit()") == 1, (
+        "the matrix save must commit exactly once; a mid-loop commit exposes an "
+        "empty-topology window to any concurrent gate recompute"
+    )
+    body_after_loop = src[src.rindex("for cell in sorted(rendered):"):]
+    assert body_after_loop.index("await db.commit()") > body_after_loop.rindex(
+        "COHORT_ACTION_AGENT_REMOVED"
+    ), "the commit must come after every add/remove has been staged"
+
+
+async def test_empty_topology_fails_open_not_closed(live, monkeypatch):
+    """If a reader ever does see an empty topology mid-write, the outcome must be
+    'everyone unrestricted', never 'everyone silenced'."""
+    factory, run_id = live
+    await _topology(factory, {"alpha": []})
+    _cfg(monkeypatch, enabled=True, policy="isolated")
+    eng = _engine(factory, run_id)
+    await eng._recompute_allowed_sender_ids()
+    assert eng._cohort_preflight_error is not None
+    assert all(a.allowed_sender_ids is None for a in eng.agents.values()), (
+        "an empty topology must fail OPEN — a transient write window must never "
+        "silence the roster"
+    )
