@@ -1371,3 +1371,153 @@ async def test_start_records_a_snapshot_even_when_the_gate_is_off(live, monkeypa
         )).scalars().all()
     assert len(snaps) == 1, "a gate-off run must still record its topology"
     assert snaps[0].topology["cohort_isolation_enabled"] is False
+
+
+# ===========================================================================
+# §9 outbound tag hygiene, §10.3 the fairness valve
+# ===========================================================================
+
+
+# The strip's contract as data. su's gate is {su, wiseman}; cravatt and lotz are
+# outside it. Each row is (input, expected output).
+STRIP_CASES = [
+    ("Great point @CravattBot, shall we?",   "Great point, shall we?"),
+    ("@CravattBot hi",                       "hi"),
+    ("cc @CravattBot",                       "cc"),
+    ("(@CravattBot)",                        "()"),
+    ("a @CravattBot b @CravattBot c",        "a b c"),
+    ("keep @WisemanBot, drop @CravattBot",   "keep @WisemanBot, drop"),
+    ("self @SuBot stays",                    "self @SuBot stays"),
+    ("unknown @GhostBot stays",              "unknown @GhostBot stays"),
+    ("mail a@cravattbot.example",            "mail a@cravattbot.example"),
+    ("see http://x/@cravattbot",             "see http://x/@cravattbot"),
+    ("@CravattBotly stays",                  "@CravattBotly stays"),
+    ("line1 @CravattBot\nline2",             "line1\nline2"),
+    ("here:\n    def f():\n        return @CravattBot",
+     "here:\n    def f():\n        return"),
+    ("two outsiders @CravattBot @LotzBot",   "two outsiders"),
+]
+
+
+@pytest.mark.parametrize("text,expected", STRIP_CASES,
+                         ids=[c[0][:26] for c in STRIP_CASES])
+async def test_strip_cases(live, monkeypatch, text, expected):
+    """Every §9 behaviour as a row, so a failure names the surrounding, not the regex."""
+    factory, run_id = live
+    await _topology(factory, {"alpha": ["su", "wiseman"]})
+    _cfg(monkeypatch, enabled=True, policy="isolated")
+    eng = _engine(factory, run_id)
+    await eng._recompute_allowed_sender_ids()
+    assert eng.agents["su"].allowed_sender_ids == {"su", "wiseman"}
+    assert eng._strip_disallowed_tags(text, eng.agents["su"]) == expected
+
+
+def test_strip_cases_include_survival_rows():
+    """Control for the table.
+
+    At least one row must PRESERVE a cross-agent mention and at least one must remove
+    one. A table of removal-only rows would pass against a function that deleted every
+    @-mention; a table of preserve-only rows against one that did nothing.
+    """
+    preserved = [t for t, exp in STRIP_CASES if "@" in exp]
+    removed = [t for t, exp in STRIP_CASES if "@CravattBot" in t and "@" not in exp]
+    assert preserved, "no row preserves a mention"
+    assert removed, "no row removes a mention"
+    assert any("@WisemanBot" in exp for _, exp in STRIP_CASES), (
+        "no row proves a COHORT-MATE mention survives — the strip could be deleting "
+        "every mention and this table would not notice"
+    )
+
+
+async def test_strip_indentation_is_preserved(live, monkeypatch):
+    """Regression: the whitespace tidy-up must not reflow line-leading indentation.
+
+    An earlier version normalised `(?m)^[ \\t]+`, which flattened the code blocks and
+    bullet lists agents put in messages. This runs on EVERY outbound message, so a
+    reflow would corrupt real content on a path that has nothing to do with cohorts.
+    """
+    factory, run_id = live
+    await _topology(factory, {"alpha": ["su", "wiseman"]})
+    _cfg(monkeypatch, enabled=True, policy="isolated")
+    eng = _engine(factory, run_id)
+    await eng._recompute_allowed_sender_ids()
+
+    text = (
+        "Proposal @CravattBot:\n"
+        "```python\n"
+        "def screen(hits):\n"
+        "    for h in hits:\n"
+        "        yield h\n"
+        "```\n"
+        "- first bullet\n"
+        "  - nested bullet\n"
+    )
+    out = eng._strip_disallowed_tags(text, eng.agents["su"])
+    assert "@CravattBot" not in out, "the mention must still be stripped"
+    assert "    for h in hits:" in out, "code-block indentation was reflowed"
+    assert "        yield h" in out, "nested code indentation was reflowed"
+    assert "  - nested bullet" in out, "list indentation was reflowed"
+
+
+async def test_valve_holds_over_sustained_load(live20, monkeypatch):
+    """§10.3 at pilot scale over 200 selections.
+
+    A fake clock is essential: with wall time every pick lands in the same instant, the
+    staleness weight clamps to 1.0 for everyone, and the proactive tier becomes uniform
+    — which would make the pair's share a property of the fake, not of the valve.
+
+    Both bounds matter. The upper one is the valve doing its job; the LOWER one is the
+    control — a scheduler with no reactive tier at all would give the pair roughly
+    2/20 of the turns and would pass an upper bound alone.
+    """
+    import random
+    import types
+
+    import src.agent.simulation as sim
+    from src.agent.state import ThreadState
+
+    factory, run_id = live20
+    await _topology(factory, {"alpha": list(AGENT_IDS_20)})
+    _cfg(monkeypatch, enabled=True, policy="isolated", valve=3)
+    eng = _engine(factory, run_id, agent_ids=AGENT_IDS_20)
+    await eng._recompute_allowed_sender_ids()
+
+    random.seed(20260730)
+    clock = [1000.0]
+    monkeypatch.setattr(sim, "time", types.SimpleNamespace(time=lambda: clock[0]))
+
+    # Two agents locked in a perpetual exchange — the starvation scenario §10.3 exists
+    # for. The other 18 have nothing owed and can only be reached proactively.
+    for a, b in (("su", "wiseman"), ("wiseman", "su")):
+        eng.agents[a].state.active_threads[f"t-{a}"] = ThreadState(
+            thread_id=f"t-{a}", channel="general", other_agent_id=b,
+            has_pending_reply=True,
+        )
+
+    picks = []
+    for _ in range(200):
+        got = eng._select_agent()
+        assert got is not None
+        picks.append(got.agent_id)
+        eng._last_llm_caller = got.agent_id
+        got.state.last_selected = clock[0]
+        clock[0] += 10.0
+
+    pair = sum(1 for p in picks if p in {"su", "wiseman"})
+    assert pair <= 160, (
+        f"the pair took {pair}/200 turns — the valve is not holding"
+    )
+    assert pair >= 100, (
+        f"the pair took only {pair}/200 — the reactive tier is not firing at all, so "
+        "the upper bound above proves nothing"
+    )
+    # The valve's purpose: everyone else still gets to form new conversations.
+    others = set(picks) - {"su", "wiseman"}
+    assert len(others) >= 15, (
+        f"only {len(others)} of the other 18 agents were ever selected: {sorted(others)}"
+    )
+    assert eng._reactive_selections + eng._proactive_selections == 200
+    assert eng._proactive_selections >= 40, (
+        f"only {eng._proactive_selections} proactive picks in 200 — the valve should "
+        "force roughly one in four"
+    )
