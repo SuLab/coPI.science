@@ -27,6 +27,7 @@ Without a key every test skips, so the default suite stays free and offline.
 """
 
 import os
+import uuid
 
 import pytest
 
@@ -265,4 +266,110 @@ async def test_real_scan_response_parses_under_an_active_gate(log):
     assert set(map(str, selected)) <= allowed_ids | {""}, (
         f"the model selected a post id that was gated out: {selected} "
         f"(allowed: {sorted(allowed_ids)})"
+    )
+
+
+async def test_real_model_acts_on_an_uncohorted_peer_under_open_policy(log):
+    """§5.2 with a real model: under `open`, a cohorted agent must be able to act on an
+    uncohorted one.
+
+    This is the defect a real multi-turn run surfaced. The gate was asymmetric — the
+    uncohorted agent could react to anyone but appeared in nobody's mate set, so it
+    opened threads that were never answered. Every gate-computation test passed.
+
+    Control: the same call with the uncohorted agent excluded from the gate must NOT
+    select the post, so a model that selects everything cannot pass.
+    """
+    from src.services.cohorts import compute_gates
+
+    c1 = uuid.uuid4()
+    gates, reason = compute_gates(
+        membership_rows=[(c1, "su"), (c1, "wiseman")],
+        agent_ids=["su", "wiseman", "cravatt"],
+        isolation_enabled=True, policy="open", cohort_count=1,
+    )
+    assert reason is None
+    assert gates["cravatt"] is None, "the uncohorted agent stays unrestricted"
+    assert "cravatt" in gates["su"], (
+        f"precondition: the open-policy fix must be in place. su gate={gates['su']}"
+    )
+
+    a = _profiled_agent()
+    visible = log.get_new_top_level_posts(
+        since=0, channels={"general"}, exclude_agent_id="su",
+        allowed_sender_ids=gates["su"],
+    )
+    assert {p.ts for p in visible} == {"1000.0001", "1000.0002"}, (
+        "the uncohorted peer's post must reach su's prompt at all"
+    )
+    selected = _selected_ids(await _call(*a.build_phase2_scan_prompt(_post_dicts(visible))))
+    assert selected is not None, "real Phase 2 response did not parse"
+    assert "1000.0002" in selected, (
+        f"the model did not act on the uncohorted peer's relevant post: {selected}"
+    )
+
+    # Control: exclude cravatt and the same model must not select it — it is not in
+    # the prompt to select.
+    gated = log.get_new_top_level_posts(
+        since=0, channels={"general"}, exclude_agent_id="su",
+        allowed_sender_ids={"su", "wiseman"},
+    )
+    sel2 = _selected_ids(await _call(*a.build_phase2_scan_prompt(_post_dicts(gated))))
+    assert sel2 is not None
+    assert "1000.0002" not in sel2, (
+        f"control leg failed: the post was selected even when gated out ({sel2}), so "
+        "the prompt leaked it"
+    )
+
+
+async def test_real_model_cannot_reach_across_a_hub(log):
+    """Non-transitivity with a real model: A-B and B-C must not yield A-C.
+
+    wiseman shares a cohort with su, and su shares one with cravatt, but wiseman and
+    cravatt share none. cravatt's post must be absent from wiseman's prompt even though
+    su can see it — and wiseman is given SU_PROFILE so scientific relevance cannot be
+    the thing doing the filtering.
+
+    Control: su, who does share a cohort with cravatt, selects the same post. Without
+    that leg, wiseman's non-selection is equally explained by a model that selects
+    nothing.
+    """
+    from src.services.cohorts import compute_gates
+
+    c1, c2 = uuid.uuid4(), uuid.uuid4()
+    gates, reason = compute_gates(
+        membership_rows=[(c1, "su"), (c1, "wiseman"), (c2, "su"), (c2, "cravatt")],
+        agent_ids=["su", "wiseman", "cravatt"],
+        isolation_enabled=True, policy="isolated", cohort_count=2,
+    )
+    assert reason is None
+    assert "cravatt" in gates["su"] and "wiseman" in gates["su"], gates["su"]
+    assert "cravatt" not in gates["wiseman"], (
+        f"precondition: the hub must not be transitive. wiseman gate={gates['wiseman']}"
+    )
+
+    w = _agent("wiseman", "WisemanBot")
+    w._public_profile = SU_PROFILE
+    seen = log.get_new_top_level_posts(
+        since=0, channels={"general"}, exclude_agent_id="wiseman",
+        allowed_sender_ids=gates["wiseman"],
+    )
+    sysp, msgs = w.build_phase2_scan_prompt(_post_dicts(seen))
+    assert POST_RELEVANT[:40] not in sysp + str(msgs), "the spoke's prompt leaked it"
+    sel = _selected_ids(await _call(sysp, msgs))
+    assert sel is not None
+    assert "1000.0002" not in sel
+
+    # Control: the hub does select it.
+    s = _profiled_agent()
+    seen_su = log.get_new_top_level_posts(
+        since=0, channels={"general"}, exclude_agent_id="su",
+        allowed_sender_ids=gates["su"],
+    )
+    assert POST_RELEVANT[:40] in str(_post_dicts(seen_su))
+    sel_su = _selected_ids(await _call(*s.build_phase2_scan_prompt(_post_dicts(seen_su))))
+    assert sel_su is not None
+    assert "1000.0002" in sel_su, (
+        f"control leg failed: the hub did not select the post either ({sel_su}), so "
+        "the spoke's non-selection proves nothing"
     )
