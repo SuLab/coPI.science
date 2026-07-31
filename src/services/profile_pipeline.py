@@ -14,7 +14,6 @@ Implements the pipeline from profile-ingestion.md:
 """
 
 import hashlib
-import json
 import logging
 import uuid
 from datetime import datetime, timezone
