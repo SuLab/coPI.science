@@ -41,6 +41,8 @@ from src.agent.ids import mint_local_ts
 from src.agent.slack_client import AgentSlackClient, ThreadNotFound
 from src.config import get_settings
 from src.models import (
+    VISIBILITY_COLLAB_PRIVATE,
+    VISIBILITY_PUBLIC,
     AgentChannel,
     AgentMessage,
     AgentRegistry,
@@ -48,8 +50,6 @@ from src.models import (
     SimulationRun,
     ThreadDecision,
     User,
-    VISIBILITY_COLLAB_PRIVATE,
-    VISIBILITY_PUBLIC,
 )
 
 logger = logging.getLogger(__name__)

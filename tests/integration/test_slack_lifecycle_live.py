@@ -204,14 +204,14 @@ async def test_ensure_seeded_channels_reuses_an_existing_channel(
     """The reuse branch: a second start must adopt the existing channel, not create a
     second one.
 
-    Discovery is patched to the fully paginated ground truth — the same live Slack data,
-    just complete — because `_ensure_seeded_channels` looks the channel up with
-    `client.list_channels()`, which returns one 200-item page of a 323-channel workspace.
-    Unpatched, this test passes or fails on whether Slack's id ordering happens to put
-    the channel we just made inside that page: a ~62% coin flip, and the original cause
-    of this test's intermittent failures. The lottery is not the subject here; the engine's
-    reuse logic is. The defect itself is pinned deterministically by the xfail test below
-    and by test_slack_client_live.py::test_list_channels_returns_every_public_channel.
+    Discovery runs against the real `client.list_channels()`. It used to be patched to a
+    fully paginated ground truth because src read one 200-item page of a 323-channel
+    workspace, so this test passed or failed on whether Slack's id ordering happened to
+    put the channel we had just made inside that page — a ~62% coin flip, and the
+    original cause of this test's intermittent failures. Now that `list_channels`
+    paginates, the patch would only hide the code under test; the fully paginated fixture
+    is kept as the *independent* ground truth for "does Slack have this channel", which
+    is a different code path from the client's own listing on purpose.
     """
     import src.agent.simulation as sim
 
@@ -224,10 +224,6 @@ async def test_ensure_seeded_channels_reuses_an_existing_channel(
         ground = slack_list_all_channels(su)
         assert ground.get(fresh) == made["id"]
         for c in slack_clients.values():
-            monkeypatch.setattr(
-                c, "list_channels",
-                lambda include_private=False, _g=ground: dict(_g),
-            )
             monkeypatch.setattr(
                 c, "create_channel",
                 lambda ch, _a=c.agent_id: pytest.fail(
@@ -253,44 +249,80 @@ async def test_ensure_seeded_channels_reuses_an_existing_channel(
         su._call_with_retry(su._client.conversations_archive, channel=made["id"])
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "src defect (NOT fixed, reported): _ensure_seeded_channels (simulation.py:3038) "
-    "discovers existing channels with client.list_channels(), which shows only the first "
-    "200-item page of conversations.list. A seeded channel outside that page is treated "
-    "as missing, conversations.create answers name_taken, create_channel returns None, "
-    "and the channel ends up with NO entry in _channel_id_map — after which every post "
-    "to it is addressed by name and Slack answers not_in_channel. "
-    "strict=True: this XPASSes the moment list_channels paginates (or the workspace "
-    "drops under one page), which is the signal to delete the marker."
-))
 async def test_ensure_seeded_channels_adopts_a_channel_beyond_the_first_page(
     lifecycle, monkeypatch, slack_list_all_channels
 ):
-    """Deterministic reproduction of the production consequence of the pagination defect.
+    """The pagination fix, observed through the engine's real bootstrap path.
 
-    Uses a channel Slack really has but src's single page does not show, so there is no
-    coin flip: with 323 public channels and a 200-channel page, 123 of them are always
-    invisible. No side effects — the conversations.create attempt this provokes is
-    answered with name_taken.
+    Was `xfail(strict=True)` while `list_channels` read a single 200-item page of
+    conversations.list and ignored `response_metadata.next_cursor`. A seeded channel
+    outside that page was treated as missing, conversations.create answered
+    `name_taken`, `create_channel` returned None, and the channel ended up with NO entry
+    in `_channel_id_map` — after which every post to it was addressed by name and Slack
+    answered `not_in_channel`.
+
+    Deliberately not a coin flip. The victim is a channel that `list_channels()` reports
+    but conversations.list's FIRST PAGE does not — i.e. one the old implementation could
+    never see — and `create_channel` is replaced with a failure so the
+    duplicate-creation path is a hard error rather than something to infer from the
+    resulting id.
+
+    The victim is cross-checked against an independent fully paginated walk before being
+    used, and the majority of the beyond-page-one set must check out. Neither walk is a
+    snapshot: conversations.list is cursor-paginated over a workspace this suite mutates,
+    and Slack's listing is eventually consistent, so any single channel can be missing
+    from one complete walk. Requiring a majority keeps the anti-invention claim (a client
+    fabricating names beyond page 1 fails) without letting Slack's index latency decide
+    the outcome.
     """
     import src.agent.simulation as sim
 
     build, factory, run_id, name, cid, slack_clients = lifecycle
     su = slack_clients["su"]
-    page = su.list_channels()
+    # One raw page: the whole of what src used to see.
+    first_page = {
+        ch["name"]: ch["id"] for ch in su._call_with_retry(
+            su._client.conversations_list, types="public_channel", limit=200,
+        )["channels"]
+    }
+    listed = su.list_channels()
     ground = slack_list_all_channels(su)
-    beyond = sorted(set(ground) - set(page))
-    if not beyond:
-        pytest.skip("every channel fits in one page — nothing to demonstrate")
 
-    victim = beyond[0]
+    beyond = sorted(set(listed) - set(first_page))
+    assert beyond, (
+        f"list_channels() returned {len(listed)} channels and none of them is beyond "
+        "conversations.list's first 200-item page — it is not paginating, or the "
+        "workspace no longer exceeds one page"
+    )
+    confirmed = [n for n in beyond if ground.get(n) == listed[n]]
+    assert len(confirmed) > len(beyond) // 2, (
+        f"only {len(confirmed)} of {len(beyond)} channels beyond the first page could be "
+        "confirmed against an independent walk of Slack: "
+        f"{sorted(set(beyond) - set(confirmed))[:5]}"
+    )
+
+    victim = confirmed[0]
     monkeypatch.setattr(sim, "SEEDED_CHANNELS", [victim])
+    for c in slack_clients.values():
+        monkeypatch.setattr(
+            c, "create_channel",
+            lambda ch, _a=c.agent_id: pytest.fail(
+                f"[{_a}] _ensure_seeded_channels tried to create #{ch}, which Slack "
+                "already has beyond the first page of conversations.list — the "
+                "duplicate-creation path the pagination fix closed"
+            ),
+        )
     eng = build(slack_on=True)
     eng._ensure_seeded_channels()
     assert eng._channel_id_map.get(victim) == ground[victim], (
         f"#{victim} exists in Slack as {ground[victim]} but the engine mapped it to "
         f"{eng._channel_id_map.get(victim)!r}"
     )
+    # And every client can address it by name, which is what the id is for.
+    for c in slack_clients.values():
+        assert c._channel_name_to_id.get(victim) == ground[victim], (
+            f"[{c.agent_id}] did not get the shared channel map"
+        )
 
 
 # --- T10: Slack-off <-> Slack-on ---------------------------------------------------------

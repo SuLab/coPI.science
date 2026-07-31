@@ -203,19 +203,29 @@ def slack_list_all_channels():
     """Fully paginated conversations.list — the ground truth for "does Slack have this
     channel". Returns a callable ``(client, include_private=False) -> {name: id}``.
 
-    Needed because ``AgentSlackClient.list_channels`` asks for a single 200-item page and
-    ignores ``response_metadata.next_cursor`` (src/agent/slack_client.py:619), so on a
-    workspace with more than 200 conversations it returns an arbitrary *subset*. Slack
-    orders conversations.list by channel id, and ids are not monotonic in creation time,
-    so a channel created a second ago can sort anywhere in that order. A test that asks
-    ``list_channels()`` whether a channel exists is therefore flipping a coin.
+    Originally needed because ``AgentSlackClient.list_channels`` asked for a single
+    200-item page and ignored ``response_metadata.next_cursor``, so on a workspace with
+    more than 200 conversations it returned an arbitrary *subset*: Slack orders
+    conversations.list by channel id, ids are not monotonic in creation time, and this
+    workspace has 300+ public channels (most of them archived `t-` channels from earlier
+    runs — Slack has no delete-channel API). Asking ``list_channels()`` whether a channel
+    existed was therefore a coin flip, and that was the cause of the whole live tier's
+    rotating failures.
 
-    This workspace has 323 public channels (320 of them archived `t-` channels from
-    earlier runs, and Slack has no delete-channel API), so the coin is permanently
-    biased: ~38% of newly created channels are invisible to a single page. Every test
-    that needs to know whether a channel really exists uses this instead. The defect
-    itself is pinned by test_slack_client_live.py::test_list_channels_returns_every_
-    public_channel (xfail strict).
+    ``list_channels`` paginates now, so this fixture is no longer a *workaround*. It is
+    kept because it is a deliberately **independent** implementation: a test that asked
+    the client's own listing whether the client's own listing was complete would pass
+    just as happily if both shared a bug. Assertions about the client's completeness are
+    made against this, in
+    ``test_slack_client_live.py::test_list_channels_returns_every_public_channel``, which
+    no longer carries an xfail marker.
+
+    One property to respect at the call site: this is a cursor walk, not a snapshot. The
+    suite mutates the workspace as it runs (probe channels are created and archived by
+    fixtures) and Slack's listing is eventually consistent, so a channel can be absent
+    from one complete walk and present in the next seconds later. Tests that compare two
+    walks bracket the call under test and assert against both — see that test for the
+    measurement.
     """
     def _all(client, *, include_private: bool = False) -> dict[str, str]:
         types = "public_channel,private_channel" if include_private else "public_channel"

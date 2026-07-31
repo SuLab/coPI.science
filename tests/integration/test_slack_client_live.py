@@ -63,9 +63,11 @@ def test_channel_create_list_join_and_id_resolution(
     slack_client_su, slack_probe_channel, slack_list_all_channels
 ):
     """Creation, resolution and join. The channel's *existence* is asserted against the
-    fully paginated listing rather than against `list_channels()`, which shows one
-    200-item page of a 323-channel workspace — see test_list_channels_returns_every_
-    public_channel below for that defect, pinned separately so it cannot hide in here.
+    fully paginated fixture rather than against `list_channels()` — deliberately a
+    different code path, so this test cannot pass because the client's own listing and
+    the client's own resolution share a bug. `list_channels()`'s completeness is the
+    subject of test_list_channels_returns_every_public_channel below, and is not
+    re-litigated here.
     """
     name, cid = slack_probe_channel
     assert slack_list_all_channels(slack_client_su).get(name) == cid, (
@@ -105,22 +107,42 @@ def test_list_channels_returns_every_public_channel(
 
     The control matters as much as the claim: the workspace must be *bigger* than one
     page, or a client that still ignored the cursor would pass this.
+
+    The ground truth is read TWICE, bracketing the call under test, and the comparison is
+    made against both. Neither walk is a snapshot — conversations.list is cursor-paginated
+    over a workspace this very suite mutates (the previous test archives its probe channel
+    on the way out) and Slack's listing is eventually consistent, so a channel can be
+    absent from one complete walk and present in the next one seconds later. Measured:
+    with a single ground read, this test failed on 1 of 3 consecutive tier runs because a
+    `t-probe-` channel archived moments earlier was missing from the ground walk and
+    present in `list_channels()` — an artifact of Slack's index latency, asserted as if it
+    were a src defect. Bracketing keeps both real claims intact: a channel Slack listed in
+    both walks was there throughout and a paginating client must have seen it, and a name
+    the client invented is in neither.
     """
-    ground = slack_list_all_channels(slack_client_su)
-    assert len(ground) > 200, (
-        f"only {len(ground)} public channels — this workspace no longer exceeds one "
-        "200-item page, so this test can no longer detect a missing paginator"
-    )
+    before = slack_list_all_channels(slack_client_su)
     listed = slack_client_su.list_channels()
-    missing = sorted(set(ground) - set(listed))
+    after = slack_list_all_channels(slack_client_su)
+
+    stable = set(before) & set(after)
+    assert len(stable) > 200, (
+        f"only {len(stable)} stably-listed public channels — this workspace no longer "
+        "exceeds one 200-item page, so this test can no longer detect a missing paginator"
+    )
+    missing = sorted(stable - set(listed))
     assert not missing, (
-        f"list_channels() returned {len(listed)} of {len(ground)} public channels; "
-        f"{len(missing)} are invisible to it, e.g. {missing[:5]}"
+        f"list_channels() returned {len(listed)} of {len(stable)} public channels that "
+        f"Slack listed in two independent walks; {len(missing)} are invisible to it, "
+        f"e.g. {missing[:5]}"
     )
-    assert set(listed) == set(ground), (
-        f"list_channels() invented channels Slack does not list: "
-        f"{sorted(set(listed) - set(ground))[:5]}"
+    invented = sorted(set(listed) - set(before) - set(after))
+    assert not invented, (
+        "list_channels() returned channels Slack does not list in either walk: "
+        f"{invented[:5]}"
     )
+    # The ids agree too, not just the names — a listing that paired the right names with
+    # the wrong ids resolves every post to the wrong channel.
+    assert {n: listed[n] for n in stable} == {n: before[n] for n in stable}
 
 
 def test_exclude_archived_is_opt_in_because_an_archived_channel_owns_its_name(

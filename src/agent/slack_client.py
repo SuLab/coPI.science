@@ -21,7 +21,8 @@ import logging
 import re
 import secrets
 import time
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
@@ -213,7 +214,13 @@ def split_for_slack(text: str, limit: int = SLACK_MAX_TEXT_CHARS) -> list[str]:
     if len(text) <= limit:
         return [text]
     fenced = _FENCE in text
-    budget = limit - _FENCE_REPAIR_BUDGET if fenced else limit
+    # Clamped to >= 1 so the loop below always makes progress. A budget of zero makes
+    # ``_cut_at`` return 0, ``rest`` never shrinks, and this hangs the calling turn
+    # forever — measured: ``split_for_slack(fenced_text, limit=8)`` never returned,
+    # because the fence-repair reserve is 8 characters. Unreachable at the module's own
+    # 4000-character limit, but ``limit`` is a parameter and a hang is not a failure mode
+    # worth leaving available to a future caller.
+    budget = max(1, limit - _FENCE_REPAIR_BUDGET if fenced else limit)
     chunks: list[str] = []
     rest = text
     while len(rest) > budget:
@@ -462,11 +469,38 @@ class AgentSlackClient:
 
     @staticmethod
     def _conversation_messages(raw: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Drop workspace bookkeeping and normalise what's left."""
-        return [
-            normalize_inbound_message(m) for m in raw
-            if m.get("subtype") not in _SYSTEM_SUBTYPES
-        ]
+        """Drop workspace bookkeeping, normalise what's left, order it oldest-first.
+
+        Ordering belongs here — one place, all four inbound reads — because Slack's page
+        order is not one rule. conversations.history pages *backwards* in time when no
+        ``oldest`` is given, and *forwards* from ``oldest`` when one is. Measured against
+        the live workspace: five messages, ``oldest`` set to the first and ``limit=2``,
+        and page 1 came back as the OLDEST pair (newest-first within the page). So
+        reversing the concatenated walk — which is exactly what a single page needed, and
+        what this client did — assembled the pages newest-block-first as soon as
+        pagination was added. ``_poll_slack_for_pi_messages`` advances
+        ``_poll_cursors[ch_id]`` to the last message it iterates, so the cursor landed on
+        the second-oldest message of the window instead of the newest, and every later
+        tick re-polled messages it had already handled: idempotent ``MessageLog.append``
+        keeps that from duplicating rows, but ``_check_pi_proposal_review`` and the
+        PI-directive branch re-fire on a PI message each time.
+
+        Sorting by ts depends on no Slack ordering at all, which is the point. The thread
+        parent keeps its position for free: it is the oldest message in its thread.
+        """
+        def _by_ts(msg: dict[str, Any]) -> float:
+            try:
+                return float(msg.get("ts") or 0.0)
+            except (TypeError, ValueError):
+                return 0.0
+
+        return sorted(
+            (
+                normalize_inbound_message(m) for m in raw
+                if m.get("subtype") not in _SYSTEM_SUBTYPES
+            ),
+            key=_by_ts,
+        )
 
     def poll_channel_messages(
         self,
@@ -485,6 +519,10 @@ class AgentSlackClient:
         here is bounded by the same ``MAX_PAGES`` guard as everything else, and an
         incomplete listing returns ``[]`` rather than a partial window precisely
         so the caller's cursor cannot step over the gap.
+
+        Oldest-first, and ordered by ts rather than by Slack's page order — see
+        ``_conversation_messages`` for the measurement that makes the distinction
+        matter once there is more than one page.
         """
         if not self._client:
             return []
@@ -497,8 +535,7 @@ class AgentSlackClient:
                 "conversations_history", "messages",
                 limit=limit, channel=channel_id, oldest=oldest, inclusive=False,
             )
-            # conversations.history pages newest-first; reverse for oldest-first.
-            return list(reversed(self._conversation_messages(messages)))
+            return self._conversation_messages(messages)
         except SlackListingIncomplete as exc:
             logger.error(
                 "[%s] Poll of %s is INCOMPLETE (%s) — dropping the partial window so "
@@ -579,7 +616,7 @@ class AgentSlackClient:
         except SlackApiError as exc:
             logger.error("[%s] Failed to get channel history %s: %s", self.agent_id, channel_id, exc)
             return []
-        return list(reversed(self._conversation_messages(messages)))
+        return self._conversation_messages(messages)
 
     def get_all_thread_replies(
         self,

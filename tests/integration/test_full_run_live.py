@@ -26,14 +26,17 @@ cost a rewrite there:
 
 Two more are specific to running both dependencies at once:
 
-5. **`AgentSlackClient.list_channels` does not paginate** (one 200-item page of 500+
-   conversations, ordered by channel id, which is not monotonic in creation time), so
-   asking Slack "does this channel exist" is a coin flip and `_ensure_seeded_channels`
-   would try to *create* the probe channel it just failed to see. The defect is pinned by
-   `test_slack_client_live.py::test_list_channels_returns_every_public_channel` (xfail
-   strict); here every client's `list_channels` is replaced with the fully-paginated
-   `slack_list_all_channels` so the engine's real bootstrap path can run against a
-   truthful answer instead of a random subset.
+5. **Channel discovery is not stubbed.** `AgentSlackClient.list_channels` used to read one
+   200-item page of 500+ conversations, ordered by channel id, which is not monotonic in
+   creation time — so asking Slack "does this channel exist" was a coin flip and
+   `_ensure_seeded_channels` would try to *create* the probe channel it had just failed to
+   see. Every client's `list_channels` was therefore replaced here with a fully paginated
+   stand-in. It paginates for itself now, and the stub is gone: the whole-system test is
+   the one place the engine's real bootstrap path can be observed, and a patch over the
+   function under test would make that impossible. The paginator is pinned directly by
+   `test_slack_client_live.py::test_list_channels_returns_every_public_channel` and, at
+   the engine level, by `test_slack_lifecycle_live.py::
+   test_ensure_seeded_channels_adopts_a_channel_beyond_the_first_page`.
 6. **Every outbound post is guarded to the probe channel.** `_phase5_new_post` reads
    `action_data.get("channel", "general")` and posts there without checking it against the
    target post's channel, so one malformed JSON reply from a model would write into the
@@ -201,8 +204,7 @@ class TurnRecord:
 
 
 @pytest.fixture
-async def full_run(engine, slack_clients, slack_probe_channel,
-                   slack_list_all_channels, tmp_path, monkeypatch):
+async def full_run(engine, slack_clients, slack_probe_channel, tmp_path, monkeypatch):
     """A live workspace collapsed to one `t-` channel, a 3-agent roster, one cohort.
 
     Deliberately not the rolled-back ``db_session``: the engine opens its own sessions
@@ -242,12 +244,9 @@ async def full_run(engine, slack_clients, slack_probe_channel,
     ctx = RunCtx(factory=factory, run_id=run_id, channel=name, channel_id=cid,
                  clients=dict(slack_clients))
 
-    # Discipline 5: a truthful answer to "which channels exist".
+    # Discipline 6: never write outside the probe channel. `list_channels` is
+    # deliberately NOT patched — see discipline 5 in the module docstring.
     for client in slack_clients.values():
-        monkeypatch.setattr(
-            client, "list_channels", _paginated_list_channels(client, slack_list_all_channels)
-        )
-        # Discipline 6: never write outside the probe channel.
         monkeypatch.setattr(
             client, "post_message", _channel_guard(client, name, cid, ctx.off_channel_posts)
         )
@@ -324,15 +323,6 @@ def _is_fragment_of(chunk: str, whole: str) -> bool:
     if len(words) < 5:
         return False
     return " ".join(words[1:-1]) in _canonical_text(whole)
-
-
-def _paginated_list_channels(client, list_all):
-    """`list_channels` that actually follows `response_metadata.next_cursor`."""
-    def _list(include_private: bool = False) -> dict[str, str]:
-        mapping = list_all(client, include_private=include_private)
-        client._channel_name_to_id.update(mapping)
-        return mapping
-    return _list
 
 
 def _channel_guard(client, allowed_name, allowed_id, sink):
@@ -693,13 +683,15 @@ async def test_a_full_run_keeps_both_stores_in_bijection(full_run):
         f"{len(db_only)} message(s): "
         f"{[(t, db_rows[t].agent_id, db_rows[t].content[:60]) for t in sorted(db_only)]}. {where}"
     )
-    # Slack-only messages have exactly one benign explanation, and it is a defect we
-    # characterise rather than tolerate silently: a post over SLACK_TEXT_CHUNK arrives as
-    # several Slack messages and only the last one's ts is recorded, so the earlier
-    # chunks are in Slack with no row. Anything that is NOT a fragment of a message we do
-    # have is a genuine loss and fails here. The defect itself is pinned by
-    # test_a_message_over_slacks_4000_char_limit_stays_in_bijection (xfail strict), so a
-    # fix turns that test red and this allowance can be deleted.
+    # This allowance is now expected to be EMPTY, and the cross-check below asserts it.
+    # It used to absorb the one benign explanation for a Slack-only message: a post over
+    # SLACK_TEXT_CHUNK arrived as several Slack messages and only the last one's ts was
+    # recorded, so the earlier chunks were in Slack with no row. The client cuts at the
+    # boundary itself now and the engine records one row per message, so no row can be
+    # over the limit and `_split_fragments` therefore finds nothing to excuse. Kept
+    # rather than deleted because it is self-neutralising — `oversized` empty forces
+    # `fragments` empty — and it names, at the point of use, what a regression looks
+    # like. Anything that is NOT a fragment of a message we do have is a genuine loss.
     fragments = _split_fragments(slack, db_rows, slack_only)
     unexplained = slack_only - set(fragments)
     assert not unexplained, (
@@ -823,15 +815,16 @@ async def test_a_full_run_keeps_both_stores_in_bijection(full_run):
 # T13.1b — the one-store-only condition, isolated and deterministic
 #
 # Found by the run above, then reduced to these two tests: no LLM calls, four Slack
-# calls, and a definite answer. They are the reason the run test is allowed to tolerate
-# split fragments — the defect is pinned here instead of being absorbed there.
+# calls, and a definite answer. The >4000-char case was an xfail(strict=True) here while
+# the split defect was open, which is why the run test above carries a split-fragment
+# allowance; both are now closed and the pair is the cheapest end-to-end evidence for it.
 # ===========================================================================
 
 
 async def test_a_short_message_round_trips_one_to_one(full_run):
     """Control for the test below: the mirror IS in bijection for ordinary messages.
 
-    Without this leg, the xfail below is equally explained by the mirror being broken for
+    Without this leg, a failure below is equally explained by the mirror being broken for
     everything, or by the probe channel being unreadable (Rule S2).
     """
     ctx = full_run
@@ -850,25 +843,23 @@ async def test_a_short_message_round_trips_one_to_one(full_run):
     assert _canonical_text(slack[row.message_ts][0]) == _canonical_text(row.content)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "src bug, NOT fixed: Slack splits a chat.postMessage `text` over 4000 chars into "
-        "several messages and returns the LAST chunk's ts. AgentSlackClient.post_message "
-        "passes that single ts back, SimulationEngine._post_message records it as the "
-        "canonical id, and every earlier chunk exists in Slack with no agent_messages "
-        "row. Delete this xfail when post_message chunks (or refuses) explicitly."
-    ),
-)
 async def test_a_message_over_slacks_4000_char_limit_stays_in_bijection(full_run):
-    """One `_post_message` must produce one Slack message and one row — or say so.
+    """One `_post_message` produces one row per Slack message it really made.
 
-    Phase 4 replies are generated with `max_tokens=1500`, which is roughly 6000
-    characters, so this is reached by ordinary agent traffic: it is what the 20-turn run
-    tripped over. The consequences go past a missing row — `slack_ts` names the *tail* of
-    the message, so `_slack_parent_ts` threads replies onto a fragment, `posted_at =
-    float(ts)` takes the tail's clock, and the next restart's `_rebuild_state_from_slack`
-    sees the unrecorded head chunks as brand-new inbound messages and ingests them.
+    Was `xfail(strict=True)`. Slack splits a `chat.postMessage` `text` over 4000
+    characters into several messages itself and returns only the LAST chunk's ts;
+    `post_message` passed that single ts back, `_post_message` recorded it as the
+    canonical id, and every earlier chunk existed in Slack with no `agent_messages` row.
+    The consequences went past a missing row — `slack_ts` named the *tail*, so
+    `_slack_parent_ts` threaded replies onto a fragment, `posted_at = float(ts)` took the
+    tail's clock, and the next restart's `_rebuild_state_from_slack` saw the unrecorded
+    head chunks as brand-new inbound messages and ingested them.
+
+    Phase 4 replies are generated with `max_tokens=1500`, roughly 6000 characters, so
+    this is reached by ordinary agent traffic: it is what the 20-turn run tripped over.
+    The client now cuts at the boundary itself and reports every message it created, and
+    the engine writes one row each — so the set equality below is exact, with no
+    "characterised split fragment" allowance on either side.
     """
     ctx = full_run
     eng = _make_engine(ctx, budget=0, bare=True)
@@ -886,13 +877,40 @@ async def test_a_message_over_slacks_4000_char_limit_stays_in_bijection(full_run
     row = next(iter(db_rows.values()))
     detail = (
         f"posted {len(body)} chars; Slack holds {len(slack)} message(s) of lengths "
-        f"{sorted(len(t) for t, _ in slack.values())}; the row recorded slack_ts="
-        f"{row.slack_ts} which is the "
+        f"{sorted(len(t) for t, _ in slack.values())}; the DB holds {len(db_rows)} row(s) "
+        f"of lengths {sorted(len(r.content) for r in db_rows.values())}; the first row "
+        f"recorded slack_ts={row.slack_ts} which is the "
         f"{'LAST' if row.slack_ts == max(slack) else 'first' if row.slack_ts == min(slack) else 'nth'}"
         f" of them; {len(slack_only)} chunk(s) have no row"
     )
     assert not db_only, detail
     assert set(db_rows) == set(slack), detail
+
+    # The split really happened — otherwise the bijection above is the trivial one and
+    # this test would pass just as well against a client that refused to post at all.
+    assert len(slack) > 1, detail
+    # Every row is a message Slack accepted whole: nothing over the limit survives, so
+    # nothing was silently re-split on Slack's side behind our back.
+    assert all(len(markdown_to_mrkdwn(r.content)) <= SLACK_TEXT_CHUNK
+               for r in db_rows.values()), detail
+    # One logical post stays ONE top-level post. Without this, the continuations arrive
+    # as N fresh roots and every other agent's Phase 2 scan sees N posts for one.
+    roots = [r for r in db_rows.values() if r.thread_ts is None]
+    assert len(roots) == 1, (
+        f"the split produced {len(roots)} top-level posts: "
+        f"{[(r.message_ts, r.content[:40]) for r in roots]}"
+    )
+    assert row.slack_ts == min(slack), (
+        "the recorded canonical id is not the FIRST Slack message — a reply threaded on "
+        f"it would hang off a fragment. {detail}"
+    )
+    # And the whole post survived the split: no chunk lost, none duplicated.
+    rejoined = re.sub(r"\s+", "", "".join(
+        r.content for r in sorted(db_rows.values(), key=lambda r: float(r.message_ts))
+    ))
+    assert rejoined == re.sub(r"\s+", "", body), (
+        "the rows do not reassemble into the posted message"
+    )
 
 
 # ===========================================================================
