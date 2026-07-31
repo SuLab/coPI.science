@@ -142,7 +142,15 @@ class AgentSlackClient:
             )
             return True
         except SlackApiError as exc:
+            # Drop the client. `is_connected` is `self._client is not None`, and nine
+            # call sites gate "is Slack usable" on it — the poll-client rotation,
+            # _client_for_channel, _ensure_seeded_channels, the mirror branch in
+            # _post_message, the PI DM path. Leaving a client behind after a failed
+            # auth made every one of them take the Slack-ON path with a dead token, so
+            # an invalid_auth degraded into every call failing on every tick instead of
+            # into the DB-only mode the design already has.
             logger.error("[%s] Slack auth failed: %s", self.agent_id, exc)
+            self._client = None
             return False
 
     @property
