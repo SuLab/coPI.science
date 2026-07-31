@@ -128,3 +128,87 @@ async def client(db_session, engine, monkeypatch):
 @pytest.fixture
 def _text():
     return text
+
+
+# ---------------------------------------------------------------------------
+# Live Slack tier — see .notes/slack-integration-test-plan.md
+# ---------------------------------------------------------------------------
+
+_LIVE_SLACK_ENV = ("SLACK_TEST_WORKSPACE", "SLACK_TEST_PI_USER_ID",
+                   "SLACK_TEST_BOT_TOKEN_SU")
+
+
+def pytest_collection_modifyitems(config, items):
+    """Skip the live Slack tier unless the workspace credentials are present.
+
+    Deliberately a skip rather than a collection filter, so `-m live_slack` with no
+    credentials reports "skipped" instead of "no tests ran" — the latter is
+    indistinguishable from a typo'd marker.
+    """
+    missing = [k for k in _LIVE_SLACK_ENV if not os.environ.get(k)]
+    if not missing:
+        return
+    skip = pytest.mark.skip(reason=f"live Slack tier needs {', '.join(missing)}")
+    for item in items:
+        if "live_slack" in item.keywords:
+            item.add_marker(skip)
+
+
+@pytest.fixture(scope="session")
+def slack_bot_tokens() -> dict[str, str]:
+    """Bot tokens from the environment, keyed by agent_id. Never read from a file."""
+    out = {}
+    for aid in ("su", "cravatt", "wiseman"):
+        tok = os.environ.get(f"SLACK_TEST_BOT_TOKEN_{aid.upper()}", "")
+        if tok:
+            out[aid] = tok
+    return out
+
+
+@pytest.fixture(scope="session")
+def slack_pi_user_id() -> str:
+    return os.environ.get("SLACK_TEST_PI_USER_ID", "")
+
+
+def _make_slack_client(agent_id: str, token: str, visibility_lookup=None):
+    from src.agent.slack_client import AgentSlackClient
+
+    c = AgentSlackClient(agent_id=agent_id, bot_token=token,
+                         visibility_lookup=visibility_lookup)
+    assert c.connect() is True, f"[{agent_id}] auth.test failed — token dead or revoked"
+    return c
+
+
+@pytest.fixture
+def slack_clients(slack_bot_tokens):
+    """All three probe clients, connected. Skips if any token is absent."""
+    missing = [a for a in ("su", "cravatt", "wiseman") if a not in slack_bot_tokens]
+    if missing:
+        pytest.skip(f"no bot token for {missing}")
+    return {a: _make_slack_client(a, t) for a, t in slack_bot_tokens.items()}
+
+
+@pytest.fixture
+def slack_client_su(slack_clients):
+    return slack_clients["su"]
+
+
+@pytest.fixture
+def slack_probe_channel(slack_client_su):
+    """A fresh `t-`-prefixed public channel, archived on teardown.
+
+    Slack has no delete-channel API, so this archives. The `t-` prefix means a test can
+    never touch one of the seeded channel names in src/agent/channels.py, and the
+    teardown script can match on it safely.
+    """
+    import uuid as _uuid
+
+    name = f"t-probe-{_uuid.uuid4().hex[:8]}"
+    data = slack_client_su.create_channel(name)
+    assert data and data.get("id"), f"could not create #{name}: {data}"
+    yield name, data["id"]
+    try:
+        slack_client_su._call_with_retry(
+            slack_client_su._client.conversations_archive, channel=data["id"])
+    except Exception as exc:            # teardown must not mask a test failure
+        print(f"WARNING: could not archive #{name}: {exc}")
