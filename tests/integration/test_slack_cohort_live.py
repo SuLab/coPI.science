@@ -310,6 +310,14 @@ async def test_the_private_channel_exemption_holds_over_slack(cohort_engine, sla
         assert su.invite_to_channel(pcid, [cravatt.bot_user_id]) is True
         eng._channel_id_map[pname] = pcid
         eng._channel_visibility[pname] = VISIBILITY_COLLAB_PRIVATE
+        # cravatt posts to this channel by NAME below, and only su's client learned the
+        # id from create_private_channel. Without the shared cache, cravatt's
+        # _resolve_channel_id falls back to list_channels() — which never returns private
+        # channels at all in its default mode — and the raw name is handed to
+        # chat.postMessage. The engine shares the map for exactly this reason in
+        # production (_sync_private_channels_from_db / cache_channel_ids).
+        for c in slack_clients.values():
+            c.cache_channel_ids({pname: pcid})
         for a in eng.agents.values():
             a.state.subscribed_channels.add(pname)
 

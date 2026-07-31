@@ -58,10 +58,28 @@ def test_an_unknown_user_id_does_not_raise(slack_client_su):
 # --- channel lifecycle --------------------------------------------------------------
 
 
-def test_channel_create_list_join_and_id_resolution(slack_client_su, slack_probe_channel):
+def test_channel_create_list_join_and_id_resolution(
+    slack_client_su, slack_probe_channel, slack_list_all_channels
+):
+    """Creation, resolution and join. The channel's *existence* is asserted against the
+    fully paginated listing rather than against `list_channels()`, which shows one
+    200-item page of a 323-channel workspace — see test_list_channels_returns_every_
+    public_channel below for that defect, pinned separately so it cannot hide in here.
+    """
     name, cid = slack_probe_channel
+    assert slack_list_all_channels(slack_client_su).get(name) == cid, (
+        f"#{name} was created but Slack does not list it as a public channel"
+    )
+    # list_channels itself must at least answer with a well-formed page.
     listed = slack_client_su.list_channels()
-    assert listed.get(name) == cid, f"#{name} missing from list_channels(): got {len(listed)}"
+    assert listed and all(v.startswith("C") for v in listed.values()), listed
+
+    # create_channel populates the name->id cache, which is what makes resolution work
+    # without a listing round trip. That is the contract `cache_channel_ids` and
+    # `_ensure_seeded_channels` rely on.
+    assert slack_client_su._channel_name_to_id.get(name) == cid, (
+        "create_channel did not cache the new channel's id"
+    )
     assert slack_client_su.get_channel_id(name) == cid
     assert slack_client_su._resolve_channel_id(name) == cid
     assert slack_client_su._resolve_channel_id(cid) == cid, "an id must pass through"
@@ -70,6 +88,36 @@ def test_channel_create_list_join_and_id_resolution(slack_client_su, slack_probe
     slack_client_su.join_channel(cid)
     # Control: an unknown name resolves to None rather than to something plausible.
     assert slack_client_su.get_channel_id("t-does-not-exist-zzzz") is None
+
+
+@pytest.mark.xfail(strict=True, reason=(
+    "src defect (NOT fixed, reported): AgentSlackClient.list_channels calls "
+    "conversations.list with limit=200, ignores response_metadata.next_cursor and never "
+    "passes exclude_archived, so on a workspace with more than 200 conversations it "
+    "returns an arbitrary subset — Slack orders the result by channel id, which is not "
+    "monotonic in creation time. Consequences in production: "
+    "_ensure_seeded_channels (simulation.py:3038) fails to find an existing seeded "
+    "channel, re-creates it, gets name_taken, and leaves it with NO id; and "
+    "post_message's _resolve_channel_id (slack_client.py:394) falls back to passing the "
+    "channel NAME to chat.postMessage, which answers not_in_channel. "
+    "strict=True on purpose: if pagination is added, or the workspace shrinks below one "
+    "page, this XPASSes and fails the run, which is the signal to delete the marker."
+))
+def test_list_channels_returns_every_public_channel(
+    slack_client_su, slack_list_all_channels
+):
+    """The single-page defect, pinned deterministically.
+
+    This is the root cause of the whole tier's rotating failures: every test that
+    addressed a channel by name went through a listing that can silently omit it.
+    """
+    ground = slack_list_all_channels(slack_client_su)
+    listed = slack_client_su.list_channels()
+    missing = sorted(set(ground) - set(listed))
+    assert not missing, (
+        f"list_channels() returned {len(listed)} of {len(ground)} public channels; "
+        f"{len(missing)} are invisible to it, e.g. {missing[:5]}"
+    )
 
 
 def test_cache_channel_ids_is_used_by_resolution(slack_client_su):
@@ -244,17 +292,25 @@ def test_private_channel_invite_and_membership(slack_clients, private_channel):
     ], "the invited bot still cannot read the private channel"
 
 
-def test_private_channels_are_excluded_from_the_public_listing(slack_clients, private_channel):
+def test_private_channels_are_excluded_from_the_public_listing(
+    slack_clients, private_channel, slack_list_all_channels
+):
     """Note the name: create_private_channel appends a UTC timestamp to whatever it is
     given, because the reopen slug is deterministic per agent-pair + origin channel and
     Slack rejects a duplicate with name_taken. The fixture returns the name Slack
-    actually assigned, not the one requested."""
+    actually assigned, not the one requested.
+
+    Both halves go through the fully paginated listing. Asking `list_channels()` (one
+    200-item page of 323) made the positive half a coin flip AND the negative half
+    vacuous — a private channel really leaking into the public listing would still be
+    absent from page 1 about 38% of the time, so `not in` proved nothing.
+    """
     name, cid = private_channel
     su = slack_clients["su"]
-    assert name in su.list_channels(include_private=True), (
+    assert slack_list_all_channels(su, include_private=True).get(name) == cid, (
         f"the private channel is missing from the include_private listing: {name}"
     )
-    assert name not in su.list_channels(include_private=False), (
+    assert name not in slack_list_all_channels(su, include_private=False), (
         "a private channel leaked into the public listing"
     )
 

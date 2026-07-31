@@ -92,7 +92,7 @@ async def migration_setup(engine, slack_clients, slack_bot_tokens):
 
 
 async def test_migration_creates_a_real_private_channel_with_both_bots(
-    migration_setup, slack_clients
+    migration_setup, slack_clients, slack_list_all_channels
 ):
     """The whole flow, asserted from Slack: the channel exists, is private, both bots
     are members, and the handover text is really in it.
@@ -130,9 +130,16 @@ async def test_migration_creates_a_real_private_channel_with_both_bots(
         f"the PI's guidance never reached the channel: {texts}"
     )
 
-    # It is genuinely private: absent from the public listing.
-    assert cname not in su.list_channels(include_private=False)
-    assert cname in su.list_channels(include_private=True)
+    # It is genuinely private: absent from the public listing, present in the private
+    # one. Both halves read the fully paginated listing, not AgentSlackClient's
+    # single-page one — with 323 public channels and a 200-item page, "in" was a coin
+    # flip and "not in" was vacuous. See tests/conftest.py::slack_list_all_channels.
+    assert cname not in slack_list_all_channels(su, include_private=False), (
+        f"the private refinement channel #{cname} is in the public listing"
+    )
+    assert slack_list_all_channels(su, include_private=True).get(cname) == cid, (
+        f"#{cname} was reported by the migration but Slack does not list it"
+    )
 
 
 @pytest.mark.parametrize("slack_on", [True, False], ids=["slack-on", "slack-off"])

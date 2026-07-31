@@ -169,15 +169,17 @@ async def test_a_restart_does_not_repost_to_slack(lifecycle):
     assert [m.get("text") for m in after].count("posted once") == 1
 
 
-async def test_ensure_seeded_channels_creates_and_reuses_with_a_live_client(lifecycle):
+async def test_ensure_seeded_channels_creates_a_missing_channel_with_a_live_client(
+    lifecycle, monkeypatch, slack_list_all_channels
+):
     """Only the Slack-off branch of _ensure_seeded_channels was covered. With a
-    connected client it must create a missing channel and get a real C… id, then REUSE
-    it on a second call rather than creating a duplicate."""
+    connected client a missing channel must be created, get a real C… id, and really
+    exist in Slack (Rule S1 — the id in our map proves only that we stored an id)."""
     import src.agent.simulation as sim
 
     build, factory, run_id, name, cid, slack_clients = lifecycle
     fresh = f"t-seeded-{uuid.uuid4().hex[:8]}"
-    sim.SEEDED_CHANNELS = [fresh]
+    monkeypatch.setattr(sim, "SEEDED_CHANNELS", [fresh])
     eng = build(slack_on=True)
     try:
         eng._ensure_seeded_channels()
@@ -186,17 +188,109 @@ async def test_ensure_seeded_channels_creates_and_reuses_with_a_live_client(life
             f"expected a real Slack channel id, got {first!r}"
         )
         assert eng._channel_visibility[fresh] == VISIBILITY_PUBLIC
-
-        eng2 = build(slack_on=True)
-        eng2._ensure_seeded_channels()
-        assert eng2._channel_id_map.get(fresh) == first, (
-            "a second call created a duplicate channel instead of reusing the existing one"
+        assert slack_list_all_channels(slack_clients["su"]).get(fresh) == first, (
+            f"#{fresh} has an id in _channel_id_map but Slack has no such channel"
         )
     finally:
         if eng._channel_id_map.get(fresh, "").startswith("C"):
             slack_clients["su"]._call_with_retry(
                 slack_clients["su"]._client.conversations_archive,
                 channel=eng._channel_id_map[fresh])
+
+
+async def test_ensure_seeded_channels_reuses_an_existing_channel(
+    lifecycle, monkeypatch, slack_list_all_channels
+):
+    """The reuse branch: a second start must adopt the existing channel, not create a
+    second one.
+
+    Discovery is patched to the fully paginated ground truth — the same live Slack data,
+    just complete — because `_ensure_seeded_channels` looks the channel up with
+    `client.list_channels()`, which returns one 200-item page of a 323-channel workspace.
+    Unpatched, this test passes or fails on whether Slack's id ordering happens to put
+    the channel we just made inside that page: a ~62% coin flip, and the original cause
+    of this test's intermittent failures. The lottery is not the subject here; the engine's
+    reuse logic is. The defect itself is pinned deterministically by the xfail test below
+    and by test_slack_client_live.py::test_list_channels_returns_every_public_channel.
+    """
+    import src.agent.simulation as sim
+
+    build, factory, run_id, name, cid, slack_clients = lifecycle
+    su = slack_clients["su"]
+    fresh = f"t-seeded-{uuid.uuid4().hex[:8]}"
+    made = su.create_channel(fresh)
+    assert made and made.get("id"), made
+    try:
+        ground = slack_list_all_channels(su)
+        assert ground.get(fresh) == made["id"]
+        for c in slack_clients.values():
+            monkeypatch.setattr(
+                c, "list_channels",
+                lambda include_private=False, _g=ground: dict(_g),
+            )
+            monkeypatch.setattr(
+                c, "create_channel",
+                lambda ch, _a=c.agent_id: pytest.fail(
+                    f"[{_a}] _ensure_seeded_channels created #{ch} although Slack "
+                    "already has it — a duplicate, not a reuse"
+                ),
+            )
+        monkeypatch.setattr(sim, "SEEDED_CHANNELS", [fresh])
+
+        eng = build(slack_on=True)
+        eng._ensure_seeded_channels()
+        assert eng._channel_id_map.get(fresh) == made["id"], (
+            "the existing channel was not adopted: "
+            f"{eng._channel_id_map.get(fresh)!r} != {made['id']!r}"
+        )
+        assert eng._channel_visibility[fresh] == VISIBILITY_PUBLIC
+        # And every client can address it without another listing round trip.
+        for c in slack_clients.values():
+            assert c._channel_name_to_id.get(fresh) == made["id"], (
+                f"[{c.agent_id}] did not get the shared channel map"
+            )
+    finally:
+        su._call_with_retry(su._client.conversations_archive, channel=made["id"])
+
+
+@pytest.mark.xfail(strict=True, reason=(
+    "src defect (NOT fixed, reported): _ensure_seeded_channels (simulation.py:3038) "
+    "discovers existing channels with client.list_channels(), which shows only the first "
+    "200-item page of conversations.list. A seeded channel outside that page is treated "
+    "as missing, conversations.create answers name_taken, create_channel returns None, "
+    "and the channel ends up with NO entry in _channel_id_map — after which every post "
+    "to it is addressed by name and Slack answers not_in_channel. "
+    "strict=True: this XPASSes the moment list_channels paginates (or the workspace "
+    "drops under one page), which is the signal to delete the marker."
+))
+async def test_ensure_seeded_channels_adopts_a_channel_beyond_the_first_page(
+    lifecycle, monkeypatch, slack_list_all_channels
+):
+    """Deterministic reproduction of the production consequence of the pagination defect.
+
+    Uses a channel Slack really has but src's single page does not show, so there is no
+    coin flip: with 323 public channels and a 200-channel page, 123 of them are always
+    invisible. No side effects — the conversations.create attempt this provokes is
+    answered with name_taken.
+    """
+    import src.agent.simulation as sim
+
+    build, factory, run_id, name, cid, slack_clients = lifecycle
+    su = slack_clients["su"]
+    page = su.list_channels()
+    ground = slack_list_all_channels(su)
+    beyond = sorted(set(ground) - set(page))
+    if not beyond:
+        pytest.skip("every channel fits in one page — nothing to demonstrate")
+
+    victim = beyond[0]
+    monkeypatch.setattr(sim, "SEEDED_CHANNELS", [victim])
+    eng = build(slack_on=True)
+    eng._ensure_seeded_channels()
+    assert eng._channel_id_map.get(victim) == ground[victim], (
+        f"#{victim} exists in Slack as {ground[victim]} but the engine mapped it to "
+        f"{eng._channel_id_map.get(victim)!r}"
+    )
 
 
 # --- T10: Slack-off <-> Slack-on ---------------------------------------------------------

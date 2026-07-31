@@ -199,22 +199,73 @@ def slack_client_su(slack_clients):
 
 
 @pytest.fixture
-def slack_probe_channel(slack_client_su):
+def slack_list_all_channels():
+    """Fully paginated conversations.list — the ground truth for "does Slack have this
+    channel". Returns a callable ``(client, include_private=False) -> {name: id}``.
+
+    Needed because ``AgentSlackClient.list_channels`` asks for a single 200-item page and
+    ignores ``response_metadata.next_cursor`` (src/agent/slack_client.py:619), so on a
+    workspace with more than 200 conversations it returns an arbitrary *subset*. Slack
+    orders conversations.list by channel id, and ids are not monotonic in creation time,
+    so a channel created a second ago can sort anywhere in that order. A test that asks
+    ``list_channels()`` whether a channel exists is therefore flipping a coin.
+
+    This workspace has 323 public channels (320 of them archived `t-` channels from
+    earlier runs, and Slack has no delete-channel API), so the coin is permanently
+    biased: ~38% of newly created channels are invisible to a single page. Every test
+    that needs to know whether a channel really exists uses this instead. The defect
+    itself is pinned by test_slack_client_live.py::test_list_channels_returns_every_
+    public_channel (xfail strict).
+    """
+    def _all(client, *, include_private: bool = False) -> dict[str, str]:
+        types = "public_channel,private_channel" if include_private else "public_channel"
+        out: dict[str, str] = {}
+        cursor = ""
+        while True:
+            r = client._call_with_retry(
+                client._client.conversations_list,
+                types=types, limit=200, cursor=cursor,
+            )
+            for ch in r.get("channels", []):
+                out[ch["name"]] = ch["id"]
+            cursor = (r.get("response_metadata") or {}).get("next_cursor") or ""
+            if not cursor:
+                return out
+
+    return _all
+
+
+@pytest.fixture
+def slack_probe_channel(slack_clients):
     """A fresh `t-`-prefixed public channel, archived on teardown.
 
     Slack has no delete-channel API, so this archives. The `t-` prefix means a test can
     never touch one of the seeded channel names in src/agent/channels.py, and the
     teardown script can match on it safely.
+
+    The name->id cache of *every* client is seeded, not just the creator's. This mirrors
+    what the engine does in production — `_ensure_seeded_channels` ends with
+    `for c in self.slack_clients.values(): c.cache_channel_ids(existing)`
+    (src/agent/simulation.py:3061) — and it is load-bearing here rather than cosmetic:
+    the engine's `_post_message` passes a channel *name* to `post_message`, which
+    resolves it through `_resolve_channel_id` -> `list_channels()`. Only the creating
+    client gets a cache entry from `create_channel`, so a post by any other agent used to
+    depend on whether this brand-new channel happened to land in Slack's first 200-item
+    page — see the slack_list_all_channels docstring. When it did not, the name was
+    passed through to chat.postMessage verbatim and Slack answered `not_in_channel`, at
+    random, in whichever tests happened to post as cravatt or wiseman.
     """
     import uuid as _uuid
 
+    su = slack_clients["su"]
     name = f"t-probe-{_uuid.uuid4().hex[:8]}"
-    data = slack_client_su.create_channel(name)
+    data = su.create_channel(name)
     assert data and data.get("id"), f"could not create #{name}: {data}"
+    for c in slack_clients.values():
+        c.cache_channel_ids({name: data["id"]})
     yield name, data["id"]
     try:
-        slack_client_su._call_with_retry(
-            slack_client_su._client.conversations_archive, channel=data["id"])
+        su._call_with_retry(su._client.conversations_archive, channel=data["id"])
     except Exception as exc:            # teardown must not mask a test failure
         print(f"WARNING: could not archive #{name}: {exc}")
 
