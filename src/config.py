@@ -45,6 +45,9 @@ class Settings(BaseSettings):
 
     # NCBI
     ncbi_api_key: str = ""
+    # Sent as `email=` on every E-utilities request. NCBI requires it (with `tool=`)
+    # and throttles or blocks unidentified clients. Falls back to ses_sender_email.
+    ncbi_contact_email: str = ""
 
     # App
     secret_key: str = INSECURE_SECRET_KEY
