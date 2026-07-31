@@ -67,6 +67,7 @@ markers = [
     "contract: respx-mocked external HTTP",
     "real_llm: spends real Anthropic tokens; skipped unless ANTHROPIC_API_KEY is set",
     "live_slack: hits a real Slack workspace; needs SLACK_TEST_WORKSPACE=1 plus bot tokens in the environment",
+    "live_api: calls a real third-party API (ORCID/NCBI/grants.gov); needs LIVE_API_TESTS=1",
 ]
 
 [tool.coverage.run]

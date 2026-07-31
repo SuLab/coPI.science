@@ -146,12 +146,17 @@ def pytest_collection_modifyitems(config, items):
     indistinguishable from a typo'd marker.
     """
     missing = [k for k in _LIVE_SLACK_ENV if not os.environ.get(k)]
-    if not missing:
-        return
-    skip = pytest.mark.skip(reason=f"live Slack tier needs {', '.join(missing)}")
-    for item in items:
-        if "live_slack" in item.keywords:
-            item.add_marker(skip)
+    if missing:
+        skip = pytest.mark.skip(reason=f"live Slack tier needs {', '.join(missing)}")
+        for item in items:
+            if "live_slack" in item.keywords:
+                item.add_marker(skip)
+
+    if not os.environ.get("LIVE_API_TESTS"):
+        skip_api = pytest.mark.skip(reason="live third-party API tier needs LIVE_API_TESTS=1")
+        for item in items:
+            if "live_api" in item.keywords:
+                item.add_marker(skip_api)
 
 
 @pytest.fixture(scope="session")
@@ -212,3 +217,42 @@ def slack_probe_channel(slack_client_su):
             slack_client_su._client.conversations_archive, channel=data["id"])
     except Exception as exc:            # teardown must not mask a test failure
         print(f"WARNING: could not archive #{name}: {exc}")
+
+
+@pytest.fixture(scope="session")
+def api_budget():
+    """Per-provider rate limiting and a call ceiling for the live_api tier.
+
+    NCBI blocks clients that exceed 3 req/s without a key and *requires* tool= and
+    email= on every request. ORCID and grants.gov are more forgiving but a runaway loop
+    can still get the IP throttled, which would break the tier for everyone afterwards.
+    """
+    import time as _time
+
+    limits = {"ncbi": 0.40, "orcid": 0.10, "grants": 1.0}
+    last: dict[str, float] = {}
+    counts: dict[str, int] = {}
+
+    class Budget:
+        max_calls = 200
+
+        def wait(self, provider: str):
+            gap = limits.get(provider, 0.5)
+            prev = last.get(provider)
+            if prev is not None:
+                delta = _time.monotonic() - prev
+                if delta < gap:
+                    _time.sleep(gap - delta)
+            last[provider] = _time.monotonic()
+            counts[provider] = counts.get(provider, 0) + 1
+            total = sum(counts.values())
+            assert total <= self.max_calls, (
+                f"live_api call ceiling exceeded ({total} > {self.max_calls}); "
+                f"per-provider: {counts}. A test is looping."
+            )
+
+        @property
+        def counts(self):
+            return dict(counts)
+
+    return Budget()
