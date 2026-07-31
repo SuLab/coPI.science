@@ -10,6 +10,7 @@ Every live assertion here uses plain prose for that reason.
 """
 
 import os
+import re
 import time
 import uuid
 
