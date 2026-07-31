@@ -39,11 +39,11 @@ TOKEN_CASES = [
     # A USER token in the bot-token field. Accepted by the pre-hardening
     # implementation, which meant one paste could flip slack_enabled on and then fail
     # every call with not_allowed_token_type.
-    ("xoxp-1174389572841-abcdef", False),
+    ("xoxp-EXAMPLE-NOT-A-REAL-TOKEN", False),
     # A CONFIG token in the bot-token field — same hazard. This is the exact token type
     # used for provisioning, so the two live side by side in the same .env.
-    ("xoxe.xoxp-1-Mi0yLTExNzQz-example", False),
-    ("xoxe-1-My0xLTExNzQz-example", False),
+    ("xoxe.xoxp-1-EXAMPLE-NOT-A-REAL-TOKEN", False),
+    ("xoxe-1-EXAMPLE-NOT-A-REAL-TOKEN", False),
     # Unfilled template values.
     ("REPLACE_ME", False),
     ("xoxb-your-token-here", True),  # indistinguishable from a real token; documented
