@@ -243,25 +243,91 @@ def test_model_dump_is_not_used_on_settings_anywhere_in_src():
     Adding the DSN redaction (`database_url`'s password) did not change this: it is a
     `__repr_args__` rule, so `model_dump()` still returns that password in the clear
     too. The measurement below pins the rationale instead of just asserting it.
-    """
-    import pathlib
-    import re
 
-    dump = Settings(_env_file=None, secret_key="dump-secret-value",
-                    database_url="postgresql://u:dump-dsn-password@h/db").model_dump()
+    ``model_dump`` is not the only bulk-read: ``dict(settings)`` (pydantic v2 defines
+    ``__iter__``), ``vars(settings)`` and ``settings.__dict__`` each return every field
+    in the clear as well, and the original regex here — ``(settings|get_settings\\(\\))
+    \\s*\\.model_dump`` — matched none of them. All five forms are MEASURED to leak
+    below before any of them is scanned for, so this is a check on the real leak set
+    rather than on one remembered member of it. The scan is AST-based because the
+    dangerous forms are `dict(x)`/`vars(x)` calls, which a line regex cannot bind to a
+    settings object.
+    """
+    import ast
+    import pathlib
+
+    leaky = Settings(_env_file=None, secret_key="dump-secret-value",
+                     database_url="postgresql://u:dump-dsn-password@h/db")
+
+    # Leg 1 — measure. Every bulk-read below must actually expose both secrets; a
+    # pydantic upgrade that redacted one of them would make scanning for it dead weight,
+    # and one that added a sixth form would show up here as a stale list.
+    dump = leaky.model_dump()
     assert dump["secret_key"] == "dump-secret-value"
     assert "dump-dsn-password" in dump["database_url"]
+    for label, rendered in (
+        ("model_dump", str(dump)),
+        ("model_dump_json", leaky.model_dump_json()),
+        ("dict()", str(dict(leaky))),
+        ("vars()", str(vars(leaky))),
+        ("__dict__", str(leaky.__dict__)),
+    ):
+        assert "dump-secret-value" in rendered, f"{label} no longer leaks; update the scan"
+        assert "dump-dsn-password" in rendered, f"{label} no longer leaks the DSN password"
+    # Control for the measurement itself: repr/str DO redact, so "everything leaks" is
+    # not the trivially true statement it would be if __repr_args__ were broken.
+    assert "dump-secret-value" not in repr(leaky)
+    assert "dump-dsn-password" not in repr(leaky)
+
+    # Leg 2 — scan. Names treated as a settings object: anything bound from
+    # get_settings(), plus the module-wide convention `settings` (21 files in src/ do
+    # `settings = get_settings()`), plus a `Settings(...)` construction.
+    LEAKY_ATTRS = ("model_dump", "model_dump_json", "__dict__")
+    LEAKY_BUILTINS = ("dict", "vars")
+
+    def _is_settings_call(node):
+        if not isinstance(node, ast.Call):
+            return False
+        fn = node.func
+        name = fn.attr if isinstance(fn, ast.Attribute) else getattr(fn, "id", None)
+        return name in ("get_settings", "Settings")
 
     src = pathlib.Path(__file__).resolve().parents[2] / "src"
     offenders = []
-    for f in src.rglob("*.py"):
-        for i, line in enumerate(f.read_text().splitlines(), 1):
-            if re.search(r"(settings|get_settings\(\))\s*\.model_dump", line):
-                offenders.append(f"{f.relative_to(src.parent)}:{i}: {line.strip()}")
+    for f in sorted(src.rglob("*.py")):
+        text = f.read_text()
+        tree = ast.parse(text, filename=str(f))
+        names = {"settings"}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign) and _is_settings_call(node.value):
+                names.update(t.id for t in node.targets if isinstance(t, ast.Name))
+            elif isinstance(node, ast.AnnAssign) and _is_settings_call(node.value):
+                if isinstance(node.target, ast.Name):
+                    names.add(node.target.id)
+        for node in ast.walk(tree):
+            hit = None
+            if isinstance(node, ast.Attribute) and node.attr in LEAKY_ATTRS:
+                base = node.value
+                if (isinstance(base, ast.Name) and base.id in names) or _is_settings_call(base):
+                    hit = f"{node.attr} on a settings object"
+            elif (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id in LEAKY_BUILTINS
+                and len(node.args) == 1
+                and (
+                    (isinstance(node.args[0], ast.Name) and node.args[0].id in names)
+                    or _is_settings_call(node.args[0])
+                )
+            ):
+                hit = f"{node.func.id}() over a settings object"
+            if hit:
+                line = text.splitlines()[node.lineno - 1].strip()
+                offenders.append(f"{f.relative_to(src.parent)}:{node.lineno}: {hit}: {line}")
     assert not offenders, (
-        "Settings.model_dump() returns unredacted secrets — see "
-        "Settings.__repr_args__. Widen the redaction before adding these:\n"
-        + "\n".join(offenders)
+        "a bulk read of Settings returns unredacted secrets — only repr()/str() go "
+        "through __repr_args__. See Settings.__repr_args__; widen the redaction (or use "
+        "SecretStr) before adding these:\n" + "\n".join(offenders)
     )
     # Control: the scan is actually looking at files. A glob that matched nothing would
     # make the assertion above vacuous.

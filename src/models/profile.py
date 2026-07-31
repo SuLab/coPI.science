@@ -51,8 +51,16 @@ class ResearcherProfile(Base):
     # stored). Both None means "no synthesis stored / pre-0023 row".
     #   evidence_pmid_count — distinct PMIDs resolved from the ORCID works list,
     #                         i.e. what the pipeline should have been able to fetch
-    #   evidence_pub_count  — publications whose abstracts actually reached the
-    #                         synthesis prompt (the prompt keeps the 30 newest)
+    #   evidence_pub_count  — PubMed records that were research-type AND carried an
+    #                         abstract, i.e. the set offered to the synthesis prompt
+    #                         (len(pubs_for_synthesis) at profile_pipeline.py step 9).
+    #                         Read it as a lower bound on grounding, not as a count of
+    #                         what the model saw: _build_synthesis_context sorts by year
+    #                         and keeps sorted_pubs[:30], so for a PI with more than 30
+    #                         abstract-bearing papers this exceeds what reached the
+    #                         prompt. It is exact where it matters — the 0 / non-zero
+    #                         boundary this column exists to draw is the same either way,
+    #                         because 30 is a cap and never a floor.
     evidence_pmid_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     evidence_pub_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # Nullable JSON: stores candidate profile awaiting user review

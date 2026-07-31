@@ -29,6 +29,23 @@ Design notes that keep this gate from crying wolf (a noisy gate gets deleted):
   * ``ROUTE_ALLOWLIST`` entries carry a written reason and are themselves gated:
     ``test_route_allowlist_has_no_stale_entries`` fails if an allowlisted route becomes
     referenced. A stale suppression is the same bug wearing a disguise.
+
+Known false negative, recorded because it is not hypothetical. This gate is static: a
+link counts as a credit if it appears in a reachable template, and nothing here
+evaluates the Jinja condition the link sits under. A control behind a branch that never
+holds is therefore invisible to it. There is a live instance:
+``POST /onboarding/retry`` (src/routers/onboarding.py:354) has exactly one control in
+the app — the "Try Again" form at templates/onboarding/profile_review.html:53 — and it
+sits inside ``{% elif job_status == 'failed' %}``. ``job_status`` is
+``Job.status``, and src/worker/main.py only ever writes 'processing', 'completed',
+'dead' or 'pending'; ``'failed'`` is permitted by the enum (src/models/job.py:23) and
+assigned by nothing in src/. So the retry button is unreachable at runtime while this
+gate reports the route as referenced. Closing it would mean evaluating template
+conditions against the values src/ can actually produce — a different and much larger
+analysis, and one that would cry wolf. Left as a false negative on purpose (the same
+trade recorded above: false negatives leave a future orphan, false positives get the
+gate deleted), but recorded so the next reader does not mistake this gate's silence for
+proof that every control is live.
   * The live defects this gate was built to expose are listed in the ``KNOWN_*`` sets
     and subtracted from the aggregate assertions, so those stay green and fail loudly on
     a *new* orphan. Each defect additionally gets its own ``xfail(strict=True)`` test
@@ -890,6 +907,51 @@ def test_route_allowlist_has_no_stale_entries():
 def test_every_allowlist_entry_has_a_reason():
     for key, reason in ROUTE_ALLOWLIST.items():
         assert reason and len(reason) > 20, f"{key} needs a real reason, got {reason!r}"
+
+
+def test_every_known_defect_entry_is_paired_with_a_strict_xfail():
+    """The ``KNOWN_*`` sets are suppressions: each subtracts a finding from an aggregate
+    gate. The docstring says "Do NOT add to this list to silence a new finding", and
+    until now nothing enforced it — a sixth entry would have gone in silently and the
+    gate would have gone quiet with it.
+
+    What makes a ``KNOWN_*`` entry legitimate is the paired ``xfail(strict=True)`` test:
+    that is what turns the file red the moment the defect is repaired, forcing the entry
+    out. So the invariant is a one-to-one count. Adding an entry without a paired
+    defect test fails here; deleting a defect test but leaving its entry behind fails
+    here too.
+
+    Deliberately a count and not a name-matching scheme: a mapping keyed on test names
+    would itself need maintaining, and the thing worth protecting is that the two never
+    drift apart in size.
+    """
+    entries = (
+        [("KNOWN_ORPHAN_TEMPLATES", e) for e in KNOWN_ORPHAN_TEMPLATES]
+        + [("KNOWN_UNREACHABLE_ROUTES", e) for e in KNOWN_UNREACHABLE_ROUTES]
+        + [("KNOWN_BROKEN_LINKS", e) for e in KNOWN_BROKEN_LINKS]
+        + [("KNOWN_DEAD_IMPORTS", e) for e in KNOWN_DEAD_IMPORTS]
+    )
+    defect_tests = []
+    for name, obj in sorted(globals().items()):
+        if not (name.startswith("test_defect_") and callable(obj)):
+            continue
+        marks = [m for m in getattr(obj, "pytestmark", []) if m.name == "xfail"]
+        assert marks, f"{name} must carry an xfail marker pinning the live defect"
+        for m in marks:
+            assert m.kwargs.get("strict") is True, (
+                f"{name} carries a NON-STRICT xfail. A non-strict xfail rots silently: "
+                "it keeps reporting 'expected failure' after the defect is fixed, so the "
+                "KNOWN_* entry it justifies never gets removed."
+            )
+            reason = m.kwargs.get("reason") or ""
+            assert len(reason) > 40, f"{name}'s xfail needs a reason naming the defect"
+        defect_tests.append(name)
+
+    assert len(entries) == len(defect_tests), (
+        f"{len(entries)} KNOWN_* suppression(s) but {len(defect_tests)} strict-xfail "
+        "defect test(s). Every suppression needs one, or it is an unexplained "
+        f"suppression.\n  entries: {sorted(entries)}\n  tests:   {defect_tests}"
+    )
 
 
 def test_guarded_and_first_party_imports_resolve():

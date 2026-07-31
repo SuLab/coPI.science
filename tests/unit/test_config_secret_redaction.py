@@ -2,7 +2,7 @@
 
 import pytest
 
-from src.config import Settings
+from src.config import _SECRET_NAME_HINTS, Settings, _redact_url_credentials
 
 # A DSN with the password embedded in the userinfo — the shape the app ships with
 # (docker-compose sets DATABASE_URL=postgresql+asyncpg://copi:copi@postgres:5432/copi).
@@ -176,14 +176,51 @@ def test_every_string_field_is_classified_secret_or_not():
 
 
 def test_no_string_field_leaks_a_password_embedded_in_a_url():
-    """Second sweep: every str field gets a DSN carrying a password. Catches any
-    URL-shaped field, present or future, regardless of its name."""
+    """Second sweep: every str field gets a DSN carrying a password in its userinfo.
+    Catches such a field present or future, regardless of its name.
+
+    Scope, stated precisely because the obvious reading is wider than the truth: this
+    sweeps the two places `_redact_url_credentials` looks — the userinfo and the query
+    string. A URL whose credential is a PATH SEGMENT is not covered; see
+    test_a_credential_in_a_url_path_is_a_known_gap below."""
     s = _sweep_settings(lambda n: f"postgresql://user:pw-{n}@host:5432/db")
     rendered = repr(s) + str(s)
     leaked = [n for n in _str_field_names() if f"pw-{n}" in rendered]
     assert leaked == []
     # Control: the sweep really did populate the object.
     assert s.database_url == "postgresql://user:pw-database_url@host:5432/db"
+
+
+def test_a_credential_in_a_url_path_is_a_known_gap():
+    """Pins the one credential shape the positional path does NOT mask, so it is a
+    recorded limitation rather than a surprise.
+
+    A Slack/Discord incoming-webhook URL, an S3 presigned URL and a Twilio-style
+    callback all carry their secret in the PATH, not the userinfo or the query string.
+    `_redact_url_credentials` masks neither, deliberately: `base_url` and
+    `orcid_redirect_uri` have paths that an operator needs to read, and there is no
+    way to tell a secret path segment from a route without knowing the field.
+
+    No Settings field has this shape today — `test_every_string_field_is_classified_
+    secret_or_not` is what keeps that true, because a new field renders in the clear
+    only if someone adds it to NON_SECRET_STR_FIELDS in the same diff. If one is ever
+    added whose name misses `_SECRET_NAME_HINTS` (e.g. `slack_incoming_webhook`), the
+    right fix is the name hint, not a path heuristic."""
+    webhook = "https://hooks.slack.com/services/T00000/B00000/xxxxSECRETxxxx"
+    assert _redact_url_credentials(webhook) == webhook
+
+    # And why that is not a live leak: every str field is either masked whole by name
+    # or explicitly classified non-secret. There is no third, unreviewed category for a
+    # path-credential field to hide in.
+    unclassified = [
+        n for n in _str_field_names()
+        if n not in NON_SECRET_STR_FIELDS
+        and not any(h in n.lower() for h in _SECRET_NAME_HINTS)
+    ]
+    assert unclassified == [], (
+        "str field(s) that are neither name-masked nor listed as non-secret — a "
+        f"path-credential field could hide here: {unclassified}"
+    )
 
 
 def test_sweep_covers_the_bot_tokens_and_the_dsn():
