@@ -416,11 +416,31 @@ async def test_t41_one_real_orcid_becomes_a_stored_profile_grounded_in_its_works
         "monthly refresh"
     )
 
-    # --- _validate_profile accepted it ------------------------------------------------
+    # --- _validate_profile accepted it, and the row says so ---------------------------
     assert profile_pipeline._validate_profile(as_synthesized(profile)) is True, (
-        "the profile the pipeline STORED does not pass _validate_profile. Step 8 stores "
-        "the synthesized fields whether or not validation passed, so this is the case "
-        "where a below-standard profile is persisted and nothing downstream can tell"
+        "the profile the pipeline STORED does not pass _validate_profile. Since 0023 "
+        "step 9 records that verdict in synthesis_validated rather than discarding it, "
+        "so this should be impossible for a True flag below — a mismatch means the "
+        "stored fields and the recorded verdict came from different syntheses"
+    )
+    assert profile.synthesis_validated is True, (
+        f"synthesis_validated is {profile.synthesis_validated!r} after a run whose "
+        "stored fields pass the validator. False means step 8's retry also failed and "
+        "the draft was stored marked (the run cost 2 public calls — see below); None "
+        "means step 9 stored the fields without recording the verdict, which is the "
+        "pre-0023 defect back again"
+    )
+    # Grounded, and the row can prove it: this is the assertion that separates a real
+    # profile from the one T4.4 produces with PubMed unreachable.
+    assert (profile.evidence_pub_count or 0) > 0, (
+        f"evidence_pub_count is {profile.evidence_pub_count!r} after a live run over a "
+        f"real corpus ({profile.evidence_pmid_count!r} PMIDs in hand). Either no abstract "
+        "reached the prompt — in which case this whole test is measuring a fabricated "
+        "profile — or step 9 is not writing the count, and a fabricated profile is "
+        "indistinguishable from this one again"
+    )
+    assert profile.evidence_state == "grounded", (
+        f"evidence_state is {profile.evidence_state!r} for a live run with a real corpus"
     )
     assert probe.public_calls == 1, (
         f"{probe.public_calls} public-synthesis calls. 2 means validation rejected the "
@@ -547,6 +567,10 @@ async def test_t41_one_real_orcid_becomes_a_stored_profile_grounded_in_its_works
         "raw_abstracts_hash": profile.raw_abstracts_hash,
         "private_profile_md": profile.private_profile_md,
         "private_profile_seed": profile.private_profile_seed,
+        "synthesis_validated": profile.synthesis_validated,
+        "evidence_pmid_count": profile.evidence_pmid_count,
+        "evidence_pub_count": profile.evidence_pub_count,
+        "evidence_state": profile.evidence_state,
         # Read off the ORM object, NOT off as_synthesized() — that helper coerces None to
         # ""/[] for the validator, which would make T4.5's type comparison always pass.
         "field_types": {
@@ -915,16 +939,59 @@ async def test_t44_pubmed_unreachable_still_yields_a_profile_but_a_measurably_th
         "broken, not the pipeline"
     )
 
-    # Characterization, deliberately recorded rather than left implicit: the profile
-    # synthesized from a name and a department passes the same validator as the one
-    # synthesized from a dozen abstracts, and is stored with the same profile_version 1
-    # and the same absence of any marker. Nothing downstream — the agent prompt builder,
-    # the public profile page, the monthly refresh — can tell the two apart. If this ever
-    # returns False, the pipeline gained the ability to notice, and that is worth knowing.
+    # Still true, and still worth asserting: the profile synthesized from a name and a
+    # department passes the same validator as the one synthesized from a dozen abstracts.
+    # _validate_profile only measures SHAPE — a 150-250 word summary, three techniques, a
+    # disease area — and a fluent model satisfies all three from prior knowledge. No
+    # amount of tightening the validator finds this case, which is why the discriminator
+    # below is a count of evidence and not a quality score.
     assert profile_pipeline._validate_profile(as_synthesized(profile)) is True, (
         "the evidence-free profile now FAILS _validate_profile. That is an improvement, "
         "not a regression, but it changes the pipeline's behaviour under a PubMed outage "
-        "(step 8 would retry, then store the fields anyway) and this test needs updating"
+        "(step 8 would retry, then store the draft marked unvalidated) and this test "
+        "needs updating"
+    )
+    assert profile.synthesis_validated is True, (
+        f"synthesis_validated is {profile.synthesis_validated!r}; the assertion above says "
+        "the stored fields pass the validator, so the recorded verdict disagrees with the "
+        "validator applied to the same row"
+    )
+
+    # What USED to be the finding here: the fabricated profile was stored with the same
+    # profile_version 1 and no marker of any kind, so nothing downstream — the agent
+    # prompt builder, the public profile page, the monthly refresh — could tell it from a
+    # profile grounded in a dozen abstracts. Migration 0023 closed that. The row now
+    # carries what the synthesis was actually founded on, and this is the live proof of
+    # it: ORCID gave the pipeline identifiers, PubMed gave it nothing, so the profile is
+    # ungrounded AND says which of the two ungrounded cases it is.
+    assert profile.evidence_pub_count == 0, (
+        f"evidence_pub_count is {profile.evidence_pub_count!r} while every NCBI host was "
+        "unreachable. No abstract can have reached the prompt, so a non-zero count means "
+        "step 9 is recording something other than what it synthesized from"
+    )
+    assert (profile.evidence_pmid_count or 0) > 0, (
+        f"evidence_pmid_count is {profile.evidence_pmid_count!r}. ORCID is up in this test "
+        "and this record carries PMIDs directly (7 of 12 as of 2026-07-30), so zero means "
+        "the ORCID leg failed too and this is a total outage, not a PubMed one — and the "
+        "state below would then be 'lost' for the wrong reason"
+    )
+    assert profile.evidence_state == "evidence_lost", (
+        f"the fabricated profile reports evidence_state {profile.evidence_state!r}. "
+        "'no_evidence_available' would be a false negative — it is the answer reserved "
+        "for a researcher who genuinely has nothing indexed, and it tells an operator "
+        "NOT to regenerate, which is exactly wrong after an outage"
+    )
+    # The comparison that makes the discriminator meaningful: the grounded baseline and
+    # this run are the same profile_version, so version cannot separate them and the
+    # evidence counts must.
+    assert profile.profile_version == baseline["profile_version"], (
+        "the degraded and grounded runs no longer share a profile_version, so the claim "
+        "that they are indistinguishable without the evidence counts is out of date"
+    )
+    assert baseline["evidence_state"] == "grounded" != profile.evidence_state, (
+        f"the grounded baseline reports evidence_state {baseline['evidence_state']!r} and "
+        f"this ungrounded run reports {profile.evidence_state!r} — the column does not "
+        "separate the two cases it exists to separate"
     )
 
     # Thinness at the level of the profile text, not just its evidence base. The degraded

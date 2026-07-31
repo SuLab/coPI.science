@@ -1,6 +1,7 @@
 """Application configuration from environment variables using Pydantic Settings."""
 
 import logging
+import re
 from functools import lru_cache
 from typing import Literal
 
@@ -19,10 +20,79 @@ INSECURE_SECRET_KEY = "insecure-dev-key-change-me"
 # tolerated with a warning). Anything else fails fast.
 _DEV_ENVIRONMENTS = {"development", "dev", "local", "test"}
 
-# Field-name substrings that mark a setting as a credential. Any such field with
-# a non-empty value is masked in repr()/str() of the Settings object so an
-# accidental log line or `repr(settings)` can't dump the ~130 secrets (SEC-19).
-_SECRET_NAME_HINTS = ("secret", "token", "key", "password")
+_MASK = "***REDACTED***"
+
+# Field-name substrings that mark a setting whose ENTIRE value is a credential. Any
+# such field with a non-empty value is masked in repr()/str() of the Settings object
+# so an accidental log line or `repr(settings)` can't dump the ~130 secrets (SEC-19).
+#
+# Deliberately NOT hinted: "url"/"uri". Those fields carry a credential only inside
+# their userinfo or query string, and blanking base_url or database_url wholesale
+# would cost an operator the host they are actually pointed at — the first thing you
+# read in a deploy postmortem. _redact_url_credentials masks them positionally
+# instead. "passwd"/"credential" match no field today; they are here so a future
+# `db_passwd` is covered on arrival rather than after the next audit.
+_SECRET_NAME_HINTS = ("secret", "token", "key", "password", "passwd", "credential")
+
+# A URL/DSN split into scheme, authority and everything after it.
+_URL_RE = re.compile(
+    r"(?P<scheme>[A-Za-z][A-Za-z0-9+.-]*://)(?P<authority>[^/?#]*)(?P<rest>.*)",
+    re.DOTALL,
+)
+
+# Query-parameter names whose value is a credential — libpq/asyncpg DSNs accept
+# "?password=...". Narrower than _SECRET_NAME_HINTS on purpose: a Postgres URL also
+# carries "?sslkey=/etc/ssl/client.key", a filename an operator needs to be able to
+# read, so bare "key" is not enough of a signal on this side.
+_URL_QUERY_SECRET_HINTS = (
+    "password", "passwd", "secret", "token", "api_key", "apikey", "access_key",
+    "credential",
+)
+_URL_QUERY_SECRET_RE = re.compile(
+    r"(?P<sep>[?&])(?P<name>[^=&#\s]*(?:"
+    + "|".join(_URL_QUERY_SECRET_HINTS)
+    + r")[^=&#\s]*)=(?P<value>[^&#\s]+)",
+    re.IGNORECASE,
+)
+
+
+def _redact_url_credentials(value: str) -> str:
+    """Mask credentials embedded in a URL/DSN without hiding the rest of it.
+
+    `database_url` is a credential-carrying field whose name matches none of
+    `_SECRET_NAME_HINTS`, so `repr(settings)` printed the deployed DSN — password
+    included — verbatim. Masking only the password component (the same choice
+    SQLAlchemy makes in ``URL.render_as_string(hide_password=True)``) keeps the
+    scheme/host/port/database legible, which is the diagnostic value of the field.
+
+    Left deliberately untouched, so that the mask always means "a real credential is
+    hidden here" rather than "this field might have one":
+
+    * A URL with no userinfo (``postgresql://host/db``). There is no secret in it;
+      masking would destroy the only useful diagnostic and would make the mask
+      ambiguous about whether a password is configured at all.
+    * A bare userinfo with no ``":"`` (``postgresql://copi@host/db``) — that is a
+      username, not a credential. A URL whose userinfo *is* the credential
+      (``https://<token>@host``) would live in a ``*_token`` field and be masked
+      whole by name.
+    * A present-but-empty password (``postgresql://copi:@host/db``), mirroring the
+      empty-value rule on the name-based path.
+
+    Non-URL strings are returned unchanged, so this is safe to run over every field.
+    """
+    m = _URL_RE.match(value)
+    if not m:
+        return value
+    authority = m.group("authority")
+    if "@" in authority:
+        userinfo, _, host = authority.rpartition("@")
+        user, sep, password = userinfo.partition(":")
+        if sep and password:
+            authority = f"{user}:{_MASK}@{host}"
+    rest = _URL_QUERY_SECRET_RE.sub(
+        lambda q: f"{q['sep']}{q['name']}={_MASK}", m.group("rest")
+    )
+    return f"{m['scheme']}{authority}{rest}"
 
 
 class Settings(BaseSettings):
@@ -278,15 +348,33 @@ class Settings(BaseSettings):
         """Redact credential-valued fields in repr()/str().
 
         Pydantic v2 routes both ``repr(settings)`` and ``str(settings)`` through
-        ``__repr_args__``, so masking here closes the only described leak path
-        for SEC-19 (an accidental log/repr of the settings object) with no
-        change to how any field is *read*. Fields keep their plain ``str`` type,
-        avoiding a ``.get_secret_value()`` churn across ~130 call sites; a
-        deliberate reader of a specific attribute still gets the real value.
+        ``__repr_args__`` (``BaseModel.__str__`` -> ``__repr_str__`` ->
+        ``__repr_args__``; verified against pydantic 2.13 and asserted in
+        tests/unit/test_config_secret_redaction.py), so masking here closes the
+        only described leak path for SEC-19 (an accidental log/repr of the
+        settings object) with no change to how any field is *read*. Fields keep
+        their plain ``str`` type, avoiding a ``.get_secret_value()`` churn across
+        ~130 call sites; a deliberate reader of a specific attribute still gets
+        the real value.
+
+        Two rules, because credentials arrive in two shapes:
+
+        1. Whole-value secrets, recognised by field name (``_SECRET_NAME_HINTS``)
+           — the ~130 bot tokens, API keys, the signing key.
+        2. Credentials embedded in an otherwise-public URL/DSN, recognised by
+           value shape (``_redact_url_credentials``) — ``database_url``, whose
+           name matches no hint. Masked positionally so the host and database
+           stay readable.
+
+        Still out of scope, by design: ``model_dump()`` returns everything in the
+        clear. The invariant that keeps that safe is tested in
+        tests/unit/test_slack_tokens.py (nothing in src/ dumps a settings object).
         """
         for name, value in super().__repr_args__():
             if value and any(h in str(name).lower() for h in _SECRET_NAME_HINTS):
-                yield name, "***REDACTED***"
+                yield name, _MASK
+            elif value and isinstance(value, str):
+                yield name, _redact_url_credentials(value)
             else:
                 yield name, value
 

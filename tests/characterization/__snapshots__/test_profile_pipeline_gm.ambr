@@ -13,6 +13,9 @@
     'disease_areas': list([
       'computational theory',
     ]),
+    'evidence_pmid_count': 2,
+    'evidence_pub_count': 2,
+    'evidence_state': 'grounded',
     'experimental_models': list([
       'analytical engine',
       'difference engine',
@@ -68,6 +71,7 @@
     ]),
     'raw_abstracts_hash': '66d887a29c4b61aa02e65852fb24d28cd464bede0c2950fbaf2f76ee13b9e42b',
     'research_summary': 'This laboratory investigates programmable mechanical computation and the mathematical foundations that make general-purpose calculation possible. The central line of work formalizes how a sequence of operations can be encoded on punched cards and executed by an analytical engine, turning an abstract algorithm into a repeatable physical process. A recurring theme is the computation of Bernoulli numbers, used as a demanding proving ground for loop control, intermediate storage, and the reuse of partial results. The group connects nineteenth-century engine architecture to modern notions of symbolic manipulation, arguing that the machine could act on entities other than numbers when those entities obey formal rules. Methodologically the work spans analytical derivation, stepwise numerical verification, and the careful design of operation tables that other researchers can follow and reproduce.',
+    'synthesis_validated': True,
     'techniques': list([
       'mechanical computation',
       'algorithm design',
@@ -79,6 +83,9 @@
 # name: test_profile_pipeline_llm_failure_leaves_fields_unset
   dict({
     'disease_areas': None,
+    'evidence_pmid_count': None,
+    'evidence_pub_count': None,
+    'evidence_state': 'unknown',
     'grant_titles': list([
       'Difference Engine Program',
       'Analytical Engine Grant',
@@ -87,11 +94,64 @@
     'profile_version': 0,
     'raw_abstracts_hash_is_set': True,
     'research_summary': None,
+    'synthesis_validated': None,
     'techniques': None,
+  })
+# ---
+# name: test_profile_pipeline_marks_a_profile_that_fails_validation_twice
+  dict({
+    'disease_areas': list([
+    ]),
+    'evidence_pmid_count': 2,
+    'evidence_pub_count': 2,
+    'evidence_state': 'grounded',
+    'llm_calls_total': 3,
+    'profile_version': 1,
+    'research_summary': 'The lab studies engines. Work continues on several fronts and results will be reported in due course elsewhere.',
+    'synthesis_validated': False,
+    'techniques': list([
+      'mechanical computation',
+      'algorithm design',
+    ]),
+    'unvalidated_in_progress': True,
+  })
+# ---
+# name: test_profile_pipeline_orcid_works_failure_is_not_reported_as_no_works
+  dict({
+    'evidence_pmid_count': None,
+    'evidence_pub_count': 0,
+    'evidence_state': 'evidence_lost',
+    'profile_version': 1,
+  })
+# ---
+# name: test_profile_pipeline_pubmed_outage_on_rerun_keeps_the_grounded_profile
+  dict({
+    'evidence_pub_count': 2,
+    'evidence_state': 'grounded',
+    'first_version': 1,
+    'generated_at_untouched': True,
+    'rejected_in_progress': True,
+    'second_version': 1,
+  })
+# ---
+# name: test_profile_pipeline_pubmed_outage_stores_a_profile_marked_evidence_lost
+  dict({
+    'context_has_publications_section': False,
+    'evidence_pmid_count': 2,
+    'evidence_pub_count': 0,
+    'evidence_state': 'evidence_lost',
+    'profile_version': 1,
+    'publication_rows': 0,
+    'summary_is_set': True,
+    'synthesis_validated': True,
+    'ungrounded_in_progress': True,
+    'validator_accepts_it': True,
   })
 # ---
 # name: test_profile_pipeline_rerun_increments_version_and_updates_pubs
   dict({
+    'evidence_pmid_count': 2,
+    'evidence_pub_count': 2,
     'first_version': 1,
     'llm_calls_total': 3,
     'pub_count_after_two_runs': 2,
@@ -99,5 +159,50 @@
     'second_version': 2,
     'seed_set_after_first_run': True,
     'seed_unchanged_on_rerun': True,
+    'synthesis_validated': True,
+  })
+# ---
+# name: test_profile_pipeline_rerun_that_fails_validation_keeps_the_stored_profile
+  dict({
+    'evidence_pub_count': 2,
+    'first_version': 1,
+    'kept_the_validated_summary': True,
+    'llm_calls_total': 4,
+    'profile_row_count': 1,
+    'rejected_in_progress': True,
+    'same_profile_row': True,
+    'second_version': 1,
+    'synthesis_validated': True,
+    'took_the_rejected_draft': False,
+  })
+# ---
+# name: test_profile_pipeline_researcher_with_no_works_is_not_reported_as_evidence_lost
+  dict({
+    'evidence_pmid_count': 0,
+    'evidence_pub_count': 0,
+    'evidence_state': 'no_evidence_available',
+    'profile_version': 1,
+    'summary_is_set': True,
+    'synthesis_validated': True,
+    'ungrounded_in_progress': True,
+  })
+# ---
+# name: test_profile_pipeline_stores_the_retry_not_the_rejected_first_synthesis
+  dict({
+    'disease_areas': list([
+      'computational theory',
+    ]),
+    'evidence_state': 'grounded',
+    'llm_calls_total': 3,
+    'profile_version': 1,
+    'stored_the_rejected_draft': False,
+    'stored_the_retry': True,
+    'synthesis_validated': True,
+    'techniques': list([
+      'mechanical computation',
+      'algorithm design',
+      'numerical analysis',
+      'punch-card programming',
+    ]),
   })
 # ---

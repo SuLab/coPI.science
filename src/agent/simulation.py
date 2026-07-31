@@ -24,7 +24,7 @@ from src.agent.funding_rules import (
     summarize_funding_thread,
 )
 from src.agent.message_log import LogEntry, MessageLog, is_funding_post
-from src.agent.slack_client import ThreadNotFound
+from src.agent.slack_client import SlackListingIncomplete, ThreadNotFound
 from src.agent.state import PostRef, ProposalRef, ThreadState
 from src.services.cohorts import compute_gates, summarise_gates
 from src.agent.tools import TOOL_DEFINITIONS, execute_tool
@@ -2326,6 +2326,13 @@ class SimulationEngine:
             oldest = self._poll_cursors.get(ch_id, "0")
             try:
                 messages = client.poll_channel_messages(ch_id, oldest=oldest)
+                # `msg["thread_ts"]` arrives normalised: Slack sets thread_ts == ts on
+                # a parent once it has replies, and the transport nulls that at ingest
+                # (slack_client.normalize_inbound_message). Copying it verbatim, as
+                # this loop used to, ingested a root as a reply to itself — and
+                # get_new_top_level_posts skips anything with a non-null thread_ts, so
+                # the post vanished from Phase 2 and _rebuild_state_from_db made it
+                # permanent. The rule now lives in exactly one place.
                 for msg in messages:
                     ts = msg.get("ts", "")
                     user_id = msg.get("user", "")
@@ -2898,7 +2905,7 @@ class SimulationEngine:
         slack_parent = self._slack_parent_ts(thread_ts)
         can_mirror = thread_ts is None or slack_parent is not None
 
-        result = None
+        result: dict | None = None
         if client and client.is_connected and not can_mirror:
             logger.warning(
                 "[%s] Not mirroring reply to #%s: thread %s has no Slack root "
@@ -2923,18 +2930,21 @@ class SimulationEngine:
         else:
             logger.info("[%s] MOCK post to #%s: %s...", agent_id, channel, text[:60])
 
+        # One log entry per message that really exists on the transport. Normally
+        # that is one; it is several when the text was over Slack's 4000-character
+        # per-message limit and the client split it (see
+        # AgentSlackClient.post_message). Recording a single row for a post Slack
+        # turned into five messages left four of them in Slack with no row at all,
+        # and named the row's slack_ts after the *tail* — so _slack_parent_ts
+        # threaded replies onto a fragment, posted_at took the tail's clock, and the
+        # next restart's _rebuild_state_from_slack re-ingested the unrecorded head
+        # chunks as brand-new inbound messages. The mirror is only in bijection with
+        # Slack if the row count matches the message count.
+        mirrored = self._mirrored_messages(result, text, slack_parent)
+
         # Canonical id: the Slack ts when a connected client posted, else a
         # locally-minted ts. Slack ts (when present) is also recorded as the
         # mirror mapping on the entry.
-        slack_ts = result.get("ts") if result else None
-        ts = slack_ts or self.mint_ts()
-        try:
-            posted_at = float(ts)
-        except (TypeError, ValueError):
-            posted_at = time.time()
-
-        # Add to message log. When Slack posted this, record the mirror mapping
-        # (in pure Slack-on mode slack_ts == ts).
         #
         # `visibility` is stamped from the channel's class. It was previously omitted,
         # so every agent-authored message defaulted to "public" even in a
@@ -2951,23 +2961,65 @@ class SimulationEngine:
         # Found by a real multi-turn run: the private-channel messages persisted with
         # visibility='public' while the AgentChannel row said collab_private.
         # See .notes/cohort-system-v2.md §7.
-        entry = LogEntry(
-            ts=ts,
-            channel=channel,
-            sender_agent_id=agent_id,
-            sender_name=agent.bot_name if agent else f"{agent_id}Bot",
-            content=text,
-            thread_ts=thread_ts,
-            posted_at=posted_at,
-            is_bot=True,
-            visibility=self._resolve_channel_visibility(channel),
-            slack_ts=slack_ts,
-            slack_channel_id=(result.get("channel") if result else None),
-            slack_thread_ts=(slack_parent if slack_ts else None),
-        )
-        # Persisted to agent_messages via the MessageLog append callback
-        # (_enqueue_persist → _flush_persisted). The DB is the primary store.
-        self.message_log.append(entry)
+        visibility = self._resolve_channel_visibility(channel)
+        sender_name = agent.bot_name if agent else f"{agent_id}Bot"
+        root_ts: str | None = None
+        for index, message in enumerate(mirrored or [None]):
+            slack_ts = message.get("ts") if message else None
+            ts = slack_ts or self.mint_ts()
+            try:
+                posted_at = float(ts)
+            except (TypeError, ValueError):
+                posted_at = time.time()
+            # Chunk 0 keeps the caller's canonical thread id. A continuation chunk of
+            # a *root* post hangs off chunk 0 — one logical post stays one top-level
+            # post, so nobody's Phase 2 scan sees N roots where the author wrote one.
+            canonical_parent = thread_ts if (thread_ts or index == 0) else root_ts
+            entry = LogEntry(
+                ts=ts,
+                channel=channel,
+                sender_agent_id=agent_id,
+                sender_name=sender_name,
+                content=(message.get("text") if message else None) or text,
+                thread_ts=canonical_parent,
+                posted_at=posted_at,
+                is_bot=True,
+                visibility=visibility,
+                slack_ts=slack_ts,
+                slack_channel_id=(message.get("channel") if message else None),
+                # The parent the transport reports, so the row always describes the
+                # message the transport actually made rather than the one we asked for.
+                slack_thread_ts=(message.get("thread_ts") if message and slack_ts else None),
+            )
+            if index == 0:
+                root_ts = ts
+            # Persisted to agent_messages via the MessageLog append callback
+            # (_enqueue_persist → _flush_persisted). The DB is the primary store.
+            self.message_log.append(entry)
+
+    @staticmethod
+    def _mirrored_messages(
+        result: dict | None, text: str, slack_parent: str | None,
+    ) -> list[dict]:
+        """Normalise a transport's post result into one record per real message.
+
+        ``AgentSlackClient`` reports ``posted_messages``; a Transport backend that
+        never splits need not, so a bare ``{"ts": ..., "channel": ...}`` is read as
+        the single message it describes. Returns ``[]`` when nothing was posted,
+        which is the signal to mint a local canonical id instead.
+        See src/agent/transport.py for the declared contract.
+        """
+        if not result:
+            return []
+        posted = result.get("posted_messages")
+        if posted:
+            return list(posted)
+        return [{
+            "ts": result.get("ts"),
+            "channel": result.get("channel"),
+            "text": text,
+            "thread_ts": slack_parent,
+        }]
 
     def _slack_parent_ts(self, thread_ts: str | None) -> str | None:
         """Resolve a canonical thread id to the Slack ts Slack must thread on.
@@ -3035,15 +3087,35 @@ class SimulationEngine:
             self._channel_visibility = {ch: VISIBILITY_PUBLIC for ch in SEEDED_CHANNELS}
             return
 
-        existing = client.list_channels()
+        # A *complete* listing, or none. list_channels raises rather than hand back a
+        # subset that looks whole, because the subset is what made this method
+        # re-create channels the workspace already had: conversations.create answers
+        # name_taken, create_channel used to return None, and the channel ended up
+        # with no id in _channel_id_map at all — after which every post to it was
+        # addressed by name and Slack answered not_in_channel. Demonstrated on a real
+        # workspace: #all-copi-test exists as C0BM57CG4HJ and the engine mapped it to
+        # None. With an incomplete listing we adopt what we saw and create nothing,
+        # since "absent from this listing" no longer means "absent from Slack".
+        listing_complete = True
+        try:
+            existing = client.list_channels()
+        except SlackListingIncomplete as exc:
+            listing_complete = False
+            existing = {ch["name"]: ch["id"] for ch in exc.partial}
+            logger.error(
+                "Channel discovery is incomplete (%s) — adopting the %d channel(s) "
+                "seen and creating none, so a channel Slack already has is not "
+                "duplicated", exc.reason, len(existing),
+            )
 
         # Create missing seeded channels
-        for ch_name in SEEDED_CHANNELS:
-            if ch_name not in existing:
-                logger.info("Creating seeded channel #%s", ch_name)
-                ch_data = client.create_channel(ch_name)
-                if ch_data:
-                    existing[ch_name] = ch_data.get("id", "")
+        if listing_complete:
+            for ch_name in SEEDED_CHANNELS:
+                if ch_name not in existing:
+                    logger.info("Creating seeded channel #%s", ch_name)
+                    ch_data = client.create_channel(ch_name)
+                    if ch_data:
+                        existing[ch_name] = ch_data.get("id", "")
 
         self._channel_id_map = dict(existing)
         # Seeded channels are always 'public'. Agent-created channels (including
@@ -3483,13 +3555,18 @@ class SimulationEngine:
                         self._poll_cursors[ch_id] = ts
                     continue
                 sender_name = msg.get("username", "") or user_id
+                # `thread_ts` is already normalised: Slack marks a parent that has
+                # replies with thread_ts == ts, and the transport nulls that at ingest
+                # for every inbound path (see slack_client.normalize_inbound_message).
+                # The rule used to live here and *only* here, which is why the live
+                # poller ingested roots as replies to themselves.
                 entry = LogEntry(
                     ts=ts,
                     channel=ch_name,
                     sender_agent_id=sender_agent_id,
                     sender_name=sender_name,
                     content=msg.get("text", ""),
-                    thread_ts=msg.get("thread_ts") if msg.get("thread_ts") != ts else None,
+                    thread_ts=msg.get("thread_ts"),
                     posted_at=float(ts) if ts else 0.0,
                     is_bot=is_bot,
                     visibility=ch_visibility,
@@ -3497,9 +3574,7 @@ class SimulationEngine:
                     slack_channel_id=ch_id,
                     # Slack-origin: canonical id == Slack ts, so the thread
                     # parent needs no translation.
-                    slack_thread_ts=(
-                        msg.get("thread_ts") if msg.get("thread_ts") != ts else None
-                    ),
+                    slack_thread_ts=msg.get("thread_ts"),
                 )
                 if self.message_log.append(entry):
                     total_messages += 1

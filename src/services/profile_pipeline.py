@@ -9,7 +9,8 @@ Implements the pipeline from profile-ingestion.md:
 6. Prepare profile record
 7. LLM synthesis (public profile)
 8. Validation
-9. Store + seed private profile (first creation only)
+9. Store, gated on validation and recorded on the profile row (migration 0023),
+   + seed private profile (first creation only)
 """
 
 import hashlib
@@ -100,11 +101,16 @@ async def run_profile_pipeline(
 
     # Step 3: Fetch ORCID works
     update_progress("step3", "Fetching publication list from ORCID...")
+    # When this lookup FAILS we do not know how many works the researcher has, so
+    # step 9 must not record "0 identifiers" — that reads as "nothing to fetch"
+    # (a genuinely publication-less researcher) when it means "we could not ask".
+    works_lookup_failed = False
     try:
         orcid_works = await fetch_orcid_works(orcid_id)
     except Exception as exc:
         logger.warning("Step 3 failed: %s", exc)
         orcid_works = []
+        works_lookup_failed = True
 
     # Extract PMIDs for works that have them
     pmids = [w["pmid"] for w in orcid_works if w.get("pmid")]
@@ -323,20 +329,131 @@ async def run_profile_pipeline(
         except Exception as exc:
             logger.error("Retry synthesis failed: %s", exc)
 
-    # Step 9: Store
+    # Step 9: Store.
+    #
+    # `validated` is READ here. It used to gate only the retry above: step 9 stored
+    # on `if synthesized:` alone, so the retry's validation result was computed and
+    # thrown away, and a profile that failed _validate_profile twice was persisted
+    # as though it had passed. Nothing recorded the difference, so no test could
+    # see it — hardwiring _validate_profile to `return True` changed no observable
+    # behaviour at all. Two columns now record the decision (migration 0023):
+    # `synthesis_validated`, and the evidence counts that say what the stored
+    # fields are grounded in.
+    #
+    # The failure mode on a double validation failure is deliberate: store the
+    # draft and MARK it, rather than raise or store nothing.
+    #   * Raising is loud in the log and silent in the UI. execute_generate_profile
+    #     lets the exception reach process_job, which retries up to
+    #     Job.max_attempts (default 3) — three more full LLM+NCBI runs for a
+    #     formatting miss the retry above already tried to fix — and then sets
+    #     status='dead'. templates/onboarding/profile_review.html keys its "Try
+    #     Again" control on job_status == 'failed', which src/worker/main.py never
+    #     assigns (it only ever writes 'pending' or 'dead'), so a dead job falls
+    #     through to that template's `elif profile` branch and the PI is shown the
+    #     review form with empty fields and no explanation. Raising would also
+    #     skip step 9b, the markdown export and create_revision below, costing the
+    #     private-profile seed and the audit trail.
+    #   * Storing nothing is indistinguishable from "the pipeline never ran" and
+    #     throws away the only draft the PI has to edit. (It would not cause the
+    #     /onboarding re-enqueue loop: that self-heal is gated on `job is None and
+    #     profile is None`, and step 6 above always creates the row first.)
+    #   * Storing + marking keeps onboarding moving — the PI edits the draft and
+    #     POSTs /onboarding/save-profile — while being distinguishable (one column,
+    #     one ERROR log, one job-progress entry) and recoverable (POST
+    #     /onboarding/retry, or the next monthly_refresh).
+    #
+    # What it will NOT do is let a worse synthesis overwrite a better stored one.
+    # A monthly refresh that fails validation, or one that runs while PubMed is
+    # down, keeps the profile that is already there.
     update_progress("step9", "Saving profile to database...")
     profile.grant_titles = grant_titles or profile.grant_titles
+    # Records this run's INPUT (change detection), so it is written even when the
+    # synthesized fields below are not. The evidence counts are the ones that
+    # describe the stored profile.
     profile.raw_abstracts_hash = abstracts_hash
 
+    # What the pipeline should have been able to fetch, and what actually reached
+    # the prompt. Both zero means there was nothing to fetch; the first non-zero
+    # with the second zero means the fetch failed and whatever the model wrote is
+    # ungrounded. None for the first means step 3 could not even enumerate the
+    # works, so "nothing to fetch" cannot be claimed. See
+    # ResearcherProfile.evidence_state.
+    evidence_pmid_count = None if works_lookup_failed else len(set(pmids))
+    evidence_pub_count = len(pubs_for_synthesis)
+
     if synthesized:
-        profile.research_summary = synthesized.get("research_summary", "")
-        profile.techniques = synthesized.get("techniques", [])
-        profile.experimental_models = synthesized.get("experimental_models", [])
-        profile.disease_areas = synthesized.get("disease_areas", [])
-        profile.key_targets = synthesized.get("key_targets", [])
-        profile.keywords = synthesized.get("keywords", [])
-        profile.profile_version = (profile.profile_version or 0) + 1
-        profile.profile_generated_at = datetime.now(timezone.utc)
+        stored_is_worth_keeping = (
+            (profile.profile_version or 0) > 0
+            and bool(profile.research_summary)
+            # A stored profile already known to have failed validation is not
+            # worth protecting. NULL (legacy/unknown) is.
+            and profile.synthesis_validated is not False
+        )
+        lost_evidence = evidence_pub_count == 0 and (profile.evidence_pub_count or 0) > 0
+        if stored_is_worth_keeping and (not validated or lost_evidence):
+            reason = (
+                "failed validation twice"
+                if not validated
+                else f"grounded in 0 publications, down from {profile.evidence_pub_count}"
+            )
+            logger.error(
+                "Discarding synthesized profile for %s (%s); keeping stored version %d",
+                user.name, reason, profile.profile_version,
+            )
+            update_progress(
+                "validation_rejected",
+                f"Kept the existing profile (version {profile.profile_version}): "
+                f"the new synthesis {reason}.",
+            )
+        else:
+            profile.research_summary = synthesized.get("research_summary", "")
+            profile.techniques = synthesized.get("techniques", [])
+            profile.experimental_models = synthesized.get("experimental_models", [])
+            profile.disease_areas = synthesized.get("disease_areas", [])
+            profile.key_targets = synthesized.get("key_targets", [])
+            profile.keywords = synthesized.get("keywords", [])
+            profile.synthesis_validated = validated
+            profile.evidence_pmid_count = evidence_pmid_count
+            profile.evidence_pub_count = evidence_pub_count
+            profile.profile_version = (profile.profile_version or 0) + 1
+            profile.profile_generated_at = datetime.now(timezone.utc)
+
+            if not validated:
+                logger.error(
+                    "Stored an UNVALIDATED profile for %s (version %d): failed "
+                    "_validate_profile on both attempts. Marked "
+                    "synthesis_validated=False for regeneration.",
+                    user.name, profile.profile_version,
+                )
+                update_progress(
+                    "unvalidated",
+                    "The generated profile did not meet the quality checks "
+                    "(150-250 word summary, 3+ techniques, 1+ disease area). "
+                    "It was saved as a draft for you to edit.",
+                )
+            if evidence_pub_count == 0:
+                # Nothing the researcher wrote reached the prompt, so whatever the
+                # model produced came from its own priors plus a name and a
+                # department. It is stored (a PubMed outage must not stop a PI
+                # being onboarded, and some researchers really have no indexed
+                # papers) but it is no longer indistinguishable from a real one.
+                found = (
+                    "an unknown number of"
+                    if evidence_pmid_count is None
+                    else str(evidence_pmid_count)
+                )
+                logger.error(
+                    "Stored an UNGROUNDED profile for %s: 0 publication abstracts "
+                    "reached the synthesis prompt (%s publication IDs in hand, "
+                    "evidence_state=%s)",
+                    user.name, found, profile.evidence_state,
+                )
+                update_progress(
+                    "ungrounded",
+                    f"No publication abstracts reached the profile synthesis "
+                    f"({found} publication IDs were found): "
+                    f"{profile.evidence_state}.",
+                )
 
     # Step 9b: Generate private profile seed (if no live profile and no existing seed)
     if not profile.private_profile_md and not profile.private_profile_seed:

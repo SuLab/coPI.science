@@ -222,6 +222,8 @@ def test_every_slack_secret_is_redacted_in_the_settings_repr():
     text = repr(s) + str(s)
     for secret in ("xoxb-secret-aaaaaaa", "xoxe.xoxp-secret-bbbbbbb",
                    "xoxe-1-secret-ccccccc"):
+        # A token is a whole-value credential: nothing of it survives, unlike the
+        # positional masking applied to a DSN's password.
         assert secret not in text, f"{secret[:14]}... leaked into the settings repr"
     assert s.aws_region in text, "control leg failed: the repr shows nothing at all"
 
@@ -237,9 +239,18 @@ def test_model_dump_is_not_used_on_settings_anywhere_in_src():
     That scoping is only safe while nothing dumps the settings object, so the invariant
     that actually protects SEC-19 is this one, not a redaction test. If a future caller
     needs `model_dump()`, the redaction has to be widened first.
+
+    Adding the DSN redaction (`database_url`'s password) did not change this: it is a
+    `__repr_args__` rule, so `model_dump()` still returns that password in the clear
+    too. The measurement below pins the rationale instead of just asserting it.
     """
     import pathlib
     import re
+
+    dump = Settings(_env_file=None, secret_key="dump-secret-value",
+                    database_url="postgresql://u:dump-dsn-password@h/db").model_dump()
+    assert dump["secret_key"] == "dump-secret-value"
+    assert "dump-dsn-password" in dump["database_url"]
 
     src = pathlib.Path(__file__).resolve().parents[2] / "src"
     offenders = []

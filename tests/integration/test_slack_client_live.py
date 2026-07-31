@@ -90,34 +90,74 @@ def test_channel_create_list_join_and_id_resolution(
     assert slack_client_su.get_channel_id("t-does-not-exist-zzzz") is None
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "src defect (NOT fixed, reported): AgentSlackClient.list_channels calls "
-    "conversations.list with limit=200, ignores response_metadata.next_cursor and never "
-    "passes exclude_archived, so on a workspace with more than 200 conversations it "
-    "returns an arbitrary subset — Slack orders the result by channel id, which is not "
-    "monotonic in creation time. Consequences in production: "
-    "_ensure_seeded_channels (simulation.py:3038) fails to find an existing seeded "
-    "channel, re-creates it, gets name_taken, and leaves it with NO id; and "
-    "post_message's _resolve_channel_id (slack_client.py:394) falls back to passing the "
-    "channel NAME to chat.postMessage, which answers not_in_channel. "
-    "strict=True on purpose: if pagination is added, or the workspace shrinks below one "
-    "page, this XPASSes and fails the run, which is the signal to delete the marker."
-))
 def test_list_channels_returns_every_public_channel(
     slack_client_su, slack_list_all_channels
 ):
-    """The single-page defect, pinned deterministically.
+    """Pagination, against the workspace that broke without it.
 
-    This is the root cause of the whole tier's rotating failures: every test that
-    addressed a channel by name went through a listing that can silently omit it.
+    This was the root cause of the whole tier's rotating failures: `list_channels`
+    asked conversations.list for a single 200-item page and ignored
+    `response_metadata.next_cursor`, so every test that addressed a channel by name
+    went through a listing that could silently omit it. Slack orders conversations.list
+    by channel id, and ids are not monotonic in creation time, so which channels a
+    single page showed was effectively random.
+
+    The control matters as much as the claim: the workspace must be *bigger* than one
+    page, or a client that still ignored the cursor would pass this.
     """
     ground = slack_list_all_channels(slack_client_su)
+    assert len(ground) > 200, (
+        f"only {len(ground)} public channels — this workspace no longer exceeds one "
+        "200-item page, so this test can no longer detect a missing paginator"
+    )
     listed = slack_client_su.list_channels()
     missing = sorted(set(ground) - set(listed))
     assert not missing, (
         f"list_channels() returned {len(listed)} of {len(ground)} public channels; "
         f"{len(missing)} are invisible to it, e.g. {missing[:5]}"
     )
+    assert set(listed) == set(ground), (
+        f"list_channels() invented channels Slack does not list: "
+        f"{sorted(set(listed) - set(ground))[:5]}"
+    )
+
+
+def test_exclude_archived_is_opt_in_because_an_archived_channel_owns_its_name(
+    slack_clients, slack_list_all_channels
+):
+    """Both halves of the `exclude_archived` decision, live.
+
+    The default is False — archived channels ARE listed — and that is deliberate, not
+    an oversight: both callers ask this question to learn whether a *name* is in use,
+    and Slack keeps the name of an archived channel reserved. A listing that hid
+    archived channels would send `_ensure_seeded_channels` to conversations.create for
+    a name Slack refuses with `name_taken`, which is the same production failure the
+    pagination fix just closed, reached by a different route.
+
+    Control: passing True really does drop it, so the parameter is not inert.
+    """
+    su = slack_clients["su"]
+    name = f"t-arch-{uuid.uuid4().hex[:8]}"
+    made = su.create_channel(name)
+    assert made and made.get("id"), made
+    su._call_with_retry(su._client.conversations_archive, channel=made["id"])
+
+    with_archived = su.list_channels()
+    assert with_archived.get(name) == made["id"], (
+        f"#{name} is archived and vanished from the default listing — "
+        "_ensure_seeded_channels would try to create it and get name_taken"
+    )
+    without = su.list_channels(exclude_archived=True)
+    assert name not in without, (
+        "exclude_archived=True still returned an archived channel, so the flag does "
+        "nothing"
+    )
+    assert without and set(without) < set(with_archived), (
+        f"exclude_archived=True is not a subset of the default listing: "
+        f"{len(without)} vs {len(with_archived)}"
+    )
+    # And the archived channel is still addressable by name, which is the point.
+    assert su.get_channel_id(name) == made["id"]
 
 
 def test_cache_channel_ids_is_used_by_resolution(slack_client_su):
@@ -189,6 +229,129 @@ def test_replying_to_a_nonexistent_thread_raises_thread_not_found(
 def test_posting_to_a_nonexistent_channel_returns_none(slack_client_su):
     """Degrade rather than crash: a stale channel id must not end a turn."""
     assert slack_client_su.post_message("C00000000000", "nowhere") is None
+
+
+# --- the >4000-char split, at the client boundary --------------------------------------
+
+
+def _prose(n: int) -> str:
+    """Word-separated prose of exactly n characters."""
+    unit = "kinetics "
+    s = (unit * (n // len(unit) + 2))[:n]
+    return s[:-1] + "." if s.endswith(" ") else s
+
+
+def _texts_in(client, cid) -> list[str]:
+    """Every message in the channel, top level and threaded, oldest first."""
+    out = []
+    for msg in client.get_full_channel_history(cid):
+        out.append(msg.get("text") or "")
+        if msg.get("reply_count"):
+            for r in client.get_all_thread_replies(cid, msg["ts"]):
+                if r.get("ts") != msg.get("ts"):
+                    out.append(r.get("text") or "")
+    return out
+
+
+def test_a_message_at_the_limit_is_one_message(slack_client_su, slack_probe_channel):
+    """Measured live: Slack accepts exactly 4000 characters as a single message, so the
+    client must not split at the boundary and turn one post into two."""
+    from src.agent.slack_client import SLACK_MAX_TEXT_CHARS
+
+    name, cid = slack_probe_channel
+    body = _prose(SLACK_MAX_TEXT_CHARS)
+    assert len(body) == 4000
+    out = _post(slack_client_su, cid, body)
+    assert out and len(out["posted_messages"]) == 1, out["posted_messages"]
+    assert len(_texts_in(slack_client_su, cid)) == 1
+
+
+@pytest.mark.parametrize("size", [4001, 8500])
+def test_an_over_limit_post_reports_every_message_it_created(
+    slack_client_su, slack_probe_channel, size
+):
+    """Slack splits a >4000-char `text` itself and returns only the LAST chunk's ts, so
+    a client that posts blind names the tail of its own message and leaves the head with
+    no record. Chunking here instead means every Slack message is one we can account for.
+
+    4001 is the first size past the boundary; 8500 forces three chunks. Both are asserted
+    the same way, because the property — not the chunk count — is what matters:
+    `posted_messages` must be exactly the set of messages the channel now holds, in order,
+    and its FIRST ts (not its last) must be what `post_message` returns for threading.
+    """
+    name, cid = slack_probe_channel
+    body = _prose(size)
+    out = _post(slack_client_su, cid, body)
+    assert out, "the oversized post did not land at all"
+    posted = out["posted_messages"]
+    assert len(posted) >= 2, f"{size} chars was not split: {len(posted)} message(s)"
+    assert out["ts"] == posted[0]["ts"], (
+        "post_message returned a ts other than the first message's — this is the value "
+        "the engine records as the canonical id and threads replies onto"
+    )
+
+    live = _texts_in(slack_client_su, cid)
+    assert len(live) == len(posted), (
+        f"Slack holds {len(live)} message(s) for {len(posted)} reported: {live[:2]}"
+    )
+    # Every reported chunk is really there, and nothing else is.
+    from src.agent.slack_client import markdown_to_mrkdwn
+    assert [markdown_to_mrkdwn(p["text"]) for p in posted] == live
+    # No content was lost or duplicated across the split.
+    assert re.sub(r"\s+", "", "".join(live)) == re.sub(r"\s+", "", body)
+    # A split root stays ONE top-level post: the continuations hang off the first
+    # message, so nobody else's Phase 2 scan sees several roots for one post.
+    assert posted[0]["thread_ts"] is None
+    assert all(p["thread_ts"] == posted[0]["ts"] for p in posted[1:]), (
+        f"continuation chunks are not threaded on the first: {[p['thread_ts'] for p in posted]}"
+    )
+    assert len(slack_client_su.get_full_channel_history(cid)) == 1, (
+        "the split produced more than one top-level message"
+    )
+
+
+def test_an_over_limit_reply_keeps_every_chunk_in_the_caller_s_thread(
+    slack_client_su, slack_probe_channel
+):
+    """Control for the test above: for a *reply*, every chunk belongs to the thread the
+    caller named — not to a sub-thread on the first chunk."""
+    name, cid = slack_probe_channel
+    root = _post(slack_client_su, cid, "root for a long reply")
+    out = _post(slack_client_su, cid, _prose(9000), thread_ts=root["ts"])
+    posted = out["posted_messages"]
+    assert len(posted) >= 3, len(posted)
+    assert all(p["thread_ts"] == root["ts"] for p in posted), (
+        f"a reply chunk left the thread: {[p['thread_ts'] for p in posted]}"
+    )
+    replies = slack_client_su.get_all_thread_replies(cid, root["ts"])
+    assert len([r for r in replies if r["ts"] != root["ts"]]) == len(posted)
+
+
+def test_a_code_fence_spanning_a_split_is_closed_and_reopened(
+    slack_client_su, slack_probe_channel
+):
+    """Slack renders `text` as mrkdwn, so a chunk that ends inside a ``` block renders
+    its tail as code and the next chunk renders its head as prose — the split moves the
+    block boundary. Balancing each chunk keeps every piece rendering as the whole would.
+    """
+    name, cid = slack_probe_channel
+    body = "Here is the analysis script:\n\n```\n" + "\n".join(
+        f"row_{i} = measure(sample_{i})  # covalent engagement at t={i}" for i in range(120)
+    ) + "\n```\n\nThat is the whole pipeline."
+    assert len(body) > 4000, len(body)
+    out = _post(slack_client_su, cid, body)
+    posted = out["posted_messages"]
+    assert len(posted) >= 2, len(posted)
+    for i, p in enumerate(posted):
+        assert p["text"].count("```") % 2 == 0, (
+            f"chunk {i} leaves a code fence open: ...{p['text'][-60:]!r}"
+        )
+    live = _texts_in(slack_client_su, cid)
+    assert len(live) == len(posted)
+    # The fence repair is the only text added; every original line survives.
+    joined = "".join(live)
+    for i in (0, 60, 119):
+        assert f"row_{i} = measure(sample_{i})" in joined
 
 
 # --- DMs -----------------------------------------------------------------------------
