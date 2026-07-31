@@ -37,6 +37,14 @@ async def migration_setup(engine, slack_clients, slack_bot_tokens):
     factory = async_sessionmaker(engine, expire_on_commit=False)
     run_id = uuid.uuid4()
     created_channels = []
+    # A unique origin channel per test. The private-channel slug is deterministic in
+    # (agent pair, origin channel) and create_private_channel only appends a
+    # second-granularity timestamp, so three tests sharing one origin name collide
+    # inside the same second and fall through to the name_taken retry — intermittently
+    # observed. Slack also treats ARCHIVED channel names as taken, so collisions
+    # accumulate across runs. A distinct origin per test is both stable and more
+    # faithful: each test is a different thread.
+    origin = f"t-origin-{uuid.uuid4().hex[:8]}"
 
     async with factory() as db:
         db.add(SimulationRun(id=run_id, status="running"))
@@ -57,7 +65,7 @@ async def migration_setup(engine, slack_clients, slack_bot_tokens):
             ))
         td = ThreadDecision(
             simulation_run_id=run_id, thread_id="1700000000.000100",
-            channel="t-origin", agent_a=PAIR[0], agent_b=PAIR[1],
+            channel=origin, agent_a=PAIR[0], agent_b=PAIR[1],
             outcome="proposal", summary_text="A joint degrader screen.",
             origin_visibility=VISIBILITY_PUBLIC,
         )
@@ -65,7 +73,7 @@ async def migration_setup(engine, slack_clients, slack_bot_tokens):
         await db.commit()
         td_id, user_ids = td.id, {a: u.id for a, u in users.items()}
 
-    yield factory, run_id, td_id, user_ids, created_channels
+    yield factory, run_id, td_id, user_ids, created_channels, origin
 
     su = slack_clients["su"]
     for cid in created_channels:
@@ -91,7 +99,7 @@ async def test_migration_creates_a_real_private_channel_with_both_bots(
 
     Rule S1 — an AgentChannel row proves we wrote a row.
     """
-    factory, run_id, td_id, user_ids, created = migration_setup
+    factory, run_id, td_id, user_ids, created, origin = migration_setup
     async with factory() as db:
         td = (await db.execute(select(ThreadDecision).where(
             ThreadDecision.id == td_id))).scalar_one()
@@ -137,7 +145,7 @@ async def test_the_handover_is_persisted_in_both_migration_paths(
 
     Parametrised rather than two tests, so neither path can be quietly forgotten.
     """
-    factory, run_id, td_id, user_ids, created = migration_setup
+    factory, run_id, td_id, user_ids, created, origin = migration_setup
     if not slack_on:
         monkeypatch.setattr(
             "src.services.private_channels._slack_enabled_for_migration",
@@ -173,16 +181,16 @@ async def test_the_handover_is_persisted_in_both_migration_paths(
     # closing notice lands in the PUBLIC origin thread so the old conversation says
     # where it went. Asserting "everything is collab_private" would have called that
     # notice a bug.
-    private = [r for r in rows if r.channel_name != "t-origin"]
-    origin = [r for r in rows if r.channel_name == "t-origin"]
+    private = [r for r in rows if r.channel_name != origin]
+    origin_rows = [r for r in rows if r.channel_name == origin]
     assert private, f"[slack_on={slack_on}] nothing was written to the private channel"
     assert all(r.visibility == VISIBILITY_COLLAB_PRIVATE for r in private), (
         f"[slack_on={slack_on}] a handover row is not collab_private: "
         f"{[(r.channel_name, r.visibility) for r in private]}"
     )
-    assert origin and all(r.visibility == VISIBILITY_PUBLIC for r in origin), (
+    assert origin_rows and all(r.visibility == VISIBILITY_PUBLIC for r in origin_rows), (
         f"[slack_on={slack_on}] the origin-thread notice is missing or mislabelled: "
-        f"{[(r.channel_name, r.visibility) for r in origin]}"
+        f"{[(r.channel_name, r.visibility) for r in origin_rows]}"
     )
     assert any(f"Path marker {slack_on}" in (r.content or "") for r in private), (
         f"[slack_on={slack_on}] the guidance text is missing from the handover"

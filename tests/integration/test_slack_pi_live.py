@@ -109,12 +109,28 @@ async def test_a_standing_instruction_is_persisted_and_acknowledged(pi_setup):
                                    .where(ResearcherProfile.user_id == user_id))).scalar_one()
 
     marker = f"ferroptosis-{uuid.uuid4().hex[:6]}"
-    dm_before = set(_dm_texts(client, pi))
-    await handler.handle_dm(
-        "su", pi,
-        f"From now on, always mention our interest in {marker} when proposing "
-        "collaborations.",
+    text = (f"From now on, always mention our interest in {marker} when proposing "
+            "collaborations.")
+
+    # Classify first, and assert on it separately. handle_dm routes on a real LLM
+    # call, so a failure downstream has two possible causes — the classifier put this
+    # in the wrong bucket, or the persistence path is broken — and they need different
+    # fixes. Observed once in a full-suite run: the same instruction came back as
+    # `feedback` rather than `standing_instruction`, which is a classifier-boundary
+    # observation, not a persistence bug. Naming it here keeps the two apart.
+    cls = await handler._classify_dm(text)
+    routed = cls.get("category")
+    assert routed == "standing_instruction" or (
+        routed == "feedback" and cls.get("implies_standing_instruction")
+    ), (
+        f"the classifier routed an explicit 'from now on, always X' instruction to "
+        f"{routed!r} (implies_standing_instruction="
+        f"{cls.get('implies_standing_instruction')!r}). That is a classifier-boundary "
+        "finding, not a persistence failure — the profile write below was never reached."
     )
+
+    dm_before = set(_dm_texts(client, pi))
+    await handler.handle_dm("su", pi, text)
     time.sleep(POST_GAP)
 
     async with factory() as db:
