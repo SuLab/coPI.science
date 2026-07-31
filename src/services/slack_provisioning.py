@@ -28,6 +28,12 @@ BOT_SCOPES = [
     "chat:write",         # chat.postMessage
     "groups:history",     # threads in private channels
     "groups:read",        # conversations.list private
+    # conversations.create(is_private=True) and conversations.invite into a private
+    # channel both require this. Without it a bot provisions, connects and posts
+    # perfectly, and then private-channel migration — the PI-pairing feature — fails
+    # with missing_scope. Adding a scope needs every existing bot REINSTALLED; an
+    # already-installed app keeps the grant it was installed with.
+    "groups:write",       # conversations.create/invite for private channels
     "im:history",         # poll_dm_messages
     "im:write",           # conversations.open (DMs)
     "users:read",         # users.info

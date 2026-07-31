@@ -184,3 +184,73 @@ class FakeSlackClient:
         if channel.startswith(("C", "G")):
             return channel
         return f"C_{channel}"
+
+
+class RecordingSlackClient:
+    """Records outbound Slack Web API calls; scripts responses and errors.
+
+    Deliberately distinct from ``FakeSlackClient``. That one implements the
+    *Transport* protocol and returns canned values, which means a mirror that never
+    called Slack at all would satisfy it just as well as one that did. This class
+    stands in for the ``slack_sdk.WebClient`` **inside** ``AgentSlackClient``, and
+    ``.calls`` is the evidence that the call was made and with what arguments.
+
+    ``responses`` maps a WebClient method name to the dict it should return.
+    ``errors`` maps a method name to a list of exceptions, popped one per call, so a
+    retry path can be scripted as "fail, then succeed".
+    """
+
+    def __init__(self, responses=None, errors=None):
+        self.calls: list[tuple[str, dict]] = []
+        self._responses = dict(responses or {})
+        self._errors = {k: list(v) for k, v in (errors or {}).items()}
+
+    def __getattr__(self, name):
+        if name.startswith("_"):
+            raise AttributeError(name)
+
+        def _call(**kwargs):
+            self.calls.append((name, kwargs))
+            queue = self._errors.get(name)
+            if queue:
+                raise queue.pop(0)
+            return _SlackResponse(self._responses.get(name, {"ok": True}))
+
+        return _call
+
+    def calls_to(self, method: str) -> list[dict]:
+        return [kw for m, kw in self.calls if m == method]
+
+
+class _SlackResponse:
+    """The parts of slack_sdk's SlackResponse that AgentSlackClient touches."""
+
+    def __init__(self, data: dict):
+        self.data = data
+        self.headers: dict[str, str] = {}
+        self.status_code = 200
+
+    def get(self, key, default=None):
+        return self.data.get(key, default)
+
+    def __getitem__(self, key):
+        return self.data[key]
+
+    def __contains__(self, key):
+        return key in self.data
+
+
+def slack_error(code: str, *, retry_after: int | None = None):
+    """A SlackApiError shaped the way ``_call_with_retry`` inspects it.
+
+    It reads ``exc.response.get("error")`` and ``exc.response.headers.get("Retry-After")``,
+    so both have to be present on the response object or the retry branch is never
+    reached and the test would pass for the wrong reason.
+    """
+    from slack_sdk.errors import SlackApiError
+
+    resp = _SlackResponse({"ok": False, "error": code})
+    if retry_after is not None:
+        resp.headers = {"Retry-After": str(retry_after)}
+    resp.status_code = 429 if code == "ratelimited" else 400
+    return SlackApiError(code, resp)

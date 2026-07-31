@@ -150,12 +150,22 @@ class AgentSlackClient:
         return self._client is not None
 
     def _call_with_retry(self, method, **kwargs) -> Any:
-        """Call a Slack API method with retry on rate limiting."""
+        """Call a Slack API method with retry on rate limiting.
+
+        ``last_exc`` exists because Python unbinds an ``except ... as exc`` name at the
+        end of the except block. Referring to ``exc`` after the loop raised
+        ``UnboundLocalError`` instead of the intended ``SlackApiError`` — and callers
+        catch ``SlackApiError``, so an exhausted retry escaped ``post_message``'s
+        handler entirely and crashed the turn. That happens precisely when Slack is
+        throttling us, i.e. when the system is busiest.
+        """
+        last_exc: SlackApiError | None = None
         for attempt in range(MAX_RETRIES):
             try:
                 return method(**kwargs)
             except SlackApiError as exc:
                 if exc.response.get("error") == "ratelimited":
+                    last_exc = exc
                     retry_after = int(exc.response.headers.get("Retry-After", 5))
                     logger.warning(
                         "[%s] Rate limited, retrying in %ds (attempt %d/%d)",
@@ -164,7 +174,10 @@ class AgentSlackClient:
                     time.sleep(retry_after)
                 else:
                     raise
-        raise SlackApiError("Rate limit retries exhausted", response=exc.response)
+        raise SlackApiError(
+            "Rate limit retries exhausted",
+            response=last_exc.response if last_exc else None,
+        )
 
     @property
     def bot_user_id(self) -> str | None:
