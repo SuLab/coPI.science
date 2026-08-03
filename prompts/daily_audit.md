@@ -10,8 +10,9 @@ You are auditing the CoPI agent simulation. Working directory: /home/ubuntu/copi
 
 GOAL
 Produce a concise summary of the last 24 hours of activity and flag any
-likely bugs or wasteful LLM behavior. Email the summary to asu@scripps.edu
-and malanjary@scripps.edu.
+likely bugs or wasteful LLM behavior. Email the summary to the recipients
+configured in `AUDIT_RECIPIENTS` (see HOW TO SEND THE EMAIL below) — do not
+hardcode addresses here or in the send command.
 
 WHAT TO EXAMINE
 
@@ -148,6 +149,11 @@ heartbeat is the point.
 HOW TO SEND THE EMAIL
 
 Use the app container's existing SES config (already verified working).
+The recipient list is NOT hardcoded here — it comes from the
+`AUDIT_RECIPIENTS` setting (`src/config.py`, comma-separated; parsed by
+`settings.audit_recipient_list`). Override it by setting `AUDIT_RECIPIENTS`
+in `.env`; to change it permanently, edit the default in `src/config.py`.
+
 Pass the body on stdin and the status-derived subject prefix via env var
 so emoji glyphs survive the shell intact:
 
@@ -162,14 +168,15 @@ so emoji glyphs survive the shell intact:
   s = get_settings()
   resp = boto3.client('ses', region_name=s.aws_region).send_email(
       Source=s.ses_sender_email,
-      Destination={'ToAddresses': ['asu@scripps.edu', 'malanjary@scripps.edu']},
+      Destination={'ToAddresses': s.audit_recipient_list},
       Message={
           'Subject': {'Data': subject, 'Charset': 'UTF-8'},
           'Body': {'Text': {'Data': body, 'Charset': 'UTF-8'}},
       },
   )
-  print('MessageId:', resp['MessageId'])
+  print('MessageId:', resp['MessageId'], 'To:', s.audit_recipient_list)
   " <<< "$BODY"
 
-Confirm the SES MessageId in your final response so the run is traceable.
+Confirm the SES MessageId and the recipient list in your final response so
+the run is traceable.
 Do not modify any files in the repo. Read-only audit only.
