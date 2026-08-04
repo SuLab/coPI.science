@@ -91,6 +91,11 @@ def _build_slug(agent_a: str, agent_b: str, origin_channel_name: str) -> str:
 # under the limit with clean content boundaries. See observed split on
 # priv-lotz-su-single-cell-omics where a single ~4600-char handover landed
 # as two unrelated-looking posts (one orphaned mid-bullet).
+#
+# Kept below slack_client.SLACK_MAX_TEXT_CHARS deliberately: _add_handover_message
+# writes ONE DB row per call, so a post that Slack splits would desynchronise the
+# mirror (8515f65, defect 2). Pinned by
+# tests/unit/test_slack_client_contract.py::test_handover_post_budget_stays_under_the_slack_split_threshold.
 _MAX_POST_CHARS = 3500
 
 
