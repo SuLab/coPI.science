@@ -21,7 +21,7 @@ Usage (runs inside the app container — needs DB + prompts + profiles):
 
     docker cp scripts/generate_sparsedata_user.py copi-python-app-1:/app/scripts/
     docker exec copi-python-app-1 python scripts/generate_sparsedata_user.py \\
-        --file newuserlist02.tsv --force
+        --file data/cohorts/newuserlist02.tsv --force
 
 Outputs:
   - DB rows

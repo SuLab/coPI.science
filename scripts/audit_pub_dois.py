@@ -23,7 +23,7 @@ Usage (runs inside the app container — needs DB + network):
 
     # Audit + fix specific users by ORCID:
     docker exec copi-python-app-1 python scripts/audit_pub_dois.py \\
-        --orcids 0000-0002-9943-7557 --fix
+        --orcids 0000-0000-0000-0001 --fix
 
     # Audit + fix specific agents, or everyone:
     docker exec copi-python-app-1 python scripts/audit_pub_dois.py --agents liu bollong --fix

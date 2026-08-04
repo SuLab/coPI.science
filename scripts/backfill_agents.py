@@ -10,7 +10,7 @@ Usage (inside the app container):
 
     docker cp scripts/backfill_agents.py copi-python-app-1:/app/scripts/
     docker exec copi-python-app-1 python scripts/backfill_agents.py \\
-        --orcids newuserlist01_orcids.txt
+        --orcids data/cohorts/newuserlist01_orcids.txt
 
 The --orcids file is the same format as orcids.txt: one ORCID per line,
 '# Name' comment lines OK. The script processes ORCIDs in file order so the
