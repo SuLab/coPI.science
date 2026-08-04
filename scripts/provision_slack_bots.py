@@ -338,15 +338,24 @@ def main():
     config_token = existing_env.get("SLACK_CONFIG_TOKEN", "").strip()
     refresh_token = existing_env.get("SLACK_CONFIG_REFRESH_TOKEN", "").strip()
 
-    if not config_token:
-        console.print("\n[bold red]SLACK_CONFIG_TOKEN is not set in .env[/bold red]")
+    # EITHER credential is enough. Requiring SLACK_CONFIG_TOKEN here was a bug: the
+    # rotation below derives a fresh access token from the refresh token and
+    # overwrites config_token unconditionally, so a refresh-token-only .env — the
+    # normal state after a rotation, since rotation replaces both — was rejected
+    # for want of a value the script was about to discard anyway.
+    if not config_token and not refresh_token:
+        console.print(
+            "\n[bold red]Neither SLACK_CONFIG_TOKEN nor SLACK_CONFIG_REFRESH_TOKEN "
+            "is set in .env[/bold red]"
+        )
         console.print(
             "  1. Open https://api.slack.com/apps in a browser\n"
             "  2. Click 'Your App Configuration Tokens'\n"
             "  3. Click 'Generate Token' for your workspace\n"
-            "  4. Copy the token (xoxe-...) and refresh token into .env:\n"
-            "       SLACK_CONFIG_TOKEN=xoxe-...\n"
-            "       SLACK_CONFIG_REFRESH_TOKEN=xoxe-...\n"
+            "  4. Copy BOTH values into .env. Note the prefixes differ:\n"
+            "       SLACK_CONFIG_TOKEN=xoxe.xoxp-...   (access token, ~12h life)\n"
+            "       SLACK_CONFIG_REFRESH_TOKEN=xoxe-1-...  (refresh token, single use)\n"
+            "  The refresh token alone is sufficient — it mints the access token.\n"
         )
         sys.exit(1)
 
@@ -359,6 +368,25 @@ def main():
             console.print("[green]Config token rotated and saved.[/green]")
         except Exception as exc:
             console.print(f"[yellow]Token rotation failed ({exc}); using existing token.[/yellow]")
+
+    # Rotation can fail with a still-empty config_token — a refresh token that was
+    # revoked, expired, or already spent (they are single use, so a value left in
+    # .env after someone rotated it elsewhere is dead). Stop here rather than
+    # calling apps.manifest.create with an empty Authorization header, which fails
+    # with an opaque Slack error that says nothing about the real cause.
+    if not config_token:
+        console.print(
+            "\n[bold red]No usable config token.[/bold red] The refresh token in "
+            f"{args.env_file} did not rotate, and SLACK_CONFIG_TOKEN is empty."
+        )
+        console.print(
+            "  Config refresh tokens are SINGLE USE: whoever rotated it last holds the\n"
+            "  only live one, and a copy left behind in .env is already dead.\n"
+            "  Generate a fresh pair at https://api.slack.com/apps -> "
+            "'Your App Configuration Tokens'\n"
+            "  and replace BOTH values in .env."
+        )
+        sys.exit(1)
 
     # -----------------------------------------------------------------------
     # 3. Start OAuth callback server (before app creation so URLs work immediately)
