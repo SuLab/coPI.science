@@ -596,3 +596,125 @@ async def test_matrix_save_ignores_a_cell_for_an_unknown_agent(
         for m in (await db_session.execute(select(CohortMembership))).scalars().all()
     }
     assert rows == {(str(a.id), "su")}, f"an unknown agent id was written: {rows}"
+
+
+# --- attribution and the not-found / no-op edges --------------------------
+#
+# The handlers above are all entered by the tests before this line, but five
+# branches inside them were never taken: the creator-name lookup on the list
+# page, the empty-members path on the detail page, and the three
+# missing-row paths (delete, add-agent, remove-agent). Each one is a place
+# where the route can either 500 or silently do the wrong thing, so each gets
+# its own test asserting the observable outcome.
+
+
+async def test_list_attributes_each_cohort_to_its_creator(client, db_session, admin):
+    """The "Created by" column resolves created_by to a user name.
+
+    A distinct creator (not the logged-in admin) is used deliberately: the page's
+    nav bar already prints the current user's name, so asserting on the admin's
+    own name would pass even if creator_map were never populated.
+    """
+    creator = await factories.make_user(
+        db_session, name="Zelda Creator", email="zelda@example.org"
+    )
+    await _cohort(db_session, "attributed", creator)
+    orphan = Cohort(name="orphaned", created_by=None)
+    db_session.add(orphan)
+    await db_session.flush()
+
+    r = await client.get("/admin/cohorts", headers=_auth(admin.id))
+    assert r.status_code == 200
+    assert "attributed" in r.text and "orphaned" in r.text
+    assert "Zelda Creator" in r.text, "created_by was never resolved to a name"
+    # A cohort whose creator row is gone (ondelete=SET NULL) must render without
+    # borrowing the other row's name.
+    orphan_row = next(f for f in r.text.split("<tr ") if ">orphaned</a>" in f)
+    assert "Zelda Creator" not in orphan_row
+
+
+async def test_detail_of_an_empty_cohort_renders_the_no_members_state(
+    client, db_session, admin, roster
+):
+    """With no memberships there are no adders to look up, and the members table
+    is replaced by the empty state rather than rendering a headless table."""
+    c = await _cohort(db_session, "empty", admin)
+    r = await client.get(f"/admin/cohorts/{c.id}", headers=_auth(admin.id))
+    assert r.status_code == 200
+    assert "No members yet" in r.text
+    # The add-agent picker still offers the whole active roster.
+    for bot in ("SuBot", "WisemanBot", "CravattBot"):
+        assert bot in r.text, f"{bot} missing from the picker"
+
+
+async def test_deleting_an_unknown_cohort_redirects_instead_of_500ing(
+    client, db_session, admin
+):
+    """A double-submitted delete (or a stale bookmark) must not raise.
+
+    Current behaviour is a bare redirect to the list with no error and no notice —
+    indistinguishable from a successful delete. Pinned as-is; unlike add-agent,
+    which raises 404 for the same missing cohort, this one is silent.
+    """
+    ghost = uuid.uuid4()
+    r = await client.post(f"/admin/cohorts/{ghost}/delete", headers=_auth(admin.id))
+    assert r.status_code == 302
+    assert r.headers["location"] == "/admin/cohorts"
+    assert (await db_session.execute(
+        select(CohortAuditEvent).where(CohortAuditEvent.cohort_id == ghost)
+    )).scalars().all() == [], "a delete that deleted nothing must not be audited"
+
+
+async def test_adding_an_agent_to_an_unknown_cohort_is_a_404(
+    client, db_session, admin, roster
+):
+    """The membership must not be created against a cohort id that does not exist:
+    there is no FK from cohort_memberships.agent_id, and an orphan row would be
+    invisible in every cohort view."""
+    r = await client.post(
+        f"/admin/cohorts/{uuid.uuid4()}/add-agent",
+        data={"agent_id": "su"},
+        headers=_auth(admin.id),
+    )
+    assert r.status_code == 404
+    assert (await db_session.execute(select(CohortMembership))).scalars().all() == []
+
+
+async def test_removing_an_agent_that_is_not_a_member_is_a_silent_no_op(
+    client, db_session, admin, roster
+):
+    """A stale Remove button must neither 500 nor forge an audit event."""
+    c = await _cohort(db_session, "wave", admin, members=["su"])
+    r = await client.post(
+        f"/admin/cohorts/{c.id}/remove-agent",
+        data={"agent_id": "wiseman"},
+        headers=_auth(admin.id),
+    )
+    assert r.status_code == 302
+    assert r.headers["location"] == f"/admin/cohorts/{c.id}"
+    rows = {
+        (str(m.cohort_id), m.agent_id)
+        for m in (await db_session.execute(select(CohortMembership))).scalars().all()
+    }
+    assert rows == {(str(c.id), "su")}, (
+        f"removing a non-member touched the real membership: {rows}"
+    )
+    assert (await db_session.execute(
+        select(CohortAuditEvent).where(CohortAuditEvent.cohort_id == c.id)
+    )).scalars().all() == [], "a removal that removed nothing must not be audited"
+
+
+async def test_removing_an_agent_from_an_unknown_cohort_does_not_500(
+    client, db_session, admin, roster
+):
+    """Same handler, cohort row missing too — the lookup that feeds the audit
+    event's cohort_name returns None, and the no-op path must survive that."""
+    ghost = uuid.uuid4()
+    r = await client.post(
+        f"/admin/cohorts/{ghost}/remove-agent",
+        data={"agent_id": "su"},
+        headers=_auth(admin.id),
+    )
+    assert r.status_code == 302
+    assert r.headers["location"] == f"/admin/cohorts/{ghost}"
+    assert (await db_session.execute(select(CohortAuditEvent))).scalars().all() == []
