@@ -108,22 +108,29 @@ def admin_grant(
     orcid: str = typer.Option(..., "--orcid", help="ORCID ID to grant admin to"),
 ):
     """Grant admin privileges to a user by ORCID."""
-    async def _grant():
+    async def _grant() -> bool:
         from sqlalchemy import select
         from src.models import User
         engine, factory = await _get_db()
-        async with factory() as db:
-            result = await db.execute(select(User).where(User.orcid == orcid))
-            user = result.scalar_one_or_none()
-            if not user:
-                console.print(f"[red]User with ORCID {orcid} not found[/red]")
-                return
-            user.is_admin = True
-            await db.commit()
-            console.print(f"[green]Granted admin to {user.name} ({orcid})[/green]")
-        await engine.dispose()
+        try:
+            async with factory() as db:
+                result = await db.execute(select(User).where(User.orcid == orcid))
+                user = result.scalar_one_or_none()
+                if not user:
+                    console.print(f"[red]User with ORCID {orcid} not found[/red]")
+                    return False
+                user.is_admin = True
+                await db.commit()
+                console.print(f"[green]Granted admin to {user.name} ({orcid})[/green]")
+                return True
+        finally:
+            await engine.dispose()
 
-    _run(_grant())
+    if not _run(_grant()):
+        # Exit nonzero so a provisioning script checking $? can tell a typo'd ORCID
+        # from a successful grant. The message above says which; a bare exit code
+        # with no explanation would be worse than the silent success it replaces.
+        raise typer.Exit(1)
 
 
 @app.command(name="admin:revoke")
@@ -131,22 +138,26 @@ def admin_revoke(
     orcid: str = typer.Option(..., "--orcid", help="ORCID ID to revoke admin from"),
 ):
     """Revoke admin privileges from a user by ORCID."""
-    async def _revoke():
+    async def _revoke() -> bool:
         from sqlalchemy import select
         from src.models import User
         engine, factory = await _get_db()
-        async with factory() as db:
-            result = await db.execute(select(User).where(User.orcid == orcid))
-            user = result.scalar_one_or_none()
-            if not user:
-                console.print(f"[red]User with ORCID {orcid} not found[/red]")
-                return
-            user.is_admin = False
-            await db.commit()
-            console.print(f"[green]Revoked admin from {user.name} ({orcid})[/green]")
-        await engine.dispose()
+        try:
+            async with factory() as db:
+                result = await db.execute(select(User).where(User.orcid == orcid))
+                user = result.scalar_one_or_none()
+                if not user:
+                    console.print(f"[red]User with ORCID {orcid} not found[/red]")
+                    return False
+                user.is_admin = False
+                await db.commit()
+                console.print(f"[green]Revoked admin from {user.name} ({orcid})[/green]")
+                return True
+        finally:
+            await engine.dispose()
 
-    _run(_revoke())
+    if not _run(_revoke()):
+        raise typer.Exit(1)
 
 
 @app.command(name="list-users")
@@ -215,7 +226,7 @@ def backfill_profile_revisions():
         from pathlib import Path
         from sqlalchemy import select
         from src.models import AgentRegistry
-        from src.services.profile_versioning import create_revision
+        from src.services.profile_versioning import create_revision, latest_revision
 
         engine, factory = await _get_db()
         async with factory() as db:
@@ -242,6 +253,19 @@ def backfill_profile_revisions():
                         continue
                     content = filepath.read_text(encoding="utf-8")
                     if not content.strip():
+                        continue
+                    # `create_revision` also refuses to duplicate an unchanged body, so
+                    # this is not what makes the command idempotent. It is what makes
+                    # the command *say so*: without it the tally below would report
+                    # creating rows a re-run did not create.
+                    previous = await latest_revision(
+                        db, agent_registry_id=agent_reg.id, profile_type=profile_type
+                    )
+                    if previous is not None and previous.content == content:
+                        console.print(
+                            f"[yellow]Unchanged {profile_type} profile for {agent_id} "
+                            f"— no new revision[/yellow]"
+                        )
                         continue
                     await create_revision(
                         db,

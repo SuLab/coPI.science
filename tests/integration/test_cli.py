@@ -434,15 +434,6 @@ def test_admin_grant_on_unknown_orcid_changes_nothing_and_says_so(db, runner):
     assert db(lambda s: _user_by_orcid(s, real_orcid)).is_admin is True
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "BUG (src/cli.py:120,143): admin:grant / admin:revoke print a red 'not found' "
-        "line and then `return`, so the process still exits 0. A provisioning script "
-        "that checks $? cannot tell a typo'd ORCID from a successful grant. Should "
-        "`raise typer.Exit(1)`."
-    ),
-)
 def test_admin_grant_on_unknown_orcid_should_exit_nonzero(runner):
     result = runner.invoke(cli_app, ["admin:grant", "--orcid", _orcid("admin-nobody")])
     assert result.exit_code != 0
@@ -661,12 +652,14 @@ def test_backfill_creates_one_revision_per_profile_file_and_skips_the_rest(
     assert db(lambda s: _revisions_for(s, fx["beta_uuid"])) == []
 
 
-def test_backfill_run_twice_duplicates_every_revision(db, runner, backfill_fixture):
-    """Characterization of the T6.5 bug, with the evidence in one place.
+def test_backfill_run_twice_does_not_duplicate_any_revision(db, runner, backfill_fixture):
+    """Regression for the T6.5 bug, with the evidence in one place.
 
-    `create_revision` (src/services/profile_versioning.py) appends unconditionally and
-    the command never checks for an existing row, so a second backfill writes a second
-    identical revision for every file. Recorded here rather than fixed.
+    `create_revision` (src/services/profile_versioning.py) used to append
+    unconditionally and the command never checked for an existing row, so a second
+    backfill wrote a second byte-identical revision for every file — the duplicates
+    being identical is what made them useless as history. The second run must now
+    report creating nothing and leave the row count alone.
     """
     fx = backfill_fixture
 
@@ -676,22 +669,14 @@ def test_backfill_run_twice_duplicates_every_revision(db, runner, backfill_fixtu
     assert len(db(lambda s: _revisions_for(s, fx["alpha_uuid"]))) == 3
 
     second = _ok(runner.invoke(cli_app, ["backfill-profile-revisions"]))
-    assert "Created 3 profile revisions." in second.output
+    assert "Created 0 profile revisions." in second.output
+    assert f"Unchanged public profile for {fx['alpha_id']}" in second.output
     revisions = db(lambda s: _revisions_for(s, fx["alpha_uuid"]))
-    assert len(revisions) == 6, "expected the known duplication; see the xfail below"
-    # The duplicates are byte-identical, which is what makes them useless as history.
+    assert len(revisions) == 3, "a re-run must not duplicate anything"
+    # One revision per (type, content) pair — no identical siblings.
     assert len({(r.profile_type, r.content) for r in revisions}) == 3
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "BUG (src/cli.py:246 + services/profile_versioning.create_revision): "
-        "backfill-profile-revisions is not idempotent. Re-running doubles every "
-        "revision, inflating each profile's history with identical rows. T6.5 requires "
-        "the second run to be a no-op."
-    ),
-)
 def test_backfill_is_idempotent(db, runner, backfill_fixture):
     fx = backfill_fixture
     _ok(runner.invoke(cli_app, ["backfill-profile-revisions"]))
@@ -699,6 +684,41 @@ def test_backfill_is_idempotent(db, runner, backfill_fixture):
     assert after_first == 3
     _ok(runner.invoke(cli_app, ["backfill-profile-revisions"]))
     assert len(db(lambda s: _revisions_for(s, fx["alpha_uuid"]))) == after_first
+
+
+def test_a_changed_profile_body_still_creates_a_new_revision(db, runner, backfill_fixture):
+    """The other half of the idempotency guard, and the reason it keys on content.
+
+    `create_revision` skips a write only when the newest revision for that
+    (agent, profile_type) is byte-identical. A guard that also swallowed real edits
+    would be a worse bug than the duplication it replaced — it would silently drop
+    history — so this pins the positive case: edit one file, re-run, get one more
+    revision for that type and none for the two untouched ones.
+    """
+    fx = backfill_fixture
+    _ok(runner.invoke(cli_app, ["backfill-profile-revisions"]))
+    assert len(db(lambda s: _revisions_for(s, fx["alpha_uuid"]))) == 3
+
+    edited = "# Alpha public\nPeptides, and now also proteases.\n"
+    (fx["tmp_path"] / "profiles" / "public" / f"{fx['alpha_id']}.md").write_text(
+        edited, encoding="utf-8"
+    )
+
+    second = _ok(runner.invoke(cli_app, ["backfill-profile-revisions"]))
+    assert "Created 1 profile revisions." in second.output
+
+    revisions = db(lambda s: _revisions_for(s, fx["alpha_uuid"]))
+    assert len(revisions) == 4, "the edited file must produce a second revision"
+
+    by_type: dict[str, list] = {}
+    for revision in revisions:
+        by_type.setdefault(revision.profile_type, []).append(revision)
+    assert len(by_type["public"]) == 2
+    # Both the old and the new body are on record — this is history, not a replace.
+    assert {r.content for r in by_type["public"]} == {"# Alpha public\nPeptides.\n", edited}
+    # Control: the two files nobody touched are still at one revision each.
+    assert len(by_type["private"]) == 1
+    assert len(by_type["memory"]) == 1
 
 
 def test_backfill_with_no_profile_directories_is_a_clean_no_op(db, runner, monkeypatch, tmp_path):
