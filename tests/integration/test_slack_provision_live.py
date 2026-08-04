@@ -23,7 +23,10 @@ def _auth_test(token: str) -> dict:
                       headers={"Authorization": f"Bearer {token}"}, timeout=15).json()
 
 
-def test_every_probe_bot_authenticates_into_the_same_workspace(slack_bot_tokens):
+def test_every_probe_bot_authenticates_into_the_same_workspace(slack_bot_tokens_all):
+    # slack_bot_tokens_all, not slack_bot_tokens: this test compares the bots
+    # against each other, so a partial set makes it vacuous. Skip, don't fail.
+    slack_bot_tokens = slack_bot_tokens_all
     assert set(slack_bot_tokens) == {"su", "cravatt", "wiseman"}, sorted(slack_bot_tokens)
     teams, users = set(), {}
     for aid, tok in slack_bot_tokens.items():
@@ -51,7 +54,7 @@ def test_lookup_team_id_agrees_with_auth_test(slack_bot_tokens):
     assert lookup_team_id("") is None
 
 
-def test_the_granted_scopes_are_the_scopes_we_asked_for(slack_bot_tokens):
+def test_the_granted_scopes_are_the_scopes_we_asked_for(slack_bot_tokens_all):
     """apps.permissions.scopes reports what the install actually granted.
 
     su and cravatt were installed with groups:write; wiseman deliberately was not — it
@@ -68,8 +71,8 @@ def test_the_granted_scopes_are_the_scopes_we_asked_for(slack_bot_tokens):
         assert raw, "Slack did not report the granted scopes"
         return {s.strip() for s in raw.split(",") if s.strip()}
 
-    su = _scopes(slack_bot_tokens["su"])
-    wiseman = _scopes(slack_bot_tokens["wiseman"])
+    su = _scopes(slack_bot_tokens_all["su"])
+    wiseman = _scopes(slack_bot_tokens_all["wiseman"])
     assert "groups:write" in su, f"su was expected to have groups:write: {sorted(su)}"
     assert "groups:write" not in wiseman, (
         "wiseman is the control for the missing-scope finding and must NOT have "

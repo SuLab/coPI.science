@@ -184,10 +184,35 @@ def _make_slack_client(agent_id: str, token: str, visibility_lookup=None):
     return c
 
 
+_PROBE_BOTS = ("su", "cravatt", "wiseman")
+
+
+@pytest.fixture
+def slack_bot_tokens_all(slack_bot_tokens):
+    """All three probe tokens, or skip — the raw-token analogue of ``slack_clients``.
+
+    A test that compares the bots *against each other* (same workspace? distinct bot
+    users? which scopes were granted?) needs every token, and there is no partial
+    answer: with one token those comparisons are vacuous, so passing would be worse
+    than skipping.
+
+    This exists because two tests in test_slack_provision_live.py took
+    ``slack_bot_tokens`` directly and then indexed ``["wiseman"]``, so an environment
+    holding only su's token FAILED them — reporting an incomplete environment as a
+    product defect. ``pytest_collection_modifyitems`` gates the whole tier on
+    SLACK_TEST_BOT_TOKEN_SU alone, so su-only is an expected, supported state and the
+    tier's tests have to say what more they need.
+    """
+    missing = [a for a in _PROBE_BOTS if a not in slack_bot_tokens]
+    if missing:
+        pytest.skip(f"no bot token for {missing}")
+    return slack_bot_tokens
+
+
 @pytest.fixture
 def slack_clients(slack_bot_tokens):
     """All three probe clients, connected. Skips if any token is absent."""
-    missing = [a for a in ("su", "cravatt", "wiseman") if a not in slack_bot_tokens]
+    missing = [a for a in _PROBE_BOTS if a not in slack_bot_tokens]
     if missing:
         pytest.skip(f"no bot token for {missing}")
     return {a: _make_slack_client(a, t) for a, t in slack_bot_tokens.items()}
