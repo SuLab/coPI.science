@@ -81,7 +81,7 @@ class SlackListingIncomplete(Exception):
     resulting ``conversations.create`` answers ``name_taken``.
     """
 
-    def __init__(self, method: str, partial: list, reason: str):
+    def __init__(self, method: str, partial: list | dict, reason: str):
         self.method = method
         self.partial = partial
         self.reason = reason
