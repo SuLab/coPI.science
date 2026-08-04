@@ -77,6 +77,30 @@ def _clear_settings_cache():
     get_settings.cache_clear()
 
 
+# Every SLACK_BOT_TOKEN_* name Settings knows about, derived rather than listed: there
+# are 125 of them and the roster grows.
+_ALL_BOT_TOKEN_ENV = tuple(
+    f.upper() for f in Settings.model_fields if f.startswith("slack_bot_token_")
+)
+
+
+def _blank_all_bot_tokens(monkeypatch):
+    """Make "no bot token is configured" actually true.
+
+    Two tests here assert that nothing usable exists, and they used to defend against
+    exactly one ambient value — ``monkeypatch.delenv("SLACK_BOT_TOKEN_SU")`` — while
+    ``Settings.get_slack_tokens()`` reads 125. They passed only because .env happened to
+    hold none of them. Provisioning two probe bots put real tokens in .env and both went
+    red, on a machine where the product was working fine.
+
+    ``delenv`` cannot fix it either: pydantic-settings reads the .env *file*, so removing
+    a process env var leaves the file value in place. An empty env var does override the
+    file (env beats .env in the precedence chain), so blanking is the lever that works.
+    """
+    for name in _ALL_BOT_TOKEN_ENV:
+        monkeypatch.setenv(name, "")
+
+
 def test_token_for_agent_row_prefers_the_db_column(monkeypatch):
     """CLAUDE.md: the AgentRegistry column is the source of truth, .env is a read
     fallback. Both halves, so a resolver that only ever read one source fails."""
@@ -137,7 +161,7 @@ async def test_get_agent_bot_token_reads_the_db_then_env(db_session, monkeypatch
 async def test_get_any_bot_token_ignores_invalid_rows(db_session, monkeypatch):
     """A placeholder row must not satisfy 'any usable token' — that is what
     auto-detect keys on, so a placeholder would switch Slack on for the deployment."""
-    monkeypatch.delenv("SLACK_BOT_TOKEN_SU", raising=False)
+    _blank_all_bot_tokens(monkeypatch)
     _clear_settings_cache()
     try:
         u1 = await factories.make_user(db_session, email="a-tok@example.org")
@@ -175,7 +199,7 @@ ENABLED_CASES = [
 async def test_slack_globally_enabled_tri_state(
     db_session, monkeypatch, name, setting, has_token, expected
 ):
-    monkeypatch.delenv("SLACK_BOT_TOKEN_SU", raising=False)
+    _blank_all_bot_tokens(monkeypatch)
     if setting is None:
         monkeypatch.delenv("SLACK_ENABLED", raising=False)
     else:
