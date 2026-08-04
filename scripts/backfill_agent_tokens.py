@@ -11,9 +11,9 @@ and only from a valid (non-placeholder) env token. Safe to re-run.
 
 Usage (inside the app container):
 
-    docker exec copi-python-app-1 python scripts/backfill_agent_tokens.py
+    docker compose exec app python scripts/backfill_agent_tokens.py
     # preview only:
-    docker exec copi-python-app-1 python scripts/backfill_agent_tokens.py --dry-run
+    docker compose exec app python scripts/backfill_agent_tokens.py --dry-run
 """
 
 from __future__ import annotations

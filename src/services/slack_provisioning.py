@@ -81,13 +81,25 @@ def create_app(
     pi_name: str,
     redirect_uri: str,
     max_rate_limit_retries: int = 5,
+    scopes: list[str] | None = None,
 ) -> dict:
     """Create one Slack app via the Manifest API.
 
     Returns a dict with ``agent_id``, ``bot_name``, ``pi_name``, ``app_id``,
     ``client_id``, ``client_secret``, ``oauth_url``. Retries on rate-limit
     responses only; all other errors raise immediately.
+
+    ``scopes`` defaults to ``BOT_SCOPES``. It is overridable because the scope set
+    is fixed at *manifest* time and cannot be changed at install time — Slack's
+    consent screen offers Allow or Cancel, not a per-scope choice, and an
+    already-installed app keeps the grant it was installed with. The live Slack
+    tier depends on that: ``wiseman`` is the control that must NOT hold
+    ``groups:write`` (see
+    ``test_slack_provision_live.py::test_the_granted_scopes_are_the_scopes_we_asked_for``
+    and ``test_private_channel_creation_needs_groups_write``), so it has to be
+    created from a reduced manifest or the asymmetry is unreproducible.
     """
+    scopes = list(BOT_SCOPES) if scopes is None else list(scopes)
     manifest = {
         "display_information": {
             "name": bot_name,
@@ -101,7 +113,7 @@ def create_app(
         },
         "oauth_config": {
             "redirect_urls": [redirect_uri],
-            "scopes": {"bot": BOT_SCOPES},
+            "scopes": {"bot": scopes},
         },
         "settings": {
             "org_deploy_enabled": False,

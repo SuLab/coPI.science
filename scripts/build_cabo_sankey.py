@@ -6,17 +6,17 @@ shares the single resumed simulation_run_id (date is the only way to isolate a
 window — see the window constants in src/routers/public.py).
 
 Run inside the app container (scripts/ isn't mounted — docker cp it in first):
-  docker cp scripts/build_cabo_sankey.py copi-python-app-1:/app/scripts/
+  docker compose cp scripts/build_cabo_sankey.py app:/app/scripts/
 
   # Cabo run (defaults):
-  docker exec copi-python-app-1 python scripts/build_cabo_sankey.py
+  docker compose exec app python scripts/build_cabo_sankey.py
 
   # Schultz alumni reunion window:
-  docker exec copi-python-app-1 python scripts/build_cabo_sankey.py \
+  docker compose exec app python scripts/build_cabo_sankey.py \
       --start 2026-06-06 --out /app/data/schultz_viz --label "Schultz Alumni reunion run"
 
 Output (sankey.html + sankey.png) lands in --out inside the container; retrieve
-with `docker cp copi-python-app-1:/app/data/schultz_viz ./data/`.
+with `docker cp app:/app/data/schultz_viz ./data/`.
 """
 
 from __future__ import annotations

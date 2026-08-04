@@ -105,14 +105,14 @@ rotating pair is persisted in the `app_settings` KV table) and a public `base_ur
 roster from the container, then run the script on the host:
 
 ```bash
-docker exec copi-python-app-1 python scripts/export_agent_roster.py   # writes data/agent_roster.json
+docker compose exec app python scripts/export_agent_roster.py   # writes data/agent_roster.json
 python3 scripts/provision_slack_bots.py                               # host: creates apps, prints OAuth URLs
 ```
 
 The host script writes tokens to `.env`; import them into the DB column with:
 
 ```bash
-docker exec copi-python-app-1 python scripts/backfill_agent_tokens.py
+docker compose exec app python scripts/backfill_agent_tokens.py
 ```
 
 (`.env` + `config.py get_slack_tokens()` remain a read fallback, but the DB column is

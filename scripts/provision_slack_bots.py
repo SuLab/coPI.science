@@ -63,10 +63,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 # Shared provisioning helpers (transport-only; no heavy deps so this stays
 # importable on the host). See src/services/slack_provisioning.py.
 from src.services.slack_provisioning import (
+    BOT_SCOPES,
     create_app,
     exchange_code,
-    lookup_team_id as _slack_lookup_team_id,
     rotate_config_token,
+)
+from src.services.slack_provisioning import (
+    lookup_team_id as _slack_lookup_team_id,
 )
 
 # ---------------------------------------------------------------------------
@@ -109,7 +112,7 @@ def load_roster() -> list[dict]:
     if not ROSTER_PATH.exists():
         raise RuntimeError(
             f"{ROSTER_PATH} not found. Generate it in the container first:\n"
-            f"  docker exec copi-python-app-1 python scripts/export_agent_roster.py"
+            f"  docker compose exec app python scripts/export_agent_roster.py"
         )
     roster = json.loads(ROSTER_PATH.read_text())
     return [r for r in roster if r.get("status") in PROVISIONABLE_STATUSES]
@@ -250,6 +253,13 @@ def main():
              "Auto-detected from an existing bot token if not provided.",
     )
     parser.add_argument(
+        "--omit-scope", action="append", default=[], metavar="AGENT_ID:SCOPE",
+        help="Create AGENT_ID's app without SCOPE. Repeatable. The scope set is fixed "
+             "at manifest time — Slack's consent screen has no per-scope choice — so "
+             "this is the only way to install a bot deliberately missing one. The live "
+             "tier needs it for wiseman: --omit-scope wiseman:groups:write",
+    )
+    parser.add_argument(
         "--only", nargs="+", metavar="AGENT_ID",
         help="Only provision these agent_id(s), e.g. --only good. "
              "Handy for testing the OAuth approval flow on a single bot.",
@@ -287,6 +297,14 @@ def main():
         lab for lab in roster
         if not lab.get("has_token") and lab["id"] not in tokenized
     ]
+
+    omit: dict[str, set[str]] = {}
+    for spec in args.omit_scope:
+        aid, _, scope = spec.partition(":")
+        if not aid or not scope:
+            console.print(f"[red]--omit-scope needs AGENT_ID:SCOPE, got {spec!r}[/red]")
+            raise SystemExit(2)
+        omit.setdefault(aid.lower(), set()).add(scope)
 
     if args.only:
         only = {a.lower() for a in args.only}
@@ -389,7 +407,14 @@ def main():
         failed_count = 0
         for i, lab in enumerate(missing):
             try:
-                app = create_app(config_token, lab["id"], lab["name"], lab["pi"], redirect_uri)
+                dropped = omit.get(lab["id"].lower(), set())
+                scopes = [x for x in BOT_SCOPES if x not in dropped] if dropped else None
+                if dropped:
+                    console.print(f"      [yellow]omitting scope(s) {sorted(dropped)} for {lab['id']}[/yellow]")
+                app = create_app(
+                    config_token, lab["id"], lab["name"], lab["pi"], redirect_uri,
+                    scopes=scopes,
+                )
                 created.append(app)
                 # Persist immediately (0600) so an interruption mid-run doesn't
                 # lose the client_secret we just minted.
@@ -437,11 +462,11 @@ def main():
     if done < total:
         outstanding = [a["bot_name"] for a in created if a["agent_id"] not in _CallbackHandler.received]
         console.print(f"[yellow]Still missing: {', '.join(outstanding)}[/yellow]")
-        console.print(f"Re-run with [bold]--skip-create[/bold] to retry without recreating the apps.")
+        console.print("Re-run with [bold]--skip-create[/bold] to retry without recreating the apps.")
     else:
         if STATE_FILE.exists():
             STATE_FILE.unlink()
-        console.print(f"[green]All done! Restart the agent container to pick up the new tokens.[/green]")
+        console.print("[green]All done! Restart the agent container to pick up the new tokens.[/green]")
         console.print("  docker stop -t 30 agent-run  # SIGTERM so the engine flushes")
         console.print("  docker rm agent-run")
         console.print("  docker compose up -d --build app worker")

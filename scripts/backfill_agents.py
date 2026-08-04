@@ -8,8 +8,8 @@ profile exported to profiles/public/{agent_id}.md).
 
 Usage (inside the app container):
 
-    docker cp scripts/backfill_agents.py copi-python-app-1:/app/scripts/
-    docker exec copi-python-app-1 python scripts/backfill_agents.py \\
+    docker compose cp scripts/backfill_agents.py app:/app/scripts/
+    docker compose exec app python scripts/backfill_agents.py \\
         --orcids newuserlist01_orcids.txt
 
 The --orcids file is the same format as orcids.txt: one ORCID per line,
