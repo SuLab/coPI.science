@@ -3644,6 +3644,18 @@ class SimulationEngine:
                     all_decisions = result.scalars().all()
                     for td in all_decisions:
                         closed_thread_ids.add(td.thread_id)
+                        # _prior_threads is a list per pair, so appending here
+                        # unconditionally is not idempotent: a second rebuild —
+                        # or a rebuild after _close_thread already recorded this
+                        # thread in-process — feeds Phase 5 the same prior
+                        # discussion twice, as "you already tried this N times".
+                        # _closed_thread_ids is the shared already-accounted-for
+                        # marker (_close_thread sets it before its own append),
+                        # and it is only updated after this loop, so a thread with
+                        # several decision rows from repeated propose/reopen cycles
+                        # still contributes each of them on the first pass.
+                        if td.thread_id in self._closed_thread_ids:
+                            continue
                         pair_key = tuple(sorted([td.agent_a, td.agent_b]))
                         self._prior_threads.setdefault(pair_key, []).append({
                             "channel": td.channel,
@@ -3763,14 +3775,31 @@ class SimulationEngine:
                     agent = self.agents[aid]
                     is_reviewed = (td.id, aid) in reviewed_set
                     other = td.agent_b if aid == td.agent_a else td.agent_a
-                    agent.state.pending_proposals.append(ProposalRef(
+                    ref = ProposalRef(
                         thread_id=td.thread_id,
                         channel=td.channel,
                         other_agent_id=other,
                         summary_text=td.summary_text or "",
                         proposed_at=td.decided_at.timestamp() if td.decided_at else 0.0,
                         reviewed=is_reviewed,
-                    ))
+                    )
+                    # pending_proposals is a list, and an unreviewed entry blocks
+                    # its agent. A plain append is therefore not idempotent in a
+                    # way that matters: a second rebuild would give the agent two
+                    # copies of one proposal, and reviewing it pops one — leaving
+                    # the agent blocked on a phantom for the rest of the run.
+                    # Replace in place instead; latest_by_key already holds exactly
+                    # one (latest) decision per thread and the DB is authoritative,
+                    # so this also refreshes a stale `reviewed` flag.
+                    idx = next(
+                        (i for i, p in enumerate(agent.state.pending_proposals)
+                         if p.thread_id == ref.thread_id),
+                        None,
+                    )
+                    if idx is None:
+                        agent.state.pending_proposals.append(ref)
+                    else:
+                        agent.state.pending_proposals[idx] = ref
             except Exception as exc:
                 logger.warning("Failed to rebuild proposals: %s", exc)
 
