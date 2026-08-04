@@ -66,6 +66,11 @@ data/agent_roster.json
 # Local scratch notes
 .notes/
 
+# Superpowers working files (implementation plans, per-session scratch). Local
+# process artifacts, not project documentation — docs/agent-flow.md and specs/
+# are where anything durable belongs.
+docs/superpowers/
+
 # Slack provisioning state — holds app client_secrets during a bulk provisioning
 # run (scripts/provision_slack_bots.py). Must never be committed.
 .provision_state.json
