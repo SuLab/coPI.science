@@ -187,17 +187,40 @@ def join_channel(token: str, channel_id: str) -> None:
         raise
 
 
-def post_message(token: str, channel: str, text: str) -> list[dict[str, Any]]:
+def post_message(
+    token: str,
+    channel: str,
+    text: str,
+    *,
+    thread_ts: str | None = None,
+) -> list[dict[str, Any]]:
     """Post ``text``, split so no chunk exceeds Slack's limit.
 
     Returns one record per Slack message actually created. Callers that persist
     what they posted must write one row per returned record, or the DB and Slack
     disagree about how many messages exist — measured live at >4000 characters,
     where Slack silently splits and returns only the last ts.
+
+    ``thread_ts`` exists because two callers post *threaded* replies — the
+    legacy PI-guidance path in ``routers/agent_page.py`` and its email
+    equivalent in ``services/email_inbound.py``. Without it they could not come
+    through here at all: posting their guidance without a ``thread_ts`` would
+    move it out of the proposal thread and into the channel root, which is a
+    worse defect than the raw client they were using. It is omitted from the
+    payload entirely when None, so a top-level post is byte-identical to before
+    this parameter existed.
     """
     client = _client(token)
     posted: list[dict[str, Any]] = []
     for chunk in split_for_slack(text, SLACK_MAX_TEXT_CHARS):
-        result = _call(client, "chat_postMessage", channel=channel, text=chunk)
-        posted.append({"ts": result.get("ts"), "channel": channel, "text": chunk})
+        call: dict[str, Any] = {"channel": channel, "text": chunk}
+        if thread_ts:
+            call["thread_ts"] = thread_ts
+        result = _call(client, "chat_postMessage", **call)
+        posted.append({
+            "ts": result.get("ts"),
+            "channel": channel,
+            "text": chunk,
+            "thread_ts": thread_ts,
+        })
     return posted

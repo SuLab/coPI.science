@@ -114,3 +114,37 @@ def test_list_channel_ids_raises_rather_than_returning_a_subset(monkeypatch):
     with pytest.raises(slack_web.SlackListingIncomplete) as exc:
         slack_web.list_channel_ids("xoxb-test")
     assert exc.value.partial == {"a": "C1"}
+
+
+def test_post_message_threads_the_reply_when_thread_ts_is_given(monkeypatch):
+    """The two legacy PI-guidance callers post into a proposal thread.
+
+    Without thread_ts they could not use this boundary at all: guidance posted
+    without one lands in the channel root instead of the thread, which is worse
+    than the raw client they used before.
+    """
+    client = MagicMock()
+    client.chat_postMessage.side_effect = lambda **kw: _resp({"ts": "9.0", "ok": True})
+    monkeypatch.setattr(slack_web, "_client", lambda _t: client)
+
+    posted = slack_web.post_message(
+        "xoxb-test", "C123", "guidance", thread_ts="1700000000.000100")
+
+    assert client.chat_postMessage.call_count == 1
+    assert client.chat_postMessage.call_args.kwargs["thread_ts"] == "1700000000.000100"
+    assert posted[0]["thread_ts"] == "1700000000.000100"
+
+
+def test_post_message_omits_thread_ts_entirely_when_not_threading(monkeypatch):
+    """A top-level post must be byte-identical to before thread_ts existed.
+
+    Sending thread_ts=None would be a different Slack payload, so the key is
+    dropped rather than passed as None.
+    """
+    client = MagicMock()
+    client.chat_postMessage.side_effect = lambda **kw: _resp({"ts": "9.0", "ok": True})
+    monkeypatch.setattr(slack_web, "_client", lambda _t: client)
+
+    slack_web.post_message("xoxb-test", "#general", "top level")
+
+    assert "thread_ts" not in client.chat_postMessage.call_args.kwargs
