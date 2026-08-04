@@ -38,23 +38,13 @@
     </div>
     {% endif %}
 
-    {% if pending_profile %}
-    <!-- Pending profile update -->
-    <div class="bg-amber-50 border border-amber-200 rounded-xl p-4 mb-6">
-        <div class="flex items-start justify-between">
-            <div>
-                <h3 class="font-semibold text-amber-800">Updated Profile Available</h3>
-                <p class="text-sm text-amber-700 mt-1">
-                    We found new publications and generated an updated profile. Review the changes below.
-                </p>
-            </div>
-            <a href="/profile/review-update"
-               class="bg-amber-600 text-white px-4 py-2 rounded-lg hover:bg-amber-700 text-sm whitespace-nowrap ml-4">
-                Review Update
-            </a>
-        </div>
-    </div>
-    {% endif %}
+    {# The "Updated Profile Available" banner that used to sit here linked to
+       GET /profile/review-update, a route b99fdfd never implemented — its only
+       control was a silent 404. Nothing in src/ writes
+       ResearcherProfile.pending_profile either, so the banner's condition never
+       held and there was no "changes below" for it to point at. Rebuild the
+       producer and the review page together if the feature is wanted; a banner
+       whose only action 404s is worse than no banner. #}
 
     {% if not profile %}
     <!-- No profile yet -->

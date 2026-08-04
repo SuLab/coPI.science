@@ -1,5 +1,7 @@
 """Reachability gate: nothing in this repo asserted that routes, templates and
-imports are actually *reachable*, and three live defects grew in that blind spot.
+imports are actually *reachable*, and four live defects grew in that blind spot.
+All four are now repaired, so the ``KNOWN_*`` suppression sets below are empty and
+this file has no strict xfails left: every finding is a real failure.
 
 What "reachable" means here, precisely:
 
@@ -34,7 +36,7 @@ Known false negative, recorded because it is not hypothetical. This gate is stat
 link counts as a credit if it appears in a reachable template, and nothing here
 evaluates the Jinja condition the link sits under. A control behind a branch that never
 holds is therefore invisible to it. There is a live instance:
-``POST /onboarding/retry`` (src/routers/onboarding.py:354) has exactly one control in
+``POST /onboarding/retry`` (src/routers/onboarding.py:317) has exactly one control in
 the app — the "Try Again" form at templates/onboarding/profile_review.html:53 — and it
 sits inside ``{% elif job_status == 'failed' %}``. ``job_status`` is
 ``Job.status``, and src/worker/main.py only ever writes 'processing', 'completed',
@@ -46,15 +48,15 @@ analysis, and one that would cry wolf. Left as a false negative on purpose (the 
 trade recorded above: false negatives leave a future orphan, false positives get the
 gate deleted), but recorded so the next reader does not mistake this gate's silence for
 proof that every control is live.
-  * The live defects this gate was built to expose are listed in the ``KNOWN_*`` sets
-    and subtracted from the aggregate assertions, so those stay green and fail loudly on
-    a *new* orphan. Each defect additionally gets its own ``xfail(strict=True)`` test
-    asserting it is fixed; repairing one flips that test red and forces the entry out.
-    (Chosen over plain characterization asserts: an equality assert on today's broken
-    value passes forever and never notices the repair.)
-
-Run ``pytest tests/unit/test_reachability.py --runxfail`` to see the live defects as
-real failures with full diagnostics.
+  * The ``KNOWN_*`` sets are the escape hatch, and they are empty. While a defect was
+    live its entry was subtracted from the aggregate assertions (so those stayed green
+    and still failed loudly on a *new* orphan) and it carried a paired
+    ``xfail(strict=True)`` test asserting the defect was fixed — which is what turned
+    this file red the moment it *was* fixed, forcing the entry out. That mechanism is
+    still wired up (``test_every_known_defect_entry_is_paired_with_a_strict_xfail``)
+    and is the only sanctioned way to record a finding you are not fixing today. It
+    was chosen over plain characterization asserts: an equality assert on today's
+    broken value passes forever and never notices the repair.
 """
 
 from __future__ import annotations
@@ -65,8 +67,6 @@ import importlib
 import re
 from dataclasses import dataclass
 from pathlib import Path
-
-import pytest
 
 import src
 from src.main import create_app
@@ -82,35 +82,22 @@ HOLE = "\x00"
 
 
 # ---------------------------------------------------------------------------
-# Known-live defects. Each is subtracted from the aggregate gates below and gets a
-# dedicated xfail(strict=True) test, so a repair turns this file red until the entry
-# is deleted. Do NOT add to this list to silence a new finding — fix the finding.
+# Known-live defects: none. All four are repaired, so every set here is empty and the
+# aggregate gates below subtract nothing.
+#
+# Do NOT add to these to silence a new finding — fix the finding. If you genuinely
+# cannot fix it today, an entry is subtracted from its aggregate gate and MUST come
+# with a paired xfail(strict=True) test asserting the defect is fixed, so the repair
+# turns this file red and forces the entry back out. That pairing is enforced by
+# test_every_known_defect_entry_is_paired_with_a_strict_xfail (and you will need to
+# re-add `import pytest`, dropped when the last defect test went).
 # ---------------------------------------------------------------------------
 
-KNOWN_ORPHAN_TEMPLATES = {
-    # Commit 336c0c0 deleted the route that rendered this "add supplementary texts"
-    # step and left the template behind. Its Skip button is the only caller of
-    # POST /onboarding/complete.
-    "onboarding/add_texts.html",
-}
+KNOWN_ORPHAN_TEMPLATES: set[str] = set()
 
-KNOWN_UNREACHABLE_ROUTES = {
-    # Reachable only from templates/onboarding/add_texts.html, which is itself an
-    # orphan (above). Sets onboarding_complete=True with no email / profile /
-    # private-profile validation — harmless as the Skip button of an optional step,
-    # a hole in the flow now that it is the only surviving door.
-    ("POST", "/onboarding/complete"),
-    # Renders "You're all set!" without ever setting onboarding_complete. Orphaned by
-    # fb7701b; nothing links to it and no redirect targets it.
-    ("GET", "/onboarding/done"),
-}
+KNOWN_UNREACHABLE_ROUTES: set[tuple[str, str]] = set()
 
-KNOWN_BROKEN_LINKS = {
-    # templates/profile/view.html "Review Update" button, shown whenever
-    # ResearcherProfile.pending_profile is set. The route was never implemented —
-    # the link has pointed at nothing since b99fdfd added it.
-    ("profile/view.html", "GET", "/profile/review-update"),
-}
+KNOWN_BROKEN_LINKS: set[tuple[str, str, str]] = set()
 
 KNOWN_DEAD_IMPORTS: set[tuple[str, str]] = set()
 
@@ -985,64 +972,6 @@ def test_static_link_resolution_coverage_is_reported():
 
 
 # ---------------------------------------------------------------------------
-# The live defects, one test each. xfail(strict=True): each turns red on repair, forcing
-# the corresponding KNOWN_* entry out of this file.
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.xfail(
-    strict=True,
-    reason="LIVE DEFECT: templates/onboarding/add_texts.html is rendered by no route "
-    "(336c0c0 deleted the route, kept the template).",
-)
-def test_defect_add_texts_template_is_orphaned():
-    orphans = compute_orphan_templates(template_names(), reachable_templates())
-    assert "onboarding/add_texts.html" not in orphans
-
-
-@pytest.mark.xfail(
-    strict=True,
-    reason="LIVE DEFECT: POST /onboarding/complete is reachable only from the orphaned "
-    "add_texts.html, and sets onboarding_complete=True with no validation.",
-)
-def test_defect_post_onboarding_complete_is_unreachable():
-    unreachable = compute_unreachable_routes(
-        http_routes(),
-        template_links(),
-        reachable_templates(),
-        src_referenced_paths() | static_js_paths(),
-        ROUTE_ALLOWLIST,
-    )
-    assert ("POST", "/onboarding/complete") not in unreachable
-
-
-@pytest.mark.xfail(
-    strict=True,
-    reason="LIVE DEFECT: GET /onboarding/done renders \"You're all set!\" without "
-    "setting onboarding_complete, and nothing links to it (orphaned by fb7701b).",
-)
-def test_defect_get_onboarding_done_is_unreachable():
-    unreachable = compute_unreachable_routes(
-        http_routes(),
-        template_links(),
-        reachable_templates(),
-        src_referenced_paths() | static_js_paths(),
-        ROUTE_ALLOWLIST,
-    )
-    assert ("GET", "/onboarding/done") not in unreachable
-
-
-@pytest.mark.xfail(
-    strict=True,
-    reason="LIVE DEFECT: templates/profile/view.html links to /profile/review-update, "
-    "a route that was never implemented; the ImportError-free 404 is silent.",
-)
-def test_defect_profile_review_update_link_is_broken():
-    broken = compute_broken_links(template_links(), http_routes(), reachable_templates())
-    assert ("profile/view.html", "GET", "/profile/review-update") not in broken
-
-
-# ---------------------------------------------------------------------------
 # Teeth. The detectors are pure functions of collected data, so we can feed them
 # synthetic trees and prove each finds a fresh orphan — without touching a repo file.
 # ---------------------------------------------------------------------------
@@ -1106,8 +1035,11 @@ def test_teeth_unreachable_route_detector_catches_a_new_orphan_route():
 
 
 def test_teeth_a_link_inside_an_orphaned_template_does_not_launder_a_route():
-    """The exact shape of live defect 1: the only caller of a route sits in a template
-    nothing renders. A non-transitive gate would call the route reachable."""
+    """The exact shape of the defect this gate was built for: the only caller of a route
+    sits in a template nothing renders. A non-transitive gate would call the route
+    reachable. Kept synthetic on purpose — the real instance (add_texts.html's Skip
+    button, the sole caller of POST /onboarding/complete) has since been deleted, and
+    this is what would catch the next one."""
     routes = (Route("POST", "/onboarding/complete", "complete_onboarding"),)
     links = (
         Link(

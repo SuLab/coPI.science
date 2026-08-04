@@ -314,43 +314,6 @@ async def save_private_profile(
     return RedirectResponse(url="/profile?onboarding_complete=1", status_code=302)
 
 
-@router.post("/complete")
-async def complete_onboarding(
-    request: Request,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    """Mark onboarding as complete."""
-    was_complete = current_user.onboarding_complete
-    current_user.onboarding_complete = True
-    await db.commit()
-
-    _maybe_send_welcome(current_user, was_complete)
-
-    pending_token = request.session.pop("pending_invite_token", None)
-    if pending_token:
-        request.session.pop("post_login_redirect", None)
-        return RedirectResponse(url=f"/invite/{pending_token}", status_code=302)
-
-    # Resume the page the user originally requested before being sent to login.
-    next_url = pop_post_login_redirect(request)
-    if next_url:
-        return RedirectResponse(url=next_url, status_code=302)
-    return RedirectResponse(url="/profile?onboarding_complete=1", status_code=302)
-
-
-@router.get("/done", response_class=HTMLResponse)
-async def onboarding_done(
-    request: Request,
-    current_user: User = Depends(get_current_user),
-):
-    return templates.TemplateResponse(
-        request,
-        "onboarding/complete.html",
-        _template_context(request, current_user),
-    )
-
-
 @router.post("/retry")
 async def retry_pipeline(
     request: Request,

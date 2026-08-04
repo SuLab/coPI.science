@@ -1,8 +1,12 @@
 """Task 7 — the first-run experience: onboarding, profile and settings.
 
-Seventeen HTTP endpoints across ``src/routers/onboarding.py`` (7),
+Fifteen HTTP endpoints across ``src/routers/onboarding.py`` (5),
 ``src/routers/profile.py`` (6) and ``src/routers/settings.py`` (4) had no direct
 coverage, and ``src/services/profile_export.py`` had no test referencing it at all.
+
+(It was seventeen until ``POST /onboarding/complete`` and ``GET /onboarding/done``
+were deleted as an unreachable duplicate of the terminal step — see
+``test_the_terminal_step_*`` below, which inherited their controls.)
 
 Real ASGI requests, real Postgres, real Jinja templates, real ``profile_export``.
 Nothing external runs: the ORCID and Anthropic entry points are replaced with
@@ -197,7 +201,7 @@ async def _prefs(db, uid) -> dict:
 
 
 async def _snapshot(db, uid):
-    """Everything the 15 session-authenticated endpoints between them can change.
+    """Everything the 13 session-authenticated endpoints between them can change.
 
     One tuple, so a single equality covers "this endpoint touched the victim in
     any way at all" without the sweep needing per-endpoint knowledge.
@@ -283,7 +287,7 @@ def _profile_form(u):
 
 
 ENDPOINTS: list[Ep] = [
-    # --- src/routers/onboarding.py (7) ---
+    # --- src/routers/onboarding.py (5) ---
     Ep("GET", "/onboarding", onboarding_complete=False),
     Ep("POST", "/onboarding/save-profile", _onboarding_form, onboarding_complete=False),
     Ep("GET", "/onboarding/private-profile", onboarding_complete=False),
@@ -293,8 +297,6 @@ ENDPOINTS: list[Ep] = [
         lambda u: {"content": f"SWEEP-PRIVATE-{u.orcid}"},
         onboarding_complete=False,
     ),
-    Ep("POST", "/onboarding/complete", lambda u: {}, onboarding_complete=False),
-    Ep("GET", "/onboarding/done"),
     Ep("POST", "/onboarding/retry", lambda u: {}),
     # --- src/routers/profile.py (6) ---
     Ep("GET", "/profile"),
@@ -330,7 +332,7 @@ def test_the_endpoint_inventory_is_the_whole_first_run_surface():
     """The sweeps below are only as complete as this list.
 
     Read the routes off the three routers rather than trusting a hand-count, so
-    an 18th endpoint fails here loudly instead of quietly escaping the
+    a 16th endpoint fails here loudly instead of quietly escaping the
     authorization sweeps.
     """
     live = set()
@@ -350,7 +352,7 @@ def test_the_endpoint_inventory_is_the_whole_first_run_surface():
         f"missing from the tests: {sorted(live - declared)}; "
         f"no longer in the code: {sorted(declared - live)}"
     )
-    assert len(ENDPOINTS) == 17
+    assert len(ENDPOINTS) == 15
 
     # The two exemptions below are asserted, not assumed: unsubscribe links are
     # clicked from an email client with no session.
@@ -473,7 +475,6 @@ async def test_the_onboarding_walk_completes_only_at_the_final_step(
     [
         ("GET", "/onboarding", None),
         ("GET", "/onboarding/private-profile", None),
-        ("GET", "/onboarding/done", None),
         (
             "POST",
             "/onboarding/save-profile",
@@ -621,35 +622,49 @@ async def test_the_private_profile_editor_falls_back_live_then_seed_then_disk_th
     assert "PI Behavioral Instructions" not in r.text
 
 
-async def test_complete_endpoint_flips_the_flag_and_welcomes_exactly_once(
+async def test_the_terminal_step_flips_the_flag_and_welcomes_exactly_once(
     client, db_session, newcomer, welcome_emails
 ):
+    """The replay control on ``_maybe_send_welcome``'s ``was_complete`` guard.
+
+    Aimed at POST /onboarding/private-profile because that is the only terminal
+    step left: the duplicate POST /onboarding/complete this control used to fire
+    has been deleted. Nothing stops a replay of this one — unlike the GET, the
+    POST has no ``if current_user.onboarding_complete`` short-circuit — so the
+    guard is load-bearing and a second welcome email is reachable without it.
+    """
     h = _auth(newcomer.id)
-    r = await client.post("/onboarding/complete", headers=h)
+    r = await client.post("/onboarding/private-profile", headers=h, data={"content": "# Mine"})
     assert r.status_code == 302
     assert r.headers["location"] == "/profile?onboarding_complete=1"
     assert await _flag(db_session, newcomer.id) is True
     assert [e["to"] for e in welcome_emails] == ["nadia@example.org"]
 
     # control on the was_complete guard: a replay must not send a second welcome.
-    r = await client.post("/onboarding/complete", headers=h)
+    r = await client.post("/onboarding/private-profile", headers=h, data={"content": "# Mine"})
     assert r.status_code == 302
     assert len(welcome_emails) == 1, "the welcome email is sent again on every replay"
 
 
-async def test_complete_resumes_a_pending_invite_before_the_default_redirect(
+async def test_the_terminal_step_resumes_a_pending_invite_before_the_default_redirect(
     client, db_session, newcomer
 ):
-    """The invite branch in complete_onboarding. Control: no token -> /profile."""
+    """The invite branch in save_private_profile. Control: no token -> /profile.
+
+    Also inherited from the deleted POST /onboarding/complete, which carried the
+    same branch verbatim.
+    """
     h = _auth(newcomer.id)
-    r = await client.post("/onboarding/complete", headers=h)
+    r = await client.post("/onboarding/private-profile", headers=h, data={"content": "# Mine"})
     assert r.headers["location"] == "/profile?onboarding_complete=1"
 
     signer = TimestampSigner(get_settings().secret_key)
     payload = {"user_id": str(newcomer.id), "pending_invite_token": "tok-123"}
     cookie = signer.sign(base64.b64encode(json.dumps(payload).encode())).decode()
     r = await client.post(
-        "/onboarding/complete", headers={"Cookie": f"copi-session={cookie}"}
+        "/onboarding/private-profile",
+        headers={"Cookie": f"copi-session={cookie}"},
+        data={"content": "# Mine"},
     )
     assert r.headers["location"] == "/invite/tok-123"
 
@@ -661,19 +676,17 @@ def _session_cookie(user_id, **extra) -> dict:
     return {"Cookie": f"copi-session={cookie}"}
 
 
-@pytest.mark.parametrize(
-    "endpoint,data",
-    [
-        ("/onboarding/complete", {}),
-        ("/onboarding/private-profile", {"content": "finished"}),
-    ],
-)
 async def test_finishing_onboarding_resumes_only_a_safe_post_login_destination(
-    client, db_session, endpoint, data
+    client, db_session
 ):
-    """Both terminal steps honour post_login_redirect. It is attacker-influenced
+    """The terminal step honours post_login_redirect. It is attacker-influenced
     (it comes off the /login query string), so the open-redirect guard has to
-    hold here too, not only in auth.py."""
+    hold here too, not only in auth.py.
+
+    This was parametrised over two endpoints until POST /onboarding/complete —
+    which duplicated the same resume block — was deleted.
+    """
+    endpoint, data = "/onboarding/private-profile", {"content": "finished"}
     for stashed, expected in (
         ("/settings", "/settings"),  # positive: a real GET page resumes
         ("https://evil.example.com/steal", "/profile?onboarding_complete=1"),
@@ -691,12 +704,6 @@ async def test_finishing_onboarding_resumes_only_a_safe_post_login_destination(
         assert r.status_code == 302
         assert r.headers["location"] == expected, f"{endpoint} with next={stashed!r}"
         assert await _flag(db_session, u.id) is True
-
-
-async def test_onboarding_done_renders(client, newcomer):
-    r = await client.get("/onboarding/done", headers=_auth(newcomer.id))
-    assert r.status_code == 200
-    assert "You're all set!" in r.text
 
 
 async def test_retry_enqueues_another_generate_profile_job(client, db_session, newcomer):
