@@ -9,6 +9,45 @@
 # each mutant is a full live run against Slack.
 #
 #   source <live env> && ./scripts/mutate_slack_mirror.sh
+#
+# ---------------------------------------------------------------------------------------
+# WARNING, 2026-08-04: THIS SCRIPT STILL EDITS src/ IN PLACE. It is the last of the three
+# mutation harnesses to do so. scripts/mutate_system.sh's header documents that exact
+# strategy as having been auto-reverted mid-run by a repo guard, silently corrupting three
+# earlier agents' results — mutants reported as SURVIVING would in fact have been killed —
+# and scripts/mutate_cohorts.sh was converted away from it on 2026-08-04. Use
+# mutate_system.sh as the pattern when converting this one:
+#
+#   1. copy the tree into the container's /tmp and mutate the COPY, running pytest with
+#      the copy as its working directory;
+#   2. assert provenance — `import src` from the copy must resolve to
+#      "$COPY/src/__init__.py". `src` is ALSO installed into site-packages in this image,
+#      so without this a run can exercise unmutated code and report every mutant as
+#      SURVIVED. That is not hypothetical: it is what produced 8515f65's false "all four
+#      chokepoint mutants survived the offline selection", re-measured 2026-08-04 as 4/4
+#      killed;
+#   3. assert the mutated module still imports, so a SyntaxError cannot fake a kill;
+#   4. assert `git diff --quiet -- src/` before the first mutant and after the last.
+#
+# NOT CONVERTED HERE ON PURPOSE. Every mutant below is judged by the live Slack tier, and
+# SLACK_TEST_WORKSPACE was not available, so a rewrite could not be run even once before
+# being committed. Rewriting a measurement harness you cannot execute converts a known
+# weakness into an unknown one. Two further defects found by reading, also left alone for
+# the same reason — fix them in the same pass as the conversion, then run it three times:
+#
+#   a. the applier does NOT convert `\n` in the FROM/TO fields to a real newline, unlike
+#      the other two harnesses (`frm, to = os.environ["FROM"], os.environ["TO"]`). No
+#      mutant below currently spans a line, so nothing is broken today, but the first
+#      multi-line mutant added here will substitute a literal backslash-n, and the result
+#      will mean nothing.
+#   b. `eval "$RUN" >/dev/null 2>&1` discards all output, so a kill cannot name the test
+#      that killed it, and a mutant that "killed" because the workspace was unreachable is
+#      indistinguishable from a real kill. S4 is the only thing standing between this
+#      script and that failure mode; keep it, and add per-mutant logs.
+#
+# S4 is the inert control and MUST SURVIVE — see mutate_system.sh on why a tier without
+# one scores 100% precisely when it is broken.
+# ---------------------------------------------------------------------------------------
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 

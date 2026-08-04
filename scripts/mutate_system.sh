@@ -11,6 +11,12 @@
 # because one mutation target contains a `|` and kept here because several contain `~`-free
 # SQL with pipes and quotes of both kinds.
 #
+# As of 2026-08-04 mutate_cohorts.sh shares this file's isolation strategy — it was
+# converted from in-place editing to copy+provenance, and its 9/9 was re-measured under
+# the new strategy and held. mutate_slack_mirror.sh still edits src/ in place; it needs
+# live Slack credentials, so it could not be re-verified after a rewrite and was left
+# alone with a header warning rather than silently changed.
+#
 # THE INERT MUTANTS ARE NOT OPTIONAL. Every tier below carries one edit that changes no
 # behaviour (a docstring, a comment, a log string) and MUST SURVIVE. Without it a tier
 # that is broken for any unrelated reason — a dead credential, a migrated-away column, a
@@ -43,27 +49,83 @@
 # test) that is supposed to kill it, never the whole suite. That is what keeps the
 # Anthropic spend at ~7 calls and the NCBI traffic inside the 3 req/s anonymous policy.
 #
-# KNOWN SURVIVORS as of 2026-07-31 (11/13 real mutants killed, 8/8 inert controls
-# survived). Both are reported, not worked around; do not weaken either mutant.
+# MEASURED 2026-08-04, offline tiers only, no credentials present:
 #
-#   M1b  fetch_orcid_profile hardcoded to "Josiah Carberry" survives
-#        tests/live_api/test_orcid_live.py. That file's only defence against a constant
-#        name is the dated `"Carberry" in prof["name"]` assertion, which a hardcode of the
-#        expected value satisfies. Nothing in the live tier compares the parsed name
-#        against the record it came from, and the docstring's claimed control ("the parser
-#        must NOT return the same thing for a different id") is not implemented — the id
-#        it checks is copied from the argument, not parsed. Measured: the PRE-EXISTING
-#        contract test tests/contract/test_orcid_contract.py::
-#        test_fetch_orcid_profile_falls_back_to_orcid_when_no_name DOES kill it, so this is
-#        a gap in the new tier rather than in the repo.
-#   M6   _validate_profile hardwired to True survives T4.1 and, measured separately, the
-#        entire 1047-test offline suite. The tier's three references to the function are
-#        all `assert _validate_profile(as_synthesized(profile)) is True`, which a function
-#        that always returns True satisfies by construction, and the retry it gates never
-#        fires on real model output, so `probe.public_calls == 1` sees no difference
-#        either. M6b (always False) IS killed — the tier can see validation's effect in
-#        one direction only. Killing M6 needs an input the validator must REJECT (a
-#        20-word summary, or two techniques) fed through step 8.
+#   killed 6/6 real mutants        M4, M5 (worker); M7 (graph); M8, M9 (onboarding);
+#                                  M10 (agentpage)
+#   inert controls 4/4 survived    M12c, M12e, M12f, M12g
+#   11 skipped for credentials     orcid: M12a, M1, M1b
+#                                  pubmed: M12b, M2, M3
+#                                  pipeline: M12d, M6, M6b
+#                                  grantbot: M12h, M11
+#   src/ clean, exit 0
+#
+# NO REAL MUTANT SURVIVED ANY TIER THAT COULD BE RUN. The list below is therefore not a
+# list of survivors; it is the standing record for the two mutants this script's own
+# tiers cannot judge without credentials, plus the resolution of one that used to survive.
+# Do not weaken any of them.
+#
+#   M1b  UNMEASURED as of 2026-08-04 — its tier (orcid) needs LIVE_API_TESTS=1, which was
+#        not available, so it reported `skipped`. It was last measured as SURVIVING on
+#        2026-07-31 and nothing has changed tests/live_api/test_orcid_live.py since, so
+#        treat it as still open: fetch_orcid_profile hardcoded to "Josiah Carberry"
+#        survives that file. Its only defence against a constant name is the dated
+#        `"Carberry" in prof["name"]` assertion, which a hardcode of the expected value
+#        satisfies. Nothing in the live tier compares the parsed name against the record
+#        it came from, and the docstring's claimed control ("the parser must NOT return
+#        the same thing for a different id") is not implemented — the id it checks is
+#        copied from the argument, not parsed. Measured then: the PRE-EXISTING contract
+#        test tests/contract/test_orcid_contract.py::
+#        test_fetch_orcid_profile_falls_back_to_orcid_when_no_name DOES kill it, so this
+#        is a gap in the new tier rather than in the repo. Re-run with LIVE_API_TESTS=1
+#        before claiming it either way.
+#
+#   M6   RESOLVED 2026-08-04. _validate_profile hardwired to `return True` is now KILLED
+#        by tests/characterization/test_profile_pipeline_gm.py (3 failed:
+#        stores_the_retry_not_the_rejected_first_synthesis,
+#        marks_a_profile_that_fails_validation_twice,
+#        rerun_that_fails_validation_keeps_the_stored_profile), and M6b (always False) by
+#        7 — so the validator's effect is now visible in BOTH directions, which it was
+#        not before. An inert docstring edit on the same function survived the same
+#        selection (11 passed), so those kills are the mutation and not a red suite.
+#        Fix 2 (d311170) is what closed it: the return value now gates step 9 instead of
+#        being computed and discarded. The old note here claimed M6 survived the entire
+#        offline suite; that stopped being true and nothing updated it.
+#
+#        CAVEAT, so this is not misread: the kill comes from the OFFLINE characterization
+#        file, not from this script's `pipeline` tier, which is
+#        tests/integration/test_profile_pipeline_live.py and still needs LIVE_API_TESTS=1
+#        plus ANTHROPIC_API_KEY. M6/M6b therefore still report `skipped` in a
+#        credential-free run — see the 2026-08-04 measurement above. The evidence was
+#        produced with this script's own copy+provenance pattern (tree copied into the
+#        container, `src.__file__` asserted under the copy, the mutated module
+#        import-checked), not by editing src/. If you want this harness to see M6 by
+#        itself, the characterization file has to join a tier whose CREDS are "".
+#
+# 2026-08-04, the Slack chokepoint mutants — 8515f65's control was a PROVENANCE ARTIFACT.
+# That commit recorded, as the most important line in its report, that the four
+# chokepoint mutants "run against the offline selection ALL SURVIVED, at exactly 1093",
+# and flagged the suspiciously round figure as needing reproduction before belief. It has
+# now been reproduced, and the claim does not hold: against
+# tests/unit/test_slack_client_contract.py + tests/unit/test_transport.py (81 passed
+# unmutated) all four are KILLED, with an inert docstring edit on the same file surviving.
+# The pagination mutant was additionally run against the WHOLE offline suite, which is the
+# selection the 1093 figure came from: 9 failed / 1158 passed / 120 skipped, the same 9
+# tests. So the full suite kills it too — and today's collection is 1158, not 1093, which
+# is a second reason that figure describes a run that was not measuring what it claimed.
+#
+#   pagination            _paginate returns after page 1  ...............  9 failed
+#   ts-ordering           the pre-fix list(reversed(...)) in
+#                         _conversation_messages  ........................  4 failed
+#                         (the stronger `key=_by_ts, reverse=True` variant:  7 failed)
+#   splitting             split_for_slack never splits (`if True: return [text]`)  7 failed
+#   thread_ts normalise   normalize_inbound_message's self-reference test dead  5 failed
+#   INERT control         _conversation_messages docstring reworded  ....  survived
+#
+# So Fix 4's offline tests do protect all four mechanisms; the earlier "all survived" was
+# the failure mode this script's provenance check exists to catch — unmutated code under
+# test, every mutant falsely surviving. Which is also why the exact-1093 count was the
+# tell: a selection that never loaded the mutant cannot move.
 #
 # Overridable env:
 #   TEST_DATABASE_URL   throwaway asyncpg DSN (default: the copi_a3 scratch database)
@@ -80,6 +142,15 @@ SVC="${MUTSYS_SERVICE:-app}"
 COPY="${MUTSYS_COPY_DIR:-/tmp/mutsys}"
 LOGDIR="${MUTSYS_LOGDIR:-$(mktemp -d)}"
 DC=(docker compose exec -T)
+
+# mkdir, because MUTSYS_LOGDIR is documented as overridable and this script did not
+# create it. Measured 2026-08-04: pass a path that does not exist and every `>"$log"`
+# redirect fails, which the shell scores as a nonzero exit — i.e. as a KILL — for every
+# mutant, inert controls included. The run reported "killed 6/6 real mutants" and
+# "inert controls: 0/4 survived", and only that second line distinguished it from a
+# perfect score. Any earlier run of this script made with MUTSYS_LOGDIR set to a
+# nonexistent directory reported every mutant as killed and is void.
+mkdir -p "$LOGDIR" || { echo "ERROR: cannot create log dir $LOGDIR" >&2; exit 1; }
 
 # Deliberately NOT the live database, and asserted rather than assumed: several of these
 # suites commit (the worker tests need another connection to see the write, so they cannot
