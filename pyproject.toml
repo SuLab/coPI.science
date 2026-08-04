@@ -83,13 +83,18 @@ source = ["src"]
 # this line, 41% with it (484 vs 359 statements missed). So the shortfall is
 # largest in exactly the modules that talk to the database most.
 #
-# COV_MIN in scripts/ci.sh is a ratchet floor, so it was set against suppressed
-# data and is safe to raise once a real figure is measured — see that script.
+# Re-measured 2026-08-04 with this line in place: the suite's true total is 61.638%,
+# not the 35.66% the suppressed data reported. COV_MIN in scripts/ci.sh has been
+# re-baselined from 35 to 60 accordingly.
 concurrency = ["thread", "greenlet"]
 
 [tool.coverage.report]
 show_missing = false
-precision = 0
+# Two decimals, not 0. At precision = 0 the total printed as "62%" while the real
+# figure was 61.638% — i.e. the report rounded UP past the true value, so anyone
+# re-baselining COV_MIN off the printed number would set a floor the suite cannot
+# actually meet. A ratchet is only as good as the number you read it from.
+precision = 2
 
 # Mutation-testing scope lives in scripts/mutation.sh (CLI flags), not here — mutmut
 # 2.x reads setup.cfg/CLI rather than pyproject's [tool.mutmut].
