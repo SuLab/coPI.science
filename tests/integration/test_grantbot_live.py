@@ -66,6 +66,7 @@ from src.agent.funding_rules import (
     summarize_funding_thread,
 )
 from src.agent.message_log import LogEntry, MessageLog
+from src.agent.slack_client import SLACK_MAX_TEXT_CHARS, split_for_slack
 from src.models import AgentMessage, GrantbotPostedFoa, SimulationRun
 from src.services import grants
 
@@ -130,6 +131,29 @@ def days_out(opp: dict, now: datetime) -> int | None:
     return None if close is None else (close - now).days
 
 
+def synthetic_opportunity(number: str, now: datetime) -> dict:
+    """An FOA shaped exactly like `search_opportunities` returns one.
+
+    Every other test in this file feeds GrantBot a *live* opportunity, because their
+    claims are about the live feed: its date formats, its empty `description`, whether a
+    real FOA survives selection. The two splitting tests below make no claim about
+    grants.gov at all — their subject is how many Slack messages an 11,000-character body
+    becomes — so spending catalogue budget and a `fetchOpportunity` round trip on them
+    would buy nothing and would make a splitting test fail when the feed was down.
+    """
+    return {
+        "number": number,
+        "id": "999999",
+        "title": "Synthetic Mechanisms of Long Bodies (R01 Clinical Trial Not Allowed)",
+        "agency": "HHS-NIH11",
+        "close_date": (
+            now + timedelta(days=grantbot.MIN_LEAD_DAYS + 60)
+        ).strftime("%m/%d/%Y"),
+        "description": "",
+        "synopsis": "",
+    }
+
+
 def expected_header(opp: dict) -> str:
     """The header `_run_grantbot_with_session` prepends to every funding post.
 
@@ -154,8 +178,12 @@ class _StageRecorder:
     include/exclude judgement would only add noise to that.
     """
 
-    def __init__(self, channel: str = "funding-opportunities"):
+    def __init__(self, channel: str = "funding-opportunities", body: str | None = None):
         self.channel = channel
+        # `body` overrides the stub draft text. The splitting tests need a body of a
+        # chosen length, and the length of a *real* model's draft is not something a test
+        # about splitting can control — `_draft_post` caps max_tokens at 500.
+        self.body = body
         self.offered_to_select: list[str] = []
         self.drafted: list[str] = []
         self.select_calls = 0
@@ -170,7 +198,9 @@ class _StageRecorder:
         self.drafted.append(number)
         return {
             "channel": self.channel,
-            "post_text": f"Stubbed draft body for {number}. Scope, mechanism, eligibility.",
+            "post_text": self.body if self.body is not None else (
+                f"Stubbed draft body for {number}. Scope, mechanism, eligibility."
+            ),
         }
 
     def install(self, monkeypatch):
@@ -184,18 +214,24 @@ class _ExplodingWebClient:
 
     def __init__(self, *args, **kwargs):
         raise AssertionError(
-            "GrantBot constructed a real slack_sdk.WebClient during a Slack-OFF test — "
-            "it would have posted into the shared copi-test workspace, which another "
-            "agent owns. `slack_globally_enabled` was patched to False, so reaching here "
-            "means the gate in _run_grantbot_with_session no longer consults it."
+            "GrantBot reached a real Slack transport during a Slack-OFF test — it would "
+            "have posted into the shared copi-test workspace, which another agent owns. "
+            "`slack_globally_enabled` was patched to False, so reaching here means the "
+            "gate in _run_grantbot_with_session no longer consults it."
         )
 
 
 class _RecordingWebClient:
     """A Slack transport double. Records posts; never opens a socket.
 
-    `fail_post` makes `chat_postMessage` raise, which is how the claim-release path
-    (a post that failed must not leave the FOA marked as posted) gets exercised.
+    `next_fail_post` makes `chat_postMessage` raise, which is how the claim-release path
+    (a post that failed must not leave the FOA marked as posted) gets exercised. It is
+    read *per call* off the class rather than captured at construction because GrantBot
+    now posts through `src.services.slack_web`, whose `_client` seam the `slack_on`
+    fixture backs with a single shared double for a whole test: a flag captured in
+    `__init__` would be frozen at whatever it was when that one instance was built, and
+    the failure half of the transport test — which flips the flag between two runs —
+    would silently exercise the success path instead.
     """
 
     instances: list["_RecordingWebClient"] = []
@@ -208,12 +244,13 @@ class _RecordingWebClient:
         self.token = token
         self.posts: list[dict] = []
         self.joined: list[str] = []
-        self.fail_post = _RecordingWebClient.next_fail_post
+        self.listed: list[dict] = []
         _RecordingWebClient.instances.append(self)
 
     next_fail_post = False
 
     def conversations_list(self, **kwargs):
+        self.listed.append(dict(kwargs))
         return {
             "channels": [{"name": n, "id": f"C{n[:8].upper()}"} for n in ALLOWED_CHANNELS],
             "response_metadata": {"next_cursor": ""},
@@ -224,10 +261,10 @@ class _RecordingWebClient:
         return {"ok": True}
 
     def chat_postMessage(self, channel: str, text: str):
-        if self.fail_post:
+        if _RecordingWebClient.next_fail_post:
             raise RuntimeError("simulated Slack outage")
         self.posts.append({"channel": channel, "text": text})
-        return {"ok": True, "ts": "1700000000.000100"}
+        return {"ok": True, "ts": f"1700000000.{len(self.posts):06d}"}
 
 
 class _SettingsWithFakeToken:
@@ -333,24 +370,46 @@ async def sim_run(db_session) -> SimulationRun:
 
 @pytest.fixture
 def slack_off(monkeypatch):
-    """Force the DB-post path and make any real Slack client construction fatal."""
+    """Force the DB-post path and make any real Slack client construction fatal.
+
+    Both seams are stopped because GrantBot's transport moved: it posts through
+    `src.services.slack_web`, whose only `WebClient` construction is `_client`, and
+    `slack_web` binds `WebClient` at *import* time — so patching `slack_sdk.WebClient`
+    alone would no longer stop anything. That patch is kept anyway: it is what catches a
+    regression that goes back to constructing a client inside grantbot.py itself, which is
+    precisely the bypass `tests/unit/test_slack_boundary.py` exists to forbid.
+    """
     async def _disabled(db):
         return False
 
     monkeypatch.setattr("src.services.slack_tokens.slack_globally_enabled", _disabled)
     monkeypatch.setattr("slack_sdk.WebClient", _ExplodingWebClient)
+    monkeypatch.setattr("src.services.slack_web._client", _ExplodingWebClient)
 
 
 @pytest.fixture
 def slack_on(monkeypatch):
-    """Take the Slack branch, but through `_RecordingWebClient` with a fake token."""
+    """Take the Slack branch, but through `_RecordingWebClient` with a fake token.
+
+    `slack_web._client` is backed by *one* shared double for the whole test, so
+    `client.posts` and `client.joined` stay a single ledger. Production builds a fresh
+    `WebClient` per boundary call; nothing asserted here depends on that, and a shared
+    ledger is what lets a test count the messages one FOA produced.
+    """
     async def _enabled(db):
         return True
 
     _RecordingWebClient.instances = []
     _RecordingWebClient.next_fail_post = False
+
+    def _shared_double(token: str = "", **kwargs) -> _RecordingWebClient:
+        if not _RecordingWebClient.instances:
+            _RecordingWebClient(token)
+        return _RecordingWebClient.instances[0]
+
     monkeypatch.setattr("src.services.slack_tokens.slack_globally_enabled", _enabled)
     monkeypatch.setattr("slack_sdk.WebClient", _RecordingWebClient)
+    monkeypatch.setattr("src.services.slack_web._client", _shared_double)
     real_settings = grantbot.get_settings()
     monkeypatch.setattr(grantbot, "get_settings", lambda: _SettingsWithFakeToken(real_settings))
     return _RecordingWebClient
@@ -933,6 +992,17 @@ async def test_the_slack_leg_posts_through_a_double_and_releases_a_failed_claim(
         "the bot never called conversations_join — GrantBot cannot post to a public "
         "channel it has not joined, so the first run in a fresh workspace would fail"
     )
+    assert client.listed and all(
+        call.get("exclude_archived") is True and call.get("types") == "public_channel"
+        for call in client.listed
+    ), (
+        f"the auto-join listing was requested as {client.listed}. Both arguments are "
+        "deliberate and neither is the boundary's default: the map feeds "
+        "conversations_join, an archived channel cannot be joined, and a private channel "
+        "cannot be joined by a bot that was never invited. `list_channel_ids` defaults "
+        "exclude_archived to False because its other callers ask 'does this name exist', "
+        "where an archived channel still owns its name — so this call site has to pass it"
+    )
     assert await _claimed_numbers(db_session) == {opportunity["number"]}, (
         "a successful Slack post left no grantbot_posted_foas row — the next run reposts it"
     )
@@ -959,6 +1029,229 @@ async def test_the_slack_leg_posts_through_a_double_and_releases_a_failed_claim(
     assert await _claimed_numbers(db_session) == {opportunity["number"]}, (
         "CONTROL FAILED: the successful claim was released too, so the release above is "
         "not evidence that failures specifically are rolled back"
+    )
+
+
+# ------------------------------------------------------------------ splitting (T13)
+
+# 37 characters per unit; 320 units is ~11.8k characters, which is three Slack messages
+# at SLACK_MAX_TEXT_CHARS and cuts cleanly on word boundaries. A body that produced only
+# two chunks would let an off-by-one in the splitter pass.
+_LONG_BODY = "Funding opportunity detail sentence. " * 320
+
+
+def _stub_detail_fetch(monkeypatch) -> None:
+    """Make step 4's `fetch_opportunity_detail` a no-op, so no test here calls out.
+
+    The synthetic opportunity carries an `id`, which is what `_run_grantbot_with_session`
+    checks before fetching detail. Leaving the `id` off would also skip the fetch, but it
+    would change the grants.gov URL in the header and make the header assertions below
+    quietly weaker than they look.
+    """
+    async def _no_detail(opportunity_id: str):
+        return None
+
+    monkeypatch.setattr(grantbot, "fetch_opportunity_detail", _no_detail)
+
+
+async def test_a_long_funding_post_is_split_into_messages_slack_will_accept(
+    db_session, sim_run, now_utc, slack_on, fixed_catalogue, monkeypatch,
+):
+    """>4000 characters must leave GrantBot as N messages, not as one Slack will chunk.
+
+    T13 measured Slack silently splitting an over-long body and returning only the last
+    ts. GrantBot posted through a raw `WebClient` with no splitting, so it could not
+    learn that: it logged one post and had one ts's worth of nothing, while the workspace
+    held three messages — and the simulation's channel poller, which is what mirrors
+    GrantBot's Slack posts into `agent_messages` (`simulation.py`, the `is_bot` branch of
+    the channel poll), ingested three rows. Routing the post through
+    `slack_web.post_message` splits it here, so GrantBot's count, Slack's count and the
+    mirror's count are the same number by construction.
+
+    `split_for_slack` is used to compute the expected count rather than a hard-coded 3:
+    the number of chunks is a property of the splitter, and hard-coding it would make
+    this test fail if the splitter's boundary heuristics changed for a good reason. The
+    `>= 3` guard below is what stops that making the assertion vacuous.
+    """
+    _stub_detail_fetch(monkeypatch)
+    opportunity = synthetic_opportunity("TEST-SPLIT-SLACK", now_utc)
+    _StageRecorder(channel="chemical-biology", body=_LONG_BODY).install(monkeypatch)
+    fixed_catalogue([opportunity])
+
+    posted = await grantbot._run_grantbot_with_session(
+        db_session, channel="funding-opportunities", dry_run=False,
+        max_posts=5, max_per_channel=5,
+    )
+    assert [p["number"] for p in posted] == [opportunity["number"]], (
+        f"the long FOA did not post at all: {posted}"
+    )
+
+    full_post = expected_header(opportunity) + _LONG_BODY
+    chunks = split_for_slack(full_post, SLACK_MAX_TEXT_CHARS)
+    assert len(chunks) >= 3 and len(full_post) > 2 * SLACK_MAX_TEXT_CHARS, (
+        f"the test body is only {len(full_post)} characters and splits into "
+        f"{len(chunks)} chunk(s) — too short to distinguish splitting from not splitting"
+    )
+
+    client = _RecordingWebClient.instances[0]
+    sent = [p["text"] for p in client.posts]
+    assert len(sent) == len(chunks), (
+        f"GrantBot made {len(sent)} chat_postMessage call(s) for a {len(full_post)}-"
+        f"character post that Slack accepts as {len(chunks)} messages. Slack does not "
+        "reject the oversized call — it splits it and returns only the last ts, so the "
+        "divergence is silent"
+    )
+    for text in sent:
+        assert len(text) <= SLACK_MAX_TEXT_CHARS, (
+            f"a {len(text)}-character chunk was sent; Slack's limit is "
+            f"{SLACK_MAX_TEXT_CHARS} and it splits anything longer itself"
+        )
+    assert all(p["channel"] == "#chemical-biology" for p in client.posts), (
+        f"chunks went to more than one channel: {[p['channel'] for p in client.posts]}"
+    )
+    assert sent[0].startswith(expected_header(opportunity)), (
+        f"the first chunk is not the head of the post:\n{sent[0][:250]!r}"
+    )
+    # Joined on whitespace, not on "": `split_for_slack` rstrips/lstrips at each cut (the
+    # whitespace a chunk boundary lands on is the boundary), so concatenating the chunks
+    # directly fuses the last word of one to the first word of the next. Comparing word
+    # sequences is the guarantee the splitter actually documents — no non-whitespace
+    # character lost or duplicated.
+    assert " ".join(sent).split() == full_post.split(), (
+        "splitting lost, duplicated or reordered content — the words that reached Slack "
+        "are not the words GrantBot drafted"
+    )
+    assert await _claimed_numbers(db_session) == {opportunity["number"]}, (
+        "a successful split post left no grantbot_posted_foas row — the next run reposts it"
+    )
+    assert await _messages_for_run(db_session, sim_run.id) == [], (
+        "GrantBot wrote funding rows to agent_messages on the Slack branch. It must not: "
+        "the simulation's channel poller already ingests GrantBot's Slack posts, keyed by "
+        "the Slack ts, and a second row minted with a local canonical id would not dedup "
+        "against it — every funding post would reach the agents twice, and threads rooted "
+        "on the local copy would never reach Slack (see the `is_bot` branch of the channel "
+        "poll in simulation.py). If this ever should change, the poller's dedup has to "
+        "change with it"
+    )
+
+
+async def test_a_long_funding_post_becomes_one_db_row_per_slack_message(
+    db_session, sim_run, now_utc, slack_off, fixed_catalogue, monkeypatch,
+):
+    """Slack-off: N rows of at most 4000 characters, not one row of 11,800.
+
+    This is the other half of the same invariant. `_post_funding_to_db` stored the whole
+    body in a single `agent_messages` row, so the same content was one message in the
+    database and three in Slack — `split_for_slack`'s docstring calls a chunk-per-row the
+    thing "that puts agent_messages in bijection with Slack", and a single oversized row
+    breaks it. The expected count is the *same* `split_for_slack` count the Slack test
+    above asserts against, which is what ties the two branches to one number.
+    """
+    _stub_detail_fetch(monkeypatch)
+    opportunity = synthetic_opportunity("TEST-SPLIT-DB", now_utc)
+    _StageRecorder(body=_LONG_BODY).install(monkeypatch)
+    fixed_catalogue([opportunity])
+
+    posted = await grantbot._run_grantbot_with_session(
+        db_session, channel="funding-opportunities", dry_run=False,
+        max_posts=5, max_per_channel=5,
+    )
+    assert [p["number"] for p in posted] == [opportunity["number"]], (
+        f"the long FOA did not post at all: {posted}"
+    )
+
+    full_post = expected_header(opportunity) + _LONG_BODY
+    chunks = split_for_slack(full_post, SLACK_MAX_TEXT_CHARS)
+    assert len(chunks) >= 3, f"test body splits into only {len(chunks)} chunk(s)"
+
+    rows = await _messages_for_run(db_session, sim_run.id)
+    assert len(rows) == len(chunks), (
+        f"{len(rows)} agent_messages row(s) for a {len(full_post)}-character funding post "
+        f"that Slack would render as {len(chunks)} messages"
+    )
+    for row in rows:
+        assert len(row.content) <= SLACK_MAX_TEXT_CHARS, (
+            f"a row holds {len(row.content)} characters — over Slack's "
+            f"{SLACK_MAX_TEXT_CHARS} limit, so mirroring it would split it silently"
+        )
+    assert [r.content for r in rows] == chunks, (
+        "the stored rows are not the split chunks in order"
+    )
+    assert len({r.message_ts for r in rows}) == len(rows), (
+        "two chunks share a canonical message_ts — mint_local_ts was called once and "
+        "reused, and uq_agent_messages_run_ts will drop one of the rows"
+    )
+    assert all(r.sender_name == "GrantBot" and r.is_bot for r in rows), (
+        "a chunk was filed under a different author than the post it came from"
+    )
+    assert all(r.channel_name == "funding-opportunities" for r in rows), (
+        f"chunks landed in {sorted({r.channel_name for r in rows})}"
+    )
+    assert all(r.phase == "new_post" for r in rows), (
+        "a chunk was stored as a thread_reply; every chunk is a top-level post, which is "
+        "what Phase 2 scans"
+    )
+    assert await _claimed_numbers(db_session) == {opportunity["number"]}, (
+        "the FOA was not claimed, so a later run would post it again"
+    )
+
+
+async def test_a_chunk_that_fails_leaves_no_half_written_funding_post(
+    db_session, sim_run, now_utc, slack_off, fixed_catalogue, monkeypatch,
+):
+    """A failure partway through a split post must leave zero rows and zero claims.
+
+    Splitting opened this window. When one FOA was one row, a failed write left nothing
+    behind. One row per chunk means a failure can land after chunk 1 and before chunk 4 —
+    and the recovery path is `_release_foa`, which **commits**. So without a rollback the
+    fragment is committed, the claim is released, and the next run posts the whole FOA on
+    top of it: agents then read two chunks of one post and four of another, which is the
+    divergence splitting exists to remove.
+
+    The `written == 1` assertion is the control. A fault injector that raised on the
+    *first* chunk would leave nothing to roll back, and the two assertions below would
+    pass against an implementation that never rolls anything back.
+    """
+    _stub_detail_fetch(monkeypatch)
+    opportunity = synthetic_opportunity("TEST-SPLIT-FAIL", now_utc)
+    _StageRecorder(body=_LONG_BODY).install(monkeypatch)
+    fixed_catalogue([opportunity])
+    # Read the id out before the run. The recovery path rolls the session back, and
+    # rollback expires every loaded ORM object regardless of expire_on_commit — touching
+    # `sim_run.id` afterwards would trigger a lazy reload and raise MissingGreenlet. This
+    # is a property of holding an ORM handle across the rollback, which only a test does:
+    # GrantBot's loop carries plain dicts from here on.
+    run_id = sim_run.id
+
+    real_write = grantbot._post_funding_to_db
+    written: list[str] = []
+
+    async def _fail_after_the_first_chunk(session, channel_name, text):
+        if written:
+            raise RuntimeError("simulated DB failure partway through a split post")
+        written.append(text)
+        await real_write(session, channel_name, text)
+
+    monkeypatch.setattr(grantbot, "_post_funding_to_db", _fail_after_the_first_chunk)
+
+    posted = await grantbot._run_grantbot_with_session(
+        db_session, channel="funding-opportunities", dry_run=False,
+        max_posts=5, max_per_channel=5,
+    )
+    assert posted == [], f"a funding post that failed halfway was reported as posted: {posted}"
+    assert len(written) == 1, (
+        f"CONTROL FAILED: {len(written)} chunk(s) were written before the injected "
+        "failure. The point of this test is a *partial* write; with none there is nothing "
+        "for a rollback to undo and the assertions below prove nothing"
+    )
+    assert await _messages_for_run(db_session, run_id) == [], (
+        "the chunks written before the failure are still in agent_messages. _release_foa "
+        "commits, so they are now permanent: a fragment of a funding post that the retry "
+        "will duplicate rather than replace"
+    )
+    assert await _claimed_numbers(db_session) == set(), (
+        f"{opportunity['number']} is still claimed after the write failed — the FOA is "
+        "permanently retired: never fully posted, never retried"
     )
 
 

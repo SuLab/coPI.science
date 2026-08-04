@@ -30,6 +30,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from src.agent.ids import WRITER_GRANTBOT, set_default_writer_id
+from src.agent.slack_client import SLACK_MAX_TEXT_CHARS, split_for_slack
 from src.config import get_settings
 from src.models import GrantbotPostedFoa
 from src.services.grants import fetch_opportunity_detail, list_posted_opportunities
@@ -178,6 +179,62 @@ async def _post_funding_to_db(session: AsyncSession, channel_name: str, full_pos
         content=full_post, sender_name="GrantBot", is_bot=True, posted_at=float(ts),
     ))
     await session.flush()
+
+
+async def _post_one_opportunity(
+    session: AsyncSession,
+    *,
+    channel: str,
+    full_post: str,
+    opp_num: str,
+    token: str | None = None,
+) -> list[dict[str, Any]]:
+    """Publish one FOA as N messages, none of them longer than Slack accepts.
+
+    Returns one record per message actually created, ``{"ts", "channel", "text"}``.
+
+    Slack does not reject an over-long ``chat_postMessage``: it splits the body itself and
+    returns only the *last* message's ts (measured live at >4000 characters). A caller
+    that posts an unsplit body therefore believes it published one message when the
+    workspace holds three, and it holds no id for two of them. GrantBot's bodies are
+    LLM-drafted and prefixed with a header, so their length is not something the call site
+    controls. Splitting here — via ``slack_web.post_message`` on the Slack branch and
+    ``split_for_slack`` on the DB branch — makes the count GrantBot reports, the count
+    Slack holds and the count the mirror stores the same number.
+
+    ``token=None`` is the Slack-off branch: the post goes straight into
+    ``agent_messages``, one row per chunk, because a single row holding a body Slack would
+    render as three messages is what breaks the bijection ``split_for_slack`` exists to
+    keep. On the Slack branch nothing is written here — the simulation's channel poller
+    already ingests GrantBot's Slack posts keyed by their Slack ts, and a row minted with
+    a local canonical id would not dedup against it.
+    """
+    if token is None:
+        chunks = split_for_slack(full_post, SLACK_MAX_TEXT_CHARS)
+        try:
+            for chunk in chunks:
+                await _post_funding_to_db(session, channel, chunk)
+        except Exception:
+            # Discard the chunks that did land before re-raising. Splitting opened this
+            # window: one FOA is now several rows, so a failure can land mid-post, and the
+            # caller's recovery — ``_release_foa`` — *commits*. Without this the fragment
+            # becomes permanent and the retry posts the whole FOA on top of it. The claim
+            # was committed by ``_claim_foa``, so rolling back cannot lose it.
+            await session.rollback()
+            raise
+        logger.info(
+            "Posted opportunity %s to #%s in %d message(s) (DB)",
+            opp_num, channel, len(chunks),
+        )
+        return [{"ts": None, "channel": channel, "text": c} for c in chunks]
+
+    from src.services.slack_web import post_message
+
+    posted = post_message(token, f"#{channel}", full_post)
+    logger.info(
+        "Posted opportunity %s to #%s in %d message(s)", opp_num, channel, len(posted),
+    )
+    return posted
 
 
 async def _load_posted_numbers(session: AsyncSession) -> set[str]:
@@ -366,38 +423,40 @@ Respond in JSON format:
         return None
 
 
-def _ensure_channel_membership(slack_client, channel_names: set[str]) -> None:
-    """Join any public channels the bot isn't already a member of."""
-    try:
-        # Build a map of channel name -> id for all public channels
-        channel_map: dict[str, str] = {}
-        cursor = None
-        while True:
-            resp = slack_client.conversations_list(
-                types="public_channel",
-                exclude_archived=True,
-                limit=200,
-                cursor=cursor,
-            )
-            for ch in resp.get("channels", []):
-                channel_map[ch["name"]] = ch["id"]
-            cursor = resp.get("response_metadata", {}).get("next_cursor")
-            if not cursor:
-                break
+def _ensure_channel_membership(token: str, channel_names: set[str]) -> None:
+    """Join any public channels the bot isn't already a member of.
 
-        for name in channel_names:
-            clean_name = name.lstrip("#")
-            ch_id = channel_map.get(clean_name)
-            if not ch_id:
-                logger.warning("Channel #%s not found in workspace", clean_name)
-                continue
-            try:
-                slack_client.conversations_join(channel=ch_id)
-                logger.info("Joined #%s", clean_name)
-            except Exception as exc:
-                logger.warning("Could not join #%s: %s", clean_name, exc)
+    Goes through ``slack_web`` rather than a raw client so the listing is fully paginated
+    and every call is retried on a 429. The hand-rolled loop this replaces had neither: a
+    rate-limited ``conversations.list`` raised straight into the ``except`` below, which
+    logs a warning and returns, and GrantBot then posted to channels it had not joined.
+
+    ``exclude_archived=True`` is deliberate and differs from ``list_channel_ids``'s
+    default: this map feeds ``conversations_join``, and an archived channel cannot be
+    joined. Callers that only ask "does this name exist" must count archived channels,
+    because an archived channel still owns its name — hence the differing default.
+    """
+    from src.services.slack_web import join_channel, list_channel_ids
+
+    try:
+        channel_map = list_channel_ids(
+            token, include_private=False, exclude_archived=True
+        )
     except Exception as exc:
         logger.warning("Failed to list channels for auto-join: %s", exc)
+        return
+
+    for name in channel_names:
+        clean_name = name.lstrip("#")
+        ch_id = channel_map.get(clean_name)
+        if not ch_id:
+            logger.warning("Channel #%s not found in workspace", clean_name)
+            continue
+        try:
+            join_channel(token, ch_id)
+            logger.info("Joined #%s", clean_name)
+        except Exception as exc:
+            logger.warning("Could not join #%s: %s", clean_name, exc)
 
 
 async def run_grantbot(
@@ -523,21 +582,24 @@ async def _run_grantbot_with_session(
 
     # 6. Post to Slack, or (Slack off) write straight to the DB, or dry-run.
     posted_list: list[dict] = []
-    slack_client = None
+    # "" means no usable credential, which is a different case from Slack being off: the
+    # claim has to be released so a later run with a token can still post the FOA.
+    bot_token = ""
     slack_on = False
 
     if not dry_run:
         from src.services.slack_tokens import slack_globally_enabled
         slack_on = await slack_globally_enabled(session)
         if slack_on:
-            from slack_sdk import WebClient
-            bot_token = getattr(settings, "slack_bot_token_grantbot", "")
-            if not bot_token or bot_token.startswith("xoxb-placeholder"):
-                bot_token = settings.slack_bot_token_su
+            candidate = getattr(settings, "slack_bot_token_grantbot", "")
+            if not candidate or candidate.startswith("xoxb-placeholder"):
+                candidate = settings.slack_bot_token_su
                 logger.info("No grantbot Slack token — using SuBot's token as fallback")
-            if bot_token and not bot_token.startswith("xoxb-placeholder"):
-                slack_client = WebClient(token=bot_token)
-                _ensure_channel_membership(slack_client, {item.get("channel", channel) for item in to_post})
+            if candidate and not candidate.startswith("xoxb-placeholder"):
+                bot_token = candidate
+                _ensure_channel_membership(
+                    bot_token, {item.get("channel", channel) for item in to_post}
+                )
         else:
             logger.info("Slack disabled — GrantBot posting funding opportunities to the DB")
 
@@ -570,8 +632,10 @@ async def _run_grantbot_with_session(
             # Slack off — write the funding post straight to agent_messages so
             # the sim scans it (funding threads are open to all). Keep the claim.
             try:
-                await _post_funding_to_db(session, target_channel, full_post)
-                logger.info("Posted opportunity %s to #%s (DB)", opp_num, target_channel)
+                await _post_one_opportunity(
+                    session, channel=target_channel, full_post=full_post,
+                    opp_num=opp_num,
+                )
             except Exception as exc:
                 logger.error("Failed to persist %s to #%s: %s", opp_num, target_channel, exc)
                 await _release_foa(session, opp_num)
@@ -579,15 +643,17 @@ async def _run_grantbot_with_session(
             posted_list.append({"number": opp_num, "title": title, "channel": target_channel})
             continue
 
-        if not slack_client:
-            # Slack on but no usable token/client. Release the claim so a future
-            # run with credentials can post this FOA.
+        if not bot_token:
+            # Slack on but no usable token. Release the claim so a future run with
+            # credentials can post this FOA.
             await _release_foa(session, opp_num)
             continue
 
         try:
-            slack_client.chat_postMessage(channel=f"#{target_channel}", text=full_post)
-            logger.info("Posted opportunity %s to #%s", opp_num, target_channel)
+            await _post_one_opportunity(
+                session, channel=target_channel, full_post=full_post,
+                opp_num=opp_num, token=bot_token,
+            )
         except Exception as exc:
             logger.error("Failed to post %s to #%s: %s", opp_num, target_channel, exc)
             await _release_foa(session, opp_num)
