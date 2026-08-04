@@ -1,7 +1,6 @@
 """CoPI CLI — seed-profile, seed-profiles, admin:grant, admin:revoke."""
 
 import asyncio
-import uuid
 
 import typer
 from rich.console import Console
@@ -19,6 +18,7 @@ def _run(coro):
 async def _get_db():
     """Get an async database session."""
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
     from src.config import get_settings
     settings = get_settings()
     engine = create_async_engine(settings.database_url)
@@ -29,6 +29,7 @@ async def _get_db():
 async def _seed_one_orcid(orcid: str, run_pipeline: bool = True) -> None:
     """Create user record and optionally enqueue profile generation for one ORCID."""
     from sqlalchemy import select
+
     from src.models import Job, User
     from src.services.orcid import fetch_orcid_profile
 
@@ -110,6 +111,7 @@ def admin_grant(
     """Grant admin privileges to a user by ORCID."""
     async def _grant() -> bool:
         from sqlalchemy import select
+
         from src.models import User
         engine, factory = await _get_db()
         try:
@@ -140,6 +142,7 @@ def admin_revoke(
     """Revoke admin privileges from a user by ORCID."""
     async def _revoke() -> bool:
         from sqlalchemy import select
+
         from src.models import User
         engine, factory = await _get_db()
         try:
@@ -165,6 +168,7 @@ def list_users():
     """List all users in the database."""
     async def _list():
         from sqlalchemy import select
+
         from src.models import User
         engine, factory = await _get_db()
         async with factory() as db:
@@ -197,6 +201,7 @@ def regenerate_profiles():
     """Enqueue profile regeneration jobs for all users with an ORCID."""
     async def _regenerate():
         from sqlalchemy import select
+
         from src.models import Job, User
         engine, factory = await _get_db()
         async with factory() as db:
@@ -224,7 +229,9 @@ def backfill_profile_revisions():
     """Create initial ProfileRevision rows from existing profile files on disk."""
     async def _backfill():
         from pathlib import Path
+
         from sqlalchemy import select
+
         from src.models import AgentRegistry
         from src.services.profile_versioning import create_revision, latest_revision
 

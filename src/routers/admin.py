@@ -3,7 +3,7 @@
 import logging
 import re
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, status
@@ -486,7 +486,6 @@ async def admin_discussions(
     current_user: User = Depends(get_admin_user),
 ):
     """Discussion summary: threads grouped by status."""
-    from sqlalchemy import case, distinct, literal, text
 
     # Pick which simulation run to show
     runs_result = await db.execute(
@@ -889,7 +888,7 @@ async def admin_approve_agent(
 
     if agent.status == "pending":
         agent.status = "active"
-        agent.approved_at = datetime.now(timezone.utc)
+        agent.approved_at = datetime.now(UTC)
         agent.approved_by = current_user.id
     elif agent_status in VALID_AGENT_STATUSES:
         agent.status = agent_status
@@ -1313,7 +1312,7 @@ async def admin_waitlist_mark_contacted(
     )
     signup = result.scalar_one_or_none()
     if signup:
-        signup.contacted_at = datetime.now(timezone.utc)
+        signup.contacted_at = datetime.now(UTC)
         await db.commit()
     return RedirectResponse(url="/admin/waitlist", status_code=302)
 

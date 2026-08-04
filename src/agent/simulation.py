@@ -7,15 +7,12 @@ import random
 import re
 import time
 import uuid
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from src.agent.agent import PROFILES_DIR, Agent
 from src.agent.channels import SEEDED_CHANNELS
 from src.agent.foa_cache import extract_foa_number, format_foa_for_prompt
-from src.agent.ids import WRITER_ENGINE, TsMinter
-from src.agent.prompt_safety import delimit
 from src.agent.funding_rules import (
     format_funding_thread_summary,
     format_your_prior_messages,
@@ -23,14 +20,23 @@ from src.agent.funding_rules import (
     is_announcement_only_funding_reply,
     summarize_funding_thread,
 )
+from src.agent.ids import WRITER_ENGINE, TsMinter
 from src.agent.message_log import LogEntry, MessageLog, is_funding_post
+from src.agent.prompt_safety import delimit
 from src.agent.slack_client import SlackListingIncomplete, ThreadNotFound
 from src.agent.state import PostRef, ProposalRef, ThreadState
-from src.services.cohorts import compute_gates, summarise_gates
 from src.agent.tools import TOOL_DEFINITIONS, execute_tool
 from src.config import get_settings
-from src.models import AgentChannel, AgentMessage, LlmCallLog, ProposalReview, SimulationRun, ThreadDecision
+from src.models import (
+    AgentChannel,
+    AgentMessage,
+    LlmCallLog,
+    ProposalReview,
+    SimulationRun,
+    ThreadDecision,
+)
 from src.models.agent_activity import VISIBILITY_COLLAB_PRIVATE, VISIBILITY_PUBLIC
+from src.services.cohorts import compute_gates, summarise_gates
 from src.services.llm import (
     generate_agent_response,
     generate_with_tools,
@@ -162,7 +168,7 @@ PI_INBOX_LOOKBACK_S = 300.0
 PI_INBOX_LOOKBACK = timedelta(seconds=PI_INBOX_LOOKBACK_S)
 
 # Cursor value meaning "nothing seen yet" — every real created_at sorts after it.
-EPOCH_UTC = datetime.fromtimestamp(0, tz=timezone.utc)
+EPOCH_UTC = datetime.fromtimestamp(0, tz=UTC)
 
 # The run's total_messages / total_api_calls are cosmetic counters shown in the
 # admin UI. Recomputing total_messages with a full COUNT(*) on every flush is
@@ -363,7 +369,7 @@ class SimulationEngine:
             return True  # run forever (until SIGTERM)
         if not self._start_time:
             return True
-        elapsed = (datetime.now(timezone.utc) - self._start_time).total_seconds()
+        elapsed = (datetime.now(UTC) - self._start_time).total_seconds()
         return elapsed < self.max_runtime_minutes * 60
 
     def _agent_within_budget(self, agent: Agent) -> bool:
@@ -400,7 +406,7 @@ class SimulationEngine:
 
     async def start(self) -> None:
         """Run the full simulation."""
-        self._start_time = datetime.now(timezone.utc)
+        self._start_time = datetime.now(UTC)
         self._running = True
         settings = get_settings()
 
@@ -592,7 +598,7 @@ class SimulationEngine:
             return
         try:
             await asyncio.wait_for(self._stop_event.wait(), timeout=delay)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pass
 
     async def stop(self) -> None:
@@ -1563,6 +1569,7 @@ class SimulationEngine:
             return
         try:
             from sqlalchemy import select as sa_select
+
             from src.models import AgentChannel, PrivateChannelMember
 
             async with self.session_factory() as db:
@@ -2659,6 +2666,7 @@ class SimulationEngine:
             return
         from sqlalchemy import func as sa_func
         from sqlalchemy import select as sa_select
+
         from src.models import PiDmMessage
         try:
             async with self.session_factory() as db:
@@ -2694,6 +2702,7 @@ class SimulationEngine:
         if not self._pi_handler or not self.session_factory or not self.simulation_run_id:
             return
         from sqlalchemy import select as sa_select
+
         from src.models import PiDmMessage
         floor = self._pi_dm_cursor - PI_INBOX_LOOKBACK
         try:
@@ -3050,6 +3059,7 @@ class SimulationEngine:
             return
         try:
             from sqlalchemy import select
+
             from src.models import AgentRegistry
             async with self.session_factory() as db:
                 result = await db.execute(
@@ -3143,6 +3153,7 @@ class SimulationEngine:
         if not self.session_factory or not self.simulation_run_id:
             return
         from sqlalchemy import select as sa_select
+
         from src.agent.channels import record_channel_created
         try:
             async with self.session_factory() as db:
@@ -4656,6 +4667,7 @@ Keep it concise — under 300 words.""",
             if self.session_factory:
                 try:
                     from sqlalchemy import select as sa_sel
+
                     from src.models import AgentRegistry
                     from src.services.profile_versioning import create_revision
                     async with self.session_factory() as db:

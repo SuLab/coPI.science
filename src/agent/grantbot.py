@@ -14,7 +14,7 @@ GrantBot is independent of the simulation engine. It:
 import asyncio
 import json
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -141,7 +141,7 @@ def _parse_close_date(raw: str) -> datetime | None:
         return None
     for fmt in ("%m/%d/%Y", "%Y-%m-%d", "%Y/%m/%d"):
         try:
-            return datetime.strptime(raw, fmt).replace(tzinfo=timezone.utc)
+            return datetime.strptime(raw, fmt).replace(tzinfo=UTC)
         except ValueError:
             continue
     return None
@@ -512,7 +512,7 @@ async def _run_grantbot_with_session(
 
     # 2b. Drop FOAs with insufficient lead time — labs can't prepare a credible
     #     response for a deadline a few days out. See MIN_LEAD_DAYS.
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     short_lead: list[tuple[str, str]] = []
     kept: dict[str, dict] = {}
     for num, opp in all_opps.items():
@@ -674,7 +674,7 @@ LAST_RUN_FILE = Path("data/grantbot_last_run.txt")
 
 def _should_run_today() -> bool:
     """Return True if grantbot hasn't completed a run today (UTC)."""
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today = datetime.now(UTC).strftime("%Y-%m-%d")
     if LAST_RUN_FILE.exists():
         last_date = LAST_RUN_FILE.read_text(encoding="utf-8").strip()
         return last_date != today
@@ -684,7 +684,7 @@ def _should_run_today() -> bool:
 def _mark_run_complete() -> None:
     """Record that grantbot ran today."""
     LAST_RUN_FILE.parent.mkdir(parents=True, exist_ok=True)
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today = datetime.now(UTC).strftime("%Y-%m-%d")
     LAST_RUN_FILE.write_text(today, encoding="utf-8")
 
 
@@ -733,7 +733,7 @@ def scheduler(
     logger.info("GrantBot scheduler started (run_hour=%d UTC, check every %ds)", run_hour, check_interval)
 
     while True:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         if _should_run_today() and now.hour >= run_hour:
             logger.info("Running daily grant search...")
             try:

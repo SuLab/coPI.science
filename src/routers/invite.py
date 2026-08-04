@@ -1,7 +1,7 @@
 """Invitation acceptance router."""
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -56,7 +56,7 @@ async def accept_invite(
         )
 
     # Check expiry
-    if invitation.expires_at < datetime.now(timezone.utc):
+    if invitation.expires_at < datetime.now(UTC):
         if invitation.status == "pending":
             invitation.status = "expired"
             await db.commit()
@@ -145,7 +145,7 @@ async def confirm_accept_invite(
             {"request": request, "error": "This invitation is no longer valid."},
         )
 
-    if invitation.expires_at < datetime.now(timezone.utc):
+    if invitation.expires_at < datetime.now(UTC):
         invitation.status = "expired"
         await db.commit()
         return templates.TemplateResponse(
@@ -198,7 +198,7 @@ async def _accept_invitation(
         # Already a delegate — just mark invitation and redirect
         invitation.status = "accepted"
         invitation.accepted_by_user_id = user.id
-        invitation.accepted_at = datetime.now(timezone.utc)
+        invitation.accepted_at = datetime.now(UTC)
         await db.commit()
 
         # Get agent_id for redirect
@@ -221,7 +221,7 @@ async def _accept_invitation(
     # Mark invitation accepted
     invitation.status = "accepted"
     invitation.accepted_by_user_id = user.id
-    invitation.accepted_at = datetime.now(timezone.utc)
+    invitation.accepted_at = datetime.now(UTC)
 
     # Try Slack sync
     agent_result = await db.execute(

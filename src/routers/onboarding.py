@@ -10,8 +10,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.database import get_db
 from src.dependencies import get_current_user
-from src.routers.auth import pop_post_login_redirect
 from src.models import AgentRegistry, Job, ResearcherProfile, User
+from src.routers.auth import pop_post_login_redirect
 from src.services.profile_export import (
     PRIVATE_PROFILES_DIR,
     export_private_profile,
@@ -163,8 +163,8 @@ async def save_profile(
     agent_id_for_export = agent_reg.agent_id if agent_reg else None
 
     # Export to markdown for agent consumption (include publications)
-    from src.services.profile_export import export_profile_to_markdown
     from src.models import Publication
+    from src.services.profile_export import export_profile_to_markdown
     pub_result = await db.execute(
         select(Publication).where(Publication.user_id == current_user.id)
     )

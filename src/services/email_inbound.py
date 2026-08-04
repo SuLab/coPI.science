@@ -5,7 +5,6 @@ import json
 import logging
 import re
 import secrets
-from datetime import datetime, timezone
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker

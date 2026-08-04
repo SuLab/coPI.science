@@ -73,6 +73,19 @@ markers = [
 [tool.coverage.run]
 branch = true
 source = ["src"]
+# Without this, every coverage number this project has ever reported is wrong —
+# understated, and unevenly so. SQLAlchemy's asyncio layer runs ORM work inside
+# greenlets, and coverage's tracer loses the frame across a greenlet switch. The
+# symptom is precise: in an async route handler, the statement holding the FIRST
+# `await db.execute(...)` is recorded and everything after it is reported missing,
+# even in handlers the tests demonstrably drive to completion. Measured on
+# src/routers/admin.py against the same suite and the same commit: 19% without
+# this line, 41% with it (484 vs 359 statements missed). So the shortfall is
+# largest in exactly the modules that talk to the database most.
+#
+# COV_MIN in scripts/ci.sh is a ratchet floor, so it was set against suppressed
+# data and is safe to raise once a real figure is measured — see that script.
+concurrency = ["thread", "greenlet"]
 
 [tool.coverage.report]
 show_missing = false

@@ -3,6 +3,7 @@
 import logging
 import re
 import uuid
+from datetime import UTC
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
@@ -25,7 +26,7 @@ from src.models import (
     ThreadDecision,
     User,
 )
-from src.services.profile_export import export_private_profile, export_profile_to_markdown
+from src.services.profile_export import export_profile_to_markdown
 from src.services.validators import is_valid_email
 
 logger = logging.getLogger(__name__)
@@ -1286,7 +1287,7 @@ async def invite_delegate(
     """Send delegate invitation(s) by email."""
     import re
     import secrets
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
 
     from src.config import get_settings
     from src.models import DelegateInvitation
@@ -1353,7 +1354,7 @@ async def invite_delegate(
             email=email,
             token=token,
             status="pending",
-            expires_at=datetime.now(timezone.utc) + timedelta(days=30),
+            expires_at=datetime.now(UTC) + timedelta(days=30),
         )
         db.add(invitation)
         await db.flush()  # Get the ID

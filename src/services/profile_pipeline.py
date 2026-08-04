@@ -16,7 +16,7 @@ Implements the pipeline from profile-ingestion.md:
 import hashlib
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import select
@@ -415,7 +415,7 @@ async def run_profile_pipeline(
             profile.evidence_pmid_count = evidence_pmid_count
             profile.evidence_pub_count = evidence_pub_count
             profile.profile_version = (profile.profile_version or 0) + 1
-            profile.profile_generated_at = datetime.now(timezone.utc)
+            profile.profile_generated_at = datetime.now(UTC)
 
             if not validated:
                 logger.error(
