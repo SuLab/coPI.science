@@ -228,9 +228,9 @@ async def _post_one_opportunity(
         )
         return [{"ts": None, "channel": channel, "text": c} for c in chunks]
 
-    from src.services.slack_web import post_message
+    from src.services.slack_web import post_message_async
 
-    posted = post_message(token, f"#{channel}", full_post)
+    posted = await post_message_async(token, f"#{channel}", full_post)
     logger.info(
         "Posted opportunity %s to #%s in %d message(s)", opp_num, channel, len(posted),
     )
@@ -597,8 +597,12 @@ async def _run_grantbot_with_session(
                 logger.info("No grantbot Slack token — using SuBot's token as fallback")
             if candidate and not candidate.startswith("xoxb-placeholder"):
                 bot_token = candidate
-                _ensure_channel_membership(
-                    bot_token, {item.get("channel", channel) for item in to_post}
+                # to_thread: the helper is sync and makes paginated Slack calls
+                # with backoff, and this caller is async. Run inline it would hold
+                # the event loop for the whole listing plus any retry.
+                await asyncio.to_thread(
+                    _ensure_channel_membership,
+                    bot_token, {item.get("channel", channel) for item in to_post},
                 )
         else:
             logger.info("Slack disabled — GrantBot posting funding opportunities to the DB")

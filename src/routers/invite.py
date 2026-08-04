@@ -232,11 +232,11 @@ async def _accept_invitation(
     if user.email:
         try:
             from src.services.slack_tokens import token_for_agent_row
-            from src.services.slack_web import lookup_user_by_email
+            from src.services.slack_web import lookup_user_by_email_async
 
             bot_token = token_for_agent_row(agent)
             if bot_token:
-                sid = lookup_user_by_email(bot_token, user.email)
+                sid = await lookup_user_by_email_async(bot_token, user.email)
                 if sid:
                     current_ids = list(agent.delegate_slack_ids or [])
                     if sid not in current_ids:

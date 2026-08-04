@@ -1,5 +1,6 @@
 """My Agent page router."""
 
+import asyncio
 import logging
 import re
 import uuid
@@ -287,8 +288,13 @@ async def agent_dashboard(
     delegates = []
     if agent.delegate_slack_ids:
         from src.services.slack_tokens import get_any_bot_token
-        delegates = _resolve_delegate_names(
-            agent.delegate_slack_ids, await get_any_bot_token(db)
+        # to_thread because _resolve_delegate_names is sync and calls
+        # slack_web.get_user_info once per delegate, each of which can retry with
+        # backoff. Run inline it would block the event loop for every other
+        # request the process is serving, not just this dashboard render.
+        delegates = await asyncio.to_thread(
+            _resolve_delegate_names,
+            agent.delegate_slack_ids, await get_any_bot_token(db),
         )
 
     # Pending invitations (for PI view)
@@ -632,15 +638,15 @@ async def reopen_proposal(
                 # thread_ts precisely so this caller does not need a raw client.
                 # It also splits at 4000 characters, which the raw call did not —
                 # long PI guidance was silently chunked by Slack.
-                from src.services.slack_web import list_channel_ids, post_message
+                from src.services.slack_web import list_channel_ids_async, post_message_async
 
                 bot_token = token_for_agent_row(agent)
                 if not bot_token:
                     raise HTTPException(status_code=500, detail="No bot token available")
-                channel_id = list_channel_ids(bot_token).get(td.channel)
+                channel_id = (await list_channel_ids_async(bot_token)).get(td.channel)
                 if not channel_id:
                     raise HTTPException(status_code=500, detail=f"Channel #{td.channel} not found")
-                post_message(
+                await post_message_async(
                     bot_token,
                     channel_id,
                     f"*PI guidance from {current_user.name}:*\n\n{guidance}",
@@ -1153,7 +1159,7 @@ async def connect_slack(
 
     try:
         from src.services.slack_tokens import get_any_bot_token
-        from src.services.slack_web import lookup_user_by_email
+        from src.services.slack_web import lookup_user_by_email_async
 
         bot_token = await get_any_bot_token(db)
         if not bot_token:
@@ -1162,7 +1168,7 @@ async def connect_slack(
             # The boundary translates Slack's users_not_found into None, so "no
             # such user" is a return value here rather than a substring match on
             # an exception message.
-            slack_user_id = lookup_user_by_email(bot_token, email)
+            slack_user_id = await lookup_user_by_email_async(bot_token, email)
             if not slack_user_id:
                 error = (
                     f"No Slack user found with email {email}. "
@@ -1235,7 +1241,7 @@ async def delegate_connect_slack(
     error = None
     try:
         from src.services.slack_tokens import get_any_bot_token
-        from src.services.slack_web import lookup_user_by_email
+        from src.services.slack_web import lookup_user_by_email_async
 
         bot_token = await get_any_bot_token(db)
         if not bot_token:
@@ -1244,7 +1250,7 @@ async def delegate_connect_slack(
             # None means Slack has no such user (the boundary translates
             # users_not_found), so the "join the workspace first" message is
             # driven by a value rather than by a substring of an exception.
-            sid = lookup_user_by_email(bot_token, current_user.email)
+            sid = await lookup_user_by_email_async(bot_token, current_user.email)
             if not sid:
                 error = (
                     f"No Slack account found for {current_user.email}. "
@@ -1432,11 +1438,11 @@ async def remove_delegate(
         if delegate.user.email and agent.delegate_slack_ids:
             try:
                 from src.services.slack_tokens import get_any_bot_token
-                from src.services.slack_web import lookup_user_by_email
+                from src.services.slack_web import lookup_user_by_email_async
 
                 bot_token = await get_any_bot_token(db)
                 if bot_token:
-                    sid = lookup_user_by_email(bot_token, delegate.user.email)
+                    sid = await lookup_user_by_email_async(bot_token, delegate.user.email)
                     current_ids = list(agent.delegate_slack_ids or [])
                     if sid and sid in current_ids:
                         current_ids.remove(sid)

@@ -148,3 +148,77 @@ def test_post_message_omits_thread_ts_entirely_when_not_threading(monkeypatch):
     slack_web.post_message("xoxb-test", "#general", "top level")
 
     assert "thread_ts" not in client.chat_postMessage.call_args.kwargs
+
+
+# ---------------------------------------------------------------------------
+# The async wrappers. Six of the seven call sites are FastAPI route handlers, and
+# _call sleeps synchronously between retries, so calling the sync functions from
+# an `async def` stalls the event loop for every request the process is serving —
+# strictly worse than the raw WebClient they replaced, which had no retry at all.
+# ---------------------------------------------------------------------------
+
+
+async def test_the_async_wrapper_runs_the_blocking_call_off_the_event_loop(monkeypatch):
+    """The sync body must execute on a worker thread, not the loop's thread."""
+    import threading
+
+    loop_thread = threading.get_ident()
+    seen: dict[str, int] = {}
+
+    def _record(**kw):
+        seen["thread"] = threading.get_ident()
+        return _resp({"user": {"id": "U1"}})
+
+    client = MagicMock()
+    client.users_lookupByEmail.side_effect = _record
+    monkeypatch.setattr(slack_web, "_client", lambda _t: client)
+
+    assert await slack_web.lookup_user_by_email_async("xoxb-test", "a@b.org") == "U1"
+    assert seen["thread"] != loop_thread, (
+        "the blocking Slack call ran on the event loop's own thread — one 429 "
+        "would freeze every other request in the process"
+    )
+
+
+async def test_every_sync_entry_point_has_an_async_wrapper():
+    """A future call site must not have to choose the blocking variant by accident."""
+    for name in ("list_channel_ids", "lookup_user_by_email", "get_user_info",
+                 "join_channel", "post_message"):
+        assert hasattr(slack_web, f"{name}_async"), f"missing {name}_async"
+        assert f"{name}_async" in slack_web.__all__
+
+
+def test_an_outsized_retry_after_is_capped(monkeypatch):
+    """Slack can ask for a minute. Three of those would hold a request for minutes.
+
+    The cap bounds request latency; it is only safe to sleep at all because the
+    async callers reach this through the _async wrappers.
+    """
+    slept: list[float] = []
+    monkeypatch.setattr(slack_web.time, "sleep", lambda d: slept.append(d))
+
+    err = SlackApiError("ratelimited", _resp({"error": "ratelimited"}))
+    err.response.headers = {"Retry-After": "600"}
+    client = MagicMock()
+    client.users_lookupByEmail.side_effect = [err, _resp({"user": {"id": "U2"}})]
+    monkeypatch.setattr(slack_web, "_client", lambda _t: client)
+
+    assert slack_web.lookup_user_by_email("xoxb-test", "a@b.org") == "U2"
+    assert slept == [slack_web._MAX_RETRY_AFTER], (
+        f"slept {slept} instead of capping at {slack_web._MAX_RETRY_AFTER}s"
+    )
+
+
+def test_a_modest_retry_after_is_honoured_exactly(monkeypatch):
+    """Under the cap, obey Slack — guessing is how a throttled bot gets blocked."""
+    slept: list[float] = []
+    monkeypatch.setattr(slack_web.time, "sleep", lambda d: slept.append(d))
+
+    err = SlackApiError("ratelimited", _resp({"error": "ratelimited"}))
+    err.response.headers = {"Retry-After": "7"}
+    client = MagicMock()
+    client.users_lookupByEmail.side_effect = [err, _resp({"user": {"id": "U3"}})]
+    monkeypatch.setattr(slack_web, "_client", lambda _t: client)
+
+    slack_web.lookup_user_by_email("xoxb-test", "a@b.org")
+    assert slept == [7.0]

@@ -12,11 +12,15 @@ This module is the second half of that boundary. `tests/unit/test_slack_boundary
 asserts that `slack_sdk` is imported in exactly two modules, so a ninth bypass is
 a failing test rather than a defect discovered in production.
 
-Synchronous on purpose: every caller is either a sync route helper or GrantBot,
-and slack_sdk's async client would push an event loop into paths that have none.
+The core is synchronous, because ``slack_sdk.WebClient`` is and because GrantBot
+and one route helper have no event loop. **Async callers must use the ``_async``
+wrappers at the bottom of this module, not the sync functions.** Six of the seven
+call sites are FastAPI route handlers, and a synchronous ``time.sleep`` inside one
+of those stalls the whole event loop, not just that request — see ``_call``.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from typing import Any
@@ -36,6 +40,13 @@ logger = logging.getLogger(__name__)
 
 _MAX_ATTEMPTS = 4
 _BACKOFF_BASE = 0.5
+# Slack can answer a 429 with Retry-After in the tens of seconds. Honouring it
+# exactly is right for not getting throttled harder, but three of them would hold a
+# request for minutes, so it is capped and the cap is logged. The cap is only safe
+# because async callers reach this through the _async wrappers, which run it in a
+# worker thread — a bare time.sleep on a route handler's own thread would block
+# every other request in the process, not just this one.
+_MAX_RETRY_AFTER = 30.0
 
 # Errors that mean "this call will never work", so retrying is pointless.
 # ``user_not_found`` is users.info's spelling and ``users_not_found`` is
@@ -50,10 +61,15 @@ _TERMINAL = frozenset({
 __all__ = [
     "SlackListingIncomplete",
     "get_user_info",
+    "get_user_info_async",
     "join_channel",
+    "join_channel_async",
     "list_channel_ids",
+    "list_channel_ids_async",
     "lookup_user_by_email",
+    "lookup_user_by_email_async",
     "post_message",
+    "post_message_async",
 ]
 
 
@@ -90,9 +106,15 @@ def _call(client: WebClient, method: str, **kwargs: Any) -> Any:
                 retry_after = (getattr(exc.response, "headers", {}) or {}).get("Retry-After")
                 if retry_after is not None:
                     try:
-                        delay = float(retry_after)
+                        asked = float(retry_after)
                     except (TypeError, ValueError):
-                        pass
+                        asked = delay
+                    if asked > _MAX_RETRY_AFTER:
+                        logger.warning(
+                            "[slack_web] %s asked for Retry-After=%.0fs; capping at %.0fs",
+                            method, asked, _MAX_RETRY_AFTER,
+                        )
+                    delay = min(asked, _MAX_RETRY_AFTER)
             logger.warning("[slack_web] %s failed (%s); retrying in %.1fs", method, code, delay)
             if delay > 0:
                 time.sleep(delay)
@@ -224,3 +246,55 @@ def post_message(
             "thread_ts": thread_ts,
         })
     return posted
+
+
+# ---------------------------------------------------------------------------
+# Async wrappers — the entry point for every FastAPI route handler.
+#
+# The sync functions above call slack_sdk, which blocks on network I/O, and _call
+# adds up to three time.sleep()s on top of that. Called directly from an `async
+# def` route those block the event loop, so ONE throttled Slack call freezes every
+# other request the process is serving. That is strictly worse than the raw
+# WebClient these functions replaced: it had no retry, so its worst case was a
+# single blocking HTTP call rather than four plus backoff.
+#
+# asyncio.to_thread moves the whole thing to a worker thread, so the wait costs
+# that request its latency and nothing else. Six of the seven call sites are async;
+# GrantBot and _resolve_delegate_names are sync and use the plain functions.
+# ---------------------------------------------------------------------------
+
+
+async def list_channel_ids_async(
+    token: str,
+    *,
+    include_private: bool = True,
+    exclude_archived: bool = False,
+) -> dict[str, str]:
+    """``list_channel_ids`` off the event loop."""
+    return await asyncio.to_thread(
+        list_channel_ids, token,
+        include_private=include_private, exclude_archived=exclude_archived,
+    )
+
+
+async def lookup_user_by_email_async(token: str, email: str) -> str | None:
+    """``lookup_user_by_email`` off the event loop."""
+    return await asyncio.to_thread(lookup_user_by_email, token, email)
+
+
+async def get_user_info_async(token: str, user_id: str) -> dict[str, Any] | None:
+    """``get_user_info`` off the event loop."""
+    return await asyncio.to_thread(get_user_info, token, user_id)
+
+
+async def join_channel_async(token: str, channel_id: str) -> None:
+    """``join_channel`` off the event loop."""
+    return await asyncio.to_thread(join_channel, token, channel_id)
+
+
+async def post_message_async(
+    token: str, channel: str, text: str, *, thread_ts: str | None = None
+) -> list[dict[str, Any]]:
+    """``post_message`` off the event loop."""
+    return await asyncio.to_thread(
+        post_message, token, channel, text, thread_ts=thread_ts)

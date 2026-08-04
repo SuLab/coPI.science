@@ -139,7 +139,11 @@ FLOWS: dict[str, dict] = {
              "stands in for the ORCID-fed pipeline"),
             ("open", "/onboarding", "now renders the editable review form"),
             ("click", "Save & Continue", "POST /onboarding/save-profile"),
-            ("click", "Save & Complete Onboarding", "POST /onboarding/complete"),
+            # The button lives in private_profile.html and always posted here;
+            # this note said POST /onboarding/complete, which was wrong even
+            # before that duplicate route was deleted for setting
+            # onboarding_complete with no validation.
+            ("click", "Save & Complete Onboarding", "POST /onboarding/private-profile"),
         ],
         "expect": [
             "onboarding_complete=1",

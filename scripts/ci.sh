@@ -144,7 +144,11 @@ else
     # Fixed container name, removed up front as well as on exit, so a run that was
     # killed mid-flight cannot wedge the next one. ci.sh is a serial pre-push gate;
     # two concurrent runs would collide on the port regardless of the name.
-    trap migcheck_cleanup EXIT
+    # INT and TERM as well as EXIT: this gate runs for ~6 minutes, so Ctrl-C
+    # partway through is the likely case, and a leaked container keeps
+    # MIGCHECK_PORT bound — the next run would then fail its readiness wait and
+    # look like a broken migration rather than a stale container.
+    trap migcheck_cleanup EXIT INT TERM
     migcheck_cleanup
     docker run -d --name "$MIGCHECK_CONTAINER" \
       -e POSTGRES_USER=copi -e POSTGRES_PASSWORD=copi -e POSTGRES_DB=copi_migcheck \

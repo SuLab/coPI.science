@@ -531,19 +531,19 @@ async def _handle_instruction(
             # precisely so this caller does not need a raw client. It also splits
             # at 4000 characters, which the raw call did not — a long emailed
             # instruction was silently chunked by Slack.
-            from src.services.slack_web import list_channel_ids, post_message
+            from src.services.slack_web import list_channel_ids_async, post_message_async
 
             bot_token = token_for_agent_row(agent)
             if not bot_token:
                 logger.error("No bot token for agent %s", agent.agent_id)
                 return False
 
-            channel_id = list_channel_ids(bot_token).get(td.channel)
+            channel_id = (await list_channel_ids_async(bot_token)).get(td.channel)
             if not channel_id:
                 logger.error("Channel #%s not found for instruction posting", td.channel)
                 return False
 
-            post_message(
+            await post_message_async(
                 bot_token,
                 channel_id,
                 f"*PI guidance from {user.name} (via email):*\n\n{instruction}",

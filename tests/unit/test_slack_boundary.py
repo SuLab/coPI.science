@@ -17,6 +17,14 @@ ALLOWED = {
     "services/slack_web.py",   # the web/service boundary
 }
 
+# Known limitation, stated so nobody mistakes this for airtight: the check is
+# static and line-based, so `importlib.import_module("slack_sdk")` or
+# `__import__` would slip past it. Neither appears anywhere in src/ today
+# (verified), and a dynamic import of a transport is odd enough to notice in
+# review. What this test does buy is that the ordinary way to bypass the
+# boundary — writing `from slack_sdk import WebClient` in a route — is a build
+# failure rather than a defect found in production.
+
 _IMPORT = re.compile(r"^\s*(?:from\s+slack_sdk[.\w]*\s+import|import\s+slack_sdk)", re.M)
 
 

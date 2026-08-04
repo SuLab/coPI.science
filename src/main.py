@@ -93,8 +93,14 @@ class AgentBadgeMiddleware(BaseHTTPMiddleware):
                             reviewed = reviewed_result.scalar() or 0
                             badge_count += max(0, total - reviewed)
                         request.state.agent_badge_count = badge_count
-            except Exception:
-                pass
+            except Exception as exc:
+                # Deliberately swallowed: this middleware only computes a nav
+                # badge count, and no page should 500 because a count failed.
+                # But it is LOGGED — the last bare `except Exception: pass` in
+                # src/ hid a dead import in invite.py for an unknown length of
+                # time (the delegate Slack sync never ran once), so a silent
+                # swallow here would hide a broken query just as well.
+                logger.warning("Badge-count middleware failed, continuing: %s", exc)
         return await call_next(request)
 
 
