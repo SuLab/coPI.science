@@ -539,7 +539,18 @@ async def _run_grantbot_with_session(
     logger.info("Selected %d opportunities for posting", len(selected_opps))
 
     # 4. Fetch details for selected opportunities
+    #
+    # The fallback to the search-shaped `opp` is deliberate — a post with no
+    # description beats no post. But it used to be SILENT, and that hid an
+    # upstream outage completely: measured 2026-08-04, grants.gov's detail
+    # backend answered every id with an outer "Webservice Succeeds" wrapping an
+    # inner "No response received ... at the backend server", so
+    # fetch_opportunity_detail returned None for 5/5 real ids. Search hits carry
+    # no description either, so every drafted post went to the LLM with an empty
+    # Description field and nothing said so. The tally below is what makes that
+    # visible rather than indistinguishable from a normal quiet run.
     detailed_opps = []
+    detail_misses = 0
     for num, opp in selected_opps.items():
         if opp.get("id"):
             try:
@@ -547,9 +558,19 @@ async def _run_grantbot_with_session(
                 if detail:
                     detailed_opps.append(detail)
                     continue
+                logger.warning("No detail returned for %s (id=%s)", num, opp["id"])
             except Exception as exc:
-                logger.debug("Detail fetch failed for %s: %s", num, exc)
+                logger.warning("Detail fetch failed for %s: %s", num, exc)
+        detail_misses += 1
         detailed_opps.append(opp)
+
+    if detail_misses and detailed_opps:
+        level = logger.error if detail_misses == len(detailed_opps) else logger.warning
+        level(
+            "Grants.gov detail unavailable for %d/%d opportunities — those posts are "
+            "drafted from title and agency alone, with no description",
+            detail_misses, len(detailed_opps),
+        )
 
     # 4b. Cache FOA details locally for agent access
     from src.agent.foa_cache import cache_foa

@@ -72,6 +72,14 @@ async def search_opportunities(
 
     Returns a list of opportunity dicts with keys:
         id, number, title, agency, open_date, close_date, description
+
+    ``description`` is **always** ``""``: search2's ``oppHits`` do not carry one.
+    Measured live 2026-08-04 — a hit's entire key set is agency, agencyCode,
+    cfdaList, closeDate, docType, id, number, openDate, oppStatus, title. The
+    real description lives on the detail endpoint (``fetch_opportunity_detail``).
+    That empty description reaching the drafting prompt is a known, reported bug,
+    pinned by
+    ``test_grantbot_live.py::test_the_draft_prompt_is_built_from_an_empty_description``.
     """
     payload = {
         "keyword": keyword,
@@ -99,6 +107,13 @@ async def search_opportunities(
             "agency": hit.get("agencyCode", ""),
             "open_date": hit.get("openDate", ""),
             "close_date": hit.get("closeDate", ""),
+            # Always "" in practice — search2 sends no description (see the
+            # docstring). The key is kept deliberately: the drafting prompt in
+            # grantbot.py reads it, and that empty-description bug is REPORTED
+            # AND PINNED by
+            # test_grantbot_live.py::test_the_draft_prompt_is_built_from_an_empty_description.
+            # Dropping the key here changes "" to a missing key and fixes nothing,
+            # while breaking the pin that keeps the issue visible.
             "description": hit.get("description", ""),
         })
 
