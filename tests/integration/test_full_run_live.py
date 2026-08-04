@@ -291,20 +291,35 @@ async def full_run(engine, slack_clients, slack_probe_channel, tmp_path, monkeyp
 def _canonical_text(text: str) -> str:
     """Reduce a message to the content both stores can be held to.
 
-    Slack does not store what you posted. Measured against this workspace today, three
-    rewrites happen inside `chat.postMessage` before the text is ever readable back:
+    Slack does not store what you posted. Measured against this workspace, four rewrites
+    happen inside `chat.postMessage` before the text is ever readable back:
 
         'See https://doi.org/10.1038/x'  ->  'See <https://doi.org/10.1038/x>'
         '✅ and ⏸️'                       ->  ':white_check_mark: and :double_vertical_bar:'
         'Contact a@b.edu'                ->  'Contact <mailto:a@b.edu|a@b.edu>'
+        'half-life <2 hours & rising'    ->  'half-life &lt;2 hours &amp; rising'
 
-    Asserting byte equality against that pins Slack's own text normalisation, not our
+    The fourth is HTML escaping of ``<``, ``>`` and ``&``, and it is why this test could
+    not pass before: dropping punctuation reduces the authored ``<2`` to ``2`` but Slack's
+    ``&lt;2`` to ``lt 2``, so any message containing an inequality or an ampersand
+    diverged. Scientific prose is full of them — "<2 hours", ">6 hours", "CRBN & VHL" —
+    so the first live run failed on an agent writing "say <2 hours". Verified by posting
+    both spellings to this workspace: a raw ``<`` comes back as ``&lt;``, and an already
+    escaped ``&lt;`` comes back unchanged. Unescaping first collapses the two spellings
+    onto one, exactly as the emoji handling below collapses its two.
+
+    Asserting byte equality against all that pins Slack's own text normalisation, not our
     mirror (Rule L2), and it fails the moment an agent cites a paper or types a check
-    mark — which is exactly what the ✅ close protocol asks it to do. So: unwrap Slack's
-    link markup, drop emoji in *both* spellings (shortcode and the raw codepoint), drop
-    punctuation, and compare the remaining words. A mirror that posted different content,
-    truncated it, or swapped two messages still fails; Slack's rendering no longer does.
+    mark — which is exactly what the ✅ close protocol asks it to do. So: undo Slack's
+    escaping, unwrap its link markup, drop emoji in *both* spellings (shortcode and the
+    raw codepoint), drop punctuation, and compare the remaining words. A mirror that
+    posted different content, truncated it, or swapped two messages still fails; Slack's
+    rendering no longer does.
     """
+    # Before _NON_WORD: afterwards '&lt;' has already become the word 'lt'. Order
+    # matters more than it looks — &amp;lt; must not double-unescape into '<', so this
+    # is a single pass over the three entities Slack actually emits, not html.unescape.
+    text = text.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
     text = _LINK_LABELLED.sub(r"\1", text)
     text = _LINK_BARE.sub(r"\1", text)
     text = _EMOJI_SHORTCODE.sub(" ", text)
@@ -918,17 +933,12 @@ async def test_a_message_over_slacks_4000_char_limit_stays_in_bijection(full_run
 # ===========================================================================
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "LIVE DEFECT, pre-dating Fix 4 and recorded in 8515f65: the open-thread "
-        "restore in Simulation._rebuild_agent_state does not reconstruct every "
-        "open partnership across a SIGTERM. The DB-side invariant is pinned "
-        "offline in tests/integration/test_state_rebuild.py, which passes — so "
-        "the gap is in the live path (Slack ordering or the shutdown flush), not "
-        "in the rebuild query. Unfixed, not unknown."
-    ),
-)
+# NOT xfailed. It was, on the reasoning that this test's phase B builds a fresh
+# engine so the _rebuild_agent_state idempotency fixes could not have addressed
+# it — reasoning made without credentials to check it. Run live for the first time
+# on 2026-08-04 with all three probe bots, it PASSED, and the strict xfail turned
+# that into a failure, which is the marker doing its job. The defect 8515f65
+# recorded is fixed; the pin is gone rather than relaxed.
 async def test_sigterm_and_restart_lose_nothing_and_duplicate_nothing(full_run):
     """Stop the engine with a real SIGTERM mid-turn, resume the same run, compare stores.
 
