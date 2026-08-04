@@ -146,6 +146,13 @@ services:
     # localhost:8858 (e.g. an SSH tunnel to a remote dev instance).
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    # `default` keeps nginx on the project network (reaches app/postgres by
+    # service name); `copi-edge` is the shared external network the second
+    # (blackbird) stack's app joins so nginx can proxy to blackbird-app:8000.
+    # See ../blackbird-copi-science/SECOND_INSTANCE_SETUP.md.
+    networks:
+      default: {}
+      copi-edge: {}
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/templates/default.conf.template:ro
       - ./certbot/conf:/etc/letsencrypt:ro
@@ -187,3 +194,10 @@ services:
 
 volumes:
   pgdata:
+
+# Shared edge network for cross-stack routing. Created once out-of-band
+# (`docker network create copi-edge`) and referenced as external here so this
+# compose file never tries to create/own it. Only nginx joins it on this side.
+networks:
+  copi-edge:
+    external: true
