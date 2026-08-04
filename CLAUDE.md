@@ -2,9 +2,26 @@
 
 ## Testing
 
-Run `python -m pytest tests/ -v` before committing. All tests must pass.
-Tests run inside Docker: `docker compose exec app python -m pytest tests/ -v`
-(may need `pip install pytest pytest-asyncio` first if the container was rebuilt).
+Run `./scripts/ci.sh` before committing — alembic sanity (single head, no
+duplicate revision ids), `ruff check` on the test suite, then the full pytest run
+with a branch-coverage floor. This is exactly what the `pre-push` hook runs, and
+it is the whole gate: there is no server-side CI.
+
+To run pytest alone **inside the container**, `TEST_DATABASE_URL` is required.
+Without it `tests/conftest.py` falls back to spinning an ephemeral Postgres via
+testcontainers, and the `app` container has no Docker socket — so every test that
+needs a database errors out (469 of them, measured 2026-08-04):
+
+```bash
+docker compose exec -T -e TEST_DATABASE_URL=postgresql+asyncpg://copi:copi@postgres:5432/copi_a3 \
+  app python -m pytest tests/ -v
+```
+
+The named database must already exist — the suite migrates it, it does not create
+it. Add a fresh scratch DB with
+`docker compose exec -T postgres createdb -U copi copi_xN`, and give concurrent
+suites distinct names so they do not migrate each other's schema mid-run. Never
+point `TEST_DATABASE_URL` at `copi`, the dev database.
 
 ## Running the Agent Simulation
 

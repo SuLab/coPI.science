@@ -522,28 +522,32 @@ async def _handle_instruction(
                 logger.error("No simulation run to record email guidance for %s", td.thread_id)
                 return False
 
-            from slack_sdk import WebClient
+            # The channel lookup goes through the boundary. It used to read a
+            # single 200-item page of the paginated conversations.list, so a
+            # workspace with more channels than that reported "Channel not found"
+            # for a channel that exists; list_channel_ids follows every cursor and
+            # raises rather than returning a subset.
+            #
+            # The post goes through it too, threaded: post_message takes thread_ts
+            # precisely so this caller does not need a raw client. It also splits
+            # at 4000 characters, which the raw call did not — a long emailed
+            # instruction was silently chunked by Slack.
+            from src.services.slack_web import list_channel_ids, post_message
+
             bot_token = token_for_agent_row(agent)
             if not bot_token:
                 logger.error("No bot token for agent %s", agent.agent_id)
                 return False
 
-            client = WebClient(token=bot_token)
-            channels_result = client.conversations_list(
-                types="public_channel,private_channel", limit=200
-            )
-            channel_id = None
-            for ch in channels_result.get("channels", []):
-                if ch["name"] == td.channel:
-                    channel_id = ch["id"]
-                    break
+            channel_id = list_channel_ids(bot_token).get(td.channel)
             if not channel_id:
                 logger.error("Channel #%s not found for instruction posting", td.channel)
                 return False
 
-            client.chat_postMessage(
-                channel=channel_id,
-                text=f"*PI guidance from {user.name} (via email):*\n\n{instruction}",
+            post_message(
+                bot_token,
+                channel_id,
+                f"*PI guidance from {user.name} (via email):*\n\n{instruction}",
                 thread_ts=td.thread_id,
             )
             logger.warning(

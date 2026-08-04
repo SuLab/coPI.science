@@ -109,6 +109,10 @@ def slack(monkeypatch) -> _SlackRecorder:
     # AgentSlackClient bound WebClient at import time, so patch that name too —
     # it is the one the private-channel migration would use.
     monkeypatch.setattr("src.agent.slack_client.WebClient", factory)
+    # services/slack_web.py is the web layer's Slack boundary and binds WebClient
+    # at import time as well. Patching only `slack_sdk.WebClient` would leave the
+    # routes' user lookups and channel listing talking to the real workspace.
+    monkeypatch.setattr("src.services.slack_web.WebClient", factory)
     return rec
 
 
@@ -327,15 +331,6 @@ async def test_signup_prefixes_the_first_initial_only_on_a_last_name_collision(
     assert (await _agent_of(db_session, control)).agent_id == "zephyr"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "DEFECT: request_agent() applies the first-initial prefix to agent_id only. "
-        "bot_name is always f'{last_name}Bot', so Peng Wu gets bot_name='WuBot' — "
-        "identical to Chunlei Wu's. CLAUDE.md documents 'pwu / PWuBot' and says the "
-        "web UI applies the logic automatically. Flip this assertion when fixed."
-    ),
-)
 async def test_signup_collision_also_disambiguates_the_bot_name(client, db_session):
     await _signup(client, db_session, "Chunlei Wu", "chunlei@example.org")
     second, _ = await _signup(client, db_session, "Peng Wu", "peng@example.org")
@@ -532,6 +527,53 @@ async def test_reopening_an_already_private_thread_reports_not_implemented(
     # Control: a public-origin proposal on the same route does migrate.
     assert (await _reopen(client, world, world.td, world.pi)).status_code == 302
     assert len(await _private_channels(db_session)) == 1
+
+
+async def test_the_legacy_reopen_finds_a_channel_past_the_first_page(
+    client, db_session, world, slack, monkeypatch
+):
+    """The legacy (``enable_private_refinement=False``) path resolves the channel
+    id through the whole of conversations.list, not just page one.
+
+    It used to call ``conversations_list(limit=200)`` once and scan that page, so
+    a workspace with more channels than fit in one page answered "Channel #x not
+    found" for a channel that exists — defect 11/12. The route now goes through
+    ``slack_web.list_channel_ids``, which follows every cursor, so the target on
+    page **two** below is the whole point of this test.
+    """
+    monkeypatch.setattr(get_settings(), "enable_private_refinement", False)
+    world.agent.slack_bot_token = "xoxb-fake-for-tests"   # flips Slack on
+    await db_session.flush()
+
+    pages = [
+        {"channels": [{"name": "decoy", "id": "C-DECOY"}],
+         "response_metadata": {"next_cursor": "page2"}},
+        {"channels": [{"name": world.td.channel, "id": "C-TARGET"}],
+         "response_metadata": {"next_cursor": ""}},
+    ]
+    seen: list[dict] = []
+
+    def _list(**kwargs):
+        seen.append(kwargs)
+        return pages[len(seen) - 1]
+
+    slack.stub("conversations_list", _list)
+    slack.stub("chat_postMessage", {"ok": True, "ts": "1700000000.000900"})
+
+    assert (await _reopen(client, world, world.td, world.pi)).status_code == 302
+
+    assert len(seen) == 2, "one page only — the pagination defect is back"
+    assert seen[1]["cursor"] == "page2"
+    posted = [kw for name, kw in slack.calls if name == "chat_postMessage"]
+    assert len(posted) == 1
+    assert posted[0]["channel"] == "C-TARGET", (
+        "the channel on page two was not resolved"
+    )
+    assert posted[0]["thread_ts"] == world.td.thread_id, (
+        "the guidance must stay in the proposal thread, not the channel root"
+    )
+    # Legacy path posts in place: no private refinement channel is minted.
+    assert await _private_channels(db_session) == []
 
 
 # ===========================================================================
@@ -775,15 +817,6 @@ async def test_a_delegate_can_link_their_slack_account(client, db_session, world
     assert agent.delegate_slack_ids == ["U-DELEGATE"]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "DEFECT: src/routers/invite.py:235 does `from src.routers.agent_page import "
-        "_get_bot_token`, a symbol that no longer exists. The ImportError is "
-        "swallowed by the surrounding `except Exception: pass`, so the Slack sync "
-        "promised by specs/web-delegates.md §Slack Linkage never runs on acceptance."
-    ),
-)
 async def test_accepting_an_invitation_syncs_the_delegates_slack_id(
     client, db_session, world, slack
 ):
@@ -897,19 +930,6 @@ async def test_posting_an_empty_message_is_rejected(client, db_session, world):
     assert len((await db_session.execute(select(AgentMessage))).scalars().all()) == 1
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "DEFECT (privacy): POST /agent/{agent_id}/message takes channel_name from "
-        "the form and passes it straight to pi_inbox.record_pi_message, which "
-        "resolves any channel in the run with no membership check. A PI can "
-        "therefore write into a collab_private channel that neither they nor their "
-        "agent belong to; the row inherits visibility='collab_private' and the "
-        "engine's _poll_inbound_from_db ingests it into that channel's context. "
-        "specs/privacy-and-channel-visibility.md relies on Slack ACLs for this, "
-        "which do not exist on the DB-only path."
-    ),
-)
 async def test_a_pi_cannot_post_into_another_pairs_private_channel(
     client, db_session, world
 ):

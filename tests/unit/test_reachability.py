@@ -112,12 +112,7 @@ KNOWN_BROKEN_LINKS = {
     ("profile/view.html", "GET", "/profile/review-update"),
 }
 
-KNOWN_DEAD_IMPORTS = {
-    # src/routers/invite.py:235 — agent_page._get_bot_token no longer exists. The
-    # ImportError is swallowed by an enclosing `except Exception: pass`, so the
-    # delegate Slack-ID sync promised by specs/web-delegates.md is dead code.
-    ("src/routers/invite.py", "from src.routers.agent_page import _get_bot_token"),
-}
+KNOWN_DEAD_IMPORTS: set[tuple[str, str]] = set()
 
 
 # ---------------------------------------------------------------------------
@@ -1045,21 +1040,6 @@ def test_defect_get_onboarding_done_is_unreachable():
 def test_defect_profile_review_update_link_is_broken():
     broken = compute_broken_links(template_links(), http_routes(), reachable_templates())
     assert ("profile/view.html", "GET", "/profile/review-update") not in broken
-
-
-@pytest.mark.xfail(
-    strict=True,
-    reason="LIVE DEFECT: src/routers/invite.py imports agent_page._get_bot_token, which "
-    "no longer exists; `except Exception: pass` hides it, so the delegate Slack-ID sync "
-    "in specs/web-delegates.md is dead code.",
-)
-def test_defect_invite_delegate_slack_sync_import_is_dead():
-    dead = compute_dead_imports(import_sites(), GUARDED_IMPORT_ALLOWLIST)
-    assert not [
-        entry
-        for entry in dead
-        if entry[0] == "src/routers/invite.py" and "_get_bot_token" in entry[1]
-    ]
 
 
 # ---------------------------------------------------------------------------
