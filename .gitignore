@@ -74,3 +74,20 @@ data/agent_roster.json
 # mutmut 2.x results cache (scripts/mutation.sh)
 .mutmut-cache
 mutants/
+
+# Local Claude Code state
+.claude/
+
+# Log/backup artifacts (broadens the earlier logs/*.log rule)
+logs/
+
+# One-off scratch scripts and their inputs
+scripts/_*
+
+# Editor/tool backups
+*.bak.*
+
+# Third-party personal data (cohort seed lists, contact lists, CV/web context for
+# profile synthesis, profile QA reviews, decks) lives under the ignored `data/`
+# tree above — see data/cohorts/README.md. This repo is public; the roster of
+# record is Postgres, not git.

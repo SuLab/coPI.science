@@ -1,0 +1,17 @@
+.git
+.gitignore
+certbot
+logs
+data
+*.log
+__pycache__
+**/__pycache__
+*.pyc
+.venv
+venv
+.pytest_cache
+.provision_state.json
+
+# Secrets — never in an image layer (compose injects these at runtime via env_file)
+.env
+.env.*
