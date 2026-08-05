@@ -1567,19 +1567,32 @@ async def admin_cohort_topology_save(
     or partial form can never delete memberships for a cohort or agent it did not
     display — the usual checkbox-matrix data-loss bug. Unknown cohort/agent ids are
     ignored, never written. Every add and remove is audited individually.
+
+    ``present_cohort``/``present_agent`` are filtered down to ids that still exist
+    *before* the cross product is built, not after: the product of two
+    attacker-controlled lists is multiplicative, so crossing them first and
+    validating each resulting cell afterward (the naive approach) lets a payload
+    well within ``_TOPOLOGY_MAX_FIELDS`` build a cross product many orders of
+    magnitude larger than either list — e.g. 25,000 garbage ids on each side is
+    50,000 form fields (under the cap) but a 625-million-entry ``rendered`` set.
+    Filtering first bounds the product by the real ``Cohort``/``AgentRegistry`` row
+    counts instead. ``ticked`` is filtered the same way for the same reason, and so
+    that a ticked cell naming an id that no longer exists is silently ignored
+    (as it always was) rather than tripping the "malformed submission" guard below,
+    which is reserved for a cell that names two otherwise-valid ids but was never
+    part of the rendered cross product at all.
     """
     form = await request.form(max_fields=_TOPOLOGY_MAX_FIELDS)
     ticked = {v for v in form.getlist("cell") if isinstance(v, str)}
     present_agents = {v for v in form.getlist("present_agent") if isinstance(v, str)}
     present_cohorts = {v for v in form.getlist("present_cohort") if isinstance(v, str)}
-    rendered = {f"{cid}:{aid}" for cid in present_cohorts for aid in present_agents}
-    if not rendered:
+    # Checked on the raw, unfiltered marker sets: a genuinely empty submission (no
+    # rows or no columns rendered at all) is an error, but a submission naming only
+    # since-deleted rows/columns is not — that is just every cell turning out inert,
+    # handled below by the (empty) diff loop, not by this guard.
+    if not present_agents or not present_cohorts:
         return RedirectResponse(
             url="/admin/cohorts/topology?error=Nothing+to+save", status_code=302
-        )
-    if ticked - rendered:
-        return RedirectResponse(
-            url="/admin/cohorts/topology?error=Malformed+submission", status_code=302
         )
 
     cohorts_by_id = {
@@ -1588,6 +1601,23 @@ async def admin_cohort_topology_save(
     valid_agents = {
         r[0] for r in (await db.execute(select(AgentRegistry.agent_id))).all()
     }
+
+    def _known_cell(cell: str) -> bool:
+        cid, _, aid = cell.partition(":")
+        return bool(cid) and bool(aid) and cid in cohorts_by_id and aid in valid_agents
+
+    # Filter BEFORE crossing: bounds the cross product by the current table sizes
+    # rather than by the (attacker-controlled) lengths of the submitted lists.
+    present_cohorts &= cohorts_by_id.keys()
+    present_agents &= valid_agents
+    ticked = {t for t in ticked if _known_cell(t)}
+
+    rendered = {f"{cid}:{aid}" for cid in present_cohorts for aid in present_agents}
+    if ticked - rendered:
+        return RedirectResponse(
+            url="/admin/cohorts/topology?error=Malformed+submission", status_code=302
+        )
+
     existing = {
         (str(cid), aid): mid
         for mid, cid, aid in (await db.execute(
