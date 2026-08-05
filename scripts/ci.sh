@@ -55,7 +55,15 @@ SRC_LINT_MAX="${SRC_LINT_MAX:-260}"
 # lowering it widens the round trip, which is always safe on a throwaway database.
 MIGCHECK_PORT="${MIGCHECK_PORT:-55432}"
 MIGCHECK_CONTAINER="copi-ci-migcheck"
-MIGRATION_FLOOR="${MIGRATION_FLOOR:-0021}"
+# 0018, not 0021. At 0021 the round trip never executed the 0019/0020/0021
+# DOWNGRADES — and those are the ones with teeth: 0019's downgrade drops the
+# content columns and puts agent_id back to NOT NULL, and 0019/0020/0021 lack the
+# if_exists guards that 0022/0023 have. The gate runs against an empty throwaway
+# database, so the NOT NULL step cannot fail here; that is precisely why it is safe
+# to exercise, and why the gate still cannot catch the data-dependent failure that
+# same step produces on a populated production database. Raise this only to skip
+# work deliberately.
+MIGRATION_FLOOR="${MIGRATION_FLOOR:-0018}"
 
 LINT_TARGETS=(
   tests/conftest.py tests/factories.py tests/fakes.py
