@@ -647,22 +647,34 @@ async def test_detail_of_an_empty_cohort_renders_the_no_members_state(
         assert bot in r.text, f"{bot} missing from the picker"
 
 
-async def test_deleting_an_unknown_cohort_redirects_instead_of_500ing(
-    client, db_session, admin
-):
-    """A double-submitted delete (or a stale bookmark) must not raise.
+async def test_deleting_an_unknown_cohort_is_a_404(client, db_session, admin):
+    """A double-submitted delete (or a stale bookmark) must not raise, and must not
+    claim to have deleted anything.
 
-    Current behaviour is a bare redirect to the list with no error and no notice —
-    indistinguishable from a successful delete. Pinned as-is; unlike add-agent,
-    which raises 404 for the same missing cohort, this one is silent.
+    This used to be a bare redirect to the list carrying neither ``error=`` nor
+    ``notice=``. The successful path redirects with ``notice=Deleted+cohort+{name}``,
+    so the silent version was the only outcome in the whole surface that reported
+    nothing whatsoever — a second submit of an already-processed delete just landed
+    back on the list. It is now a 404, the same answer ``add-agent`` and
+    ``remove-agent`` give for a missing cohort and the same answer
+    ``GET /admin/cohorts/{id}`` gives for this very id.
     """
     ghost = uuid.uuid4()
     r = await client.post(f"/admin/cohorts/{ghost}/delete", headers=_auth(admin.id))
-    assert r.status_code == 302
-    assert r.headers["location"] == "/admin/cohorts"
+    assert r.status_code == 404
     assert (await db_session.execute(
         select(CohortAuditEvent).where(CohortAuditEvent.cohort_id == ghost)
     )).scalars().all() == [], "a delete that deleted nothing must not be audited"
+
+
+async def test_a_real_delete_still_reports_success(client, db_session, admin):
+    """Positive control for the 404 above: the same route, given a cohort that does
+    exist, still redirects with a notice. Without this, a handler that 404'd
+    unconditionally would pass the test above."""
+    c = await _cohort(db_session, "realdelete", admin)
+    r = await client.post(f"/admin/cohorts/{c.id}/delete", headers=_auth(admin.id))
+    assert r.status_code == 302
+    assert "notice=Deleted+cohort+realdelete" in r.headers["location"]
 
 
 async def test_adding_an_agent_to_an_unknown_cohort_is_a_404(
@@ -704,17 +716,53 @@ async def test_removing_an_agent_that_is_not_a_member_is_a_silent_no_op(
     )).scalars().all() == [], "a removal that removed nothing must not be audited"
 
 
-async def test_removing_an_agent_from_an_unknown_cohort_does_not_500(
+async def test_removing_an_agent_from_an_unknown_cohort_is_a_404(
     client, db_session, admin, roster
 ):
-    """Same handler, cohort row missing too — the lookup that feeds the audit
-    event's cohort_name returns None, and the no-op path must survive that."""
+    """Same handler, cohort row missing too.
+
+    This used to redirect to ``/admin/cohorts/{ghost}`` — a detail page that then
+    404s on its own, so the admin spent two round trips to reach the same error.
+    The handler now answers 404 directly. Note this is *not* the same case as
+    ``test_removing_an_agent_that_is_not_a_member_is_a_silent_no_op`` above, where
+    the cohort exists and the redirect target is a real page.
+    """
     ghost = uuid.uuid4()
     r = await client.post(
         f"/admin/cohorts/{ghost}/remove-agent",
         data={"agent_id": "su"},
         headers=_auth(admin.id),
     )
-    assert r.status_code == 302
-    assert r.headers["location"] == f"/admin/cohorts/{ghost}"
+    assert r.status_code == 404
+    assert (await db_session.execute(select(CohortAuditEvent))).scalars().all() == []
+
+
+async def test_every_cohort_route_answers_a_missing_cohort_the_same_way(
+    client, db_session, admin, roster
+):
+    """The three mutating cohort routes once disagreed three ways about a cohort id
+    that does not exist: add-agent raised 404, delete redirected silently to the
+    list, remove-agent redirected to a detail page that 404s. They now all match
+    the GET detail page, which is the convention the rest of this module uses for a
+    missing path-addressed row (see ``admin_user_delete``, ``admin_approve_agent``,
+    ``admin_approve_access`` and friends). ``?error=`` redirects stay reserved for
+    bad form input against a cohort that really exists.
+    """
+    ghost = uuid.uuid4()
+    calls = [
+        ("GET", f"/admin/cohorts/{ghost}", None),
+        ("POST", f"/admin/cohorts/{ghost}/delete", {}),
+        ("POST", f"/admin/cohorts/{ghost}/add-agent", {"agent_id": "su"}),
+        ("POST", f"/admin/cohorts/{ghost}/remove-agent", {"agent_id": "su"}),
+    ]
+    codes = {}
+    for method, path, data in calls:
+        if method == "GET":
+            r = await client.get(path, headers=_auth(admin.id))
+        else:
+            r = await client.post(path, data=data, headers=_auth(admin.id))
+        codes[path.rsplit("/", 1)[-1]] = r.status_code
+    assert set(codes.values()) == {404}, f"routes still disagree: {codes}"
+    # And nothing was written on any of the four attempts.
+    assert (await db_session.execute(select(CohortMembership))).scalars().all() == []
     assert (await db_session.execute(select(CohortAuditEvent))).scalars().all() == []

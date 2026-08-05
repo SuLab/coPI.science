@@ -1677,13 +1677,18 @@ async def admin_cohort_delete(
     cascades its memberships away, silently reshaping the interaction topology of a
     running simulation. Remove the members first so each removal is an audited,
     individually reversible step. See v2 §12.
+
+    A cohort id that does not exist is a 404, matching every other route in this
+    module whose path-addressed row is missing (and ``admin_cohort_detail`` for
+    this very id). It used to be a bare redirect to the list, which said nothing
+    at all — a double-submitted delete looked like it had done the work.
     """
     result = await db.execute(
         select(Cohort).options(selectinload(Cohort.memberships)).where(Cohort.id == cohort_id)
     )
     cohort = result.scalar_one_or_none()
     if not cohort:
-        return RedirectResponse(url="/admin/cohorts", status_code=302)
+        raise HTTPException(status_code=404, detail="Cohort not found")
     if cohort.memberships:
         return RedirectResponse(
             url=f"/admin/cohorts/{cohort_id}?error=Remove+all+"
@@ -1764,10 +1769,20 @@ async def admin_cohort_remove_agent(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_admin_user),
 ):
-    """Remove an agent from the cohort."""
+    """Remove an agent from the cohort.
+
+    An unknown cohort id is a 404, as everywhere else in this module: the old
+    behaviour redirected to ``/admin/cohorts/{cohort_id}``, a detail page that
+    then 404s itself — so the user paid for two requests to be told nothing.
+    Removing an agent that is not a member is a different case and stays a quiet
+    redirect back to the (real) detail page: a stale Remove button is a race the
+    admin cannot act on, and the page it returns to already shows the truth.
+    """
     cohort = (await db.execute(
         select(Cohort).where(Cohort.id == cohort_id)
     )).scalar_one_or_none()
+    if not cohort:
+        raise HTTPException(status_code=404, detail="Cohort not found")
     result = await db.execute(
         select(CohortMembership).where(
             CohortMembership.cohort_id == cohort_id,
@@ -1780,7 +1795,7 @@ async def admin_cohort_remove_agent(
             db,
             action=COHORT_ACTION_AGENT_REMOVED,
             cohort_id=cohort_id,
-            cohort_name=cohort.name if cohort else "?",
+            cohort_name=cohort.name,
             agent_id=membership.agent_id,
             actor=current_user,
         )
