@@ -914,3 +914,41 @@ class TestSlackParentTranslation:
         reply = [e for e in engine.message_log._entries if e.thread_ts == "1700000000.000000"][0]
         assert reply.slack_thread_ts == "1700009999.111111"
         assert reply.thread_ts == "1700000000.000000"  # canonical id unchanged
+
+
+# ---------------------------------------------------------------
+# _build_lab_directories — cohort gate must scope the "Other Labs'
+# Recent Publications" section (runbook finding A3), not just the
+# message log.
+# ---------------------------------------------------------------
+
+class TestBuildLabDirectoriesCohortGate:
+    def _agent_with_pubs(self, agent_id, bot_name, pi_name, pub_line):
+        from src.agent.agent import Agent
+
+        agent = Agent(agent_id, bot_name, pi_name)
+        agent._public_profile = (
+            f"# {pi_name} Lab\n\n"
+            "## Recent Publications\n"
+            f"{pub_line}\n"
+        )
+        return agent
+
+    def test_lab_directory_respects_the_cohort_gate(self):
+        a = self._agent_with_pubs("a", "ABot", "A PI", "- A's distinctive paper on topic A")
+        b = self._agent_with_pubs("b", "BBot", "B PI", "- B's distinctive paper on topic B")
+        c = self._agent_with_pubs("c", "CBot", "C PI", "- C's distinctive paper on topic C")
+
+        # Gate ON for A: may only see B.
+        a.allowed_sender_ids = {"b"}
+        # Gate OFF for B: sees everyone (unchanged behavior).
+        b.allowed_sender_ids = None
+
+        engine = SimulationEngine(agents=[a, b, c], slack_clients={})
+        engine._build_lab_directories()
+
+        assert "B's distinctive paper on topic B" in a._lab_directory
+        assert "C's distinctive paper on topic C" not in a._lab_directory
+
+        assert "A's distinctive paper on topic A" in b._lab_directory
+        assert "C's distinctive paper on topic C" in b._lab_directory
