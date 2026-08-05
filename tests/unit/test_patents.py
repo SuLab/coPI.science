@@ -63,3 +63,44 @@ async def test_bad_json_returns_empty(monkeypatch):
     monkeypatch.setattr(patents, "_api_key", lambda: "k")
     respx.get(patents.SEARCH_URL).mock(return_value=httpx.Response(200, text="not json"))
     assert await patents.search_prior_art("x") == []
+
+
+from src.agent.tools import _execute_search_prior_art, TOOL_DEFINITIONS
+
+CAVEAT_MARK = "US filings only"
+
+
+def test_search_prior_art_is_a_registered_tool():
+    assert any(t["name"] == "search_prior_art" for t in TOOL_DEFINITIONS)
+
+
+@pytest.mark.asyncio
+async def test_output_always_carries_us_only_caveat(monkeypatch):
+    from src.agent import tools as tools_mod
+    monkeypatch.setattr(tools_mod, "search_prior_art", lambda q, limit=10: _fake([]))
+    out = await _execute_search_prior_art("crispr delivery")
+    assert CAVEAT_MARK in out
+    assert "no us filings matched" in out.lower()
+
+
+async def _fake(v):
+    return v
+
+
+@pytest.mark.asyncio
+async def test_output_carries_caveat_on_has_hits_path(monkeypatch):
+    from src.agent import tools as tools_mod
+
+    hit = {
+        "patent_id": "123",
+        "title": "Widget",
+        "date": "2020-01-01",
+        "abstract": "An abstract",
+        "assignees": ["Acme"],
+    }
+    monkeypatch.setattr(tools_mod, "search_prior_art", lambda q, limit=10: _fake([hit]))
+    out = await _execute_search_prior_art("widget")
+    assert CAVEAT_MARK in out
+    assert "US123" in out
+    assert "Widget" in out
+    assert "Acme" in out

@@ -6,6 +6,7 @@ from typing import Any
 
 from src.agent.prompt_safety import delimit
 from src.agent.roles import load_role
+from src.services.patents import search_prior_art
 from src.services.pubmed import fetch_abstract, fetch_full_text
 
 logger = logging.getLogger(__name__)
@@ -87,7 +88,28 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
             "required": ["foa_number"],
         },
     },
+    {
+        "name": "search_prior_art",
+        "description": (
+            "Search issued US patents (USPTO / PatentsView) for prior art related "
+            "to an idea or technique. Use when assessing whether an idea is novel "
+            "or patentable. US filings only — absence of a hit is NOT proof of "
+            "novelty."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Free-text description of the idea/technique"},
+            },
+            "required": ["query"],
+        },
+    },
 ]
+
+_PATENT_CAVEAT = (
+    "Source: USPTO (PatentsView), US filings only. Absence of a hit here is not "
+    "evidence of novelty — EP/WO/JP filings and non-patent prior art are not searched.\n\n"
+)
 
 
 def tools_for_role(role: str) -> list[dict[str, Any]]:
@@ -139,6 +161,9 @@ async def execute_tool(
 
         elif tool_name == "retrieve_foa":
             return await _execute_retrieve_foa(tool_input["foa_number"])
+
+        elif tool_name == "search_prior_art":
+            return await _execute_search_prior_art(tool_input["query"])
 
         else:
             return f"Unknown tool: {tool_name}"
@@ -238,3 +263,21 @@ async def _execute_retrieve_full_text(pmid_or_doi: str) -> str:
         parts.append("")
         parts.append(f"Note: {result['note']}")
     return "\n".join(parts)
+
+
+async def _execute_search_prior_art(query: str) -> str:
+    """Search PatentsView for prior art. Every return carries the US-only caveat."""
+    hits = await search_prior_art(query)
+    if not hits:
+        return _PATENT_CAVEAT + "No US filings matched this query."
+    lines = [_PATENT_CAVEAT]
+    for h in hits:
+        assignee = ", ".join(h["assignees"]) or "Unassigned"
+        # Patent title/abstract come from PatentsView — untrusted external text (SEC-14).
+        lines.append(
+            delimit(
+                f"US{h['patent_id']} ({h['date']}) — {h['title']} [{assignee}]\n{h['abstract']}",
+                "patent",
+            )
+        )
+    return "\n\n".join(lines)
