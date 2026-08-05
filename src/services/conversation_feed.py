@@ -11,6 +11,17 @@ from every other cohort consumes the window and the page comes back near-empty.
 So the rule is expressed twice — once as a predicate, once as a WHERE fragment —
 and ``tests/integration/test_conversation_feed.py`` asserts the two agree on
 every row of the engine's own decision table.
+
+Two functions, one pipeline: ``resolve_agent_gate`` computes *what the gate is*
+for the viewing agent, by calling the engine's own ``compute_gates``
+(``src/services/cohorts.py``) — the same call ``_cohort_gate_context`` in
+``src/routers/admin.py`` makes for the admin preview, so the page can never
+compute a different gate than the engine would. ``gate_clause`` then turns that
+gate into the SQL predicate above. The one deliberate difference from the admin
+preview: ``resolve_agent_gate``'s roster is the active agents **plus the
+viewing agent**, because ``/agent/{id}/conversations`` also admits an inactive
+viewer, and ``compute_gates`` only returns a gate for agents in the roster it is
+handed.
 """
 
 from __future__ import annotations
