@@ -22,10 +22,21 @@ async def test_search_returns_normalised_hits(monkeypatch):
 
 
 @pytest.mark.asyncio
+@respx.mock
 async def test_missing_key_returns_empty_and_does_not_call(monkeypatch):
     monkeypatch.setattr(patents, "_api_key", lambda: "")
+    # Register a route that WOULD succeed if called, so this test proves the
+    # guard short-circuits before any HTTP call — not just that the result
+    # happens to be []. If the `if not key: return []` guard were removed,
+    # the request would hit this route and route.call_count would be 1,
+    # failing the assertion below (empty "patents" alone would still let
+    # hits == [] pass vacuously, which is why call_count is asserted too).
+    route = respx.get(patents.SEARCH_URL).mock(
+        return_value=httpx.Response(200, json={"patents": []})
+    )
     hits = await patents.search_prior_art("widget")
     assert hits == []
+    assert route.call_count == 0
 
 
 @pytest.mark.asyncio
@@ -34,3 +45,21 @@ async def test_http_error_returns_empty(monkeypatch):
     monkeypatch.setattr(patents, "_api_key", lambda: "k")
     respx.get(patents.SEARCH_URL).mock(return_value=httpx.Response(500))
     assert await patents.search_prior_art("widget") == []
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_rate_limited_returns_empty(monkeypatch):
+    monkeypatch.setattr(patents, "_api_key", lambda: "k")
+    respx.get(patents.SEARCH_URL).mock(
+        return_value=httpx.Response(429, headers={"Retry-After": "1"})
+    )
+    assert await patents.search_prior_art("x") == []
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_bad_json_returns_empty(monkeypatch):
+    monkeypatch.setattr(patents, "_api_key", lambda: "k")
+    respx.get(patents.SEARCH_URL).mock(return_value=httpx.Response(200, text="not json"))
+    assert await patents.search_prior_art("x") == []
