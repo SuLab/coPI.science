@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from src.agent.prompt_safety import delimit
+from src.agent.roles import load_role
 from src.services.pubmed import fetch_abstract, fetch_full_text
 
 logger = logging.getLogger(__name__)
@@ -89,18 +90,29 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
 ]
 
 
+def tools_for_role(role: str) -> list[dict[str, Any]]:
+    """``TOOL_DEFINITIONS`` filtered down to what ``role`` is allowed to call."""
+    allowed = load_role(role).tools
+    return [t for t in TOOL_DEFINITIONS if t["name"] in allowed]
+
+
 async def execute_tool(
     tool_name: str,
     tool_input: dict[str, Any],
     agent_id: str,
     thread_state: Any | None = None,
+    role: str = "pi_lab",
 ) -> str:
     """
     Execute a tool call and return the result as a string.
 
     Enforces per-thread rate limits for retrieve_abstract (other lab) and
-    retrieve_full_text.
+    retrieve_full_text. Refuses (without raising) any tool not allowed for
+    ``role``.
     """
+    if tool_name not in load_role(role).tools:
+        logger.warning("[tools] %s: role %r may not call %s", agent_id, role, tool_name)
+        return f"Tool '{tool_name}' is not available to this agent."
     try:
         if tool_name == "retrieve_profile":
             return await _execute_retrieve_profile(tool_input["agent_id"])
