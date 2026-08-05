@@ -3205,10 +3205,13 @@ class SimulationEngine:
                     lab_pubs[agent.agent_id] = pubs[:5]
 
         for agent in self.agents.values():
+            allowed = agent.allowed_sender_ids  # None == gate off
             sections = []
             for other_id, pubs in sorted(lab_pubs.items()):
                 if other_id == agent.agent_id:
                     continue
+                if allowed is not None and other_id not in allowed:
+                    continue  # cohort gate: don't prime this agent with a non-mate's work
                 other_agent = self.agents[other_id]
                 sections.append(f"### {other_agent.pi_name} Lab")
                 sections.extend(pubs)
