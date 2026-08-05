@@ -38,6 +38,13 @@
 </div>
 {% else %}
 <form method="POST" action="/admin/cohorts/topology">
+    {# Rendered rows and columns. The save reconstructs the rendered CELL set as
+       the cross product of these two lists, which is exactly what the template
+       renders below (an unconditional nested loop). Same stale-form guarantee as
+       the old per-cell `present` inputs — a column or row that was not displayed
+       cannot be diffed away — at 116 fields instead of 3,360. #}
+    {% for a in agents %}<input type="hidden" name="present_agent" value="{{ a.agent_id }}">{% endfor %}
+    {% for c in cohorts %}<input type="hidden" name="present_cohort" value="{{ c.id }}">{% endfor %}
     <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-x-auto">
         <table class="min-w-full divide-y divide-gray-200">
             <thead class="bg-gray-50">
@@ -77,9 +84,6 @@
                     {% for c in cohorts %}
                     {% set cell = c.id | string ~ ':' ~ a.agent_id %}
                     <td class="px-3 py-3 text-center">
-                        {# `present` records that this cell was rendered; the save
-                           diffs against it, never against the whole table. #}
-                        <input type="hidden" name="present" value="{{ cell }}">
                         <input type="checkbox" name="cell" value="{{ cell }}"
                                data-col="{{ c.id }}"
                                class="h-4 w-4 rounded border-gray-300 text-indigo-600"

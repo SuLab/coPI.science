@@ -339,13 +339,15 @@ async def test_topology_save_applies_adds_and_removes_in_one_pass(
 ):
     a = await _cohort(db_session, "alpha", admin, members=["su"])
     b = await _cohort(db_session, "beta", admin)
-    present = [f"{a.id}:{x}" for x in ("su", "wiseman", "cravatt")] + \
-              [f"{b.id}:{x}" for x in ("su", "wiseman", "cravatt")]
     # Drop su from alpha, add wiseman to alpha, add cravatt to beta — one save.
     ticked = [f"{a.id}:wiseman", f"{b.id}:cravatt"]
     r = await client.post(
         "/admin/cohorts/topology",
-        data={"present": present, "cell": ticked},
+        data={
+            "present_cohort": [str(a.id), str(b.id)],
+            "present_agent": ["su", "wiseman", "cravatt"],
+            "cell": ticked,
+        },
         headers=_auth(admin.id),
     )
     assert r.status_code == 302
@@ -359,10 +361,13 @@ async def test_topology_save_applies_adds_and_removes_in_one_pass(
 
 async def test_topology_save_audits_every_change(client, db_session, admin, roster):
     a = await _cohort(db_session, "alpha", admin, members=["su"])
-    present = [f"{a.id}:{x}" for x in ("su", "wiseman")]
     await client.post(
         "/admin/cohorts/topology",
-        data={"present": present, "cell": [f"{a.id}:wiseman"]},
+        data={
+            "present_cohort": [str(a.id)],
+            "present_agent": ["su", "wiseman"],
+            "cell": [f"{a.id}:wiseman"],
+        },
         headers=_auth(admin.id),
     )
     events = (await db_session.execute(
@@ -379,10 +384,12 @@ async def test_topology_save_only_touches_rendered_cells(
     a = await _cohort(db_session, "alpha", admin, members=["su"])
     b = await _cohort(db_session, "beta", admin, members=["cravatt"])
     # Submit ONLY alpha's cells, all unticked. Beta's membership must survive.
-    present = [f"{a.id}:{x}" for x in ("su", "wiseman", "cravatt")]
     r = await client.post(
         "/admin/cohorts/topology",
-        data={"present": present},
+        data={
+            "present_cohort": [str(a.id)],
+            "present_agent": ["su", "wiseman", "cravatt"],
+        },
         headers=_auth(admin.id),
     )
     assert r.status_code == 302
@@ -408,7 +415,11 @@ async def test_topology_save_rejects_a_tick_outside_the_rendered_set(
     a = await _cohort(db_session, "alpha", admin)
     r = await client.post(
         "/admin/cohorts/topology",
-        data={"present": [f"{a.id}:su"], "cell": [f"{a.id}:wiseman"]},
+        data={
+            "present_cohort": [str(a.id)],
+            "present_agent": ["su"],
+            "cell": [f"{a.id}:wiseman"],
+        },
         headers=_auth(admin.id),
     )
     assert "error=Malformed+submission" in r.headers["location"]
@@ -422,7 +433,8 @@ async def test_topology_save_ignores_unknown_ids(client, db_session, admin, rost
     r = await client.post(
         "/admin/cohorts/topology",
         data={
-            "present": [f"{ghost}:su", f"{a.id}:nobody"],
+            "present_cohort": [str(ghost), str(a.id)],
+            "present_agent": ["su", "nobody"],
             "cell": [f"{ghost}:su", f"{a.id}:nobody"],
         },
         headers=_auth(admin.id),
@@ -608,9 +620,13 @@ async def test_matrix_save_never_touches_an_unrendered_cohort(
     b = await _cohort(db_session, "beta", admin, members=["cravatt"])
     await db_session.commit()
 
-    present = [f"{a.id}:{x}" for x in ("su", "wiseman", "cravatt")]
     r = await client.post(
-        "/admin/cohorts/topology", data={"present": present}, headers=_auth(admin.id)
+        "/admin/cohorts/topology",
+        data={
+            "present_cohort": [str(a.id)],
+            "present_agent": ["su", "wiseman", "cravatt"],
+        },
+        headers=_auth(admin.id),
     )
     assert r.status_code == 302
 
@@ -640,7 +656,8 @@ async def test_matrix_save_ignores_a_cell_for_a_deleted_cohort(
     r = await client.post(
         "/admin/cohorts/topology",
         data={
-            "present": [f"{a.id}:su", f"{ghost}:wiseman"],
+            "present_cohort": [str(a.id), str(ghost)],
+            "present_agent": ["su", "wiseman"],
             "cell": [f"{a.id}:su", f"{ghost}:wiseman"],
         },
         headers=_auth(admin.id),
@@ -665,7 +682,8 @@ async def test_matrix_save_ignores_a_cell_for_an_unknown_agent(
     r = await client.post(
         "/admin/cohorts/topology",
         data={
-            "present": [f"{a.id}:su", f"{a.id}:nobody"],
+            "present_cohort": [str(a.id)],
+            "present_agent": ["su", "nobody"],
             "cell": [f"{a.id}:su", f"{a.id}:nobody"],
         },
         headers=_auth(admin.id),
@@ -816,6 +834,117 @@ async def test_removing_an_agent_from_an_unknown_cohort_is_a_404(
     )
     assert r.status_code == 404
     assert (await db_session.execute(select(CohortAuditEvent))).scalars().all() == []
+
+
+async def test_topology_save_round_trips_with_marker_payload(client, db_session, admin):
+    """The new payload adds and removes exactly the ticked/unticked cells."""
+    c1 = await _cohort(db_session, "alpha-marker", admin)
+    c2 = await _cohort(db_session, "beta-marker", admin)
+    await factories.make_agent(db_session, agent_id="ta1", bot_name="Ta1Bot")
+    await factories.make_agent(db_session, agent_id="ta2", bot_name="Ta2Bot")
+    # Pre-existing membership that the save must REMOVE (unticked but rendered).
+    db_session.add(CohortMembership(cohort_id=c1.id, agent_id="ta2", added_by=admin.id))
+    await db_session.commit()
+
+    r = await client.post(
+        "/admin/cohorts/topology",
+        data={
+            "present_agent": ["ta1", "ta2"],
+            "present_cohort": [str(c1.id), str(c2.id)],
+            "cell": [f"{c1.id}:ta1"],
+        },
+        headers=_auth(admin.id),
+    )
+    assert r.status_code == 302
+    assert "1+added,+1+removed" in r.headers["location"], r.headers["location"]
+
+    rows = {
+        (str(cid), aid)
+        for cid, aid in (await db_session.execute(
+            select(CohortMembership.cohort_id, CohortMembership.agent_id)
+        )).all()
+    }
+    assert rows == {(str(c1.id), "ta1")}
+
+
+async def test_a_form_omitting_a_column_cannot_delete_that_columns_memberships(
+    client, db_session, admin
+):
+    """The stale-form data-loss guard survives the cross-product reconstruction."""
+    c1 = await _cohort(db_session, "shown", admin)
+    c2 = await _cohort(db_session, "hidden", admin)
+    await factories.make_agent(db_session, agent_id="tb1", bot_name="Tb1Bot")
+    db_session.add(CohortMembership(cohort_id=c2.id, agent_id="tb1", added_by=admin.id))
+    await db_session.commit()
+
+    # c2 is NOT in present_cohort, so its cell was never rendered.
+    r = await client.post(
+        "/admin/cohorts/topology",
+        data={"present_agent": ["tb1"], "present_cohort": [str(c1.id)]},
+        headers=_auth(admin.id),
+    )
+    assert r.status_code == 302
+
+    survivors = {
+        (str(cid), aid)
+        for cid, aid in (await db_session.execute(
+            select(CohortMembership.cohort_id, CohortMembership.agent_id)
+        )).all()
+    }
+    assert survivors == {(str(c2.id), "tb1")}, "a hidden column's membership was deleted"
+
+
+async def test_a_form_omitting_a_row_cannot_delete_that_rows_memberships(
+    client, db_session, admin
+):
+    c1 = await _cohort(db_session, "only", admin)
+    await factories.make_agent(db_session, agent_id="tc1", bot_name="Tc1Bot")
+    await factories.make_agent(db_session, agent_id="tc2", bot_name="Tc2Bot")
+    db_session.add(CohortMembership(cohort_id=c1.id, agent_id="tc2", added_by=admin.id))
+    await db_session.commit()
+
+    r = await client.post(
+        "/admin/cohorts/topology",
+        data={"present_agent": ["tc1"], "present_cohort": [str(c1.id)]},
+        headers=_auth(admin.id),
+    )
+    assert r.status_code == 302
+
+    survivors = {
+        aid for (aid,) in (await db_session.execute(
+            select(CohortMembership.agent_id)
+        )).all()
+    }
+    assert survivors == {"tc2"}, "a hidden row's membership was deleted"
+
+
+async def test_full_matrix_payload_stays_under_the_field_limit(client, db_session, admin):
+    """60x56 used to post 3,528 fields against Starlette's max_fields=1000."""
+    cohorts = []
+    for i in range(56):
+        c = Cohort(name=f"c{i:03d}", created_by=admin.id)
+        db_session.add(c)
+        cohorts.append(c)
+    await db_session.flush()
+    for i in range(60):
+        await factories.make_agent(
+            db_session, agent_id=f"td{i:03d}", bot_name=f"Td{i:03d}Bot"
+        )
+    await db_session.commit()
+
+    present_agents = [f"td{i:03d}" for i in range(60)]
+    present_cohorts = [str(c.id) for c in cohorts]
+    cell = [f"{cohorts[0].id}:td000"]
+    total_fields = len(present_agents) + len(present_cohorts) + len(cell)
+    assert total_fields == 117, f"expected 116 markers + 1 cell, got {total_fields}"
+
+    r = await client.post(
+        "/admin/cohorts/topology",
+        data={"present_agent": present_agents, "present_cohort": present_cohorts, "cell": cell},
+        headers=_auth(admin.id),
+    )
+    assert r.status_code == 302, r.text
+    assert "1+added" in r.headers["location"]
 
 
 async def test_every_cohort_route_answers_a_missing_cohort_the_same_way(
