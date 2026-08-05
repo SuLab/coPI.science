@@ -731,7 +731,12 @@ async def agent_conversations(
                 PiDmMessage.simulation_run_id == run_id,
                 PiDmMessage.agent_id == aid,
             )
-            .order_by(PiDmMessage.posted_at.desc())
+            # Total ordering. posted_at alone is not one: pi_dm_messages.posted_at
+            # carries server_default '0' (migration 0020), so any writer that omits
+            # it produces a tie group, and with LIMIT the tie makes row SELECTION
+            # plan-dependent, not just row order.
+            .order_by(PiDmMessage.posted_at.desc(), PiDmMessage.created_at.desc(),
+                      PiDmMessage.id.desc())
             .limit(20)
         )
         dms = [
@@ -753,7 +758,17 @@ async def agent_conversations(
                 AgentMessage.simulation_run_id == run_id,
                 AgentMessage.channel_name.in_(channels),
             )
-            .order_by(AgentMessage.posted_at.desc())
+            # Total ordering, and it matters more here than it looks. Migration
+            # 0019 adds posted_at with server_default '0', so EVERY row that
+            # predates it shares one value. With `ORDER BY posted_at DESC LIMIT
+            # 100` over a tie group larger than 100, Postgres is free to return
+            # any 100 — measured on a 200-row tie group, the index-scan and
+            # seq-scan plans returned two DISJOINT pages, so half the messages
+            # were unreachable and which half flipped with the plan. Adding
+            # created_at and the primary key makes the sort total, so the page is
+            # stable and every row is reachable by paging.
+            .order_by(AgentMessage.posted_at.desc(), AgentMessage.created_at.desc(),
+                      AgentMessage.id.desc())
             .limit(100)
         )
         messages = [
