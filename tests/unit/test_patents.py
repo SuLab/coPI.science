@@ -1,36 +1,50 @@
+import httpx
 import pytest
 import respx
-import httpx
 
 from src.services import patents
+
+# A realistic USPTO ODP Patent File Wrapper search response (trimmed).
+_ODP_ONE_HIT = {
+    "count": 1,
+    "patentFileWrapperDataBag": [
+        {
+            "applicationNumberText": "18/000000",
+            "applicationMetaData": {
+                "inventionTitle": "Novel Widget",
+                "earliestPublicationNumber": "US20260000001A1",
+                "earliestPublicationDate": "2026-01-01",
+                "filingDate": "2024-01-01",
+                "firstApplicantName": "Acme Corp",
+                "firstInventorName": "Jane Doe",
+                "applicationStatusDescriptionText": "Patented Case",
+            },
+        }
+    ],
+}
 
 
 @pytest.mark.asyncio
 @respx.mock
 async def test_search_returns_normalised_hits(monkeypatch):
     monkeypatch.setattr(patents, "_api_key", lambda: "k")
-    respx.get(patents.SEARCH_URL).mock(return_value=httpx.Response(
-        200, json={"patents": [
-            {"patent_id": "123", "patent_title": "Widget", "patent_date": "2020-01-01",
-             "patent_abstract": "An abstract", "assignees": [{"assignee_organization": "Acme"}]},
-        ]},
-    ))
+    respx.post(patents.SEARCH_URL).mock(return_value=httpx.Response(200, json=_ODP_ONE_HIT))
     hits = await patents.search_prior_art("widget")
-    assert hits[0]["patent_id"] == "123"
-    assert hits[0]["title"] == "Widget"
-    assert hits[0]["assignees"] == ["Acme"]
+    assert hits[0]["patent_id"] == "US20260000001A1"
+    assert hits[0]["title"] == "Novel Widget"
+    assert hits[0]["applicant"] == "Acme Corp"
+    assert hits[0]["inventor"] == "Jane Doe"
+    assert hits[0]["date"] == "2026-01-01"
 
 
 @pytest.mark.asyncio
 @respx.mock
 async def test_missing_key_returns_none_and_does_not_call(monkeypatch):
     monkeypatch.setattr(patents, "_api_key", lambda: "")
-    # Register a route that WOULD succeed if called, so this test proves the
-    # guard short-circuits before any HTTP call. With no key the search cannot
-    # run, so the contract is None (NOT []): "couldn't search" must be
-    # distinguishable from "searched, found nothing".
-    route = respx.get(patents.SEARCH_URL).mock(
-        return_value=httpx.Response(200, json={"patents": []})
+    # Route WOULD succeed if called — proves the no-key guard short-circuits before
+    # any HTTP call. No key = cannot search = None (NOT []).
+    route = respx.post(patents.SEARCH_URL).mock(
+        return_value=httpx.Response(200, json={"patentFileWrapperDataBag": []})
     )
     hits = await patents.search_prior_art("widget")
     assert hits is None
@@ -42,7 +56,7 @@ async def test_missing_key_returns_none_and_does_not_call(monkeypatch):
 async def test_http_error_returns_none(monkeypatch):
     # 500 / unreachable / DNS failure = could-not-search = None (not []).
     monkeypatch.setattr(patents, "_api_key", lambda: "k")
-    respx.get(patents.SEARCH_URL).mock(return_value=httpx.Response(500))
+    respx.post(patents.SEARCH_URL).mock(return_value=httpx.Response(500))
     assert await patents.search_prior_art("widget") is None
 
 
@@ -50,7 +64,7 @@ async def test_http_error_returns_none(monkeypatch):
 @respx.mock
 async def test_rate_limited_returns_none(monkeypatch):
     monkeypatch.setattr(patents, "_api_key", lambda: "k")
-    respx.get(patents.SEARCH_URL).mock(
+    respx.post(patents.SEARCH_URL).mock(
         return_value=httpx.Response(429, headers={"Retry-After": "1"})
     )
     assert await patents.search_prior_art("x") is None
@@ -60,7 +74,7 @@ async def test_rate_limited_returns_none(monkeypatch):
 @respx.mock
 async def test_bad_json_returns_none(monkeypatch):
     monkeypatch.setattr(patents, "_api_key", lambda: "k")
-    respx.get(patents.SEARCH_URL).mock(return_value=httpx.Response(200, text="not json"))
+    respx.post(patents.SEARCH_URL).mock(return_value=httpx.Response(200, text="not json"))
     assert await patents.search_prior_art("x") is None
 
 
@@ -69,17 +83,53 @@ async def test_bad_json_returns_none(monkeypatch):
 async def test_searched_but_empty_returns_empty_list(monkeypatch):
     # A real 200 with zero matches is [] (searched, found nothing) — NOT None.
     monkeypatch.setattr(patents, "_api_key", lambda: "k")
-    respx.get(patents.SEARCH_URL).mock(return_value=httpx.Response(200, json={"patents": []}))
+    respx.post(patents.SEARCH_URL).mock(
+        return_value=httpx.Response(200, json={"count": 0, "patentFileWrapperDataBag": []})
+    )
     assert await patents.search_prior_art("nonexistent-xyzzy") == []
 
 
-from src.agent.tools import _execute_search_prior_art, TOOL_DEFINITIONS
+@pytest.mark.asyncio
+@respx.mock
+async def test_404_no_matches_returns_empty_list(monkeypatch):
+    # ODP answers 404 (not 200) when a valid search matches nothing. That is
+    # "searched, found nothing" ([]), NOT "could not search" (None).
+    monkeypatch.setattr(patents, "_api_key", lambda: "k")
+    respx.post(patents.SEARCH_URL).mock(
+        return_value=httpx.Response(404, json={"code": "404", "message": "Not Found"})
+    )
+    assert await patents.search_prior_art("nonexistent-xyzzy-concept") == []
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_query_ands_title_tokens(monkeypatch):
+    # Multi-word queries must AND the title tokens (OR returns tens of thousands of
+    # junk matches on common words). Assert the outgoing body ANDs the tokens.
+    monkeypatch.setattr(patents, "_api_key", lambda: "k")
+    captured = {}
+
+    def _capture(request):
+        import json
+        captured["q"] = json.loads(request.content)["q"]
+        return httpx.Response(200, json={"patentFileWrapperDataBag": []})
+
+    respx.post(patents.SEARCH_URL).mock(side_effect=_capture)
+    await patents.search_prior_art("CRISPR base editing")
+    assert captured["q"] == "applicationMetaData.inventionTitle:(CRISPR AND base AND editing)"
+
+
+from src.agent.tools import _execute_search_prior_art, TOOL_DEFINITIONS  # noqa: E402
 
 CAVEAT_MARK = "US filings only"
 
 
 def test_search_prior_art_is_a_registered_tool():
     assert any(t["name"] == "search_prior_art" for t in TOOL_DEFINITIONS)
+
+
+async def _fake(v):
+    return v
 
 
 @pytest.mark.asyncio
@@ -94,34 +144,30 @@ async def test_searched_empty_carries_caveat_and_says_no_matches(monkeypatch):
 @pytest.mark.asyncio
 async def test_unavailable_when_search_could_not_run(monkeypatch):
     # search_prior_art returns None (no key / endpoint unreachable). The tool must
-    # emit an explicit UNAVAILABLE notice, NOT "no US filings matched" — otherwise
-    # a dead endpoint reads as a clean novelty result.
+    # emit an explicit UNAVAILABLE notice, NOT "no US filings matched".
     from src.agent import tools as tools_mod
     monkeypatch.setattr(tools_mod, "search_prior_art", lambda q, limit=10: _fake(None))
     out = await _execute_search_prior_art("crispr delivery")
     assert "unavailable" in out.lower()
-    assert "not" in out.lower() and "novelty" in out.lower()
+    assert "novelty" in out.lower()
     assert "no us filings matched" not in out.lower()
 
 
-async def _fake(v):
-    return v
-
-
 @pytest.mark.asyncio
-async def test_output_carries_caveat_on_has_hits_path(monkeypatch):
+async def test_output_carries_caveat_and_fields_on_has_hits_path(monkeypatch):
     from src.agent import tools as tools_mod
-
     hit = {
-        "patent_id": "123",
-        "title": "Widget",
-        "date": "2020-01-01",
-        "abstract": "An abstract",
-        "assignees": ["Acme"],
+        "patent_id": "US20260000001A1",
+        "title": "Novel Widget",
+        "date": "2026-01-01",
+        "applicant": "Acme Corp",
+        "inventor": "Jane Doe",
+        "status": "Patented Case",
     }
     monkeypatch.setattr(tools_mod, "search_prior_art", lambda q, limit=10: _fake([hit]))
     out = await _execute_search_prior_art("widget")
     assert CAVEAT_MARK in out
-    assert "US123" in out
-    assert "Widget" in out
-    assert "Acme" in out
+    assert "US20260000001A1" in out
+    assert "Novel Widget" in out
+    assert "Acme Corp" in out
+    assert "Jane Doe" in out

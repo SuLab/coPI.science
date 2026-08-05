@@ -107,8 +107,9 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
 ]
 
 _PATENT_CAVEAT = (
-    "Source: USPTO (PatentsView), US filings only. Absence of a hit here is not "
-    "evidence of novelty — EP/WO/JP filings and non-patent prior art are not searched.\n\n"
+    "Source: USPTO Open Data Portal, US filings only (title search). Absence of a "
+    "hit here is not evidence of novelty — EP/WO/JP filings, non-patent prior art, "
+    "and matches only in the abstract/claims are not searched.\n\n"
 )
 
 
@@ -289,11 +290,16 @@ async def _execute_search_prior_art(query: str) -> str:
         return _PATENT_CAVEAT + "No US filings matched this query."
     lines = [_PATENT_CAVEAT]
     for h in hits:
-        assignee = ", ".join(h["assignees"]) or "Unassigned"
-        # Patent title/abstract come from PatentsView — untrusted external text (SEC-14).
+        applicant = h.get("applicant") or "Unknown applicant"
+        inventor = h.get("inventor") or "Unknown inventor"
+        status = h.get("status") or ""
+        # Title/applicant/inventor come from the USPTO API — untrusted external
+        # text (SEC-14); fence it.
         lines.append(
             delimit(
-                f"US{h['patent_id']} ({h['date']}) — {h['title']} [{assignee}]\n{h['abstract']}",
+                f"{h.get('patent_id','')} ({h.get('date','')}) — {h.get('title','')}\n"
+                f"  applicant: {applicant} | inventor: {inventor}"
+                + (f" | status: {status}" if status else ""),
                 "patent",
             )
         )

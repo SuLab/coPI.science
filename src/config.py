@@ -119,8 +119,15 @@ class Settings(BaseSettings):
     # and throttles or blocks unidentified clients. Falls back to ses_sender_email.
     ncbi_contact_email: str = ""
 
-    # PatentsView (USPTO) prior-art search — hub-only tool. Name contains "key"
-    # so it is auto-redacted in repr(settings). US filings only.
+    # USPTO prior-art search — hub-only tool. Name contains "key" so it is
+    # auto-redacted in repr(settings). US filings only.
+    #
+    # The endpoint is the USPTO Open Data Portal (api.uspto.gov): PatentsView
+    # decommissioned search.patentsview.org in its 2026-03-20 migration to ODP.
+    # `uspto_api_key` is the correct name; `patentsview_api_key` is kept as a
+    # fallback so an existing .env value keeps working (the same key is accepted
+    # by api.uspto.gov). See src/services/patents.py.
+    uspto_api_key: str = ""
     patentsview_api_key: str = ""
 
     # App
