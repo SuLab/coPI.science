@@ -265,9 +265,26 @@ async def _execute_retrieve_full_text(pmid_or_doi: str) -> str:
     return "\n".join(parts)
 
 
+_PATENT_UNAVAILABLE = (
+    "Prior-art search is UNAVAILABLE right now (the patent endpoint could not be "
+    "reached, errored, or no API key is configured). This is NOT a prior-art result: "
+    "do NOT treat the absence of results as evidence of novelty or freedom-to-operate. "
+    "Note the search could not be run at all."
+)
+
+
 async def _execute_search_prior_art(query: str) -> str:
-    """Search PatentsView for prior art. Every return carries the US-only caveat."""
+    """Search PatentsView for prior art.
+
+    Distinguishes three outcomes so the hub never mistakes an unreachable/unconfigured
+    tool for a clean novelty result:
+      * ``None``  → the search could not run → an explicit UNAVAILABLE notice;
+      * ``[]``    → the search ran and matched nothing → the caveat + "no matches";
+      * results   → the caveat + the filings.
+    """
     hits = await search_prior_art(query)
+    if hits is None:
+        return _PATENT_UNAVAILABLE
     if not hits:
         return _PATENT_CAVEAT + "No US filings matched this query."
     lines = [_PATENT_CAVEAT]

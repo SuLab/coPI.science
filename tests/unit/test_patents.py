@@ -23,46 +23,54 @@ async def test_search_returns_normalised_hits(monkeypatch):
 
 @pytest.mark.asyncio
 @respx.mock
-async def test_missing_key_returns_empty_and_does_not_call(monkeypatch):
+async def test_missing_key_returns_none_and_does_not_call(monkeypatch):
     monkeypatch.setattr(patents, "_api_key", lambda: "")
     # Register a route that WOULD succeed if called, so this test proves the
-    # guard short-circuits before any HTTP call — not just that the result
-    # happens to be []. If the `if not key: return []` guard were removed,
-    # the request would hit this route and route.call_count would be 1,
-    # failing the assertion below (empty "patents" alone would still let
-    # hits == [] pass vacuously, which is why call_count is asserted too).
+    # guard short-circuits before any HTTP call. With no key the search cannot
+    # run, so the contract is None (NOT []): "couldn't search" must be
+    # distinguishable from "searched, found nothing".
     route = respx.get(patents.SEARCH_URL).mock(
         return_value=httpx.Response(200, json={"patents": []})
     )
     hits = await patents.search_prior_art("widget")
-    assert hits == []
+    assert hits is None
     assert route.call_count == 0
 
 
 @pytest.mark.asyncio
 @respx.mock
-async def test_http_error_returns_empty(monkeypatch):
+async def test_http_error_returns_none(monkeypatch):
+    # 500 / unreachable / DNS failure = could-not-search = None (not []).
     monkeypatch.setattr(patents, "_api_key", lambda: "k")
     respx.get(patents.SEARCH_URL).mock(return_value=httpx.Response(500))
-    assert await patents.search_prior_art("widget") == []
+    assert await patents.search_prior_art("widget") is None
 
 
 @pytest.mark.asyncio
 @respx.mock
-async def test_rate_limited_returns_empty(monkeypatch):
+async def test_rate_limited_returns_none(monkeypatch):
     monkeypatch.setattr(patents, "_api_key", lambda: "k")
     respx.get(patents.SEARCH_URL).mock(
         return_value=httpx.Response(429, headers={"Retry-After": "1"})
     )
-    assert await patents.search_prior_art("x") == []
+    assert await patents.search_prior_art("x") is None
 
 
 @pytest.mark.asyncio
 @respx.mock
-async def test_bad_json_returns_empty(monkeypatch):
+async def test_bad_json_returns_none(monkeypatch):
     monkeypatch.setattr(patents, "_api_key", lambda: "k")
     respx.get(patents.SEARCH_URL).mock(return_value=httpx.Response(200, text="not json"))
-    assert await patents.search_prior_art("x") == []
+    assert await patents.search_prior_art("x") is None
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_searched_but_empty_returns_empty_list(monkeypatch):
+    # A real 200 with zero matches is [] (searched, found nothing) — NOT None.
+    monkeypatch.setattr(patents, "_api_key", lambda: "k")
+    respx.get(patents.SEARCH_URL).mock(return_value=httpx.Response(200, json={"patents": []}))
+    assert await patents.search_prior_art("nonexistent-xyzzy") == []
 
 
 from src.agent.tools import _execute_search_prior_art, TOOL_DEFINITIONS
@@ -75,12 +83,25 @@ def test_search_prior_art_is_a_registered_tool():
 
 
 @pytest.mark.asyncio
-async def test_output_always_carries_us_only_caveat(monkeypatch):
+async def test_searched_empty_carries_caveat_and_says_no_matches(monkeypatch):
     from src.agent import tools as tools_mod
     monkeypatch.setattr(tools_mod, "search_prior_art", lambda q, limit=10: _fake([]))
     out = await _execute_search_prior_art("crispr delivery")
     assert CAVEAT_MARK in out
     assert "no us filings matched" in out.lower()
+
+
+@pytest.mark.asyncio
+async def test_unavailable_when_search_could_not_run(monkeypatch):
+    # search_prior_art returns None (no key / endpoint unreachable). The tool must
+    # emit an explicit UNAVAILABLE notice, NOT "no US filings matched" — otherwise
+    # a dead endpoint reads as a clean novelty result.
+    from src.agent import tools as tools_mod
+    monkeypatch.setattr(tools_mod, "search_prior_art", lambda q, limit=10: _fake(None))
+    out = await _execute_search_prior_art("crispr delivery")
+    assert "unavailable" in out.lower()
+    assert "not" in out.lower() and "novelty" in out.lower()
+    assert "no us filings matched" not in out.lower()
 
 
 async def _fake(v):
