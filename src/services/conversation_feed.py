@@ -15,9 +15,12 @@ every row of the engine's own decision table.
 
 from __future__ import annotations
 
-from sqlalchemy import ColumnElement, and_, false, or_, true
+from sqlalchemy import ColumnElement, and_, false, func, or_, select, true
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.models import AgentMessage
+from src.config import get_settings
+from src.models import AgentMessage, AgentRegistry, Cohort, CohortMembership
+from src.services.cohorts import compute_gates
 from src.visibility import VISIBILITY_COLLAB_PRIVATE
 
 
@@ -53,3 +56,39 @@ def gate_clause(gate: set[str] | None) -> ColumnElement[bool]:
             AgentMessage.agent_id.in_(gate),
         ) if gate else false(),
     )
+
+
+async def resolve_agent_gate(db: AsyncSession, agent_id: str) -> set[str] | None:
+    """The viewing agent's ``allowed_sender_ids``, via the engine's own computation.
+
+    Same call the admin preview makes (``_cohort_gate_context``), with one
+    deliberate difference: the roster is the active agents **plus the viewing
+    agent**. ``/agent/{id}/conversations`` admits ``status in ("active",
+    "inactive")``, but ``compute_gates`` only returns keys for the roster it is
+    handed, so an inactive viewer would KeyError. Adding it can only *raise*
+    ``live_members``, which the preflight compares against zero — so it cannot
+    turn a refusal into a silent roster-wide isolation.
+    """
+    settings = get_settings()
+    roster = {
+        r[0] for r in (await db.execute(
+            select(AgentRegistry.agent_id).where(AgentRegistry.status == "active")
+        )).all()
+    }
+    roster.add(agent_id)
+    rows = (await db.execute(
+        select(CohortMembership.cohort_id, CohortMembership.agent_id)
+    )).all()
+    cohort_count = (await db.execute(
+        select(func.count()).select_from(Cohort)
+    )).scalar() or 0
+
+    gates, _preflight_error = compute_gates(
+        membership_rows=[(r[0], r[1]) for r in rows],
+        agent_ids=sorted(roster),
+        isolation_enabled=settings.cohort_isolation_enabled,
+        policy=settings.cohort_default_policy,
+        cohort_count=cohort_count,
+        has_db=True,
+    )
+    return gates.get(agent_id)
