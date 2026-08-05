@@ -107,8 +107,11 @@ async def test_gate_is_off_when_isolation_is_disabled(db_session, monkeypatch):
 
 async def test_an_inactive_viewing_agent_still_resolves(db_session, monkeypatch):
     """compute_gates only keys the roster it is given, and the conversations route
-    admits status 'inactive'. Without adding the viewer to the roster this raised
-    KeyError instead of returning a gate."""
+    admits status 'inactive'. Without adding the viewer to the roster, 'sleeper'
+    would be absent from compute_gates' agent_ids, so gates.get('sleeper') would
+    silently return None (gate off / unrestricted) instead of the viewer's real
+    cohort gate {'sleeper', 'awake'} — the opposite of the intended isolation,
+    and worse than a KeyError because it fails open rather than loud."""
     from src.config import get_settings
     s = get_settings()
     monkeypatch.setattr(s, "cohort_isolation_enabled", True, raising=False)
