@@ -71,7 +71,7 @@ EXIT_OK = 0
 EXIT_BLOCKED = 1
 EXIT_WARN = 2
 
-DEFAULT_TARGET = "0023"
+DEFAULT_TARGET = "0024"
 #: Revisions this migration path has been exercised from. 0023 means "already done".
 #:
 #: 0020 and 0021 are here because origin/main's own alembic head is 0021 (PR19). A
@@ -84,7 +84,7 @@ DEFAULT_TARGET = "0023"
 #: already exists, so duplicates cannot be present and there is no 0019 index build to
 #: wait on. All that remains is 0022 (three empty tables) and 0023 (three columns on the
 #: small researcher_profiles).
-SUPPORTED_START_REVISIONS = ("0018", "0019", "0020", "0021")
+SUPPORTED_START_REVISIONS = ("0018", "0019", "0020", "0021", "0023")
 
 #: Start revisions at which migration 0019 has already run, so the expensive
 #: ACCESS EXCLUSIVE index build on agent_messages is behind us.
@@ -199,7 +199,7 @@ PLANNED_OBJECTS: tuple[PlannedObject, ...] = (
     PlannedObject("0023", "column", "evidence_pub_count", "researcher_profiles"),
 )
 
-REVISION_ORDER = ("0018", "0019", "0020", "0021", "0022", "0023")
+REVISION_ORDER = ("0018", "0019", "0020", "0021", "0022", "0023", "0024")
 
 
 def planned_objects_between(current: str, target: str) -> tuple[PlannedObject, ...]:
