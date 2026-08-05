@@ -27,6 +27,17 @@ See `.notes/slack-integration-test-plan.md` §"Global Constraints".
 ## Setup
 
 ```bash
+# 0. Migrate the e2e database first, and re-check this EVERY time. It is not
+#    permanently at head: `copi_slack_test` was left at 0022 while the branch head
+#    moved to 0023, and because the ORM carries 0023's columns
+#    (ResearcherProfile.synthesis_validated and the two evidence counts) any query
+#    that touches researcher_profiles then fails with UndefinedColumnError — which
+#    takes out `python -m tests.e2e.seed` and the whole onboarding flow. Adding
+#    three nullable columns is safe; NEVER downgrade this database (see above).
+docker compose exec -T \
+  -e DATABASE_URL=postgresql+asyncpg://copi:copi@postgres:5432/copi_slack_test \
+  app python -m alembic upgrade head
+
 # 1. an app instance on a MIGRATED database (the live `copi` DB is at 0018 and
 #    has no `agents` table, so /admin/agents cannot work against it)
 docker compose run -d --name app-8002 -p 8002:8000 \
@@ -53,6 +64,38 @@ docker compose exec -T \
   -e E2E_SIGNUP_USER_ID=<signup_user_id> \
   -e E2E_ONBOARDING_USER_ID=<onboarding_user_id> \
   app python -m pytest tests/e2e/test_browser_flows.py -q
+```
+
+Steps 1 and 2 are `docker compose run`, which *creates* a container, so on any
+machine that has run this before they fail with `Conflict. The container name
+"/app-8002" is already in use`. The two containers carry their env and port
+bindings, and `.:/app` is a mount, so the right move is to reuse them —
+`docker start app-8002 app-8003` — and, since neither runs `--reload`,
+`docker restart app-8002 app-8003` after any `src/` change you want under test.
+
+Or run step 4 from the **host** against `.venv-test` — the same interpreter
+`scripts/ci.sh` uses, so a green tier here is green under the gate. Both app
+instances publish host ports, so the URLs are `localhost:` rather than the
+container hostnames; everything else is identical, and the forged cookie works
+because `src.config` reads the same `.env` `SECRET_KEY` the containers do:
+
+```bash
+E2E_BASE_URL=http://localhost:8002 \
+E2E_ISOLATION_BASE_URL=http://localhost:8003 \
+E2E_ADMIN_USER_ID=<admin_user_id> \
+E2E_SIGNUP_USER_ID=<signup_user_id> \
+E2E_ONBOARDING_USER_ID=<onboarding_user_id> \
+.venv-test/bin/python -m pytest tests/e2e/test_browser_flows.py -q
+# -> 8 passed, 1 xfailed   (the xfail is the ORCID pin below)
+```
+
+Nothing in that command needs a browser: the pytest tier is httpx replays. The
+**driven** half — replaying `FLOWS` in a real browser for the screenshots in
+`.playwright-mcp/` — is what needs Playwright, and the wheel alone is not enough:
+
+```bash
+uv pip install --python .venv-test/bin/python playwright   # or: -e '.[dev]'
+.venv-test/bin/python -m playwright install chromium       # ~300MB of binaries
 ```
 
 ## Authentication: why the cookie is forged
@@ -172,6 +215,19 @@ auto-enqueues a `generate_profile` job and shows that spinner while
 usable ORCID credentials it can never complete, and the page spins forever. The
 flow therefore substitutes the `ResearcherProfile` row the pipeline would have
 written and continues from there; the pipeline itself is Task 4's subject.
+
+**The flow destroys its own fixture, so `seed.py` resets it.** Walking it sets
+`users.onboarding_complete=True`, and the substitute step leaves a
+`ResearcherProfile` plus a `generate_profile` job in status `completed`. Any of
+the three and a re-run is not the same test: `onboarding_complete` makes
+`/onboarding` 302 straight to `/profile`, and a `completed` job takes
+`profile_review.html` past the spinner branch. Get-or-create does not undo that —
+it finds the row and leaves it — so `seed.py` now explicitly clears all three for
+`ONBOARDING_ORCID` and nothing else. Found on 2026-08-04: all three were still
+set from the 2026-07-31 run, and
+`test_onboarding_goes_as_far_as_the_orcid_dependency` had been silently falling
+through to its second branch. **Re-seed before trusting that test**; if it reports
+the completed-profile branch, the reset did not run.
 
 ## Artefacts
 

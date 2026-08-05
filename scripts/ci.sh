@@ -60,6 +60,11 @@ MIGRATION_FLOOR="${MIGRATION_FLOOR:-0021}"
 LINT_TARGETS=(
   tests/conftest.py tests/factories.py tests/fakes.py
   tests/unit tests/integration tests/characterization tests/contract
+  # tests/e2e was the one test directory the gate never linted. Added 2026-08-04,
+  # when that tier was first run end to end; it was already at zero findings, so
+  # this closes the hole without paying anything down. Two of its nine tests need
+  # no server and run in the offline suite, so it is gate-relevant either way.
+  tests/e2e
 )
 
 if [ ! -x "$VENV_PY" ]; then

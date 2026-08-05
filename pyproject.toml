@@ -42,6 +42,15 @@ dev = [
     # mutmut 3.x's instrumentation trampoline rejects this repo's `src.`-prefixed
     # module names; 2.x mutates files directly and works with the src/ layout.
     "mutmut>=2.4,<3",
+    # For the human/driven half of tests/e2e only — the browser that replays
+    # tests/e2e/test_browser_flows.py::FLOWS and drops its screenshots in
+    # .playwright-mcp/. NOTHING under tests/ imports it: the pytest tier in that
+    # directory is httpx replays of the same route sequences, so `pytest tests/`
+    # is green without it and the wheel alone is not enough to drive a browser —
+    # `python -m playwright install chromium` fetches the ~300MB binaries, which
+    # pip cannot. Pinned as a floor, not an upper bound; the browser build is
+    # chosen by that command, not by this line.
+    "playwright>=1.44.0",
 ]
 
 [project.scripts]

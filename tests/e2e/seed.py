@@ -32,7 +32,7 @@ import os
 import sys
 from datetime import UTC, datetime
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 # Identities the browser flows log in as. ORCIDs are in the ISNI test range that
 # orcid.org never issues, so these rows can never collide with a real login.
@@ -116,6 +116,7 @@ async def seed(session) -> dict[str, str]:
         AgentChannel,
         AgentMessage,
         AgentRegistry,
+        Job,
         ResearcherProfile,
         SimulationRun,
         ThreadDecision,
@@ -171,6 +172,25 @@ async def seed(session) -> dict[str, str]:
         institution="Scripps Research",
         access_status="allowed",
         onboarding_complete=False,
+    )
+    # ...and RESET the row if a previous run walked it. Get-or-create alone does
+    # not deliver the state the paragraph above promises, because the flow is
+    # destructive to its own fixture: its last step POSTs
+    # /onboarding/private-profile, which sets onboarding_complete=True, and its
+    # "substitute" step leaves a ResearcherProfile and a generate_profile job in
+    # status 'completed' behind. Any of the three and the flow is unreplayable —
+    # `onboarding_complete` makes /onboarding 302 straight to /profile
+    # (src/routers/onboarding.py::onboarding_start, first statement), and a
+    # 'completed' job takes profile_review.html past the spinner branch. Measured
+    # on copi_slack_test 2026-08-04: all three were set from the 2026-07-31 run,
+    # so the flow had silently stopped testing anything a browser would see.
+    # Scoped to this one fixture ORCID; nothing else is deleted anywhere here.
+    onboarding.onboarding_complete = False
+    await session.execute(
+        delete(ResearcherProfile).where(ResearcherProfile.user_id == onboarding.id)
+    )
+    await session.execute(
+        delete(Job).where(Job.user_id == onboarding.id, Job.type == "generate_profile")
     )
     out["onboarding_user_id"] = str(onboarding.id)
 

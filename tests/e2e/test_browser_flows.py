@@ -444,12 +444,22 @@ def test_onboarding_goes_as_far_as_the_orcid_dependency(as_user):
     if "Building Your Profile" in r.text:
         assert "Step 3 of 4" in r.text
         return
-    # The fixture has already been walked to completion by a previous run; then
-    # /onboarding redirects to /profile. Both outcomes are correct, and saying
-    # which one we saw is the Rule L3 part.
-    assert "Profile" in r.text, (
-        "/onboarding neither showed the pipeline spinner nor the completed "
-        "profile — the flow is in neither documented state"
+    # Otherwise the fixture was walked to completion by a previous run, and
+    # /onboarding 302s to /profile. Both outcomes are correct; which one we saw
+    # is the Rule L3 part — so assert it on the LANDING PATH.
+    #
+    # This assertion used to be `"Profile" in r.text`, which discriminates
+    # nothing: the spinner page above renders the literal string "Building Your
+    # Profile", so it satisfies this branch too, and so does any other page
+    # carrying the app's nav. A route that had stopped honouring
+    # onboarding_complete would have passed it. The path is the one observable
+    # that differs between the two documented states.
+    #
+    # Reaching this branch at all now means tests.e2e.seed's onboarding reset did
+    # not run — re-seed before believing anything this test says.
+    assert r.url.path == "/profile", (
+        "/onboarding neither showed the pipeline spinner nor redirected to the "
+        f"completed profile — the flow is in neither documented state: {r.url}"
     )
 
 
