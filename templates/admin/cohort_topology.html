@@ -44,6 +44,7 @@
                 <tr>
                     <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase sticky left-0 bg-gray-50">Agent</th>
                     <th class="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+                    <th class="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase">Role</th>
                     {% for c in cohorts %}
                     <th class="px-3 py-3 text-center text-xs font-medium text-gray-500">
                         <a href="/admin/cohorts/{{ c.id }}" class="text-indigo-600 hover:underline">{{ c.name }}</a>
@@ -69,6 +70,9 @@
                             {% if a.status == 'active' %}bg-green-100 text-green-700
                             {% elif a.status == 'suspended' %}bg-red-100 text-red-700
                             {% else %}bg-gray-100 text-gray-600{% endif %}">{{ a.status }}</span>
+                    </td>
+                    <td class="px-3 py-3">
+                        <span class="px-2 py-0.5 text-xs rounded-full bg-indigo-100 text-indigo-700">{{ a.role }}</span>
                     </td>
                     {% for c in cohorts %}
                     {% set cell = c.id | string ~ ':' ~ a.agent_id %}

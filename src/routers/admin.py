@@ -14,6 +14,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from src.agent.roles import available_roles
 from src.config import get_settings
 from src.database import get_db
 from src.dependencies import get_admin_user, get_current_user
@@ -850,8 +851,10 @@ async def admin_agent_detail(
             agent=agent,
             linked_user=linked_user,
             valid_statuses=VALID_AGENT_STATUSES,
+            available_roles=available_roles(),
             slack_error=request.query_params.get("slack_error"),
             slack_ok=request.query_params.get("slack_ok"),
+            role_error=request.query_params.get("role_error"),
         ),
     )
 
@@ -998,6 +1001,37 @@ async def admin_link_agent(
     await db.commit()
 
     return RedirectResponse(url="/admin/agents", status_code=302)
+
+
+@router.post("/agents/{agent_id}/role")
+async def admin_set_agent_role(
+    agent_id: uuid.UUID,
+    request: Request,
+    role: str = Form(...),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_admin_user),
+):
+    """Set an agent's role — selects its per-role prompt overrides and tool
+    allow-list (src/agent/roles.py). Validated against the same role set the
+    admin's <select> was built from, so a stale or hand-crafted form can never
+    write a role the runtime does not know how to resolve.
+    """
+    result = await db.execute(
+        select(AgentRegistry).where(AgentRegistry.id == agent_id)
+    )
+    agent = result.scalar_one_or_none()
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    if role not in available_roles():
+        return RedirectResponse(
+            url=f"/admin/agents/{agent_id}?role_error=Unknown+role", status_code=302
+        )
+
+    agent.role = role
+    await db.commit()
+
+    return RedirectResponse(url=f"/admin/agents/{agent_id}", status_code=302)
 
 
 @router.post("/impersonate")

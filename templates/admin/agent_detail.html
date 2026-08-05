@@ -27,6 +27,11 @@
         ⚠️ Slack provisioning failed: {{ slack_error }}
     </div>
     {% endif %}
+    {% if role_error %}
+    <div class="mb-4 px-4 py-3 rounded-lg bg-red-50 border border-red-200 text-sm text-red-800">
+        ⚠️ {{ role_error }}
+    </div>
+    {% endif %}
 
     <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
         <div class="grid grid-cols-2 gap-4 text-sm mb-6">
@@ -42,6 +47,12 @@
             <div>
                 <span class="text-gray-500">PI:</span>
                 <span class="ml-2 font-medium">{{ agent.pi_name }}</span>
+            </div>
+            <div>
+                <span class="text-gray-500">Role:</span>
+                <span class="ml-2 px-2 py-0.5 rounded-full text-xs bg-indigo-100 text-indigo-700">
+                    {{ agent.role }}
+                </span>
             </div>
             {% if linked_user %}
             <div>
@@ -117,6 +128,27 @@
         <!-- Separate form for the Provision button (can't nest inside the approve form). -->
         <form id="provision-slack-form" method="POST"
               action="/admin/agents/{{ agent.id }}/slack/provision"></form>
+
+        <form method="POST" action="/admin/agents/{{ agent.id }}/role"
+              class="mt-3 pt-4 border-t border-gray-200 flex items-end gap-2">
+            <div class="flex-1">
+                <label class="block text-sm font-medium text-gray-700 mb-1">Role</label>
+                <select name="role" class="w-full text-sm">
+                    {% for r in available_roles %}
+                    <option value="{{ r }}" {% if agent.role == r %}selected{% endif %}>{{ r }}</option>
+                    {% endfor %}
+                </select>
+                <p class="text-xs text-gray-400 mt-1">
+                    Selects the agent's per-role prompt overrides and tool allow-list
+                    (<code>prompts/roles/&lt;role&gt;/</code>). <b>pi_lab</b> is the legacy
+                    default. A running sim picks up the change on its next roster sync.
+                </p>
+            </div>
+            <button type="submit"
+                    class="shrink-0 px-4 py-2 bg-indigo-600 text-white text-sm font-medium rounded-lg hover:bg-indigo-700">
+                Set Role
+            </button>
+        </form>
 
         {% if agent.status == 'pending' %}
         <form method="POST" action="/admin/agents/{{ agent.id }}/reject" class="mt-3">

@@ -34,6 +34,20 @@ class RoleSpec:
     tools: frozenset[str]
 
 
+def available_roles() -> list[str]:
+    """Every role an agent can be assigned: ``pi_lab`` plus every directory under
+    ``prompts/roles/``. ``pi_lab`` is listed even if its directory does not exist
+    (it is the absence of overrides, see ``resolve_prompt_path``) and always comes
+    first so callers (e.g. the admin `<select>`) get a stable, predictable order.
+    """
+    names = [DEFAULT_ROLE]
+    if ROLES_DIR.is_dir():
+        names += sorted(
+            p.name for p in ROLES_DIR.iterdir() if p.is_dir() and p.name != DEFAULT_ROLE
+        )
+    return names
+
+
 def resolve_prompt_path(role: str, filename: str) -> Path:
     """Return the role's override for ``filename`` if present, else the global file.
 
