@@ -82,3 +82,7 @@ mutants/
 
 # Playwright MCP browser artifacts (console logs, page snapshots)
 .playwright-mcp/
+
+# Production migration dumps (scripts/migrate/run_migration.sh). Never commit these:
+# they are full database copies containing message bodies and tokens.
+backups/

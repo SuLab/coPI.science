@@ -73,6 +73,10 @@ LINT_TARGETS=(
   # this closes the hole without paying anything down. Two of its nine tests need
   # no server and run in the offline suite, so it is gate-relevant either way.
   tests/e2e
+  # The production migration tooling. Not tests, but it is the code an operator runs
+  # against a live database during an outage window, so it gets held to the same bar.
+  # Verified at zero findings when added 2026-08-04.
+  scripts/migrate
 )
 
 if [ ! -x "$VENV_PY" ]; then
