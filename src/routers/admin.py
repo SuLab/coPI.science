@@ -1368,6 +1368,12 @@ async def admin_waitlist_mark_contacted(
 # Cohort name: lowercase alphanumeric + hyphens, max 48 chars (slug style).
 _COHORT_NAME_RE = re.compile(r"^[a-z0-9-]{1,48}$")
 
+# Starlette's request.form() defaults to max_fields=1000. The topology matrix
+# posts one marker per rendered row and column plus one value per ticked cell,
+# so the payload is agents + cohorts + ticked — but "ticked" alone will pass
+# 1,000 on a large enough roster, so the limit is raised rather than relied on.
+_TOPOLOGY_MAX_FIELDS = 50_000
+
 
 async def _cohort_gate_context(db: AsyncSession) -> dict[str, Any]:
     """Preview of the gate the engine will compute from the current topology.
@@ -1549,16 +1555,24 @@ async def admin_cohort_topology_save(
 ):
     """Apply a whole-matrix edit as a diff against the cells that were rendered.
 
-    The form posts one ``cell`` value per ticked box (``{cohort_id}:{agent_id}``) and
-    one ``present`` value per rendered cell. Diffing against ``present`` rather than
-    against the whole table means a stale or partial form can never delete
-    memberships for a cohort or agent it did not display — the usual
-    checkbox-matrix data-loss bug. Unknown cohort/agent ids are ignored, never
-    written. Every add and remove is audited individually.
+    The form posts one ``cell`` value per ticked box (``{cohort_id}:{agent_id}``),
+    one ``present_agent`` per rendered row and one ``present_cohort`` per rendered
+    column; the rendered cell set is their cross product, which is what the
+    template renders (an unconditional nested loop). Sending markers instead of one
+    hidden input per cell keeps the payload at agents+cohorts fields rather than
+    agents*cohorts — 60x56 posted 3,528 fields and hit Starlette's
+    ``max_fields=1000``, which is why the matrix could not be saved at all.
+
+    Diffing against ``rendered`` rather than against the whole table means a stale
+    or partial form can never delete memberships for a cohort or agent it did not
+    display — the usual checkbox-matrix data-loss bug. Unknown cohort/agent ids are
+    ignored, never written. Every add and remove is audited individually.
     """
-    form = await request.form()
+    form = await request.form(max_fields=_TOPOLOGY_MAX_FIELDS)
     ticked = {v for v in form.getlist("cell") if isinstance(v, str)}
-    rendered = {v for v in form.getlist("present") if isinstance(v, str)}
+    present_agents = {v for v in form.getlist("present_agent") if isinstance(v, str)}
+    present_cohorts = {v for v in form.getlist("present_cohort") if isinstance(v, str)}
+    rendered = {f"{cid}:{aid}" for cid in present_cohorts for aid in present_agents}
     if not rendered:
         return RedirectResponse(
             url="/admin/cohorts/topology?error=Nothing+to+save", status_code=302
