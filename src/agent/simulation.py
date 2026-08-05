@@ -25,7 +25,7 @@ from src.agent.message_log import LogEntry, MessageLog, is_funding_post
 from src.agent.prompt_safety import delimit
 from src.agent.slack_client import SlackListingIncomplete, ThreadNotFound
 from src.agent.state import PostRef, ProposalRef, ThreadState
-from src.agent.tools import TOOL_DEFINITIONS, execute_tool
+from src.agent.tools import execute_tool, tools_for_role
 from src.config import get_settings
 from src.models import (
     AgentChannel,
@@ -1165,14 +1165,16 @@ class SimulationEngine:
 
         # Create tool executor bound to this thread's state
         async def tool_executor(tool_name: str, tool_input: dict) -> str:
-            return await execute_tool(tool_name, tool_input, agent.agent_id, thread)
+            return await execute_tool(
+                tool_name, tool_input, agent.agent_id, thread, role=agent.role
+            )
 
         agent.api_call_count += 1
         try:
             response_text = await generate_with_tools(
                 system_prompt=system_prompt,
                 messages=messages,
-                tools=TOOL_DEFINITIONS,
+                tools=tools_for_role(agent.role),
                 tool_executor=tool_executor,
                 model=settings.llm_agent_model_opus,
                 max_tokens=1500,
