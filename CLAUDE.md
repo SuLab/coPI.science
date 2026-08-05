@@ -9,60 +9,99 @@ it is the whole gate: there is no server-side CI.
 
 To run pytest alone **inside the container**, `TEST_DATABASE_URL` is required.
 Without it `tests/conftest.py` falls back to spinning an ephemeral Postgres via
-testcontainers, and the `app` container has no Docker socket — so every test that
+testcontainers, and the web container has no Docker socket — so every test that
 needs a database errors out (469 of them, measured 2026-08-04):
 
 ```bash
-docker compose exec -T -e TEST_DATABASE_URL=postgresql+asyncpg://copi:copi@postgres:5432/copi_a3 \
-  app python -m pytest tests/ -v
+docker compose -f docker-compose.prod.yml exec -T \
+  -e TEST_DATABASE_URL=postgresql+asyncpg://copi:copi@postgres:5432/copi_a3 \
+  blackbird-app python -m pytest tests/ -v
 ```
+
+The service is **`blackbird-app`**, not `app` — see the two-stack warning under
+"Running the Agent Simulation" for why the `-f docker-compose.prod.yml` is not
+optional.
 
 The named database must already exist — the suite migrates it, it does not create
 it. Add a fresh scratch DB with
-`docker compose exec -T postgres createdb -U copi copi_xN`, and give concurrent
-suites distinct names so they do not migrate each other's schema mid-run. Never
-point `TEST_DATABASE_URL` at `copi`, the dev database.
+`docker compose -f docker-compose.prod.yml exec -T postgres createdb -U copi copi_xN`,
+and give concurrent suites distinct names so they do not migrate each other's
+schema mid-run. Never point `TEST_DATABASE_URL` at `copi`, the dev database.
 
 ## Running the Agent Simulation
 
-The simulation runs in a one-off container named `agent-run`:
+> ### ⚠️ This host runs TWO stacks. Read this before any `docker` command.
+>
+> A second, unrelated CoPI deployment (**org1**, `/home/ubuntu/copi-python`,
+> project `copi-python`, serving `copi.science`) shares this host. Its
+> simulation container is named **`agent-run`** — the *unprefixed* name. This
+> repo's is **`blackbird-agent-run`**.
+>
+> **`docker stop agent-run` / `docker rm agent-run` stops org1's PRODUCTION run.**
+>
+> Always confirm ownership before touching any container:
+>
+> ```bash
+> docker inspect <name> --format '{{index .Config.Labels "com.docker.compose.project"}}'
+> # copi-blackbird = this repo.  copi-python = org1, DO NOT TOUCH.
+> ```
+>
+> Two more rules that follow from the shared host:
+> - **Always pass `-f docker-compose.prod.yml`.** Bare `docker compose` resolves
+>   to `docker-compose.yml`, a *different* (dev) stack whose web service is named
+>   `app`, runs `--reload`, bind-mounts the whole repo, and binds host `:8001`.
+>   The deployed stack is `docker-compose.prod.yml`, whose web service is
+>   `blackbird-app`. `COMPOSE_PROJECT_NAME=copi-blackbird` in `.env` fixes the
+>   project name but *not* the file.
+> - **Never pass `--remove-orphans`** — it has killed org1's nginx + certbot.
+
+The simulation runs in a one-off container named `blackbird-agent-run`:
 
 ```bash
+DC="docker compose -f docker-compose.prod.yml"
+
 # Resume an existing run (no budget limit):
-docker compose --profile agent run -d --name agent-run agent python -m src.agent.main --budget 0
+$DC --profile agent run -d --name blackbird-agent-run agent python -m src.agent.main --budget 0
 
 # Resume with a budget cap (e.g. 50 LLM calls per agent):
-docker compose --profile agent run -d --name agent-run agent python -m src.agent.main --budget 50
+$DC --profile agent run -d --name blackbird-agent-run agent python -m src.agent.main --budget 50
 
 # Fresh run (wipes agent_messages/channels, keeps proposals):
-docker compose --profile agent run -d --name agent-run agent python -m src.agent.main --fresh --budget 0
+$DC --profile agent run -d --name blackbird-agent-run agent python -m src.agent.main --fresh --budget 0
 
 # With a time limit (minutes):
-docker compose --profile agent run -d --name agent-run agent python -m src.agent.main --max-runtime 60 --budget 0
+$DC --profile agent run -d --name blackbird-agent-run agent python -m src.agent.main --max-runtime 60 --budget 0
 ```
 
 **Before restarting**, always save logs and rebuild containers:
 
 ```bash
+DC="docker compose -f docker-compose.prod.yml"
+
 # 1. Save logs
-docker logs agent-run > logs/run_$(date +%s).log 2>&1
-ls -t logs/run_*.log | tail -n +11 | xargs rm -f
+docker logs blackbird-agent-run > logs/blackbird_run_$(date +%s).log 2>&1
+ls -t logs/blackbird_run_*.log | tail -n +11 | xargs -r rm -f
 
 # 2. Stop the old container — GRACEFULLY. `docker rm -f` sends SIGKILL, which
 #    skips the shutdown flush and permanently loses the in-flight turn's
 #    messages (the DB, not Slack, is the durable store). `docker stop` sends
 #    SIGTERM; -t 30 leaves room for an in-flight LLM call to finish.
-docker stop -t 30 agent-run
-docker rm agent-run
+docker stop -t 30 blackbird-agent-run
+docker rm blackbird-agent-run
 
-# 3. Rebuild app + worker (picks up code changes)
-docker compose up -d --build app worker
+# 3. Rebuild the web tier (picks up code changes)
+$DC up -d --build blackbird-app worker
 
 # 4. Start the new run
-docker compose --profile agent run -d --name agent-run agent python -m src.agent.main --budget 0
+$DC --profile agent run -d --name blackbird-agent-run agent python -m src.agent.main --budget 0
 ```
 
 **Note:** The agent-run container uses mounted source code but the Python process only loads modules at startup. **Code** changes require a container restart to take effect. **After any code change that affects the running agent process, flag this to the user so they can decide whether to restart.** (Roster changes — activating/inactivating agents or setting a new `slack_bot_token` in `AgentRegistry` — do NOT need a restart; they're picked up live by `_sync_roster_from_db`.)
+
+**`.env` changes need a container *recreate*, not a restart.** `env_file` is
+resolved when the container is created, so `docker restart` re-runs the old
+environment. Step 2 + step 4 above (rm, then `run`) is what actually picks up an
+edited `.env`.
 
 ## Adding New PIs
 
@@ -77,7 +116,7 @@ its row) makes it go live **without a restart**.
 Look up each PI's ORCID ID (search orcid.org or the ORCID public API). Add them to `orcids.txt` with a comment line, then seed:
 
 ```bash
-docker compose exec app python -m src.cli seed-profiles --file new_orcids.txt
+docker compose -f docker-compose.prod.yml exec blackbird-app python -m src.cli seed-profiles --file new_orcids.txt
 ```
 
 This creates `User` rows and enqueues profile generation jobs (processed by the worker).
@@ -105,14 +144,14 @@ rotating pair is persisted in the `app_settings` KV table) and a public `base_ur
 roster from the container, then run the script on the host:
 
 ```bash
-docker compose exec app python scripts/export_agent_roster.py   # writes data/agent_roster.json
+docker compose -f docker-compose.prod.yml exec blackbird-app python scripts/export_agent_roster.py   # writes data/agent_roster.json
 python3 scripts/provision_slack_bots.py                               # host: creates apps, prints OAuth URLs
 ```
 
 The host script writes tokens to `.env`; import them into the DB column with:
 
 ```bash
-docker compose exec app python scripts/backfill_agent_tokens.py
+docker compose -f docker-compose.prod.yml exec blackbird-app python scripts/backfill_agent_tokens.py
 ```
 
 (`.env` + `config.py get_slack_tokens()` remain a read fallback, but the DB column is
