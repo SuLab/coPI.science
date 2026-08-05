@@ -119,6 +119,10 @@ class Settings(BaseSettings):
     # and throttles or blocks unidentified clients. Falls back to ses_sender_email.
     ncbi_contact_email: str = ""
 
+    # PatentsView (USPTO) prior-art search — hub-only tool. Name contains "key"
+    # so it is auto-redacted in repr(settings). US filings only.
+    patentsview_api_key: str = ""
+
     # App
     secret_key: str = INSECURE_SECRET_KEY
     base_url: str = "http://localhost:8000"
