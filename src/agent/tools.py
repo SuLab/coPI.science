@@ -293,14 +293,16 @@ async def _execute_search_prior_art(query: str) -> str:
         applicant = h.get("applicant") or "Unknown applicant"
         inventor = h.get("inventor") or "Unknown inventor"
         status = h.get("status") or ""
-        # Title/applicant/inventor come from the USPTO API — untrusted external
-        # text (SEC-14); fence it.
-        lines.append(
-            delimit(
-                f"{h.get('patent_id','')} ({h.get('date','')}) — {h.get('title','')}\n"
-                f"  applicant: {applicant} | inventor: {inventor}"
-                + (f" | status: {status}" if status else ""),
-                "patent",
-            )
+        block = (
+            f"{h.get('patent_id','')} ({h.get('date','')}) — {h.get('title','')}\n"
+            f"  applicant: {applicant} | inventor: {inventor}"
+            + (f" | status: {status}" if status else "")
         )
+        if h.get("abstract"):
+            block += f"\n  abstract: {h['abstract']}"
+        if h.get("claim"):
+            block += f"\n  claim 1: {h['claim']}"
+        # Title/applicant/abstract/claim come from the USPTO API — untrusted
+        # external text (SEC-14); fence it.
+        lines.append(delimit(block, "patent"))
     return "\n\n".join(lines)

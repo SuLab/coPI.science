@@ -37,6 +37,62 @@ async def test_search_returns_normalised_hits(monkeypatch):
     assert hits[0]["date"] == "2026-01-01"
 
 
+_XML_URL = "https://api.uspto.gov/files/APPXML/1.xml"
+_ODP_HIT_WITH_PGPUB = {
+    "count": 1,
+    "patentFileWrapperDataBag": [
+        {
+            "applicationNumberText": "18/000001",
+            "pgpubDocumentMetaData": {"fileLocationURI": _XML_URL},
+            "applicationMetaData": {
+                "inventionTitle": "Gene Editing Widget",
+                "earliestPublicationNumber": "US20260000002A1",
+                "earliestPublicationDate": "2026-02-02",
+                "firstApplicantName": "Johns Hopkins University",
+                "firstInventorName": "Jane Roe",
+                "applicationStatusDescriptionText": "Docketed New Case",
+            },
+        }
+    ],
+}
+_PGPUB_XML = (
+    "<us-patent-application><abstract><p>A widget for editing genes precisely.</p>"
+    "</abstract><claims><claim>1. A gene-editing widget comprising a guide.</claim>"
+    "<claim>2. The widget of claim 1.</claim></claims></us-patent-application>"
+)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_enriches_abstract_and_first_claim_from_pgpub_xml(monkeypatch):
+    monkeypatch.setattr(patents, "_api_key", lambda: "k")
+    respx.post(patents.SEARCH_URL).mock(
+        return_value=httpx.Response(200, json=_ODP_HIT_WITH_PGPUB)
+    )
+    respx.get(_XML_URL).mock(return_value=httpx.Response(200, text=_PGPUB_XML))
+    hits = await patents.search_prior_art("gene editing widget")
+    assert "editing genes precisely" in hits[0]["abstract"]
+    assert "gene-editing widget comprising a guide" in hits[0]["claim"]
+    # only the FIRST claim is taken
+    assert "claim 1" not in hits[0]["claim"].lower()
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_fulltext_fetch_failure_leaves_hit_title_level(monkeypatch):
+    # A hit with a pgpub URI whose XML fetch fails must still return the hit,
+    # just without abstract/claim — enrichment is best-effort, never fatal.
+    monkeypatch.setattr(patents, "_api_key", lambda: "k")
+    respx.post(patents.SEARCH_URL).mock(
+        return_value=httpx.Response(200, json=_ODP_HIT_WITH_PGPUB)
+    )
+    respx.get(_XML_URL).mock(return_value=httpx.Response(500))
+    hits = await patents.search_prior_art("gene editing widget")
+    assert len(hits) == 1
+    assert hits[0]["title"] == "Gene Editing Widget"
+    assert hits[0]["abstract"] == "" and hits[0]["claim"] == ""
+
+
 @pytest.mark.asyncio
 @respx.mock
 async def test_missing_key_returns_none_and_does_not_call(monkeypatch):
@@ -163,6 +219,8 @@ async def test_output_carries_caveat_and_fields_on_has_hits_path(monkeypatch):
         "applicant": "Acme Corp",
         "inventor": "Jane Doe",
         "status": "Patented Case",
+        "abstract": "A widget that does things.",
+        "claim": "1. A widget comprising a thing.",
     }
     monkeypatch.setattr(tools_mod, "search_prior_art", lambda q, limit=10: _fake([hit]))
     out = await _execute_search_prior_art("widget")
@@ -171,3 +229,5 @@ async def test_output_carries_caveat_and_fields_on_has_hits_path(monkeypatch):
     assert "Novel Widget" in out
     assert "Acme Corp" in out
     assert "Jane Doe" in out
+    assert "A widget that does things." in out
+    assert "1. A widget comprising a thing." in out
