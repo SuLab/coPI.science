@@ -14,7 +14,7 @@ from itsdangerous import TimestampSigner
 from sqlalchemy import select
 
 from src.config import get_settings
-from src.models import Cohort, CohortAuditEvent, CohortMembership
+from src.models import AgentRegistry, Cohort, CohortAuditEvent, CohortMembership
 from tests import factories
 
 pytestmark = pytest.mark.integration
@@ -54,6 +54,87 @@ async def _cohort(db_session, name, admin, members=()):
         db_session.add(CohortMembership(cohort_id=c.id, agent_id=aid, added_by=admin.id))
     await db_session.flush()
     return c
+
+
+# --- agent role editing (task 11) -------------------------------------------
+
+
+async def test_admin_can_set_agent_role(client, db_session, admin, roster):
+    agent = roster["su"]
+    assert agent.role == "pi_lab"
+    r = await client.post(
+        f"/admin/agents/{agent.id}/role",
+        data={"role": "scout_hub"},
+        headers=_auth(admin.id),
+    )
+    assert r.status_code == 302
+    row = (await db_session.execute(
+        select(AgentRegistry).where(AgentRegistry.id == agent.id)
+    )).scalar_one()
+    assert row.role == "scout_hub"
+
+
+async def test_setting_an_unknown_role_is_rejected_without_a_500(
+    client, db_session, admin, roster
+):
+    agent = roster["su"]
+    r = await client.post(
+        f"/admin/agents/{agent.id}/role",
+        data={"role": "not-a-real-role"},
+        headers=_auth(admin.id),
+    )
+    assert r.status_code == 302
+    assert "error" in r.headers["location"]
+    row = (await db_session.execute(
+        select(AgentRegistry).where(AgentRegistry.id == agent.id)
+    )).scalar_one()
+    assert row.role == "pi_lab", "an unknown role must never be persisted"
+
+
+async def test_setting_agent_role_requires_admin(client, db_session, admin, roster):
+    agent = roster["su"]
+    plain = await factories.make_user(db_session, is_admin=False, email="plain2@example.org")
+    await db_session.flush()
+    r = await client.post(
+        f"/admin/agents/{agent.id}/role",
+        data={"role": "scout_hub"},
+        headers=_auth(plain.id),
+    )
+    assert r.status_code == 403
+    row = (await db_session.execute(
+        select(AgentRegistry).where(AgentRegistry.id == agent.id)
+    )).scalar_one()
+    assert row.role == "pi_lab"
+
+
+async def test_setting_agent_role_requires_login(client, db_session, roster):
+    agent = roster["su"]
+    r = await client.post(
+        f"/admin/agents/{agent.id}/role",
+        data={"role": "scout_hub"},
+    )
+    assert r.status_code == 302
+    assert "/login" in r.headers["location"]
+    row = (await db_session.execute(
+        select(AgentRegistry).where(AgentRegistry.id == agent.id)
+    )).scalar_one()
+    assert row.role == "pi_lab"
+
+
+async def test_agent_detail_page_shows_the_current_role(client, admin, roster):
+    agent = roster["su"]
+    r = await client.get(f"/admin/agents/{agent.id}", headers=_auth(admin.id))
+    assert r.status_code == 200
+    assert "pi_lab" in r.text
+
+
+async def test_topology_page_shows_each_agents_role(client, db_session, admin, roster):
+    # The matrix table (and therefore any per-agent role cell) only renders once
+    # there is at least one cohort — see the "No cohorts yet" empty state.
+    await _cohort(db_session, "wave", admin)
+    r = await client.get("/admin/cohorts/topology", headers=_auth(admin.id))
+    assert r.status_code == 200
+    assert "pi_lab" in r.text
 
 
 # --- access control ---------------------------------------------------------
