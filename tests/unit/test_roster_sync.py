@@ -48,10 +48,10 @@ class TestTokenHelpers:
 # Live roster sync (_sync_roster_from_db)
 # ---------------------------------------------------------------
 
-def _row(agent_id, token="xoxb-real"):
+def _row(agent_id, token="xoxb-real", role="pi_lab"):
     return types.SimpleNamespace(
         agent_id=agent_id, bot_name=f"{agent_id.capitalize()}Bot",
-        pi_name=f"PI {agent_id}", slack_bot_token=token,
+        pi_name=f"PI {agent_id}", slack_bot_token=token, role=role,
     )
 
 

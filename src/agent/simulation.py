@@ -3985,14 +3985,31 @@ class SimulationEngine:
                         AgentRegistry.bot_name,
                         AgentRegistry.pi_name,
                         AgentRegistry.slack_bot_token,
+                        AgentRegistry.role,
                     ).where(AgentRegistry.status == "active")
                 )).all()
 
             desired = {r.agent_id: r for r in rows}
+
+            # Role-diff for surviving agents (agents present in both current and
+            # desired). Must run even when to_add/to_remove are empty, or a role
+            # reassignment on a running agent is invisible until the next add/remove.
+            role_changed = False
+            for aid, agent in self.agents.items():
+                r = desired.get(aid)
+                if r is not None and getattr(r, "role", "pi_lab") != agent.role:
+                    logger.info("[roster] %s role %s -> %s", aid, agent.role, r.role)
+                    agent.role = r.role
+                    role_changed = True
+
             current = set(self.agents)
             to_remove = current - set(desired)
             to_add = set(desired) - current
             if not to_remove and not to_add:
+                if role_changed:
+                    # Persona/tooling changed but membership did not — refresh the
+                    # derived structures a role can influence.
+                    self._build_lab_directories()
                 # Roster unchanged, but cohort membership may have — recompute.
                 await self._recompute_allowed_sender_ids()
                 return
@@ -4029,7 +4046,7 @@ class SimulationEngine:
                     # gate on a token/connection that doesn't apply in DB-only mode).
                     from src.agent.transport import NullTransport
                     client = NullTransport(agent_id=aid)
-                agent = Agent(agent_id=aid, bot_name=r.bot_name, pi_name=r.pi_name)
+                agent = Agent(agent_id=aid, bot_name=r.bot_name, pi_name=r.pi_name, role=r.role)
                 # In-place inserts (PIHandler shares these dicts by reference).
                 self.agents[aid] = agent
                 self.slack_clients[aid] = client
