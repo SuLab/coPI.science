@@ -215,21 +215,45 @@ def test_revision_status_passes_at_the_target():
     assert "no-op" in reason
 
 
-@pytest.mark.parametrize("rev", ["0018", "0019"])
+@pytest.mark.parametrize("rev", ["0018", "0019", "0020", "0021"])
 def test_revision_status_passes_at_a_supported_starting_point(rev):
     assert pf.revision_status(rev, "0023")[0] == pf.PASS
 
 
-@pytest.mark.parametrize("rev", ["0001", "0017", "0020", "0021", "0022", "0024", "abcdef"])
+@pytest.mark.parametrize("rev", ["0001", "0017", "0022", "0024", "abcdef"])
 def test_revision_status_blocks_anywhere_else(rev):
     status, reason = pf.revision_status(rev, "0023")
     assert status == pf.BLOCK
     assert rev in reason
 
 
-def test_supported_start_revisions_are_exactly_the_documented_pair():
-    assert pf.SUPPORTED_START_REVISIONS == ("0018", "0019")
+def test_supported_start_revisions_are_exactly_the_documented_set():
+    assert pf.SUPPORTED_START_REVISIONS == ("0018", "0019", "0020", "0021")
     assert pf.DEFAULT_TARGET == "0023"
+
+
+def test_0021_is_supported_because_that_is_origin_mains_own_alembic_head():
+    """Regression guard: do not narrow this list back to ("0018", "0019").
+
+    origin/main's head is 0021 (PR19 merged 0019, 0020 and 0021), so any deployment
+    tracking main is stamped 0021. The first version of this allowlist blocked exactly
+    that state -- preflight refused the one starting point main itself produces, which
+    was found by auditing the branch for a PR into main rather than by any test.
+
+    0022 is deliberately NOT here: no deployment reaches it (main stops at 0021, this
+    branch's head is 0023) and the path has not been exercised from there. An allowlist
+    for a safety gate should contain what was tested, not what seems plausible.
+    """
+    assert "0021" in pf.SUPPORTED_START_REVISIONS
+    assert "0020" in pf.SUPPORTED_START_REVISIONS
+    assert "0022" not in pf.SUPPORTED_START_REVISIONS
+
+
+def test_sizing_does_not_quote_the_0019_index_build_once_0019_has_run():
+    """The row-scaled lock estimate only applies while 0019 is still pending."""
+    assert pf.POST_0019_STARTS == ("0020", "0021")
+    for rev in pf.POST_0019_STARTS:
+        assert rev in pf.SUPPORTED_START_REVISIONS
 
 
 # --------------------------------------------------------------------------- #

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 #
 # Guided production migration to alembic head 0023 (branch cohort-db-conversations).
-# Supported starting points: 0018 (main pre-PR19) and 0019.
+# Supported starting points: 0018 (main before PR19), 0019, 0020 and 0021.
+# 0021 is origin/main's own alembic head, so that is where a deployment tracking main is.
 #
 # READ docs/production-migration.md BEFORE RUNNING THIS. This script is the
 # executable half of that runbook; the runbook explains *why* each step is where

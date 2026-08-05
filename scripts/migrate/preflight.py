@@ -73,7 +73,22 @@ EXIT_WARN = 2
 
 DEFAULT_TARGET = "0023"
 #: Revisions this migration path has been exercised from. 0023 means "already done".
-SUPPORTED_START_REVISIONS = ("0018", "0019")
+#:
+#: 0020 and 0021 are here because origin/main's own alembic head is 0021 (PR19). A
+#: deployment that tracks main is therefore stamped 0021, and the first version of this
+#: list — ("0018", "0019") — hard-BLOCKED exactly that state. The framing that produced
+#: it ("migrate from 0018 or 0019") described where production was at the time, not where
+#: main is.
+#:
+#: Starting at 0020/0021 is strictly safer than starting at 0018: uq_agent_messages_run_ts
+#: already exists, so duplicates cannot be present and there is no 0019 index build to
+#: wait on. All that remains is 0022 (three empty tables) and 0023 (three columns on the
+#: small researcher_profiles).
+SUPPORTED_START_REVISIONS = ("0018", "0019", "0020", "0021")
+
+#: Start revisions at which migration 0019 has already run, so the expensive
+#: ACCESS EXCLUSIVE index build on agent_messages is behind us.
+POST_0019_STARTS = ("0020", "0021")
 
 #: Tables whose row counts are snapshotted for postflight. Empty = every user table.
 SNAPSHOT_SCHEMA = "public"
@@ -1089,7 +1104,7 @@ async def run_preflight(args) -> Report:
         # --- 9. sizing / expected lock window ------------------------------------
         rows = 0
         try:
-            sizing = await check_sizing(conn)
+            sizing = await check_sizing(conn, rev)
             report.add(*sizing)
             rows = sizing[4].get("agent_messages_rows", 0)
         except Exception as exc:  # noqa: BLE001
@@ -1590,12 +1605,38 @@ def check_migration_harness():
     )
 
 
-async def check_sizing(conn):
-    """agent_messages row count, size, and the estimated lock window."""
+async def check_sizing(conn, rev: str | None = None):
+    """agent_messages row count, size, and the estimated lock window.
+
+    The estimate is a function of the 0019 index build, so it only applies when 0019 is
+    still pending. Starting from 0020/0021 that cost is already paid and the remaining
+    chain (0022's three empty tables, 0023's three columns on a small table) does not
+    scale with agent_messages at all — quoting the row-scaled number there would tell an
+    operator to book an outage they do not need.
+    """
     title = "Sizing and expected lock window"
     if not await table_exists(conn, "agent_messages"):
         return (title, WARN, "agent_messages does not exist.", [], {"agent_messages_rows": 0})
     rows = int(await fetch_one_value(conn, "SELECT count(*) FROM agent_messages"))
+    if rev in POST_0019_STARTS:
+        heap = int(await fetch_one_value(conn, "SELECT pg_relation_size('agent_messages')"))
+        return (
+            title,
+            PASS,
+            f"agent_messages: {rows:,} rows, heap {heap / 1e6:.1f} MB — but 0019 has "
+            f"already run at {rev}, so its ACCESS EXCLUSIVE index build is behind you. "
+            f"What remains is 0022 (three empty tables) and 0023 (three columns on "
+            f"researcher_profiles); neither scales with agent_messages. Measured at ~2s "
+            f"at every size tested.",
+            [],
+            {
+                "agent_messages_rows": rows,
+                "agent_messages_heap_bytes": heap,
+                "estimated_lock_window_ms_low": 0,
+                "estimated_lock_window_ms_high": 2000,
+                "index_build_already_done": True,
+            },
+        )
     heap = int(await fetch_one_value(conn, "SELECT pg_relation_size('agent_messages')"))
     total = int(await fetch_one_value(conn, "SELECT pg_total_relation_size('agent_messages')"))
     dbsize = int(await fetch_one_value(conn, "SELECT pg_database_size(current_database())"))

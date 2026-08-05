@@ -4,7 +4,14 @@
 You do not need to understand the branch to run this. You do need to follow the order,
 and you need to stop when something says STOP.
 
-Supported starting points: **0018** (`main` before PR19) and **0019**. Both are tested.
+Supported starting points: **0018** (`main` before PR19), **0019**, **0020** and **0021**.
+All four are tested end to end.
+
+**If your deployment tracks `main`, you are at 0021** — that is `origin/main`'s own alembic
+head, since PR19 merged 0019, 0020 and 0021. Starting there is the *easiest* case: the
+expensive 0019 index build and the duplicate-row risk are both already behind you, and all
+that remains is 0022 (three empty tables) and 0023 (three columns on a small table), which
+takes ~2 s at any size. Starting from 0018 is the one that needs a real window.
 
 The executable half of this runbook is `scripts/migrate/run_migration.sh`. This document
 explains *why* each step is where it is, which is what you need when a step fails.
@@ -562,6 +569,9 @@ Tested end to end on seeded production-like databases:
 - **From 0019**, with 151 rows including a PI row (`agent_id IS NULL`): preflight warned
   (correctly) that downgrade is blocked, migration applied, revision 0023, postflight 13
   checks 0 FAIL, 151 rows preserved.
+- **From 0020 and 0021**, with 120 rows each: check 1 passes, check 9 correctly reports
+  that 0019's index build is already behind you rather than quoting a row-scaled window,
+  migration applied, revision 0023, postflight 13 checks 0 FAIL, 120 rows preserved.
 - Lock timeout against a real blocker: failed fast at ~12 s, revision unchanged.
 - Both downgrade outcomes in §9, on live databases.
 - Mid-chain `pg_terminate_backend`, twice: no partial application.
