@@ -947,6 +947,46 @@ async def test_full_matrix_payload_stays_under_the_field_limit(client, db_sessio
     assert "1+added" in r.headers["location"]
 
 
+async def test_a_payload_of_unknown_marker_ids_does_not_blow_up_or_delete_anything(
+    client, db_session, admin, roster
+):
+    """Many garbage present_cohort/present_agent ids must not explode the
+    cross product and must not be treated as an empty (``Nothing to save``) or
+    malformed submission — they are simply inert, like any other stale id.
+
+    ``rendered`` used to be built as the cross product of the RAW, unfiltered
+    marker sets, so a payload naming only ids that no longer exist made the
+    product multiplicative in attacker-controlled input: N garbage cohort ids
+    times M garbage agent ids, regardless of how few real rows exist. This
+    posts several hundred of each (a full-scale reproduction of the reported
+    bound — tens of thousands squared — would itself be irresponsible to run
+    in a test process) to confirm the request still completes quickly and
+    behaves as a harmless no-op, and that it does not disturb a real,
+    unrelated membership that was never named by any marker.
+    """
+    # A real membership, named by nothing in the payload below, that must survive.
+    a = await _cohort(db_session, "untouched", admin, members=["su"])
+
+    ghost_cohorts = [str(uuid.uuid4()) for _ in range(500)]
+    ghost_agents = [f"ghost-agent-{i}" for i in range(500)]
+    r = await client.post(
+        "/admin/cohorts/topology",
+        data={"present_cohort": ghost_cohorts, "present_agent": ghost_agents},
+        headers=_auth(admin.id),
+    )
+    assert r.status_code == 302
+    assert "error" not in r.headers["location"], (
+        f"an all-unknown payload must be a harmless no-op, not an error: "
+        f"{r.headers['location']}"
+    )
+
+    rows = {
+        (str(m.cohort_id), m.agent_id)
+        for m in (await db_session.execute(select(CohortMembership))).scalars().all()
+    }
+    assert rows == {(str(a.id), "su")}, "an all-unknown-id payload touched real data"
+
+
 async def test_every_cohort_route_answers_a_missing_cohort_the_same_way(
     client, db_session, admin, roster
 ):
