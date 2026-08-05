@@ -1,0 +1,2 @@
+label = "Scout Hub"
+tools = ["retrieve_profile", "retrieve_abstract", "retrieve_full_text", "search_prior_art"]
