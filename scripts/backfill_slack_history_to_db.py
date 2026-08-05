@@ -16,7 +16,7 @@ flush upserts on (simulation_run_id, message_ts). Safe to re-run.
 
 Usage (inside the app container):
 
-    docker exec copi-python-opus-app-1 python scripts/backfill_slack_history_to_db.py
+    docker compose exec app python scripts/backfill_slack_history_to_db.py
 """
 
 from __future__ import annotations

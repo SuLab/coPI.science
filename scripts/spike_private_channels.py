@@ -6,15 +6,15 @@ channel, exercises the three mechanics in question, prints a pass/fail summary,
 then archives the channel.
 
 Usage:
-    docker exec copi-python-opus-app-1 python3 scripts/spike_private_channels.py \\
+    docker compose exec app python3 scripts/spike_private_channels.py \\
         --bot-a su --bot-b wiseman
 
     # Optional: also invite a human user to verify the PI-invite path
-    docker exec copi-python-opus-app-1 python3 scripts/spike_private_channels.py \\
+    docker compose exec app python3 scripts/spike_private_channels.py \\
         --bot-a su --bot-b wiseman --pi-user-id U01234567
 
     # Optional: also test the negative case (uninvited bot tries to post)
-    docker exec copi-python-opus-app-1 python3 scripts/spike_private_channels.py \\
+    docker compose exec app python3 scripts/spike_private_channels.py \\
         --bot-a su --bot-b wiseman --uninvited-bot lotz
 
 What it checks:

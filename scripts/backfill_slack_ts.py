@@ -37,9 +37,15 @@ from src.services.slack_tokens import get_any_bot_token
 
 CANDIDATES = text(
     """
-    SELECT message_ts, channel_id, channel_name, sender_name
+    SELECT message_ts, channel_id, channel_name, sender_name, thread_ts
     FROM agent_messages
-    WHERE slack_ts IS NULL AND channel_id NOT LIKE 'local:%'
+    WHERE slack_ts IS NULL
+      AND channel_id NOT LIKE 'local:%'
+      -- A NULL message_ts has nothing to look up. Included previously, which sent
+      -- conversations.history(latest=None, oldest=None) — that returns the channel's
+      -- NEWEST message, compares it to None, and books the row as DB-origin. One
+      -- wasted Slack call per row and an inflated db_origin count.
+      AND message_ts IS NOT NULL
     ORDER BY message_ts
     """
 )
@@ -52,12 +58,30 @@ APPLY = text(
 )
 
 
-def _exists_on_slack(client: WebClient, channel_id: str, ts: str) -> bool | None:
-    """True/False if Slack answered, None if the lookup itself failed."""
+def _exists_on_slack(
+    client: WebClient, channel_id: str, ts: str, thread_ts: str | None = None
+) -> bool | None:
+    """True/False if Slack answered, None if the lookup itself failed.
+
+    A thread reply MUST be looked up with conversations.replies.
+    ``conversations.history`` does not return replies at all, so asking it about one
+    yields an empty page — indistinguishable from "this timestamp does not exist".
+    That made the old single-call version report every thread reply as
+    ``NOT on Slack (DB-origin)`` and leave its slack_ts NULL forever: not an
+    "unverified" it could be retried from, but a confident wrong answer. Measured
+    against a real reply in this workspace: history returned [], replies returned it.
+    Agents converse almost entirely in threads, so that was most of the rows.
+    """
     try:
-        resp = client.conversations_history(
-            channel=channel_id, latest=ts, oldest=ts, inclusive=True, limit=1,
-        )
+        if thread_ts:
+            resp = client.conversations_replies(
+                channel=channel_id, ts=thread_ts, latest=ts, oldest=ts,
+                inclusive=True, limit=100,
+            )
+        else:
+            resp = client.conversations_history(
+                channel=channel_id, latest=ts, oldest=ts, inclusive=True, limit=1,
+            )
     except Exception as exc:  # noqa: BLE001 — an API error must not be read as "absent"
         print(f"  ! lookup failed for {ts} in {channel_id}: {exc}")
         return None
@@ -87,8 +111,8 @@ async def main(apply: bool) -> int:
     absent = 0
     errored = 0
     print(f"{len(rows)} candidate row(s):\n")
-    for ts, channel_id, channel_name, sender_name in rows:
-        found = _exists_on_slack(client, channel_id, ts)
+    for ts, channel_id, channel_name, sender_name, thread_ts in rows:
+        found = _exists_on_slack(client, channel_id, ts, thread_ts)
         mark = {True: "on Slack", False: "NOT on Slack (DB-origin)", None: "unverified"}[found]
         print(f"  {ts}  #{channel_name:<24} {sender_name:<22} {mark}")
         if found is True:
@@ -103,16 +127,30 @@ async def main(apply: bool) -> int:
     )
     if not apply:
         print("\nDry run. Re-run with --apply to write slack_ts on the confirmed rows.")
+        if errored:
+            print(
+                f"WARNING: {errored} row(s) UNVERIFIED — fix access before --apply, or "
+                "they stay NULL.", file=sys.stderr,
+            )
         await engine.dispose()
-        return 0
+        return 2 if errored else 0
 
     async with session_factory() as db:
         for ts, channel_id in confirmed:
             await db.execute(APPLY, {"ts": ts, "ch": channel_id})
         await db.commit()
-    print(f"\nUpdated {len(confirmed)} row(s). The rest keep slack_ts NULL, which is correct.")
+    # Do NOT claim the remainder is "correct": an unverified row is a row we could
+    # not ask about, not a row Slack denied. The previous wording printed
+    # "which is correct" on runs where every single lookup had failed.
+    print(f"\nUpdated {len(confirmed)} row(s). {absent} denied by Slack (correctly NULL).")
+    if errored:
+        print(
+            f"WARNING: {errored} row(s) UNVERIFIED — Slack could not be asked (token "
+            "scope, bot not in channel, or rate limit). Re-run; this is not a verdict.",
+            file=sys.stderr,
+        )
     await engine.dispose()
-    return 0
+    return 2 if errored else 0
 
 
 if __name__ == "__main__":
