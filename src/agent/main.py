@@ -73,7 +73,7 @@ async def _run_simulation(
         _sf = _asm(_engine, expire_on_commit=False)
         async with _sf() as _db:
             _stmt = _select(
-                _AR.agent_id, _AR.bot_name, _AR.pi_name, _AR.slack_bot_token
+                _AR.agent_id, _AR.bot_name, _AR.pi_name, _AR.slack_bot_token, _AR.role
             )
             if not all_agents:
                 _stmt = _stmt.where(_AR.status == "active")
@@ -81,7 +81,10 @@ async def _run_simulation(
     finally:
         await _engine.dispose()
 
-    agents = [Agent(agent_id=r.agent_id, bot_name=r.bot_name, pi_name=r.pi_name) for r in _rows]
+    agents = [
+        Agent(agent_id=r.agent_id, bot_name=r.bot_name, pi_name=r.pi_name, role=r.role)
+        for r in _rows
+    ]
     roster_tokens = {r.agent_id: r.slack_bot_token for r in _rows}
 
     if not agents:
