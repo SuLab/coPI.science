@@ -239,13 +239,20 @@ where that would silence a deployment.
 | Unknown `post_type` name | Drop it, WARNING — mirrors `roles.py:99-103` for tools |
 | `targets` names a nonexistent role | Type never offered, WARNING at load (catches typos) |
 | Gate is `None` | Layers 2 and 3 are no-ops |
-| Layer 2 filters the menu to empty | Skip the turn, WARNING — never send an empty menu |
+| Layer 2 filters the menu to empty | Render an explicit "none available" menu and reject any `new_post`; do **not** skip the turn |
 | Counterparty role unknown | Matches no `targets` |
 | Malformed `role.toml` overall | Existing behaviour: log ERROR, use defaults, never raise |
 
-The empty-menu row is the one real hazard in the `pitch` design: were the hub to go inactive,
-every spoke's directed types would vanish. Broadcast types carry no `targets`, so the menu
-cannot actually empty out; the guard remains as belt-and-braces.
+The empty-menu row deserves care. An earlier draft of this design said "skip the turn", which is
+wrong: the menu governs `action: "new_post"` only, so skipping would also suppress a legitimate
+`action: "reply"` — exactly the funding replies that are the only thing a blocked spoke can still
+do in `funding_only` mode. Instead the menu renders an explicit "no new top-level post type is
+available to you this turn — reply or skip", and enforcement rejects only an actual `new_post`.
+
+In normal mode the menu cannot empty out anyway, because the broadcast types carry no `targets`.
+It can and does empty in `funding_only` mode in the star, where `funding_collab` is the only
+new-post candidate and has no reachable `pi_lab` — which is precisely the case that must still
+leave Option A open.
 
 ## 6. Testing
 
