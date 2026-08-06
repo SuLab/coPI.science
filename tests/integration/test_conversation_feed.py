@@ -174,8 +174,18 @@ async def test_a_spoke_pi_does_not_see_another_spokes_bot(
 async def test_a_pi_message_still_renders_under_the_gate(
     client, db_session, monkeypatch
 ):
-    """is_bot=False bypasses the gate — the human bypass must survive."""
+    """is_bot=False bypasses the gate — the human bypass must survive.
+
+    The gate must be genuinely ON here, or this proves nothing: with zero
+    cohorts defined, compute_gates' preflight refuses under
+    policy="isolated" (roster-wide-silence guard) and returns gate=None for
+    every agent, which makes gate_clause a no-op regardless of is_bot. Putting
+    "solo" in a cohort of its own makes resolve_agent_gate return a real,
+    non-None set, so the human row can only pass through the is_bot bypass
+    branch of gate_clause, not through the gate being off — asserted below.
+    """
     from src.config import get_settings
+    from src.services.conversation_feed import resolve_agent_gate
     s = get_settings()
     monkeypatch.setattr(s, "cohort_isolation_enabled", True, raising=False)
     monkeypatch.setattr(s, "cohort_default_policy", "isolated", raising=False)
@@ -184,6 +194,7 @@ async def test_a_pi_message_still_renders_under_the_gate(
     await factories.make_agent(
         db_session, user=pi, agent_id="solo", bot_name="SoloBot", pi_name="Solo PI"
     )
+    await _cohort(db_session, "solo-cohort", "solo")
     run = await factories.make_simulation_run(db_session)
     common = dict(run=run, channel_name="general", channel_id="C1", visibility="public")
     await factories.make_agent_message(
@@ -196,9 +207,174 @@ async def test_a_pi_message_still_renders_under_the_gate(
     )
     await db_session.commit()
 
+    assert await resolve_agent_gate(db_session, "solo") == {"solo"}, (
+        "the gate must be a real, non-None set here, or the bypass this test "
+        "targets is never actually exercised"
+    )
+
     page = await client.get("/agent/solo/conversations", headers=_auth(pi.id))
     assert page.status_code == 200
     assert "HUMAN-said-this" in page.text
+
+
+async def test_an_uncohorted_agent_still_sees_its_own_posts(
+    client, db_session, monkeypatch
+):
+    """Under policy="isolated" an active-but-uncohorted agent's gate is the
+    EMPTY set (not None) — deliberately, so it cannot read any other lab's
+    traffic. But activation and cohort assignment are separate admin steps
+    (see CLAUDE.md's onboarding order: Provision -> Approve & Activate happens
+    before any admin adds the agent to a cohort), so a PI must still see their
+    OWN bot's posts in that gap, or their page goes blank the moment their bot
+    goes live. This is the safe, deliberate divergence from `_entry_allowed`
+    documented at the `own_or_gated` clause in agent_page.py: it can only ever
+    admit this agent's own rows, never another agent's."""
+    from src.config import get_settings
+    from src.services.conversation_feed import resolve_agent_gate
+    s = get_settings()
+    monkeypatch.setattr(s, "cohort_isolation_enabled", True, raising=False)
+    monkeypatch.setattr(s, "cohort_default_policy", "isolated", raising=False)
+
+    pi = await factories.make_user(db_session, name="Lonely PI", email="lonely@example.org")
+    await factories.make_agent(
+        db_session, user=pi, agent_id="lonely", bot_name="LonelyBot", pi_name="Lonely PI"
+    )
+    await factories.make_agent(db_session, agent_id="other", bot_name="OtherBot")
+    await _cohort(db_session, "other-only", "other")  # "lonely" is deliberately left out
+
+    run = await factories.make_simulation_run(db_session)
+    common = dict(run=run, channel_name="general", channel_id="C1", visibility="public")
+    await factories.make_agent_message(
+        db_session, agent_id="lonely", message_ts="8.0001",
+        content="LONELY-OWN-POST", sender_name="LonelyBot", **common
+    )
+    await factories.make_agent_message(
+        db_session, agent_id="other", message_ts="8.0002",
+        content="OTHER-LAB-POST", sender_name="OtherBot", **common
+    )
+    await db_session.commit()
+
+    assert await resolve_agent_gate(db_session, "lonely") == set(), (
+        "this test targets the isolated-empty-set case specifically"
+    )
+
+    page = await client.get("/agent/lonely/conversations", headers=_auth(pi.id))
+    assert page.status_code == 200
+    assert "LONELY-OWN-POST" in page.text, (
+        "an uncohorted agent's PI must still see their own bot's posts"
+    )
+    assert "OTHER-LAB-POST" not in page.text
+
+
+async def test_gate_is_applied_before_limit_not_after(
+    client, db_session, monkeypatch
+):
+    """`_ROOT_LIMIT` must select the top-N GATE-PASSING roots, not the top-N
+    roots with the gate applied afterward in Python. Flood the channel with 60
+    out-of-cohort roots, all newer (higher posted_at) than a single in-cohort
+    root belonging to a cohort-mate. If the gate ran after `.limit(_ROOT_LIMIT)`
+    instead of in the SQL WHERE, the initial fetch would already be full of the
+    50 newest out-of-cohort rows and the in-cohort root — older than all 60 —
+    would never be fetched at all, gate or no gate."""
+    from src.config import get_settings
+    from src.routers.agent_page import _ROOT_LIMIT
+    s = get_settings()
+    monkeypatch.setattr(s, "cohort_isolation_enabled", True, raising=False)
+    monkeypatch.setattr(s, "cohort_default_policy", "isolated", raising=False)
+
+    assert _ROOT_LIMIT < 60, "the flood must exceed the window for this test to prove anything"
+
+    pi = await factories.make_user(db_session, name="Flooded PI", email="flooded@example.org")
+    await factories.make_agent(
+        db_session, user=pi, agent_id="victim", bot_name="VictimBot", pi_name="Flooded PI"
+    )
+    await factories.make_agent(db_session, agent_id="mate", bot_name="MateBot")
+    await factories.make_agent(db_session, agent_id="flooder", bot_name="FlooderBot")
+    await _cohort(db_session, "victim-mate", "victim", "mate")
+
+    run = await factories.make_simulation_run(db_session)
+    common = dict(run=run, channel_name="general", channel_id="C1", visibility="public")
+    for i in range(60):
+        await factories.make_agent_message(
+            db_session, agent_id="flooder", message_ts=f"7.{i:04d}",
+            phase="new_post", content=f"FLOOD-{i}", sender_name="FlooderBot",
+            posted_at=1000.0 + i, **common
+        )
+    await factories.make_agent_message(
+        db_session, agent_id="mate", message_ts="7.9999", phase="new_post",
+        content="SURVIVOR-ROOT", sender_name="MateBot", posted_at=1.0, **common
+    )
+    await db_session.commit()
+
+    page = await client.get("/agent/victim/conversations", headers=_auth(pi.id))
+    assert page.status_code == 200
+    assert "SURVIVOR-ROOT" in page.text, (
+        "the in-cohort root, though older than all 60 out-of-cohort floods, must "
+        "still render — proving the gate ran in SQL before LIMIT, not in Python after"
+    )
+
+
+async def test_reply_count_excludes_out_of_cohort_replies(
+    client, db_session, monkeypatch
+):
+    """`reply_count` must be computed with the SAME gate as the roots query, so
+    the badge (Task 6) can never promise a reply the thread-expand endpoint
+    (Task 5) will not show. A root with one in-cohort reply and one
+    out-of-cohort reply must report reply_count == 1, not 2.
+
+    The template does not render reply_count yet (Task 6 owns that), so this
+    intercepts the context handed to templates.TemplateResponse rather than
+    reading it out of rendered HTML.
+    """
+    import src.routers.agent_page as agent_page_module
+    from src.config import get_settings
+    s = get_settings()
+    monkeypatch.setattr(s, "cohort_isolation_enabled", True, raising=False)
+    monkeypatch.setattr(s, "cohort_default_policy", "isolated", raising=False)
+
+    pi = await factories.make_user(db_session, name="Counter PI", email="counter@example.org")
+    await factories.make_agent(
+        db_session, user=pi, agent_id="counter", bot_name="CounterBot", pi_name="Counter PI"
+    )
+    await factories.make_agent(db_session, agent_id="mate", bot_name="MateBot")
+    await factories.make_agent(db_session, agent_id="outsider", bot_name="OutsiderBot")
+    await _cohort(db_session, "counter-mate", "counter", "mate")
+
+    run = await factories.make_simulation_run(db_session)
+    common = dict(run=run, channel_name="general", channel_id="C1", visibility="public")
+    await factories.make_agent_message(
+        db_session, agent_id="counter", message_ts="6.0001", phase="new_post",
+        content="COUNT-ROOT", sender_name="CounterBot", **common
+    )
+    await factories.make_agent_message(
+        db_session, agent_id="mate", message_ts="6.0002", thread_ts="6.0001",
+        phase="thread_reply", content="IN-COHORT-REPLY", sender_name="MateBot", **common
+    )
+    await factories.make_agent_message(
+        db_session, agent_id="outsider", message_ts="6.0003", thread_ts="6.0001",
+        phase="thread_reply", content="OUT-OF-COHORT-REPLY", sender_name="OutsiderBot",
+        **common
+    )
+    await db_session.commit()
+
+    captured: dict = {}
+    original_response = agent_page_module.templates.TemplateResponse
+
+    def _capture(request, name, context, *args, **kwargs):
+        captured["messages"] = context.get("messages")
+        return original_response(request, name, context, *args, **kwargs)
+
+    monkeypatch.setattr(agent_page_module.templates, "TemplateResponse", _capture)
+
+    page = await client.get("/agent/counter/conversations", headers=_auth(pi.id))
+    assert page.status_code == 200
+
+    roots_by_content = {m["content"]: m for m in captured["messages"]}
+    assert "COUNT-ROOT" in roots_by_content
+    assert roots_by_content["COUNT-ROOT"]["reply_count"] == 1, (
+        "reply_count must be gated the same as the roots query — it should count "
+        "only the in-cohort reply, not the out-of-cohort one"
+    )
 
 
 async def test_replies_are_not_listed_as_top_level_rows(
