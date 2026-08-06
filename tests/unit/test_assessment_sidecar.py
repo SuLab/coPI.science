@@ -18,8 +18,8 @@ Recommendation: route-to-incubation. [Speculative]
   "company_or_project": "DBT / BCAA-autophagy axis",
   "subject_agent_id": "wang",
   "funnel_stage": "incubation",
-  "gating": {"baltimore_commitment": false, "life_sciences_domain": true,
-             "credible_tech_source": true, "fto_achievable": false},
+  "gating": {"baltimore_commitment": "unconfirmed", "life_sciences_domain": "met",
+             "credible_tech_source": "met", "fto_achievable": "not_met"},
   "scores": {"differentiation": 4, "market_unmet_need": 4, "team": 4,
              "external_signals": 1, "ip_fto": 2, "platform": 3,
              "dev_regulatory_feasibility": 3, "workplan_capital_efficiency": 3,
@@ -39,7 +39,10 @@ def test_extracts_the_sidecar_verdict():
     verdict = _extract_assessment_json(_RESPONSE)
     assert verdict["funnel_stage"] == "incubation"
     assert verdict["subject_agent_id"] == "wang"
-    assert verdict["gating"]["baltimore_commitment"] is False
+    # Tri-state string, never a bare boolean (F11) — "the PI declined"
+    # (not_met) and "we never asked" (unconfirmed) are different facts.
+    assert verdict["gating"]["baltimore_commitment"] == "unconfirmed"
+    assert verdict["gating"]["fto_achievable"] == "not_met"
     assert verdict["scores"]["differentiation"] == 4
     assert verdict["recommendation"] == "route-to-incubation"
 
@@ -73,3 +76,68 @@ def test_last_sidecar_wins_when_the_model_revises():
         "<assessment_json>{\"funnel_stage\": \"incubation\"}</assessment_json>"
     )
     assert _extract_assessment_json(text)["funnel_stage"] == "incubation"
+
+
+_RESPONSE_FENCED_SIDECAR = """
+Here is my reasoning about the Wang DBT opportunity.
+
+```json
+{"action": "new_post", "target_post_id": null, "channel": "general",
+ "post_type": "opportunity_assessment", "tagged_agent": null}
+```
+
+<slack_message>
+:mag: *Opportunity Assessment — Wang Lab (JHU)*
+Recommendation: route-to-incubation. [Speculative]
+</slack_message>
+
+<assessment_json>
+```json
+{
+  "company_or_project": "DBT / BCAA-autophagy axis",
+  "subject_agent_id": "wang",
+  "funnel_stage": "incubation",
+  "gating": {"baltimore_commitment": "unconfirmed", "life_sciences_domain": "met",
+             "credible_tech_source": "met", "fto_achievable": "not_met"},
+  "scores": {"differentiation": 4},
+  "weighted_score": 0,
+  "recommendation": "route-to-incubation",
+  "confidence": "Speculative"
+}
+```
+</assessment_json>
+"""
+
+
+def test_fenced_sidecar_does_not_hijack_the_action_parse():
+    """F1 regression: the model routinely wraps the <assessment_json> sidecar
+    in a ```json``` fence despite being told not to. Because the sidecar is
+    emitted LAST, a fenced sidecar becomes the LAST fenced block in the raw
+    response — exactly what _parse_phase5_response used to take as the
+    action. Before the fix, this made ``action_data`` the verdict dict
+    itself: ``action`` fell back to "new_post" (now removed too, see below),
+    ``channel`` fell back to "general", and post_type came back empty, so
+    persistence never fired for a named-PI assessment that posted into the
+    workspace's broadest channel."""
+    from src.agent.simulation import SimulationEngine
+
+    data, body = SimulationEngine._parse_phase5_response(None, _RESPONSE_FENCED_SIDECAR)
+
+    # The real action wins, not the verdict dict.
+    assert data["action"] == "new_post"
+    assert data["channel"] == "general"
+    assert data["post_type"] == "opportunity_assessment"
+    assert "funnel_stage" not in data
+    assert "gating" not in data
+
+    # The slack_message body is unaffected and carries no sidecar leakage.
+    assert ":mag:" in body
+    assert "assessment_json" not in body
+
+    # The verdict itself is still separately extractable via the sidecar
+    # extractor (fence-tolerant on the way in — _ASSESSMENT_RE matches on the
+    # tags, not the fence — even though the prompt asks for no fence).
+    verdict = _extract_assessment_json(_RESPONSE_FENCED_SIDECAR)
+    assert verdict is not None
+    assert verdict["subject_agent_id"] == "wang"
+    assert verdict["funnel_stage"] == "incubation"

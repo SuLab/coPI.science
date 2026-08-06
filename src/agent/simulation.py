@@ -2128,7 +2128,16 @@ class SimulationEngine:
                 system_prompt=system_prompt,
                 messages=messages,
                 model=settings.llm_agent_model_opus,
-                max_tokens=1000,
+                # scout_hub's opportunity assessment is an 11-section body
+                # plus a ~15-line <assessment_json> sidecar emitted LAST, so
+                # truncation drops the machine-readable verdict first while
+                # still leaving the Slack post looking complete (F8). 1000
+                # was sized for a short reply/skip decision, not this
+                # artifact. NOTE: src/services/llm.py's retry-at-2x path does
+                # not re-check stop_reason, so this ceiling is not a silent
+                # safety net against truncation either way — it just needs to
+                # be big enough that truncation stops being the common case.
+                max_tokens=2500,
                 log_meta={"agent_id": agent.agent_id, "phase": "new_post"},
             )
             if not response or not response.strip():
@@ -2141,7 +2150,20 @@ class SimulationEngine:
                 logger.warning("[%s] Phase 5: Could not parse response", agent.agent_id)
                 return
 
-            action = action_data.get("action", "new_post")
+            # A missing `action` is an unparseable response, not a license to
+            # post something anyway — defaulting to "new_post" here is exactly
+            # what let a hijacked action dict (see _parse_phase5_response's
+            # sidecar-strip fix) fall through into posting to #general with an
+            # empty post_type instead of being rejected outright.
+            action = action_data.get("action")
+            if not action:
+                logger.warning(
+                    "[%s] Phase 5: parsed JSON had no 'action' field — "
+                    "treating as unparseable",
+                    agent.agent_id,
+                )
+                return
+
             if action == "skip":
                 agent.state.consecutive_phase5_skips += 1
                 logger.info(
@@ -2324,7 +2346,13 @@ class SimulationEngine:
                     if post_type == "opportunity_assessment":
                         verdict = _extract_assessment_json(response)
                         if verdict is not None:
-                            await self._persist_assessment(agent.agent_id, channel, verdict)
+                            # `posted` is the canonical id _post_message just
+                            # minted/returned for this post (F7) — thread it
+                            # through so the triage row can link back to the
+                            # Slack post it summarises.
+                            await self._persist_assessment(
+                                agent.agent_id, channel, verdict, slack_ts=posted,
+                            )
                         elif _ASSESSMENT_UNCLOSED_RE.search(response or ""):
                             # An <assessment_json> opening tag is present (well-formed
                             # but invalid JSON, or truncated) — _extract_assessment_json
@@ -2369,10 +2397,16 @@ class SimulationEngine:
             logger.error("[%s] Phase 5 failed: %s", agent.agent_id, exc)
 
     async def _persist_assessment(
-        self, agent_id: str, channel: str, verdict: dict
+        self, agent_id: str, channel: str, verdict: dict, slack_ts: str | None = None,
     ) -> None:
         """Store a scouting verdict. Best-effort: a failure here must never cost
         the Slack post that already went out.
+
+        ``slack_ts`` is the canonical post id ``_post_message`` returned for
+        the assessment post itself (F7) — the row's link back to the Slack
+        message it summarises. Optional and defaulted to ``None`` so every
+        existing direct caller (tests driving this method on a stub) keeps
+        working unchanged.
 
         The weighted score and band are computed here from the verdict's own
         dimension scores, never taken from the model's ``weighted_score`` field
@@ -2395,8 +2429,17 @@ class SimulationEngine:
             return
 
         scores = verdict.get("scores") if isinstance(verdict.get("scores"), dict) else {}
-        computed_score = rubric_weighted_score(scores)
-        computed_band = rubric_band(computed_score)
+        # An empty/missing `scores` map is "we don't know", not "we scored it
+        # a 0.00 pass" — rubric_weighted_score({}) returns 0.0 and that bands
+        # as "pass", which is a real, decisive decline the model never made.
+        # weighted_score/band are both nullable for exactly this case; leave
+        # them unset rather than record a verdict nobody rendered (F6).
+        if scores:
+            computed_score = rubric_weighted_score(scores)
+            computed_band = rubric_band(computed_score)
+        else:
+            computed_score = None
+            computed_band = None
         gating = _normalize_gating(verdict.get("gating"))
         red_flags = verdict.get("red_flags")
         milestones = verdict.get("suggested_derisking_milestones")
@@ -2419,7 +2462,8 @@ class SimulationEngine:
                     agent_id=agent_id,
                     subject_agent_id=subject_agent_id,
                     channel_name=channel,
-                    company_or_project=(verdict.get("company_or_project") or None),
+                    slack_ts=slack_ts,
+                    company_or_project=_str_or_none(verdict.get("company_or_project")),
                     funnel_stage=funnel_stage,
                     recommendation=recommendation,
                     confidence=confidence,
@@ -2431,7 +2475,7 @@ class SimulationEngine:
                     derisking_milestones=(
                         milestones if isinstance(milestones, list) else None
                     ),
-                    rationale=(verdict.get("rationale") or None),
+                    rationale=_str_or_none(verdict.get("rationale")),
                     raw_verdict=verdict,
                 ))
                 await db.commit()
@@ -2522,29 +2566,44 @@ class SimulationEngine:
         block so that if the LLM revises its decision mid-response the final
         action wins.  Requires <slack_message> tags for the message body —
         raw text after the JSON block is never used (prevents reasoning leakage).
+
+        The <assessment_json> sidecar is stripped from the source ONCE, up
+        front, before either the fenced-block search or the raw-JSON fallback
+        runs — not just the fallback. The sidecar is meant to be bare JSON
+        with no fence (see _extract_assessment_json's docstring), but a model
+        routinely wraps it in a ```json``` fence anyway despite the prompt's
+        instructions. Since the sidecar is emitted LAST (after the action
+        fence and the <slack_message> block), a fenced sidecar becomes the
+        LAST ```json``` block in the raw response — exactly the one this
+        method is looking for — and would silently hijack the action parse:
+        the verdict dict gets treated as the action, `action` and `channel`
+        fall back to defaults, and the real action is lost. Stripping first
+        removes the sidecar (fence and all, since the tags wrap the fence)
+        before the action search ever runs, so a fenced sidecar can no longer
+        reach it.
         """
         data = None
+        stripped = _strip_assessment_sidecar(response)
         try:
-            # Find the LAST ```json``` block (LLM may revise mid-response)
+            # Find the LAST ```json``` block (LLM may revise mid-response).
             json_matches = list(
-                re.finditer(r"```json\s*\n(.*?)\n```", response, re.DOTALL)
+                re.finditer(r"```json\s*\n(.*?)\n```", stripped, re.DOTALL)
             )
             if json_matches:
                 data = json.loads(json_matches[-1].group(1))
             else:
-                # Try finding raw JSON. Strip any <assessment_json> sidecar
-                # first — it is bare JSON with no fence, so without this a
-                # sidecar-only response (no action fence present at all) would
-                # be indistinguishable from the action and get parsed as one,
-                # silently discarding a legitimate Phase 5 turn.
-                fallback_source = _strip_assessment_sidecar(response)
-                json_start = fallback_source.find("{")
+                # Try finding raw JSON in the same sidecar-stripped source —
+                # without the strip, a sidecar-only response (no action fence
+                # present at all) would be indistinguishable from the action
+                # and get parsed as one, silently discarding a legitimate
+                # Phase 5 turn.
+                json_start = stripped.find("{")
                 json_end = (
-                    fallback_source.find("}", json_start) + 1
+                    stripped.find("}", json_start) + 1
                     if json_start >= 0 else -1
                 )
                 if json_start >= 0 and json_end > json_start:
-                    data = json.loads(fallback_source[json_start:json_end])
+                    data = json.loads(stripped[json_start:json_end])
         except (json.JSONDecodeError, ValueError) as exc:
             logger.warning("Failed to parse Phase 5 JSON: %s", exc)
 
@@ -3194,17 +3253,22 @@ class SimulationEngine:
         channel: str,
         text: str,
         thread_ts: str | None = None,
-    ) -> bool:
+    ) -> str | None:
         """Post a message to Slack and record it in the message log + DB.
 
-        Returns whether a message was actually recorded — ``False`` when the
-        text stripped to nothing, or the reply's parent thread was found to be
-        deleted, in which case nothing was posted and no log entry was written.
-        Callers that count a turn or persist something derived from the post
-        (e.g. the opportunity_assessment verdict sidecar) must check this
-        before doing either — see Task 11 fix round 1, Finding 3. Existing
-        callers that don't care are unaffected: ignoring a return value is
-        always safe.
+        Returns the canonical post id (the root chunk's ``ts`` — a real Slack
+        ts when a connected client posted, else a locally-minted one; see
+        "Canonical id" below), or ``None`` when nothing was actually recorded:
+        the text stripped to nothing, or the reply's parent thread was found
+        to be deleted — in either case nothing was posted and no log entry was
+        written. Callers that count a turn or persist something derived from
+        the post (e.g. the opportunity_assessment verdict sidecar, which
+        stores this id as ``slack_ts`` for a link back to the post it
+        summarises — F7) must check this before doing either — see Task 11
+        fix round 1, Finding 3. The return value is truthy exactly when a post
+        was recorded, so existing callers that only did ``if not posted:`` (or
+        ignore the return value entirely) are unaffected by the ``bool`` ->
+        ``str | None`` change.
         """
         # Final safety: strip any leaked <slack_message> tags, and any
         # <assessment_json> sidecar — that block is for Blackbird staff and the DB,
@@ -3232,7 +3296,7 @@ class SimulationEngine:
                 "a sidecar-only or truncated response with no real message body.",
                 agent_id, channel,
             )
-            return False
+            return None
 
         client = self.slack_clients.get(agent_id)
         agent = self.agents.get(agent_id)
@@ -3273,7 +3337,7 @@ class SimulationEngine:
                     "[%s] Skipped reply to deleted thread %s in #%s",
                     agent_id, thread_ts, channel,
                 )
-                return False
+                return None
         else:
             logger.info("[%s] MOCK post to #%s: %s...", agent_id, channel, text[:60])
 
@@ -3343,7 +3407,7 @@ class SimulationEngine:
             # Persisted to agent_messages via the MessageLog append callback
             # (_enqueue_persist → _flush_persisted). The DB is the primary store.
             self.message_log.append(entry)
-        return True
+        return root_ts
 
     @staticmethod
     def _mirrored_messages(
@@ -5200,19 +5264,39 @@ def _strip_assessment_sidecar(text: str) -> str:
     return text
 
 
+# A model routinely wraps the sidecar's JSON in a ```json``` fence despite the
+# prompt asking for bare JSON (see _parse_phase5_response, which now strips
+# the whole <assessment_json>...</assessment_json> span — fence included —
+# before it ever looks for the action). That strip protects the action parse
+# unconditionally, but it would be a shame to also throw the verdict away
+# just because it arrived fenced: tolerate one optional wrapping fence here
+# too, so the verdict itself still comes through.
+_SIDECAR_FENCE_RE = re.compile(r"^```(?:json)?\s*\n?(.*?)\n?```$", re.DOTALL | re.IGNORECASE)
+
+
+def _unfence_sidecar(raw: str) -> str:
+    """Strip one optional ```json```/``` fence wrapping ``raw``, if present."""
+    match = _SIDECAR_FENCE_RE.match(raw.strip())
+    return match.group(1) if match else raw
+
+
 def _extract_assessment_json(text: str) -> dict | None:
     """Parse the scout hub's machine-readable verdict sidecar, or None.
 
     The sidecar is deliberately BARE JSON, not a ```json``` fence:
-    _parse_phase5_response takes the LAST fenced json block as the action, so a
-    fenced sidecar would hijack the action data and silently no-op every
-    assessment post. Anchored on the LAST block so a revised verdict wins.
+    _parse_phase5_response strips this whole tagged span before it ever looks
+    for the action fence, so a fenced sidecar would otherwise hijack the
+    action data and silently no-op every assessment post. Anchored on the
+    LAST block so a revised verdict wins. A fenced sidecar is still tolerated
+    here (see _unfence_sidecar) — the action is already protected regardless,
+    so there is no reason to also lose the verdict over a fence the model
+    added despite the instruction not to.
     """
     matches = _ASSESSMENT_RE.findall(text or "")
     if not matches:
         return None
     try:
-        parsed = json.loads(matches[-1])
+        parsed = json.loads(_unfence_sidecar(matches[-1]))
     except (json.JSONDecodeError, ValueError) as exc:
         logger.warning("[assessment] sidecar present but unparseable: %s", exc)
         return None
@@ -5286,6 +5370,22 @@ def _bounded_str(value: object, max_len: int) -> str | None:
     if not isinstance(value, str) or not value:
         return None
     return value[:max_len]
+
+
+def _str_or_none(value: object) -> str | None:
+    """Coerce a verdict field expected to be a string, dropping it if it
+    isn't a (non-empty) string at all.
+
+    ``company_or_project``/``rationale`` are Text columns, not bounded
+    VARCHARs like ``_bounded_str`` guards, so there is no length to truncate
+    to — but they are exactly as exposed to a wrong-typed value. A model that
+    emits a structured (dict/list) ``rationale`` instead of prose is still a
+    plain Python object of the wrong type for this column, and passing it
+    straight to the ORM raises at commit — which takes the whole row down
+    with it, the same failure ``_bounded_str`` exists to prevent for the
+    VARCHAR columns (F9).
+    """
+    return value if isinstance(value, str) and value else None
 
 
 def _strip_llm_preamble(text: str) -> str:

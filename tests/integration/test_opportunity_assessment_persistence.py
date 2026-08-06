@@ -368,8 +368,10 @@ async def test_persist_assessment_tolerates_a_sparse_verdict(engine):
                     OpportunityAssessment.simulation_run_id == run_id
                 )
             )).scalar_one()
-            assert row.weighted_score == pytest.approx(0.0)
-            assert row.band == "pass"
+            # F6: no scores at all is "we don't know", not a decisive 0.00/pass
+            # decline the model never made.
+            assert row.weighted_score is None
+            assert row.band is None
             assert row.red_flags is None  # wrong type discarded, not stored
             assert row.scores is None
     finally:
@@ -432,6 +434,108 @@ async def test_persist_assessment_bounds_oversized_short_string_fields(engine):
             # The untruncated originals still survive verbatim for audit.
             assert row.raw_verdict["subject_agent_id"] == oversized_subject_agent_id
             assert row.raw_verdict["recommendation"] == oversized_recommendation
+    finally:
+        async with factory() as cleanup:
+            stale = (await cleanup.execute(
+                select(SimulationRun).where(SimulationRun.id == run_id)
+            )).scalar_one_or_none()
+            if stale is not None:
+                await cleanup.delete(stale)
+                await cleanup.commit()
+
+
+@pytest.mark.asyncio
+async def test_persist_assessment_empty_scores_dict_stores_null_score_and_band(engine):
+    """F6: `weighted_score({})` is 0.0, which bands as "pass" — a real,
+    decisive decline the model never made. An explicitly empty `scores` map
+    (not just a missing key) must still store None/None, not 0.00/"pass",
+    the same as the missing-key case covered by the sparse-verdict test
+    above."""
+    from types import SimpleNamespace
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from src.agent.simulation import SimulationEngine
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as setup:
+        run = SimulationRun()
+        setup.add(run)
+        await setup.commit()
+        run_id = run.id
+
+    stub = SimpleNamespace(simulation_run_id=run_id, session_factory=factory)
+    await SimulationEngine._persist_assessment(
+        stub, "blackbird", "general", {"subject_agent_id": "wang", "scores": {}}
+    )
+
+    try:
+        async with factory() as check:
+            row = (await check.execute(
+                select(OpportunityAssessment).where(
+                    OpportunityAssessment.simulation_run_id == run_id
+                )
+            )).scalar_one()
+            assert row.weighted_score is None
+            assert row.band is None
+            assert row.scores is None
+            assert row.subject_agent_id == "wang"  # unaffected sibling field
+    finally:
+        async with factory() as cleanup:
+            stale = (await cleanup.execute(
+                select(SimulationRun).where(SimulationRun.id == run_id)
+            )).scalar_one_or_none()
+            if stale is not None:
+                await cleanup.delete(stale)
+                await cleanup.commit()
+
+
+@pytest.mark.asyncio
+async def test_persist_assessment_drops_non_string_text_fields_instead_of_dying(engine):
+    """F9: company_or_project/rationale are Text columns guarded with only
+    `or None`, not an isinstance check. A model emitting a structured (dict)
+    rationale — or a company_or_project that comes back as a list — is a
+    plain Python object of the wrong type for a str column; passing it
+    straight to the ORM raises DataError at commit, which the outer except
+    then drops the ENTIRE row for, losing everything else in the verdict too.
+    Both fields must degrade to None per-field, the same as every other
+    wrong-typed field on this row."""
+    from types import SimpleNamespace
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from src.agent.simulation import SimulationEngine
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as setup:
+        run = SimulationRun()
+        setup.add(run)
+        await setup.commit()
+        run_id = run.id
+
+    stub = SimpleNamespace(simulation_run_id=run_id, session_factory=factory)
+    verdict = {
+        "subject_agent_id": "wang",
+        "company_or_project": ["DBT", "BCAA-autophagy axis"],  # wrong type
+        "rationale": {"summary": "structured, not prose"},  # wrong type
+        "scores": {"differentiation": 3},
+    }
+    await SimulationEngine._persist_assessment(stub, "blackbird", "general", verdict)
+
+    try:
+        async with factory() as check:
+            row = (await check.execute(
+                select(OpportunityAssessment).where(
+                    OpportunityAssessment.simulation_run_id == run_id
+                )
+            )).scalar_one()
+            # The row exists at all — the wrong-typed fields did not sink the write.
+            assert row.subject_agent_id == "wang"
+            assert row.company_or_project is None
+            assert row.rationale is None
+            # The untruncated originals still survive verbatim for audit.
+            assert row.raw_verdict["company_or_project"] == ["DBT", "BCAA-autophagy axis"]
+            assert row.raw_verdict["rationale"] == {"summary": "structured, not prose"}
     finally:
         async with factory() as cleanup:
             stale = (await cleanup.execute(
@@ -558,8 +662,12 @@ async def test_phase5_empty_sidecar_object_still_persists_a_row(engine, monkeypa
         rows = await _assessment_rows(factory, run_id)
         assert len(rows) == 1
         assert rows[0].raw_verdict == {}
-        assert rows[0].weighted_score == pytest.approx(0.0)
-        assert rows[0].band == "pass"
+        # F6: an empty `scores` map is "we don't know", not a decisive
+        # 0.00/pass decline the model never made.
+        assert rows[0].weighted_score is None
+        assert rows[0].band is None
+        # F7: the row links back to the Slack post it summarises.
+        assert rows[0].slack_ts == client.posted[0]["ts"]
     finally:
         await _delete_run(factory, run_id)
 
@@ -681,6 +789,39 @@ async def test_admin_assessments_page_lists_verdicts(client, db_session, admin):
     assert "No external validation yet" in resp.text
     # band must be legible as text, not just a font colour on the score.
     assert _band_label(resp.text) == "conditional"
+
+
+@pytest.mark.asyncio
+async def test_admin_assessments_page_does_not_double_wrap_confidence(
+    client, db_session, admin
+):
+    """F11: the prompt shows the confidence label bracketed in the Slack body
+    text (*[High]*) but bare in the sidecar ("High"). If a model ever copies
+    the bracketed body style into the sidecar field too, the template's own
+    unconditional `[{{ a.confidence }}]` wrap used to double it up into
+    "[[High]]". The fix strips any brackets the value already carries before
+    re-wrapping, so the page always shows exactly one bracket pair regardless
+    of which form the stored value took."""
+    run = SimulationRun()
+    db_session.add(run)
+    await db_session.flush()
+    db_session.add(OpportunityAssessment(
+        simulation_run_id=run.id, agent_id="blackbird", subject_agent_id="wang",
+        channel_name="general", company_or_project="Bracketed confidence fixture",
+        confidence="[High]",  # as if the model copied the body's bracketed style
+    ))
+    db_session.add(OpportunityAssessment(
+        simulation_run_id=run.id, agent_id="blackbird", subject_agent_id="fu",
+        channel_name="general", company_or_project="Bare confidence fixture",
+        confidence="Moderate",  # the documented, bare sidecar form
+    ))
+    await db_session.flush()
+
+    resp = await client.get("/admin/assessments", headers=_auth(admin.id))
+    assert resp.status_code == 200
+    assert "[[High]]" not in resp.text
+    assert "[High]" in resp.text
+    assert "[Moderate]" in resp.text
 
 
 @pytest.mark.asyncio
