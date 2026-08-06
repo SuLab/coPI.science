@@ -768,9 +768,13 @@ class SimulationEngine:
            after a run of reactive ones so new-conversation formation isn't
            starved — at the original default of 8, a single live pair took 24 of
            27 turns. See .notes/cohort-system-v2.md §10.3.
-        2. **Proactive** — the original weighted-random selection:
-           P(agent) ∝ (now - last_selected), with a penalty for agents that have
-           repeatedly skipped Phase 5 (weight /= 2^(skips-2) once skips >= 3).
+        2. **Proactive** — staleness-weighted random, scaled by load:
+           P(agent) ∝ (now - last_selected) * _agent_load(agent), with a penalty
+           for agents that have repeatedly skipped Phase 5
+           (weight /= 2^(skips-2) once skips >= 3). The load factor is what makes
+           a star's hub — one endpoint of every conversation — draw a share that
+           tracks the edges it actually sits on, instead of the 1/N a uniform
+           weighting gave it. See design §4.3.
 
         Both tiers draw from the same eligibility pool (`_turn_eligible`): budget
         plus the per-agent `turn_delay_seconds` cooldown.
@@ -791,7 +795,16 @@ class SimulationEngine:
                 self._reactive_streak += 1
                 self._reactive_selections += 1
                 self._log_selection_ratio()
-                return min(owed, key=lambda a: a.state.last_selected)
+                # Weighted by load, NOT bare last_selected. The hub is selected
+                # often, so its last_selected is always recent — under
+                # min(last_selected) it lost every tiebreak to a long-idle spoke,
+                # i.e. it was penalised precisely for being the busiest agent.
+                # Still "longest wait wins", now scaled by obligation count.
+                # See design §1.3 / §4.3.
+                return max(
+                    owed,
+                    key=lambda a: (now - a.state.last_selected) * self._agent_load(a),
+                )
 
         # --- Proactive tier: staleness-weighted random ---------------------
         self._reactive_streak = 0
@@ -799,7 +812,7 @@ class SimulationEngine:
         self._log_selection_ratio()
         weights = []
         for a in candidates:
-            w = max(now - a.state.last_selected, 1.0)
+            w = max(now - a.state.last_selected, 1.0) * self._agent_load(a)
             skips = a.state.consecutive_phase5_skips
             if skips >= 3:
                 w /= 2 ** (skips - 2)

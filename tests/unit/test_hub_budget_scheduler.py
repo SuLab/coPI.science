@@ -13,6 +13,7 @@ Implements the test plan in docs/specs/2026-08-06-hub-budget-scheduler-design.md
 """
 
 import logging
+import random
 import time
 import types
 
@@ -231,3 +232,64 @@ class TestRestartRebuild:
         # step 4b found no rows inside the window
         assert eng._within_rate_limit(a, 10_000.0) is True
         assert eng._turn_eligible(a, 10_000.0) is True
+
+
+class TestScheduler:
+    def test_proactive_weight_scales_with_load(self, monkeypatch):
+        """A load-12 hub against 12 load-1 spokes, all equally stale, should take
+        ~12/(12+12) = 50% of proactive draws. Under the old agent-fair weighting
+        it took 1/13 = 7.7%."""
+        _patch(monkeypatch, active_thread_threshold=12)
+        random.seed(20260806)
+        ids = ["hub"] + [f"pi{i}" for i in range(12)]
+        eng = _engine(ids)
+        _add_threads(eng.agents["hub"], 12)
+        now = time.time()
+        for a in eng.agents.values():
+            a.state.last_selected = now - 100.0
+
+        picks = [eng._select_agent().agent_id for _ in range(2000)]
+        share = picks.count("hub") / 2000
+        assert 0.42 < share < 0.58, f"hub share {share:.3f} not load-proportional"
+
+    def test_reactive_tiebreak_no_longer_penalises_the_busy_agent(
+        self, monkeypatch
+    ):
+        """The hub is selected often, so its last_selected is always recent. Under
+        min(last_selected) it lost every tiebreak to a long-idle spoke — it was
+        penalised precisely for being busy. Weighted by load, it wins."""
+        _patch(monkeypatch, active_thread_threshold=12)
+        eng = _engine(["hub", "spoke"])
+        now = time.time()
+        _add_threads(eng.agents["hub"], 12, pending=True)
+        _add_threads(eng.agents["spoke"], 1, pending=True, prefix="s")
+        eng.agents["hub"].state.last_selected = now - 10.0    # 10 * 12 = 120
+        eng.agents["spoke"].state.last_selected = now - 60.0  # 60 *  1 =  60
+
+        assert eng._select_agent().agent_id == "hub"
+
+    def test_reactive_tier_still_prefers_a_genuinely_starved_spoke(
+        self, monkeypatch
+    ):
+        """The load weighting must not become a blank cheque: a spoke that has
+        waited long enough still outranks the hub."""
+        _patch(monkeypatch, active_thread_threshold=12)
+        eng = _engine(["hub", "spoke"])
+        now = time.time()
+        _add_threads(eng.agents["hub"], 2, pending=True)
+        _add_threads(eng.agents["spoke"], 1, pending=True, prefix="s")
+        eng.agents["hub"].state.last_selected = now - 10.0     # 10 * 2 =  20
+        eng.agents["spoke"].state.last_selected = now - 600.0  # 600 * 1 = 600
+
+        assert eng._select_agent().agent_id == "spoke"
+
+    def test_throttled_hub_is_not_selected(self, monkeypatch):
+        _patch(monkeypatch, llm_calls_per_load_per_window=1,
+               active_thread_threshold=12)
+        eng = _engine(["hub", "spoke"])
+        now = time.time()
+        hub = eng.agents["hub"]
+        _add_threads(hub, 1)
+        hub.record_api_call(now=now)
+        for _ in range(50):
+            assert eng._select_agent().agent_id == "spoke"
