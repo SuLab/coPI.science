@@ -262,7 +262,7 @@ async def test_all_tiers_empty_reports_the_narrowest_breadth_tried(monkeypatch):
     )
     result = await patents.search_prior_art("alpha beta gamma delta epsilon")
     assert result.hits == []
-    assert len(result.terms_used) == 2  # floored at two terms
+    assert len(result.terms_used) == 1  # floored at one term (F2b)
     assert result.broadened is True
 
 
@@ -339,10 +339,30 @@ def test_all_generic_query_still_backs_off_normally():
     # ("specific or tokens"), so an all-generic query must still get narrower
     # tiers — guarding the asymmetry where that fallback got backoff but a query
     # with exactly one specific term (see the lone-specific-term test above) did
-    # not, before the _tiers fix.
+    # not, before the _tiers fix. Widths now end at one term (F2b), so a
+    # 5-token all-generic query yields four tiers: full, top-3, top-2, top-1.
     tiers = patents._tiers(["the", "of", "for", "with", "via"])
-    assert len(tiers) == 3
-    assert len(tiers[-1]) == 2
+    assert len(tiers) == 4
+    assert len(tiers[-1]) == 1
+
+
+def test_two_token_query_now_backs_off_instead_of_being_inert():
+    # Regression (F2): the pre-fix guard (`width >= len(tokens): continue`)
+    # skipped BOTH backoff tiers for a 2-token query, so the widely-recommended
+    # "2-4 specific terms" query never backed off at all. `_rank_terms` had
+    # already isolated "TFEB" as the only non-generic term, but the old code
+    # never tried it alone.
+    assert patents._tiers(["TFEB", "inhibitor"]) == [["TFEB", "inhibitor"], ["TFEB"]]
+
+
+def test_two_specific_term_query_still_backs_off_to_the_single_term_floor():
+    # Both tokens survive generics-filtering, so width 3 and width _MIN_TERMS
+    # (2) collapse into tier 1 (the exact query) with nothing left to add —
+    # but the final width-1 floor (F2b, human-approved) still applies
+    # unconditionally, since even a fully-specific AND'd pair can zero out
+    # where either term alone returns real hits (TFEB: 10, BRAF: 10, measured
+    # live). No redundant *duplicate* tiers are produced either way.
+    assert patents._tiers(["TFEB", "BRAF"]) == [["TFEB", "BRAF"], ["TFEB"]]
 
 
 from src.agent.tools import TOOL_DEFINITIONS, _execute_search_prior_art  # noqa: E402

@@ -66,8 +66,10 @@ _GENERIC = frozenset({
     "expression", "activity", "function",
 })
 
-# Floor on breadth. One term is too broad to be informative for a multi-concept
-# idea; two ANDed specific terms is the widest search worth reporting.
+# Floor on how narrow a *multi*-term backoff goes before the final single-term
+# tier (see _tiers). Two ANDed specific terms is still worth trying on its own
+# before dropping to one, since a pairing of two real signal terms is more
+# specific than either alone when both survive generics-filtering.
 _MIN_TERMS = 2
 
 
@@ -92,26 +94,35 @@ def _rank_terms(tokens: list[str]) -> list[str]:
 
 
 def _tiers(tokens: list[str]) -> list[list[str]]:
-    """Breadths to try, widest first, at most three HTTP calls (the ODP
+    """Breadths to try, widest first, at most four HTTP calls (the ODP
     rate-limits aggressively — a 429 costs us the whole search).
 
     Tier 1 is the query EXACTLY as asked, in the caller's own order: that is
     the precise search, and preserving it means the backoff only ever widens.
-    Later tiers drop generic words and keep the most specific terms.
+    Later tiers drop generic words and keep the most specific terms, ending at
+    a single term: measured against the live USPTO API, a lone specific term
+    (TFEB, BRAF, C9orf72) reliably returns hits where a 2-term floor returned
+    zero for exactly the queries this backoff exists to fix. A long query can
+    now cost up to four calls; a 429 on any of them still returns ``None``
+    (see search_prior_art) rather than a clean-looking empty result.
 
-    ``_MIN_TERMS`` is a floor on how narrow a *multi*-term backoff goes, not a
-    minimum on how much specific signal a tier must contain: when the specific
-    pool is narrower than a given width (e.g. only one gene symbol survives
-    among several generic words), that narrower pool is still used, in full,
-    as its own tier. Skipping it there would silently reproduce the guaranteed
-    zero-hit bug this backoff exists to fix — a single specific term is more
-    informative than the full generic-laden phrase it's paired with.
+    Widths are gated on ``candidate not in tiers`` alone, NOT on the input
+    token count — gating on ``width >= len(tokens)`` (the pre-fix behaviour)
+    skipped every backoff tier for a query of 2 tokens or fewer, which is
+    exactly the breadth the prompt now asks the model to use.
+
+    ``_MIN_TERMS`` is a floor on how narrow a *multi*-term backoff goes before
+    the final single-term tier below it, not a minimum on how much specific
+    signal a tier must contain: when the specific pool is narrower than a
+    given width (e.g. only one gene symbol survives among several generic
+    words), that narrower pool is still used, in full, as its own tier.
+    Skipping it there would silently reproduce the guaranteed zero-hit bug
+    this backoff exists to fix — a single specific term is more informative
+    than the full generic-laden phrase it's paired with.
     """
     ranked = _rank_terms(tokens)
     tiers = [list(tokens)]
-    for width in (3, _MIN_TERMS):
-        if width >= len(tokens):
-            continue
+    for width in (3, _MIN_TERMS, 1):
         candidate = ranked[:width] if width <= len(ranked) else list(ranked)
         if candidate not in tiers:
             tiers.append(candidate)
