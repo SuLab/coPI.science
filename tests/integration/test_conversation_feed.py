@@ -13,6 +13,7 @@ from src.agent.message_log import _entry_allowed
 from src.models import AgentMessage, Cohort, CohortMembership
 from src.services.conversation_feed import gate_clause, resolve_agent_gate
 from tests import factories
+from tests.integration.test_agent_page import _auth
 from tests.unit.test_cohort_isolation import DECISION_TABLE, _post
 
 pytestmark = pytest.mark.integration
@@ -124,3 +125,150 @@ async def test_an_inactive_viewing_agent_still_resolves(db_session, monkeypatch)
     await _cohort(db_session, "mixed", "sleeper", "awake")
 
     assert await resolve_agent_gate(db_session, "sleeper") == {"sleeper", "awake"}
+
+
+async def test_a_spoke_pi_does_not_see_another_spokes_bot(
+    client, db_session, monkeypatch
+):
+    """The star topology: two spokes and a hub. Spoke 1's PI must not see
+    Spoke 2's bot, and MUST still see the hub (the positive control)."""
+    from src.config import get_settings
+    s = get_settings()
+    monkeypatch.setattr(s, "cohort_isolation_enabled", True, raising=False)
+    monkeypatch.setattr(s, "cohort_default_policy", "isolated", raising=False)
+
+    pi1 = await factories.make_user(db_session, name="Spoke One", email="s1@example.org")
+    await factories.make_agent(
+        db_session, user=pi1, agent_id="spoke1", bot_name="Spoke1Bot", pi_name="Spoke One"
+    )
+    await factories.make_agent(db_session, agent_id="spoke2", bot_name="Spoke2Bot")
+    await factories.make_agent(db_session, agent_id="hub", bot_name="HubBot")
+    await _cohort(db_session, "pair1", "spoke1", "hub")
+    await _cohort(db_session, "pair2", "spoke2", "hub")
+
+    run = await factories.make_simulation_run(db_session)
+    common = dict(run=run, channel_name="general", channel_id="C1", visibility="public")
+    # Spoke 1's own post is what puts #general in its channel set.
+    await factories.make_agent_message(
+        db_session, agent_id="spoke1", message_ts="1.0001",
+        content="MINE-own-post", sender_name="Spoke1Bot", **common
+    )
+    await factories.make_agent_message(
+        db_session, agent_id="hub", message_ts="1.0002",
+        content="HUB-visible-post", sender_name="HubBot", **common
+    )
+    await factories.make_agent_message(
+        db_session, agent_id="spoke2", message_ts="1.0003",
+        content="LEAK-other-spoke-post", sender_name="Spoke2Bot", **common
+    )
+    await db_session.commit()
+
+    page = await client.get("/agent/spoke1/conversations", headers=_auth(pi1.id))
+    assert page.status_code == 200
+    assert "MINE-own-post" in page.text
+    assert "HUB-visible-post" in page.text, "positive control: the hub must be visible"
+    assert "LEAK-other-spoke-post" not in page.text
+    assert "Spoke2Bot" not in page.text
+
+
+async def test_a_pi_message_still_renders_under_the_gate(
+    client, db_session, monkeypatch
+):
+    """is_bot=False bypasses the gate — the human bypass must survive."""
+    from src.config import get_settings
+    s = get_settings()
+    monkeypatch.setattr(s, "cohort_isolation_enabled", True, raising=False)
+    monkeypatch.setattr(s, "cohort_default_policy", "isolated", raising=False)
+
+    pi = await factories.make_user(db_session, name="Solo PI", email="solo@example.org")
+    await factories.make_agent(
+        db_session, user=pi, agent_id="solo", bot_name="SoloBot", pi_name="Solo PI"
+    )
+    run = await factories.make_simulation_run(db_session)
+    common = dict(run=run, channel_name="general", channel_id="C1", visibility="public")
+    await factories.make_agent_message(
+        db_session, agent_id="solo", message_ts="2.0001",
+        content="BOT-anchor", sender_name="SoloBot", **common
+    )
+    await factories.make_agent_message(
+        db_session, agent_id=None, is_bot=False, message_ts="2.0002",
+        content="HUMAN-said-this", sender_name="Solo PI (PI)", **common
+    )
+    await db_session.commit()
+
+    page = await client.get("/agent/solo/conversations", headers=_auth(pi.id))
+    assert page.status_code == 200
+    assert "HUMAN-said-this" in page.text
+
+
+async def test_replies_are_not_listed_as_top_level_rows(
+    client, db_session, monkeypatch
+):
+    """The feed selects ROOTS. A reply appears via its count, not as its own card."""
+    from src.config import get_settings
+    monkeypatch.setattr(
+        get_settings(), "cohort_isolation_enabled", False, raising=False
+    )
+
+    pi = await factories.make_user(db_session, name="Root PI", email="root@example.org")
+    await factories.make_agent(
+        db_session, user=pi, agent_id="rooter", bot_name="RooterBot", pi_name="Root PI"
+    )
+    run = await factories.make_simulation_run(db_session)
+    common = dict(run=run, channel_name="general", channel_id="C1", visibility="public")
+    await factories.make_agent_message(
+        db_session, agent_id="rooter", message_ts="3.0001", phase="new_post",
+        content="THE-ROOT", sender_name="RooterBot", **common
+    )
+    await factories.make_agent_message(
+        db_session, agent_id="rooter", message_ts="3.0002", thread_ts="3.0001",
+        phase="thread_reply", content="THE-REPLY", sender_name="RooterBot", **common
+    )
+    await db_session.commit()
+
+    page = await client.get("/agent/rooter/conversations", headers=_auth(pi.id))
+    assert page.status_code == 200
+    assert "THE-ROOT" in page.text
+    assert "THE-REPLY" not in page.text, "a reply must not render as a top-level card"
+
+
+async def test_a_delegate_sees_exactly_what_the_owner_sees(
+    client, db_session, monkeypatch
+):
+    """Access is owner-or-delegate; the gate is the AGENT's, not the viewer's, so
+    both must get byte-identical feeds."""
+    from src.config import get_settings
+    from src.models import AgentDelegate
+    s = get_settings()
+    monkeypatch.setattr(s, "cohort_isolation_enabled", True, raising=False)
+    monkeypatch.setattr(s, "cohort_default_policy", "isolated", raising=False)
+
+    pi = await factories.make_user(db_session, name="Owner", email="own@example.org")
+    agent = await factories.make_agent(
+        db_session, user=pi, agent_id="deleg", bot_name="DelegBot", pi_name="Owner"
+    )
+    await factories.make_agent(db_session, agent_id="stranger", bot_name="StrangerBot")
+    await _cohort(db_session, "solo", "deleg")
+
+    dee = await factories.make_user(db_session, name="Dee", email="dee2@example.org")
+    db_session.add(AgentDelegate(agent_registry_id=agent.id, user_id=dee.id))
+
+    run = await factories.make_simulation_run(db_session)
+    common = dict(run=run, channel_name="general", channel_id="C1", visibility="public")
+    await factories.make_agent_message(
+        db_session, agent_id="deleg", message_ts="4.0001",
+        content="OWN-POST", sender_name="DelegBot", **common
+    )
+    await factories.make_agent_message(
+        db_session, agent_id="stranger", message_ts="4.0002",
+        content="OUTSIDER-POST", sender_name="StrangerBot", **common
+    )
+    await db_session.commit()
+
+    owner_page = await client.get("/agent/deleg/conversations", headers=_auth(pi.id))
+    dee_page = await client.get("/agent/deleg/conversations", headers=_auth(dee.id))
+    assert owner_page.status_code == 200
+    assert dee_page.status_code == 200
+    assert "OWN-POST" in dee_page.text
+    assert "OUTSIDER-POST" not in owner_page.text
+    assert "OUTSIDER-POST" not in dee_page.text

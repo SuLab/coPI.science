@@ -40,6 +40,11 @@ SLACK_INVITE_URL = (
     "zt-3sxfrrisw-t4hRz4aMfZZPxThxUaTGKA"
 )
 
+# Thread roots per page. The window's unit is threads, not messages: replies no
+# longer consume slots, so this surfaces more distinct conversations than the
+# previous flat 100-message window did.
+_ROOT_LIMIT = 50
+
 
 def _extract_proposal_title(text: str | None) -> str:
     """Best-effort one-line title for a proposal summary.
@@ -712,6 +717,7 @@ async def agent_conversations(
     discussing and to inject a message/tag — it writes to the DB inbox, which
     the running simulation ingests. See specs/local-db-conversations.md.
     """
+    from src.services.conversation_feed import gate_clause, resolve_agent_gate
     from src.services.pi_inbox import get_latest_run_id
 
     agent, is_owner = await get_agent_with_access(agent_id, db, current_user)
@@ -751,36 +757,65 @@ async def agent_conversations(
             )
         )
         channels = sorted({r[0] for r in ch_rows} | {"general"})
-        # Recent messages in those channels (content is now stored in the DB).
-        msg_rows = await db.execute(
+        # What this PI may read == what their bot may act on. Filtering happens in
+        # SQL, before LIMIT: #general carries every other cohort's traffic, so
+        # filtering in Python afterwards would leave the page nearly empty.
+        gate = await resolve_agent_gate(db, aid)
+
+        # Thread ROOTS, newest first. `phase` is belt-and-braces alongside
+        # `thread_ts IS NULL`; the two agree on every row.
+        #
+        # The three-column ordering is load-bearing, not stylistic. Migration
+        # 0019 adds posted_at with server_default '0', so EVERY row that
+        # predates it shares one value. With `ORDER BY posted_at DESC LIMIT
+        # 50` over a tie group larger than 50, Postgres is free to return any
+        # 50 — measured on a 200-row tie group, the index-scan and seq-scan
+        # plans returned two DISJOINT pages, so half the messages were
+        # unreachable and which half flipped with the plan. Adding created_at
+        # and the primary key makes the sort total.
+        root_rows = await db.execute(
             select(AgentMessage)
             .where(
                 AgentMessage.simulation_run_id == run_id,
                 AgentMessage.channel_name.in_(channels),
+                AgentMessage.thread_ts.is_(None),
+                AgentMessage.phase == "new_post",
+                gate_clause(gate),
             )
-            # Total ordering, and it matters more here than it looks. Migration
-            # 0019 adds posted_at with server_default '0', so EVERY row that
-            # predates it shares one value. With `ORDER BY posted_at DESC LIMIT
-            # 100` over a tie group larger than 100, Postgres is free to return
-            # any 100 — measured on a 200-row tie group, the index-scan and
-            # seq-scan plans returned two DISJOINT pages, so half the messages
-            # were unreachable and which half flipped with the plan. Adding
-            # created_at and the primary key makes the sort total, so the page is
-            # stable and every row is reachable by paging.
             .order_by(AgentMessage.posted_at.desc(), AgentMessage.created_at.desc(),
                       AgentMessage.id.desc())
-            .limit(100)
+            .limit(_ROOT_LIMIT)
         )
+        roots = list(reversed(root_rows.scalars().all()))
+
+        # Reply counts, gated with the SAME clause so the badge can never promise
+        # turns the expansion will not show.
+        root_ts = [r.message_ts for r in roots if r.message_ts]
+        counts: dict[str, int] = {}
+        if root_ts:
+            count_rows = await db.execute(
+                select(AgentMessage.thread_ts, func.count(AgentMessage.id))
+                .where(
+                    AgentMessage.simulation_run_id == run_id,
+                    AgentMessage.thread_ts.in_(root_ts),
+                    gate_clause(gate),
+                )
+                .group_by(AgentMessage.thread_ts)
+            )
+            counts = {ts: n for ts, n in count_rows}
+
         messages = [
             {
                 "channel": m.channel_name,
                 "sender": m.sender_name or (m.agent_id or "PI"),
                 "is_bot": m.is_bot,
                 "content": m.content,
+                "message_ts": m.message_ts,
                 "thread_ts": m.thread_ts,
+                "reply_count": counts.get(m.message_ts, 0),
                 "posted_at": m.posted_at,
             }
-            for m in reversed(msg_rows.scalars().all())
+            for m in roots
         ]
     else:
         channels = ["general"]
