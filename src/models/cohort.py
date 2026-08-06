@@ -18,7 +18,7 @@ gate the engine computes, as SQL, via `src/services/conversation_feed.py`
 (`resolve_agent_gate` / `gate_clause` / `own_or_gated`). Every other PI- and
 admin-facing read (dashboard, proposals, profile, admin discussion views,
 exports, public graph routes) is unaffected and must stay ungated. See
-.notes/cohort-system-v2.md §6.2 for the full amendment.
+specs/cohort-system-v2.md §6.2 for the full amendment.
 """
 
 import uuid
