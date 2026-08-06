@@ -377,6 +377,27 @@ class SimulationEngine:
             return True  # unlimited
         return agent.api_call_count < self.budget_cap
 
+    def _agent_load(self, agent: Agent) -> int:
+        """Concurrent conversational obligations for one agent.
+
+        The shared signal behind BOTH the rate allowance (``_within_rate_limit``)
+        and the selection weight (``_select_agent``). Deriving both from one
+        number is the point: the failure this fixes was the limiter and the
+        scheduler holding contradictory views of what a hub deserves — the
+        reactive tier gave the blackbird hub a 7x boost while the cumulative cap
+        benched it for 161 consecutive turns, and the cap won, silently. See
+        docs/specs/2026-08-06-hub-budget-scheduler-design.md §1.4.
+
+        Floors at 1 so an idle agent stays eligible. Ceilings at
+        ``active_thread_threshold`` so nothing can inflate its own allowance past
+        the thread cap it is already bound by — that clamp is what stops a
+        thread-opening runaway from financing itself (§4.1).
+        """
+        live = sum(
+            1 for t in agent.state.active_threads.values() if t.status == "active"
+        )
+        return max(1, min(live, get_settings().active_thread_threshold))
+
     def _non_funding_thread_count(self, agent: Agent) -> int:
         """Count active threads that are NOT funding-related."""
         return sum(
