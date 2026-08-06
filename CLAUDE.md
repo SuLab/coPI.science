@@ -95,14 +95,29 @@ ls -t logs/blackbird_run_*.log | tail -n +11 | xargs -r rm -f
 docker stop -t 30 blackbird-agent-run
 docker rm blackbird-agent-run
 
-# 3. Rebuild the web tier (picks up code changes)
+# 3. Rebuild the web tier AND the agent image (both bake src/ into the image)
 $DC up -d --build blackbird-app worker
+$DC --profile agent build agent
 
 # 4. Start the new run
 $DC --profile agent run -d --name blackbird-agent-run agent python -m src.agent.main
 ```
 
-**Note:** The agent-run container uses mounted source code but the Python process only loads modules at startup. **Code** changes require a container restart to take effect. **After any code change that affects the running agent process, flag this to the user so they can decide whether to restart.** (Roster changes — activating/inactivating agents or setting a new `slack_bot_token` in `AgentRegistry` — do NOT need a restart; they're picked up live by `_sync_roster_from_db`.)
+> ### ⚠️ The agent image does NOT mount `src/`. Rebuild it, or you deploy stale code.
+>
+> The `agent` service in `docker-compose.prod.yml` mounts only `./profiles`,
+> `./prompts` and `./data`. **`src/` is baked into the image at build time.** So
+> `$DC up -d --build blackbird-app worker` does *not* update the simulation — it
+> rebuilds the web tier only, and `docker compose run agent` then starts the
+> **previous** image. Measured 2026-08-06: a rebuild that skipped step 3's second
+> line launched a run on hours-old code, silently, with no error — the startup
+> banner (`Budget: N calls/agent`) was the only tell.
+>
+> After any `src/` change, always run `$DC --profile agent build agent` before
+> starting a new run, and check the startup banner matches what you expect.
+
+**Note:** The agent-run container loads Python modules only at startup, so **code**
+changes require rebuilding the image (above) and restarting the container. **After any code change that affects the running agent process, flag this to the user so they can decide whether to restart.** (Roster changes — activating/inactivating agents or setting a new `slack_bot_token` in `AgentRegistry` — do NOT need a restart; they're picked up live by `_sync_roster_from_db`.)
 
 **`.env` changes need a container *recreate*, not a restart.** `env_file` is
 resolved when the container is created, so `docker restart` re-runs the old
