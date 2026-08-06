@@ -2300,35 +2300,61 @@ class SimulationEngine:
 
             else:
                 # New top-level post
-                await self._post_message(agent.agent_id, channel, message_text)
-                agent.message_count += 1
-
-                # A :mag: Opportunity Assessment carries a machine-readable verdict
-                # sidecar (stripped from the Slack body). Persist it — the whole
-                # point of the artifact is that staff can triage it later.
-                if post_type == "opportunity_assessment":
-                    verdict = _extract_assessment_json(response)
-                    if verdict:
-                        await self._persist_assessment(agent.agent_id, channel, verdict)
-                    else:
-                        logger.warning(
-                            "[%s] Phase 5: opportunity_assessment post with no "
-                            "parseable <assessment_json> sidecar — verdict lost",
-                            agent.agent_id,
-                        )
-
-                # Check if it tags another agent
-                tagged_agent = action_data.get("tagged_agent")
-                if tagged_agent:
+                posted = await self._post_message(agent.agent_id, channel, message_text)
+                if not posted:
+                    # _post_message already logged why (e.g. the text stripped to
+                    # empty). Nothing reached Slack, so neither the turn counter
+                    # nor an assessment row may be written for it — either would
+                    # be a phantom record with no corresponding Slack message
+                    # (Task 11 fix round 1, Finding 3).
                     logger.info(
-                        "[%s] Phase 5: New post in #%s tagging @%s",
-                        agent.agent_id, channel, tagged_agent,
-                    )
-                else:
-                    logger.info(
-                        "[%s] Phase 5: New post in #%s",
+                        "[%s] Phase 5: New post in #%s suppressed — not counted, "
+                        "nothing persisted",
                         agent.agent_id, channel,
                     )
+                else:
+                    agent.message_count += 1
+
+                    # A :mag: Opportunity Assessment carries a machine-readable
+                    # verdict sidecar (stripped from the Slack body). Persist it —
+                    # the whole point of the artifact is that staff can triage it
+                    # later. ``verdict`` can legitimately be ``{}`` (an empty but
+                    # parsed sidecar) — that is falsy but not a failure, so the
+                    # gate is `is not None`, never a truthiness check (Finding 1).
+                    if post_type == "opportunity_assessment":
+                        verdict = _extract_assessment_json(response)
+                        if verdict is not None:
+                            await self._persist_assessment(agent.agent_id, channel, verdict)
+                        elif _ASSESSMENT_UNCLOSED_RE.search(response or ""):
+                            # An <assessment_json> opening tag is present (well-formed
+                            # but invalid JSON, or truncated) — _extract_assessment_json
+                            # already logged the parse error; this names the
+                            # consequence without re-claiming "no sidecar" (Finding 1).
+                            logger.warning(
+                                "[%s] Phase 5: opportunity_assessment post's "
+                                "<assessment_json> sidecar was present but "
+                                "unparseable — verdict lost",
+                                agent.agent_id,
+                            )
+                        else:
+                            logger.warning(
+                                "[%s] Phase 5: opportunity_assessment post had no "
+                                "<assessment_json> sidecar present — verdict lost",
+                                agent.agent_id,
+                            )
+
+                    # Check if it tags another agent
+                    tagged_agent = action_data.get("tagged_agent")
+                    if tagged_agent:
+                        logger.info(
+                            "[%s] Phase 5: New post in #%s tagging @%s",
+                            agent.agent_id, channel, tagged_agent,
+                        )
+                    else:
+                        logger.info(
+                            "[%s] Phase 5: New post in #%s",
+                            agent.agent_id, channel,
+                        )
 
             # In a collab_private channel, a :memo: Summary + ✅ handshake
             # finalizes the refined proposal (the flat path has no
@@ -2374,17 +2400,29 @@ class SimulationEngine:
         gating = _normalize_gating(verdict.get("gating"))
         red_flags = verdict.get("red_flags")
         milestones = verdict.get("suggested_derisking_milestones")
+        # subject_agent_id/funnel_stage/recommendation/confidence are bounded
+        # VARCHAR columns (see src/models/opportunity.py); every other field
+        # degrades per-field on a bad value (wrong type -> None), but a
+        # too-long *string* in one of these four is still the right type and
+        # would sail past an isinstance check straight into a DataError at
+        # commit — which the outer except then drops the WHOLE row for. Clip
+        # instead of dropping: a truncated recommendation is still useful for
+        # triage, an absent one is not (Task 11 fix round 1, Finding 5).
+        subject_agent_id = _bounded_str(verdict.get("subject_agent_id"), 50)
+        funnel_stage = _bounded_str(verdict.get("funnel_stage"), 20)
+        recommendation = _bounded_str(verdict.get("recommendation"), 30)
+        confidence = _bounded_str(verdict.get("confidence"), 20)
         try:
             async with self.session_factory() as db:
                 db.add(OpportunityAssessment(
                     simulation_run_id=self.simulation_run_id,
                     agent_id=agent_id,
-                    subject_agent_id=(verdict.get("subject_agent_id") or None),
+                    subject_agent_id=subject_agent_id,
                     channel_name=channel,
                     company_or_project=(verdict.get("company_or_project") or None),
-                    funnel_stage=(verdict.get("funnel_stage") or None),
-                    recommendation=(verdict.get("recommendation") or None),
-                    confidence=(verdict.get("confidence") or None),
+                    funnel_stage=funnel_stage,
+                    recommendation=recommendation,
+                    confidence=confidence,
                     weighted_score=computed_score,
                     band=computed_band,
                     gating=gating,
@@ -2399,8 +2437,8 @@ class SimulationEngine:
                 await db.commit()
             logger.info(
                 "[%s] Assessment stored: %s -> %s (%.2f, %s)",
-                agent_id, verdict.get("subject_agent_id") or "?",
-                verdict.get("recommendation") or "?", computed_score, computed_band,
+                agent_id, subject_agent_id or "?",
+                recommendation or "?", computed_score, computed_band,
             )
         except Exception as exc:  # noqa: BLE001 — never lose a posted assessment
             logger.error("[%s] Failed to persist assessment: %s", agent_id, exc)
@@ -3156,8 +3194,18 @@ class SimulationEngine:
         channel: str,
         text: str,
         thread_ts: str | None = None,
-    ) -> None:
-        """Post a message to Slack and record it in the message log + DB."""
+    ) -> bool:
+        """Post a message to Slack and record it in the message log + DB.
+
+        Returns whether a message was actually recorded — ``False`` when the
+        text stripped to nothing, or the reply's parent thread was found to be
+        deleted, in which case nothing was posted and no log entry was written.
+        Callers that count a turn or persist something derived from the post
+        (e.g. the opportunity_assessment verdict sidecar) must check this
+        before doing either — see Task 11 fix round 1, Finding 3. Existing
+        callers that don't care are unaffected: ignoring a return value is
+        always safe.
+        """
         # Final safety: strip any leaked <slack_message> tags, and any
         # <assessment_json> sidecar — that block is for Blackbird staff and the DB,
         # never for the channel. See _strip_assessment_sidecar for why an
@@ -3184,7 +3232,7 @@ class SimulationEngine:
                 "a sidecar-only or truncated response with no real message body.",
                 agent_id, channel,
             )
-            return
+            return False
 
         client = self.slack_clients.get(agent_id)
         agent = self.agents.get(agent_id)
@@ -3225,7 +3273,7 @@ class SimulationEngine:
                     "[%s] Skipped reply to deleted thread %s in #%s",
                     agent_id, thread_ts, channel,
                 )
-                return
+                return False
         else:
             logger.info("[%s] MOCK post to #%s: %s...", agent_id, channel, text[:60])
 
@@ -3295,6 +3343,7 @@ class SimulationEngine:
             # Persisted to agent_messages via the MessageLog append callback
             # (_enqueue_persist → _flush_persisted). The DB is the primary store.
             self.message_log.append(entry)
+        return True
 
     @staticmethod
     def _mirrored_messages(
@@ -5179,31 +5228,64 @@ _VALID_GATING_STATES = frozenset({"met", "not_met", "unconfirmed"})
 
 
 def _normalize_gating(raw: object) -> dict | None:
-    """Validate a verdict's ``gating`` map against the tri-state contract, or
-    drop it to ``None``.
+    """Filter a verdict's ``gating`` map down to the keys already conforming to
+    the tri-state contract; drop only the keys that don't.
 
     The ``gating`` column is plain JSONB, so nothing at the database layer
-    stops a pre-tri-state boolean map — or a genuinely malformed one — from
-    being written verbatim. A column that sometimes holds
-    ``{"...": true}`` and sometimes holds ``{"...": "met"}`` is worse than one
-    that is occasionally null: a consumer cannot tell which convention a given
-    row uses without inspecting every value, which defeats the point of a
-    structured column. So the map is stored only when every value already
-    conforms to the contract; anything else becomes ``None`` here.
+    stops a pre-tri-state boolean value — or a genuinely malformed one — from
+    being written verbatim. A key that sometimes holds ``true``/``false`` and
+    sometimes holds ``"met"``/``"not_met"``/``"unconfirmed"`` is worse than one
+    that is occasionally absent: a consumer cannot tell which convention a
+    given key uses without inspecting its value, which defeats the point of a
+    structured column. So each key is kept only when its own value already
+    conforms; anything else is dropped for that key alone.
+
+    Filtering per key rather than dropping the whole map (Task 11 fix round 1,
+    Finding 4) matches how every sibling field on this row already degrades —
+    ``red_flags``/``derisking_milestones`` null only when THEY are the wrong
+    type, never because some unrelated field was also bad. Wholesale-dropping
+    a map with three good gates over one bad one denied the (now-shipped)
+    triage page three gates it could have shown, for no correctness benefit:
+    the reason to refuse the bad key stands on its own (see below) and has
+    nothing to do with its siblings.
 
     Booleans are deliberately NOT coerced (``True`` -> "met", ``False`` ->
     "not_met"): under the old boolean-only contract there was no way to say
     "unconfirmed" at all, so a legacy ``False`` is genuinely ambiguous between
     "not_met" and "unconfirmed" — guessing would fabricate a certainty the
-    original verdict never had. This never loses information: ``raw_verdict``
-    keeps the original ``gating`` value verbatim regardless of what is decided
-    here.
+    original verdict never had, so that key is omitted rather than guessed.
+    This never loses information regardless: ``raw_verdict`` keeps the
+    original ``gating`` value verbatim no matter what survives here.
+
+    Returns ``None`` when ``raw`` isn't a dict at all, or when no key survives
+    filtering — an empty structured map is no more useful than a missing one.
     """
     if not isinstance(raw, dict) or not raw:
         return None
-    if all(isinstance(v, str) and v in _VALID_GATING_STATES for v in raw.values()):
-        return raw
-    return None
+    kept = {
+        key: value for key, value in raw.items()
+        if isinstance(value, str) and value in _VALID_GATING_STATES
+    }
+    return kept or None
+
+
+def _bounded_str(value: object, max_len: int) -> str | None:
+    """Coerce a verdict field expected to be a short string into one that
+    fits its column, or drop it if it isn't a (non-empty) string at all.
+
+    Every other field on this row degrades per-field on a bad value via an
+    isinstance check ahead of the insert; a short VARCHAR column is the one
+    place a value of the *right* type can still blow up the write, since an
+    oversized string is a perfectly good Python str right up until Postgres
+    raises DataError at commit — which takes the whole row down with it, not
+    just the one field (Task 11 fix round 1, Finding 5). Truncating instead of
+    dropping is deliberate: a clipped recommendation is still useful for
+    triage, an absent one is not. ``raw_verdict`` keeps the untruncated
+    original regardless.
+    """
+    if not isinstance(value, str) or not value:
+        return None
+    return value[:max_len]
 
 
 def _strip_llm_preamble(text: str) -> str:

@@ -199,15 +199,15 @@ async def test_persist_assessment_recomputes_the_score_it_is_handed(engine):
 
 
 @pytest.mark.asyncio
-async def test_persist_assessment_drops_boolean_gating_but_keeps_raw_verdict(engine):
+async def test_persist_assessment_gating_drops_only_the_invalid_key(engine):
     """The old contract wrote gating as booleans; the current one writes
-    "met"/"not_met"/"unconfirmed" strings. A gating map is stored in the
-    structured `gating` column only when EVERY value already conforms to the
-    tri-state contract — a map with even one boolean (or otherwise invalid)
-    value is dropped to None wholesale rather than partially normalized, so the
-    column never silently mixes the two conventions. The original is untouched
-    in raw_verdict, so nothing is lost — only left where it can't be
-    misread as structured data it isn't."""
+    "met"/"not_met"/"unconfirmed" strings. Fix round 1, Finding 4: a map with
+    three valid gates and one stray boolean must keep the three valid gates —
+    dropping the whole map wholesale (the original Task 11 behavior) denied
+    the triage page three gates it could have shown for no correctness
+    benefit. The invalid key is still never guessed/coerced (a legacy False is
+    genuinely ambiguous between not_met and unconfirmed), so it alone is
+    omitted. The original four-key map is untouched in raw_verdict regardless."""
     from types import SimpleNamespace
 
     from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -222,12 +222,16 @@ async def test_persist_assessment_drops_boolean_gating_but_keeps_raw_verdict(eng
         run_id = run.id
 
     stub = SimpleNamespace(simulation_run_id=run_id, session_factory=factory)
+    original_gating = {
+        "baltimore_commitment": False,  # legacy boolean — the one bad key
+        "life_sciences_domain": "met",
+        "credible_tech_source": "met",
+        "fto_achievable": "not_met",
+    }
     verdict = {
         "subject_agent_id": "wang",
         "scores": {"differentiation": 3},
-        # One legacy boolean mixed with one valid tri-state string — the whole
-        # map must be rejected, not just the bad key.
-        "gating": {"baltimore_commitment": False, "life_sciences_domain": "met"},
+        "gating": dict(original_gating),
     }
     await SimulationEngine._persist_assessment(stub, "blackbird", "general", verdict)
 
@@ -238,10 +242,54 @@ async def test_persist_assessment_drops_boolean_gating_but_keeps_raw_verdict(eng
                     OpportunityAssessment.simulation_run_id == run_id
                 )
             )).scalar_one()
-            assert row.gating is None
-            assert row.raw_verdict["gating"] == {
-                "baltimore_commitment": False, "life_sciences_domain": "met",
+            assert row.gating == {
+                "life_sciences_domain": "met",
+                "credible_tech_source": "met",
+                "fto_achievable": "not_met",
             }
+            assert "baltimore_commitment" not in row.gating  # not guessed, omitted
+            assert row.raw_verdict["gating"] == original_gating
+    finally:
+        async with factory() as cleanup:
+            stale = (await cleanup.execute(
+                select(SimulationRun).where(SimulationRun.id == run_id)
+            )).scalar_one_or_none()
+            if stale is not None:
+                await cleanup.delete(stale)
+                await cleanup.commit()
+
+
+@pytest.mark.asyncio
+async def test_persist_assessment_gating_that_is_not_a_dict_is_dropped(engine):
+    """A `gating` value that isn't even a mapping (a string, in this case) must
+    become None wholesale — there are no keys to filter — while raw_verdict
+    still holds the original for audit."""
+    from types import SimpleNamespace
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from src.agent.simulation import SimulationEngine
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as setup:
+        run = SimulationRun()
+        setup.add(run)
+        await setup.commit()
+        run_id = run.id
+
+    stub = SimpleNamespace(simulation_run_id=run_id, session_factory=factory)
+    verdict = {"subject_agent_id": "wang", "gating": "all four met, trust me"}
+    await SimulationEngine._persist_assessment(stub, "blackbird", "general", verdict)
+
+    try:
+        async with factory() as check:
+            row = (await check.execute(
+                select(OpportunityAssessment).where(
+                    OpportunityAssessment.simulation_run_id == run_id
+                )
+            )).scalar_one()
+            assert row.gating is None
+            assert row.raw_verdict["gating"] == "all four met, trust me"
     finally:
         async with factory() as cleanup:
             stale = (await cleanup.execute(
@@ -332,6 +380,247 @@ async def test_persist_assessment_tolerates_a_sparse_verdict(engine):
             if stale is not None:
                 await cleanup.delete(stale)
                 await cleanup.commit()
+
+
+@pytest.mark.asyncio
+async def test_persist_assessment_bounds_oversized_short_string_fields(engine):
+    """Fix round 1, Finding 5: subject_agent_id/funnel_stage/recommendation/
+    confidence are bounded VARCHAR columns. Every other field on this row
+    degrades per-field on a bad *type*, but an oversized value of the *right*
+    type (a plain str, just too long) sails past any isinstance check and
+    raised DataError at commit — which the outer except then dropped the
+    WHOLE row for. The fields must be truncated to fit before the insert, not
+    left to blow up the write, and raw_verdict must still hold the untruncated
+    original."""
+    from types import SimpleNamespace
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from src.agent.simulation import SimulationEngine
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as setup:
+        run = SimulationRun()
+        setup.add(run)
+        await setup.commit()
+        run_id = run.id
+
+    oversized_recommendation = "advance" + "!" * 200  # column is String(30)
+    oversized_subject_agent_id = "w" * 200  # column is String(50)
+    stub = SimpleNamespace(simulation_run_id=run_id, session_factory=factory)
+    verdict = {
+        "subject_agent_id": oversized_subject_agent_id,
+        "recommendation": oversized_recommendation,
+        "funnel_stage": "incubation",  # well within String(20) — unaffected
+        "scores": {"differentiation": 3},
+    }
+    await SimulationEngine._persist_assessment(stub, "blackbird", "general", verdict)
+
+    try:
+        async with factory() as check:
+            row = (await check.execute(
+                select(OpportunityAssessment).where(
+                    OpportunityAssessment.simulation_run_id == run_id
+                )
+            )).scalar_one()
+            # The row exists at all — the oversized fields did not sink the write.
+            assert len(row.subject_agent_id) == 50
+            assert oversized_subject_agent_id.startswith(row.subject_agent_id)
+            assert len(row.recommendation) == 30
+            assert oversized_recommendation.startswith(row.recommendation)
+            assert row.funnel_stage == "incubation"
+            # The untruncated originals still survive verbatim for audit.
+            assert row.raw_verdict["subject_agent_id"] == oversized_subject_agent_id
+            assert row.raw_verdict["recommendation"] == oversized_recommendation
+    finally:
+        async with factory() as cleanup:
+            stale = (await cleanup.execute(
+                select(SimulationRun).where(SimulationRun.id == run_id)
+            )).scalar_one_or_none()
+            if stale is not None:
+                await cleanup.delete(stale)
+                await cleanup.commit()
+
+
+# --- Phase 5 wiring: the real "New top-level post" branch, not the
+# _persist_assessment stub (Task 11 fix round 1, Finding 2) -----------------
+#
+# Every test above drives _persist_assessment directly on a SimpleNamespace
+# stub, which bypasses the `if verdict is not None:` gate in
+# SimulationEngine._phase5_new_post entirely — exactly why Finding 1 (a valid
+# `{}` sidecar misrouted to the "verdict lost" branch) had zero coverage. These
+# tests build a real SimulationEngine + Agent + FakeSlackClient and drive
+# _phase5_new_post end-to-end against a canned LLM response, so the assertions
+# exercise the actual wiring code, not a re-description of it.
+
+async def _drive_phase5_new_post(engine, monkeypatch, response_text):
+    """Build a real engine wired to the test DB and run _phase5_new_post
+    against ``response_text`` as if it were the LLM's raw output. Returns
+    (agent, client, factory, run_id) for the caller's own assertions/cleanup.
+    """
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from src.agent.agent import Agent
+    from src.agent.simulation import SimulationEngine
+    from tests.fakes import FakeSlackClient
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as setup:
+        run = SimulationRun()
+        setup.add(run)
+        await setup.commit()
+        run_id = run.id
+
+    agent = Agent("blackbird", "BlackbirdBot", "Blackbird")
+    client = FakeSlackClient(agent_id="blackbird")
+    sim = SimulationEngine(
+        agents=[agent], slack_clients={"blackbird": client},
+        session_factory=factory, simulation_run_id=run_id,
+    )
+    # Bypass real prompt construction (profile files on disk, etc.) — this
+    # class tests what happens AFTER the LLM responds, not prompt building.
+    monkeypatch.setattr(agent, "build_phase5_prompt", lambda **kw: ("sys", []))
+
+    async def _fake_generate(**kwargs):
+        return response_text
+
+    monkeypatch.setattr("src.agent.simulation.generate_agent_response", _fake_generate)
+
+    await sim._phase5_new_post(agent)
+    return agent, client, factory, run_id
+
+
+async def _assessment_rows(factory, run_id):
+    async with factory() as check:
+        return (await check.execute(
+            select(OpportunityAssessment).where(
+                OpportunityAssessment.simulation_run_id == run_id
+            )
+        )).scalars().all()
+
+
+async def _delete_run(factory, run_id):
+    async with factory() as cleanup:
+        stale = (await cleanup.execute(
+            select(SimulationRun).where(SimulationRun.id == run_id)
+        )).scalar_one_or_none()
+        if stale is not None:
+            await cleanup.delete(stale)  # cascades to any assessment
+            await cleanup.commit()
+
+
+_ACTION_JSON = (
+    '```json\n'
+    '{"action": "new_post", "channel": "general", "post_type": "opportunity_assessment", '
+    '"tagged_agent": null, "target_post_id": null}\n'
+    '```\n\n'
+)
+_SLACK_BODY = (
+    "<slack_message>\n"
+    ":mag: *Opportunity Assessment — Wang Lab*\n"
+    "Recommendation: proceed to diligence.\n"
+    "</slack_message>"
+)
+
+
+@pytest.mark.asyncio
+async def test_phase5_valid_sidecar_persists_a_row(engine, monkeypatch):
+    response = (
+        _ACTION_JSON + _SLACK_BODY + "\n\n"
+        '<assessment_json>\n'
+        '{"subject_agent_id": "wang", "recommendation": "advance", '
+        '"scores": {"differentiation": 5}}\n'
+        '</assessment_json>'
+    )
+    agent, client, factory, run_id = await _drive_phase5_new_post(engine, monkeypatch, response)
+    try:
+        assert len(client.posted) == 1  # the post really went out
+        assert agent.message_count == 1
+        rows = await _assessment_rows(factory, run_id)
+        assert len(rows) == 1
+        assert rows[0].subject_agent_id == "wang"
+        assert rows[0].recommendation == "advance"
+    finally:
+        await _delete_run(factory, run_id)
+
+
+@pytest.mark.asyncio
+async def test_phase5_empty_sidecar_object_still_persists_a_row(engine, monkeypatch):
+    """Finding 1: `{}` is a successfully parsed, if sparse, verdict — it must
+    not be treated as "no sidecar" and silently discarded."""
+    response = (
+        _ACTION_JSON + _SLACK_BODY + "\n\n"
+        "<assessment_json>\n{}\n</assessment_json>"
+    )
+    agent, client, factory, run_id = await _drive_phase5_new_post(engine, monkeypatch, response)
+    try:
+        assert len(client.posted) == 1
+        rows = await _assessment_rows(factory, run_id)
+        assert len(rows) == 1
+        assert rows[0].raw_verdict == {}
+        assert rows[0].weighted_score == pytest.approx(0.0)
+        assert rows[0].band == "pass"
+    finally:
+        await _delete_run(factory, run_id)
+
+
+@pytest.mark.asyncio
+async def test_phase5_no_sidecar_persists_nothing_and_logs_its_absence(
+    engine, monkeypatch, caplog
+):
+    response = _ACTION_JSON + _SLACK_BODY  # no <assessment_json> at all
+    agent, client, factory, run_id = await _drive_phase5_new_post(engine, monkeypatch, response)
+    try:
+        assert len(client.posted) == 1  # the post itself still went out
+        assert (await _assessment_rows(factory, run_id)) == []
+        assert "had no <assessment_json> sidecar present" in caplog.text
+        assert "unparseable" not in caplog.text  # must not claim the wrong failure
+    finally:
+        await _delete_run(factory, run_id)
+
+
+@pytest.mark.asyncio
+async def test_phase5_unparseable_sidecar_persists_nothing_and_names_the_failure(
+    engine, monkeypatch, caplog
+):
+    response = (
+        _ACTION_JSON + _SLACK_BODY + "\n\n"
+        '<assessment_json>\n{this is not valid json}\n</assessment_json>'
+    )
+    agent, client, factory, run_id = await _drive_phase5_new_post(engine, monkeypatch, response)
+    try:
+        assert len(client.posted) == 1
+        assert (await _assessment_rows(factory, run_id)) == []
+        assert "sidecar was present but unparseable" in caplog.text
+        assert "had no <assessment_json> sidecar present" not in caplog.text
+    finally:
+        await _delete_run(factory, run_id)
+
+
+@pytest.mark.asyncio
+async def test_phase5_suppressed_post_persists_nothing_and_does_not_count(
+    engine, monkeypatch, caplog
+):
+    """Cross-task Finding 3: _post_message now suppresses a post that strips
+    to nothing (e.g. the sidecar nested *inside* <slack_message>, leaving no
+    real body once stripped). Before this fix the caller still counted the
+    turn and — worse — still persisted an assessment row extracted from the
+    raw response, for a post that never reached Slack."""
+    response = (
+        _ACTION_JSON +
+        "<slack_message>"
+        '<assessment_json>{"subject_agent_id": "wang", "scores": {"differentiation": 5}}'
+        "</assessment_json>"
+        "</slack_message>"
+    )
+    agent, client, factory, run_id = await _drive_phase5_new_post(engine, monkeypatch, response)
+    try:
+        assert client.posted == []  # nothing actually reached Slack
+        assert agent.message_count == 0  # the turn was not counted
+        assert (await _assessment_rows(factory, run_id)) == []  # no phantom row
+        assert "Suppressed a post" in caplog.text
+    finally:
+        await _delete_run(factory, run_id)
 
 
 # --- /admin/assessments (task 12) -------------------------------------------
