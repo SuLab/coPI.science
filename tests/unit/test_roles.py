@@ -102,6 +102,42 @@ def test_scout_hub_ships_with_the_hub_tool_set():
     assert "retrieve_foa" not in spec.tools  # GrantBot fetches FOAs, not the hub
 
 
+def test_scout_hub_phase4_override_renders_and_drops_the_tool_it_lacks():
+    from src.agent.agent import Agent
+    from src.agent.state import ThreadState
+
+    agent = Agent("blackbird", "BlackbirdBot", "Blackbird Labs", role="scout_hub")
+    thread = ThreadState(
+        thread_id="t1", channel="general", other_agent_id="wang", message_count=5
+    )
+    _, messages = agent.build_phase4_prompt(
+        thread=thread,
+        thread_history=[{"sender": "WangBot", "content": "our CRISPR screen hit DBT"}],
+        other_agent_name="WangBot",
+        other_agent_lab="Wang",
+    )
+    content = messages[0]["content"]
+
+    # The override rendered, not a silent fallback to the pi_lab template.
+    assert "scouting interview" in content.lower()
+    # retrieve_foa is withheld from this role by role.toml — the prompt must not
+    # tell the agent it is required, or available at all.
+    assert "retrieve_foa" not in content
+    # This role never brokers or proposes collaborations.
+    assert ":memo:" not in content
+    assert "beats either lab working alone" not in content
+    # search_prior_art IS in this role's tool set and must be documented.
+    assert "search_prior_art" in content
+    # Every substitution token was consumed.
+    for token in ("{channel_name}", "{other_agent_name}", "{other_agent_lab}",
+                  "{message_count}", "{thread_phase}", "{thread_history}",
+                  "{phase_guidance}", "{instructions}", "{foa_number}",
+                  "{funding_thread_context}"):
+        assert token not in content, f"leftover token {token!r}"
+    # The Task 5 DECIDE guidance landed in the rendered prompt.
+    assert "Baltimore commitment" in content
+
+
 def test_scout_hub_phase5_override_renders_in_both_modes():
     """build_phase5_prompt loads phase5-new-post.md through the role-aware
     _load_prompt() (see src/agent/agent.py), so a scout_hub agent must pick up
