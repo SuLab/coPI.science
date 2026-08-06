@@ -32,11 +32,14 @@ from src.models import (
     AgentChannel,
     AgentMessage,
     LlmCallLog,
+    OpportunityAssessment,
     ProposalReview,
     SimulationRun,
     ThreadDecision,
 )
 from src.models.agent_activity import VISIBILITY_COLLAB_PRIVATE, VISIBILITY_PUBLIC
+from src.services.blackbird_rubric import band as rubric_band
+from src.services.blackbird_rubric import weighted_score as rubric_weighted_score
 from src.services.cohorts import compute_gates, summarise_gates
 from src.services.llm import (
     generate_agent_response,
@@ -2300,6 +2303,20 @@ class SimulationEngine:
                 await self._post_message(agent.agent_id, channel, message_text)
                 agent.message_count += 1
 
+                # A :mag: Opportunity Assessment carries a machine-readable verdict
+                # sidecar (stripped from the Slack body). Persist it — the whole
+                # point of the artifact is that staff can triage it later.
+                if post_type == "opportunity_assessment":
+                    verdict = _extract_assessment_json(response)
+                    if verdict:
+                        await self._persist_assessment(agent.agent_id, channel, verdict)
+                    else:
+                        logger.warning(
+                            "[%s] Phase 5: opportunity_assessment post with no "
+                            "parseable <assessment_json> sidecar — verdict lost",
+                            agent.agent_id,
+                        )
+
                 # Check if it tags another agent
                 tagged_agent = action_data.get("tagged_agent")
                 if tagged_agent:
@@ -2324,6 +2341,69 @@ class SimulationEngine:
 
         except Exception as exc:
             logger.error("[%s] Phase 5 failed: %s", agent.agent_id, exc)
+
+    async def _persist_assessment(
+        self, agent_id: str, channel: str, verdict: dict
+    ) -> None:
+        """Store a scouting verdict. Best-effort: a failure here must never cost
+        the Slack post that already went out.
+
+        The weighted score and band are computed here from the verdict's own
+        dimension scores, never taken from the model's ``weighted_score`` field
+        — the model is instructed to leave that at 0 but will sometimes fill in
+        a flattering number anyway. ``recommendation`` (the model's judgement,
+        which can legitimately be "route-to-incubation" — a value band() can
+        never produce) and the computed ``band`` are kept in separate columns
+        and neither ever overwrites the other. The verdict exactly as emitted
+        is kept verbatim in ``raw_verdict`` regardless of what could be parsed
+        out of it, so nothing is ever lost to a parsing decision made here.
+        """
+        # The engine can run without a database (see __init__) — in that mode
+        # this is a silent no-op, matching every other run-scoped write in
+        # this class (e.g. _check_thread_outcome above, :1520 in the class).
+        if not self.session_factory or not self.simulation_run_id:
+            logger.debug(
+                "[%s] Skipping assessment persistence — no database configured",
+                agent_id,
+            )
+            return
+
+        scores = verdict.get("scores") if isinstance(verdict.get("scores"), dict) else {}
+        computed_score = rubric_weighted_score(scores)
+        computed_band = rubric_band(computed_score)
+        gating = _normalize_gating(verdict.get("gating"))
+        red_flags = verdict.get("red_flags")
+        milestones = verdict.get("suggested_derisking_milestones")
+        try:
+            async with self.session_factory() as db:
+                db.add(OpportunityAssessment(
+                    simulation_run_id=self.simulation_run_id,
+                    agent_id=agent_id,
+                    subject_agent_id=(verdict.get("subject_agent_id") or None),
+                    channel_name=channel,
+                    company_or_project=(verdict.get("company_or_project") or None),
+                    funnel_stage=(verdict.get("funnel_stage") or None),
+                    recommendation=(verdict.get("recommendation") or None),
+                    confidence=(verdict.get("confidence") or None),
+                    weighted_score=computed_score,
+                    band=computed_band,
+                    gating=gating,
+                    scores=scores or None,
+                    red_flags=red_flags if isinstance(red_flags, list) else None,
+                    derisking_milestones=(
+                        milestones if isinstance(milestones, list) else None
+                    ),
+                    rationale=(verdict.get("rationale") or None),
+                    raw_verdict=verdict,
+                ))
+                await db.commit()
+            logger.info(
+                "[%s] Assessment stored: %s -> %s (%.2f, %s)",
+                agent_id, verdict.get("subject_agent_id") or "?",
+                verdict.get("recommendation") or "?", computed_score, computed_band,
+            )
+        except Exception as exc:  # noqa: BLE001 — never lose a posted assessment
+            logger.error("[%s] Failed to persist assessment: %s", agent_id, exc)
 
     def _strip_disallowed_tags(self, message_text: str | None, agent: Agent) -> str | None:
         """Remove @BotName mentions of non-cohort agents from an outbound message.
@@ -5067,6 +5147,42 @@ def _extract_assessment_json(text: str) -> dict | None:
         logger.warning("[assessment] sidecar present but unparseable: %s", exc)
         return None
     return parsed if isinstance(parsed, dict) else None
+
+
+# The prompt's tri-state gating contract (see prompts/roles/scout_hub/phase5-new-post.md):
+# every gating.* value must be exactly one of these three strings, never a bare
+# boolean — "the PI declined" (not_met) and "we never asked" (unconfirmed) are
+# different facts, and a boolean can express only the first two of these three
+# outcomes.
+_VALID_GATING_STATES = frozenset({"met", "not_met", "unconfirmed"})
+
+
+def _normalize_gating(raw: object) -> dict | None:
+    """Validate a verdict's ``gating`` map against the tri-state contract, or
+    drop it to ``None``.
+
+    The ``gating`` column is plain JSONB, so nothing at the database layer
+    stops a pre-tri-state boolean map — or a genuinely malformed one — from
+    being written verbatim. A column that sometimes holds
+    ``{"...": true}`` and sometimes holds ``{"...": "met"}`` is worse than one
+    that is occasionally null: a consumer cannot tell which convention a given
+    row uses without inspecting every value, which defeats the point of a
+    structured column. So the map is stored only when every value already
+    conforms to the contract; anything else becomes ``None`` here.
+
+    Booleans are deliberately NOT coerced (``True`` -> "met", ``False`` ->
+    "not_met"): under the old boolean-only contract there was no way to say
+    "unconfirmed" at all, so a legacy ``False`` is genuinely ambiguous between
+    "not_met" and "unconfirmed" — guessing would fabricate a certainty the
+    original verdict never had. This never loses information: ``raw_verdict``
+    keeps the original ``gating`` value verbatim regardless of what is decided
+    here.
+    """
+    if not isinstance(raw, dict) or not raw:
+        return None
+    if all(isinstance(v, str) and v in _VALID_GATING_STATES for v in raw.values()):
+        return raw
+    return None
 
 
 def _strip_llm_preamble(text: str) -> str:
