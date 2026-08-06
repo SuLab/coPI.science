@@ -71,8 +71,10 @@ EXIT_OK = 0
 EXIT_BLOCKED = 1
 EXIT_WARN = 2
 
-DEFAULT_TARGET = "0024"
-#: Revisions this migration path has been exercised from. 0023 means "already done".
+DEFAULT_TARGET = "0025"
+#: Revisions this migration path has been exercised from. 0025 means "already done"
+#: (that state is a no-op, handled by the current == target branch of revision_status(),
+#: not by membership in this tuple).
 #:
 #: 0020 and 0021 are here because origin/main's own alembic head is 0021 (PR19). A
 #: deployment that tracks main is therefore stamped 0021, and the first version of this
@@ -80,11 +82,16 @@ DEFAULT_TARGET = "0024"
 #: it ("migrate from 0018 or 0019") described where production was at the time, not where
 #: main is.
 #:
+#: 0023 and 0024 were each added here for the same reason: production's stamp at the time
+#: its target moved past them (0023 -> 0024, then 0024 -> 0025 — see git history on this
+#: constant). Each stays supported afterward; nothing here narrows.
+#:
 #: Starting at 0020/0021 is strictly safer than starting at 0018: uq_agent_messages_run_ts
 #: already exists, so duplicates cannot be present and there is no 0019 index build to
-#: wait on. All that remains is 0022 (three empty tables) and 0023 (three columns on the
-#: small researcher_profiles).
-SUPPORTED_START_REVISIONS = ("0018", "0019", "0020", "0021", "0023")
+#: wait on. All that remains is 0022 (three empty tables), 0023 (three columns on the small
+#: researcher_profiles), 0024 (one column on agents) and 0025 (one new table,
+#: opportunity_assessments).
+SUPPORTED_START_REVISIONS = ("0018", "0019", "0020", "0021", "0023", "0024")
 
 #: Start revisions at which migration 0019 has already run, so the expensive
 #: ACCESS EXCLUSIVE index build on agent_messages is behind us.
@@ -199,7 +206,7 @@ PLANNED_OBJECTS: tuple[PlannedObject, ...] = (
     PlannedObject("0023", "column", "evidence_pub_count", "researcher_profiles"),
 )
 
-REVISION_ORDER = ("0018", "0019", "0020", "0021", "0022", "0023", "0024")
+REVISION_ORDER = ("0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025")
 
 
 def planned_objects_between(current: str, target: str) -> tuple[PlannedObject, ...]:
