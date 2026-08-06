@@ -140,6 +140,56 @@ class TestSyncRosterFromDb:
         assert "newbie" not in engine.agents
         assert set(engine.agents) == {"su"}
 
+    async def test_surviving_agent_that_gains_a_token_gets_a_client(self, monkeypatch):
+        """Regression: a roster agent provisioned AFTER startup stayed Slack-less.
+
+        Measured 2026-08-06 on the blackbird deployment: 48 bots were installed
+        while the engine ran, their tokens landed in AgentRegistry, and not one
+        of them ever connected — ``Connected as`` stayed at the 7 that had tokens
+        at process start. Cause: ``main.py`` puts EVERY active agent into
+        ``self.agents`` regardless of token, so a later-provisioned agent is in
+        neither ``to_add`` nor ``to_remove``, the sync early-returns, and clients
+        are only ever built in the ``to_add`` loop. The docstring's promise that
+        "a freshly provisioned token is picked up on the next tick" held only for
+        an agent *entering* the roster.
+        """
+        _patch_client(monkeypatch)
+        engine = _make_engine([_row("su"), _row("late")], existing_agents=["su", "late"])
+        # Reproduce the startup state: on the roster, but tokenless then, so
+        # main.py never built it a client.
+        del engine.slack_clients["late"]
+
+        await engine._sync_roster_from_db()
+
+        assert "late" in engine.slack_clients, (
+            "an agent already on the roster that later gains a token must be "
+            "given a Slack client without a process restart"
+        )
+        assert engine.slack_clients["late"].bot_token == "xoxb-real"
+
+    async def test_surviving_agent_without_a_token_gets_no_client(self, monkeypatch):
+        """The adopt path must not invent a client for a still-tokenless agent."""
+        _patch_client(monkeypatch)
+        monkeypatch.setattr(slack_tokens, "get_settings",
+                            lambda: types.SimpleNamespace(get_slack_tokens=lambda: {}))
+        engine = _make_engine([_row("su"), _row("late", token=None)],
+                              existing_agents=["su", "late"])
+        del engine.slack_clients["late"]
+
+        await engine._sync_roster_from_db()
+
+        assert "late" not in engine.slack_clients
+
+    async def test_existing_client_is_not_rebuilt(self, monkeypatch):
+        """Adoption must be idempotent — no reconnect churn every 30s."""
+        _patch_client(monkeypatch)
+        engine = _make_engine([_row("su")], existing_agents=["su"])
+        before = engine.slack_clients["su"]
+
+        await engine._sync_roster_from_db()
+
+        assert engine.slack_clients["su"] is before
+
     async def test_throttle_skips_within_interval(self, monkeypatch):
         _patch_client(monkeypatch)
         import time
