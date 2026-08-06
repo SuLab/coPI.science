@@ -1039,6 +1039,7 @@ class SimulationEngine:
                 messages=messages,
                 max_tokens=500,
                 log_meta={"agent_id": agent.agent_id, "phase": "scan"},
+                on_retry=agent.record_api_call,
             )
             if not response or not response.strip():
                 logger.warning("[%s] Phase 2: Empty response from LLM, skipping", agent.agent_id)
@@ -1085,6 +1086,7 @@ class SimulationEngine:
                 messages=messages,
                 max_tokens=500,
                 log_meta={"agent_id": agent.agent_id, "phase": "prune"},
+                on_retry=agent.record_api_call,
             )
             if not response or not response.strip():
                 logger.warning("[%s] Phase 2 prune: empty response", agent.agent_id)
@@ -1406,10 +1408,24 @@ class SimulationEngine:
                     return
 
             # Post the reply
-            await self._post_message(
+            posted = await self._post_message(
                 agent.agent_id, thread.channel, response_text,
                 thread_ts=thread.thread_id,
             )
+            if not posted:
+                # _post_message already logged why (e.g. the text stripped to
+                # empty once its own sidecar/tag stripping ran, even though it
+                # passed the empty-response check above). Nothing reached
+                # Slack, so this turn must not count and the reply must not be
+                # treated as sent — has_pending_reply stays True so the next
+                # Phase 4 pass tries again instead of silently dropping the
+                # thread (mirrors the phase-5 new-post suppression handling).
+                logger.info(
+                    "[%s] Phase 4: reply to thread %s suppressed — not "
+                    "counted, nothing persisted",
+                    agent.agent_id, thread.thread_id,
+                )
+                return
             agent.message_count += 1
             thread.has_pending_reply = False
             thread.funding_reject_count = 0
@@ -2133,12 +2149,13 @@ class SimulationEngine:
                 # truncation drops the machine-readable verdict first while
                 # still leaving the Slack post looking complete (F8). 1000
                 # was sized for a short reply/skip decision, not this
-                # artifact. NOTE: src/services/llm.py's retry-at-2x path does
-                # not re-check stop_reason, so this ceiling is not a silent
-                # safety net against truncation either way — it just needs to
-                # be big enough that truncation stops being the common case.
+                # artifact. NOTE: src/services/llm.py's retry-at-2x path logs
+                # loudly (logger.error) if the retry ALSO truncates, but it
+                # does not retry again — this ceiling still needs to be big
+                # enough that truncation stops being the common case.
                 max_tokens=2500,
                 log_meta={"agent_id": agent.agent_id, "phase": "new_post"},
+                on_retry=agent.record_api_call,
             )
             if not response or not response.strip():
                 logger.warning("[%s] Phase 5: Empty response from LLM, skipping", agent.agent_id)
@@ -2272,53 +2289,72 @@ class SimulationEngine:
                 )
 
                 if is_private_channel:
-                    await self._post_message(agent.agent_id, channel, message_text)
-                    agent.message_count += 1
-                    # Consume the interesting post (we acted on it) but do not
-                    # create an active_thread — private channels don't thread.
-                    agent.state.interesting_posts = [
-                        p for p in agent.state.interesting_posts
-                        if p.post_id != target_post_id
-                    ]
-                    logger.info(
-                        "[%s] Phase 5: Posted flat follow-up to %s in private #%s",
-                        agent.agent_id, target_post_id, channel,
-                    )
+                    posted = await self._post_message(agent.agent_id, channel, message_text)
+                    if not posted:
+                        # _post_message already logged why (e.g. the text
+                        # stripped to empty). Nothing reached Slack, so this
+                        # turn must not count and the post must not be
+                        # consumed from interesting_posts (Task 11 fix round
+                        # 1, Finding 3, applied here too).
+                        logger.info(
+                            "[%s] Phase 5: flat follow-up to %s in private "
+                            "#%s suppressed — not counted, nothing persisted",
+                            agent.agent_id, target_post_id, channel,
+                        )
+                    else:
+                        agent.message_count += 1
+                        # Consume the interesting post (we acted on it) but do not
+                        # create an active_thread — private channels don't thread.
+                        agent.state.interesting_posts = [
+                            p for p in agent.state.interesting_posts
+                            if p.post_id != target_post_id
+                        ]
+                        logger.info(
+                            "[%s] Phase 5: Posted flat follow-up to %s in private #%s",
+                            agent.agent_id, target_post_id, channel,
+                        )
                 else:
                     # Reply to an interesting post → creates a new thread
-                    await self._post_message(
+                    posted = await self._post_message(
                         agent.agent_id, channel, message_text,
                         thread_ts=target_post_id,
                     )
-                    agent.message_count += 1
-
-                    # Move from interesting_posts to active_threads
-                    agent.state.interesting_posts = [
-                        p for p in agent.state.interesting_posts
-                        if p.post_id != target_post_id
-                    ]
-                    # Determine the other agent from the original post
-                    original_entry = self.message_log.get_entry(target_post_id)
-                    other_id = original_entry.sender_agent_id if original_entry else None
-                    if other_id:
-                        # Carry FOA number from the PostRef if this is a funding post
-                        post_foa = None
-                        for p in original_posts:
-                            if p.post_id == target_post_id:
-                                post_foa = p.foa_number
-                                break
-                        agent.state.active_threads[target_post_id] = ThreadState(
-                            thread_id=target_post_id,
-                            channel=channel,
-                            other_agent_id=other_id,
-                            message_count=2,  # original + this reply
-                            foa_number=post_foa,
+                    if not posted:
+                        logger.info(
+                            "[%s] Phase 5: reply to post %s in #%s suppressed "
+                            "— not counted, nothing persisted",
+                            agent.agent_id, target_post_id, channel,
                         )
+                    else:
+                        agent.message_count += 1
 
-                    logger.info(
-                        "[%s] Phase 5: Replied to post %s in #%s",
-                        agent.agent_id, target_post_id, channel,
-                    )
+                        # Move from interesting_posts to active_threads
+                        agent.state.interesting_posts = [
+                            p for p in agent.state.interesting_posts
+                            if p.post_id != target_post_id
+                        ]
+                        # Determine the other agent from the original post
+                        original_entry = self.message_log.get_entry(target_post_id)
+                        other_id = original_entry.sender_agent_id if original_entry else None
+                        if other_id:
+                            # Carry FOA number from the PostRef if this is a funding post
+                            post_foa = None
+                            for p in original_posts:
+                                if p.post_id == target_post_id:
+                                    post_foa = p.foa_number
+                                    break
+                            agent.state.active_threads[target_post_id] = ThreadState(
+                                thread_id=target_post_id,
+                                channel=channel,
+                                other_agent_id=other_id,
+                                message_count=2,  # original + this reply
+                                foa_number=post_foa,
+                            )
+
+                        logger.info(
+                            "[%s] Phase 5: Replied to post %s in #%s",
+                            agent.agent_id, target_post_id, channel,
+                        )
 
             else:
                 # New top-level post
@@ -2354,16 +2390,28 @@ class SimulationEngine:
                                 agent.agent_id, channel, verdict, slack_ts=posted,
                             )
                         elif _ASSESSMENT_UNCLOSED_RE.search(response or ""):
-                            # An <assessment_json> opening tag is present (well-formed
-                            # but invalid JSON, or truncated) — _extract_assessment_json
-                            # already logged the parse error; this names the
-                            # consequence without re-claiming "no sidecar" (Finding 1).
-                            logger.warning(
-                                "[%s] Phase 5: opportunity_assessment post's "
-                                "<assessment_json> sidecar was present but "
-                                "unparseable — verdict lost",
-                                agent.agent_id,
-                            )
+                            # An <assessment_json> opening tag is present.
+                            # _extract_assessment_json already logged the
+                            # per-block reason; this names the consequence
+                            # without re-claiming "no sidecar" (Finding 1) —
+                            # and without calling a block that parsed fine but
+                            # was the wrong shape (e.g. a JSON array)
+                            # "unparseable", which it was not (Finding A3).
+                            if _sidecar_has_valid_json_block(response or ""):
+                                logger.warning(
+                                    "[%s] Phase 5: opportunity_assessment "
+                                    "post's <assessment_json> sidecar parsed "
+                                    "as valid JSON but was not an object — "
+                                    "verdict lost",
+                                    agent.agent_id,
+                                )
+                            else:
+                                logger.warning(
+                                    "[%s] Phase 5: opportunity_assessment post's "
+                                    "<assessment_json> sidecar was present but "
+                                    "unparseable — verdict lost",
+                                    agent.agent_id,
+                                )
                         else:
                             logger.warning(
                                 "[%s] Phase 5: opportunity_assessment post had no "
@@ -5156,6 +5204,7 @@ Keep it concise — under 300 words.""",
                 messages=messages,
                 max_tokens=800,
                 log_meta={"agent_id": agent.agent_id, "phase": "memory"},
+                on_retry=agent.record_api_call,
             )
             if not response or not response.strip():
                 logger.warning("[%s] Memory update: empty response", agent.agent_id)
@@ -5286,21 +5335,67 @@ def _extract_assessment_json(text: str) -> dict | None:
     The sidecar is deliberately BARE JSON, not a ```json``` fence:
     _parse_phase5_response strips this whole tagged span before it ever looks
     for the action fence, so a fenced sidecar would otherwise hijack the
-    action data and silently no-op every assessment post. Anchored on the
-    LAST block so a revised verdict wins. A fenced sidecar is still tolerated
-    here (see _unfence_sidecar) — the action is already protected regardless,
-    so there is no reason to also lose the verdict over a fence the model
-    added despite the instruction not to.
+    action data and silently no-op every assessment post. A fenced sidecar is
+    still tolerated here (see _unfence_sidecar) — the action is already
+    protected regardless, so there is no reason to also lose the verdict over
+    a fence the model added despite the instruction not to.
+
+    Walks blocks newest-first and returns the first one that parses to a JSON
+    object — "the newest verdict that is actually usable", not "the newest
+    block, or nothing": a model that emits a good verdict and then a broken
+    revision (invalid JSON, or valid JSON that isn't an object, e.g. an array)
+    must not lose the good one just because it revised afterward. Last-wins is
+    still right when a revision *does* parse — it should supersede the
+    earlier verdict, which is exactly what returning on the first hit here
+    does. Returns None only when no block parses to a dict; never raises.
     """
     matches = _ASSESSMENT_RE.findall(text or "")
     if not matches:
         return None
-    try:
-        parsed = json.loads(_unfence_sidecar(matches[-1]))
-    except (json.JSONDecodeError, ValueError) as exc:
-        logger.warning("[assessment] sidecar present but unparseable: %s", exc)
-        return None
-    return parsed if isinstance(parsed, dict) else None
+    last_index = len(matches) - 1
+    for index in range(last_index, -1, -1):
+        try:
+            parsed = json.loads(_unfence_sidecar(matches[index]))
+        except (json.JSONDecodeError, ValueError) as exc:
+            logger.warning(
+                "[assessment] sidecar block %d/%d unparseable: %s",
+                index + 1, len(matches), exc,
+            )
+            continue
+        if not isinstance(parsed, dict):
+            logger.warning(
+                "[assessment] sidecar block %d/%d parsed but was not a JSON "
+                "object (got %s)",
+                index + 1, len(matches), type(parsed).__name__,
+            )
+            continue
+        if index != last_index:
+            logger.warning(
+                "[assessment] using sidecar block %d/%d — %d later block(s) "
+                "were present but unusable, so an earlier valid verdict was "
+                "used instead of losing it",
+                index + 1, len(matches), last_index - index,
+            )
+        return parsed
+    return None
+
+
+def _sidecar_has_valid_json_block(text: str) -> bool:
+    """True if any <assessment_json> block in ``text`` is syntactically valid
+    JSON, whatever its shape.
+
+    Lets a caller distinguish "no block ever parsed" from "a block parsed
+    fine but wasn't an object" (Finding A3) — the two outcomes both leave
+    ``_extract_assessment_json`` returning None, but only the first is
+    actually "unparseable".
+    """
+    for raw in _ASSESSMENT_RE.findall(text or ""):
+        try:
+            json.loads(_unfence_sidecar(raw))
+        except (json.JSONDecodeError, ValueError):
+            continue
+        return True
+    return False
 
 
 # The prompt's tri-state gating contract (see prompts/roles/scout_hub/phase5-new-post.md):

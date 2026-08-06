@@ -78,6 +78,40 @@ def test_last_sidecar_wins_when_the_model_revises():
     assert _extract_assessment_json(text)["funnel_stage"] == "incubation"
 
 
+def test_earlier_valid_verdict_survives_a_later_malformed_revision():
+    # Finding A4: last-wins is right when the revision itself parses. It must
+    # NOT mean "the newest block, or nothing" — a model emitting a good
+    # verdict and then a broken revision must not lose the good one.
+    text = (
+        '<assessment_json>{"funnel_stage": "incubation"}</assessment_json>'
+        "<assessment_json>{not json,,,}</assessment_json>"
+    )
+    verdict = _extract_assessment_json(text)
+    assert verdict is not None
+    assert verdict["funnel_stage"] == "incubation"
+
+
+def test_earlier_valid_verdict_survives_a_later_non_object_revision():
+    # Same principle, but the later block is syntactically valid JSON — just
+    # the wrong shape (an array instead of an object). Still not usable, so
+    # the earlier good verdict must still win.
+    text = (
+        '<assessment_json>{"funnel_stage": "incubation"}</assessment_json>'
+        '<assessment_json>[1, 2, 3]</assessment_json>'
+    )
+    verdict = _extract_assessment_json(text)
+    assert verdict is not None
+    assert verdict["funnel_stage"] == "incubation"
+
+
+def test_all_blocks_unusable_still_returns_none_and_does_not_raise():
+    text = (
+        "<assessment_json>{not json,,,}</assessment_json>"
+        '<assessment_json>[1, 2, 3]</assessment_json>'
+    )
+    assert _extract_assessment_json(text) is None
+
+
 _RESPONSE_FENCED_SIDECAR = """
 Here is my reasoning about the Wang DBT opportunity.
 

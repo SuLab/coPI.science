@@ -1084,6 +1084,198 @@ class TestPostMessageStripsAssessmentSidecar:
 
 
 # ---------------------------------------------------------------
+# A suppressed _post_message (return value falsy — text stripped to nothing
+# by the sidecar/tag cleanup inside it) must not count a turn or drain state
+# at any call site (Finding A2). The phase-5 "New top-level post" branch
+# already got this right; these tests cover the phase-4 reply call site and
+# the two phase-5 reply-action branches, which did not check the return
+# value at all before the fix.
+# ---------------------------------------------------------------
+
+# A response whose <slack_message> body is entirely an unclosed
+# <assessment_json> tag: non-empty at every check that runs before
+# _post_message (so it is never mistaken for the empty-response case those
+# checks already guard), but strips to nothing once _post_message removes
+# the sidecar/tag markup — the exact suppression case Finding A2 is about.
+_SUPPRESSING_SLACK_MESSAGE = (
+    '<slack_message><assessment_json>{"funnel_stage": "incubation"</slack_message>'
+)
+
+
+class TestPhase4ReplySuppression:
+    def _engine_with_thread(self):
+        from src.agent.agent import Agent
+        from src.agent.state import ThreadState
+        from tests.fakes import FakeSlackClient
+
+        agent = Agent("blackbird", "BlackbirdBot", "Blackbird")
+        thread = ThreadState(
+            thread_id="t1", channel="general", other_agent_id="wang",
+            message_count=0, has_pending_reply=True,
+        )
+        agent.state.active_threads["t1"] = thread
+        client = FakeSlackClient(agent_id="blackbird")
+        engine = SimulationEngine(agents=[agent], slack_clients={"blackbird": client})
+        return engine, agent, thread, client
+
+    @pytest.mark.asyncio
+    async def test_suppressed_reply_is_not_counted_or_drained(self, monkeypatch, caplog):
+        caplog.set_level("INFO")
+        engine, agent, thread, client = self._engine_with_thread()
+
+        async def _fake_generate_with_tools(**kwargs):
+            return _SUPPRESSING_SLACK_MESSAGE
+
+        monkeypatch.setattr(agent, "build_phase4_prompt", lambda **kw: ("sys", []))
+        monkeypatch.setattr(
+            "src.agent.simulation.generate_with_tools", _fake_generate_with_tools
+        )
+
+        await engine._reply_to_thread(agent, thread)
+
+        assert client.posted == []
+        assert agent.message_count == 0
+        # Nothing actually went out, so the reply must still be pending —
+        # clearing it here would silently drop the thread instead of retrying.
+        assert thread.has_pending_reply is True
+        assert thread.empty_response_count == 0
+        assert "suppressed" in caplog.text
+        assert "not counted" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_non_suppressed_reply_still_counts_and_drains(self, monkeypatch):
+        """The non-suppressed path must be unchanged by the fix."""
+        engine, agent, thread, client = self._engine_with_thread()
+
+        async def _fake_generate_with_tools(**kwargs):
+            return "<slack_message>A normal reply.</slack_message>"
+
+        monkeypatch.setattr(agent, "build_phase4_prompt", lambda **kw: ("sys", []))
+        monkeypatch.setattr(
+            "src.agent.simulation.generate_with_tools", _fake_generate_with_tools
+        )
+
+        await engine._reply_to_thread(agent, thread)
+
+        assert len(client.posted) == 1
+        assert client.posted[0]["text"] == "A normal reply."
+        assert agent.message_count == 1
+        assert thread.has_pending_reply is False
+
+
+class TestPhase5ReplyActionSuppression:
+    """Covers both reply-action branches in _phase5_new_post: the private-
+    channel flat follow-up, and the normal thread-creating reply."""
+
+    def _engine_with_agent(self, *, private_channel: bool):
+        from src.agent.agent import Agent
+        from src.agent.message_log import LogEntry
+        from src.agent.state import PostRef
+        from src.visibility import VISIBILITY_COLLAB_PRIVATE
+        from tests.fakes import FakeSlackClient
+
+        agent = Agent("blackbird", "BlackbirdBot", "Blackbird")
+        agent.state.interesting_posts.append(PostRef(
+            post_id="t1", channel="general", sender_agent_id="wang",
+            content_snippet="an interesting post", posted_at=0.0,
+        ))
+        client = FakeSlackClient(agent_id="blackbird")
+        engine = SimulationEngine(agents=[agent], slack_clients={"blackbird": client})
+        # The threaded-reply branch looks up the original post's sender via
+        # the message log (to populate the new ThreadState) — give it an
+        # entry to find, so the non-suppressed case exercises that too.
+        engine.message_log.load_entry(LogEntry(
+            ts="t1", channel="general", sender_agent_id="wang",
+            sender_name="WangBot", content="an interesting post", posted_at=0.0,
+            # Slack-origin, so _slack_parent_ts resolves a root and the
+            # non-suppressed threaded reply actually mirrors to Slack.
+            slack_ts="t1",
+        ))
+        if private_channel:
+            engine._channel_visibility["general"] = VISIBILITY_COLLAB_PRIVATE
+        return engine, agent, client
+
+    _ACTION_JSON = (
+        '```json\n'
+        '{"action": "reply", "target_post_id": "t1", "channel": "general", '
+        '"post_type": "", "tagged_agent": null}\n'
+        '```\n\n'
+    )
+
+    async def _drive(self, engine, agent, monkeypatch, slack_message_body):
+        async def _fake_generate(**kwargs):
+            return self._ACTION_JSON + slack_message_body
+
+        monkeypatch.setattr(agent, "build_phase5_prompt", lambda **kw: ("sys", []))
+        monkeypatch.setattr("src.agent.simulation.generate_agent_response", _fake_generate)
+        await engine._phase5_new_post(agent)
+
+    @pytest.mark.asyncio
+    async def test_suppressed_private_channel_reply_is_not_counted_or_drained(
+        self, monkeypatch, caplog
+    ):
+        caplog.set_level("INFO")
+        engine, agent, client = self._engine_with_agent(private_channel=True)
+
+        await self._drive(engine, agent, monkeypatch, _SUPPRESSING_SLACK_MESSAGE)
+
+        assert client.posted == []
+        assert agent.message_count == 0
+        # The post never went out, so the interesting post must not be
+        # consumed — draining it would silently drop the opportunity to reply.
+        assert [p.post_id for p in agent.state.interesting_posts] == ["t1"]
+        assert "suppressed" in caplog.text
+        assert "not counted" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_non_suppressed_private_channel_reply_still_counts_and_drains(
+        self, monkeypatch
+    ):
+        engine, agent, client = self._engine_with_agent(private_channel=True)
+
+        await self._drive(
+            engine, agent, monkeypatch,
+            "<slack_message>A normal flat follow-up.</slack_message>",
+        )
+
+        assert len(client.posted) == 1
+        assert agent.message_count == 1
+        assert agent.state.interesting_posts == []
+
+    @pytest.mark.asyncio
+    async def test_suppressed_threaded_reply_is_not_counted_or_drained(
+        self, monkeypatch, caplog
+    ):
+        caplog.set_level("INFO")
+        engine, agent, client = self._engine_with_agent(private_channel=False)
+
+        await self._drive(engine, agent, monkeypatch, _SUPPRESSING_SLACK_MESSAGE)
+
+        assert client.posted == []
+        assert agent.message_count == 0
+        assert [p.post_id for p in agent.state.interesting_posts] == ["t1"]
+        assert agent.state.active_threads == {}
+        assert "suppressed" in caplog.text
+        assert "not counted" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_non_suppressed_threaded_reply_still_counts_and_drains(
+        self, monkeypatch
+    ):
+        engine, agent, client = self._engine_with_agent(private_channel=False)
+
+        await self._drive(
+            engine, agent, monkeypatch,
+            "<slack_message>A normal threaded reply.</slack_message>",
+        )
+
+        assert len(client.posted) == 1
+        assert agent.message_count == 1
+        assert agent.state.interesting_posts == []
+        assert "t1" in agent.state.active_threads
+
+
+# ---------------------------------------------------------------
 # _build_lab_directories — cohort gate must scope the "Other Labs'
 # Recent Publications" section (runbook finding A3), not just the
 # message log.

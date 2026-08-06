@@ -706,6 +706,29 @@ async def test_phase5_unparseable_sidecar_persists_nothing_and_names_the_failure
 
 
 @pytest.mark.asyncio
+async def test_phase5_non_object_sidecar_persists_nothing_and_names_the_right_failure(
+    engine, monkeypatch, caplog
+):
+    """Finding A3: a sidecar that parsed as valid JSON but wasn't an object
+    (e.g. a bare array) is a real parse — the wrong shape, not "unparseable".
+    Before the fix this was misreported under the same message as genuinely
+    invalid JSON, so the two failure modes were indistinguishable in logs."""
+    response = (
+        _ACTION_JSON + _SLACK_BODY + "\n\n"
+        '<assessment_json>\n[1, 2, 3]\n</assessment_json>'
+    )
+    agent, client, factory, run_id = await _drive_phase5_new_post(engine, monkeypatch, response)
+    try:
+        assert len(client.posted) == 1
+        assert (await _assessment_rows(factory, run_id)) == []
+        assert "parsed as valid JSON but was not an object" in caplog.text
+        assert "sidecar was present but unparseable" not in caplog.text
+        assert "had no <assessment_json> sidecar present" not in caplog.text
+    finally:
+        await _delete_run(factory, run_id)
+
+
+@pytest.mark.asyncio
 async def test_phase5_suppressed_post_persists_nothing_and_does_not_count(
     engine, monkeypatch, caplog
 ):
