@@ -255,6 +255,31 @@ The actual message.
         data, msg = engine._parse_phase5_response(response)
         assert data["channel"] == "#structural-biology"
 
+    def test_raw_json_fallback_ignores_a_bare_sidecar(self, engine):
+        """A bare <assessment_json> sidecar with no ```json``` action fence at
+        all must never be mistaken for the action (Task 8 fix round 1,
+        Finding 4) — without the fix this returned
+        data={"funnel_stage": "incubation"} and silently discarded the turn."""
+        response = (
+            '<assessment_json>{"funnel_stage": "incubation"}</assessment_json>'
+        )
+        data, msg = engine._parse_phase5_response(response)
+        assert data is None
+        assert msg is None
+
+    def test_raw_json_fallback_still_finds_the_action_past_a_sidecar(self, engine):
+        """Stripping the sidecar out of the fallback search must not break the
+        fallback's ability to find a real, legitimate raw-JSON action that
+        precedes it — the primary ```json``` fence rule is untouched, but the
+        raw-JSON fallback must still work when no fence is present."""
+        response = (
+            '{"action": "new_post", "channel": "general", "post_type": "idea", '
+            '"tagged_agent": null, "target_post_id": null}\n\n'
+            '<assessment_json>{"funnel_stage": "incubation"}</assessment_json>'
+        )
+        data, msg = engine._parse_phase5_response(response)
+        assert data["action"] == "new_post"
+
 
 # ---------------------------------------------------------------
 # _sync_profiles_from_disk
@@ -914,6 +939,111 @@ class TestSlackParentTranslation:
         reply = [e for e in engine.message_log._entries if e.thread_ts == "1700000000.000000"][0]
         assert reply.slack_thread_ts == "1700009999.111111"
         assert reply.thread_ts == "1700000000.000000"  # canonical id unchanged
+
+
+# ---------------------------------------------------------------
+# _post_message must never let the <assessment_json> verdict sidecar reach
+# Slack — it is for Blackbird staff and the DB, never for the channel the
+# assessed scientist reads. Placed here (rather than in
+# tests/unit/test_assessment_sidecar.py) because it needs the
+# FakeSlackClient-backed engine this class's harness already provides:
+# these tests drive the real _post_message text-cleaning path end-to-end and
+# assert on what a Slack client would actually receive
+# (`client.posted[i]["text"]`), instead of testing the strip regexes in
+# isolation. test_assessment_sidecar.py's tests never call _post_message at
+# all, so before this class existed the anti-leak property had zero coverage
+# (Task 8 fix round 1, Finding 2).
+# ---------------------------------------------------------------
+
+class TestPostMessageStripsAssessmentSidecar:
+    def _engine_with_client(self):
+        from src.agent.agent import Agent
+        from tests.fakes import FakeSlackClient
+
+        agent = Agent("su", "SuBot", "Andrew Su")
+        client = FakeSlackClient(agent_id="su")
+        return SimulationEngine(agents=[agent], slack_clients={"su": client}), client
+
+    # Distinctive fragments that only ever appear inside the verdict JSON —
+    # deliberately not "incubation" alone, since that word can legitimately
+    # appear in the recommendation prose of a real Slack body.
+    _VERDICT_MARKERS = (
+        "assessment_json",
+        "funnel_stage",
+        '"differentiation": 4',
+        "No external validation yet",
+    )
+
+    def _assert_no_verdict_leaked(self, posted_text):
+        lowered = posted_text.lower()
+        for marker in self._VERDICT_MARKERS:
+            assert marker.lower() not in lowered, f"leaked {marker!r} into: {posted_text!r}"
+
+    @pytest.mark.asyncio
+    async def test_well_formed_sidecar_nested_in_slack_message_never_reaches_slack(self):
+        # A model that mistakenly puts the sidecar *inside* <slack_message>
+        # instead of after it.
+        engine, client = self._engine_with_client()
+        text = (
+            "<slack_message>\n"
+            ":mag: *Opportunity Assessment — Wang Lab (JHU)*\n"
+            "Recommendation: proceed to diligence. [Speculative]\n"
+            "<assessment_json>\n"
+            '{"funnel_stage": "incubation", '
+            '"scores": {"differentiation": 4}, '
+            '"red_flags": ["No external validation yet"]}\n'
+            "</assessment_json>\n"
+            "</slack_message>"
+        )
+
+        await engine._post_message("su", "general", text)
+
+        assert len(client.posted) == 1
+        posted_text = client.posted[0]["text"]
+        self._assert_no_verdict_leaked(posted_text)
+        # The legitimate body must survive, not just the verdict be gone.
+        assert "Opportunity Assessment" in posted_text
+        assert "Recommendation: proceed to diligence" in posted_text
+
+    @pytest.mark.asyncio
+    async def test_unclosed_sidecar_is_dropped_to_end_of_text_not_leaked(self):
+        # Simulates a Phase 5 response truncated mid-sidecar (Finding 1): the
+        # closing </assessment_json> never arrives because max_tokens was hit.
+        engine, client = self._engine_with_client()
+        text = (
+            "<slack_message>Legit body.\n"
+            '<assessment_json>{"funnel_stage": "incubation", '
+            '"red_flags": ["No external validation yet"]}'
+        )
+
+        await engine._post_message("su", "general", text)
+
+        posted_text = client.posted[0]["text"]
+        self._assert_no_verdict_leaked(posted_text)
+        # Losing trailing prose after an unclosed tag is the accepted
+        # trade-off; the text *before* the orphaned tag must be untouched.
+        assert posted_text == "Legit body."
+
+    @pytest.mark.asyncio
+    async def test_uppercase_and_spaced_tag_variants_are_stripped(self):
+        # Finding 3: the tag match must be case-insensitive and tolerant of
+        # stray whitespace inside the delimiters.
+        engine, client = self._engine_with_client()
+        text = (
+            "<slack_message>\n"
+            "Legit body.\n"
+            "<ASSESSMENT_JSON >\n"
+            '{"funnel_stage": "incubation", '
+            '"red_flags": ["No external validation yet"]}\n'
+            "</ASSESSMENT_JSON >\n"
+            "</slack_message>"
+        )
+
+        await engine._post_message("su", "general", text)
+
+        posted_text = client.posted[0]["text"]
+        self._assert_no_verdict_leaked(posted_text)
+        assert posted_text == "Legit body."
 
 
 # ---------------------------------------------------------------

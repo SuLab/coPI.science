@@ -2414,11 +2414,19 @@ class SimulationEngine:
             if json_matches:
                 data = json.loads(json_matches[-1].group(1))
             else:
-                # Try finding raw JSON
-                json_start = response.find("{")
-                json_end = response.find("}", json_start) + 1 if json_start >= 0 else -1
+                # Try finding raw JSON. Strip any <assessment_json> sidecar
+                # first — it is bare JSON with no fence, so without this a
+                # sidecar-only response (no action fence present at all) would
+                # be indistinguishable from the action and get parsed as one,
+                # silently discarding a legitimate Phase 5 turn.
+                fallback_source = _strip_assessment_sidecar(response)
+                json_start = fallback_source.find("{")
+                json_end = (
+                    fallback_source.find("}", json_start) + 1
+                    if json_start >= 0 else -1
+                )
                 if json_start >= 0 and json_end > json_start:
-                    data = json.loads(response[json_start:json_end])
+                    data = json.loads(fallback_source[json_start:json_end])
         except (json.JSONDecodeError, ValueError) as exc:
             logger.warning("Failed to parse Phase 5 JSON: %s", exc)
 
@@ -3072,9 +3080,9 @@ class SimulationEngine:
         """Post a message to Slack and record it in the message log + DB."""
         # Final safety: strip any leaked <slack_message> tags, and any
         # <assessment_json> sidecar — that block is for Blackbird staff and the DB,
-        # never for the channel.
-        text = _ASSESSMENT_RE.sub("", text)
-        text = re.sub(r"</?assessment_json>", "", text)
+        # never for the channel. See _strip_assessment_sidecar for why an
+        # unclosed tag is handled differently from a well-formed pair.
+        text = _strip_assessment_sidecar(text)
         text = re.sub(r"</?slack_message>", "", text).strip()
 
         client = self.slack_clients.get(agent_id)
@@ -4991,9 +4999,55 @@ def _extract_slack_message(text: str) -> str:
     return _strip_llm_preamble(text)
 
 
+# Case-insensitive and tolerant of stray whitespace inside the delimiters
+# (e.g. `<ASSESSMENT_JSON>`, `<assessment_json >`) — a model is not guaranteed
+# to reproduce the tag verbatim, and a tag variant that slips past these
+# regexes is a verdict that leaks straight into Slack.
 _ASSESSMENT_RE = re.compile(
-    r"<assessment_json>\s*(.*?)\s*</assessment_json>", re.DOTALL
+    r"<\s*assessment_json\s*>\s*(.*?)\s*<\s*/\s*assessment_json\s*>",
+    re.DOTALL | re.IGNORECASE,
 )
+
+# An opening tag with no matching close — e.g. the LLM response got truncated
+# mid-sidecar (Phase 5's max_tokens budget plus an 11-section body ahead of a
+# ~15-line sidecar makes this a realistic outcome, and the retry path does not
+# re-check stop_reason). `_ASSESSMENT_RE` requires a literal closing tag, so it
+# does not match an unclosed one and would leave the raw verdict JSON — scores,
+# red flags, recommendation — sitting in the text. Strip everything from the
+# orphaned opening tag to the end of the response instead.
+#
+# This can discard trailing legitimate prose that happened to follow the
+# sidecar. That is an accepted, deliberate trade-off: losing a sentence of
+# prose is strictly better than leaking dimension scores and red flags into a
+# channel the assessed scientist reads. Do not "optimize" this into a lazy
+# match that stops short of end-of-string — the whole point is to consume
+# unconditionally to the end once an unclosed opening tag is found.
+_ASSESSMENT_UNCLOSED_RE = re.compile(
+    r"<\s*assessment_json\s*>.*", re.DOTALL | re.IGNORECASE
+)
+
+# Mop-up for any stray tag markup neither of the above removed (e.g. an
+# orphaned closing tag with no opening).
+_ASSESSMENT_ORPHAN_TAG_RE = re.compile(
+    r"<\s*/?\s*assessment_json\s*>", re.IGNORECASE
+)
+
+
+def _strip_assessment_sidecar(text: str) -> str:
+    """Remove the <assessment_json> sidecar from ``text`` before it reaches Slack.
+
+    That block is for Blackbird staff and the DB, never for the channel. Order
+    matters:
+      1. Remove well-formed pairs whole (tags + contents).
+      2. Anything left starting with an opening tag has no matching close —
+         truncated mid-sidecar — so drop from there to the end of the text
+         rather than leave the verdict JSON exposed.
+      3. Mop up any remaining stray tag markup neither step removed.
+    """
+    text = _ASSESSMENT_RE.sub("", text)
+    text = _ASSESSMENT_UNCLOSED_RE.sub("", text)
+    text = _ASSESSMENT_ORPHAN_TAG_RE.sub("", text)
+    return text
 
 
 def _extract_assessment_json(text: str) -> dict | None:
