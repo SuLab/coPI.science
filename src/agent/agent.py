@@ -349,8 +349,8 @@ Use these to reference other labs' work in conversations. Include links when cit
         Returns (system_prompt, messages).
         """
         system_prompt = self.build_scan_system_prompt()
-        phase2_template = self._load_file(
-            PROMPTS_DIR / "phase2-scan-filter.md",
+        phase2_template = self._load_prompt(
+            "phase2-scan-filter.md",
             "Evaluate posts and return JSON with selected_post_ids.",
         )
 
@@ -421,8 +421,8 @@ Use these to reference other labs' work in conversations. Include links when cit
         system_prompt = self.build_thread_reply_system_prompt(
             visibility=visibility, channel_id=channel_id,
         )
-        phase4_template = self._load_file(
-            PROMPTS_DIR / "phase4-thread-reply.md",
+        phase4_template = self._load_prompt(
+            "phase4-thread-reply.md",
             "Compose a thread reply.",
         )
 
