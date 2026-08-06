@@ -214,14 +214,70 @@ def test_missing_manifest_yields_no_rate_override(tmp_path, monkeypatch):
 def test_scout_hub_prompts_state_the_title_only_limitation():
     """The hub's whole novelty read rests on this tool. The prompt must not let it
     describe a title search as though it covered claims, and must not name the
-    decommissioned PatentsView endpoint."""
+    decommissioned PatentsView endpoint.
+
+    Beyond the vocabulary checks, the assertions below bind the *meaning* of the
+    caveat rather than just the presence of the word "title" -- a prompt that uses
+    "title" for an unrelated reason, or that states the US-only limitation without
+    the title-only one, must still fail. Each phrase is copied verbatim (modulo
+    markdown emphasis and line-wrap whitespace, which the normalizer below erases)
+    from the current prompts, so it fails loudly against a plausible wrong version:
+    one that drops the abstracts/claims exclusion, the broadened-query case, the
+    empty-result "not novelty, not FTO" framing, the 2-4-term query guidance with
+    its concrete contrast, or -- the regression that motivated this -- a citation
+    instruction that carries only the US-only half of the caveat.
+    """
     from pathlib import Path
 
+    def _normalize(text: str) -> str:
+        # Strip markdown emphasis and collapse whitespace/line-wraps so these
+        # assertions aren't brittle to reflowing or bold/italic-only edits.
+        return " ".join(text.replace("*", "").split())
+
     for name in ("agent-system.md", "phase5-new-post.md"):
-        text = Path("prompts/roles/scout_hub") / name
-        body = text.read_text(encoding="utf-8")
+        path = Path("prompts/roles/scout_hub") / name
+        body = path.read_text(encoding="utf-8")
         assert "PatentsView" not in body, f"{name} still names the dead endpoint"
         assert "title" in body.lower(), f"{name} omits the title-only limitation"
+
     system = (Path("prompts/roles/scout_hub") / "agent-system.md").read_text(encoding="utf-8")
+    phase5 = (Path("prompts/roles/scout_hub") / "phase5-new-post.md").read_text(encoding="utf-8")
+    norm_system = _normalize(system)
+    norm_phase5 = _normalize(phase5)
+
     assert "freedom-to-operate" in system.lower()
     assert "2-4" in system
+
+    # The title-only limitation must be stated in terms that exclude abstracts and
+    # claims, not merely that the word "title" appears somewhere in the file.
+    assert "not abstracts, not claims" in norm_system, (
+        "agent-system.md no longer excludes abstracts/claims from the title-only limitation"
+    )
+    assert "differently-titled patent" in norm_phase5, (
+        "phase5-new-post.md no longer distinguishes a title match from a claims/differently-"
+        "titled match"
+    )
+
+    # An empty/no-hit result must be described as neither novelty nor freedom-to-operate.
+    assert "is never novelty and never freedom-to-operate" in norm_system, (
+        "agent-system.md no longer states that an empty title search is neither novelty nor FTO"
+    )
+
+    # The broadened-search case must be addressed in both files.
+    assert "reports it broadened your query" in norm_system
+    assert "if the tool broadened your query, say so" in norm_phase5.lower()
+
+    # The 2-4-specific-terms guidance must come with a concrete good/bad contrast,
+    # not just the bare "2-4" token.
+    assert "TFEB melanoma" in norm_system
+    assert "TFEB inhibitor nuclear translocation melanoma BRAF resistance" in norm_system
+
+    # The citation instruction (Citing Papers) must itself carry the title-only
+    # limitation. It's the more specific instruction a model follows when writing
+    # an actual citation, so fixing the caveat only in the principles/Tools
+    # sections and leaving this one stale would still reproduce the omission this
+    # task exists to remove.
+    assert (
+        "cite the patent ID and filing date, and always attach the caveat: "
+        "title-only, US-only"
+    ) in norm_system, "Citing Papers section still omits the title-only limitation"

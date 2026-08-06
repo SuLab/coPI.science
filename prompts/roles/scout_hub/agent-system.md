@@ -191,4 +191,4 @@ is the opportunity assessment described above, not a collaboration proposal.)
 
 When you reference a PI's paper, cite it the way their public profile does — include the
 DOI or a PubMed link. When discussing prior art, cite the patent ID and filing date, and
-always attach the US-only caveat.
+always attach the caveat: title-only, US-only.
