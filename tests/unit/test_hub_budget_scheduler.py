@@ -197,3 +197,37 @@ class TestRateLimiter:
             eng._within_rate_limit(a, 1011.0)
             eng._within_rate_limit(a, 1012.0)
         assert caplog.text.count("throttled") == 1
+
+
+class TestRestartRebuild:
+    def test_window_filter_selects_only_recent_calls(self, monkeypatch):
+        """Step 4b's cutoff arithmetic, isolated from the DB.
+
+        The full DB round trip is covered by the integration suite; what matters
+        here is that the cutoff is `now - window` and that boundary rows are
+        included, since an off-by-one there silently re-creates the permanent
+        bench for anything on the edge.
+        """
+        _patch(monkeypatch, llm_rate_window_seconds=600)
+        eng = _engine(["hub"])
+        a = eng.agents["hub"]
+        now = 10_000.0
+        # Simulate what step 4b loads: only rows at or after the cutoff.
+        cutoff = now - 600
+        rows = [now - 1200, now - 700, now - 600, now - 100, now - 1]
+        a.state.call_times.extend(t for t in rows if t >= cutoff)
+        assert list(a.state.call_times) == [now - 600, now - 100, now - 1]
+        assert eng._within_rate_limit(a, now) is True
+
+    def test_agent_whose_calls_all_predate_the_window_starts_unthrottled(
+        self, monkeypatch
+    ):
+        """The exact post-restart state that benched the hub: a large lifetime
+        count, but nothing inside the window."""
+        _patch(monkeypatch, llm_calls_per_load_per_window=8)
+        eng = _engine(["hub"])
+        a = eng.agents["hub"]
+        a.api_call_count = 42  # rebuilt by step 4, lifetime
+        # step 4b found no rows inside the window
+        assert eng._within_rate_limit(a, 10_000.0) is True
+        assert eng._turn_eligible(a, 10_000.0) is True

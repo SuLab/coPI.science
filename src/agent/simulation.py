@@ -3927,6 +3927,38 @@ class SimulationEngine:
             except Exception as exc:
                 logger.warning("Failed to rebuild api_call_count: %s", exc)
 
+        # 4b. Rebuild the sliding-window call ledger from the same table.
+        #
+        # Deliberately SEPARATE from step 4, which stays an all-time COUNT(*):
+        # api_call_count is lifetime accounting (run summary,
+        # SimulationRun.total_api_calls) while call_times is the live throttle.
+        # Folding these together is the bug — it is what made an over-budget
+        # agent over-budget again on every restart, forever. See design §4.2.
+        if self.session_factory and self.simulation_run_id:
+            try:
+                from sqlalchemy import select as sa_select
+
+                # datetime, UTC and timedelta are already module-level imports
+                # (simulation.py:10) — do not re-import them here.
+                cutoff = datetime.now(UTC) - timedelta(
+                    seconds=get_settings().llm_rate_window_seconds
+                )
+                async with self.session_factory() as db:
+                    result = await db.execute(
+                        sa_select(LlmCallLog.agent_id, LlmCallLog.created_at)
+                        .where(
+                            LlmCallLog.simulation_run_id == self.simulation_run_id,
+                            LlmCallLog.created_at >= cutoff,
+                        )
+                        .order_by(LlmCallLog.created_at)
+                    )
+                    for r in result:
+                        agent = self.agents.get(r.agent_id)
+                        if agent:
+                            agent.state.call_times.append(r.created_at.timestamp())
+            except Exception as exc:
+                logger.warning("Failed to rebuild call_times: %s", exc)
+
         # 5. Set last_seen_cursor per agent to latest message time
         if self._reset_cursors:
             logger.info("--reset-cursors: agents will re-scan all posts")
