@@ -144,6 +144,18 @@ ROUTE_ALLOWLIST: dict[tuple[str, str], str] = {
         "Same as /cabo-graph: hand-shared public graph URL for the Schultz group "
         "alumni cohort, whitelisted in nginx/nginx.conf:111."
     ),
+    ("GET", "/agent/{agent_id}/thread/{message_ts}"): (
+        "Thread-expand endpoint for the conversations page (Task 5 of "
+        ".superpowers/sdd/2026-08-05-conversations-cohort-scope-and-threads). Its "
+        "caller is a data-thread-url attribute Jinja renders per reply-badge row, "
+        "read at click time by a plain JS fetch(btn.getAttribute(...)) (Task 6, "
+        "templates/agent/conversations.html). That value lives in a bare data-* "
+        "attribute, not href/action, and is passed to fetch() rather than "
+        "location.href/assign/replace/window.open or a <script>-block literal, so "
+        "none of this gate's matchers can see it — the same class of permanent "
+        "false negative as the /onboarding/retry button documented in this file's "
+        "module docstring. Expected to stay allowlisted even after Task 6 ships."
+    ),
 }
 
 # Optional third-party imports that are allowed to be absent at test time. Empty

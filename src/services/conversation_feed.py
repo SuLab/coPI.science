@@ -12,13 +12,14 @@ So the rule is expressed twice — once as a predicate, once as a WHERE fragment
 and ``tests/integration/test_conversation_feed.py`` asserts the two agree on
 every row of the engine's own decision table.
 
-Two functions, one pipeline: ``resolve_agent_gate`` computes *what the gate is*
-for the viewing agent, by calling the engine's own ``compute_gates``
+Three functions, one pipeline: ``resolve_agent_gate`` computes *what the gate
+is* for the viewing agent, by calling the engine's own ``compute_gates``
 (``src/services/cohorts.py``) — the same call ``_cohort_gate_context`` in
 ``src/routers/admin.py`` makes for the admin preview, so the page can never
 compute a different gate than the engine would. ``gate_clause`` then turns that
-gate into the SQL predicate above. The one deliberate difference from the admin
-preview: ``resolve_agent_gate``'s roster is the active agents **plus the
+gate into the SQL predicate above, and ``own_or_gated`` widens it with a PI's
+own-post carve-out (see its docstring). The one deliberate difference from the
+admin preview: ``resolve_agent_gate``'s roster is the active agents **plus the
 viewing agent**, because ``/agent/{id}/conversations`` also admits an inactive
 viewer, and ``compute_gates`` only returns a gate for agents in the roster it is
 handed.
@@ -67,6 +68,27 @@ def gate_clause(gate: set[str] | None) -> ColumnElement[bool]:
             AgentMessage.agent_id.in_(gate),
         ) if gate else false(),
     )
+
+
+def own_or_gated(gate: set[str] | None, agent_id: str) -> ColumnElement[bool]:
+    """``gate_clause`` widened with a PI's own-post carve-out.
+
+    A PI must always see their OWN bot's posts, even when that bot is active
+    but not yet placed in a cohort — under ``policy="isolated"`` that agent's
+    gate is the empty set (see ``resolve_agent_gate``/``compute_gates``), and
+    ``gate_clause(set())`` admits nothing from the membership branch, so
+    without this OR the PI's own posts would vanish the moment their bot is
+    activated and before an admin has assigned it a cohort. This is a
+    deliberate, safe divergence from ``_entry_allowed``: the engine never
+    needs this clause because an agent is never asked to decide whether to
+    act on its own post. Safe because it can only ever admit THIS agent's own
+    rows, never another agent's.
+
+    One expression serves three call sites that must never drift apart: the
+    conversations feed's roots query, its reply-count query, and the thread
+    expand endpoint's root re-resolution and reply fetch.
+    """
+    return or_(gate_clause(gate), AgentMessage.agent_id == agent_id)
 
 
 async def resolve_agent_gate(db: AsyncSession, agent_id: str) -> set[str] | None:

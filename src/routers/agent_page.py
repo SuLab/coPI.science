@@ -10,7 +10,7 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import distinct, func, or_, select
+from sqlalchemy import distinct, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -717,7 +717,7 @@ async def agent_conversations(
     discussing and to inject a message/tag — it writes to the DB inbox, which
     the running simulation ingests. See specs/local-db-conversations.md.
     """
-    from src.services.conversation_feed import gate_clause, resolve_agent_gate
+    from src.services.conversation_feed import own_or_gated, resolve_agent_gate
     from src.services.pi_inbox import get_latest_run_id
 
     agent, is_owner = await get_agent_with_access(agent_id, db, current_user)
@@ -761,17 +761,12 @@ async def agent_conversations(
         # SQL, before LIMIT: #general carries every other cohort's traffic, so
         # filtering in Python afterwards would leave the page nearly empty.
         gate = await resolve_agent_gate(db, aid)
-        # A PI must always see their OWN bot's posts, even when that bot is
-        # active but not yet placed in a cohort — under policy="isolated" that
-        # agent's gate is the empty set (see resolve_agent_gate/compute_gates),
-        # and gate_clause(set()) admits nothing from the membership branch, so
-        # without this OR the PI's own posts would vanish the moment their bot
-        # is activated and before an admin has assigned it a cohort. This is a
-        # deliberate, safe divergence from `_entry_allowed`: the engine never
-        # needs this clause because an agent is never asked to decide whether
-        # to act on its own post. Safe because it can only ever admit THIS
-        # agent's own rows, never another agent's.
-        own_or_gated = or_(gate_clause(gate), AgentMessage.agent_id == aid)
+        # own_or_gated (src/services/conversation_feed.py) is gate_clause widened
+        # with the PI's own-post carve-out — see its docstring for why the OR is
+        # needed. One expression here, in the reply-count query below, and in
+        # agent_thread_replies keeps the feed, the badge, and the expansion from
+        # ever disagreeing on what a PI may see.
+        gated = own_or_gated(gate, aid)
 
         # Thread ROOTS, newest first. `phase` is belt-and-braces alongside
         # `thread_ts IS NULL`; the two agree on every row.
@@ -792,7 +787,7 @@ async def agent_conversations(
                 AgentMessage.channel_name.in_(channels),
                 AgentMessage.thread_ts.is_(None),
                 AgentMessage.phase == "new_post",
-                own_or_gated,
+                gated,
             )
             .order_by(AgentMessage.posted_at.desc(), AgentMessage.created_at.desc(),
                       AgentMessage.id.desc())
@@ -816,7 +811,7 @@ async def agent_conversations(
                 .where(
                     AgentMessage.simulation_run_id == run_id,
                     AgentMessage.thread_ts.in_(root_ts),
-                    own_or_gated,
+                    gated,
                 )
                 .group_by(AgentMessage.thread_ts)
             )
@@ -847,6 +842,90 @@ async def agent_conversations(
             has_run=run_id is not None,
             posted=request.query_params.get("posted"),
         ),
+    )
+
+
+@router.get("/{agent_id}/thread/{message_ts}", response_class=HTMLResponse)
+async def agent_thread_replies(
+    agent_id: str,
+    message_ts: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Replies for one thread, as an HTML fragment for the conversations page.
+
+    ``message_ts`` is a guessable identifier, so authorisation cannot stop at the
+    agent: the ROOT is re-resolved under this agent's channel set and cohort gate
+    before any reply is read. Anything that does not resolve is a 404 — absent,
+    not-a-root, another channel, and out-of-cohort are deliberately
+    indistinguishable to the caller.
+
+    Replies are gated too, with the same clause that produced the count on the
+    page (``own_or_gated``), so the badge and the expansion can never disagree.
+    This diverges from the engine, which classifies ``get_thread_history`` as
+    UNGATED (``src/agent/message_log.py:224-226``) because it is thread-internal;
+    here the whole point is that out-of-cohort traffic must not become reachable
+    by clicking, and a future reader should not "fix" this back toward engine
+    parity.
+    """
+    from src.services.conversation_feed import own_or_gated, resolve_agent_gate
+    from src.services.pi_inbox import get_latest_run_id
+
+    agent, _is_owner = await get_agent_with_access(agent_id, db, current_user)
+    if agent.status not in ("active", "inactive"):
+        raise HTTPException(status_code=404)
+    aid = agent.agent_id
+
+    run_id = await get_latest_run_id(db)
+    if not run_id:
+        raise HTTPException(status_code=404)
+
+    ch_rows = await db.execute(
+        select(distinct(AgentMessage.channel_name)).where(
+            AgentMessage.simulation_run_id == run_id,
+            AgentMessage.agent_id == aid,
+        )
+    )
+    channels = sorted({r[0] for r in ch_rows} | {"general"})
+
+    gate = await resolve_agent_gate(db, aid)
+    gated = own_or_gated(gate, aid)
+    root = (await db.execute(
+        select(AgentMessage)
+        .where(
+            AgentMessage.simulation_run_id == run_id,
+            AgentMessage.message_ts == message_ts,
+            AgentMessage.thread_ts.is_(None),
+            AgentMessage.channel_name.in_(channels),
+            gated,
+        )
+        .limit(1)
+    )).scalar_one_or_none()
+    if root is None:
+        raise HTTPException(status_code=404)
+
+    reply_rows = await db.execute(
+        select(AgentMessage)
+        .where(
+            AgentMessage.simulation_run_id == run_id,
+            AgentMessage.thread_ts == message_ts,
+            gated,
+        )
+        .order_by(AgentMessage.posted_at.asc(), AgentMessage.created_at.asc(),
+                  AgentMessage.id.asc())
+    )
+    replies = [
+        {
+            "sender": m.sender_name or (m.agent_id or "PI"),
+            "is_bot": m.is_bot,
+            "content": m.content,
+        }
+        for m in reply_rows.scalars().all()
+    ]
+
+    return templates.TemplateResponse(
+        request, "agent/_thread_replies.html", {"replies": replies}
     )
 
 
