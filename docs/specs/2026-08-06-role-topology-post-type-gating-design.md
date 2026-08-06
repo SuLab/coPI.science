@@ -267,9 +267,56 @@ tests that exercise **production order**, not just the predicate.
 6. **`load_role` degradation** — one test per row in §5.
 7. **Menu/enforcement agreement** — the rendered `{post_type_menu}` names exactly the
    post-layer-2 set.
-8. **Mesh characterization** — `pi_lab` with gate `None` behaves byte-identically.
-   `tests/characterization/__snapshots__/test_agent_turn_gm.ambr` pins the phase-4 strings.
-   Never run `pytest --snapshot-update` to resolve a mismatch.
+8. **Mesh behaviour** — `pi_lab` with gate `None` still offers every declared type and rejects
+   nothing. Layers 2 and 3 must be provably inert.
+9. **Token pins** — `{post_type_menu}` must be added to the `leftover_tokens` list at
+   `tests/unit/test_roles.py:178` and the renderer-anchor list at `:370`. Without that, a
+   template carrying the token while the renderer does not substitute it would pass CI and leak
+   the raw `{post_type_menu}` into a live prompt.
+10. **A new pi_lab phase-5 token/surgery pin.** Measured: `test_roles.py:160-227` pins the
+    scout_hub override only — the *global* `pi_lab` template's tokens and `funding_only`
+    surgeries are pinned nowhere. Since this change rewrites that template, add the equivalent
+    test for `pi_lab`.
+
+### Characterization snapshots will legitimately change — 8 of 9
+
+Measured, not assumed. `agent-system.md` and `identity.md` are injected into **every** phase's
+system prompt, so editing them moves almost every snapshot in
+`tests/characterization/__snapshots__/test_agent_turn_gm.ambr`:
+
+| Snapshot | Why it changes |
+|---|---|
+| `test_scan_system_prompt_gm` | `Scripps Research`, `:test_tube:`, `:package:` |
+| `test_system_prompt_public_vs_private_gm` | same |
+| `test_thread_reply_system_prompt_gm` | same |
+| `test_phase2_scan_prompt_flags_self_authored_gm` | same |
+| `test_phase4_prompt_phase_progression_gm` | same |
+| `test_phase4_prompt_pi_context_and_funding_gm` | same |
+| `test_reply_turn_composes_prompt_and_posts_gm` | same |
+| `test_phase5_prompt_gm` | the above **plus** `Quality bar for :bulb:`, `TAG the other lab`, `@WisemanBot` |
+
+Only `test_decide_phase_parses_scripted_json_gm` is unaffected.
+
+This does **not** license a blanket `pytest --snapshot-update`. CLAUDE.md's prohibition exists to
+stop unintended drift being papered over, and it still binds. The rule for this change:
+
+- Regenerate those eight snapshots deliberately, then **read the diff line by line**.
+- The diff must contain *only* text originating in the three edited prompt files.
+- The EXPLORE / DECIDE / CONCLUDE guidance strings from `src/agent/thread_guidance.py` must
+  appear **unchanged** in the diff. They are not touched by this work, and any movement in them
+  means something else broke.
+- Baseline before starting: these nine snapshots pass today (verified — 130 tests, 9 snapshots
+  green across `test_agent_turn_gm`, `test_roles`, `test_agent_prompts`, `test_simulation_logic`,
+  `test_roster_sync`, `test_tool_gating`).
+
+### Prompt and code must land in the same change
+
+`prompts/` is bind-mounted into the agent container and re-read per call
+(`docker inspect` confirms the mount; `agent.py:744` reads from disk with no cache), while
+`src/` is **baked into the image**. So installing the prompt drafts without rebuilding the agent
+image would put `{post_type_menu}` in front of a live renderer that cannot substitute it — the
+raw token would reach real prompts. Ship the template edit and the renderer together, and
+rebuild the agent image (`$DC --profile agent build agent`) before the next run.
 
 Gate: `./scripts/ci.sh`. No migration — `post_types` is config and `AgentRegistry.role` already
 exists.
@@ -284,12 +331,22 @@ cutover depends on their ordering.
 | Disable `alanjary` (test-only bot) | `status='inactive'` in `AgentRegistry`; picked up live by `_sync_roster_from_db`, no restart | Yes |
 | Delete its orphan cohort | `hub-alanjary` holds only `blackbird`+`grantbot`; the PI was never a member, so the agent is currently isolated to nobody | Yes |
 | Clean working memory | Move `profiles/memory/*` to a timestamped backup — never `rm` | Yes |
-| Delete mutilated Slack posts | Via each authoring bot's own token | **No** |
+| Delete mutilated Slack posts | **113 messages** (see below), via each authoring bot's own token | **No** |
 
-`--fresh` already wipes `agent_messages` (`src/agent/main.py:167`), so deleting the Slack copies
+`--fresh` already wipes `agent_messages` (`src/agent/main.py:168`), so deleting the Slack copies
 and then restarting `--fresh` leaves both sides consistent, with no orphaned DB rows breaking
 the row-count-matches-Slack-message-count invariant documented at `_post_message`. `--fresh`
 does **not** touch `profiles/memory/`, which is why the memory move is a separate step.
+
+**The deletion set, measured.** 200 top-level `:bulb:` posts carry the strip artifact; **113 of
+them reached Slack** (the other 87 are DB-only, written while Slack was off or before tokens were
+provisioned). They span 43 authoring agents and 6 channels. Only the 113 can be deleted — and
+only the 113 need to be, since the rest never became visible.
+
+All measurements in this document come from a single simulation run,
+`4f1e8395-8329-438d-99e8-d3bfeaa5ffb5` (started 2026-08-05 18:25 UTC, 671 messages). The agent
+container was restarted at 21:50 UTC on 2026-08-06 and **resumed** that run rather than starting
+a new one, so the counts remain current.
 
 The deletion set requires explicit sign-off before it runs.
 

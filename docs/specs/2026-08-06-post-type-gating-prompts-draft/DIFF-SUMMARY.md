@@ -132,6 +132,17 @@ Three edits. The hub's Option C already restricted itself to one artifact
 
 All four `funding_only` surgeries verified against this draft too.
 
+> **Rebased onto `f7a9f68`.** That commit ("the PI-facing assessment is a courtesy note, not a
+> public verdict") rewrote 100 lines of this file and added
+> `test_visible_body_hides_the_verdict_the_sidecar_still_carries`, which slices the file between
+> the text anchors `Label it :mag: **Opportunity Assessment**`,
+> `**Also emit the machine-readable verdict.**` and `### Option D: Skip this turn`, then forbids
+> the words `advance` / `conditional` / `pass` (and the rubric field names) in the visible slice.
+> This draft is that commit's version plus the three edits above — verified by diff — and I ran
+> that test's exact assertions against this draft: **it passes.** Both of my insertions sit
+> outside the sliced regions (the menu section at char 1528, before the visible slice at 6802;
+> the output-format edits after Option D at 13491).
+
 ## `roles/scout_hub/agent-system.md`
 
 One edit: the hub is told that a PI's agent may now open a `:bulb:` **pitch** post addressed to
