@@ -116,6 +116,12 @@ class PIHandler:
                 model=settings.llm_agent_model_sonnet,
                 max_tokens=2000,
                 log_meta={"agent_id": agent_id, "phase": "profile_rewrite"},
+                # Fires immediately if llm.py's max_tokens retry actually makes
+                # a second call, so a retried turn still books as one call per
+                # real API call, not one per turn. See Agent.record_api_call
+                # and the explicit record_api_call() just below, which books
+                # the (at least one) call every turn makes regardless.
+                on_retry=agent.record_api_call,
             )
             # This call is logged to llm_call_logs under a REAL agent_id, so the
             # restart rebuild (simulation step 4/4b) will attribute it to this
@@ -213,6 +219,7 @@ class PIHandler:
                 model=settings.llm_agent_model_sonnet,
                 max_tokens=800,
                 log_meta={"agent_id": agent_id, "phase": "pi_question"},
+                on_retry=agent.record_api_call,
             )
             # Logged under a real agent_id -> counted by the restart rebuild, so
             # it must be counted live too. See _handle_standing_instruction.

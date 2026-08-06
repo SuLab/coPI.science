@@ -164,8 +164,18 @@ async def generate_agent_response(
     model: str | None = None,
     max_tokens: int = 1000,
     log_meta: dict[str, str] | None = None,
+    on_retry: Callable[[], None] | None = None,
 ) -> str:
-    """Generate an agent response via Claude."""
+    """Generate an agent response via Claude.
+
+    ``on_retry``, if given, fires once — synchronously, before this returns —
+    exactly when the max_tokens retry below actually makes a second API call.
+    A caller that books one call against a rate limiter or budget for this
+    whole turn (e.g. ``Agent.record_api_call``) should pass that callable here
+    so a retried turn is booked as the two real API calls it made, not one.
+    Optional and additive: omitting it changes nothing about behavior or the
+    return contract.
+    """
     settings = get_settings()
     model = model or settings.llm_agent_model
     client = get_anthropic_client()
@@ -211,11 +221,38 @@ async def generate_agent_response(
                 system=system_prompt,
                 messages=messages,
             )
+            # This is a second real, billed API call for what the caller
+            # booked as one turn — fire the caller's own accounting hook (if
+            # any) so a rate limiter sized to "one call per turn" isn't
+            # quietly undercounting the one turn most likely to retry: the
+            # phase-5 assessment, whose body runs long enough to hit
+            # max_tokens before its <assessment_json> sidecar at the end.
+            if on_retry is not None:
+                on_retry()
             retry_latency = (time.monotonic() - t0) * 1000
             latency_ms += retry_latency
             if retry_msg.content:
                 response_text = retry_msg.content[0].text
             message = retry_msg  # use retry stats for logging
+
+            if message.stop_reason == "max_tokens":
+                # The retry doubled max_tokens and STILL truncated. The
+                # retry's (still-truncated) text is returned below — it is
+                # still the best available answer — but this must be loud:
+                # for phase 5 the <assessment_json> verdict sidecar is
+                # emitted last, so a still-truncated response silently drops
+                # the machine-readable verdict while the Slack post can still
+                # look complete.
+                agent_id = (log_meta or {}).get("agent_id", "?")
+                phase = (log_meta or {}).get("phase", "?")
+                logger.error(
+                    "Response still truncated after 2x max_tokens retry "
+                    "(model=%s agent=%s phase=%s retry_max_tokens=%d "
+                    "out_tok=%d) — returning the truncated text; anything "
+                    "the model emits last (e.g. a phase-5 <assessment_json> "
+                    "sidecar) may be missing from it.",
+                    model, agent_id, phase, retry_max, message.usage.output_tokens,
+                )
 
         if _call_log_callback and log_meta:
             from datetime import datetime, timezone
