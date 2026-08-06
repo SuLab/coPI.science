@@ -3070,7 +3070,11 @@ class SimulationEngine:
         thread_ts: str | None = None,
     ) -> None:
         """Post a message to Slack and record it in the message log + DB."""
-        # Final safety: strip any leaked <slack_message> tags
+        # Final safety: strip any leaked <slack_message> tags, and any
+        # <assessment_json> sidecar — that block is for Blackbird staff and the DB,
+        # never for the channel.
+        text = _ASSESSMENT_RE.sub("", text)
+        text = re.sub(r"</?assessment_json>", "", text)
         text = re.sub(r"</?slack_message>", "", text).strip()
 
         client = self.slack_clients.get(agent_id)
@@ -4985,6 +4989,30 @@ def _extract_slack_message(text: str) -> str:
             return text[last_open + len("<slack_message>"):last_close].strip()
     # Fallback: strip preamble heuristically
     return _strip_llm_preamble(text)
+
+
+_ASSESSMENT_RE = re.compile(
+    r"<assessment_json>\s*(.*?)\s*</assessment_json>", re.DOTALL
+)
+
+
+def _extract_assessment_json(text: str) -> dict | None:
+    """Parse the scout hub's machine-readable verdict sidecar, or None.
+
+    The sidecar is deliberately BARE JSON, not a ```json``` fence:
+    _parse_phase5_response takes the LAST fenced json block as the action, so a
+    fenced sidecar would hijack the action data and silently no-op every
+    assessment post. Anchored on the LAST block so a revised verdict wins.
+    """
+    matches = _ASSESSMENT_RE.findall(text or "")
+    if not matches:
+        return None
+    try:
+        parsed = json.loads(matches[-1])
+    except (json.JSONDecodeError, ValueError) as exc:
+        logger.warning("[assessment] sidecar present but unparseable: %s", exc)
+        return None
+    return parsed if isinstance(parsed, dict) else None
 
 
 def _strip_llm_preamble(text: str) -> str:
