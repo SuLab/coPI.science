@@ -1051,3 +1051,192 @@ async def test_admin_assessments_page_omits_detail_row_when_empty(
     assert "Sparse verdict" in resp.text
     assert "assessment-detail" not in resp.text
     assert "assessment-rationale" not in resp.text
+
+
+@pytest.mark.asyncio
+async def test_admin_assessments_page_renders_derisking_milestones(
+    client, db_session, admin
+):
+    """derisking_milestones is persisted (src/agent/simulation.py) but was
+    never rendered on the triage page — the concrete next results that would
+    unlock the next funnel stage, arguably the most actionable field in the
+    whole verdict (Finding B2).
+    """
+    run = SimulationRun()
+    db_session.add(run)
+    await db_session.flush()
+    db_session.add(OpportunityAssessment(
+        simulation_run_id=run.id, agent_id="blackbird", subject_agent_id="wang",
+        channel_name="general", company_or_project="Milestones fixture",
+        rationale="Differentiated angle; needs a second-species rescue.",
+        derisking_milestones=[
+            "In vivo rescue in a second species",
+            "Signed MTA with a pharma partner",
+        ],
+    ))
+    await db_session.flush()
+
+    resp = await client.get("/admin/assessments", headers=_auth(admin.id))
+    assert resp.status_code == 200
+    html = resp.text
+    assert "De-risking milestones" in html
+    assert "In vivo rescue in a second species" in html
+    assert "Signed MTA with a pharma partner" in html
+
+    # Rendered as list items, in the order stored — not sorted, not reversed.
+    block_match = re.search(
+        r'<div class="assessment-derisking.*?</div>', html, re.S
+    )
+    assert block_match, "no derisking-milestones block rendered"
+    block = block_match.group(0)
+    assert block.find("In vivo rescue") < block.find("Signed MTA")
+
+
+@pytest.mark.asyncio
+async def test_admin_assessments_page_handles_null_and_empty_derisking_milestones(
+    client, db_session, admin
+):
+    """None (never asked / not applicable) and [] (asked, nothing to report)
+    must both render as nothing — no heading, no empty list, and never the
+    literal string "None" (Finding B2)."""
+    run = SimulationRun()
+    db_session.add(run)
+    await db_session.flush()
+    db_session.add(OpportunityAssessment(
+        simulation_run_id=run.id, agent_id="blackbird", subject_agent_id="wang",
+        channel_name="general", company_or_project="Null milestones fixture",
+        derisking_milestones=None,
+    ))
+    db_session.add(OpportunityAssessment(
+        simulation_run_id=run.id, agent_id="blackbird", subject_agent_id="fu",
+        channel_name="general", company_or_project="Empty milestones fixture",
+        derisking_milestones=[],
+    ))
+    await db_session.flush()
+
+    resp = await client.get("/admin/assessments", headers=_auth(admin.id))
+    assert resp.status_code == 200
+    html = resp.text
+    assert "Null milestones fixture" in html
+    assert "Empty milestones fixture" in html
+    assert "De-risking milestones" not in html
+    assert "assessment-derisking" not in html
+    assert "None" not in html
+
+
+async def _two_runs_with_one_assessment_each(db_session):
+    """Older run + a 'stale' verdict, newer run + a 'current' verdict —
+    the exact shape --fresh (src/agent/main.py) leaves behind: a fresh
+    restart creates a new SimulationRun but never deletes
+    opportunity_assessments, so the old run's verdict is still tied to Slack
+    messages that no longer exist.
+
+    started_at is set explicitly rather than left to the column's
+    ``server_default=func.now()``: Postgres's ``now()`` is pinned to
+    transaction start, and this whole test runs in one transaction, so both
+    rows would otherwise get the identical timestamp and "current run"
+    ordering would be a coin flip. Real runs are minutes-to-days apart and
+    never hit this.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    now = datetime.now(UTC)
+    old_run = SimulationRun(started_at=now - timedelta(hours=1))
+    db_session.add(old_run)
+    await db_session.flush()
+    db_session.add(OpportunityAssessment(
+        simulation_run_id=old_run.id, agent_id="blackbird", subject_agent_id="wang",
+        channel_name="general", company_or_project="Stale pre-fresh verdict",
+    ))
+    await db_session.flush()
+
+    new_run = SimulationRun(started_at=now)
+    db_session.add(new_run)
+    await db_session.flush()
+    db_session.add(OpportunityAssessment(
+        simulation_run_id=new_run.id, agent_id="blackbird", subject_agent_id="fu",
+        channel_name="general", company_or_project="Current verdict",
+    ))
+    await db_session.flush()
+    return old_run, new_run
+
+
+@pytest.mark.asyncio
+async def test_admin_assessments_page_defaults_to_the_current_run(
+    client, db_session, admin
+):
+    """Finding B1: the page must be able to tell "this verdict belongs to the
+    current run" from "this is a leftover from a wiped run". Defaulting to
+    the most recently started SimulationRun excludes the stale one by
+    construction, without deleting it."""
+    await _two_runs_with_one_assessment_each(db_session)
+
+    resp = await client.get("/admin/assessments", headers=_auth(admin.id))
+    assert resp.status_code == 200
+    assert "Current verdict" in resp.text
+    assert "Stale pre-fresh verdict" not in resp.text
+
+
+@pytest.mark.asyncio
+async def test_admin_assessments_page_all_runs_reaches_the_stale_verdict(
+    client, db_session, admin
+):
+    """Finding B1: excluded-by-default must never mean deleted or
+    unreachable — ?run_id=all is the escape hatch back to everything."""
+    await _two_runs_with_one_assessment_each(db_session)
+
+    resp = await client.get("/admin/assessments?run_id=all", headers=_auth(admin.id))
+    assert resp.status_code == 200
+    assert "Current verdict" in resp.text
+    assert "Stale pre-fresh verdict" in resp.text
+    # All-runs view names which run each row came from.
+    assert "(current)" in resp.text
+
+
+@pytest.mark.asyncio
+async def test_admin_assessments_page_can_select_a_specific_older_run(
+    client, db_session, admin
+):
+    old_run, _new_run = await _two_runs_with_one_assessment_each(db_session)
+
+    resp = await client.get(
+        f"/admin/assessments?run_id={old_run.id}", headers=_auth(admin.id)
+    )
+    assert resp.status_code == 200
+    assert "Stale pre-fresh verdict" in resp.text
+    assert "Current verdict" not in resp.text
+
+
+@pytest.mark.asyncio
+async def test_admin_assessments_page_bounds_the_query_and_says_so(
+    client, db_session, admin, monkeypatch
+):
+    """Finding B1: the query had no LIMIT at all. Rather than create hundreds
+    of rows to exercise the real cap, shrink it via monkeypatch and prove the
+    truncation is visible on the page, not silent — and that it drops the
+    lowest-scoring rows first, never the highest."""
+    from src.routers import admin as admin_router
+
+    monkeypatch.setattr(admin_router, "_ASSESSMENTS_LIMIT", 1)
+
+    run = SimulationRun()
+    db_session.add(run)
+    await db_session.flush()
+    db_session.add(OpportunityAssessment(
+        simulation_run_id=run.id, agent_id="blackbird", subject_agent_id="wang",
+        channel_name="general", company_or_project="Highest scoring",
+        weighted_score=4.5, band="advance",
+    ))
+    db_session.add(OpportunityAssessment(
+        simulation_run_id=run.id, agent_id="blackbird", subject_agent_id="fu",
+        channel_name="general", company_or_project="Lower scoring",
+        weighted_score=1.0, band="pass",
+    ))
+    await db_session.flush()
+
+    resp = await client.get("/admin/assessments", headers=_auth(admin.id))
+    assert resp.status_code == 200
+    html = resp.text
+    assert "Highest scoring" in html
+    assert "Lower scoring" not in html
+    assert "top 1 of 2" in html

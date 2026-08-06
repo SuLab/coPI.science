@@ -304,6 +304,7 @@ async def generate_with_tools(
     max_tokens: int = 1000,
     max_tool_rounds: int = 5,
     log_meta: dict[str, str] | None = None,
+    on_retry: Callable[[], None] | None = None,
 ) -> str:
     """
     Generate a response with Anthropic tool-use API.
@@ -312,6 +313,16 @@ async def generate_with_tools(
     re-call until we get a final text response or hit max_tool_rounds.
 
     Returns the final text response.
+
+    ``on_retry``, same contract as ``generate_agent_response``'s: it fires
+    once — synchronously, before this returns — exactly when one of this
+    function's two internal max_tokens retries (the "final text" branch's,
+    or the max-tool-rounds fallback's; at most one runs per call) actually
+    makes a second API call. A caller that books one call against a rate
+    limiter or budget for this whole turn (e.g. ``Agent.record_api_call``)
+    should pass that callable here so a retried turn is booked as the two
+    real API calls it made, not one. Optional and additive: omitting it
+    changes nothing about behavior or the return contract.
     """
     settings = get_settings()
     model = model or settings.llm_agent_model
@@ -358,6 +369,11 @@ async def generate_with_tools(
                     system=system_prompt,
                     messages=conversation,
                 )
+                # Second real, billed API call for what the caller booked as
+                # one turn — fire the caller's own accounting hook (if any),
+                # same reasoning as generate_agent_response's retry (B0).
+                if on_retry is not None:
+                    on_retry()
                 retry_latency = (time.monotonic() - t0) * 1000
                 latency_ms += retry_latency
                 total_input_tokens += retry_msg.usage.input_tokens
@@ -366,8 +382,19 @@ async def generate_with_tools(
                 if retry_texts:
                     response_text = retry_texts[0].text
                 if retry_msg.stop_reason == "max_tokens":
-                    logger.warning(
-                        "Response still truncated after retry (%d tokens)",
+                    # Loud and specific, matching generate_agent_response: a
+                    # silent still-truncated retry here drops the tail of a
+                    # phase-4 reply (e.g. the closing </slack_message> tag)
+                    # with no trace in the logs.
+                    agent_id = (log_meta or {}).get("agent_id", "?")
+                    phase = (log_meta or {}).get("phase", "?")
+                    logger.error(
+                        "Response still truncated after 2x max_tokens retry "
+                        "(model=%s agent=%s phase=%s retry_max_tokens=%d "
+                        "out_tok=%d) — returning the truncated text; anything "
+                        "the model emits last (e.g. a closing tag) may be "
+                        "missing from it.",
+                        model, agent_id, phase, retry_max,
                         retry_msg.usage.output_tokens,
                     )
 
@@ -440,6 +467,10 @@ async def generate_with_tools(
             system=system_prompt,
             messages=conversation,
         )
+        # Second real, billed API call for what the caller booked as one
+        # turn — same accounting hook as the other retry site above (B0).
+        if on_retry is not None:
+            on_retry()
         retry_latency = (time.monotonic() - t0) * 1000
         latency_ms += retry_latency
         total_input_tokens += retry_msg.usage.input_tokens
@@ -447,6 +478,21 @@ async def generate_with_tools(
         retry_texts = [b for b in retry_msg.content if b.type == "text"]
         if retry_texts:
             response_text = retry_texts[0].text
+        if retry_msg.stop_reason == "max_tokens":
+            # This retry site never re-checked stop_reason at all before this
+            # fix — a still-truncated response after exhausting max_tool_rounds
+            # AND doubling max_tokens passed silently. Loud and specific, same
+            # as the other retry site.
+            agent_id = (log_meta or {}).get("agent_id", "?")
+            phase = (log_meta or {}).get("phase", "?")
+            logger.error(
+                "Response still truncated after 2x max_tokens retry "
+                "(model=%s agent=%s phase=%s retry_max_tokens=%d "
+                "out_tok=%d) — returning the truncated text; anything "
+                "the model emits last (e.g. a closing tag) may be "
+                "missing from it.",
+                model, agent_id, phase, retry_max, retry_msg.usage.output_tokens,
+            )
 
     if _call_log_callback and log_meta:
         from datetime import datetime, timezone

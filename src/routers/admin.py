@@ -822,9 +822,21 @@ async def admin_agents(
     )
 
 
+# Hard cap on rows fetched for one render of the triage queue (B1). Scoped to
+# the current run this is rarely close to binding — a single run's worth of
+# :mag: assessments — but "All Runs" accumulates across every run this
+# instance has ever done, and the table has no other bound. Capped rather
+# than paginated because this is a triage queue: the highest-scoring rows
+# (the ones that matter) are always first under the existing ORDER BY, so a
+# cap only ever drops the least-actionable tail, and the "N of TOTAL" note
+# below says so rather than hiding the truncation.
+_ASSESSMENTS_LIMIT = 500
+
+
 @router.get("/assessments", response_class=HTMLResponse)
 async def admin_assessments(
     request: Request,
+    run_id: str | None = None,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_admin_user),
 ):
@@ -833,14 +845,55 @@ async def admin_assessments(
     Ordered by weighted score descending (NULLs last), then most-recent-first,
     so the advance/conditional candidates are what a human sees on arrival —
     this page is a triage queue, not a log.
+
+    Defaults to the CURRENT simulation run (the most recently started
+    ``SimulationRun``) — ``?run_id=all`` or picking an older run from the
+    dropdown reaches everything else; nothing is ever deleted from this view,
+    only filtered. This is deliberate, not incidental: ``--fresh``
+    (``src/agent/main.py``) wipes ``agent_messages``/``agent_channels`` but
+    NEVER ``opportunity_assessments`` — a screening verdict is a durable
+    record and losing one is worse than keeping a stale one — so after a
+    fresh restart, old assessments whose Slack messages no longer exist would
+    otherwise sit on this page with nothing to distinguish them from current
+    ones. Scoping to the latest run excludes those by construction (their
+    ``simulation_run_id`` is the run that got wiped), while the "All Runs"
+    escape hatch and the per-run dropdown keep every row reachable. Mirrors
+    the run-selector pattern already used by ``admin_discussions``.
     """
-    result = await db.execute(
-        select(OpportunityAssessment).order_by(
-            OpportunityAssessment.weighted_score.desc().nullslast(),
-            OpportunityAssessment.created_at.desc(),
-        )
+    runs_result = await db.execute(
+        select(SimulationRun).order_by(SimulationRun.started_at.desc())
     )
+    runs = runs_result.scalars().all()
+
+    show_all_runs = run_id == "all"
+    selected_run_id: uuid.UUID | str | None = "all" if show_all_runs else None
+    if not show_all_runs and run_id:
+        try:
+            selected_run_id = uuid.UUID(run_id)
+        except ValueError:
+            pass
+    if not selected_run_id and runs:
+        selected_run_id = runs[0].id
+
+    query = select(OpportunityAssessment)
+    if not show_all_runs and selected_run_id:
+        query = query.where(OpportunityAssessment.simulation_run_id == selected_run_id)
+
+    total_count = (
+        await db.execute(select(func.count()).select_from(query.subquery()))
+    ).scalar() or 0
+
+    # NULLS LAST needs saying: a bare .desc() puts NULLs FIRST in Postgres,
+    # which would float every not-yet-scored assessment to the top of a
+    # triage queue instead of to the bottom.
+    query = query.order_by(
+        OpportunityAssessment.weighted_score.desc().nullslast(),
+        OpportunityAssessment.created_at.desc(),
+    ).limit(_ASSESSMENTS_LIMIT)
+
+    result = await db.execute(query)
     assessments = result.scalars().all()
+
     return templates.TemplateResponse(
         request,
         "admin/assessments.html",
@@ -855,6 +908,12 @@ async def admin_assessments(
             # in the weighted score (src/services/blackbird_rubric.py), so a
             # reader needs to see which ones were never answered.
             rubric_weights=RUBRIC_WEIGHTS,
+            runs=runs,
+            runs_by_id={r.id: r for r in runs},
+            selected_run_id=selected_run_id,
+            show_all_runs=show_all_runs,
+            total_count=total_count,
+            assessments_limit=_ASSESSMENTS_LIMIT,
         ),
     )
 

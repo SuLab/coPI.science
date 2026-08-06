@@ -2,7 +2,23 @@
 {% block title %}Admin — Assessments — CoPI{% endblock %}
 
 {% block content %}
-<h1 class="text-2xl font-bold text-gray-900 mb-2">Opportunity Assessments</h1>
+<div class="flex items-center justify-between mb-2 gap-4">
+    <h1 class="text-2xl font-bold text-gray-900">Opportunity Assessments</h1>
+    {% if runs %}
+    <form method="GET" action="/admin/assessments" class="flex items-center gap-2">
+        <label class="text-sm text-gray-500">Run:</label>
+        <select name="run_id" onchange="this.form.submit()"
+                class="text-sm border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500">
+            {% for run in runs %}
+            <option value="{{ run.id }}" {% if not show_all_runs and run.id == selected_run_id %}selected{% endif %}>
+                {{ run.started_at.strftime('%b %d %H:%M') }} ({{ run.status }}){% if run.id == runs[0].id %} — current{% endif %}
+            </option>
+            {% endfor %}
+            <option value="all" {% if show_all_runs %}selected{% endif %}>All Runs</option>
+        </select>
+    </form>
+    {% endif %}
+</div>
 <p class="text-sm text-gray-500 mb-2">
     BlackbirdBot's screening verdicts against the Blackbird investment rubric.
     Weighted score is computed from the nine dimension scores — not taken from the
@@ -11,6 +27,19 @@
     <em>route-to-incubation</em>, which the computed band never does); the two
     can legitimately disagree.
 </p>
+<p class="text-xs text-gray-400 mb-2">
+    {% if show_all_runs %}
+        Showing every run on record.
+    {% else %}
+        Showing the current run only — assessments from earlier (e.g.
+        <code>--fresh</code>-wiped) runs still exist and are never deleted;
+        pick a run above or <a class="underline" href="/admin/assessments?run_id=all">view all runs</a>.
+    {% endif %}
+    {% if total_count > assessments_limit %}
+        Displaying the top {{ assessments_limit }} of {{ total_count }} matching
+        assessments by score; the rest are lower-scoring, not hidden by run.
+    {% endif %}
+</p>
 <p class="text-xs text-gray-400 mb-6">
     Gating: <span class="text-green-600 font-medium">&#9989; met</span> &middot;
     <span class="text-red-600 font-medium">&#10060; not met</span> &middot;
@@ -18,6 +47,11 @@
     (the rubric question was never answered — distinct from a gate that failed).
 </p>
 
+{# These four cards summarize the rows actually rendered below (bounded by
+   assessments_limit), not total_count (the true count of the current
+   filter, which may exceed what's shown) — so "Total" here always equals
+   Advance + Conditional + Pass + unscored, and the "top N of TOTAL" note
+   above is the one place a wider count appears. #}
 <div class="grid grid-cols-4 gap-4 mb-8">
     <div class="bg-white rounded-xl border border-gray-200 p-4 text-center">
         <div class="text-3xl font-bold text-gray-900">{{ assessments | length }}</div>
@@ -76,7 +110,7 @@
                 </td>
                 <td class="px-4 py-3 text-sm text-gray-600">{{ a.subject_agent_id or "—" }}</td>
                 <td class="px-4 py-3 text-sm text-gray-600">{{ a.funnel_stage or "—" }}</td>
-                <td class="px-4 py-3 text-sm whitespace-nowrap">
+                <td class="px-4 py-3 text-sm">
                     <span class="font-semibold
                         {% if a.band == 'advance' %}text-green-600
                         {% elif a.band == 'conditional' %}text-amber-600
@@ -84,11 +118,16 @@
                         {% if a.weighted_score is not none %}{{ "%.2f"|format(a.weighted_score) }}{% else %}—{% endif %}
                     </span>
                     {% if a.band %}
+                        {# No title here: the band already renders as visible
+                           uppercase text (never colour alone), so a title
+                           that just repeats it word-for-word is pure noise
+                           for a screen reader. The band/weighted-score
+                           relationship it used to gesture at is spelled out
+                           once in the page intro instead. #}
                         <span class="band-label ml-1.5 text-xs font-medium uppercase tracking-wide align-middle
                             {% if a.band == 'advance' %}text-green-600
                             {% elif a.band == 'conditional' %}text-amber-600
-                            {% else %}text-gray-400{% endif %}"
-                            title="Computed band: {{ a.band }}">{{ a.band }}</span>
+                            {% else %}text-gray-400{% endif %}">{{ a.band }}</span>
                     {% else %}
                         <span class="band-label ml-1.5 text-xs text-gray-400 align-middle">—</span>
                     {% endif %}
@@ -119,7 +158,22 @@
                         {% for flag in a.red_flags %}<div>• {{ flag }}</div>{% endfor %}
                     {% else %}none{% endif %}
                 </td>
-                <td class="px-4 py-3 text-xs text-gray-500">{{ a.created_at.strftime("%Y-%m-%d %H:%M") }}</td>
+                <td class="px-4 py-3 text-xs text-gray-500">
+                    {{ a.created_at.strftime("%Y-%m-%d %H:%M") }}
+                    {% if show_all_runs %}
+                        {# Provenance: which run this row belongs to, so "All
+                           Runs" never mixes current and stale verdicts without
+                           a way to tell them apart. #}
+                        {% set src_run = runs_by_id.get(a.simulation_run_id) %}
+                        <div class="text-gray-400 whitespace-nowrap">
+                            {% if src_run %}
+                                run {{ src_run.started_at.strftime('%b %d %H:%M') }}{% if runs and src_run.id == runs[0].id %} (current){% endif %}
+                            {% else %}
+                                run unknown
+                            {% endif %}
+                        </div>
+                    {% endif %}
+                </td>
             </tr>
             {# Detail row. The triage row above answers "which of these deserves
                attention"; this one answers "on what basis", which is the
@@ -127,13 +181,29 @@
                spanning row rather than extra columns because the table is
                already eight wide. Omitted entirely when there is nothing to
                show, so a sparse verdict does not leave an empty band. #}
-            {% if a.rationale or a.scores %}
+            {% if a.rationale or a.scores or a.derisking_milestones %}
             <tr class="assessment-detail">
                 <td colspan="8" class="px-4 pb-3 pt-0 text-xs text-gray-600 bg-gray-50">
                     {% if a.rationale %}
                         <div class="assessment-rationale mb-1">
                             <span class="font-medium text-gray-500">Rationale:</span>
                             {{ a.rationale }}
+                        </div>
+                    {% endif %}
+                    {% if a.derisking_milestones %}
+                        {# The concrete next results that would unlock the next
+                           funnel stage — the most actionable content in the
+                           verdict, so it belongs next to the rationale rather
+                           than buried after the score breakdown. None and []
+                           both skip this block entirely (never an empty
+                           heading, never the literal "None"). #}
+                        <div class="assessment-derisking mb-1">
+                            <span class="font-medium text-gray-500">De-risking milestones:</span>
+                            <ul class="list-disc list-inside">
+                                {% for milestone in a.derisking_milestones %}
+                                    <li>{{ milestone }}</li>
+                                {% endfor %}
+                            </ul>
                         </div>
                     {% endif %}
                     {% if a.scores %}

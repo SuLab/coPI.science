@@ -134,6 +134,191 @@ async def test_generate_with_tools_runs_tool_then_returns_final(monkeypatch):
     assert len(fake.calls) == 2  # one tool round + one final-text round
 
 
+async def _noop_executor(name, tool_input):
+    return "unused"
+
+
+async def test_generate_with_tools_retries_once_on_max_tokens_in_final_branch(monkeypatch):
+    """The "no more tool calls" branch's own retry: doubles max_tokens once."""
+    fake = FakeAnthropic(
+        [
+            text_response("truncated...", stop_reason="max_tokens"),
+            text_response("full answer"),
+        ]
+    )
+    monkeypatch.setattr("src.services.llm.get_anthropic_client", lambda: fake)
+
+    out = await llm.generate_with_tools(
+        system_prompt="sys",
+        messages=[{"role": "user", "content": "hi"}],
+        tools=[],
+        tool_executor=_noop_executor,
+        max_tokens=1000,
+    )
+    assert out == "full answer"
+    assert len(fake.calls) == 2
+    assert fake.calls[1]["max_tokens"] == 2000
+
+
+async def test_generate_with_tools_calls_on_retry_when_final_branch_retries(monkeypatch):
+    """Same call-accounting contract as generate_agent_response's on_retry
+    (Finding B0): a retried turn is two real, billed API calls, so a caller
+    booking one call per turn against the sliding-window rate limiter needs a
+    hook to book the second one too."""
+    fake = FakeAnthropic(
+        [
+            text_response("truncated...", stop_reason="max_tokens"),
+            text_response("full answer"),
+        ]
+    )
+    monkeypatch.setattr("src.services.llm.get_anthropic_client", lambda: fake)
+
+    retry_calls = []
+    out = await llm.generate_with_tools(
+        system_prompt="sys",
+        messages=[{"role": "user", "content": "hi"}],
+        tools=[],
+        tool_executor=_noop_executor,
+        max_tokens=1000,
+        on_retry=lambda: retry_calls.append(1),
+    )
+    assert out == "full answer"
+    assert retry_calls == [1]
+
+
+async def test_generate_with_tools_does_not_call_on_retry_without_truncation(monkeypatch):
+    fake = FakeAnthropic([text_response("full answer")])
+    monkeypatch.setattr("src.services.llm.get_anthropic_client", lambda: fake)
+
+    retry_calls = []
+    out = await llm.generate_with_tools(
+        system_prompt="sys",
+        messages=[{"role": "user", "content": "hi"}],
+        tools=[],
+        tool_executor=_noop_executor,
+        max_tokens=1000,
+        on_retry=lambda: retry_calls.append(1),
+    )
+    assert out == "full answer"
+    assert retry_calls == []
+
+
+async def test_generate_with_tools_logs_loudly_when_final_branch_retry_still_truncates(
+    monkeypatch, caplog
+):
+    """Before this fix this branch already re-checked stop_reason but only
+    logged a bare token count via logger.warning — no model/agent/phase
+    context, and not loud enough for the one function phase-4 replies (the
+    interview itself) actually use (Finding B0)."""
+    fake = FakeAnthropic(
+        [
+            text_response("first truncated...", stop_reason="max_tokens"),
+            text_response("still truncated...", stop_reason="max_tokens"),
+        ]
+    )
+    monkeypatch.setattr("src.services.llm.get_anthropic_client", lambda: fake)
+
+    out = await llm.generate_with_tools(
+        system_prompt="sys",
+        messages=[{"role": "user", "content": "hi"}],
+        tools=[],
+        tool_executor=_noop_executor,
+        max_tokens=1000,
+        log_meta={"agent_id": "blackbird", "phase": "thread_reply"},
+    )
+
+    assert out == "still truncated..."  # best-available text, not swallowed
+    assert len(fake.calls) == 2  # one retry only — no second retry added
+    assert "still truncated after 2x max_tokens retry" in caplog.text
+    assert "agent=blackbird" in caplog.text
+    assert "phase=thread_reply" in caplog.text
+
+
+async def test_generate_with_tools_retries_once_after_exhausting_max_rounds(monkeypatch):
+    """The second, previously-inconsistent retry site: the max-tool-rounds
+    fallback that forces a final call once the loop never stops requesting
+    tools."""
+    fake = FakeAnthropic(
+        [
+            tool_use_response("search_pubmed", {}, block_id="1"),
+            tool_use_response("search_pubmed", {}, block_id="2"),
+            text_response("truncated...", stop_reason="max_tokens"),
+            text_response("full answer"),
+        ]
+    )
+    monkeypatch.setattr("src.services.llm.get_anthropic_client", lambda: fake)
+
+    out = await llm.generate_with_tools(
+        system_prompt="sys",
+        messages=[{"role": "user", "content": "hi"}],
+        tools=[{"name": "search_pubmed", "input_schema": {}}],
+        tool_executor=_noop_executor,
+        max_tokens=1000,
+        max_tool_rounds=1,
+    )
+    assert out == "full answer"
+    assert len(fake.calls) == 4  # 2 tool rounds + forced final + its retry
+    assert fake.calls[3]["max_tokens"] == 2000
+
+
+async def test_generate_with_tools_calls_on_retry_after_exhausting_max_rounds(monkeypatch):
+    fake = FakeAnthropic(
+        [
+            tool_use_response("search_pubmed", {}, block_id="1"),
+            tool_use_response("search_pubmed", {}, block_id="2"),
+            text_response("truncated...", stop_reason="max_tokens"),
+            text_response("full answer"),
+        ]
+    )
+    monkeypatch.setattr("src.services.llm.get_anthropic_client", lambda: fake)
+
+    retry_calls = []
+    out = await llm.generate_with_tools(
+        system_prompt="sys",
+        messages=[{"role": "user", "content": "hi"}],
+        tools=[{"name": "search_pubmed", "input_schema": {}}],
+        tool_executor=_noop_executor,
+        max_tokens=1000,
+        max_tool_rounds=1,
+        on_retry=lambda: retry_calls.append(1),
+    )
+    assert out == "full answer"
+    assert retry_calls == [1]
+
+
+async def test_generate_with_tools_logs_loudly_when_exhausted_rounds_retry_still_truncates(
+    monkeypatch, caplog
+):
+    """Before this fix, this retry site never re-checked stop_reason at all —
+    a still-truncated response here passed completely silently (Finding B0),
+    unlike the other retry site which at least logged a bare warning."""
+    fake = FakeAnthropic(
+        [
+            tool_use_response("search_pubmed", {}, block_id="1"),
+            tool_use_response("search_pubmed", {}, block_id="2"),
+            text_response("first truncated...", stop_reason="max_tokens"),
+            text_response("still truncated...", stop_reason="max_tokens"),
+        ]
+    )
+    monkeypatch.setattr("src.services.llm.get_anthropic_client", lambda: fake)
+
+    out = await llm.generate_with_tools(
+        system_prompt="sys",
+        messages=[{"role": "user", "content": "hi"}],
+        tools=[{"name": "search_pubmed", "input_schema": {}}],
+        tool_executor=_noop_executor,
+        max_tokens=1000,
+        max_tool_rounds=1,
+        log_meta={"agent_id": "blackbird", "phase": "thread_reply"},
+    )
+
+    assert out == "still truncated..."
+    assert len(fake.calls) == 4
+    assert "still truncated after 2x max_tokens retry" in caplog.text
+    assert "agent=blackbird" in caplog.text
+    assert "phase=thread_reply" in caplog.text
+
+
 async def test_make_decision_parses_json_from_response(monkeypatch):
     fake = FakeAnthropic(['{"action": "skip", "reasoning": "no fit"}'])
     monkeypatch.setattr("src.services.llm.get_anthropic_client", lambda: fake)

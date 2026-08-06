@@ -1363,6 +1363,7 @@ class SimulationEngine:
                     "phase": "thread_reply",
                     "channel": thread.channel,
                 },
+                on_retry=agent.record_api_call,
             )
 
             # Extract message from <slack_message> tags, fall back to preamble stripping
