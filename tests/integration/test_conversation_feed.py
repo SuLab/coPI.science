@@ -127,6 +127,55 @@ async def test_an_inactive_viewing_agent_still_resolves(db_session, monkeypatch)
     assert await resolve_agent_gate(db_session, "sleeper") == {"sleeper", "awake"}
 
 
+async def test_preflight_refusal_fails_open_loudly(db_session, monkeypatch, caplog):
+    """Under policy="isolated" with zero live memberships, compute_gates' preflight
+    forces isolation OFF for every agent (src/services/cohorts.py's roster-wide-
+    silence guard) — resolve_agent_gate must still return that `None` (this is
+    deliberate engine fail-open behaviour, not a bug to "fix" here), but it must
+    say so loudly: an admin can reach exactly this state with one click ("all /
+    none" on every column of /admin/cohorts/topology, then save), and before this
+    fix nothing — no log line, no banner — recorded that every PI's conversations
+    feed had gone fully ungated as a result."""
+    from src.config import get_settings
+    s = get_settings()
+    monkeypatch.setattr(s, "cohort_isolation_enabled", True, raising=False)
+    monkeypatch.setattr(s, "cohort_default_policy", "isolated", raising=False)
+
+    await factories.make_agent(db_session, agent_id="solo", bot_name="SoloBot")
+    # Deliberately zero cohorts/memberships — the roster-wide-silence state.
+
+    with caplog.at_level("WARNING"):
+        gate = await resolve_agent_gate(db_session, "solo")
+
+    assert gate is None, (
+        "the accepted fail-open behaviour: do not change this, only make it loud"
+    )
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert any("UNGATED" in r.getMessage() for r in warnings), (
+        f"expected a warning naming the preflight refusal and its consequence, "
+        f"got: {[r.getMessage() for r in warnings]}"
+    )
+    assert any("solo" in r.getMessage() for r in warnings)
+
+
+async def test_no_warning_when_gate_is_simply_off(db_session, monkeypatch, caplog):
+    """Control for the test above: isolation disabled is the ordinary, silent
+    gate-off path (§5.1's first row) — it must not trip the preflight-refusal
+    warning, or every request would log at WARNING and the signal would be
+    worthless."""
+    from src.config import get_settings
+    s = get_settings()
+    monkeypatch.setattr(s, "cohort_isolation_enabled", False, raising=False)
+
+    await factories.make_agent(db_session, agent_id="quiet", bot_name="QuietBot")
+
+    with caplog.at_level("WARNING"):
+        gate = await resolve_agent_gate(db_session, "quiet")
+
+    assert gate is None
+    assert not any("UNGATED" in r.getMessage() for r in caplog.records)
+
+
 async def test_a_spoke_pi_does_not_see_another_spokes_bot(
     client, db_session, monkeypatch
 ):
@@ -377,6 +426,89 @@ async def test_reply_count_excludes_out_of_cohort_replies(
     )
 
 
+async def test_a_reply_from_a_different_channel_sharing_a_thread_ts_is_excluded(
+    client, db_session, monkeypatch
+):
+    """Latent-bug regression (audit finding F4). `thread_ts` alone is not proof a
+    row belongs to a given root's conversation — only `uq_agent_messages_run_ts`
+    (message_ts unique per run) is guaranteed, and nothing enforces that a row's
+    `thread_ts` names a root in ITS OWN channel. Construct exactly the scenario
+    the finding describes: a `collab_private` row (which `gate_clause` passes
+    unconditionally, regardless of cohort) whose `thread_ts` happens to equal a
+    PUBLIC root's `message_ts`, but which lives in a different channel. Both the
+    reply count and the thread-expand endpoint must exclude it — it is not a
+    reply to this root, it only shares its thread_ts by coincidence.
+
+    This state is not currently producible by any real writer (prod has zero
+    `collab_private` rows), so the row is constructed directly rather than
+    produced by the app — the point is to pin the read-side defense structurally,
+    since nothing else in the system rules the coincidence out.
+    """
+    import src.routers.agent_page as agent_page_module
+    from src.config import get_settings
+    s = get_settings()
+    monkeypatch.setattr(s, "cohort_isolation_enabled", True, raising=False)
+    monkeypatch.setattr(s, "cohort_default_policy", "isolated", raising=False)
+
+    pi = await factories.make_user(
+        db_session, name="Channel Bound PI", email="chanbound@example.org"
+    )
+    await factories.make_agent(
+        db_session, user=pi, agent_id="channelbound", bot_name="ChannelBoundBot",
+        pi_name="Channel Bound PI",
+    )
+    await factories.make_agent(db_session, agent_id="outsider2", bot_name="Outsider2Bot")
+    # "channelbound" gets a cohort of its own (not shared with "outsider2") so
+    # resolve_agent_gate returns a REAL, non-None set — the only reason
+    # outsider2's row can pass the gate below is the unconditional
+    # collab_private bypass, not a preflight refusal leaving everything open.
+    await _cohort(db_session, "channelbound-solo", "channelbound")
+
+    run = await factories.make_simulation_run(db_session)
+    common = dict(run=run, channel_id="C1", visibility="public")
+    await factories.make_agent_message(
+        db_session, agent_id="channelbound", message_ts="15.0001", phase="new_post",
+        channel_name="general", content="REAL-ROOT", sender_name="ChannelBoundBot",
+        **common,
+    )
+    await factories.make_agent_message(
+        db_session, agent_id="outsider2", message_ts="15.0002", thread_ts="15.0001",
+        phase="thread_reply", channel_name="priv-elsewhere",
+        content="WRONG-CHANNEL-COLLAB-PRIVATE-REPLY", sender_name="Outsider2Bot",
+        run=run, channel_id="C2", visibility="collab_private",
+    )
+    await db_session.commit()
+
+    assert await resolve_agent_gate(db_session, "channelbound") == {"channelbound"}, (
+        "this test targets a REAL, non-None gate — if the gate were off, the "
+        "collab_private bypass this test targets would never be exercised"
+    )
+
+    captured: dict = {}
+    original_response = agent_page_module.templates.TemplateResponse
+
+    def _capture(request, name, context, *args, **kwargs):
+        captured["messages"] = context.get("messages")
+        return original_response(request, name, context, *args, **kwargs)
+
+    monkeypatch.setattr(agent_page_module.templates, "TemplateResponse", _capture)
+
+    page = await client.get("/agent/channelbound/conversations", headers=_auth(pi.id))
+    assert page.status_code == 200
+    roots_by_content = {m["content"]: m for m in captured["messages"]}
+    assert roots_by_content["REAL-ROOT"]["reply_count"] == 0, (
+        "a row in a DIFFERENT channel must not count toward this root's replies "
+        "merely because thread_ts coincides with the root's message_ts"
+    )
+
+    r = await client.get("/agent/channelbound/thread/15.0001", headers=_auth(pi.id))
+    assert r.status_code == 200
+    assert "WRONG-CHANNEL-COLLAB-PRIVATE-REPLY" not in r.text, (
+        "the thread-expand endpoint must not render a different channel's row "
+        "just because it shares the root's thread_ts"
+    )
+
+
 async def test_replies_are_not_listed_as_top_level_rows(
     client, db_session, monkeypatch
 ):
@@ -530,6 +662,67 @@ async def test_expanding_an_out_of_cohort_root_is_404(client, db_session, monkey
     r = await client.get("/agent/spoke1/thread/9.0003", headers=_auth(pi1.id))
     assert r.status_code == 404
     assert "FOREIGN-ROOT" not in r.text
+
+
+async def test_expanding_a_root_from_a_channel_the_viewer_never_posted_in_is_404(
+    client, db_session, monkeypatch
+):
+    """Authorization check #3 of the four in ``agent_thread_replies``'s
+    docstring (``agent_page.py:870-874``): the root's channel must be in the
+    VIEWER's own channel set (``_visible_channels`` — channels this agent has
+    authored in, plus ``#general``), not merely pass the cohort gate.
+
+    Every other test in this module uses ``channel_name="general"``, which
+    ``_visible_channels`` adds unconditionally regardless of what the agent has
+    posted — so ``AgentMessage.channel_name.in_(channels)`` at
+    ``agent_page.py:907`` is a tautology everywhere else in this file and its
+    absence would not be caught. This test puts a cohort-mate's root in a
+    channel the viewer's own agent (``spoke1``) has never authored in
+    (``secret-room``, not ``general``) so the root passes ``gate_clause`` (the
+    author, ``hub``, shares a cohort with ``spoke1``) but must still 404 on the
+    channel-membership check alone.
+
+    Hand-verified: deleting the ``AgentMessage.channel_name.in_(channels)``
+    line from the root query in ``agent_thread_replies`` turns this test RED
+    (200 instead of 404); restoring it turns it GREEN. See
+    final-fix-report.md for the transcript.
+    """
+    from src.config import get_settings
+    s = get_settings()
+    monkeypatch.setattr(s, "cohort_isolation_enabled", True, raising=False)
+    monkeypatch.setattr(s, "cohort_default_policy", "isolated", raising=False)
+
+    pi1 = await factories.make_user(db_session, name="Chan One", email="chan1@example.org")
+    await factories.make_agent(
+        db_session, user=pi1, agent_id="spoke1", bot_name="Spoke1Bot", pi_name="Chan One"
+    )
+    await factories.make_agent(db_session, agent_id="hub", bot_name="HubBot")
+    await _cohort(db_session, "pair1", "spoke1", "hub")
+
+    run = await factories.make_simulation_run(db_session)
+    # hub's root lives in a channel spoke1 has never authored in — NOT "general",
+    # which _visible_channels would add regardless of authorship.
+    await factories.make_agent_message(
+        db_session, run=run, agent_id="hub", message_ts="14.0001", phase="new_post",
+        content="HUB-OTHER-CHANNEL-ROOT", sender_name="HubBot",
+        channel_name="secret-room", channel_id="C-SECRET", visibility="public",
+    )
+    await db_session.commit()
+
+    from src.services.conversation_feed import resolve_agent_gate
+    gate = await resolve_agent_gate(db_session, "spoke1")
+    assert gate == {"spoke1", "hub"}, (
+        "this test targets the case where the root PASSES the gate — if the gate "
+        "itself refused, the 404 below would prove nothing about the channel check"
+    )
+
+    r = await client.get("/agent/spoke1/thread/14.0001", headers=_auth(pi1.id))
+    assert r.status_code == 404, (
+        "a gate-passing root in a channel the viewer never authored in must still "
+        "404 — the channel-membership check is a separate authorization axis, not "
+        "implied by the cohort gate"
+    )
+    assert "HUB-OTHER-CHANNEL-ROOT" not in r.text
 
 
 async def test_expanding_a_reply_ts_rather_than_a_root_is_404(
