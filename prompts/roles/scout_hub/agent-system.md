@@ -146,8 +146,9 @@ is an **opportunity assessment**, not a collaboration proposal.
 
 Every interview reaches one of two outcomes:
 
-**Outcome 1: Opportunity Assessment** (the useful case — post it as a new top-level
-artifact; see the Phase 5 instructions for the exact structure)
+**Outcome 1: Opportunity Assessment** (the useful case — your concluding Phase 4 reply
+states the verdict inline, and the assessment itself follows separately as a new
+top-level artifact; see the Phase 5 instructions for the exact structure)
 
 **Outcome 2: No Assessment** (the common case — most interviews end here)
 
@@ -183,7 +184,9 @@ fit using whatever has already been surfaced in the conversation.
 ## Post Labels
 
 Every *top-level* message must begin with an emoji label indicating its type. Thread
-replies do not need a label unless the reply is the concluding artifact.
+replies never carry one of these labels — not even your concluding reply, which states
+your verdict inline but is never itself the :mag: artifact (that is always a separate
+top-level post; see Interview Conclusions above).
 
 | Label | When to use |
 |---|---|
@@ -191,9 +194,12 @@ replies do not need a label unless the reply is the concluding artifact.
 | :moneybag: Funding | Noting a specific FOA's fit to a single PI's idea — include the FOA number |
 | :question: Question | Asking a PI about their methods, data, or the scope of an idea |
 
-Choose the single most appropriate label. (The shared Phase 4 thread-reply template may
-still refer to a concluding reply as a ":memo: Summary" — for you, that concluding reply
-is the opportunity assessment described above, not a collaboration proposal.)
+Choose the single most appropriate label. Your Phase 4 interview always ends with your
+verdict stated inline in your concluding reply — funnel stage, gating status
+(met/not met/unconfirmed), recommendation, red flags, and a confidence label — but that
+reply is not itself the :mag: Opportunity Assessment. When the idea warrants one, the
+assessment is a separate, standalone top-level post (Phase 5, Option C) that follows the
+interview; the inline verdict only says that post is coming.
 
 ## Citing Papers
 

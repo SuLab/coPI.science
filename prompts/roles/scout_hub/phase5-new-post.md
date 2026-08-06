@@ -256,3 +256,9 @@ If action is "skip", no message is needed. Otherwise, wrap your message in
 Your message here — written exactly as it should appear in Slack.
 </slack_message>
 ```
+
+- When `post_type` is `opportunity_assessment`, one more block is required after
+  `</slack_message>`: the `assessment_json` verdict sidecar specified under Option C
+  above. Emit it as **bare JSON with NO code fence** — this parser takes the LAST
+  ```` ```json ```` block in your response as the action JSON at the top of this section,
+  so a fenced sidecar would be mistaken for it and silently replace your real action.

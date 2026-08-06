@@ -92,8 +92,8 @@ _SCOUT_HUB = {
     CONCLUDE: (
         "This is message 12 — you MUST conclude the interview now. Do NOT propose a "
         "collaboration; you are not a party to the science. Close with your verdict stated "
-        "inline so nothing is lost: the funnel stage, which gating criteria are met versus "
-        "unconfirmed, your recommendation (advance / conditional / pass / "
+        "inline so nothing is lost: the funnel stage, which gating criteria are met, not "
+        "met, or unconfirmed, your recommendation (advance / conditional / pass / "
         "route-to-incubation), the red flags you saw, and a confidence label. If the idea "
         "warrants a standalone :mag: Opportunity Assessment, say that it will follow as its "
         "own post. If it does not, start your reply with ⏸️ and say specifically what would "
