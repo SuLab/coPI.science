@@ -10,7 +10,6 @@ Usage:
 import asyncio
 import logging
 import signal
-import sys
 from datetime import datetime, timezone
 
 import typer

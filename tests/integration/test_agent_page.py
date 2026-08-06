@@ -117,6 +117,24 @@ def slack(monkeypatch) -> _SlackRecorder:
 
 
 @pytest.fixture(autouse=True)
+def _slack_enabled_auto_detect(monkeypatch):
+    """Hermetic default for the Slack on/off tri-state (src/services/slack_tokens.py
+    and src/services/private_channels.py's ``_slack_enabled_for_migration``): unset
+    (auto-detect from token presence) rather than whatever ``SLACK_ENABLED`` the
+    deployed .env on this host forces.
+
+    Without this, a populated .env with SLACK_ENABLED=true forces the real-Slack
+    branch of `reopen_proposal` even for `world`'s fictitious agents (`tstowner`,
+    `tstother`), which have no token anywhere — `migrate_public_thread_to_private`
+    then 500s on "No valid Slack bot token". Auto-detect is this suite's actual
+    premise: a test that wants Slack ON gives its own agent a token (e.g.
+    ``world.agent.slack_bot_token = "xoxb-fake-for-tests"``), which is what
+    auto-detect keys on either way.
+    """
+    monkeypatch.setattr(get_settings(), "slack_enabled", None)
+
+
+@pytest.fixture(autouse=True)
 def sent_emails(monkeypatch) -> list[dict]:
     """Recording double for the SES leg (the plan's email seam: record, never send)."""
     sent: list[dict] = []

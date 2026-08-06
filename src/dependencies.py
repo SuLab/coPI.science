@@ -1,14 +1,12 @@
 """FastAPI dependencies for auth and DB access."""
 
-import uuid
 import logging
-from typing import Annotated
+import uuid
 from urllib.parse import quote
 
-from fastapi import Cookie, Depends, HTTPException, Request, status
+from fastapi import Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-
 from sqlalchemy.orm import selectinload
 
 from src.database import get_db

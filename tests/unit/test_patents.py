@@ -175,7 +175,7 @@ async def test_query_ands_title_tokens(monkeypatch):
     assert captured["q"] == "applicationMetaData.inventionTitle:(CRISPR AND base AND editing)"
 
 
-from src.agent.tools import _execute_search_prior_art, TOOL_DEFINITIONS  # noqa: E402
+from src.agent.tools import TOOL_DEFINITIONS, _execute_search_prior_art  # noqa: E402
 
 CAVEAT_MARK = "US filings only"
 

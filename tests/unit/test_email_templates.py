@@ -70,51 +70,72 @@ def test_welcome_email_uses_shared_footer():
 
 def test_delegate_invitation_uses_shared_branding(monkeypatch):
     """Transactional invite shares the wrapper + tagline but has no unsubscribe."""
-    captured = {}
+    from src.config import get_settings
 
-    class _FakeSES:
-        def send_email(self, **kwargs):
-            captured["html"] = kwargs["Message"]["Body"]["Html"]["Data"]
+    # Hermetic: the test's premise is an unrestricted recipient allowlist (the
+    # field's own default, "" = send to everyone). Pin it rather than inherit
+    # whatever OUTBOUND_EMAIL_ALLOWLIST the deployed .env on this host sets —
+    # otherwise send_delegate_invitation silently no-ops and returns False.
+    monkeypatch.setenv("OUTBOUND_EMAIL_ALLOWLIST", "")
+    get_settings.cache_clear()
+    try:
+        captured = {}
 
-    import boto3
+        class _FakeSES:
+            def send_email(self, **kwargs):
+                captured["html"] = kwargs["Message"]["Body"]["Html"]["Data"]
 
-    monkeypatch.setattr(boto3, "client", lambda *a, **k: _FakeSES())
+        import boto3
 
-    assert send_delegate_invitation(
-        "colleague@example.com", "Dr. PI", "PIBot", "https://copi.science/invite/abc"
-    )
-    html = captured["html"]
-    assert html.lstrip().startswith('<div style="font-family')
-    assert FOOTER_TAGLINE in html
-    assert "Unsubscribe" not in html
+        monkeypatch.setattr(boto3, "client", lambda *a, **k: _FakeSES())
+
+        assert send_delegate_invitation(
+            "colleague@example.com", "Dr. PI", "PIBot", "https://copi.science/invite/abc"
+        )
+        html = captured["html"]
+        assert html.lstrip().startswith('<div style="font-family')
+        assert FOOTER_TAGLINE in html
+        assert "Unsubscribe" not in html
+    finally:
+        get_settings.cache_clear()
 
 
 def test_delegate_invitation_escapes_untrusted_names(monkeypatch):
     """PI-chosen pi_name/bot_name must be HTML-escaped in the invite body (SEC-13)."""
-    captured = {}
+    from src.config import get_settings
 
-    class _FakeSES:
-        def send_email(self, **kwargs):
-            captured["html"] = kwargs["Message"]["Body"]["Html"]["Data"]
-            captured["subject"] = kwargs["Message"]["Subject"]["Data"]
+    # Hermetic for the same reason as the branding test above: pin the allowlist
+    # to its default so this test's arbitrary example.com recipient is accepted
+    # regardless of the deployed .env's OUTBOUND_EMAIL_ALLOWLIST.
+    monkeypatch.setenv("OUTBOUND_EMAIL_ALLOWLIST", "")
+    get_settings.cache_clear()
+    try:
+        captured = {}
 
-    import boto3
+        class _FakeSES:
+            def send_email(self, **kwargs):
+                captured["html"] = kwargs["Message"]["Body"]["Html"]["Data"]
+                captured["subject"] = kwargs["Message"]["Subject"]["Data"]
 
-    monkeypatch.setattr(boto3, "client", lambda *a, **k: _FakeSES())
+        import boto3
 
-    assert send_delegate_invitation(
-        "colleague@example.com",
-        '<img src=x onerror=alert(1)>',
-        '<script>alert(2)</script>',
-        "https://copi.science/invite/abc",
-    )
-    html = captured["html"]
-    assert "<img src=x onerror=alert(1)>" not in html
-    assert "<script>alert(2)</script>" not in html
-    assert "&lt;img src=x onerror=alert(1)&gt;" in html
-    assert "&lt;script&gt;alert(2)&lt;/script&gt;" in html
-    # Subject is plain text (not HTML), but must not carry injected newlines.
-    assert "\n" not in captured["subject"] and "\r" not in captured["subject"]
+        monkeypatch.setattr(boto3, "client", lambda *a, **k: _FakeSES())
+
+        assert send_delegate_invitation(
+            "colleague@example.com",
+            '<img src=x onerror=alert(1)>',
+            '<script>alert(2)</script>',
+            "https://copi.science/invite/abc",
+        )
+        html = captured["html"]
+        assert "<img src=x onerror=alert(1)>" not in html
+        assert "<script>alert(2)</script>" not in html
+        assert "&lt;img src=x onerror=alert(1)&gt;" in html
+        assert "&lt;script&gt;alert(2)&lt;/script&gt;" in html
+        # Subject is plain text (not HTML), but must not carry injected newlines.
+        assert "\n" not in captured["subject"] and "\r" not in captured["subject"]
+    finally:
+        get_settings.cache_clear()
 
 
 @pytest.mark.asyncio

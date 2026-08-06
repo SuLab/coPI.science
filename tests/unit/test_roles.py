@@ -1,5 +1,4 @@
 import logging
-from pathlib import Path
 
 from src.agent import roles
 from src.agent.roles import DEFAULT_TOOLS, RoleSpec, load_role
@@ -93,7 +92,7 @@ def test_malformed_toml_falls_back_to_defaults(tmp_path, monkeypatch, caplog):
 # override on disk.
 # ----------------------------------------------------------------------
 
-from src.agent.roles import load_role as _load_role_real  # no monkeypatch
+from src.agent.roles import load_role as _load_role_real  # noqa: E402 (see above)
 
 
 def test_scout_hub_ships_with_the_hub_tool_set():

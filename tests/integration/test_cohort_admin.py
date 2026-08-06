@@ -157,7 +157,12 @@ async def test_cohort_pages_require_admin(client, db_session):
 # --- list + create ---------------------------------------------------------
 
 
-async def test_list_renders_with_no_cohorts(client, admin):
+async def test_list_renders_with_no_cohorts(client, admin, monkeypatch):
+    # Hermetic: the banner's "OFF" premise is cohort_isolation_enabled at its
+    # default (False). Pin it rather than inherit whatever the deployed .env on
+    # this host sets (COHORT_ISOLATION_ENABLED=true) — get_settings() is a
+    # process-wide lru_cache, so patch the cached instance's attribute directly.
+    monkeypatch.setattr(get_settings(), "cohort_isolation_enabled", False)
     r = await client.get("/admin/cohorts", headers=_auth(admin.id))
     assert r.status_code == 200
     assert "No cohorts yet" in r.text
@@ -536,6 +541,11 @@ async def test_preview_matches_the_engine_semantics(
 ):
     """The admin preview must be computed by the same function the engine uses."""
     from src.services.cohorts import compute_gates
+
+    # Hermetic: "isolation off (the default)" is this test's stated premise. Pin
+    # it — see test_list_renders_with_no_cohorts for why ambient .env cannot be
+    # trusted here.
+    monkeypatch.setattr(get_settings(), "cohort_isolation_enabled", False)
 
     a = await _cohort(db_session, "alpha", admin, members=["su", "wiseman"])
     rows = [(a.id, "su"), (a.id, "wiseman")]
