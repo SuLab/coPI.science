@@ -22,7 +22,10 @@ Two failure modes matter enough to call out explicitly:
 
 from __future__ import annotations
 
+import logging
 import math
+
+logger = logging.getLogger(__name__)
 
 # Percentage weights, exactly as tabulated in Part C.3. Sums to 100.
 RUBRIC_WEIGHTS: dict[str, int] = {
@@ -45,6 +48,20 @@ _TOTAL_WEIGHT = sum(RUBRIC_WEIGHTS.values())
 # weighted_score() can be checked against them. Keep in sync with band().
 _BAND_THRESHOLDS = (3.0, 4.0)
 
+# _round_for_band's up-only correction (see its docstring) relies on every
+# threshold sitting exactly on the 0.01 display grid: round(raw, 2) moves a
+# value by less than half a grid step, which can never carry it past a
+# grid-aligned point in the direction away from ``raw`` — only toward it. If a
+# future threshold ever lands off-grid that guarantee breaks silently instead
+# of loudly, so assert it here rather than leave a dead "the other direction"
+# branch in _round_for_band to cover a case that can only arise if this
+# assertion has already started failing.
+assert all(round(t, 2) == t for t in _BAND_THRESHOLDS), (
+    "_BAND_THRESHOLDS must sit on the 0.01 grid — _round_for_band's "
+    "correction only handles rounding crossing a threshold upward; see its "
+    "docstring"
+)
+
 
 def weighted_score(scores: dict[str, object] | None) -> float:
     """Weighted mean of the nine dimensions, on the same 1-5 scale.
@@ -53,12 +70,24 @@ def weighted_score(scores: dict[str, object] | None) -> float:
     -inf) counts as 0 — an unscored dimension must drag the total down, never
     be quietly excluded from the denominator, or a verdict that skipped its
     weakest dimensions would outscore one that answered honestly.
+
+    Keys are matched case- and whitespace-insensitively: a verdict spelling a
+    dimension ``"Differentiation"`` instead of ``"differentiation"`` must
+    still hit its rubric weight rather than being silently treated as missing
+    (and thus scored 0) purely because of casing (Finding A5).
     """
     if not scores:
         return 0.0
+    # Normalize once. If two differently-cased keys collapse to the same
+    # canonical name (e.g. both "team" and "Team" present), the later one in
+    # iteration order wins — an unlikely input, but a deterministic pick beats
+    # an arbitrary dict-merge accident.
+    normalized = {
+        key.strip().lower(): value for key, value in scores.items() if isinstance(key, str)
+    }
     total = 0.0
     for key, weight in RUBRIC_WEIGHTS.items():
-        raw = scores.get(key)
+        raw = normalized.get(key)
         if isinstance(raw, bool) or not isinstance(raw, (int, float)):
             continue
         value = float(raw)
@@ -70,6 +99,17 @@ def weighted_score(scores: dict[str, object] | None) -> float:
             # and silently produce a perfect 5.0.
             continue
         total += max(_MIN_SCORE, min(_MAX_SCORE, value)) * weight
+
+    unmatched = sorted(set(normalized) - RUBRIC_WEIGHTS.keys())
+    if unmatched:
+        # Diagnosable, not fatal: each unmatched key already counts as 0 via
+        # the .get(key) miss above (or was never a rubric key to begin with).
+        # This just makes a malformed/misspelled verdict findable instead of
+        # a silently low score.
+        logger.warning(
+            "weighted_score: verdict has key(s) not in the nine rubric "
+            "dimensions, scored as unset: %s", unmatched,
+        )
     return _round_for_band(total / _TOTAL_WEIGHT)
 
 
@@ -84,13 +124,19 @@ def _round_for_band(raw: float) -> float:
     the other side of a threshold from where the true value sits, round
     toward the true value's side instead — still to 2dp, just not to the
     nearest one.
+
+    Only one direction is handled: naive rounding pushing ``raw`` UP across a
+    threshold it was truly below (the floor correction). The opposite
+    correction (``raw`` truly at/above a threshold, naive rounding pushing it
+    below) can only happen if a threshold is off the 0.01 grid — asserted
+    impossible at module load, above — so it is not implemented here; adding
+    an unreachable branch "just in case" would be dead code with no test able
+    to prove it correct.
     """
     rounded = round(raw, 2)
     for threshold in _BAND_THRESHOLDS:
         if raw < threshold <= rounded:
             return round(math.floor(raw * 100) / 100, 2)
-        if rounded < threshold <= raw:
-            return round(math.ceil(raw * 100) / 100, 2)
     return rounded
 
 

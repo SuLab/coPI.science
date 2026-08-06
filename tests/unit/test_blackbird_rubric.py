@@ -90,6 +90,32 @@ def test_display_rounding_cannot_flip_the_band_across_a_threshold():
     assert band(score) == "conditional"
 
 
+def test_case_and_whitespace_variant_keys_still_match_their_dimension():
+    # Finding A5: a key differing only in case (or padded with stray
+    # whitespace) must still hit its rubric weight, not be silently treated
+    # as missing (and thus scored 0) purely because of spelling.
+    scores = {
+        "Differentiation": 4, "market_unmet_need": 4, "TEAM": 4,
+        " external_signals ": 1, "Ip_Fto": 2, "platform": 3,
+        "dev_regulatory_feasibility": 3, "workplan_capital_efficiency": 3,
+        "exit_thesis": 2,
+    }
+    # Same hand-computed total as test_a_real_verdict_scores_as_hand_computed.
+    assert weighted_score(scores) == 3.05
+
+
+def test_unrecognized_key_is_logged_and_still_scores_as_zero(caplog):
+    # A typo'd or made-up key must count as 0 (it can never match a rubric
+    # dimension) but should be diagnosable — not just a mysteriously low
+    # score with nothing pointing at why.
+    scores = dict.fromkeys(RUBRIC_WEIGHTS, 5)
+    scores["differentiaton"] = 1  # typo — shadows nothing, "differentiation" is still 5
+    score = weighted_score(scores)
+    assert score == 5.0  # the typo'd key never touched a real dimension
+    assert "differentiaton" in caplog.text
+    assert "not in the nine" in caplog.text
+
+
 def test_bool_dimension_values_count_as_zero_not_as_one_or_zero():
     # isinstance(True, int) is True in Python, so without an explicit bool
     # guard a True score would be silently accepted as 1 (and False as 0,
