@@ -13,7 +13,6 @@ from src.models.agent_activity import VISIBILITY_COLLAB_PRIVATE, VISIBILITY_PUBL
 logger = logging.getLogger(__name__)
 
 PROFILES_DIR = Path("profiles")
-PROMPTS_DIR = Path("prompts")
 
 # Matches a bare DOI. The character class deliberately excludes the delimiters
 # that wrap DOIs in Slack posts (whitespace, quotes, angle brackets from
@@ -379,8 +378,8 @@ Use these to reference other labs' work in conversations. Include links when cit
     def build_phase2_prune_prompt(self) -> tuple[str, list[dict]]:
         """Build system + messages for Phase 2 prune."""
         system_prompt = self.build_scan_system_prompt()
-        prune_template = self._load_file(
-            PROMPTS_DIR / "phase2-prune.md",
+        prune_template = self._load_prompt(
+            "phase2-prune.md",
             "Prune interesting_posts to ≤20. Return JSON with keep_post_ids.",
         )
 
