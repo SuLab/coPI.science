@@ -83,6 +83,10 @@ class PIHandler:
                 max_tokens=200,
                 log_meta={"agent_id": "pi_handler", "phase": "dm_classify"},
             )
+            # Deliberately NOT recorded against any Agent: this row is logged
+            # under the synthetic agent_id "pi_handler", so the restart rebuild
+            # attributes it to nobody. Counting it live would make the in-process
+            # ledger disagree with the rebuilt one in the other direction.
             return self._parse_json(response)
         except Exception as exc:
             logger.warning("DM classification failed: %s", exc)
@@ -113,6 +117,13 @@ class PIHandler:
                 max_tokens=2000,
                 log_meta={"agent_id": agent_id, "phase": "profile_rewrite"},
             )
+            # This call is logged to llm_call_logs under a REAL agent_id, so the
+            # restart rebuild (simulation step 4/4b) will attribute it to this
+            # agent. Recording it here is what keeps the live counters and the
+            # rebuilt ones consistent — without it, a PI DM burst is invisible to
+            # the rate limiter now and throttles the agent from turn 0 after a
+            # restart. See Agent.record_api_call.
+            agent.record_api_call()
 
             # Parse profile and changes from response
             profile_match = re.search(r"<profile>(.*?)</profile>", response, re.DOTALL)
@@ -203,6 +214,9 @@ class PIHandler:
                 max_tokens=800,
                 log_meta={"agent_id": agent_id, "phase": "pi_question"},
             )
+            # Logged under a real agent_id -> counted by the restart rebuild, so
+            # it must be counted live too. See _handle_standing_instruction.
+            agent.record_api_call()
             await self._send_dm(agent_id, pi_slack_id, response.strip())
         except Exception as exc:
             logger.error("[%s] Failed to answer PI question: %s", agent_id, exc)

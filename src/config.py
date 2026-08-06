@@ -350,8 +350,14 @@ class Settings(BaseSettings):
     #
     # Calibrated against run 4f1e8395: a spoke ran ~0.27 calls/10min and the hub
     # ~2.6, so 8 leaves a spoke ~30x headroom while tripping a runaway (back-to-back
-    # calls) in ~25s. A hub at load 12 gets 96/window and trips in ~5min — the
-    # deliberate price of the 12x allowance. Lower this to tighten it.
+    # calls) in ~25s. Lower this to tighten it.
+    #
+    # The hub's ceiling depends on active_thread_threshold, which _agent_load
+    # clamps to. At the IN-CODE default of 3 a hub gets at most 3 * 8 = 24 calls
+    # per window (and 3x the selection weight of an idle spoke). The deployed
+    # blackbird .env raises active_thread_threshold to 12, which is where the
+    # often-quoted 96/window and 12x weight come from — a fresh checkout gets
+    # neither. Raise active_thread_threshold, not this number, to widen a hub.
     # See docs/specs/2026-08-06-hub-budget-scheduler-design.md §4.2 / §5.
     llm_rate_window_seconds: int = 600
     llm_calls_per_load_per_window: int = 8
@@ -427,6 +433,37 @@ class Settings(BaseSettings):
     def audit_recipient_list(self) -> list[str]:
         """Daily-audit recipients, parsed from the comma-separated setting."""
         return [e.strip() for e in self.audit_recipients.split(",") if e.strip()]
+
+    @model_validator(mode="after")
+    def _guard_rate_limiter_settings(self) -> "Settings":
+        """Clamp non-positive rate-limiter settings back to their defaults.
+
+        Both fields are divisors of behaviour, not knobs with a meaningful zero:
+
+        - ``llm_calls_per_load_per_window`` <= 0 makes ``len(times) < allowance``
+          false for every agent forever, so nobody is ever eligible. The engine no
+          longer exits on that (it backs off and retries), which means a typo'd
+          ``0`` buys a silent, permanently idle run;
+        - ``llm_rate_window_seconds`` <= 0 collapses the window to a point, so
+          every recorded call is expired and the limiter never fires at all.
+
+        Clamping rather than raising matches ``roles.py``'s treatment of the
+        per-role override (warn, fall back) and keeps a bad value from taking the
+        whole deployment down. The WARNING names the setting so the cause is
+        greppable — the failure mode this guards against is otherwise invisible.
+        """
+        for name in ("llm_calls_per_load_per_window", "llm_rate_window_seconds"):
+            value = getattr(self, name)
+            if value <= 0:
+                fallback = type(self).model_fields[name].default
+                logger.warning(
+                    "%s must be a positive int, got %r — falling back to %r. "
+                    "The LLM rate limiter would otherwise never let any agent "
+                    "take a turn.",
+                    name.upper(), value, fallback,
+                )
+                setattr(self, name, fallback)
+        return self
 
     def get_slack_tokens(self) -> dict[str, str]:
         """Return slack bot tokens keyed by agent_id."""
