@@ -293,3 +293,23 @@ class TestScheduler:
         hub.record_api_call(now=now)
         for _ in range(50):
             assert eng._select_agent().agent_id == "spoke"
+
+
+class TestBudgetDeprecation:
+    def test_default_budget_is_off(self):
+        """The default must be 0 (off). A nonzero default is what silently armed
+        the legacy cap on every run."""
+        import inspect
+
+        from src.agent.main import main
+
+        default = inspect.signature(main).parameters["budget"].default
+        assert default.default == 0
+
+    def test_help_text_marks_the_flag_deprecated(self):
+        import inspect
+
+        from src.agent.main import main
+
+        help_text = inspect.signature(main).parameters["budget"].default.help
+        assert "DEPRECATED" in help_text
