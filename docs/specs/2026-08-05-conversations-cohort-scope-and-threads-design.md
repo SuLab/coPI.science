@@ -72,7 +72,8 @@ the codebase.
 
 - **Gate rule:** the page mirrors the engine's `_entry_allowed`
   (`src/agent/message_log.py:48-80`) **exactly**, including both documented
-  bypasses — humans always pass, `collab_private` always passes.
+  bypasses — humans always pass, `collab_private` always passes. One narrow,
+  deliberate exception ships on top of this mirror — see §4.3.
 - **Thread fetch:** roots only on first paint, replies loaded **on click** from a
   new endpoint.
 - **Thread gating:** replies **are** gated, and the reply count is computed with the
@@ -166,6 +167,44 @@ The `is_bot` keying (rather than `agent_id is None`) and the NULL-`agent_id`
 fail-closed branch are both carried over from `_entry_allowed`'s docstring, which
 records why each exists: `agent_messages.agent_id` is nullable, so a bot-authored
 row with a NULL `agent_id` would otherwise pass through the human bypass.
+
+### 4.3 `own_or_gated` — the one deliberate divergence from `_entry_allowed`
+
+Shipped alongside `gate_clause` in `src/services/conversation_feed.py` but not
+enumerated in §4.2's mirror above (an audit gap — this subsection is the fix):
+
+```python
+def own_or_gated(gate: set[str] | None, agent_id: str) -> ColumnElement[bool]:
+    return or_(gate_clause(gate), AgentMessage.agent_id == agent_id)
+```
+
+`gate_clause` alone is not quite what every call site needs. Under
+`policy="isolated"`, an agent that is active but not yet placed in any cohort
+gets `gate == set()` (§4.1, `resolve_agent_gate`/`compute_gates`), and
+`gate_clause(set())` — correctly, per `_entry_allowed` — admits nothing from the
+membership branch. That is exactly right for the *engine*: an uncohorted agent
+should not act on anyone. It is wrong for the *PI's own page*: onboarding
+activates an agent before an admin has assigned it to a cohort (see
+`CLAUDE.md`'s Provision → Approve & Activate order), so a strict `gate_clause`
+mirror would blank a PI's conversations feed the moment their bot goes live,
+before anyone had a chance to misconfigure anything.
+
+`own_or_gated` widens `gate_clause` with an explicit own-post carve-out: the
+viewing agent's own rows always render, regardless of gate. This is safe
+because the OR's second arm is keyed on `agent_id == agent_id` — the *viewing*
+agent's own id, fixed by the route's own authorization
+(`get_agent_with_access`), not attacker input — so it can only ever admit rows
+this exact agent authored, never another agent's. It cannot be used to read
+anyone else's traffic.
+
+Three call sites share one `own_or_gated(gate, aid)` expression rather than
+three independently-written clauses, specifically so they cannot drift apart:
+the conversations feed's roots query, its reply-count query, and the
+thread-expand endpoint's root re-resolution and reply fetch (§5.1, §5.2).
+
+Covered by `test_an_uncohorted_agent_still_sees_its_own_posts` and
+`test_expanding_an_uncohorted_own_thread_is_200_not_404`
+(`tests/integration/test_conversation_feed.py`).
 
 ## 5. Data flow
 

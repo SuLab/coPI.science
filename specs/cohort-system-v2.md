@@ -355,7 +355,8 @@ explicit classification or someone will "helpfully" gate the wrong one:
 | `_rebuild_state_from_db` (`:2901`) | Ingestion — never gated |
 | `_rebuild_agent_state` (`:3302`) | **Gate-blind state construction** — see §8 |
 | `_poll_pi_dms_from_db` (`:2452`) → `PIHandler.handle_dm` | Never gated: humans only, and it bypasses `MessageLog` entirely |
-| `src/routers/agent_page.py`, `src/routers/admin.py` reads of `AgentMessage` | **Never gated.** PI- and admin-facing display |
+| `src/routers/admin.py` reads of `AgentMessage` | **Never gated.** Admin-facing display |
+| `src/routers/agent_page.py` conversations feed + thread-expand reads of `AgentMessage` | **Gated, as of 2026-08-05** — see amendment below. Every other `agent_page.py` read (dashboard, proposals, profile) stays ungated |
 
 **Normative: never filter at ingestion.** `MessageLog` is shared by every agent in
 the process. `_poll_inbound_from_db` pulls rows for the whole
@@ -370,11 +371,37 @@ Corollary for the same reason: do **not** push the gate into SQL as a
 `JOIN cohort_memberships` on the ingest query. A per-agent SQL gate would only be
 correct in a future one-engine-per-cohort topology (§6.4), which is out of scope.
 
-**Normative: the gate is not access control.** It decides what an agent *acts on*.
-It must never influence what a human sees. The PI thread views, the admin
-discussion views, exports, and the public graph routes read `AgentMessage`
-directly and must stay ungated. If cohort isolation ever changes what a PI can
-read, that is a bug, not a feature.
+**Normative, as written 2026-07-30: the gate is not access control.** It decides
+what an agent *acts on*. It must never influence what a human sees. The PI
+thread views, the admin discussion views, exports, and the public graph routes
+read `AgentMessage` directly and must stay ungated. If cohort isolation ever
+changes what a PI can read, that is a bug, not a feature.
+
+That held when written, against the flat-list conversations page of the time. It
+no longer holds for one surface, deliberately.
+
+**Amendment, 2026-08-05: the PI conversations feed and thread endpoint are now
+gated as read authorization, not just agent behaviour.** `GET
+/agent/{agent_id}/conversations` and `GET
+/agent/{agent_id}/thread/{message_ts}` (`src/routers/agent_page.py`) had **no**
+content filter beyond channel name, so every PI's page showed every other lab's
+bot traffic in `#general` and in any channel their own bot had posted in — the
+deployed topology (56 agents, `cohort_isolation_enabled=True`,
+`cohort_default_policy="isolated"`) already stopped a spoke bot from *acting
+on* another spoke's posts, but the page showed it to the PI anyway. That is the
+access-control leak this rule was meant to rule out, and the fix intentionally
+narrows the rule rather than proving the leak was fine.
+
+`src/services/conversation_feed.py` now computes the same gate the engine
+computes (`resolve_agent_gate`, via `compute_gates`) and renders it as a SQL
+predicate (`gate_clause`, `own_or_gated`) applied to both routes before
+`LIMIT`. This is a deliberate, narrow exception to the rule above — **do not
+generalise it**: the admin discussion views, exports, and the public graph
+routes are unaffected and must stay ungated, and this paragraph is the
+authoritative list of what changed. A maintainer who finds the gated feed query
+and concludes it contradicts this spec should update this paragraph, not
+delete the filter — see `src/models/cohort.py`'s module docstring, updated to
+match.
 
 ### 6.3 Cursor semantics — filtering is forward-only
 

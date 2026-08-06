@@ -83,9 +83,18 @@ def compute_gates(
     """Compute each agent's ``allowed_sender_ids`` plus any preflight refusal.
 
     ``membership_rows`` is ``(cohort_id, agent_id)`` pairs — the whole
-    ``cohort_memberships`` table. ``agent_ids`` is the *live roster*: agents absent
-    from it are ignored, and memberships naming an agent that is not running have no
-    effect (they simply do not appear in anyone's mate set).
+    ``cohort_memberships`` table. ``agent_ids`` is the *live roster*, but it only
+    gates which agents receive an entry of their OWN in the returned ``gates``
+    dict — an agent absent from it simply has no running process asking for its
+    gate. It does **not** otherwise filter membership rows: ``members_by_cohort``
+    below is built from the raw rows, unfiltered by roster membership, so a
+    membership naming an agent that is not currently running still lands in
+    every cohort-mate's ``mates`` set and is treated as an allowed sender by
+    everyone else in its cohort(s) — it does NOT simply vanish. Confirmed live: a
+    membership-only agent_id with 56 memberships and no ``AgentRegistry`` row
+    passes every one of its cohort-mates' gates. If a non-roster membership
+    should be inert, that has to be enforced by removing the row (or filtering
+    ``membership_rows`` before calling this), not assumed from this function.
 
     Returns ``(gates, preflight_error)`` where a gate value is:
 

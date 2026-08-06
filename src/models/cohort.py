@@ -5,9 +5,20 @@ activity (scan, thread-activate, tag/reply). Cohorts are orthogonal to Slack
 channels: channel subscriptions are unchanged; cohort membership only gates
 whether one agent will *act on* another agent's posts.
 
-The gate is an agent-behaviour filter, NOT access control: it never changes what a
-human can read. PI- and admin-facing views read AgentMessage directly and stay
-ungated. See .notes/cohort-system-v2.md §6.2.
+The gate is primarily an agent-behaviour filter, not access control: admin-facing
+views read AgentMessage directly and stay ungated, and that was true of every
+PI-facing view too when this was written.
+
+As of 2026-08-05 that is no longer true for one surface, deliberately: the PI
+conversations feed and thread-expand endpoint (`src/routers/agent_page.py`,
+`GET /agent/{agent_id}/conversations` and `GET
+/agent/{agent_id}/thread/{message_ts}`) had no cohort filter at all and leaked
+every other lab's bot traffic through `#general`, so they now apply the same
+gate the engine computes, as SQL, via `src/services/conversation_feed.py`
+(`resolve_agent_gate` / `gate_clause` / `own_or_gated`). Every other PI- and
+admin-facing read (dashboard, proposals, profile, admin discussion views,
+exports, public graph routes) is unaffected and must stay ungated. See
+.notes/cohort-system-v2.md §6.2 for the full amendment.
 """
 
 import uuid
