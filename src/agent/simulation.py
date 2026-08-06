@@ -875,7 +875,7 @@ class SimulationEngine:
 
         system_prompt, messages = agent.build_phase2_scan_prompt(post_dicts)
 
-        agent.api_call_count += 1
+        agent.record_api_call()
         try:
             response = await generate_agent_response(
                 system_prompt=system_prompt,
@@ -921,7 +921,7 @@ class SimulationEngine:
         """Prune interesting_posts to ≤ cap."""
         system_prompt, messages = agent.build_phase2_prune_prompt()
 
-        agent.api_call_count += 1
+        agent.record_api_call()
         try:
             response = await generate_agent_response(
                 system_prompt=system_prompt,
@@ -1190,7 +1190,7 @@ class SimulationEngine:
                 tool_name, tool_input, agent.agent_id, thread, role=agent.role
             )
 
-        agent.api_call_count += 1
+        agent.record_api_call()
         try:
             response_text = await generate_with_tools(
                 system_prompt=system_prompt,
@@ -1965,7 +1965,7 @@ class SimulationEngine:
         # Restore
         agent.state.interesting_posts = original_posts
 
-        agent.api_call_count += 1
+        agent.record_api_call()
         try:
             response = await generate_agent_response(
                 system_prompt=system_prompt,
@@ -4688,7 +4688,7 @@ Keep it concise — under 300 words.""",
                 }
             ]
 
-            agent.api_call_count += 1
+            agent.record_api_call()
             response = await generate_agent_response(
                 system_prompt=system_prompt,
                 messages=messages,

@@ -12,6 +12,7 @@ Implements the test plan in docs/specs/2026-08-06-hub-budget-scheduler-design.md
 - TestProductionRegression §8    the exact run-4f1e8395 state
 """
 
+import time
 import types
 
 from src.agent.agent import Agent
@@ -82,3 +83,25 @@ class TestAgentLoad:
         eng = _engine(["hub"])
         _add_threads(eng.agents["hub"], 56)
         assert eng._agent_load(eng.agents["hub"]) == 12
+
+
+class TestCallLedger:
+    def test_record_api_call_increments_both_counters(self):
+        a = Agent(agent_id="hub", bot_name="HubBot", pi_name="PI hub")
+        a.record_api_call(now=100.0)
+        a.record_api_call(now=101.0)
+        assert a.api_call_count == 2
+        assert list(a.state.call_times) == [100.0, 101.0]
+
+    def test_record_api_call_defaults_to_wall_clock(self):
+        a = Agent(agent_id="hub", bot_name="HubBot", pi_name="PI hub")
+        before = time.time()
+        a.record_api_call()
+        after = time.time()
+        assert a.api_call_count == 1
+        assert before <= a.state.call_times[0] <= after
+
+    def test_call_times_starts_empty(self):
+        a = Agent(agent_id="hub", bot_name="HubBot", pi_name="PI hub")
+        assert len(a.state.call_times) == 0
+        assert a.api_call_count == 0

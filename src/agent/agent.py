@@ -2,6 +2,7 @@
 
 import logging
 import re
+import time
 from pathlib import Path
 from typing import Any
 
@@ -83,6 +84,18 @@ class Agent:
         # cohort-mates), or None when isolation is disabled (all-vs-all).
         # Recomputed each roster sync by SimulationEngine. See specs/cohort-system.md.
         self.allowed_sender_ids: set[str] | None = None
+
+    def record_api_call(self, now: float | None = None) -> None:
+        """Record one LLM call against both the lifetime counter and the
+        sliding-window ledger.
+
+        The single write point for both. Every call site must use this rather
+        than bumping ``api_call_count`` directly — a site that bumps only the
+        counter is invisible to the rate limiter, and a site that appends only to
+        the ledger corrupts ``SimulationRun.total_api_calls``.
+        """
+        self.api_call_count += 1
+        self.state.call_times.append(time.time() if now is None else now)
 
     # ------------------------------------------------------------------
     # Profile properties (cached, loaded from disk)

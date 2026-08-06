@@ -1,5 +1,6 @@
 """Per-agent state dataclasses for the turn-based simulation."""
 
+from collections import deque
 from dataclasses import dataclass, field
 
 
@@ -66,6 +67,14 @@ class AgentState:
     pending_proposals: list[ProposalRef] = field(default_factory=list)
     last_selected: float = 0.0
     last_seen_cursor: float = 0.0  # for scanning new posts since last turn
+
+    # Sliding-window LLM call ledger, maintained by Agent.record_api_call.
+    # Distinct from Agent.api_call_count on purpose: api_call_count is LIFETIME
+    # accounting (it feeds the run summary and SimulationRun.total_api_calls),
+    # while call_times is the LIVE throttle and its entries age out. Only the
+    # latter gates eligibility, which is why throttling can no longer be
+    # permanent. See docs/specs/2026-08-06-hub-budget-scheduler-design.md §4.2.
+    call_times: deque[float] = field(default_factory=deque)
 
     # Phase 5 throttling (state-change gate + skip backoff)
     consecutive_phase5_skips: int = 0
