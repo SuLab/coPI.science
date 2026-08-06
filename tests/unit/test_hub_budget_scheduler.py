@@ -12,6 +12,7 @@ Implements the test plan in docs/specs/2026-08-06-hub-budget-scheduler-design.md
 - TestProductionRegression §8    the exact run-4f1e8395 state
 """
 
+import logging
 import time
 import types
 
@@ -105,3 +106,94 @@ class TestCallLedger:
         a = Agent(agent_id="hub", bot_name="HubBot", pi_name="PI hub")
         assert len(a.state.call_times) == 0
         assert a.api_call_count == 0
+
+
+class TestRateLimiter:
+    def test_under_allowance_is_eligible(self, monkeypatch):
+        _patch(monkeypatch, llm_calls_per_load_per_window=8)
+        eng = _engine(["spoke"])
+        a = eng.agents["spoke"]
+        for i in range(7):
+            a.record_api_call(now=1000.0 + i)
+        assert eng._within_rate_limit(a, 1010.0) is True
+
+    def test_at_allowance_is_throttled(self, monkeypatch):
+        _patch(monkeypatch, llm_calls_per_load_per_window=8)
+        eng = _engine(["spoke"])
+        a = eng.agents["spoke"]
+        for i in range(8):
+            a.record_api_call(now=1000.0 + i)
+        assert eng._within_rate_limit(a, 1010.0) is False
+
+    def test_throttle_self_heals_as_the_window_slides(self, monkeypatch):
+        """The regression test for the permanent bench. A throttled agent MUST
+        become eligible again once its calls age out — this is the single
+        property the cumulative cap did not have."""
+        _patch(monkeypatch, llm_calls_per_load_per_window=8,
+               llm_rate_window_seconds=600)
+        eng = _engine(["spoke"])
+        a = eng.agents["spoke"]
+        for i in range(8):
+            a.record_api_call(now=1000.0 + i)
+        assert eng._within_rate_limit(a, 1010.0) is False
+        # 700s later every recorded call is outside the 600s window.
+        assert eng._within_rate_limit(a, 1710.0) is True
+        assert len(a.state.call_times) == 0
+
+    def test_allowance_scales_with_load(self, monkeypatch):
+        _patch(monkeypatch, llm_calls_per_load_per_window=8,
+               active_thread_threshold=12)
+        eng = _engine(["hub"])
+        hub = eng.agents["hub"]
+        _add_threads(hub, 12)
+        for i in range(50):
+            hub.record_api_call(now=1000.0 + i)
+        # load 12 -> allowance 96, so 50 calls is fine for a hub...
+        assert eng._within_rate_limit(hub, 1060.0) is True
+        # ...but the identical ledger throttles a load-1 spoke.
+        spoke = Agent(agent_id="spoke", bot_name="SpokeBot", pi_name="PI spoke")
+        for i in range(50):
+            spoke.record_api_call(now=1000.0 + i)
+        assert eng._within_rate_limit(spoke, 1060.0) is False
+
+    def test_role_override_beats_the_global_setting(self, monkeypatch):
+        _patch(monkeypatch, llm_calls_per_load_per_window=8)
+        monkeypatch.setattr(
+            "src.agent.simulation.load_role",
+            lambda name: types.SimpleNamespace(calls_per_load_per_window=2),
+        )
+        eng = _engine(["spoke"])
+        a = eng.agents["spoke"]
+        for i in range(3):
+            a.record_api_call(now=1000.0 + i)
+        assert eng._calls_per_load(a) == 2
+        assert eng._within_rate_limit(a, 1010.0) is False
+
+    def test_turn_eligible_requires_both_checks(self, monkeypatch):
+        """Legacy cumulative cap and the rate limiter compose with AND."""
+        _patch(monkeypatch, llm_calls_per_load_per_window=8)
+        eng = _engine(["spoke"], budget_cap=5)
+        a = eng.agents["spoke"]
+        # Rate limit fine (1 call), legacy cap blown (api_call_count 6 >= 5).
+        a.api_call_count = 6
+        a.record_api_call(now=1000.0)
+        assert eng._turn_eligible(a, 1010.0) is False
+
+    def test_turn_eligible_passes_when_both_pass(self, monkeypatch):
+        _patch(monkeypatch, llm_calls_per_load_per_window=8)
+        eng = _engine(["spoke"], budget_cap=0)
+        a = eng.agents["spoke"]
+        a.record_api_call(now=1000.0)
+        assert eng._turn_eligible(a, 1010.0) is True
+
+    def test_throttle_transition_warns_once(self, monkeypatch, caplog):
+        _patch(monkeypatch, llm_calls_per_load_per_window=2)
+        eng = _engine(["spoke"])
+        a = eng.agents["spoke"]
+        a.record_api_call(now=1000.0)
+        a.record_api_call(now=1001.0)
+        with caplog.at_level(logging.WARNING):
+            eng._within_rate_limit(a, 1010.0)
+            eng._within_rate_limit(a, 1011.0)
+            eng._within_rate_limit(a, 1012.0)
+        assert caplog.text.count("throttled") == 1

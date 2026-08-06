@@ -23,6 +23,7 @@ from src.agent.funding_rules import (
 from src.agent.ids import WRITER_ENGINE, TsMinter
 from src.agent.message_log import LogEntry, MessageLog, is_funding_post
 from src.agent.prompt_safety import delimit
+from src.agent.roles import load_role
 from src.agent.slack_client import SlackListingIncomplete, ThreadNotFound
 from src.agent.state import PostRef, ProposalRef, ThreadState
 from src.agent.tools import execute_tool, tools_for_role
@@ -145,6 +146,11 @@ ROSTER_POLL_INTERVAL = 30.0    # seconds between AgentRegistry roster re-syncs
 # See .notes/cohort-system-v2.md §10.3.
 SELECTION_RATIO_LOG_EVERY = 100
 
+# Distinguishes "role has no cached rate yet" from "role's cached rate is None
+# (no override)". A plain dict.get() default cannot tell those apart, so the
+# cache would re-read role.toml from disk on every tick for every default role.
+_UNSET = object()
+
 # The DB inbox pollers bound their query to recent rows for performance, but the
 # timestamp is stamped at row *creation*, not commit. A row written by another
 # process (a PI web message) can therefore become visible only after this process
@@ -220,6 +226,9 @@ class SimulationEngine:
         # API calls are made (transports are NullTransport). Drives the roster
         # gate and the DB inbox poller. See specs/local-db-conversations.md.
         self.slack_enabled = slack_enabled
+
+        # role name -> calls_per_load_per_window override (or None). See _calls_per_load.
+        self._role_rate_cache: dict[str, int | None] = {}
 
         self._start_time: datetime | None = None
         self._running = False
@@ -398,6 +407,50 @@ class SimulationEngine:
         )
         return max(1, min(live, get_settings().active_thread_threshold))
 
+    def _calls_per_load(self, agent: Agent) -> int:
+        """Per-unit-of-load LLM allowance for this agent's role.
+
+        Cached by role NAME, so an agent flipping roles at runtime simply looks
+        up a different key and needs no invalidation. The only staleness is a
+        role.toml edited mid-run, which matches get_settings() already being
+        lru_cached — both need a container recreate (design §5).
+
+        The cache exists because load_role() reads TOML from disk on every call
+        and this runs for every agent on every scheduler tick.
+        """
+        cached = self._role_rate_cache.get(agent.role, _UNSET)
+        if cached is _UNSET:
+            cached = load_role(agent.role).calls_per_load_per_window
+            self._role_rate_cache[agent.role] = cached
+        if cached is not None:
+            return cached
+        return get_settings().llm_calls_per_load_per_window
+
+    def _within_rate_limit(self, agent: Agent, now: float) -> bool:
+        """Sliding-window LLM rate check — the LIVE throttle.
+
+        allowance = _calls_per_load(agent) * _agent_load(agent), over
+        llm_rate_window_seconds. Unlike the cumulative cap this replaces, it
+        self-heals: entries age out, so an agent throttled now is eligible later.
+        See design §4.2.
+        """
+        allowance = self._calls_per_load(agent) * self._agent_load(agent)
+        window_start = now - get_settings().llm_rate_window_seconds
+        times = agent.state.call_times
+        while times and times[0] < window_start:
+            times.popleft()
+        ok = len(times) < allowance
+        if not ok and not agent.state.throttled:
+            logger.warning(
+                "[%s] throttled: %d LLM calls in the last %ds at load %d "
+                "(allowance %d). Eligible again as the window slides.",
+                agent.agent_id, len(times),
+                get_settings().llm_rate_window_seconds,
+                self._agent_load(agent), allowance,
+            )
+        agent.state.throttled = not ok
+        return ok
+
     def _non_funding_thread_count(self, agent: Agent) -> int:
         """Count active threads that are NOT funding-related."""
         return sum(
@@ -521,8 +574,15 @@ class SimulationEngine:
             # Select agent
             agent = self._select_agent()
             if not agent or not self._agent_within_budget(agent):
-                # All agents over budget
-                logger.info("All agents over budget or no agent selected. Stopping.")
+                # No agent is currently eligible: every one is either rate-limited,
+                # cooling down, or over the legacy cumulative cap. Rate limiting is
+                # transient (the window slides), so this is no longer necessarily
+                # terminal — but the loop's contract is unchanged, so say what was
+                # observed rather than guessing which cause applied.
+                logger.info(
+                    "No eligible agent (all throttled, cooling down, or over the "
+                    "legacy --budget cap). Stopping."
+                )
                 break
 
             # Prevent the same agent from making back-to-back LLM calls.
@@ -676,13 +736,19 @@ class SimulationEngine:
     def _turn_eligible(self, agent: Agent, now: float) -> bool:
         """Selection eligibility for one agent.
 
-        - within its LLM budget;
+        - within the LEGACY cumulative cap. Inert by default (``budget_cap``
+          defaults to 0, and ``_agent_within_budget`` short-circuits at <= 0);
+          armed only when an operator passes ``--budget``. Retained, not removed,
+          for back-compat — see design §6;
+        - within its sliding-window rate limit. This is the live throttle;
         - past its per-agent cooldown. ``turn_delay_seconds`` throttles an
           individual agent's tempo; enforcing it here (rather than as a global
           ``asyncio.sleep`` after every productive turn) leaves the rest of the
           roster free to act while one agent sits out. See v2 §10.3.
         """
         if not self._agent_within_budget(agent):
+            return False
+        if not self._within_rate_limit(agent, now):
             return False
         delay = get_settings().turn_delay_seconds
         if delay > 0 and (now - agent.state.last_selected) < delay:

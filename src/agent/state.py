@@ -76,6 +76,12 @@ class AgentState:
     # permanent. See docs/specs/2026-08-06-hub-budget-scheduler-design.md §4.2.
     call_times: deque[float] = field(default_factory=deque)
 
+    # True while the agent is rate-limited. Tracked only so the transition into
+    # throttling can be logged once instead of once per scheduler tick — a silent
+    # throttle is what turned the original incident into a 2.5-hour undetected
+    # outage. See design §6.
+    throttled: bool = False
+
     # Phase 5 throttling (state-change gate + skip backoff)
     consecutive_phase5_skips: int = 0
     last_phase5_action_time: float = 0.0  # last time Phase 5 was evaluated (gates the spontaneous-post timer)
