@@ -95,6 +95,41 @@ async def test_fulltext_fetch_failure_leaves_hit_title_level(monkeypatch):
 
 @pytest.mark.asyncio
 @respx.mock
+async def test_pgpub_uri_never_leaks_past_the_fulltext_cap(monkeypatch):
+    # _pgpub_uri is internal bookkeeping (which pre-grant XML to fetch for
+    # enrichment) and must never reach a returned hit — including past
+    # _FULLTEXT_MAX, where it is popped without ever being fetched. The last
+    # hit's URI is deliberately left unmocked: if the cap ever regressed and
+    # that hit got fetched too, respx would raise instead of silently passing.
+    monkeypatch.setattr(patents, "_api_key", lambda: "k")
+    n = patents._FULLTEXT_MAX + 1
+    bag = [
+        {
+            "applicationNumberText": f"18/{i:06d}",
+            "pgpubDocumentMetaData": {"fileLocationURI": f"{_XML_URL}?i={i}"},
+            "applicationMetaData": {
+                "inventionTitle": "Novel Widget",
+                "earliestPublicationNumber": f"US2026{i:07d}A1",
+                "earliestPublicationDate": "2026-01-01",
+                "firstApplicantName": "Acme Corp",
+                "firstInventorName": "Jane Doe",
+                "applicationStatusDescriptionText": "Patented Case",
+            },
+        }
+        for i in range(n)
+    ]
+    respx.post(patents.SEARCH_URL).mock(
+        return_value=httpx.Response(200, json={"patentFileWrapperDataBag": bag})
+    )
+    for i in range(patents._FULLTEXT_MAX):
+        respx.get(f"{_XML_URL}?i={i}").mock(return_value=httpx.Response(200, text=_PGPUB_XML))
+    result = await patents.search_prior_art("widget")
+    assert len(result.hits) == n
+    assert all("_pgpub_uri" not in hit for hit in result.hits)
+
+
+@pytest.mark.asyncio
+@respx.mock
 async def test_missing_key_returns_none_and_does_not_call(monkeypatch):
     monkeypatch.setattr(patents, "_api_key", lambda: "")
     # Route WOULD succeed if called — proves the no-key guard short-circuits before
@@ -248,6 +283,36 @@ async def test_rate_limit_mid_backoff_returns_none_not_a_clean_result(monkeypatc
     assert await patents.search_prior_art("alpha beta gamma delta") is None
 
 
+@pytest.mark.asyncio
+@respx.mock
+async def test_lone_specific_term_among_generics_still_gets_a_narrower_tier(monkeypatch):
+    # Regression: when only ONE token survives generics-filtering, the ranked pool
+    # is narrower than both backoff widths (3 and _MIN_TERMS=2). Skipping the
+    # narrower tier for that reason would reproduce the exact guaranteed-zero-hit
+    # bug this task exists to fix, for the query that most needs the backoff — the
+    # full 8-token AND is *always* a miss with 7 of the 8 tokens generic, and
+    # "BRAF" alone is genuinely informative (10 real hits, live-verified).
+    monkeypatch.setattr(patents, "_api_key", lambda: "k")
+    queries = []
+
+    def _capture(request):
+        import json
+        q = json.loads(request.content)["q"]
+        queries.append(q)
+        if q == "applicationMetaData.inventionTitle:(BRAF)":
+            return httpx.Response(200, json=_ODP_ONE_HIT)
+        return httpx.Response(200, json={"patentFileWrapperDataBag": []})
+
+    respx.post(patents.SEARCH_URL).mock(side_effect=_capture)
+    result = await patents.search_prior_art(
+        "novel treatment method for BRAF disease using approach"
+    )
+    assert len(result.hits) == 1
+    assert result.terms_used == ["BRAF"]
+    assert result.broadened is True
+    assert len(queries) > 1
+
+
 def test_generic_terms_lose_to_specific_ones():
     ranked = patents._rank_terms(
         ["treatment", "C9orf72", "inhibitor", "MARK2", "disease"]
@@ -267,6 +332,17 @@ def test_first_tier_is_the_query_as_asked_in_original_order():
     # Only the backoff tiers reorder by salience. Tier 1 is the user's phrase.
     tiers = patents._tiers(["CRISPR", "base", "editing"])
     assert tiers[0] == ["CRISPR", "base", "editing"]
+
+
+def test_all_generic_query_still_backs_off_normally():
+    # _rank_terms falls back to the full token list when every token is generic
+    # ("specific or tokens"), so an all-generic query must still get narrower
+    # tiers — guarding the asymmetry where that fallback got backoff but a query
+    # with exactly one specific term (see the lone-specific-term test above) did
+    # not, before the _tiers fix.
+    tiers = patents._tiers(["the", "of", "for", "with", "via"])
+    assert len(tiers) == 3
+    assert len(tiers[-1]) == 2
 
 
 from src.agent.tools import TOOL_DEFINITIONS, _execute_search_prior_art  # noqa: E402

@@ -98,14 +98,23 @@ def _tiers(tokens: list[str]) -> list[list[str]]:
     Tier 1 is the query EXACTLY as asked, in the caller's own order: that is
     the precise search, and preserving it means the backoff only ever widens.
     Later tiers drop generic words and keep the most specific terms.
+
+    ``_MIN_TERMS`` is a floor on how narrow a *multi*-term backoff goes, not a
+    minimum on how much specific signal a tier must contain: when the specific
+    pool is narrower than a given width (e.g. only one gene symbol survives
+    among several generic words), that narrower pool is still used, in full,
+    as its own tier. Skipping it there would silently reproduce the guaranteed
+    zero-hit bug this backoff exists to fix — a single specific term is more
+    informative than the full generic-laden phrase it's paired with.
     """
     ranked = _rank_terms(tokens)
     tiers = [list(tokens)]
     for width in (3, _MIN_TERMS):
-        if width < len(tokens) and width <= len(ranked):
-            candidate = ranked[:width]
-            if candidate not in tiers:
-                tiers.append(candidate)
+        if width >= len(tokens):
+            continue
+        candidate = ranked[:width] if width <= len(ranked) else list(ranked)
+        if candidate not in tiers:
+            tiers.append(candidate)
     return tiers
 
 
@@ -201,13 +210,16 @@ async def _search_titles(
 
 async def _enrich(client: httpx.AsyncClient, hits: list[dict[str, Any]]) -> None:
     """Add abstract + first claim to the top few published hits, in place. Bounded
-    and best-effort so a slow or missing XML never fails the search."""
+    and best-effort so a slow or missing XML never fails the search.
+
+    ``_pgpub_uri`` is internal bookkeeping (which pre-grant XML to fetch) and must
+    never survive into a returned hit — it is popped unconditionally here, on every
+    hit, even past ``_FULLTEXT_MAX`` where it is never fetched.
+    """
     for i, hit in enumerate(hits):
         uri = hit.pop("_pgpub_uri", None)
         if uri and i < _FULLTEXT_MAX:
             hit["abstract"], hit["claim"] = await _fetch_fulltext(client, uri)
-    for hit in hits:
-        hit.pop("_pgpub_uri", None)
 
 
 async def search_prior_art(query: str, limit: int = 10) -> PriorArtResult | None:
