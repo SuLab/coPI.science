@@ -21,17 +21,36 @@ would test a rebuild of an empty log.
 """
 
 import time
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from src.agent.agent import Agent
 from src.agent.simulation import SimulationEngine
 from src.agent.transport import NullTransport
+from src.config import get_settings
 from tests import factories
 
 pytestmark = pytest.mark.integration
 
 AGENT_IDS = ("su", "wiseman")
+
+
+class _FrozenClock:
+    """Stand-in for the module-level `datetime` name in src.agent.simulation.
+
+    Step 4b's cutoff is `datetime.now(UTC) - timedelta(...)`; by inspection,
+    neither `_rebuild_state_from_db` nor `_rebuild_agent_state` calls
+    `datetime` anywhere else, so stubbing just `.now()` pins the cutoff to an
+    exact instant and lets the boundary test assert `>=` inclusivity without
+    racing the real wall clock.
+    """
+
+    def __init__(self, fixed_now):
+        self._fixed_now = fixed_now
+
+    def now(self, tz=None):
+        return self._fixed_now
 
 
 class _FixtureSessionFactory:
@@ -210,4 +229,87 @@ async def test_a_second_rebuild_does_not_duplicate_prior_thread_context(db_sessi
     assert len(eng._prior_threads[("su", "wiseman")]) == 1, (
         "a second rebuild duplicated the prior-thread dedup context: "
         f"{eng._prior_threads[('su', 'wiseman')]}"
+    )
+
+
+async def test_call_times_rebuilds_from_the_window_and_api_call_count_stays_all_time(
+    db_session, monkeypatch,
+):
+    """DB round trip through the REAL step 4b query — not a hand-built deque.
+
+    The unit tests in test_hub_budget_scheduler.py::TestRestartRebuild hand-populate
+    `call_times` and re-check `_within_rate_limit`/`_turn_eligible`; they never invoke
+    the query itself. This test seeds `llm_call_logs` rows straddling the rate-limit
+    window boundary for one agent — including a row exactly ON the cutoff, to pin the
+    `>=` in the WHERE clause — and asserts the rebuilt `call_times` holds only the
+    in-window rows, oldest-first (`.order_by(created_at)` is load-bearing: the
+    rate limiter prunes with `popleft()` and assumes oldest-first).
+
+    `api_call_count` must still reflect every row, including the out-of-window one:
+    step 4 (lifetime COUNT(*)) and step 4b (windowed call_times) read the same table
+    but must stay independent, or a restart would either bench an agent that isn't
+    actually over budget, or silently forgive one that is.
+    """
+    run = await factories.make_simulation_run(db_session)
+    window = get_settings().llm_rate_window_seconds
+    frozen_now = datetime(2026, 1, 1, tzinfo=UTC)
+    cutoff = frozen_now - timedelta(seconds=window)
+
+    outside = cutoff - timedelta(seconds=1)  # just before cutoff: excluded
+    boundary = cutoff  # exactly on cutoff: included (>=)
+    inside_older = cutoff + timedelta(seconds=100)
+    inside_newer = cutoff + timedelta(seconds=500)
+
+    for ts in (outside, boundary, inside_older, inside_newer):
+        await factories.make_llm_call_log(
+            db_session, run=run, agent_id="su", created_at=ts,
+        )
+    await db_session.flush()
+
+    eng = _engine_for(db_session, run.id)
+    monkeypatch.setattr("src.agent.simulation.datetime", _FrozenClock(frozen_now))
+    await eng._rebuild_state_from_db()
+    await eng._rebuild_agent_state()
+
+    su = eng.agents["su"]
+    assert list(su.state.call_times) == pytest.approx([
+        boundary.timestamp(), inside_older.timestamp(), inside_newer.timestamp(),
+    ]), (
+        "call_times must hold only the in-window rows, oldest first: "
+        f"{list(su.state.call_times)}"
+    )
+    # step 4's lifetime COUNT(*) counts all 4 rows, unaffected by the window
+    # filter that gated call_times above.
+    assert su.api_call_count == 4
+
+
+async def test_a_second_rebuild_does_not_duplicate_call_times(db_session, monkeypatch):
+    """Step 4b clears each agent's ledger before repopulating it.
+
+    Same idempotency concern the pending_proposals and _prior_threads rebuilds above
+    document, applied to the sliding-window ledger: a plain, unguarded append would
+    duplicate every in-window entry on a second rebuild call and could throttle an
+    agent that is not actually over its allowance. Only one call site exists today
+    (`start()`), so this is latent, not live — pinned here so it stays that way.
+    """
+    run = await factories.make_simulation_run(db_session)
+    frozen_now = datetime(2026, 1, 1, tzinfo=UTC)
+    await factories.make_llm_call_log(
+        db_session, run=run, agent_id="su",
+        created_at=frozen_now - timedelta(seconds=10),
+    )
+    await db_session.flush()
+
+    eng = _engine_for(db_session, run.id)
+    monkeypatch.setattr("src.agent.simulation.datetime", _FrozenClock(frozen_now))
+    await eng._rebuild_state_from_db()
+    await eng._rebuild_agent_state()
+
+    su = eng.agents["su"]
+    assert len(su.state.call_times) == 1
+
+    await eng._rebuild_agent_state()
+    assert len(su.state.call_times) == 1, (
+        "a second rebuild duplicated the call_times ledger: "
+        f"{list(su.state.call_times)}"
     )
