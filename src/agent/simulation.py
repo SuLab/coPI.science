@@ -3952,10 +3952,27 @@ class SimulationEngine:
                         )
                         .order_by(LlmCallLog.created_at)
                     )
-                    for r in result:
-                        agent = self.agents.get(r.agent_id)
-                        if agent:
-                            agent.state.call_times.append(r.created_at.timestamp())
+                    rows = result.all()
+                # call_times is a deque that record_api_call appends to, same
+                # shape as pending_proposals above — so a plain append here is
+                # not idempotent either: a second rebuild call would duplicate
+                # every in-window entry and could throttle an agent that isn't
+                # actually over its allowance. Unlike pending_proposals, this
+                # query is a full window snapshot (not one row per agent), so
+                # the fix is a clear-then-repopulate rather than a replace-by-key.
+                # Clear ALL agents, not just the ones with rows in `rows`: the
+                # window query is authoritative for every agent, and an agent
+                # with zero in-window calls must end up with an EMPTY ledger,
+                # not whatever stale entries it had before this rebuild. The
+                # clear is sequenced after the query succeeds (not before) so a
+                # DB failure below is caught and logged without first wiping a
+                # ledger it then fails to repopulate.
+                for agent in self.agents.values():
+                    agent.state.call_times.clear()
+                for r in rows:
+                    agent = self.agents.get(r.agent_id)
+                    if agent:
+                        agent.state.call_times.append(r.created_at.timestamp())
             except Exception as exc:
                 logger.warning("Failed to rebuild call_times: %s", exc)
 
