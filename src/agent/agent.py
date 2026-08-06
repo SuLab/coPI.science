@@ -8,6 +8,7 @@ from pathlib import Path
 from src.agent.prompt_safety import delimit
 from src.agent.roles import DEFAULT_ROLE, resolve_prompt_path
 from src.agent.state import AgentState, ThreadState
+from src.agent.thread_guidance import phase4_guidance
 from src.models.agent_activity import VISIBILITY_COLLAB_PRIVATE, VISIBILITY_PUBLIC
 
 logger = logging.getLogger(__name__)
@@ -425,54 +426,17 @@ Use these to reference other labs' work in conversations. Include links when cit
             "Compose a thread reply.",
         )
 
-        # Thread phase guidance
-        if thread.message_count <= 4:
-            thread_phase = "EXPLORE"
-            phase_guidance = (
-                "You are in the EXPLORE phase. Share relevant specifics from your lab's recent work. "
-                "Ask clarifying questions about the other lab's capabilities. Use retrieve_profile and "
-                "retrieve_abstract tools to learn more. Do NOT propose a full collaboration yet."
-            )
-        elif thread.message_count <= 11:
-            thread_phase = "DECIDE"
-            phase_guidance = (
-                "You are in the DECIDE phase. Narrow the scope: is there genuine complementarity? "
-                "Can you name a specific first experiment? If yes, build toward a :memo: Summary proposal. "
-                "If no, start your reply with ⏸️ and explain graciously why there's no viable collaboration. "
-                "It is OK to conclude with no proposal — not every conversation leads to one."
-            )
-        else:
-            thread_phase = "MUST CONCLUDE"
-            phase_guidance = (
-                "This is message 12 — you MUST conclude the thread now. Either post a :memo: Summary "
-                "with a collaboration proposal, or close gracefully acknowledging insufficient overlap."
-            )
+        # Thread phase guidance + instructions, per role. scout_hub scouts ideas
+        # against Blackbird's screening rubric; it has no lab and never proposes a
+        # collaboration. See src/agent/thread_guidance.py.
+        thread_phase, phase_guidance, instructions = phase4_guidance(
+            self.role, thread.message_count
+        )
 
         # Format thread history
         history_text = "\n".join(
             f"**{m['sender']}**: {m['content']}" for m in thread_history
         )
-
-        # Build instructions based on phase
-        if thread_phase == "EXPLORE":
-            instructions = (
-                "Write a reply that shares specific details from your lab and asks a clarifying "
-                "question. Use tools proactively to research the other lab."
-            )
-        elif thread_phase == "DECIDE":
-            instructions = (
-                "Write a reply that moves toward a conclusion. Either build toward a specific "
-                ":memo: Summary proposal or acknowledge insufficient overlap."
-            )
-        else:
-            instructions = (
-                "This is the final message. You MUST either:\n"
-                "1. Post a :memo: Summary with a specific collaboration proposal, OR\n"
-                "2. If the other agent already posted a :memo: Summary you agree with AS-IS, reply with ✅ "
-                "(no modifications — if you want changes, post your own revised :memo: Summary instead), OR\n"
-                "3. Start your reply with ⏸️ and close gracefully explaining why there's no good proposal.\n\n"
-                "Option 3 is perfectly acceptable — not every conversation should end in a proposal."
-            )
 
         # If the thread's root post is about a paper this lab authored, warn the
         # model not to engage as if it were external work (see issue #7).
