@@ -383,6 +383,64 @@ def test_baltimore_is_a_question_not_an_inference():
     assert "is not a Baltimore commitment" in body
 
 
+def test_visible_body_hides_the_verdict_the_sidecar_still_carries():
+    """F5: the bot is a member of every lab's cohort, so a :mag: Opportunity
+    Assessment (a top-level post) is a workspace-wide broadcast, not a private
+    note. The visible `<slack_message>` must therefore read as a courtesy
+    summary and never carry the funnel stage, the four gating statuses, the
+    red-flag list, or the advance/conditional/pass/route-to-incubation
+    recommendation — those belong only in the staff-only `<assessment_json>`
+    sidecar, which must still require all of them so staff lose nothing.
+    """
+    from pathlib import Path
+
+    body = (Path("prompts/roles/scout_hub") / "phase5-new-post.md").read_text(
+        encoding="utf-8"
+    )
+
+    # Anchors bounding the visible-body instructions and the sidecar
+    # instructions within Option C. If any of these move, the slice below
+    # would silently cover the wrong text, so pin their relative order.
+    visible_start = body.index("Label it :mag: **Opportunity Assessment**")
+    sidecar_start = body.index("**Also emit the machine-readable verdict.**")
+    option_d_start = body.index("### Option D: Skip this turn")
+    assert visible_start < sidecar_start < option_d_start
+
+    visible_instructions = body[visible_start:sidecar_start]
+    sidecar_instructions = body[sidecar_start:option_d_start]
+
+    # The PI-facing instructions must not ask for (or even name) the internal
+    # verdict machinery.
+    for forbidden in (
+        "Funnel stage", "Gating criteria", "Red flags", "route-to-incubation",
+        "not_met", "not met",
+    ):
+        assert forbidden not in visible_instructions, (
+            f"{forbidden!r} leaked into the visible-body instructions — this "
+            "would surface the internal rubric in a workspace-wide post"
+        )
+    for forbidden_word in ("advance", "conditional", "pass"):
+        assert forbidden_word not in visible_instructions.lower(), (
+            f"{forbidden_word!r} leaked into the visible-body instructions"
+        )
+
+    # The sidecar instructions must still require every one of them — staff
+    # must lose nothing.
+    for required in (
+        "Funnel stage", "Gating criteria", "Red flags", "route-to-incubation",
+        "not_met",
+    ):
+        assert required in sidecar_instructions, (
+            f"sidecar instructions dropped {required!r} — staff would lose "
+            "part of the verdict"
+        )
+    for required_word in ("advance", "conditional", "pass"):
+        assert required_word in sidecar_instructions.lower(), (
+            f"sidecar instructions dropped {required_word!r} — staff would "
+            "lose part of the recommendation"
+        )
+
+
 def test_gating_values_in_assessment_skeleton_are_tristate_strings():
     """An unasked gate is not a failed gate: gating.* must round-trip through the
     sidecar as one of three strings, never a bare boolean, so a downstream reader

@@ -116,19 +116,56 @@ want to write is a question, an introduction, or anything addressed to a particu
 it is not Option C — it is Option A, or Option D if there is nothing yet to reply to.
 
 Post your opportunity assessment in the most relevant subscribed channel — usually the one
-where the underlying interview took place. This is the artifact Blackbird staff and the PI
-will actually read, so it must stand on its own.
+where the underlying interview took place. Because you belong to every lab's cohort, this
+post is visible to every lab in the workspace, not just the PI it concerns — so the
+`<slack_message>` body must read as a respectful, useful courtesy note to that PI, never as
+a verdict. The full rubric verdict — funnel stage, gating, red flags, recommendation — goes
+in the staff-only `<assessment_json>` sidecar described below, and must never appear in the
+visible message.
 
-Label it :mag: **Opportunity Assessment** and include, in this order:
+Label it :mag: **Opportunity Assessment** and include, in this order, in
+`<slack_message>`:
 
 1. **The idea.** What it is, specifically — the technique, compound, construct, dataset,
    device, or method — and which PI it came from. Name it concretely; do not summarize it
    away.
-2. **Funnel stage.** Where this sits: incubation/grant, pre-seed/formation, seed, or
+2. **Novelty & differentiation read.** What you found when you checked, with the exact
+   search terms and the title-only/US-only limitation attached — no US title hit is not
+   evidence the idea is unclaimed abroad, in the claims of a differently-titled patent, or
+   in the non-patent literature. If the tool broadened your query, say so. Is this first-
+   or best-in-class, or an incremental improvement in a less demanding setting?
+3. **Recommended next step.** The single concrete, specific action that would move this
+   idea forward for the PI — a specific experiment to run, a specific filing to make, a
+   specific piece of evidence to gather. Frame it as constructive advice a researcher can
+   act on — never as an internal verdict or a funding-stage label, and never in a way that
+   implies a go/no-go decision about their work has already been made.
+4. A confidence label — *[High]*, *[Moderate]*, or *[Speculative]* — per the standards in
+   your system prompt.
+
+**Quality bar for the visible message:**
+- Every section must be specific enough that the PI could act on it without a follow-up
+  question
+- If you're missing information, say so explicitly rather than guessing
+- **Do not post an assessment you don't believe.** If the interview didn't turn up enough
+  to write an honest, specific novelty read and next step, choose Option D instead
+- Do not hint that a separate, fuller, or internal assessment exists — write it as the
+  whole of what you have to say to this PI, not as a summary of something withheld
+
+Your visible post should be a short, self-contained courtesy note — more substantial than
+the 2-4 sentence reply of Option A, but never the full rubric.
+
+**Also emit the machine-readable verdict.** After your `<slack_message>` block, add an
+`<assessment_json>` block. This is for Blackbird staff only — it is **stripped before
+anything is posted to Slack**, so the PI never sees it, and it is where the full rubric
+verdict belongs. Everything in the list below must be captured here in full, and none of it
+may appear anywhere in `<slack_message>` above — staff must lose nothing even though the PI
+sees only the short courtesy note:
+
+1. **Funnel stage.** Where this sits: incubation/grant, pre-seed/formation, seed, or
    follow-on. The evidence bar follows from this — earlier stages are judged on potential,
    differentiation and external interest; later stages need replicated data, IP filed, a
    syndicate identified, and quantified milestones.
-3. **Gating criteria.** All four, each as **met** / **not met** / **unconfirmed** — the
+2. **Gating criteria.** All four, each as **met** / **not met** / **unconfirmed** — the
    same three states the `<assessment_json>` skeleton below encodes as `"met"` /
    `"not_met"` / `"unconfirmed"` (write "not met" here, `"not_met"` there — same state,
    just underscored for JSON):
@@ -142,45 +179,28 @@ Label it :mag: **Opportunity Assessment** and include, in this order:
    - *FTO achievable* — no unresolvable third-party blockade. A title-only prior-art
      search that found nothing does **not** establish this — an unrun or empty search
      makes this **unconfirmed**, never met.
-4. **Novelty & differentiation read.** What you found when you checked, with the exact
-   search terms and the title-only/US-only limitation attached — no US title hit is not
-   evidence the idea is unclaimed abroad, in the claims of a differently-titled patent, or
-   in the non-patent literature. If the tool broadened your query, say so. Is this first-
-   or best-in-class, or an incremental improvement in a less demanding setting?
-5. **Market & unmet need.** Quantified TAM or prevalence where you have it, the clinical
+3. **Market & unmet need.** Quantified TAM or prevalence where you have it, the clinical
    decision point, and whether the need is *actionable* — is there a downstream
    intervention?
-6. **External signals.** Any VC/funder interest, big-pharma interest or deal comps, and
-   whether a leading expert has validated the approach. Say plainly when there are none.
-7. **Platform vs. single asset.** Does this generate a pipeline, or is it one shot?
-8. **Capital efficiency.** Non-dilutive leverage available — TEDCO MII, Maryland
+4. **External signals.** Any VC/funder interest, big-pharma interest or deal comps, and
+   whether a leading expert has validated the approach. Score plainly low when there are
+   none.
+5. **Platform vs. single asset.** Does this generate a pipeline, or is it one shot?
+6. **Capital efficiency.** Non-dilutive leverage available — TEDCO MII, Maryland
    Innovation Initiative, MSCRF, the BIITC tax credit / Maryland QOF — and how it would
    de-risk this before or around equity.
-9. **Red flags.** Every disqualifier you saw, named explicitly. If there are none, say so.
-10. **Recommendation.** Exactly one of: **advance** / **conditional** / **pass** /
-    **route-to-incubation** (that last one is for high differentiation with thin data).
-11. **Suggested de-risking milestones.** The specific, quantitative next results that
-    would unlock the following stage.
+7. **Red flags.** Every disqualifier you saw, named explicitly, as `red_flags` entries. If
+   there are none, leave the array empty.
+8. **Recommendation.** Exactly one of: **advance** / **conditional** / **pass** /
+   **route-to-incubation** (that last one is for high differentiation with thin data).
+9. **Suggested de-risking milestones.** The specific, quantitative next results that
+   would unlock the following stage.
 
-Add a confidence label — *[High]*, *[Moderate]*, or *[Speculative]* — per the standards in
-your system prompt.
+If you're missing information for one of these, say so in `rationale` and mark the
+relevant gating criterion *unconfirmed* — never skip it silently and never guess.
 
-**Quality bar:**
-- Every section must be specific enough that a reader could act on it without a follow-up
-  question
-- If you're missing information for a section, say so explicitly and mark the relevant
-  gating criterion *unconfirmed* — never skip a section silently and never guess
-- **Do not post an assessment you don't believe.** If the interview didn't turn up enough
-  to fill these in honestly, choose Option D instead
-
-Your post should be thorough enough to stand alone — this is not a 2-4 sentence post like
-Option A.
-
-**Also emit the machine-readable verdict.** After your `<slack_message>` block, add an
-`<assessment_json>` block. This is for Blackbird staff only — it is **stripped before
-anything is posted to Slack**, so the PI never sees it. Score each dimension 1–5 (5 =
-strongly meets Blackbird's bar). Do not compute `weighted_score` yourself — leave it at 0
-and it will be calculated from your scores.
+Score each dimension 1–5 (5 = strongly meets Blackbird's bar). Do not compute
+`weighted_score` yourself — leave it at 0 and it will be calculated from your scores.
 
 Emit it as **bare JSON with no code fence** (a fenced block would be mistaken for your
 action JSON):
