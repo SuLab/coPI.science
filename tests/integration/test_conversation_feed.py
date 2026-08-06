@@ -456,7 +456,17 @@ async def test_a_delegate_sees_exactly_what_the_owner_sees(
 
 
 async def _threaded_world(db_session, monkeypatch):
-    """Spoke1 (owned) + Spoke2 (not owned), each with a root and one reply."""
+    """Spoke1 (owned) + Spoke2 (not owned).
+
+    Spoke1's root (9.0001) has TWO replies: one from cohort-mate `hub`
+    (HUB-REPLY, in spoke1's gate {spoke1, hub}) and one from `spoke2`
+    (OUT-OF-COHORT-REPLY, NOT in spoke1's gate — spoke1 and spoke2 are each
+    paired with `hub` but not with each other). That pairing is deliberate:
+    it is the only way to prove replies are gated at all, rather than merely
+    admitted through the root owner's own-post carve-out. Spoke2 additionally
+    has its own root (9.0003, FOREIGN-ROOT) with no reply, used by the
+    out-of-cohort-root/IDOR tests below.
+    """
     from src.config import get_settings
     s = get_settings()
     monkeypatch.setattr(s, "cohort_isolation_enabled", True, raising=False)
@@ -485,6 +495,11 @@ async def _threaded_world(db_session, monkeypatch):
         db_session, agent_id="spoke2", message_ts="9.0003", phase="new_post",
         content="FOREIGN-ROOT", sender_name="Spoke2Bot", **common
     )
+    await factories.make_agent_message(
+        db_session, agent_id="spoke2", message_ts="9.0004", thread_ts="9.0001",
+        phase="thread_reply", content="OUT-OF-COHORT-REPLY", sender_name="Spoke2Bot",
+        **common
+    )
     await db_session.commit()
     return pi1
 
@@ -492,10 +507,21 @@ async def _threaded_world(db_session, monkeypatch):
 async def test_expanding_own_thread_returns_the_gated_replies(
     client, db_session, monkeypatch
 ):
+    """Positive control (HUB-REPLY, in-cohort) and negative control
+    (OUT-OF-COHORT-REPLY, from an agent NOT in spoke1's gate) in the same
+    thread the viewer legitimately owns. This is the exact clause the brief
+    calls out as the deliberate engine divergence: replies must be gated with
+    own_or_gated, not merely admitted because the root belongs to the viewer.
+    Deleting `gated` from the reply_rows query in agent_thread_replies turns
+    this red (verified by hand — see task-5-report.md).
+    """
     pi1 = await _threaded_world(db_session, monkeypatch)
     r = await client.get("/agent/spoke1/thread/9.0001", headers=_auth(pi1.id))
     assert r.status_code == 200
     assert "HUB-REPLY" in r.text
+    assert "OUT-OF-COHORT-REPLY" not in r.text, (
+        "a reply must be gated even inside a thread the viewer owns the root of"
+    )
 
 
 async def test_expanding_an_out_of_cohort_root_is_404(client, db_session, monkeypatch):
