@@ -1,5 +1,6 @@
 import base64
 import json
+import re
 
 import pytest
 from itsdangerous import TimestampSigner
@@ -331,3 +332,125 @@ async def test_persist_assessment_tolerates_a_sparse_verdict(engine):
             if stale is not None:
                 await cleanup.delete(stale)
                 await cleanup.commit()
+
+
+# --- /admin/assessments (task 12) -------------------------------------------
+
+
+def _gating_state_for(html: str, label: str) -> str:
+    """Pull the ``gating-<state>`` class rendered for a given gate's row.
+
+    Matches the template's ``<div class="gating-row gating-{state}">...{label}
+    </div>`` markup, so this fails loudly if a future template refactor drops
+    the class rather than silently passing on unrelated markup.
+    """
+    for state, content in re.findall(
+        r'<div class="gating-row gating-(\w+)">(.*?)</div>', html, re.S
+    ):
+        if label in content:
+            return state
+    raise AssertionError(f"no gating row rendered for label {label!r} in: {html}")
+
+
+@pytest.mark.asyncio
+async def test_admin_assessments_page_lists_verdicts(client, db_session, admin):
+    run = SimulationRun()
+    db_session.add(run)
+    await db_session.flush()
+    db_session.add(OpportunityAssessment(
+        simulation_run_id=run.id, agent_id="blackbird", subject_agent_id="wang",
+        channel_name="general", company_or_project="DBT / BCAA-autophagy axis",
+        funnel_stage="incubation", recommendation="route-to-incubation",
+        confidence="Speculative", weighted_score=3.05, band="conditional",
+        red_flags=["No external validation yet"],
+    ))
+    await db_session.flush()
+
+    resp = await client.get("/admin/assessments", headers=_auth(admin.id))
+    assert resp.status_code == 200
+    assert "DBT / BCAA-autophagy axis" in resp.text
+    assert "route-to-incubation" in resp.text
+    assert "3.05" in resp.text
+    assert "No external validation yet" in resp.text
+
+
+@pytest.mark.asyncio
+async def test_admin_assessments_page_requires_admin(client, db_session):
+    plain = await factories.make_user(db_session, is_admin=False, email="plain-assess@example.org")
+    await db_session.flush()
+    resp = await client.get("/admin/assessments", headers=_auth(plain.id))
+    assert resp.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_admin_assessments_page_distinguishes_gating_tri_state(client, db_session, admin):
+    """``gating`` is a tri-state string (met/not_met/unconfirmed), not a boolean.
+
+    A template that renders it as ``{% if ok %}...{% else %}...{% endif %}``
+    would show "not_met" (the PI declined to commit) and "unconfirmed" (nobody
+    asked) with the exact same glyph — collapsing the one distinction this
+    column exists to preserve. This asserts all three states render three
+    different ways, not just that the page returns 200.
+    """
+    run = SimulationRun()
+    db_session.add(run)
+    await db_session.flush()
+    db_session.add(OpportunityAssessment(
+        simulation_run_id=run.id, agent_id="blackbird", subject_agent_id="wang",
+        channel_name="general", company_or_project="Tri-state gating fixture",
+        gating={
+            "baltimore_commitment": "not_met",
+            "life_sciences_domain": "met",
+            "credible_tech_source": "met",
+            "fto_achievable": "unconfirmed",
+        },
+    ))
+    await db_session.flush()
+
+    resp = await client.get("/admin/assessments", headers=_auth(admin.id))
+    assert resp.status_code == 200
+    html = resp.text
+
+    met_state = _gating_state_for(html, "life sciences domain")
+    not_met_state = _gating_state_for(html, "baltimore commitment")
+    unconfirmed_state = _gating_state_for(html, "fto achievable")
+
+    assert met_state == "met"
+    assert not_met_state == "not_met"
+    assert unconfirmed_state == "unconfirmed"
+    # The whole point: three distinct states must not collapse to two renderings.
+    assert len({met_state, not_met_state, unconfirmed_state}) == 3
+
+    # And the glyphs themselves differ, not just the (invisible) CSS class.
+    assert "&#9989;" in html  # met
+    assert "&#10060;" in html  # not_met
+    assert "&#10067;" in html  # unconfirmed
+
+
+@pytest.mark.asyncio
+async def test_admin_assessments_page_handles_null_and_unrecognized_gating(
+    client, db_session, admin
+):
+    """A dropped gating map (``None``, per ``_normalize_gating``) and a stray
+    unrecognized value must render without crashing the page — never a 500,
+    never a literal "None"."""
+    run = SimulationRun()
+    db_session.add(run)
+    await db_session.flush()
+    db_session.add(OpportunityAssessment(
+        simulation_run_id=run.id, agent_id="blackbird", subject_agent_id="wang",
+        channel_name="general", company_or_project="Null gating fixture",
+        gating=None,
+    ))
+    db_session.add(OpportunityAssessment(
+        simulation_run_id=run.id, agent_id="blackbird", subject_agent_id="fu",
+        channel_name="general", company_or_project="Unrecognized gating fixture",
+        # Not a value _normalize_gating would ever persist, but the template
+        # must not assume the column can only ever hold the three known states.
+        gating={"baltimore_commitment": "sort-of"},
+    ))
+    await db_session.flush()
+
+    resp = await client.get("/admin/assessments", headers=_auth(admin.id))
+    assert resp.status_code == 200
+    assert _gating_state_for(resp.text, "baltimore commitment") == "unknown"

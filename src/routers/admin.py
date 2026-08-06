@@ -33,6 +33,7 @@ from src.models import (
     CohortMembership,
     Job,
     LlmCallLog,
+    OpportunityAssessment,
     Publication,
     ResearcherProfile,
     SimulationRun,
@@ -816,6 +817,37 @@ async def admin_agents(
             env_token_agents=env_token_agents,
             proposal_counts=proposal_counts,
             review_counts=review_counts,
+        ),
+    )
+
+
+@router.get("/assessments", response_class=HTMLResponse)
+async def admin_assessments(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_admin_user),
+):
+    """BlackbirdBot's screening verdicts against the Blackbird investment rubric.
+
+    Ordered by weighted score descending (NULLs last), then most-recent-first,
+    so the advance/conditional candidates are what a human sees on arrival —
+    this page is a triage queue, not a log.
+    """
+    result = await db.execute(
+        select(OpportunityAssessment).order_by(
+            OpportunityAssessment.weighted_score.desc().nullslast(),
+            OpportunityAssessment.created_at.desc(),
+        )
+    )
+    assessments = result.scalars().all()
+    return templates.TemplateResponse(
+        request,
+        "admin/assessments.html",
+        _template_context(
+            request,
+            current_user,
+            active_admin="assessments",
+            assessments=assessments,
         ),
     )
 
