@@ -121,23 +121,40 @@ will actually read, so it must stand on its own.
 
 Label it :mag: **Opportunity Assessment** and include, in this order:
 
-1. **The idea.** What it is, specifically — the technique, compound, dataset, device, or
-   method — and which PI it came from. Name it concretely; do not summarize it away.
-2. **Novelty read.** What you found (or didn't) when you checked. If you ran
-   `search_prior_art`, state the exact terms searched and the result, and **always attach
-   the limitation: USPTO Open Data Portal, invention title only, US filings only** — no US
-   title hit is not evidence the idea is unclaimed abroad, in the claims of a
-   differently-titled patent, or in the non-patent literature. If the tool broadened your
-   query, say so. If you did not check prior art, say so plainly.
-3. **Funding fit.** Name a plausible funding mechanism (SBIR/STTR, a specific NIH
-   mechanism, foundation, industry sponsor) and explain why this idea's scope — not just
-   its topic — matches it. If nothing fits cleanly, say that.
-4. **Commercialization path.** State what the next step toward commercialization would
-   look like: a specific market, a plausible licensee, a spin-out shape, or the prototype/
-   experiment needed before any of that is knowable.
-5. **Recommended next step.** One concrete action — e.g. "file an invention disclosure",
-   "PI should apply to [specific FOA]", "needs a working prototype before this is
-   assessable", or "not ready — revisit after [specific missing piece]".
+1. **The idea.** What it is, specifically — the technique, compound, construct, dataset,
+   device, or method — and which PI it came from. Name it concretely; do not summarize it
+   away.
+2. **Funnel stage.** Where this sits: incubation/grant, pre-seed/formation, seed, or
+   follow-on. The evidence bar follows from this — earlier stages are judged on potential,
+   differentiation and external interest; later stages need replicated data, IP filed, a
+   syndicate identified, and quantified milestones.
+3. **Gating criteria.** All four, each as met / not met / **unconfirmed**:
+   - *Baltimore commitment* — would the PI anchor a NewCo in Baltimore (ideally Blackbird
+     BioHub) and keep forward activities there? **A JHU address is not a Baltimore
+     commitment.** If you never asked the PI, this is *unconfirmed* — never met.
+   - *Life-sciences / biomedical* — therapeutic, diagnostic, or platform.
+   - *Credible technology source* — a top academic lab, with a path to license the IP.
+   - *FTO achievable* — no unresolvable third-party blockade. A title-only prior-art
+     search that found nothing does **not** establish this.
+4. **Novelty & differentiation read.** What you found when you checked, with the exact
+   search terms and the title-only/US-only limitation attached — no US title hit is not
+   evidence the idea is unclaimed abroad, in the claims of a differently-titled patent, or
+   in the non-patent literature. If the tool broadened your query, say so. Is this first-
+   or best-in-class, or an incremental improvement in a less demanding setting?
+5. **Market & unmet need.** Quantified TAM or prevalence where you have it, the clinical
+   decision point, and whether the need is *actionable* — is there a downstream
+   intervention?
+6. **External signals.** Any VC/funder interest, big-pharma interest or deal comps, and
+   whether a leading expert has validated the approach. Say plainly when there are none.
+7. **Platform vs. single asset.** Does this generate a pipeline, or is it one shot?
+8. **Capital efficiency.** Non-dilutive leverage available — TEDCO MII, Maryland
+   Innovation Initiative, MSCRF, the BIITC tax credit / Maryland QOF — and how it would
+   de-risk this before or around equity.
+9. **Red flags.** Every disqualifier you saw, named explicitly. If there are none, say so.
+10. **Recommendation.** Exactly one of: **advance** / **conditional** / **pass** /
+    **route-to-incubation** (that last one is for high differentiation with thin data).
+11. **Suggested de-risking milestones.** The specific, quantitative next results that
+    would unlock the following stage.
 
 Add a confidence label — *[High]*, *[Moderate]*, or *[Speculative]* — per the standards in
 your system prompt.
@@ -145,13 +162,51 @@ your system prompt.
 **Quality bar:**
 - Every section must be specific enough that a reader could act on it without a follow-up
   question
-- If you're missing information for a section (e.g. you never ran a prior-art search),
-  say so explicitly rather than skipping the section silently
+- If you're missing information for a section, say so explicitly and mark the relevant
+  gating criterion *unconfirmed* — never skip a section silently and never guess
 - **Do not post an assessment you don't believe.** If the interview didn't turn up enough
-  to fill in these sections honestly, choose Option D instead
+  to fill these in honestly, choose Option D instead
 
 Your post should be thorough enough to stand alone — this is not a 2-4 sentence post like
 Option A.
+
+**Also emit the machine-readable verdict.** After your `<slack_message>` block, add an
+`<assessment_json>` block. This is for Blackbird staff only — it is **stripped before
+anything is posted to Slack**, so the PI never sees it. Score each dimension 1–5 (5 =
+strongly meets Blackbird's bar). Do not compute `weighted_score` yourself — leave it at 0
+and it will be calculated from your scores.
+
+Emit it as **bare JSON with no code fence** (a fenced block would be mistaken for your
+action JSON):
+
+<assessment_json>
+{
+  "company_or_project": "",
+  "subject_agent_id": "",
+  "funnel_stage": "incubation | pre-seed | seed | follow-on",
+  "gating": {
+    "baltimore_commitment": false,
+    "life_sciences_domain": true,
+    "credible_tech_source": true,
+    "fto_achievable": false
+  },
+  "scores": {
+    "differentiation": 0, "market_unmet_need": 0, "team": 0, "external_signals": 0,
+    "ip_fto": 0, "platform": 0, "dev_regulatory_feasibility": 0,
+    "workplan_capital_efficiency": 0, "exit_thesis": 0
+  },
+  "weighted_score": 0,
+  "red_flags": [],
+  "recommendation": "advance | conditional | pass | route-to-incubation",
+  "rationale": "",
+  "suggested_derisking_milestones": [],
+  "confidence": "High | Moderate | Speculative"
+}
+</assessment_json>
+
+Set `gating.baltimore_commitment` to `true` **only** if the PI has actually said they
+would anchor in Baltimore. Set `gating.fto_achievable` to `true` only on positive
+evidence, not on an empty title search.
 
 ### Option D: Skip this turn
 

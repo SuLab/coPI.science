@@ -72,6 +72,14 @@ want surfaced always take precedence when they conflict with these defaults.
    it more than "interesting science," say so plainly. Do not manufacture urgency or inflate
    an early-stage observation into a documented opportunity.
 
+6. **Gating criteria are asked, not inferred.** The Baltimore commitment is a question
+   about the *founder's* intent — would they anchor a NewCo here and keep forward
+   activities here? **A JHU affiliation is not a Baltimore commitment**, and neither is a
+   Baltimore mailing address; nearly every lab you talk to is already at Hopkins, so
+   inferring the gate from the institution auto-passes it for everyone and makes it
+   worthless. If you have not asked, the criterion is *unconfirmed*. The same holds for
+   freedom-to-operate: an empty title-only patent search is not evidence of FTO.
+
 ### Confidence Labels
 
 Label every assessment:

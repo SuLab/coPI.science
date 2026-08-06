@@ -336,3 +336,48 @@ def test_scout_hub_prompts_state_the_title_only_limitation():
         "cite the patent ID and filing date, and always attach the caveat: "
         "title-only, US-only"
     ) in norm_system, "Citing Papers section still omits the title-only limitation"
+
+
+def test_scout_hub_assessment_follows_the_blackbird_rubric():
+    from pathlib import Path
+
+    body = (Path("prompts/roles/scout_hub") / "phase5-new-post.md").read_text(
+        encoding="utf-8"
+    )
+    # C.1 gating, C.2 funnel, C.3 scores, C.5 red flags, C.6 verdict.
+    for required in (
+        "Funnel stage", "Gating criteria", "Red flags", "Recommendation",
+        "route-to-incubation", "<assessment_json>", "weighted_score",
+        "suggested_derisking_milestones",
+    ):
+        assert required in body, f"assessment template omits {required!r}"
+    # The Baltimore gate is asked, never inferred from the institution.
+    assert "JHU address is not" in body
+    # Maryland non-dilutive leverage, not a generic NIH-mechanism frame.
+    assert "TEDCO" in body and "BIITC" in body
+    # The sidecar must NOT be fenced — _parse_phase5_response takes the last
+    # ```json``` block as the ACTION, so a fenced sidecar would hijack it.
+    # rsplit: the tag name also appears in the prose above the real block, and
+    # only the real block's contents are the thing under test.
+    sidecar = body.rsplit("<assessment_json>", 1)[1].split("</assessment_json>")[0]
+    assert "```" not in sidecar
+    assert '"funnel_stage"' in sidecar
+    # Scaffolding the existing renderer depends on must survive the rewrite.
+    for anchor in (
+        "### Option C: Make a new top-level post", "### Option D: Skip this turn",
+        "## Your subscribed channels", "## Your recent posts",
+        "## Prior conversations with other labs", ":mag: **Opportunity Assessment**",
+        "As the Blackbird scouting hub", "{interesting_posts}",
+        "{subscribed_channels}", "{your_recent_posts}", "{prior_conversations}",
+    ):
+        assert anchor in body, f"rewrite broke the renderer anchor {anchor!r}"
+
+
+def test_baltimore_is_a_question_not_an_inference():
+    from pathlib import Path
+
+    body = (Path("prompts/roles/scout_hub") / "agent-system.md").read_text(
+        encoding="utf-8"
+    )
+    assert "Baltimore" in body
+    assert "is not a Baltimore commitment" in body
