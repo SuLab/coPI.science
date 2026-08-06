@@ -1113,6 +1113,7 @@ ENDPOINTS: list[Ep] = [
     Ep("POST", "/agent/request", "/agent/request", agent_scoped=False),
     Ep("GET", "/agent/{agent_id}/dashboard", "/agent/{agent}/dashboard"),
     Ep("GET", "/agent/{agent_id}/conversations", "/agent/{agent}/conversations"),
+    Ep("GET", "/agent/{agent_id}/thread/{message_ts}", "/agent/{agent}/thread/{ts}"),
     Ep("POST", "/agent/{agent_id}/message", "/agent/{agent}/message",
        {"channel_name": "general", "content": "hello"}),
     Ep("POST", "/agent/{agent_id}/dm", "/agent/{agent}/dm", {"content": "directive"}),
@@ -1162,16 +1163,39 @@ def test_the_endpoint_table_matches_the_registered_routes():
         f"missing from ENDPOINTS: {sorted(registered - listed)}; "
         f"stale entries: {sorted(listed - registered)}"
     )
-    assert len(ENDPOINTS) == 19
+    assert len(ENDPOINTS) == 20
 
 
-def _path(ep: Ep, world, delegated=None) -> str:
+def _path(ep: Ep, world, delegated=None, ts: str = "0.0000") -> str:
     return ep.template.format(
         agent=OWNER_AGENT,
         td=world.td.id,
         inv=delegated.pending_invitation.id if delegated else uuid.uuid4(),
         dele=delegated.row.id if delegated else uuid.uuid4(),
+        ts=ts,
     )
+
+
+@pytest.fixture
+async def thread_root(db_session, world) -> str:
+    """A real thread ROOT belonging to OWNER_AGENT, for the
+    /agent/{agent_id}/thread/{message_ts} authorization tests.
+
+    Not folded into `world` itself: several tests assert an exact,
+    unfiltered count of `AgentMessage` rows (e.g.
+    test_posting_an_empty_message_is_rejected), so a message seeded into the
+    shared fixture would silently change what they are counting. Without a
+    ts that actually resolves, the owner's positive-control request would 404
+    — which is not in the {200, 302} the authorization tests accept — and
+    would mask a stranger's 403 test passing for the wrong reason.
+    """
+    msg = await factories.make_agent_message(
+        db_session, run=world.run, agent_id=OWNER_AGENT, channel_name="general",
+        channel_id="C-THREAD-ROOT", phase="new_post", message_ts="50.0001",
+        sender_name="OwnerBot", content="root", visibility="public",
+    )
+    await db_session.flush()
+    return msg.message_ts
 
 
 @pytest.mark.parametrize("ep", ENDPOINTS, ids=[e.id for e in ENDPOINTS])
@@ -1187,7 +1211,7 @@ async def test_every_endpoint_redirects_a_logged_out_visitor(client, world, dele
 
 @pytest.mark.parametrize("ep", AGENT_SCOPED, ids=[e.id for e in AGENT_SCOPED])
 async def test_a_stranger_cannot_touch_an_agent_they_do_not_own(
-    client, world, delegated, ep, slack
+    client, world, delegated, ep, slack, thread_root
 ):
     """The half worth most: a logged-in user with no relationship to the agent.
 
@@ -1196,7 +1220,7 @@ async def test_a_stranger_cannot_touch_an_agent_they_do_not_own(
     fixture URL is wrong) cannot pass this.
     """
     slack.stub("users_lookupByEmail", {"user": {"id": "U-PI"}})
-    path = _path(ep, world, delegated)
+    path = _path(ep, world, delegated, ts=thread_root)
 
     denied = await client.request(ep.method, path, data=ep.data,
                                   headers=_auth(world.stranger.id))
@@ -1213,7 +1237,9 @@ async def test_a_stranger_cannot_touch_an_agent_they_do_not_own(
 
 
 @pytest.mark.parametrize("ep", AGENT_SCOPED, ids=[e.id for e in AGENT_SCOPED])
-async def test_delegate_write_access_matches_the_spec(client, world, delegated, ep, slack):
+async def test_delegate_write_access_matches_the_spec(
+    client, world, delegated, ep, slack, thread_root
+):
     """Delegates get everything except delegate management and Slack linking of
     the PI's own account (specs/web-delegates.md §Write access differentiation).
 
@@ -1221,8 +1247,8 @@ async def test_delegate_write_access_matches_the_spec(client, world, delegated, 
     reject, and every other endpoint must accept.
     """
     slack.stub("users_lookupByEmail", {"user": {"id": "U-DELEGATE"}})
-    r = await client.request(ep.method, _path(ep, world, delegated), data=ep.data,
-                             headers=_auth(delegated.user.id))
+    r = await client.request(ep.method, _path(ep, world, delegated, ts=thread_root),
+                             data=ep.data, headers=_auth(delegated.user.id))
     if ep.owner_only:
         assert r.status_code == 403, f"{ep.id} should be PI-only, got {r.status_code}"
         assert "Only the PI" in r.json()["detail"]

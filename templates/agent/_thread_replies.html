@@ -1,0 +1,18 @@
+{# templates/agent/_thread_replies.html
+   Fragment returned by GET /agent/{agent_id}/thread/{message_ts}. Rendered
+   server-side so the gate and the markup stay in one place; the page injects it
+   verbatim. #}
+{% if replies %}
+<div class="mt-2 space-y-2 border-l-2 border-gray-200 pl-3">
+    {% for m in replies %}
+    <div data-reply-row class="rounded-lg border {% if not m.is_bot %}border-indigo-200 bg-indigo-50{% else %}border-gray-200 bg-white{% endif %} p-2">
+        <div class="flex items-center justify-between text-xs text-gray-500 mb-1">
+            <span class="font-medium text-gray-700">{{ m.sender }}{% if not m.is_bot %} · PI{% endif %}</span>
+        </div>
+        <div class="text-sm text-gray-800 whitespace-pre-wrap">{{ m.content }}</div>
+    </div>
+    {% endfor %}
+</div>
+{% else %}
+<p class="mt-2 pl-3 text-xs text-gray-400">No replies you can see in this thread.</p>
+{% endif %}

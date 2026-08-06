@@ -448,3 +448,133 @@ async def test_a_delegate_sees_exactly_what_the_owner_sees(
     assert "OWN-POST" in dee_page.text
     assert "OUTSIDER-POST" not in owner_page.text
     assert "OUTSIDER-POST" not in dee_page.text
+
+
+# ---------------------------------------------------------------------------
+# Task 5: thread expand endpoint (GET /agent/{agent_id}/thread/{message_ts})
+# ---------------------------------------------------------------------------
+
+
+async def _threaded_world(db_session, monkeypatch):
+    """Spoke1 (owned) + Spoke2 (not owned), each with a root and one reply."""
+    from src.config import get_settings
+    s = get_settings()
+    monkeypatch.setattr(s, "cohort_isolation_enabled", True, raising=False)
+    monkeypatch.setattr(s, "cohort_default_policy", "isolated", raising=False)
+
+    pi1 = await factories.make_user(db_session, name="S One", email="t1@example.org")
+    await factories.make_agent(
+        db_session, user=pi1, agent_id="spoke1", bot_name="Spoke1Bot", pi_name="S One"
+    )
+    await factories.make_agent(db_session, agent_id="spoke2", bot_name="Spoke2Bot")
+    await factories.make_agent(db_session, agent_id="hub", bot_name="HubBot")
+    await _cohort(db_session, "p1", "spoke1", "hub")
+    await _cohort(db_session, "p2", "spoke2", "hub")
+
+    run = await factories.make_simulation_run(db_session)
+    common = dict(run=run, channel_name="general", channel_id="C1", visibility="public")
+    await factories.make_agent_message(
+        db_session, agent_id="spoke1", message_ts="9.0001", phase="new_post",
+        content="MY-ROOT", sender_name="Spoke1Bot", **common
+    )
+    await factories.make_agent_message(
+        db_session, agent_id="hub", message_ts="9.0002", thread_ts="9.0001",
+        phase="thread_reply", content="HUB-REPLY", sender_name="HubBot", **common
+    )
+    await factories.make_agent_message(
+        db_session, agent_id="spoke2", message_ts="9.0003", phase="new_post",
+        content="FOREIGN-ROOT", sender_name="Spoke2Bot", **common
+    )
+    await db_session.commit()
+    return pi1
+
+
+async def test_expanding_own_thread_returns_the_gated_replies(
+    client, db_session, monkeypatch
+):
+    pi1 = await _threaded_world(db_session, monkeypatch)
+    r = await client.get("/agent/spoke1/thread/9.0001", headers=_auth(pi1.id))
+    assert r.status_code == 200
+    assert "HUB-REPLY" in r.text
+
+
+async def test_expanding_an_out_of_cohort_root_is_404(client, db_session, monkeypatch):
+    """The IDOR guard: message_ts is guessable, so the root must re-pass the gate."""
+    pi1 = await _threaded_world(db_session, monkeypatch)
+    r = await client.get("/agent/spoke1/thread/9.0003", headers=_auth(pi1.id))
+    assert r.status_code == 404
+    assert "FOREIGN-ROOT" not in r.text
+
+
+async def test_expanding_a_reply_ts_rather_than_a_root_is_404(
+    client, db_session, monkeypatch
+):
+    pi1 = await _threaded_world(db_session, monkeypatch)
+    r = await client.get("/agent/spoke1/thread/9.0002", headers=_auth(pi1.id))
+    assert r.status_code == 404
+
+
+async def test_expanding_an_unknown_ts_is_404(client, db_session, monkeypatch):
+    pi1 = await _threaded_world(db_session, monkeypatch)
+    r = await client.get("/agent/spoke1/thread/0.0000", headers=_auth(pi1.id))
+    assert r.status_code == 404
+
+
+async def test_a_stranger_cannot_expand_someone_elses_thread(
+    client, db_session, monkeypatch
+):
+    await _threaded_world(db_session, monkeypatch)
+    stranger = await factories.make_user(
+        db_session, name="Nosy", email="nosy@example.org"
+    )
+    await db_session.commit()
+    r = await client.get("/agent/spoke1/thread/9.0001", headers=_auth(stranger.id))
+    assert r.status_code == 403
+    assert "HUB-REPLY" not in r.text
+
+
+async def test_expanding_an_uncohorted_own_thread_is_200_not_404(
+    client, db_session, monkeypatch
+):
+    """CONTROLLER AMENDMENT case: a PI whose agent is active but uncohorted
+    (gate == empty set under policy="isolated") must still be able to expand
+    their OWN thread. A bare `gate_clause(gate)` would resolve `root is None`
+    here and 404 the PI's own thread — the leaking-inverse of the feed's own
+    carve-out, which already renders this root and counts this reply in the
+    badge. `own_or_gated(gate, aid)` must admit both the root and the reply.
+    """
+    from src.config import get_settings
+    from src.services.conversation_feed import resolve_agent_gate
+    s = get_settings()
+    monkeypatch.setattr(s, "cohort_isolation_enabled", True, raising=False)
+    monkeypatch.setattr(s, "cohort_default_policy", "isolated", raising=False)
+
+    pi = await factories.make_user(
+        db_session, name="Lonely PI", email="lonelyexpand@example.org"
+    )
+    await factories.make_agent(
+        db_session, user=pi, agent_id="lonely", bot_name="LonelyBot", pi_name="Lonely PI"
+    )
+    await factories.make_agent(db_session, agent_id="other", bot_name="OtherBot")
+    await _cohort(db_session, "other-only", "other")  # "lonely" is deliberately left out
+
+    run = await factories.make_simulation_run(db_session)
+    common = dict(run=run, channel_name="general", channel_id="C1", visibility="public")
+    await factories.make_agent_message(
+        db_session, agent_id="lonely", message_ts="11.0001", phase="new_post",
+        content="LONELY-ROOT", sender_name="LonelyBot", **common
+    )
+    await factories.make_agent_message(
+        db_session, agent_id="lonely", message_ts="11.0002", thread_ts="11.0001",
+        phase="thread_reply", content="LONELY-OWN-REPLY", sender_name="LonelyBot",
+        **common
+    )
+    await db_session.commit()
+
+    assert await resolve_agent_gate(db_session, "lonely") == set(), (
+        "this test targets the isolated-empty-set case specifically"
+    )
+
+    r = await client.get("/agent/lonely/thread/11.0001", headers=_auth(pi.id))
+    assert r.status_code == 200
+    assert "LONELY-OWN-REPLY" in r.text
