@@ -29,12 +29,12 @@ _ODP_ONE_HIT = {
 async def test_search_returns_normalised_hits(monkeypatch):
     monkeypatch.setattr(patents, "_api_key", lambda: "k")
     respx.post(patents.SEARCH_URL).mock(return_value=httpx.Response(200, json=_ODP_ONE_HIT))
-    hits = await patents.search_prior_art("widget")
-    assert hits[0]["patent_id"] == "US20260000001A1"
-    assert hits[0]["title"] == "Novel Widget"
-    assert hits[0]["applicant"] == "Acme Corp"
-    assert hits[0]["inventor"] == "Jane Doe"
-    assert hits[0]["date"] == "2026-01-01"
+    result = await patents.search_prior_art("widget")
+    assert result.hits[0]["patent_id"] == "US20260000001A1"
+    assert result.hits[0]["title"] == "Novel Widget"
+    assert result.hits[0]["applicant"] == "Acme Corp"
+    assert result.hits[0]["inventor"] == "Jane Doe"
+    assert result.hits[0]["date"] == "2026-01-01"
 
 
 _XML_URL = "https://api.uspto.gov/files/APPXML/1.xml"
@@ -70,11 +70,11 @@ async def test_enriches_abstract_and_first_claim_from_pgpub_xml(monkeypatch):
         return_value=httpx.Response(200, json=_ODP_HIT_WITH_PGPUB)
     )
     respx.get(_XML_URL).mock(return_value=httpx.Response(200, text=_PGPUB_XML))
-    hits = await patents.search_prior_art("gene editing widget")
-    assert "editing genes precisely" in hits[0]["abstract"]
-    assert "gene-editing widget comprising a guide" in hits[0]["claim"]
+    result = await patents.search_prior_art("gene editing widget")
+    assert "editing genes precisely" in result.hits[0]["abstract"]
+    assert "gene-editing widget comprising a guide" in result.hits[0]["claim"]
     # only the FIRST claim is taken
-    assert "claim 1" not in hits[0]["claim"].lower()
+    assert "claim 1" not in result.hits[0]["claim"].lower()
 
 
 @pytest.mark.asyncio
@@ -87,10 +87,10 @@ async def test_fulltext_fetch_failure_leaves_hit_title_level(monkeypatch):
         return_value=httpx.Response(200, json=_ODP_HIT_WITH_PGPUB)
     )
     respx.get(_XML_URL).mock(return_value=httpx.Response(500))
-    hits = await patents.search_prior_art("gene editing widget")
-    assert len(hits) == 1
-    assert hits[0]["title"] == "Gene Editing Widget"
-    assert hits[0]["abstract"] == "" and hits[0]["claim"] == ""
+    result = await patents.search_prior_art("gene editing widget")
+    assert len(result.hits) == 1
+    assert result.hits[0]["title"] == "Gene Editing Widget"
+    assert result.hits[0]["abstract"] == "" and result.hits[0]["claim"] == ""
 
 
 @pytest.mark.asyncio
@@ -142,7 +142,7 @@ async def test_searched_but_empty_returns_empty_list(monkeypatch):
     respx.post(patents.SEARCH_URL).mock(
         return_value=httpx.Response(200, json={"count": 0, "patentFileWrapperDataBag": []})
     )
-    assert await patents.search_prior_art("nonexistent-xyzzy") == []
+    assert (await patents.search_prior_art("nonexistent-xyzzy")).hits == []
 
 
 @pytest.mark.asyncio
@@ -154,25 +154,119 @@ async def test_404_no_matches_returns_empty_list(monkeypatch):
     respx.post(patents.SEARCH_URL).mock(
         return_value=httpx.Response(404, json={"code": "404", "message": "Not Found"})
     )
-    assert await patents.search_prior_art("nonexistent-xyzzy-concept") == []
+    assert (await patents.search_prior_art("nonexistent-xyzzy-concept")).hits == []
 
 
 @pytest.mark.asyncio
 @respx.mock
-async def test_query_ands_title_tokens(monkeypatch):
-    # Multi-word queries must AND the title tokens (OR returns tens of thousands of
-    # junk matches on common words). Assert the outgoing body ANDs the tokens.
+async def test_first_tier_ands_all_title_tokens(monkeypatch):
+    # The first attempt must still AND every token (OR returns tens of thousands of
+    # junk matches on common words). Backoff only widens AFTER that misses.
     monkeypatch.setattr(patents, "_api_key", lambda: "k")
-    captured = {}
+    captured = []
 
     def _capture(request):
         import json
-        captured["q"] = json.loads(request.content)["q"]
+        captured.append(json.loads(request.content)["q"])
         return httpx.Response(200, json={"patentFileWrapperDataBag": []})
 
     respx.post(patents.SEARCH_URL).mock(side_effect=_capture)
     await patents.search_prior_art("CRISPR base editing")
-    assert captured["q"] == "applicationMetaData.inventionTitle:(CRISPR AND base AND editing)"
+    assert captured[0] == "applicationMetaData.inventionTitle:(CRISPR AND base AND editing)"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_backs_off_to_fewer_terms_when_full_phrase_misses(monkeypatch):
+    # A 7-token free-text query ANDed on the title matches nothing. The search must
+    # retry with the most specific terms rather than reporting a false clean.
+    monkeypatch.setattr(patents, "_api_key", lambda: "k")
+    queries = []
+
+    def _capture(request):
+        import json
+        q = json.loads(request.content)["q"]
+        queries.append(q)
+        # EXACT match, not substring: the full-phrase tier also contains both
+        # tokens, so a substring test would match on the first attempt and the
+        # backoff would never be exercised.
+        if q == "applicationMetaData.inventionTitle:(TFEB AND BRAF)":
+            return httpx.Response(200, json=_ODP_ONE_HIT)
+        return httpx.Response(200, json={"patentFileWrapperDataBag": []})
+
+    respx.post(patents.SEARCH_URL).mock(side_effect=_capture)
+    result = await patents.search_prior_art(
+        "TFEB inhibitor nuclear translocation melanoma BRAF resistance"
+    )
+    assert len(result.hits) == 1
+    assert result.terms_used == ["TFEB", "BRAF"]
+    assert result.total_terms == 7  # counts the raw query tokens, generics included
+    assert result.broadened is True
+    assert len(queries) == 3  # full phrase, top-3, top-2
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_no_backoff_needed_when_full_phrase_hits(monkeypatch):
+    monkeypatch.setattr(patents, "_api_key", lambda: "k")
+    route = respx.post(patents.SEARCH_URL).mock(
+        return_value=httpx.Response(200, json=_ODP_ONE_HIT)
+    )
+    result = await patents.search_prior_art("gene editing widget")
+    assert result.broadened is False
+    assert result.total_terms == 3
+    assert route.call_count == 1
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_all_tiers_empty_reports_the_narrowest_breadth_tried(monkeypatch):
+    monkeypatch.setattr(patents, "_api_key", lambda: "k")
+    respx.post(patents.SEARCH_URL).mock(
+        return_value=httpx.Response(200, json={"patentFileWrapperDataBag": []})
+    )
+    result = await patents.search_prior_art("alpha beta gamma delta epsilon")
+    assert result.hits == []
+    assert len(result.terms_used) == 2  # floored at two terms
+    assert result.broadened is True
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_rate_limit_mid_backoff_returns_none_not_a_clean_result(monkeypatch):
+    # A 429 on any tier must read as "could not search", never as novelty.
+    monkeypatch.setattr(patents, "_api_key", lambda: "k")
+    calls = {"n": 0}
+
+    def _capture(request):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(200, json={"patentFileWrapperDataBag": []})
+        return httpx.Response(429)
+
+    respx.post(patents.SEARCH_URL).mock(side_effect=_capture)
+    assert await patents.search_prior_art("alpha beta gamma delta") is None
+
+
+def test_generic_terms_lose_to_specific_ones():
+    ranked = patents._rank_terms(
+        ["treatment", "C9orf72", "inhibitor", "MARK2", "disease"]
+    )
+    # Set comparison: which two survive is the invariant; their relative order is
+    # an arbitrary tie-break not worth pinning.
+    assert set(ranked[:2]) == {"C9orf72", "MARK2"}
+    assert "treatment" not in ranked
+    assert "inhibitor" not in ranked
+
+
+def test_single_token_query_uses_one_tier():
+    assert patents._tiers(["TFEB"]) == [["TFEB"]]
+
+
+def test_first_tier_is_the_query_as_asked_in_original_order():
+    # Only the backoff tiers reorder by salience. Tier 1 is the user's phrase.
+    tiers = patents._tiers(["CRISPR", "base", "editing"])
+    assert tiers[0] == ["CRISPR", "base", "editing"]
 
 
 from src.agent.tools import TOOL_DEFINITIONS, _execute_search_prior_art  # noqa: E402
