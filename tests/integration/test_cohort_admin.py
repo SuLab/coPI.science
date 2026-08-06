@@ -334,6 +334,91 @@ async def test_topology_renders_a_cell_per_pair(client, db_session, admin, roste
     assert ticked == {f"{a.id}:su"}, ticked
 
 
+def _hidden_marker_values(html: str, name: str) -> set[str]:
+    """Every ``value`` of a hidden ``<input>`` with the given ``name``."""
+    import re
+
+    out = set()
+    for tag in re.finditer(r"<input\b[^>]*>", html):
+        t = tag.group(0)
+        if f'name="{name}"' not in t:
+            continue
+        value = re.search(r'value="([^"]*)"', t)
+        if value:
+            out.add(value.group(1))
+    return out
+
+
+def _all_cell_values(html: str) -> set[str]:
+    """Every ``value`` of a ``name="cell"`` checkbox, checked or not.
+
+    Unlike ``_ticked_cells`` (below), this does not filter on ``checked`` — it
+    is used to assert the RENDERED cell set, not the pre-ticked one.
+    """
+    import re
+
+    out = set()
+    for tag in re.finditer(r"<input\b[^>]*>", html):
+        t = tag.group(0)
+        if 'name="cell"' not in t:
+            continue
+        value = re.search(r'value="([^"]*)"', t)
+        if value:
+            out.add(value.group(1))
+    return out
+
+
+async def test_rendered_cells_are_exactly_the_marker_cross_product(
+    client, db_session, admin, roster
+):
+    """Structural safety property (audit finding F5): the ``present_agent`` /
+    ``present_cohort`` markers the save route trusts to reconstruct ``rendered``
+    must equal the ACTUAL cross product of cells the table drew, or a save can
+    silently delete memberships for a cell that was never shown (see
+    ``test_topology_save_only_touches_rendered_cells`` and friends above).
+
+    The old per-cell ``present`` input was emitted INSIDE the nested cell loop,
+    so it was structurally impossible for a cell to render without a matching
+    marker. The markers now sit OUTSIDE the table (``cohort_topology.html:46-47``),
+    so that guarantee is no longer enforced by the template's structure — only by
+    convention. If a future change wraps the inner ``{% for c in cohorts %}``
+    loop in a per-agent conditional (e.g. skip cohorts for a suspended agent),
+    the markers would still claim the full cross product while the table drew
+    fewer cells, and this test is what would catch the mismatch (it would fail
+    the other direction too: a cell rendered with no corresponding marker pair).
+
+    A non-active agent is included deliberately — production has 3 ``pending``
+    agents, and the "Acts on" column already special-cases non-active status
+    (a real conditional in that neighborhood), so a regression is plausible
+    exactly there.
+    """
+    a = await _cohort(db_session, "alpha", admin, members=["su"])
+    b = await _cohort(db_session, "beta", admin)
+    pending_user = await factories.make_user(db_session, email="pendingpi@example.org")
+    await factories.make_agent(
+        db_session, user=pending_user, agent_id="pendingagent", bot_name="PendingAgentBot",
+        pi_name="Pending PI", status="pending",
+    )
+
+    r = await client.get("/admin/cohorts/topology", headers=_auth(admin.id))
+    assert r.status_code == 200
+
+    present_agents = _hidden_marker_values(r.text, "present_agent")
+    present_cohorts = _hidden_marker_values(r.text, "present_cohort")
+    assert present_agents == {"su", "wiseman", "cravatt", "pendingagent"}, present_agents
+    assert present_cohorts == {str(a.id), str(b.id)}, present_cohorts
+
+    expected_cross_product = {
+        f"{cid}:{aid}" for cid in present_cohorts for aid in present_agents
+    }
+    rendered_cells = _all_cell_values(r.text)
+    assert rendered_cells == expected_cross_product, (
+        f"markers claim {len(expected_cross_product)} cells but the table drew "
+        f"{len(rendered_cells)}; missing={expected_cross_product - rendered_cells}, "
+        f"extra={rendered_cells - expected_cross_product}"
+    )
+
+
 async def test_topology_save_applies_adds_and_removes_in_one_pass(
     client, db_session, admin, roster
 ):
