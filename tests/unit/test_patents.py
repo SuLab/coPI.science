@@ -346,6 +346,7 @@ def test_all_generic_query_still_backs_off_normally():
 
 
 from src.agent.tools import TOOL_DEFINITIONS, _execute_search_prior_art  # noqa: E402
+from src.services.patents import PriorArtResult  # noqa: E402
 
 CAVEAT_MARK = "US filings only"
 
@@ -361,7 +362,10 @@ async def _fake(v):
 @pytest.mark.asyncio
 async def test_searched_empty_carries_caveat_and_says_no_matches(monkeypatch):
     from src.agent import tools as tools_mod
-    monkeypatch.setattr(tools_mod, "search_prior_art", lambda q, limit=10: _fake([]))
+    monkeypatch.setattr(
+        tools_mod, "search_prior_art",
+        lambda q, limit=10: _fake(PriorArtResult([], ["crispr", "delivery"], 2)),
+    )
     out = await _execute_search_prior_art("crispr delivery")
     assert CAVEAT_MARK in out
     assert "no us filings matched" in out.lower()
@@ -392,7 +396,10 @@ async def test_output_carries_caveat_and_fields_on_has_hits_path(monkeypatch):
         "abstract": "A widget that does things.",
         "claim": "1. A widget comprising a thing.",
     }
-    monkeypatch.setattr(tools_mod, "search_prior_art", lambda q, limit=10: _fake([hit]))
+    monkeypatch.setattr(
+        tools_mod, "search_prior_art",
+        lambda q, limit=10: _fake(PriorArtResult([hit], ["widget"], 1)),
+    )
     out = await _execute_search_prior_art("widget")
     assert CAVEAT_MARK in out
     assert "US20260000001A1" in out
@@ -401,3 +408,44 @@ async def test_output_carries_caveat_and_fields_on_has_hits_path(monkeypatch):
     assert "Jane Doe" in out
     assert "A widget that does things." in out
     assert "1. A widget comprising a thing." in out
+
+
+@pytest.mark.asyncio
+async def test_caveat_states_title_only_and_the_real_source(monkeypatch):
+    from src.agent import tools as tools_mod
+    monkeypatch.setattr(
+        tools_mod, "search_prior_art",
+        lambda q, limit=10: _fake(PriorArtResult([], ["widget"], 1)),
+    )
+    out = await _execute_search_prior_art("widget")
+    assert "TITLE ONLY" in out
+    assert "USPTO Open Data Portal" in out
+    assert "PatentsView" not in out
+    assert "freedom-to-operate" in out.lower()
+
+
+@pytest.mark.asyncio
+async def test_broadened_search_is_flagged_as_broader_than_asked(monkeypatch):
+    from src.agent import tools as tools_mod
+    result = PriorArtResult([], ["TFEB", "BRAF"], 7)
+    monkeypatch.setattr(tools_mod, "search_prior_art", lambda q, limit=10: _fake(result))
+    out = await _execute_search_prior_art("TFEB inhibitor melanoma BRAF resistance x y")
+    assert "BROADER" in out
+    assert "2 most specific of your 7" in out
+
+
+@pytest.mark.asyncio
+async def test_unbroadened_search_reports_the_terms_plainly(monkeypatch):
+    from src.agent import tools as tools_mod
+    result = PriorArtResult([], ["gene", "editing"], 2)
+    monkeypatch.setattr(tools_mod, "search_prior_art", lambda q, limit=10: _fake(result))
+    out = await _execute_search_prior_art("gene editing")
+    assert "BROADER" not in out
+    assert "gene AND editing" in out
+
+
+def test_tool_description_demands_a_short_specific_query():
+    spec = next(t for t in TOOL_DEFINITIONS if t["name"] == "search_prior_art")
+    text = spec["description"] + spec["input_schema"]["properties"]["query"]["description"]
+    assert "2-4" in text
+    assert "title" in text.lower()

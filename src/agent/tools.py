@@ -6,7 +6,7 @@ from typing import Any
 
 from src.agent.prompt_safety import delimit
 from src.agent.roles import load_role
-from src.services.patents import search_prior_art
+from src.services.patents import PriorArtResult, search_prior_art
 from src.services.pubmed import fetch_abstract, fetch_full_text
 
 logger = logging.getLogger(__name__)
@@ -91,15 +91,24 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
     {
         "name": "search_prior_art",
         "description": (
-            "Search issued US patents (USPTO / PatentsView) for prior art related "
-            "to an idea or technique. Use when assessing whether an idea is novel "
-            "or patentable. US filings only — absence of a hit is NOT proof of "
-            "novelty."
+            "Search issued and published US patent filings (USPTO Open Data Portal) "
+            "for prior art. Matches on INVENTION TITLE ONLY. Pass 2-4 highly specific "
+            "terms — gene/target symbols, a compound name, a modality — NOT a sentence. "
+            "A long descriptive query cannot match any real patent title and will come "
+            "back empty no matter how crowded the field is. Good: 'TFEB melanoma'. "
+            "Bad: 'TFEB inhibitor nuclear translocation melanoma BRAF resistance'. "
+            "US filings only — absence of a hit is NOT proof of novelty or FTO."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "query": {"type": "string", "description": "Free-text description of the idea/technique"},
+                "query": {
+                    "type": "string",
+                    "description": (
+                        "2-4 specific terms matched against the patent title (e.g. "
+                        "'C9orf72 repeat', 'TFEB melanoma'). Not a description."
+                    ),
+                },
             },
             "required": ["query"],
         },
@@ -107,9 +116,12 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
 ]
 
 _PATENT_CAVEAT = (
-    "Source: USPTO Open Data Portal, US filings only (title search). Absence of a "
-    "hit here is not evidence of novelty — EP/WO/JP filings, non-patent prior art, "
-    "and matches only in the abstract/claims are not searched.\n\n"
+    "Source: USPTO Open Data Portal (api.uspto.gov), US filings only, matched on "
+    "INVENTION TITLE ONLY — abstracts and claims are NOT searched. Absence of a hit "
+    "is weak evidence at best: it does not cover EP/WO/JP filings, unpublished "
+    "applications, non-patent prior art, or any patent whose title happens to use "
+    "different words. NEVER report a clean title search as novelty or as "
+    "freedom-to-operate; report it as what it is, a title search that found nothing.\n\n"
 )
 
 
@@ -274,22 +286,40 @@ _PATENT_UNAVAILABLE = (
 )
 
 
+def _scope_note(result: "PriorArtResult") -> str:
+    """Tell the model what breadth actually produced this answer. A broadened
+    search must never be read as an on-point clean result."""
+    if not result.terms_used:
+        return ""
+    terms = " AND ".join(result.terms_used)
+    if result.broadened:
+        return (
+            f"SCOPE: your full phrase matched no title, so this searched the "
+            f"{len(result.terms_used)} most specific of your {result.total_terms} "
+            f"terms ({terms}). That is a BROADER search than you asked for — any hits "
+            f"may be adjacent rather than on point, and an empty result at this "
+            f"breadth is the strongest negative this tool can give you (still not FTO).\n\n"
+        )
+    return f"SCOPE: searched titles for {terms}.\n\n"
+
+
 async def _execute_search_prior_art(query: str) -> str:
-    """Search PatentsView for prior art.
+    """Search the USPTO ODP for prior art.
 
     Distinguishes three outcomes so the hub never mistakes an unreachable/unconfigured
     tool for a clean novelty result:
-      * ``None``  → the search could not run → an explicit UNAVAILABLE notice;
-      * ``[]``    → the search ran and matched nothing → the caveat + "no matches";
-      * results   → the caveat + the filings.
+      * ``None``        → the search could not run → an explicit UNAVAILABLE notice;
+      * empty ``hits``  → the search ran and matched nothing → caveat + scope + "no matches";
+      * results         → caveat + scope + the filings.
     """
-    hits = await search_prior_art(query)
-    if hits is None:
+    result = await search_prior_art(query)
+    if result is None:
         return _PATENT_UNAVAILABLE
-    if not hits:
-        return _PATENT_CAVEAT + "No US filings matched this query."
-    lines = [_PATENT_CAVEAT]
-    for h in hits:
+    preamble = _PATENT_CAVEAT + _scope_note(result)
+    if not result.hits:
+        return preamble + "No US filings matched this query."
+    lines = [preamble]
+    for h in result.hits:
         applicant = h.get("applicant") or "Unknown applicant"
         inventor = h.get("inventor") or "Unknown inventor"
         status = h.get("status") or ""
