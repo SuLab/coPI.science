@@ -209,3 +209,19 @@ def test_role_rate_override_rejects_non_int(tmp_path, monkeypatch, caplog):
 def test_missing_manifest_yields_no_rate_override(tmp_path, monkeypatch):
     monkeypatch.setattr(roles, "ROLES_DIR", tmp_path / "roles")
     assert load_role("pi_lab").calls_per_load_per_window is None
+
+
+def test_scout_hub_prompts_state_the_title_only_limitation():
+    """The hub's whole novelty read rests on this tool. The prompt must not let it
+    describe a title search as though it covered claims, and must not name the
+    decommissioned PatentsView endpoint."""
+    from pathlib import Path
+
+    for name in ("agent-system.md", "phase5-new-post.md"):
+        text = Path("prompts/roles/scout_hub") / name
+        body = text.read_text(encoding="utf-8")
+        assert "PatentsView" not in body, f"{name} still names the dead endpoint"
+        assert "title" in body.lower(), f"{name} omits the title-only limitation"
+    system = (Path("prompts/roles/scout_hub") / "agent-system.md").read_text(encoding="utf-8")
+    assert "freedom-to-operate" in system.lower()
+    assert "2-4" in system

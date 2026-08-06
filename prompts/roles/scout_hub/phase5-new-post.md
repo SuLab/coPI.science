@@ -124,9 +124,11 @@ Label it :mag: **Opportunity Assessment** and include, in this order:
 1. **The idea.** What it is, specifically — the technique, compound, dataset, device, or
    method — and which PI it came from. Name it concretely; do not summarize it away.
 2. **Novelty read.** What you found (or didn't) when you checked. If you ran
-   `search_prior_art`, state the result and **always include the caveat that PatentsView/
-   USPTO coverage is US filings only** — no US hit is not evidence the idea is unclaimed
-   abroad or in the non-patent literature. If you did not check prior art, say so plainly.
+   `search_prior_art`, state the exact terms searched and the result, and **always attach
+   the limitation: USPTO Open Data Portal, invention title only, US filings only** — no US
+   title hit is not evidence the idea is unclaimed abroad, in the claims of a
+   differently-titled patent, or in the non-patent literature. If the tool broadened your
+   query, say so. If you did not check prior art, say so plainly.
 3. **Funding fit.** Name a plausible funding mechanism (SBIR/STTR, a specific NIH
    mechanism, foundation, industry sponsor) and explain why this idea's scope — not just
    its topic — matches it. If nothing fits cleanly, say that.
