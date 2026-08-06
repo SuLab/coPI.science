@@ -339,6 +339,23 @@ class Settings(BaseSettings):
     # .notes/cohort-system-v2.md §10.3.
     max_consecutive_reactive_turns: int = 3
 
+    # Load-proportional rate limiter. Replaces the cumulative --budget cap as the
+    # LIVE throttle: allowance = llm_calls_per_load_per_window * _agent_load(agent),
+    # measured over a sliding llm_rate_window_seconds.
+    #
+    # A rate self-heals — a throttled agent is eligible again as the window slides
+    # — where a cumulative cap benches permanently, and, because _rebuild_state
+    # restores api_call_count from llm_call_logs, benches permanently ACROSS
+    # RESTARTS. That is what took the blackbird hub off the air for 161 turns.
+    #
+    # Calibrated against run 4f1e8395: a spoke ran ~0.27 calls/10min and the hub
+    # ~2.6, so 8 leaves a spoke ~30x headroom while tripping a runaway (back-to-back
+    # calls) in ~25s. A hub at load 12 gets 96/window and trips in ~5min — the
+    # deliberate price of the 12x allowance. Lower this to tighten it.
+    # See docs/specs/2026-08-06-hub-budget-scheduler-design.md §4.2 / §5.
+    llm_rate_window_seconds: int = 600
+    llm_calls_per_load_per_window: int = 8
+
     # Privacy rollout — when True (default), POST /agent/{id}/proposals/{tid}/reopen
     # migrates the thread into a new collab_private channel instead of posting
     # the PI's guidance text into the origin public thread. Can be set to False
