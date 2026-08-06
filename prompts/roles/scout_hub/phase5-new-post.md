@@ -128,14 +128,20 @@ Label it :mag: **Opportunity Assessment** and include, in this order:
    follow-on. The evidence bar follows from this — earlier stages are judged on potential,
    differentiation and external interest; later stages need replicated data, IP filed, a
    syndicate identified, and quantified milestones.
-3. **Gating criteria.** All four, each as met / not met / **unconfirmed**:
+3. **Gating criteria.** All four, each as **met** / **not met** / **unconfirmed** — the
+   same three states the `<assessment_json>` skeleton below encodes as `"met"` /
+   `"not_met"` / `"unconfirmed"` (write "not met" here, `"not_met"` there — same state,
+   just underscored for JSON):
    - *Baltimore commitment* — would the PI anchor a NewCo in Baltimore (ideally Blackbird
      BioHub) and keep forward activities there? **A JHU address is not a Baltimore
-     commitment.** If you never asked the PI, this is *unconfirmed* — never met.
+     commitment.** Mark **met** only if the PI actually said they would anchor here; mark
+     **not met** only if they said they would not; if you never asked — or asked and got
+     no real commitment either way — this is **unconfirmed**, never met.
    - *Life-sciences / biomedical* — therapeutic, diagnostic, or platform.
    - *Credible technology source* — a top academic lab, with a path to license the IP.
    - *FTO achievable* — no unresolvable third-party blockade. A title-only prior-art
-     search that found nothing does **not** establish this.
+     search that found nothing does **not** establish this — an unrun or empty search
+     makes this **unconfirmed**, never met.
 4. **Novelty & differentiation read.** What you found when you checked, with the exact
    search terms and the title-only/US-only limitation attached — no US title hit is not
    evidence the idea is unclaimed abroad, in the claims of a differently-titled patent, or
@@ -185,10 +191,10 @@ action JSON):
   "subject_agent_id": "",
   "funnel_stage": "incubation | pre-seed | seed | follow-on",
   "gating": {
-    "baltimore_commitment": false,
-    "life_sciences_domain": true,
-    "credible_tech_source": true,
-    "fto_achievable": false
+    "baltimore_commitment": "unconfirmed",
+    "life_sciences_domain": "met",
+    "credible_tech_source": "met",
+    "fto_achievable": "not_met"
   },
   "scores": {
     "differentiation": 0, "market_unmet_need": 0, "team": 0, "external_signals": 0,
@@ -204,9 +210,12 @@ action JSON):
 }
 </assessment_json>
 
-Set `gating.baltimore_commitment` to `true` **only** if the PI has actually said they
-would anchor in Baltimore. Set `gating.fto_achievable` to `true` only on positive
-evidence, not on an empty title search.
+Every `gating.*` value is a **string**: exactly `"met"`, `"not_met"`, or `"unconfirmed"` —
+never a bare `true`/`false`, and never any other spelling. Set `gating.baltimore_commitment`
+to `"met"` **only** if the PI has actually said they would anchor in Baltimore; to
+`"not_met"` only if they said they would not; otherwise `"unconfirmed"` — a JHU address
+alone is always `"unconfirmed"`, never `"met"`. Set `gating.fto_achievable` to `"met"` only
+on positive evidence; an unrun or empty title-only search is `"unconfirmed"`, never `"met"`.
 
 ### Option D: Skip this turn
 

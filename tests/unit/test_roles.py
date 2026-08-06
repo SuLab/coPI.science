@@ -381,3 +381,37 @@ def test_baltimore_is_a_question_not_an_inference():
     )
     assert "Baltimore" in body
     assert "is not a Baltimore commitment" in body
+
+
+def test_gating_values_in_assessment_skeleton_are_tristate_strings():
+    """An unasked gate is not a failed gate: gating.* must round-trip through the
+    sidecar as one of three strings, never a bare boolean, so a downstream reader
+    (and the staff triage page) can tell "never asked" apart from "asked and no".
+    """
+    import json
+    from pathlib import Path
+
+    body = (Path("prompts/roles/scout_hub") / "phase5-new-post.md").read_text(
+        encoding="utf-8"
+    )
+    # Same rsplit as the rubric test above: the tag name also appears in the prose
+    # describing the skeleton, so only the LAST occurrence opens the real block.
+    sidecar = body.rsplit("<assessment_json>", 1)[1].split("</assessment_json>")[0]
+    skeleton = json.loads(sidecar)
+    gating = skeleton["gating"]
+
+    allowed_states = {"met", "not_met", "unconfirmed"}
+    for key, value in gating.items():
+        assert isinstance(value, str), (
+            f"gating.{key} is {value!r} ({type(value).__name__}) — must be a string, "
+            "never a bare true/false"
+        )
+        assert value in allowed_states, f"gating.{key}={value!r} not in {allowed_states}"
+
+    # The skeleton actually demonstrates all three states, not one value repeated
+    # across all four keys.
+    assert set(gating.values()) == allowed_states
+
+    # The prose gating item uses the same three words the JSON keys expect.
+    assert "met" in body and "not met" in body and "unconfirmed" in body
+    assert '"met"' in body and '"not_met"' in body and '"unconfirmed"' in body
