@@ -32,19 +32,26 @@ def test_scan_prompt_omits_memory_and_lab_directory():
     assert "Other Lab" not in scan  # scan prompt excludes the directory
 
 
-def test_phase2_and_phase4_honour_role_overrides(tmp_path, monkeypatch):
-    """Every other phase resolves per-role; these two were hardcoded to the global
-    file, so a role override was accepted into the repo and then ignored."""
+def test_phase2_scan_prune_and_phase4_honour_role_overrides(tmp_path, monkeypatch):
+    """build_phase2_scan_prompt, build_phase2_prune_prompt, and build_phase4_prompt each
+    load their template via a hardcoded global path rather than the role-aware
+    resolver, so a role's override file for any of the three would be accepted into
+    the repo and then silently ignored. Pin that each one now resolves through
+    Agent._load_prompt (and therefore src.agent.roles.resolve_prompt_path)."""
     from src.agent import roles as roles_mod
     from src.agent.agent import Agent
-    from src.agent.state import ThreadState
+    from src.agent.state import PostRef, ThreadState
 
     prompts = tmp_path / "prompts"
     (prompts / "roles" / "widget").mkdir(parents=True)
     (prompts / "phase2-scan-filter.md").write_text("GLOBAL SCAN {posts}", encoding="utf-8")
+    (prompts / "phase2-prune.md").write_text("GLOBAL PRUNE {interesting_posts}", encoding="utf-8")
     (prompts / "phase4-thread-reply.md").write_text("GLOBAL REPLY", encoding="utf-8")
     (prompts / "roles" / "widget" / "phase2-scan-filter.md").write_text(
         "WIDGET SCAN {posts}", encoding="utf-8"
+    )
+    (prompts / "roles" / "widget" / "phase2-prune.md").write_text(
+        "WIDGET PRUNE {interesting_posts}", encoding="utf-8"
     )
     (prompts / "roles" / "widget" / "phase4-thread-reply.md").write_text(
         "WIDGET REPLY", encoding="utf-8"
@@ -57,6 +64,12 @@ def test_phase2_and_phase4_honour_role_overrides(tmp_path, monkeypatch):
         [{"post_id": "p1", "channel": "general", "sender": "x", "content_snippet": "s"}]
     )
     assert "WIDGET SCAN" in scan_messages[0]["content"]
+
+    agent.state.interesting_posts = [
+        PostRef(post_id="p1", channel="general", sender_agent_id="x", content_snippet="s", posted_at=0.0)
+    ]
+    _, prune_messages = agent.build_phase2_prune_prompt()
+    assert "WIDGET PRUNE" in prune_messages[0]["content"]
 
     thread = ThreadState(thread_id="t1", channel="general", other_agent_id="o", message_count=1)
     _, reply_messages = agent.build_phase4_prompt(
