@@ -171,9 +171,16 @@ The cooldown branch is unchanged. The main loop's redundant second
 `_agent_within_budget` call at `simulation.py:502` is left alone; it is unreachable-false
 given `_select_agent` only returns eligible agents, and removing it is out of scope.
 
-**Restart behaviour falls out for free.** `_rebuild_state` step 4 already reads
-`llm_call_logs`; it changes from an all-time `COUNT(*)` to selecting `created_at` values
-**inside the window**. Calls age out, so §1.1's sticky bench becomes impossible by
+**Restart behaviour.** `_rebuild_state` step 4's all-time `COUNT(*)` into
+`api_call_count` is **left exactly as is** — that counter still feeds the run summary
+and `SimulationRun.total_api_calls`, and an existing integration test
+(`test_full_run_live.py:1111`) correctly pins its survival across restart. A new
+**step 4b** additionally selects `created_at` for rows **inside the window** and loads
+them into `call_times`.
+
+The two counters therefore mean different things on purpose: `api_call_count` is
+lifetime accounting, `call_times` is the live throttle. Because only the latter gates
+eligibility and its entries age out, §1.1's sticky bench becomes impossible by
 construction rather than by correct operator behaviour.
 
 ### 4.3 Consumer 2 — the scheduler
@@ -289,16 +296,20 @@ New unit tests in `tests/unit/`, using the existing `_engine` helper
 - Composition: `_turn_eligible` fails if *either* the legacy cap or the rate limit
   fails, and passes only when both do.
 
-**Two existing tests assert the old semantics and are rewritten deliberately:**
+**Existing tests — one changes, one must NOT:**
 
-- `tests/unit/test_cohort_isolation.py:1175 test_budget_still_filters` — asserts the
-  cumulative cap filters an agent.
-- `tests/integration/test_full_run_live.py:1111` — asserts `api_call_count` survives
-  restart *as a budget carry-over*.
+- `tests/unit/test_cohort_isolation.py:1175 test_budget_still_filters` sets
+  `budget_cap=1` explicitly, so it still exercises the retained legacy cap and
+  **passes unchanged**. It is extended, not rewritten, with a sibling asserting the
+  rate limiter filters independently of `budget_cap`.
+- `tests/integration/test_full_run_live.py:1111` asserts `api_call_count` survives
+  restart. Per §4.2 that counter is deliberately untouched, so this test **must keep
+  passing with no edit**. If it fails, step 4b has been implemented by modifying step 4
+  rather than adding to it — treat a failure here as the intended tripwire, not as a
+  test to update.
 
-Both are called out explicitly because "the tests changed" is where a fix of this shape
-can hide a regression. The replacements must assert the new window-scoped behaviour, not
-merely delete the assertion.
+Called out explicitly because "the tests changed" is where a fix of this shape can hide
+a regression.
 
 **Gate:** `./scripts/ci.sh` must stay green — single alembic head, `ruff` clean on
 tests, `src/` findings at or under `SRC_LINT_MAX=260`, branch coverage at or above
