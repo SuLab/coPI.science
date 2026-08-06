@@ -10,7 +10,7 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import distinct, func, select
+from sqlalchemy import distinct, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -761,6 +761,17 @@ async def agent_conversations(
         # SQL, before LIMIT: #general carries every other cohort's traffic, so
         # filtering in Python afterwards would leave the page nearly empty.
         gate = await resolve_agent_gate(db, aid)
+        # A PI must always see their OWN bot's posts, even when that bot is
+        # active but not yet placed in a cohort — under policy="isolated" that
+        # agent's gate is the empty set (see resolve_agent_gate/compute_gates),
+        # and gate_clause(set()) admits nothing from the membership branch, so
+        # without this OR the PI's own posts would vanish the moment their bot
+        # is activated and before an admin has assigned it a cohort. This is a
+        # deliberate, safe divergence from `_entry_allowed`: the engine never
+        # needs this clause because an agent is never asked to decide whether
+        # to act on its own post. Safe because it can only ever admit THIS
+        # agent's own rows, never another agent's.
+        own_or_gated = or_(gate_clause(gate), AgentMessage.agent_id == aid)
 
         # Thread ROOTS, newest first. `phase` is belt-and-braces alongside
         # `thread_ts IS NULL`; the two agree on every row.
@@ -772,7 +783,8 @@ async def agent_conversations(
         # 50 — measured on a 200-row tie group, the index-scan and seq-scan
         # plans returned two DISJOINT pages, so half the messages were
         # unreachable and which half flipped with the plan. Adding created_at
-        # and the primary key makes the sort total.
+        # and the primary key makes the sort total, so the page is stable and
+        # every row is reachable by paging.
         root_rows = await db.execute(
             select(AgentMessage)
             .where(
@@ -780,7 +792,7 @@ async def agent_conversations(
                 AgentMessage.channel_name.in_(channels),
                 AgentMessage.thread_ts.is_(None),
                 AgentMessage.phase == "new_post",
-                gate_clause(gate),
+                own_or_gated,
             )
             .order_by(AgentMessage.posted_at.desc(), AgentMessage.created_at.desc(),
                       AgentMessage.id.desc())
@@ -788,8 +800,14 @@ async def agent_conversations(
         )
         roots = list(reversed(root_rows.scalars().all()))
 
-        # Reply counts, gated with the SAME clause so the badge can never promise
-        # turns the expansion will not show.
+        # Reply counts, gated with the SAME clause (including the own-post
+        # carve-out) so the badge can never promise turns the expansion will not
+        # show. No channel_name filter here, unlike the roots query above — that
+        # is safe only because `uq_agent_messages_run_ts`
+        # (src/models/agent_activity.py) makes message_ts unique per run, so
+        # matching on `thread_ts IN (root_ts)` within one run cannot pull in a
+        # same-named thread from a different channel. A future change to that
+        # constraint would silently widen this query.
         root_ts = [r.message_ts for r in roots if r.message_ts]
         counts: dict[str, int] = {}
         if root_ts:
@@ -798,7 +816,7 @@ async def agent_conversations(
                 .where(
                     AgentMessage.simulation_run_id == run_id,
                     AgentMessage.thread_ts.in_(root_ts),
-                    gate_clause(gate),
+                    own_or_gated,
                 )
                 .group_by(AgentMessage.thread_ts)
             )
