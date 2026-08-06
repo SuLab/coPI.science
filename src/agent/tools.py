@@ -285,6 +285,16 @@ _PATENT_UNAVAILABLE = (
     "Note the search could not be run at all."
 )
 
+# Distinct from _PATENT_UNAVAILABLE: this is a caller-side bad query (empty, or
+# punctuation-only so _Q_SANITISE strips it to nothing), not a tool outage. No HTTP
+# call was ever made, so this must never read like a negative title search.
+_PATENT_NO_QUERY = (
+    "No search was performed: the query had no usable terms once punctuation was "
+    "removed (it was empty or punctuation-only). This is NOT a prior-art result — "
+    "nothing was sent to USPTO. Do NOT treat this as evidence of novelty or "
+    "freedom-to-operate. Retry with 2-4 specific terms."
+)
+
 
 def _scope_note(result: "PriorArtResult") -> str:
     """Tell the model what breadth actually produced this answer. A broadened
@@ -293,10 +303,15 @@ def _scope_note(result: "PriorArtResult") -> str:
         return ""
     terms = " AND ".join(result.terms_used)
     if result.broadened:
+        n = len(result.terms_used)
+        narrowed = (
+            f"the single most specific of your {result.total_terms} terms ({terms})"
+            if n == 1
+            else f"the {n} most specific of your {result.total_terms} terms ({terms})"
+        )
         return (
-            f"SCOPE: your full phrase matched no title, so this searched the "
-            f"{len(result.terms_used)} most specific of your {result.total_terms} "
-            f"terms ({terms}). That is a BROADER search than you asked for — any hits "
+            f"SCOPE: your full phrase matched no title, so this searched {narrowed}. "
+            f"That is a BROADER search than you asked for — any hits "
             f"may be adjacent rather than on point, and an empty result at this "
             f"breadth is the strongest negative this tool can give you (still not FTO).\n\n"
         )
@@ -306,15 +321,18 @@ def _scope_note(result: "PriorArtResult") -> str:
 async def _execute_search_prior_art(query: str) -> str:
     """Search the USPTO ODP for prior art.
 
-    Distinguishes three outcomes so the hub never mistakes an unreachable/unconfigured
-    tool for a clean novelty result:
-      * ``None``        → the search could not run → an explicit UNAVAILABLE notice;
-      * empty ``hits``  → the search ran and matched nothing → caveat + scope + "no matches";
-      * results         → caveat + scope + the filings.
+    Distinguishes four outcomes so the hub never mistakes an unreachable/unconfigured
+    tool, or a caller-side empty query, for a clean novelty result:
+      * ``None``          → the search could not run → an explicit UNAVAILABLE notice;
+      * no usable terms   → nothing was ever sent to USPTO → an explicit NO-QUERY notice;
+      * empty ``hits``    → the search ran and matched nothing → caveat + scope + "no matches";
+      * results           → caveat + scope + the filings.
     """
     result = await search_prior_art(query)
     if result is None:
         return _PATENT_UNAVAILABLE
+    if not result.terms_used:
+        return _PATENT_NO_QUERY
     preamble = _PATENT_CAVEAT + _scope_note(result)
     if not result.hits:
         return preamble + "No US filings matched this query."

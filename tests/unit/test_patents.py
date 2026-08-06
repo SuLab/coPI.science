@@ -444,6 +444,39 @@ async def test_unbroadened_search_reports_the_terms_plainly(monkeypatch):
     assert "gene AND editing" in out
 
 
+@pytest.mark.asyncio
+async def test_singular_broadened_term_reads_naturally(monkeypatch):
+    # When backoff collapses to exactly one surviving term, "the 1 most specific of
+    # your N terms" reads awkwardly. Plural wording (asserted above) must not change.
+    from src.agent import tools as tools_mod
+    result = PriorArtResult([], ["BRAF"], 8)
+    monkeypatch.setattr(tools_mod, "search_prior_art", lambda q, limit=10: _fake(result))
+    out = await _execute_search_prior_art(
+        "novel treatment method for BRAF disease using approach"
+    )
+    assert "BROADER" in out
+    assert "1 most specific" not in out
+    assert "single most specific of your 8" in out
+
+
+@pytest.mark.asyncio
+async def test_empty_query_is_not_reported_as_a_negative_result(monkeypatch):
+    # search_prior_art("") / an all-punctuation query short-circuits to
+    # PriorArtResult(hits=[], terms_used=[], total_terms=0) WITHOUT ever calling
+    # USPTO (src/services/patents.py). That must never render as "No US filings
+    # matched" — indistinguishable from a real negative — nor reuse the UNAVAILABLE
+    # wording verbatim, since this is a bad query, not a tool outage.
+    from src.agent import tools as tools_mod
+    monkeypatch.setattr(
+        tools_mod, "search_prior_art",
+        lambda q, limit=10: _fake(PriorArtResult([], [], 0)),
+    )
+    out = await _execute_search_prior_art("!!!")
+    assert "no us filings matched" not in out.lower()
+    assert "no search was performed" in out.lower()
+    assert "novelty" in out.lower() or "freedom-to-operate" in out.lower()
+
+
 def test_tool_description_demands_a_short_specific_query():
     spec = next(t for t in TOOL_DEFINITIONS if t["name"] == "search_prior_art")
     text = spec["description"] + spec["input_schema"]["properties"]["query"]["description"]
