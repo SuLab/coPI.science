@@ -622,7 +622,112 @@ async def test_the_badge_count_equals_the_rendered_reply_count(
     assert page.status_code == 200
     assert "1 reply" in page.text
     assert "1 replies" not in page.text, "singular/plural must agree with the count"
+    # The badge text alone doesn't prove the link goes anywhere real — assert
+    # the anchor for this known root addresses its own thread, not some other
+    # value (e.g. `m.thread_ts`, which is None on every root).
+    assert 'href="/agent/spoke1/thread/9.0001"' in page.text
 
     r = await client.get("/agent/spoke1/thread/9.0001", headers=_auth(pi1.id))
     assert r.status_code == 200
     assert r.text.count("data-reply-row") == 1
+
+
+async def test_a_root_with_multiple_in_cohort_replies_renders_the_plural_badge(
+    client, db_session, monkeypatch
+):
+    """`_threaded_world`'s only root has exactly one IN-COHORT reply, by design
+    (the second reply on that root is deliberately out-of-cohort, to prove
+    replies are gated at all — see `_threaded_world`'s docstring). So nothing
+    in this file, before this test, ever produces `reply_count >= 2`: a
+    template that hardcoded the singular branch (e.g.
+    `{% if m.reply_count == 1 %}reply{% endif %}` with no `else`, silently
+    rendering `"Show 2 "` with no noun, or always rendering `"reply"`
+    regardless of count) would pass every other test here. Built as an
+    independent root/agent pair rather than adding to `_threaded_world`,
+    which other tests depend on for an exact reply count of one.
+    """
+    from src.config import get_settings
+    s = get_settings()
+    monkeypatch.setattr(s, "cohort_isolation_enabled", True, raising=False)
+    monkeypatch.setattr(s, "cohort_default_policy", "isolated", raising=False)
+
+    pi = await factories.make_user(db_session, name="Plural PI", email="plural@example.org")
+    await factories.make_agent(
+        db_session, user=pi, agent_id="plural", bot_name="PluralBot", pi_name="Plural PI"
+    )
+    await factories.make_agent(db_session, agent_id="pluralmate", bot_name="PluralMateBot")
+    await _cohort(db_session, "plural-mate", "plural", "pluralmate")
+
+    run = await factories.make_simulation_run(db_session)
+    common = dict(run=run, channel_name="general", channel_id="C1", visibility="public")
+    await factories.make_agent_message(
+        db_session, agent_id="plural", message_ts="12.0001", phase="new_post",
+        content="PLURAL-ROOT", sender_name="PluralBot", **common
+    )
+    await factories.make_agent_message(
+        db_session, agent_id="pluralmate", message_ts="12.0002", thread_ts="12.0001",
+        phase="thread_reply", content="PLURAL-REPLY-1", sender_name="PluralMateBot", **common
+    )
+    await factories.make_agent_message(
+        db_session, agent_id="pluralmate", message_ts="12.0003", thread_ts="12.0001",
+        phase="thread_reply", content="PLURAL-REPLY-2", sender_name="PluralMateBot", **common
+    )
+    await db_session.commit()
+
+    page = await client.get("/agent/plural/conversations", headers=_auth(pi.id))
+    assert page.status_code == 200
+    assert "2 replies" in page.text
+    assert "2 reply" not in page.text, "singular/plural must agree with the count"
+
+
+async def test_each_roots_href_addresses_its_own_thread_not_a_neighbors(
+    client, db_session, monkeypatch
+):
+    """Nothing before this test asserted the rendered anchor's `href` value at
+    all — only that some reply-count text appeared somewhere on the page. A
+    template bug that interpolated the wrong field (e.g. `m.thread_ts`, which
+    is None on every root, or a stray reused loop variable that pins every
+    row's link to the SAME root) would still pass every badge/count test.
+    Two roots with replies on the same page make a same-value bug visible:
+    each root's href must be present exactly once, and each must point at its
+    own `message_ts`, not the other's.
+    """
+    from src.config import get_settings
+    s = get_settings()
+    monkeypatch.setattr(s, "cohort_isolation_enabled", True, raising=False)
+    monkeypatch.setattr(s, "cohort_default_policy", "isolated", raising=False)
+
+    pi = await factories.make_user(db_session, name="Href PI", email="href@example.org")
+    await factories.make_agent(
+        db_session, user=pi, agent_id="hreftest", bot_name="HrefBot", pi_name="Href PI"
+    )
+    await factories.make_agent(db_session, agent_id="hrefmate", bot_name="HrefMateBot")
+    await _cohort(db_session, "href-mate", "hreftest", "hrefmate")
+
+    run = await factories.make_simulation_run(db_session)
+    common = dict(run=run, channel_name="general", channel_id="C1", visibility="public")
+    await factories.make_agent_message(
+        db_session, agent_id="hreftest", message_ts="13.0001", phase="new_post",
+        content="HREF-ROOT-A", sender_name="HrefBot", posted_at=1.0, **common
+    )
+    await factories.make_agent_message(
+        db_session, agent_id="hrefmate", message_ts="13.0002", thread_ts="13.0001",
+        phase="thread_reply", content="HREF-REPLY-A", sender_name="HrefMateBot", **common
+    )
+    await factories.make_agent_message(
+        db_session, agent_id="hreftest", message_ts="13.0010", phase="new_post",
+        content="HREF-ROOT-B", sender_name="HrefBot", posted_at=2.0, **common
+    )
+    await factories.make_agent_message(
+        db_session, agent_id="hrefmate", message_ts="13.0011", thread_ts="13.0010",
+        phase="thread_reply", content="HREF-REPLY-B", sender_name="HrefMateBot", **common
+    )
+    await db_session.commit()
+
+    page = await client.get("/agent/hreftest/conversations", headers=_auth(pi.id))
+    assert page.status_code == 200
+    assert 'href="/agent/hreftest/thread/13.0001"' in page.text
+    assert 'href="/agent/hreftest/thread/13.0010"' in page.text
+    assert page.text.count('href="/agent/hreftest/thread/') == 2, (
+        "each root's badge must link to its own thread, not repeat one href for both"
+    )
