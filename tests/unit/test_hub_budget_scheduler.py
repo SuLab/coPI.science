@@ -313,3 +313,56 @@ class TestBudgetDeprecation:
 
         help_text = inspect.signature(main).parameters["budget"].default.help
         assert "DEPRECATED" in help_text
+
+
+class TestProductionRegression:
+    """Reconstructs the exact state of run 4f1e8395 (2026-08-05), in which the
+    blackbird hub took 0 of 161 turns while 56 spokes took 3-5 each.
+
+    Measured then: hub 42 LLM calls, next-busiest agent 9, cap 40.
+    """
+
+    def _star(self, monkeypatch, budget_cap, **kw):
+        _patch(monkeypatch, active_thread_threshold=12, **kw)
+        ids = ["blackbird"] + [f"pi{i}" for i in range(56)]
+        eng = _engine(ids, budget_cap=budget_cap)
+        eng.agents["blackbird"].api_call_count = 42
+        for i in range(56):
+            eng.agents[f"pi{i}"].api_call_count = 8
+        return eng
+
+    def test_fixed_hub_is_selectable_after_restart(self, monkeypatch):
+        """Case 1 — THE FIX. New default (budget_cap=0), lifetime count 42, but
+        nothing inside the window because step 4b found no recent rows."""
+        eng = self._star(monkeypatch, budget_cap=0)
+        hub = eng.agents["blackbird"]
+        now = time.time()
+        assert eng._turn_eligible(hub, now) is True
+
+        random.seed(20260806)
+        picks = [eng._select_agent().agent_id for _ in range(2000)]
+        assert picks.count("blackbird") > 0, "hub still benched — the fix failed"
+
+    def test_throttling_is_still_real_but_temporary(self, monkeypatch):
+        """Case 2 — the limiter has not been defanged. A load-1 hub that burns
+        its allowance inside the window IS throttled, then recovers."""
+        eng = self._star(monkeypatch, budget_cap=0,
+                         llm_calls_per_load_per_window=8,
+                         llm_rate_window_seconds=600)
+        hub = eng.agents["blackbird"]
+        base = 10_000.0
+        for i in range(8):
+            hub.record_api_call(now=base + i)
+        assert eng._turn_eligible(hub, base + 10) is False
+        assert eng._turn_eligible(hub, base + 700) is True
+
+    def test_legacy_budget_flag_still_benches_the_hub(self, monkeypatch):
+        """Case 3 — the compat path, pinned honestly. --budget 40 was NOT made
+        safe; it was deprecated and defaulted off. If someone passes it, the old
+        behaviour is exactly what they get."""
+        eng = self._star(monkeypatch, budget_cap=40)
+        hub = eng.agents["blackbird"]
+        now = time.time()
+        assert eng._turn_eligible(hub, now) is False
+        picks = [eng._select_agent().agent_id for _ in range(500)]
+        assert "blackbird" not in picks
