@@ -46,6 +46,25 @@ SLACK_INVITE_URL = (
 _ROOT_LIMIT = 50
 
 
+async def _visible_channels(db: AsyncSession, run_id, aid: str) -> list[str]:
+    """Channels this agent participates in (has authored a message in), plus
+    #general.
+
+    Shared by ``agent_conversations`` and ``agent_thread_replies`` — the
+    channel set is one of the thread-expand endpoint's four authorization
+    axes (``channel_name.in_(channels)`` on the root re-resolution query), not
+    just a display filter, so it must be computed identically in both places
+    rather than copy-pasted and left free to drift.
+    """
+    ch_rows = await db.execute(
+        select(distinct(AgentMessage.channel_name)).where(
+            AgentMessage.simulation_run_id == run_id,
+            AgentMessage.agent_id == aid,
+        )
+    )
+    return sorted({r[0] for r in ch_rows} | {"general"})
+
+
 def _extract_proposal_title(text: str | None) -> str:
     """Best-effort one-line title for a proposal summary.
 
@@ -749,14 +768,7 @@ async def agent_conversations(
             {"direction": d.direction, "sender": d.sender_name or "", "content": d.content}
             for d in reversed(dm_rows.scalars().all())
         ]
-        # Channels this agent participates in (has authored a message in).
-        ch_rows = await db.execute(
-            select(distinct(AgentMessage.channel_name)).where(
-                AgentMessage.simulation_run_id == run_id,
-                AgentMessage.agent_id == aid,
-            )
-        )
-        channels = sorted({r[0] for r in ch_rows} | {"general"})
+        channels = await _visible_channels(db, run_id, aid)
         # What this PI may read == what their bot may act on. Filtering happens in
         # SQL, before LIMIT: #general carries every other cohort's traffic, so
         # filtering in Python afterwards would leave the page nearly empty.
@@ -881,13 +893,7 @@ async def agent_thread_replies(
     if not run_id:
         raise HTTPException(status_code=404)
 
-    ch_rows = await db.execute(
-        select(distinct(AgentMessage.channel_name)).where(
-            AgentMessage.simulation_run_id == run_id,
-            AgentMessage.agent_id == aid,
-        )
-    )
-    channels = sorted({r[0] for r in ch_rows} | {"general"})
+    channels = await _visible_channels(db, run_id, aid)
 
     gate = await resolve_agent_gate(db, aid)
     gated = own_or_gated(gate, aid)
@@ -897,6 +903,7 @@ async def agent_thread_replies(
             AgentMessage.simulation_run_id == run_id,
             AgentMessage.message_ts == message_ts,
             AgentMessage.thread_ts.is_(None),
+            AgentMessage.phase == "new_post",
             AgentMessage.channel_name.in_(channels),
             gated,
         )
