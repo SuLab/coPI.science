@@ -3165,6 +3165,27 @@ class SimulationEngine:
         text = _strip_assessment_sidecar(text)
         text = re.sub(r"</?slack_message>", "", text).strip()
 
+        # A sidecar-only or truncated response can strip to nothing — e.g. an
+        # unclosed <assessment_json> nested as the entire <slack_message> body,
+        # with no real text before it (_ASSESSMENT_UNCLOSED_RE then deletes
+        # from the very start of the string). Slack rejects empty text anyway,
+        # but bailing here also matters for what happens *after* posting:
+        # without this guard, _post_message still mints a ts and writes a
+        # LogEntry with content="" and slack_ts=None — a DB row with no
+        # corresponding Slack message, breaking the row-count-matches-Slack-
+        # message-count invariant documented below, and the caller still
+        # counts the turn as published (message_count incremented,
+        # interesting_posts drained) even though nothing went out. Return
+        # before any of that — no Slack call, no minted ts, no log entry.
+        if not text:
+            logger.warning(
+                "[%s] Suppressed a post to #%s: text was empty after "
+                "stripping the assessment sidecar/slack_message tags — likely "
+                "a sidecar-only or truncated response with no real message body.",
+                agent_id, channel,
+            )
+            return
+
         client = self.slack_clients.get(agent_id)
         agent = self.agents.get(agent_id)
 

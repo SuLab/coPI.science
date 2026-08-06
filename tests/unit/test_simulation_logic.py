@@ -1045,6 +1045,43 @@ class TestPostMessageStripsAssessmentSidecar:
         self._assert_no_verdict_leaked(posted_text)
         assert posted_text == "Legit body."
 
+    @pytest.mark.asyncio
+    async def test_unclosed_sidecar_with_no_body_suppresses_the_post(self):
+        # Fix round 2 finding: an unclosed sidecar with NO legitimate text
+        # before it strips to "". Before this fix, _post_message still posted
+        # the empty string to Slack and wrote a phantom LogEntry
+        # (content="", slack_ts=None) for a message that was never actually
+        # published — a DB row with no corresponding Slack message, and the
+        # caller's turn silently consumed for nothing. Must suppress
+        # entirely: no Slack call, no log entry.
+        engine, client = self._engine_with_client()
+        text = '<assessment_json>{"funnel_stage": "incubation", "red_flags": ["danger"]'
+
+        await engine._post_message("su", "general", text)
+
+        assert client.posted == []
+        assert engine.message_log._entries == []
+
+    @pytest.mark.asyncio
+    async def test_well_formed_sidecar_as_the_entire_message_suppresses_the_post(self):
+        # The reachable shape behind the finding: a model nests the sidecar
+        # as the *entire* <slack_message> body, with nothing else in it —
+        # well-formed this time, but still nothing left to post once the
+        # verdict is stripped out.
+        engine, client = self._engine_with_client()
+        text = (
+            "<slack_message>"
+            "<assessment_json>"
+            '{"funnel_stage": "incubation", "red_flags": ["danger"]}'
+            "</assessment_json>"
+            "</slack_message>"
+        )
+
+        await engine._post_message("su", "general", text)
+
+        assert client.posted == []
+        assert engine.message_log._entries == []
+
 
 # ---------------------------------------------------------------
 # _build_lab_directories — cohort gate must scope the "Other Labs'
