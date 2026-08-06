@@ -154,9 +154,15 @@ DEFAULT_BACKUP_DIRS = ("backups", "data/backups", "/backups", "/var/backups/copi
 BACKUP_GLOBS = ("*.sql", "*.sql.gz", "*.dump", "*.dmp", "*.pgdump", "*.custom", "*.bak")
 
 # ---------------------------------------------------------------------------
-# What the migration chain CREATES, per revision. Derived by reading 0019-0023;
+# What the migration chain CREATES, per revision. Derived by reading 0019-0025;
 # tests/unit/test_migration_checks.py re-derives this from the migration files and
 # asserts it still matches, so it cannot silently drift.
+#
+# Note: postflight.py's own EXPECTED_TABLES/EXPECTED_COLUMNS/EXPECTED_INDEXES (schema
+# verification after upgrade) are still pinned to the 0019-0023 chain only, and it scopes
+# its read of PLANNED_OBJECTS accordingly (see postflight.VERIFIED_REVISIONS) — it has not
+# been extended to verify 0024/0025's objects yet. That is a separate, pre-existing gap;
+# this collision check (below) covers every revision up to DEFAULT_TARGET regardless.
 # ---------------------------------------------------------------------------
 
 
@@ -204,6 +210,17 @@ PLANNED_OBJECTS: tuple[PlannedObject, ...] = (
     PlannedObject("0023", "column", "synthesis_validated", "researcher_profiles"),
     PlannedObject("0023", "column", "evidence_pmid_count", "researcher_profiles"),
     PlannedObject("0023", "column", "evidence_pub_count", "researcher_profiles"),
+    # 0024_add_agent_role
+    PlannedObject("0024", "column", "role", "agents"),
+    # 0025_add_opportunity_assessments
+    PlannedObject("0025", "table", "opportunity_assessments"),
+    PlannedObject(
+        "0025", "index", "ix_opportunity_assessments_simulation_run_id",
+        "opportunity_assessments",
+    ),
+    PlannedObject(
+        "0025", "index", "ix_opportunity_assessments_agent_id", "opportunity_assessments",
+    ),
 )
 
 REVISION_ORDER = ("0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025")

@@ -737,7 +737,8 @@ def test_a_table_the_chain_does_not_create_is_still_flagged():
 
 def test_chain_created_tables_is_derived_from_planned_objects_not_relisted():
     assert po.CHAIN_CREATED_TABLES == frozenset(
-        o.name for o in pf.PLANNED_OBJECTS if o.kind == "table"
+        o.name for o in pf.PLANNED_OBJECTS
+        if o.kind == "table" and o.revision in po.VERIFIED_REVISIONS
     )
     assert po.CHAIN_CREATED_TABLES == {
         "pi_dm_messages",
@@ -745,6 +746,10 @@ def test_chain_created_tables_is_derived_from_planned_objects_not_relisted():
         "cohort_memberships",
         "cohort_audit_events",
     }
+    # 0025 also creates a table (opportunity_assessments), but postflight has not been
+    # extended to verify it yet — it must stay out of CHAIN_CREATED_TABLES until it does,
+    # or a real drop of that table would be masked as "expected to be absent".
+    assert "opportunity_assessments" not in po.CHAIN_CREATED_TABLES
 
 
 # --------------------------------------------------------------------------- #
@@ -786,8 +791,8 @@ def test_redact_url_is_a_no_op_when_there_is_no_password():
 # --------------------------------------------------------------------------- #
 
 
-def test_planned_objects_between_0018_and_0023_is_everything():
-    assert set(pf.planned_objects_between("0018", "0023")) == set(pf.PLANNED_OBJECTS)
+def test_planned_objects_between_0018_and_the_target_is_everything():
+    assert set(pf.planned_objects_between("0018", pf.DEFAULT_TARGET)) == set(pf.PLANNED_OBJECTS)
 
 
 def test_planned_objects_between_0019_and_0023_excludes_what_0019_already_made():
@@ -824,7 +829,7 @@ def test_every_planned_column_names_its_table():
 
 
 def test_planned_objects_matches_what_the_migration_files_actually_create():
-    """Drift guard: re-derive the object names from alembic/versions/0019..0023 and
+    """Drift guard: re-derive the object names from alembic/versions/0019..0025 and
     compare. Hardcoding the list keeps the check readable; this keeps it honest."""
     import re
 
@@ -835,7 +840,7 @@ def test_planned_objects_matches_what_the_migration_files_actually_create():
         "column": re.compile(r'add_column\(\s*\n?\s*"[^"]+",\s*\n?\s*sa\.Column\("([^"]+)"'),
         "constraint": re.compile(r'create_unique_constraint\(\s*\n?\s*"([^"]+)"'),
     }
-    for revision in ("0019", "0020", "0021", "0022", "0023"):
+    for revision in ("0019", "0020", "0021", "0022", "0023", "0024", "0025"):
         matches = list(versions_dir.glob(f"{revision}_*.py"))
         assert len(matches) == 1, (revision, matches)
         source = matches[0].read_text()
@@ -1070,17 +1075,29 @@ def test_postflight_keeps_the_partial_predicate_in_the_expected_index_definition
 
 
 def test_postflight_expects_an_index_for_every_index_the_chain_creates():
-    planned = {o.name for o in pf.PLANNED_OBJECTS if o.kind in {"index", "constraint"}}
+    # Scoped to the revisions postflight actually verifies (po.VERIFIED_REVISIONS):
+    # PLANNED_OBJECTS also carries 0025's two indexes for preflight's collision check,
+    # but postflight has no EXPECTED_INDEXES entries for them yet (see C9/VERIFIED_REVISIONS).
+    planned = {
+        o.name for o in pf.PLANNED_OBJECTS
+        if o.kind in {"index", "constraint"} and o.revision in po.VERIFIED_REVISIONS
+    }
     assert planned <= set(po.EXPECTED_INDEXES)
 
 
 def test_postflight_expects_a_table_for_every_table_the_chain_creates():
-    planned = {o.name for o in pf.PLANNED_OBJECTS if o.kind == "table"}
+    planned = {
+        o.name for o in pf.PLANNED_OBJECTS
+        if o.kind == "table" and o.revision in po.VERIFIED_REVISIONS
+    }
     assert planned == set(po.EXPECTED_TABLES)
 
 
 def test_postflight_expects_a_column_for_every_column_the_chain_creates():
-    planned = {(o.table, o.name) for o in pf.PLANNED_OBJECTS if o.kind == "column"}
+    planned = {
+        (o.table, o.name) for o in pf.PLANNED_OBJECTS
+        if o.kind == "column" and o.revision in po.VERIFIED_REVISIONS
+    }
     expected = {(t, c) for (t, c, _dt, _n, _d) in po.EXPECTED_COLUMNS}
     assert planned <= expected
 

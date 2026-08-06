@@ -128,11 +128,20 @@ EXPECTED_COLUMNS: tuple[tuple[str, str, str, bool, str | None], ...] = (
 
 EXPECTED_TABLES = ("pi_dm_messages", "cohorts", "cohort_memberships", "cohort_audit_events")
 
+#: Revisions this script's EXPECTED_TABLES/EXPECTED_COLUMNS/EXPECTED_INDEXES below
+#: actually verify. preflight.PLANNED_OBJECTS now also carries entries for 0024/0025 (for
+#: its own collision check, which covers every revision up to its target), but this
+#: script's pinned expectations have not been extended past 0023 — bump this tuple (and
+#: add the corresponding EXPECTED_* entries) when that happens, do not just widen the
+#: filter below.
+VERIFIED_REVISIONS: tuple[str, ...] = ("0019", "0020", "0021", "0022", "0023")
+
 #: The only tables the 0019..0023 chain creates, so the only ones legitimately absent
 #: from a preflight row-count snapshot. Derived from preflight.PLANNED_OBJECTS rather
 #: than re-listed, so the two cannot drift.
 CHAIN_CREATED_TABLES = frozenset(
-    o.name for o in _pf.PLANNED_OBJECTS if o.kind == "table"
+    o.name for o in _pf.PLANNED_OBJECTS
+    if o.kind == "table" and o.revision in VERIFIED_REVISIONS
 )
 
 #: index name -> the exact pg_indexes.indexdef tail, so a same-named index on the WRONG

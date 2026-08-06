@@ -45,8 +45,11 @@ async def test_assessment_row_round_trips(db_session):
         confidence="Speculative",
         weighted_score=3.05,
         band="conditional",
-        gating={"baltimore_commitment": False, "life_sciences_domain": True,
-                "credible_tech_source": True, "fto_achievable": False},
+        # Tri-state strings — the shipped contract (see src/services/blackbird_rubric.py
+        # and _normalize_gating): "not_met" (the PI declined) and "unconfirmed" (nobody
+        # asked) are different answers, never a boolean.
+        gating={"baltimore_commitment": "not_met", "life_sciences_domain": "met",
+                "credible_tech_source": "met", "fto_achievable": "unconfirmed"},
         scores={"differentiation": 4, "external_signals": 1},
         red_flags=["No external validation yet"],
         derisking_milestones=["TDP-43 mouse rescue"],
@@ -59,7 +62,10 @@ async def test_assessment_row_round_trips(db_session):
     assert row.subject_agent_id == "wang"
     assert row.weighted_score == pytest.approx(3.05)
     assert row.band == "conditional"
-    assert row.gating["baltimore_commitment"] is False
+    assert row.gating == {
+        "baltimore_commitment": "not_met", "life_sciences_domain": "met",
+        "credible_tech_source": "met", "fto_achievable": "unconfirmed",
+    }
     assert row.red_flags == ["No external validation yet"]
     assert row.created_at is not None
 

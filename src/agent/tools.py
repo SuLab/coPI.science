@@ -278,11 +278,21 @@ async def _execute_retrieve_full_text(pmid_or_doi: str) -> str:
     return "\n".join(parts)
 
 
+# Shared by _PATENT_UNAVAILABLE and _PATENT_NO_QUERY below: both describe a case where
+# no title search of USPTO actually happened (a tool outage vs. a caller-side empty
+# query), and a model must never read either one as a negative result. The two stay
+# separate messages on purpose — "could not search" and "never asked" are different
+# situations a model must be able to tell apart — but they share this exact clause so a
+# future edit to one warning cannot accidentally leave the other weaker.
+_PATENT_NOT_EVIDENCE_WARNING = (
+    "This is NOT a prior-art result: do NOT treat the absence of results as evidence "
+    "of novelty or freedom-to-operate."
+)
+
 _PATENT_UNAVAILABLE = (
     "Prior-art search is UNAVAILABLE right now (the patent endpoint could not be "
-    "reached, errored, or no API key is configured). This is NOT a prior-art result: "
-    "do NOT treat the absence of results as evidence of novelty or freedom-to-operate. "
-    "Note the search could not be run at all."
+    "reached, errored, or no API key is configured). " + _PATENT_NOT_EVIDENCE_WARNING +
+    " Note the search could not be run at all."
 )
 
 # Distinct from _PATENT_UNAVAILABLE: this is a caller-side bad query (empty, or
@@ -290,17 +300,22 @@ _PATENT_UNAVAILABLE = (
 # call was ever made, so this must never read like a negative title search.
 _PATENT_NO_QUERY = (
     "No search was performed: the query had no usable terms once punctuation was "
-    "removed (it was empty or punctuation-only). This is NOT a prior-art result — "
-    "nothing was sent to USPTO. Do NOT treat this as evidence of novelty or "
-    "freedom-to-operate. Retry with 2-4 specific terms."
+    "removed (it was empty or punctuation-only); nothing was sent to USPTO. " +
+    _PATENT_NOT_EVIDENCE_WARNING + " Retry with 2-4 specific terms."
 )
 
 
 def _scope_note(result: "PriorArtResult") -> str:
     """Tell the model what breadth actually produced this answer. A broadened
-    search must never be read as an on-point clean result."""
-    if not result.terms_used:
-        return ""
+    search must never be read as an on-point clean result.
+
+    Precondition: ``result.terms_used`` is non-empty. The only caller,
+    ``_execute_search_prior_art``, already short-circuits an empty ``terms_used`` to
+    ``_PATENT_NO_QUERY`` before this is ever called, so that case is asserted here
+    rather than handled — a silent `return ""` would mask a real bug (a caveat posted
+    with no scope disclosure) instead of failing loudly.
+    """
+    assert result.terms_used, "caller must filter empty terms_used before calling _scope_note"
     terms = " AND ".join(result.terms_used)
     if result.broadened:
         n = len(result.terms_used)
