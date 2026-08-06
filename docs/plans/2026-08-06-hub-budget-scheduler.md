@@ -10,8 +10,20 @@
 
 **Spec:** `docs/specs/2026-08-06-hub-budget-scheduler-design.md`. Read it before Task 1.
 
+## Audit trail
+
+Re-verified against the working tree at HEAD `7f6b304` on 2026-08-06. Nine commits
+landed between this plan's first draft (`7c6768e`) and that HEAD; **none touched any
+file this plan modifies** — they are confined to the PI-feed / cohort web layer
+(`src/routers/agent_page.py`, `src/services/conversation_feed.py`,
+`src/services/cohorts.py`, `src/models/cohort.py`, templates, and three integration
+test files). Every line number and code anchor below was re-confirmed against that
+tree, not carried over from an earlier read.
+
 ## Global Constraints
 
+- **Task 0 is a hard prerequisite.** There is currently no Python test environment on
+  this host at all. Do not skip it and do not "verify" any step by inspection.
 - Every task ends green on `./scripts/ci.sh`. That gate is the whole gate — there is no server-side CI.
 - Branch coverage floor `COV_MIN=60`. Never lower it.
 - `ruff` findings in `src/` must stay at or under `SRC_LINT_MAX=260`. Never raise it.
@@ -20,6 +32,100 @@
 - `tests/integration/test_full_run_live.py:1111` must keep passing **with no edit**. It is the tripwire for Task 5; see that task.
 - Work on branch `blackbird`. Commit after every task.
 - Do not restart the live `blackbird-agent-run` container. Deployment is out of scope for this plan.
+
+---
+
+### Task 0: Provision the test environment
+
+**Files:** none (everything here is gitignored — `.gitignore:77` covers `.venv-test/`).
+
+**Interfaces:**
+- Consumes: nothing.
+- Produces: a working `.venv-test/bin/python` with pytest, ruff, and the `[dev]` extras.
+
+**Why this task exists.** Verified on 2026-08-06: this host has **no** `.venv-test`, no
+`.venv`, no `venv`, no `pip`, no `ensurepip`, and no `uv`. `python3 -m pip` fails with
+"No module named pip". The `blackbird-app`, `worker`, and `grantbot` containers have no
+pytest either — the `Dockerfile` runs `pip install --no-cache-dir .`, without the
+`[dev]` extras. So:
+
+- every `pytest` command in Tasks 1-8 would fail with "No such file or directory";
+- `./scripts/ci.sh` aborts at its own guard ("ERROR: test venv python not found");
+- the container test command documented in `CLAUDE.md` also fails.
+
+Verified available for the fix: `pypi.org` reachable (HTTP 200), passwordless `sudo`,
+Docker daemon up (needed by the integration tier's testcontainers).
+
+- [ ] **Step 1: Confirm the environment really is missing**
+
+```bash
+ls .venv-test/bin/python 2>&1; python3 -m pip --version 2>&1; which uv 2>&1
+```
+
+Expected: all three fail. If `.venv-test/bin/python` already exists, someone has
+provisioned it since this plan was written — skip to Step 4 and verify.
+
+- [ ] **Step 2: Install the Python tooling**
+
+```bash
+sudo apt-get update && sudo apt-get install -y python3-venv python3-pip
+```
+
+(`scripts/ci.sh`'s own error message suggests `uv` instead. Either works; apt is used
+here because it does not require piping a remote installer script into a shell. If you
+prefer uv: `curl -LsSf https://astral.sh/uv/install.sh | sh`, then
+`uv venv .venv-test && uv pip install --python .venv-test/bin/python -e '.[dev]'`.)
+
+- [ ] **Step 3: Create the venv and install the dev extras**
+
+```bash
+cd /home/ubuntu/blackbird-copi-science
+python3 -m venv .venv-test
+.venv-test/bin/python -m pip install --upgrade pip
+.venv-test/bin/python -m pip install -e '.[dev]'
+```
+
+- [ ] **Step 4: Verify the toolchain**
+
+```bash
+.venv-test/bin/python -m pytest --version
+.venv-test/bin/python -m ruff --version
+.venv-test/bin/python -c "import testcontainers, pytest_asyncio, factory; print('dev extras OK')"
+```
+
+Expected: versions print, and `dev extras OK`.
+
+- [ ] **Step 5: Establish the baseline — the suite must be green BEFORE any change**
+
+```bash
+.venv-test/bin/python -m pytest tests/unit -q
+```
+
+Expected: all PASS. Record the count.
+
+This baseline is load-bearing. Tasks 4 and 6 change shared scheduler code, and without
+a known-green starting point you cannot tell a regression you caused from one that was
+already there.
+
+- [ ] **Step 6: Confirm the full gate runs end to end**
+
+```bash
+./scripts/ci.sh
+```
+
+Expected: `==> CI passed.` This takes ~6 minutes and starts/destroys a throwaway
+Postgres on `127.0.0.1:55432`.
+
+If it fails **before** you have changed any source, do not proceed — fix or report the
+pre-existing failure first. Nothing in Tasks 1-8 is diagnosable on top of a red baseline.
+
+- [ ] **Step 7: Nothing to commit**
+
+`.venv-test/` is gitignored. Confirm the tree is clean of it:
+
+```bash
+git status --short | grep venv || echo "clean"
+```
 
 ---
 
@@ -405,8 +511,27 @@ In `src/agent/agent.py`, add this method immediately before the `# Profile prope
         self.state.call_times.append(time.time() if now is None else now)
 ```
 
-Add `import time` to `src/agent/agent.py`'s imports if not already present. Verify with:
-`grep -n "^import time" src/agent/agent.py`
+`src/agent/agent.py` does **not** currently import `time` — verified 2026-08-06, its
+stdlib imports are `logging` (line 3) and `re` (line 4). Add it, and mind isort (`I` is
+enabled): plain `import x` lines sort alphabetically before the `from x import y` block,
+so `import time` goes **after `import re` on line 4**, before `from pathlib import Path`:
+
+```python
+import logging
+import re
+import time
+from pathlib import Path
+from typing import Any
+```
+
+Verify:
+
+```bash
+grep -n "^import time" src/agent/agent.py
+.venv-test/bin/python -m ruff check src/agent/agent.py --select I,F
+```
+
+Expected: the grep prints line 5, and ruff prints nothing.
 
 - [ ] **Step 5: Run the ledger tests to verify they pass**
 
@@ -444,7 +569,8 @@ git commit -m "feat(sched): call ledger — record_api_call maintains both count
 
 **Files:**
 - Modify: `src/agent/state.py` (`AgentState`, add `throttled`)
-- Modify: `src/agent/simulation.py` (imports line 28; `_turn_eligible` lines 655-669; new methods after `_agent_load`)
+- Modify: `src/agent/simulation.py` (new import after line 25; `_turn_eligible` at line 655; stop message at lines 503-504; new methods after `_agent_load`; `_UNSET` after `SELECTION_RATIO_LOG_EVERY` at line 146; cache init after line 222)
+- Modify: `tests/unit/test_cohort_isolation.py` (`_settings()` helper, ~line 126 — see Step 8; **this file breaks without that edit**)
 - Test: `tests/unit/test_hub_budget_scheduler.py` (append)
 
 **Interfaces:**
@@ -568,11 +694,32 @@ In `src/agent/state.py`, immediately after the `call_times` field added in Task 
 
 - [ ] **Step 4: Implement the limiter**
 
-In `src/agent/simulation.py`, add `load_role` to the roles import. The file currently imports `from src.agent.tools import execute_tool, tools_for_role` at line 28 but does not import from `src.agent.roles`; add a new import line after line 27:
+In `src/agent/simulation.py`, add a `src.agent.roles` import. The file has none today.
+
+**Placement is not free choice.** `pyproject.toml` sets `select = ["E", "F", "I", "UP", "B"]`
+— `I` is isort, and it is enforced. The `src.agent.*` block is alphabetical:
+
+```
+25: from src.agent.prompt_safety import delimit
+26: from src.agent.slack_client import SlackListingIncomplete, ThreadNotFound
+27: from src.agent.state import PostRef, ProposalRef, ThreadState
+28: from src.agent.tools import execute_tool, tools_for_role
+```
+
+`roles` sorts between `prompt_safety` and `slack_client`, so insert **after line 25**:
 
 ```python
 from src.agent.roles import load_role
 ```
+
+Putting it after line 27 (between `state` and `tools`) is an I001 finding, which counts
+against the `SRC_LINT_MAX=260` ratchet. Verify placement immediately:
+
+```bash
+.venv-test/bin/python -m ruff check src/agent/simulation.py --select I
+```
+
+Expected: no output.
 
 Then add both methods immediately after `_agent_load` (from Task 1):
 
@@ -700,21 +847,70 @@ with:
 Run: `.venv-test/bin/python -m pytest tests/unit/test_hub_budget_scheduler.py -v`
 Expected: all PASS
 
-- [ ] **Step 8: Confirm the pre-existing scheduler tests still pass**
+- [ ] **Step 8: Extend the OTHER suite's settings stub — REQUIRED, not optional**
 
-Run: `.venv-test/bin/python -m pytest tests/unit/test_cohort_isolation.py -v -k Scheduler`
-Expected: all PASS, including `test_budget_still_filters` (it sets `budget_cap=1` explicitly, so the retained legacy cap still filters it)
+`tests/unit/test_cohort_isolation.py` stubs settings with a bare `SimpleNamespace`
+carrying only four keys (its `_settings()` helper, ~line 126). The moment
+`_turn_eligible` calls `_within_rate_limit` → `_agent_load`, every scheduler test in
+that file raises `AttributeError: 'types.SimpleNamespace' object has no attribute
+'active_thread_threshold'`. A `SimpleNamespace` has no defaults — an omitted key is an
+exception, not a fallback.
 
-- [ ] **Step 9: Lint and commit**
+In `tests/unit/test_cohort_isolation.py`, add the three new keys to `_settings()`:
+
+```python
+def _settings(**kw):
+    base = dict(
+        cohort_isolation_enabled=False,
+        cohort_default_policy=POLICY_OPEN,
+        max_consecutive_reactive_turns=3,
+        turn_delay_seconds=0.0,
+        # Required since _turn_eligible gained the rate limiter: _agent_load reads
+        # active_thread_threshold, _within_rate_limit reads the other two. Values are
+        # inert for this file — no test here opens a thread or records a call, so load
+        # is always 1 and the allowance is never approached.
+        active_thread_threshold=12,
+        llm_rate_window_seconds=600,
+        llm_calls_per_load_per_window=8,
+    )
+    base.update(kw)
+    return types.SimpleNamespace(**base)
+```
+
+Audited blast radius. These are the only four test files that exercise
+`_select_agent`/`_turn_eligible`, and only the first needs changing:
+
+| File | Settings source | Verdict |
+|---|---|---|
+| `tests/unit/test_cohort_isolation.py` | bare `SimpleNamespace`, 4 keys | **BREAKS — fix here** |
+| `tests/integration/test_cohort_engine_live.py` | `real_settings().model_copy(...)` | safe — new fields get defaults |
+| `tests/integration/test_cohort_scenarios.py` | `real_settings().model_copy(...)` | safe |
+| `tests/integration/test_full_run_live.py` | `real_settings().model_copy(...)` | safe |
+
+(`tests/integration/test_cohort_real_llm.py` also builds a 4-key namespace but never
+calls the scheduler — verified by grep — so it needs no change.)
+
+- [ ] **Step 9: Confirm the pre-existing suite still passes**
+
+Run: `.venv-test/bin/python -m pytest tests/unit/test_cohort_isolation.py -v`
+Expected: all PASS, including `test_budget_still_filters` (~line 1175).
+
+Note that `test_budget_still_filters` would pass **even without Step 8**, because
+`_turn_eligible` checks the legacy cap first and short-circuits before reaching the
+rate limiter. That is precisely why Step 8 is easy to skip and then discover late —
+run the whole file, not just that test.
+
+- [ ] **Step 10: Lint and commit**
 
 ```bash
-.venv-test/bin/python -m ruff check tests/unit/test_hub_budget_scheduler.py
+.venv-test/bin/python -m ruff check tests/unit/test_hub_budget_scheduler.py tests/unit/test_cohort_isolation.py
 .venv-test/bin/python -m ruff check src --output-format=concise --quiet | wc -l
-git add src/agent/state.py src/agent/simulation.py tests/unit/test_hub_budget_scheduler.py
+git add src/agent/state.py src/agent/simulation.py \
+        tests/unit/test_hub_budget_scheduler.py tests/unit/test_cohort_isolation.py
 git commit -m "feat(sched): sliding-window rate limiter replaces the cumulative cap"
 ```
 
-The ruff count must be <= 260.
+The ruff count must be <= 260, and `tests/` must be zero.
 
 ---
 
