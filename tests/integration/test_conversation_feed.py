@@ -604,3 +604,25 @@ async def test_expanding_an_uncohorted_own_thread_is_200_not_404(
     r = await client.get("/agent/lonely/thread/11.0001", headers=_auth(pi.id))
     assert r.status_code == 200
     assert "LONELY-OWN-REPLY" in r.text
+
+
+# ---------------------------------------------------------------------------
+# Task 6: reply badge + expand-on-click
+# ---------------------------------------------------------------------------
+
+
+async def test_the_badge_count_equals_the_rendered_reply_count(
+    client, db_session, monkeypatch
+):
+    """The badge is computed with the same gate as the expansion, so it can never
+    promise turns the expansion will not show."""
+    pi1 = await _threaded_world(db_session, monkeypatch)
+
+    page = await client.get("/agent/spoke1/conversations", headers=_auth(pi1.id))
+    assert page.status_code == 200
+    assert "1 reply" in page.text
+    assert "1 replies" not in page.text, "singular/plural must agree with the count"
+
+    r = await client.get("/agent/spoke1/thread/9.0001", headers=_auth(pi1.id))
+    assert r.status_code == 200
+    assert r.text.count("data-reply-row") == 1

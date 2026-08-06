@@ -71,7 +71,7 @@
         </form>
     </div>
 
-    <!-- Recent messages -->
+    <!-- Recent activity -->
     <h2 class="text-lg font-semibold text-gray-900 mb-3">Recent activity</h2>
     {% if messages %}
     <div class="space-y-3">
@@ -79,9 +79,18 @@
         <div class="rounded-lg border {% if not m.is_bot %}border-indigo-200 bg-indigo-50{% else %}border-gray-200 bg-white{% endif %} p-3 shadow-sm">
             <div class="flex items-center justify-between text-xs text-gray-500 mb-1">
                 <span class="font-medium text-gray-700">{{ m.sender }}{% if not m.is_bot %} · PI{% endif %}</span>
-                <span>#{{ m.channel }}{% if m.thread_ts %} · thread{% endif %}</span>
+                <span>#{{ m.channel }}</span>
             </div>
             <div class="text-sm text-gray-800 whitespace-pre-wrap">{{ m.content }}</div>
+            {% if m.reply_count and m.message_ts %}
+            <a href="/agent/{{ agent.agent_id }}/thread/{{ m.message_ts }}"
+               data-thread-expand
+               data-thread-ts="{{ m.message_ts }}"
+               class="mt-2 inline-block text-xs font-medium text-indigo-600 hover:text-indigo-800">
+                Show {{ m.reply_count }} {% if m.reply_count == 1 %}reply{% else %}replies{% endif %}
+            </a>
+            <div class="thread-replies hidden" data-thread-for="{{ m.message_ts }}"></div>
+            {% endif %}
         </div>
         {% endfor %}
     </div>
@@ -89,4 +98,46 @@
     <p class="text-sm text-gray-500">No messages yet in your agent's channels.</p>
     {% endif %}
 </div>
+
+<script>
+// Threads load on demand: the page ships roots plus a gated reply count, and the
+// replies fragment is fetched once per thread and cached in the DOM thereafter.
+// Server-rendered HTML, so there is no client-side templating to keep in sync.
+//
+// The expander is a real <a href> (progressive enhancement): without JS it still
+// navigates to the fragment endpoint on its own page. With JS, the click is
+// intercepted and the fragment is fetched and injected in place instead.
+document.addEventListener('DOMContentLoaded', function() {
+    document.querySelectorAll('[data-thread-expand]').forEach(function(link) {
+        var ts = link.getAttribute('data-thread-ts');
+        var panel = document.querySelector('[data-thread-for="' + CSS.escape(ts) + '"]');
+        if (!panel) { return; }
+        var labelShown = link.textContent.trim().replace(/^Show/, 'Hide');
+        var labelHidden = link.textContent.trim();
+        link.addEventListener('click', function(e) {
+            e.preventDefault();
+            if (panel.dataset.loaded === '1') {
+                panel.classList.toggle('hidden');
+                link.textContent = panel.classList.contains('hidden') ? labelHidden : labelShown;
+                return;
+            }
+            fetch(link.getAttribute('href'), { credentials: 'same-origin' })
+                .then(function(r) {
+                    if (!r.ok) { throw new Error('HTTP ' + r.status); }
+                    return r.text();
+                })
+                .then(function(html) {
+                    panel.innerHTML = html;
+                    panel.dataset.loaded = '1';
+                    panel.classList.remove('hidden');
+                    link.textContent = labelShown;
+                })
+                .catch(function() {
+                    panel.innerHTML = '<p class="mt-2 pl-3 text-xs text-red-600">Could not load replies.</p>';
+                    panel.classList.remove('hidden');
+                });
+        });
+    });
+});
+</script>
 {% endblock %}
