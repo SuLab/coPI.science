@@ -103,8 +103,30 @@ def test_scout_hub_ships_with_the_hub_tool_set():
 
 
 def test_scout_hub_phase4_override_renders_and_drops_the_tool_it_lacks():
+    from pathlib import Path
+
     from src.agent.agent import Agent
     from src.agent.state import ThreadState
+
+    tokens = (
+        "{channel_name}", "{other_agent_name}", "{other_agent_lab}",
+        "{message_count}", "{thread_phase}", "{thread_history}",
+        "{phase_guidance}", "{instructions}", "{foa_number}",
+        "{funding_thread_context}",
+    )
+
+    # Pin the raw template on disk: every token must actually be present in the
+    # source, and neither forbidden string may sneak in there either. Without
+    # this half, the post-render absence checks below can't tell "substituted"
+    # apart from "never written" — a token silently deleted from the template
+    # would still make every `not in content` assertion pass.
+    raw_template = Path("prompts/roles/scout_hub/phase4-thread-reply.md").read_text(
+        encoding="utf-8"
+    )
+    for token in tokens:
+        assert token in raw_template, f"template is missing substitution token {token!r}"
+    assert "retrieve_foa" not in raw_template
+    assert ":memo:" not in raw_template
 
     agent = Agent("blackbird", "BlackbirdBot", "Blackbird Labs", role="scout_hub")
     thread = ThreadState(
@@ -129,10 +151,7 @@ def test_scout_hub_phase4_override_renders_and_drops_the_tool_it_lacks():
     # search_prior_art IS in this role's tool set and must be documented.
     assert "search_prior_art" in content
     # Every substitution token was consumed.
-    for token in ("{channel_name}", "{other_agent_name}", "{other_agent_lab}",
-                  "{message_count}", "{thread_phase}", "{thread_history}",
-                  "{phase_guidance}", "{instructions}", "{foa_number}",
-                  "{funding_thread_context}"):
+    for token in tokens:
         assert token not in content, f"leftover token {token!r}"
     # The Task 5 DECIDE guidance landed in the rendered prompt.
     assert "Baltimore commitment" in content
