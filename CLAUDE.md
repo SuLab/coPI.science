@@ -3,14 +3,36 @@
 ## Testing
 
 Run `./scripts/ci.sh` before committing — alembic sanity (single head, no
-duplicate revision ids), `ruff check` on the test suite, then the full pytest run
-with a branch-coverage floor. This is exactly what the `pre-push` hook runs, and
-it is the whole gate: there is no server-side CI.
+duplicate revision ids), an upgrade→downgrade→upgrade round trip against a
+throwaway Postgres it creates and destroys itself, `ruff check` on the test
+suite (zero findings) plus a ratcheted ceiling on `src/`, then the full pytest
+run with a branch-coverage floor. This is exactly what the `pre-push` hook
+runs, and it is the whole gate: there is no server-side CI.
 
-To run pytest alone **inside the container**, `TEST_DATABASE_URL` is required.
-Without it `tests/conftest.py` falls back to spinning an ephemeral Postgres via
-testcontainers, and the web container has no Docker socket — so every test that
-needs a database errors out (469 of them, measured 2026-08-04):
+**The supported way to run pytest alone is on the host, not inside a
+container:**
+
+```bash
+.venv-test/bin/python -m pytest tests/ -v
+```
+
+(If `.venv-test` doesn't exist yet: `uv venv .venv-test && uv pip install
+--python .venv-test/bin/python -e '.[dev]'`.) The host has a Docker socket, so
+with `TEST_DATABASE_URL` unset, `tests/conftest.py` spins its own ephemeral
+Postgres via testcontainers and migrates it with the real alembic chain — no
+container, no manual database, no env var needed. This is exactly what
+`scripts/ci.sh` runs.
+
+Running pytest **inside the container** (`docker compose exec blackbird-app
+python -m pytest ...`) does not currently work: the image installs with
+`pip install --no-cache-dir .` (`Dockerfile:14`), with no `[dev]` extra, so
+pytest is not installed there (verified: `exec blackbird-app python -c "import
+pytest"` → `ModuleNotFoundError`). Restoring that path would need the image (or
+a test-targeted variant of it) to install `.[dev]` instead.
+
+If that path is ever restored, `TEST_DATABASE_URL` becomes required again: the
+web container has no Docker socket, so without it every test that needs a
+database errors out (469 of them, measured 2026-08-04):
 
 ```bash
 docker compose -f docker-compose.prod.yml exec -T \
@@ -22,11 +44,12 @@ The service is **`blackbird-app`**, not `app` — see the two-stack warning unde
 "Running the Agent Simulation" for why the `-f docker-compose.prod.yml` is not
 optional.
 
-The named database must already exist — the suite migrates it, it does not create
-it. Add a fresh scratch DB with
-`docker compose -f docker-compose.prod.yml exec -T postgres createdb -U copi copi_xN`,
-and give concurrent suites distinct names so they do not migrate each other's
-schema mid-run. Never point `TEST_DATABASE_URL` at `copi`, the dev database.
+Whichever way you run it, a database named in `TEST_DATABASE_URL` must already
+exist — the suite migrates it, it does not create it. Add a fresh scratch DB
+with `docker compose -f docker-compose.prod.yml exec -T postgres createdb -U
+copi copi_xN`, and give concurrent suites distinct names so they do not
+migrate each other's schema mid-run. Never point `TEST_DATABASE_URL` at `copi`,
+the dev database.
 
 ## Running the Agent Simulation
 
@@ -177,3 +200,37 @@ docker compose -f docker-compose.prod.yml exec blackbird-app python scripts/back
 
 (`.env` + `config.py get_slack_tokens()` remain a read fallback, but the DB column is
 authoritative.)
+
+## BlackbirdBot (the scout_hub role)
+
+BlackbirdBot screens PI ideas against `data/Blackbird_initial_priorities-criteria_v1.pdf`.
+The rubric lives in **`profiles/private/blackbird.md`** (loaded per-agent from
+`profiles/private/{agent_id}.md` and injected under the `## Your Private Instructions`
+header that `Agent._compose_system_prompt` builds into every phase's system prompt); the
+per-phase behaviour lives in `prompts/roles/scout_hub/` and `src/agent/thread_guidance.py`.
+
+- **Interview guidance is per-role Python**, not a prompt: `src/agent/thread_guidance.py`.
+  The `pi_lab` strings there are byte-identical to the pre-refactor literals and are pinned
+  by `tests/characterization/__snapshots__/test_agent_turn_gm.ambr` — do not reword them,
+  and never run `pytest --snapshot-update` to make a mismatch go away.
+- **Assessments are durable.** A `:mag:` Opportunity Assessment must carry an
+  `<assessment_json>` sidecar (bare JSON, *no* ``` fence — a fenced block would be parsed
+  as the phase-5 action and silently no-op the post). It is stripped from the Slack body
+  and written to `opportunity_assessments`, visible at `/admin/assessments`.
+- **`weighted_score` is computed**, never taken from the model:
+  `src/services/blackbird_rubric.py`. `recommendation` (which may be
+  `route-to-incubation`) comes straight from the model's verdict and the computed `band`
+  comes straight from `weighted_score` — they are separate columns on
+  `opportunity_assessments` and neither is derived from the other.
+- **`gating` values are the tri-state strings** `"met"` / `"not_met"` / `"unconfirmed"`,
+  never booleans — "the PI declined" and "we never asked" are different answers, and only
+  the former can license discounting an idea.
+- **`search_prior_art` is a TITLE-only search** on the USPTO Open Data Portal (PatentsView
+  was decommissioned in its 2026-03-20 migration to api.uspto.gov). It backs off to the
+  most specific terms when the full phrase misses — before that backoff existed, every
+  production search ANDed in domain-generic words like "inhibitor" and returned zero hits,
+  reported to PIs as clean novelty. An empty title search is never FTO.
+- **`retrieve_foa` is withheld** from this role by `prompts/roles/scout_hub/role.toml`'s
+  tool allow-list. `prompts/roles/scout_hub/agent-system.md` explicitly tells the agent it
+  does not have this tool (so it doesn't hallucinate calling it); the phase-4 template
+  (`phase4-thread-reply.md`) has no need to and does not mention it either way.
