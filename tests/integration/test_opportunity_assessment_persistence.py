@@ -626,6 +626,24 @@ async def test_phase5_suppressed_post_persists_nothing_and_does_not_count(
 # --- /admin/assessments (task 12) -------------------------------------------
 
 
+def _band_label(html: str) -> str:
+    """Pull the rendered text of the ``band-label`` span next to the score.
+
+    ``band`` (computed server-side from the weighted score) and
+    ``recommendation`` (the model's own call) can legitimately disagree, and
+    that disagreement is the page's most valuable signal — so ``band`` must
+    render as text a reader can actually read, not just as a font colour on
+    the score. Matching the dedicated ``band-label`` class (rather than a
+    bare substring check) also dodges the page's intro prose, which already
+    contains the literal words "advance"/"conditional"/"pass" while
+    describing the threshold bands in general.
+    """
+    match = re.search(r'<span class="band-label[^"]*"[^>]*>([^<]*)</span>', html)
+    if match is None:
+        raise AssertionError(f"no band-label span rendered in: {html}")
+    return match.group(1).strip()
+
+
 def _gating_state_for(html: str, label: str) -> str:
     """Pull the ``gating-<state>`` class rendered for a given gate's row.
 
@@ -661,6 +679,41 @@ async def test_admin_assessments_page_lists_verdicts(client, db_session, admin):
     assert "route-to-incubation" in resp.text
     assert "3.05" in resp.text
     assert "No external validation yet" in resp.text
+    # band must be legible as text, not just a font colour on the score.
+    assert _band_label(resp.text) == "conditional"
+
+
+@pytest.mark.asyncio
+async def test_admin_assessments_page_renders_band_as_text_not_just_colour(
+    client, db_session, admin
+):
+    """Regression for the finding that ``band`` only ever selected a font
+    colour on the score cell (green/amber/gray) with no label and no
+    ``title`` — so a colour-blind reader, or anyone who had scrolled past the
+    legend, could not see a `recommendation`/`band` disagreement. This is
+    the exact concrete failure case: the model recommends
+    ``route-to-incubation`` but the server-computed band is ``pass``. Both
+    must render as their own literal, readable text, and neither may be
+    presented as the other.
+    """
+    run = SimulationRun()
+    db_session.add(run)
+    await db_session.flush()
+    db_session.add(OpportunityAssessment(
+        simulation_run_id=run.id, agent_id="blackbird", subject_agent_id="wang",
+        channel_name="general",
+        company_or_project="Band/recommendation disagreement fixture",
+        recommendation="route-to-incubation", weighted_score=1.80, band="pass",
+    ))
+    await db_session.flush()
+
+    resp = await client.get("/admin/assessments", headers=_auth(admin.id))
+    assert resp.status_code == 200
+    html = resp.text
+    assert "route-to-incubation" in html  # the model's own call, unchanged
+    assert _band_label(html) == "pass"  # the computed band, legible as text
+    # band and recommendation must never be presented as each other.
+    assert _band_label(html) != "route-to-incubation"
 
 
 @pytest.mark.asyncio

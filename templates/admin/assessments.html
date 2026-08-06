@@ -14,7 +14,7 @@
 <p class="text-xs text-gray-400 mb-6">
     Gating: <span class="text-green-600 font-medium">&#9989; met</span> &middot;
     <span class="text-red-600 font-medium">&#10060; not met</span> &middot;
-    <span class="text-amber-500 font-medium">&#10067; unconfirmed</span>
+    <span class="text-blue-500 font-medium">&#10067; unconfirmed</span>
     (the rubric question was never answered — distinct from a gate that failed).
 </p>
 
@@ -69,11 +69,22 @@
                 </td>
                 <td class="px-4 py-3 text-sm text-gray-600">{{ a.subject_agent_id or "—" }}</td>
                 <td class="px-4 py-3 text-sm text-gray-600">{{ a.funnel_stage or "—" }}</td>
-                <td class="px-4 py-3 text-sm font-semibold
-                    {% if a.band == 'advance' %}text-green-600
-                    {% elif a.band == 'conditional' %}text-amber-600
-                    {% else %}text-gray-400{% endif %}">
-                    {% if a.weighted_score is not none %}{{ "%.2f"|format(a.weighted_score) }}{% else %}—{% endif %}
+                <td class="px-4 py-3 text-sm whitespace-nowrap">
+                    <span class="font-semibold
+                        {% if a.band == 'advance' %}text-green-600
+                        {% elif a.band == 'conditional' %}text-amber-600
+                        {% else %}text-gray-400{% endif %}">
+                        {% if a.weighted_score is not none %}{{ "%.2f"|format(a.weighted_score) }}{% else %}—{% endif %}
+                    </span>
+                    {% if a.band %}
+                        <span class="band-label ml-1.5 text-xs font-medium uppercase tracking-wide align-middle
+                            {% if a.band == 'advance' %}text-green-600
+                            {% elif a.band == 'conditional' %}text-amber-600
+                            {% else %}text-gray-400{% endif %}"
+                            title="Computed band: {{ a.band }}">{{ a.band }}</span>
+                    {% else %}
+                        <span class="band-label ml-1.5 text-xs text-gray-400 align-middle">—</span>
+                    {% endif %}
                 </td>
                 <td class="px-4 py-3 text-sm text-gray-900">{{ a.recommendation or "—" }}</td>
                 <td class="px-4 py-3 text-xs text-gray-600">
@@ -85,7 +96,7 @@
                             {% elif gate_state == 'not_met' %}
                                 <span class="text-red-600" title="Not met">&#10060;</span>
                             {% elif gate_state == 'unconfirmed' %}
-                                <span class="text-amber-500" title="Unconfirmed — never asked">&#10067;</span>
+                                <span class="text-blue-500" title="Unconfirmed — never asked">&#10067;</span>
                             {% else %}
                                 <span class="text-gray-400" title="Unrecognized gating value: {{ gate_state }}">&bull;</span>
                             {% endif %}
