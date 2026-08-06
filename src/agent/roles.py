@@ -32,6 +32,10 @@ class RoleSpec:
     name: str
     label: str
     tools: frozenset[str]
+    # Optional per-role override for Settings.llm_calls_per_load_per_window.
+    # None means "use the global setting". This exists to pin a specific agent;
+    # it is NOT the mechanism — the load signal is (design §4.4). No role sets it.
+    calls_per_load_per_window: int | None = None
 
 
 def available_roles() -> list[str]:
@@ -98,4 +102,15 @@ def load_role(name: str) -> RoleSpec:
             else:
                 logger.warning("[roles] %s: unknown tool %r in role.toml — dropped", name, t)
         tools = frozenset(kept)
-    return RoleSpec(name=name, label=label, tools=tools)
+    rate = data.get("calls_per_load_per_window")
+    if rate is not None and not (
+        isinstance(rate, int) and not isinstance(rate, bool) and rate > 0
+    ):
+        logger.warning(
+            "[roles] %s: calls_per_load_per_window must be a positive int, "
+            "got %r — ignored", name, rate,
+        )
+        rate = None
+    return RoleSpec(
+        name=name, label=label, tools=tools, calls_per_load_per_window=rate,
+    )

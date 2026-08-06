@@ -171,3 +171,42 @@ def test_scout_hub_phase5_override_renders_in_both_modes():
     normal_content = normal_messages[0]["content"]
     assert "### Option C: Make a new top-level post" in normal_content
     assert ":mag: **Opportunity Assessment**" in normal_content
+
+
+def test_role_rate_override_is_read_when_positive(tmp_path, monkeypatch):
+    _write_role(
+        tmp_path, monkeypatch, "scout_hub",
+        'label = "Scout Hub"\ncalls_per_load_per_window = 20\n',
+    )
+    assert load_role("scout_hub").calls_per_load_per_window == 20
+
+
+def test_role_rate_override_defaults_to_none(tmp_path, monkeypatch):
+    _write_role(tmp_path, monkeypatch, "scout_hub", 'label = "Scout Hub"\n')
+    assert load_role("scout_hub").calls_per_load_per_window is None
+
+
+def test_role_rate_override_rejects_non_positive(tmp_path, monkeypatch, caplog):
+    _write_role(
+        tmp_path, monkeypatch, "scout_hub",
+        'label = "Scout Hub"\ncalls_per_load_per_window = 0\n',
+    )
+    with caplog.at_level(logging.WARNING):
+        spec = load_role("scout_hub")
+    assert spec.calls_per_load_per_window is None
+    assert "calls_per_load_per_window" in caplog.text
+
+
+def test_role_rate_override_rejects_non_int(tmp_path, monkeypatch, caplog):
+    _write_role(
+        tmp_path, monkeypatch, "scout_hub",
+        'label = "Scout Hub"\ncalls_per_load_per_window = "lots"\n',
+    )
+    with caplog.at_level(logging.WARNING):
+        spec = load_role("scout_hub")
+    assert spec.calls_per_load_per_window is None
+
+
+def test_missing_manifest_yields_no_rate_override(tmp_path, monkeypatch):
+    monkeypatch.setattr(roles, "ROLES_DIR", tmp_path / "roles")
+    assert load_role("pi_lab").calls_per_load_per_window is None
