@@ -32,7 +32,16 @@ app = typer.Typer()
 @app.command()
 def main(
     max_runtime: int = typer.Option(0, "--max-runtime", help="Max runtime in minutes (0 = run until stopped)"),
-    budget: int = typer.Option(50, "--budget", help="Max LLM calls per agent"),
+    budget: int = typer.Option(
+        0, "--budget",
+        help=(
+            "DEPRECATED legacy cumulative cap: max LLM calls per agent for the "
+            "WHOLE run. 0 (default) disables it. Superseded by the sliding-window "
+            "rate limiter (llm_calls_per_load_per_window). Passing a nonzero value "
+            "can permanently bench a hub agent — see "
+            "docs/specs/2026-08-06-hub-budget-scheduler-design.md §6."
+        ),
+    ),
     mock: bool = typer.Option(False, "--mock", help="Run in mock mode without real Slack tokens"),
     no_db: bool = typer.Option(False, "--no-db", help="Skip database logging"),
     fresh: bool = typer.Option(False, "--fresh", help="Wipe simulation data and start fresh"),
@@ -242,6 +251,16 @@ async def _run_simulation(
         loop.add_signal_handler(sig, shutdown)
 
     try:
+        if budget > 0:
+            logger.warning(
+                "--budget %d is the DEPRECATED cumulative cap. It counts LLM calls "
+                "for the ENTIRE run, is rebuilt from llm_call_logs on restart, and "
+                "therefore benches an agent PERMANENTLY once crossed — this is what "
+                "took the blackbird hub off the air for 161 consecutive turns. The "
+                "sliding-window rate limiter supersedes it. Pass --budget 0 unless "
+                "you specifically want the legacy behaviour.",
+                budget,
+            )
         logger.info(
             "Starting simulation: %d agents, %s max runtime, %d budget/agent%s",
             len(agents), runtime_label, budget,

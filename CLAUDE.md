@@ -60,18 +60,24 @@ The simulation runs in a one-off container named `blackbird-agent-run`:
 ```bash
 DC="docker compose -f docker-compose.prod.yml"
 
-# Resume an existing run (no budget limit):
-$DC --profile agent run -d --name blackbird-agent-run agent python -m src.agent.main --budget 0
-
-# Resume with a budget cap (e.g. 50 LLM calls per agent):
-$DC --profile agent run -d --name blackbird-agent-run agent python -m src.agent.main --budget 50
+# Resume an existing run:
+$DC --profile agent run -d --name blackbird-agent-run agent python -m src.agent.main
 
 # Fresh run (wipes agent_messages/channels, keeps proposals):
-$DC --profile agent run -d --name blackbird-agent-run agent python -m src.agent.main --fresh --budget 0
+$DC --profile agent run -d --name blackbird-agent-run agent python -m src.agent.main --fresh
 
 # With a time limit (minutes):
-$DC --profile agent run -d --name blackbird-agent-run agent python -m src.agent.main --max-runtime 60 --budget 0
+$DC --profile agent run -d --name blackbird-agent-run agent python -m src.agent.main --max-runtime 60
 ```
+
+**`--budget` is deprecated.** It is a *cumulative* cap for the whole run, it is
+rebuilt from `llm_call_logs` on restart, and it therefore benches an agent
+permanently once crossed — a restart does not clear it. It defaults to 0 (off)
+and should stay there. Pacing and runaway protection are now handled by the
+sliding-window rate limiter, whose allowance scales with each agent's live
+conversational load (`llm_calls_per_load_per_window`, `llm_rate_window_seconds`).
+A hub bot in a star topology will hit any uniform cumulative cap long before any
+spoke does. See `docs/specs/2026-08-06-hub-budget-scheduler-design.md`.
 
 **Before restarting**, always save logs and rebuild containers:
 
@@ -93,7 +99,7 @@ docker rm blackbird-agent-run
 $DC up -d --build blackbird-app worker
 
 # 4. Start the new run
-$DC --profile agent run -d --name blackbird-agent-run agent python -m src.agent.main --budget 0
+$DC --profile agent run -d --name blackbird-agent-run agent python -m src.agent.main
 ```
 
 **Note:** The agent-run container uses mounted source code but the Python process only loads modules at startup. **Code** changes require a container restart to take effect. **After any code change that affects the running agent process, flag this to the user so they can decide whether to restart.** (Roster changes — activating/inactivating agents or setting a new `slack_bot_token` in `AgentRegistry` — do NOT need a restart; they're picked up live by `_sync_roster_from_db`.)
