@@ -937,3 +937,94 @@ async def test_admin_assessments_page_handles_null_and_unrecognized_gating(
     resp = await client.get("/admin/assessments", headers=_auth(admin.id))
     assert resp.status_code == 200
     assert _gating_state_for(resp.text, "baltimore commitment") == "unknown"
+
+
+def _score_cell(html: str, key: str) -> str:
+    """The rendered detail-row cell for one rubric dimension.
+
+    Scoped to the `score-<key>` class rather than searching the whole page: the
+    dimension names also appear in the page's intro prose and in tooltips, so a
+    bare substring check would pass against a template that renders no scores at
+    all.
+    """
+    m = re.search(
+        rf'<span class="score-{re.escape(key)}[^"]*"[^>]*>(.*?)</span>\s*</span>',
+        html,
+        re.DOTALL,
+    )
+    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", m.group(1))).strip() if m else ""
+
+
+@pytest.mark.asyncio
+async def test_admin_assessments_page_renders_rationale_and_scores(
+    client, db_session, admin
+):
+    """A triage row without the basis for its number is a scoreboard, not a
+    triage tool. The reviewer has to be able to read WHY, and has to be able to
+    tell a dimension that scored low from one that was never answered — an
+    unscored dimension counts as zero in the weighted score, so the two are very
+    different findings that produce the same digit.
+    """
+    run = SimulationRun()
+    db_session.add(run)
+    await db_session.flush()
+    db_session.add(OpportunityAssessment(
+        simulation_run_id=run.id, agent_id="blackbird", subject_agent_id="wang",
+        channel_name="general", company_or_project="DBT / BCAA-autophagy axis",
+        weighted_score=3.05, band="conditional",
+        rationale="Differentiated metabolic angle; needs mammalian in vivo rescue.",
+        # external_signals deliberately omitted — must render as a gap, not a 0.
+        scores={
+            "differentiation": 4, "market_unmet_need": 4, "team": 4,
+            "ip_fto": 2, "platform": 3, "dev_regulatory_feasibility": 3,
+            "workplan_capital_efficiency": 3, "exit_thesis": 2,
+        },
+    ))
+    await db_session.flush()
+
+    resp = await client.get("/admin/assessments", headers=_auth(admin.id))
+    assert resp.status_code == 200
+    html = resp.text
+
+    assert "Differentiated metabolic angle" in html, "rationale not rendered"
+
+    # Scored dimensions carry their value and their weight.
+    assert _score_cell(html, "differentiation") == "differentiation 4 /20%"
+    assert _score_cell(html, "exit_thesis") == "exit thesis 2 /5%"
+
+    # The omitted dimension is still listed, as a gap rather than a zero.
+    assert _score_cell(html, "external_signals") == "external signals — /15%"
+
+    # All nine appear, in descending weight order, so the dimensions that move
+    # the score read first.
+    order = [
+        m.group(1)
+        for m in re.finditer(r'<span class="score-([a-z_]+)', html)
+    ]
+    assert order == [
+        "differentiation", "market_unmet_need", "team", "external_signals",
+        "ip_fto", "platform", "dev_regulatory_feasibility",
+        "workplan_capital_efficiency", "exit_thesis",
+    ], order
+
+
+@pytest.mark.asyncio
+async def test_admin_assessments_page_omits_detail_row_when_empty(
+    client, db_session, admin
+):
+    """A sparse verdict is stored deliberately rather than lost, so the page must
+    tolerate one without rendering an empty grey band under it."""
+    run = SimulationRun()
+    db_session.add(run)
+    await db_session.flush()
+    db_session.add(OpportunityAssessment(
+        simulation_run_id=run.id, agent_id="blackbird", channel_name="general",
+        company_or_project="Sparse verdict",
+    ))
+    await db_session.flush()
+
+    resp = await client.get("/admin/assessments", headers=_auth(admin.id))
+    assert resp.status_code == 200
+    assert "Sparse verdict" in resp.text
+    assert "assessment-detail" not in resp.text
+    assert "assessment-rationale" not in resp.text

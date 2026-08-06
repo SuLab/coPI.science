@@ -121,6 +121,44 @@
                 </td>
                 <td class="px-4 py-3 text-xs text-gray-500">{{ a.created_at.strftime("%Y-%m-%d %H:%M") }}</td>
             </tr>
+            {# Detail row. The triage row above answers "which of these deserves
+               attention"; this one answers "on what basis", which is the
+               difference between a triage queue and a scoreboard. Kept as a
+               spanning row rather than extra columns because the table is
+               already eight wide. Omitted entirely when there is nothing to
+               show, so a sparse verdict does not leave an empty band. #}
+            {% if a.rationale or a.scores %}
+            <tr class="assessment-detail">
+                <td colspan="8" class="px-4 pb-3 pt-0 text-xs text-gray-600 bg-gray-50">
+                    {% if a.rationale %}
+                        <div class="assessment-rationale mb-1">
+                            <span class="font-medium text-gray-500">Rationale:</span>
+                            {{ a.rationale }}
+                        </div>
+                    {% endif %}
+                    {% if a.scores %}
+                        {# Weight order, not dict order, so the dimensions that
+                           actually move the score read first. Every one of the
+                           nine is listed even when unscored: an unscored
+                           dimension counts as ZERO in the weighted score
+                           (src/services/blackbird_rubric.py), so a reader has to
+                           be able to tell "scored low" from "never answered". #}
+                        <div class="assessment-scores flex flex-wrap gap-x-3 gap-y-1">
+                            <span class="font-medium text-gray-500">Scores:</span>
+                            {% for key, weight in rubric_weights.items() %}
+                                {% set val = a.scores.get(key) %}
+                                <span class="score-{{ key }}{% if val is none %} text-gray-400{% endif %}"
+                                      title="{{ key.replace('_', ' ') }} — {{ weight }}% of the weighted score{% if val is none %} (not scored: counts as zero){% endif %}">
+                                    {{ key.replace("_", " ") }}
+                                    <span class="font-semibold">{% if val is none %}—{% else %}{{ val }}{% endif %}</span>
+                                    <span class="text-gray-400">/{{ weight }}%</span>
+                                </span>
+                            {% endfor %}
+                        </div>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endif %}
         {% endfor %}
         </tbody>
     </table>

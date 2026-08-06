@@ -122,9 +122,40 @@ docker rm blackbird-agent-run
 $DC up -d --build blackbird-app worker
 $DC --profile agent build agent
 
-# 4. Start the new run
+# 4. Apply migrations — NOTHING ELSE DOES. See the warning below.
+$DC exec -T blackbird-app alembic upgrade head
+$DC exec -T blackbird-app alembic current   # confirm it matches `alembic heads`
+
+# 5. Start the new run
 $DC --profile agent run -d --name blackbird-agent-run agent python -m src.agent.main
 ```
+
+> ### ⚠️ Nothing migrates the database for you. Step 4 is not optional.
+>
+> The prod web command is a bare `uvicorn` (`docker-compose.prod.yml`), there is
+> no `alembic upgrade` at startup, and no `create_all` anywhere in `src/main.py`
+> or `src/database.py`. So a rebuild + restart runs the **new code against the
+> old schema**, and the failure is silent rather than loud: writes that hit a
+> missing table or column raise, get swallowed by a best-effort `except`, and
+> leave one ERROR line in a log nobody is tailing.
+>
+> Measured 2026-08-06: production sat at `0024` while the branch head was `0025`.
+> Restarting without step 4 would have made every `_persist_assessment` fail on a
+> missing `opportunity_assessments` and lost **every** screening verdict, while
+> Slack posts continued to look completely normal.
+>
+> Check before you start a run, not after:
+>
+> ```bash
+> $DC exec -T postgres psql -U copi -d copi -t -A -c \
+>   "SELECT version_num FROM alembic_version;"   # must equal `alembic heads`
+> ```
+>
+> `scripts/migrate/run_migration.sh` is the guarded path for a populated
+> database (preflight → apply → postflight), but it shells out to a bare
+> `docker compose` and defaults `SVC=app`, neither of which matches this stack.
+> Override both: `COMPOSE_FILE=docker-compose.prod.yml
+> MIGRATE_SERVICE=blackbird-app ./scripts/migrate/run_migration.sh --apply`.
 
 > ### ⚠️ The agent image does NOT mount `src/`. Rebuild it, or you deploy stale code.
 >

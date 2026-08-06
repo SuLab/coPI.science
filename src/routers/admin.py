@@ -41,6 +41,7 @@ from src.models import (
     User,
     WaitlistSignup,
 )
+from src.services.blackbird_rubric import RUBRIC_WEIGHTS
 from src.services.cohorts import (
     compute_gates,
     record_cohort_audit_event,
@@ -848,6 +849,12 @@ async def admin_assessments(
             current_user,
             active_admin="assessments",
             assessments=assessments,
+            # Passed so the detail row can render the nine dimensions in
+            # descending rubric weight rather than dict order, and can show an
+            # unscored dimension as a gap. An unscored dimension counts as zero
+            # in the weighted score (src/services/blackbird_rubric.py), so a
+            # reader needs to see which ones were never answered.
+            rubric_weights=RUBRIC_WEIGHTS,
         ),
     )
 
