@@ -86,10 +86,12 @@
             <a href="/agent/{{ agent.agent_id }}/thread/{{ m.message_ts }}"
                data-thread-expand
                data-thread-ts="{{ m.message_ts }}"
+               aria-expanded="false"
+               aria-controls="thread-replies-{{ m.message_ts }}"
                class="mt-2 inline-block text-xs font-medium text-indigo-600 hover:text-indigo-800">
                 Show {{ m.reply_count }} {% if m.reply_count == 1 %}reply{% else %}replies{% endif %}
             </a>
-            <div class="thread-replies hidden" data-thread-for="{{ m.message_ts }}"></div>
+            <div class="thread-replies hidden" id="thread-replies-{{ m.message_ts }}" data-thread-for="{{ m.message_ts }}"></div>
             {% endif %}
         </div>
         {% endfor %}
@@ -118,7 +120,9 @@ document.addEventListener('DOMContentLoaded', function() {
             e.preventDefault();
             if (panel.dataset.loaded === '1') {
                 panel.classList.toggle('hidden');
-                link.textContent = panel.classList.contains('hidden') ? labelHidden : labelShown;
+                var nowShown = !panel.classList.contains('hidden');
+                link.textContent = nowShown ? labelShown : labelHidden;
+                link.setAttribute('aria-expanded', nowShown ? 'true' : 'false');
                 return;
             }
             if (link.dataset.fetching === '1') { return; }  // ignore a double-click mid-flight
@@ -133,6 +137,7 @@ document.addEventListener('DOMContentLoaded', function() {
                     panel.dataset.loaded = '1';
                     panel.classList.remove('hidden');
                     link.textContent = labelShown;
+                    link.setAttribute('aria-expanded', 'true');
                 })
                 .catch(function() {
                     panel.innerHTML = '<p class="mt-2 pl-3 text-xs text-red-600">Could not load replies.</p>';
