@@ -4028,6 +4028,39 @@ class SimulationEngine:
                     agent.role = r.role
                     role_changed = True
 
+            # Token-diff for surviving agents. `main.py` admits every active
+            # agent to self.agents regardless of token, so an agent provisioned
+            # AFTER startup is in neither to_add nor to_remove: the membership
+            # diff below early-returns and the client-building loop (which only
+            # runs over to_add) never sees it. It then posts DB-only, silently,
+            # until the process restarts. Measured 2026-08-06: 48 bots installed
+            # mid-run, tokens all in AgentRegistry, and `Connected as` never rose
+            # above the 7 that had tokens at boot. Adopt them here, before the
+            # early return, so the docstring's promise is actually true.
+            if self.slack_enabled:
+                for aid in self.agents:
+                    r = desired.get(aid)
+                    if r is None or aid in self.slack_clients:
+                        continue
+                    token = (
+                        r.slack_bot_token
+                        if is_valid_token(r.slack_bot_token)
+                        else env_token(aid)
+                    )
+                    if not is_valid_token(token):
+                        continue  # still tokenless — retry on a later tick
+                    client = AgentSlackClient(agent_id=aid, bot_token=token)
+                    if not client.connect():
+                        logger.warning(
+                            "[roster] Slack connect failed adopting %s — will retry", aid,
+                        )
+                        continue
+                    self.slack_clients[aid] = client
+                    logger.info(
+                        "[roster] Adopted Slack client for %s (token provisioned "
+                        "after startup)", aid,
+                    )
+
             current = set(self.agents)
             to_remove = current - set(desired)
             to_add = set(desired) - current
