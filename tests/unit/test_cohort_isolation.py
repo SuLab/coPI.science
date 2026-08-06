@@ -129,6 +129,13 @@ def _settings(**kw):
         cohort_default_policy=POLICY_OPEN,
         max_consecutive_reactive_turns=3,
         turn_delay_seconds=0.0,
+        # Required since _turn_eligible gained the rate limiter: _agent_load reads
+        # active_thread_threshold, _within_rate_limit reads the other two. Values are
+        # inert for this file — no test here opens a thread or records a call, so load
+        # is always 1 and the allowance is never approached.
+        active_thread_threshold=12,
+        llm_rate_window_seconds=600,
+        llm_calls_per_load_per_window=8,
     )
     base.update(kw)
     return types.SimpleNamespace(**base)
