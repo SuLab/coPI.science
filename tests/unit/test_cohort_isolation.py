@@ -1113,8 +1113,12 @@ class TestScheduler:
         assert eng._select_agent().agent_id == "wiseman"
 
     def test_global_sleep_removed_from_main_loop(self):
-        # The main loop lives in start().
-        src = inspect.getsource(SimulationEngine.start)
+        # The loop was split out of start() into _run_main_loop() so the
+        # stall-is-transient contract is reachable from a unit test; check both
+        # halves so the global sleep cannot reappear in either.
+        src = inspect.getsource(SimulationEngine.start) + inspect.getsource(
+            SimulationEngine._run_main_loop
+        )
         assert "_sleep(settings.turn_delay_seconds)" not in src
         assert "enforced at selection time in _turn_eligible" in src
 

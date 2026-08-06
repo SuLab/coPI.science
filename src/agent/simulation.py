@@ -209,7 +209,12 @@ class SimulationEngine:
         agents: list[Agent],
         slack_clients: dict,  # agent_id -> AgentSlackClient
         max_runtime_minutes: int = 60,
-        budget_cap: int = 50,
+        # 0 = off, matching the --budget CLI default and _turn_eligible's
+        # docstring. A nonzero default silently armed the DEPRECATED cumulative
+        # cap for every caller that omitted the kwarg (tests, backfill scripts),
+        # i.e. it re-created the permanent bench this branch exists to remove.
+        # The live throttle is the sliding window (_within_rate_limit).
+        budget_cap: int = 0,
         session_factory=None,
         simulation_run_id: uuid.UUID | None = None,
         reset_cursors: bool = False,
@@ -541,7 +546,68 @@ class SimulationEngine:
             simulation_run_id=self.simulation_run_id,
         )
 
-        # Main loop
+        await self._run_main_loop()
+
+    # ------------------------------------------------------------------
+    # Main loop
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _idle_backoff(streak: int) -> int:
+        """Seconds to wait after ``streak`` consecutive unproductive ticks.
+
+        One definition shared by the three places that back off — the
+        no-eligible-agent stall, the back-to-back-caller skip, and the idle turn
+        — so a tick that does no work always costs the same wall time whichever
+        way it came up empty.
+        """
+        if streak <= 3:
+            return 5
+        if streak <= 10:
+            return 15
+        return 30
+
+    def _terminal_stall_reason(self) -> str | None:
+        """Why an empty selection should END the run — or None when it is transient.
+
+        ``_select_agent()`` returning None used to break the loop unconditionally.
+        Under the sliding-window limiter that is wrong and actively dangerous:
+        both remaining live gates LAPSE WITH TIME. ``_within_rate_limit`` expires
+        entries as the window slides, and the per-agent ``turn_delay_seconds``
+        cooldown expires by the clock. Breaking on either turns "one agent is
+        benched for a while" into "the container exits and stays exited" — a
+        strictly worse failure than the one this branch was written to fix, and
+        one that bites every roster small enough for aggregate demand to reach
+        aggregate allowance (e.g. 7 token-holding agents at 8 calls/600s).
+
+        Only two conditions can never recover on their own:
+
+        - an EMPTY ROSTER — nothing will ever become eligible;
+        - the LEGACY cumulative ``--budget`` cap, armed (> 0) and blown by EVERY
+          agent. ``api_call_count`` only ever increases within a process, and
+          ``_rebuild_state_from_db`` restores it across restarts, so this one
+          really is permanent. It is also opt-in and deprecated (design §6).
+
+        ``max_runtime`` and SIGTERM still end the run through the loop condition;
+        this predicate is only about the selection stall.
+        """
+        if not self.agents:
+            return "the roster is empty"
+        if self.budget_cap > 0 and all(
+            not self._agent_within_budget(a) for a in self.agents.values()
+        ):
+            return (
+                f"every agent is over the legacy --budget cap ({self.budget_cap})"
+            )
+        return None
+
+    async def _run_main_loop(self) -> None:
+        """Poll inbound sources, select an agent, run its turn — until stopped.
+
+        Split out of ``start()`` so the scheduling contract (in particular
+        ``_terminal_stall_reason``) is reachable from a unit test without
+        standing up the whole startup sequence.
+        """
         turn_count = 0
         consecutive_idle = 0
         while self._running and self.is_within_time_limit:
@@ -573,17 +639,27 @@ class SimulationEngine:
 
             # Select agent
             agent = self._select_agent()
-            if not agent or not self._agent_within_budget(agent):
-                # No agent is currently eligible: every one is either rate-limited,
-                # cooling down, or over the legacy cumulative cap. Rate limiting is
-                # transient (the window slides), so this is no longer necessarily
-                # terminal — but the loop's contract is unchanged, so say what was
-                # observed rather than guessing which cause applied.
+            if agent is None:
+                # No agent is currently eligible. Throttling and the per-agent
+                # cooldown both lapse with time, so this is normally TRANSIENT:
+                # back off and retry rather than ending the run. Only
+                # _terminal_stall_reason's two permanent cases stop the loop.
+                reason = self._terminal_stall_reason()
+                if reason is not None:
+                    logger.info("No eligible agent: %s. Stopping.", reason)
+                    break
+                consecutive_idle += 1
+                delay = self._idle_backoff(consecutive_idle)
                 logger.info(
-                    "No eligible agent (all throttled, cooling down, or over the "
-                    "legacy --budget cap). Stopping."
+                    "No eligible agent (all throttled or cooling down) — "
+                    "retrying in %ds. Transient: the rate window slides and "
+                    "per-agent cooldowns expire. (stall streak: %d)",
+                    delay, consecutive_idle,
                 )
-                break
+                # The sleep is what keeps this a backoff rather than a hot spin,
+                # and it returns early on SIGTERM so shutdown stays prompt.
+                await self._sleep(delay)
+                continue
 
             # Prevent the same agent from making back-to-back LLM calls.
             # If this agent was the last to make an LLM call, skip its turn
@@ -591,12 +667,7 @@ class SimulationEngine:
             if self._last_llm_caller == agent.agent_id:
                 agent.state.last_selected = time.time()
                 consecutive_idle += 1
-                if consecutive_idle <= 3:
-                    delay = 5
-                elif consecutive_idle <= 10:
-                    delay = 15
-                else:
-                    delay = 30
+                delay = self._idle_backoff(consecutive_idle)
                 logger.debug(
                     "[%s] Skipped: was last LLM caller (idle backoff: %ds)",
                     agent.agent_id, delay,
@@ -634,12 +705,7 @@ class SimulationEngine:
                 consecutive_idle += 1
 
             if consecutive_idle > 0:
-                if consecutive_idle <= 3:
-                    delay = 5
-                elif consecutive_idle <= 10:
-                    delay = 15
-                else:
-                    delay = 30
+                delay = self._idle_backoff(consecutive_idle)
                 logger.debug("Idle backoff: %ds (idle streak: %d)", delay, consecutive_idle)
                 await self._sleep(delay)
             # turn_delay_seconds is NOT slept on here. It is a *per-agent* tempo
@@ -747,6 +813,15 @@ class SimulationEngine:
           roster free to act while one agent sits out. See v2 §10.3.
         """
         if not self._agent_within_budget(agent):
+            # Ordering is deliberate and must not change: the legacy cap decides
+            # eligibility first (that is what keeps the --budget compat tests
+            # meaningful). But short-circuiting here also froze
+            # ``state.throttled``, so with --budget armed an agent's next genuine
+            # throttle transition logged nothing. Evaluate the window check for
+            # its SIDE EFFECT (expire old entries, refresh the flag, emit the
+            # one-shot warning) and discard the result — eligibility is still
+            # decided by the cap alone.
+            self._within_rate_limit(agent, now)
             return False
         if not self._within_rate_limit(agent, now):
             return False

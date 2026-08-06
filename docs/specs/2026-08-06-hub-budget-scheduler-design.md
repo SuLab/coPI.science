@@ -245,10 +245,16 @@ precisely what turned this into a 2.5-hour undetected outage.
 
 **Failure modes considered:**
 
-- *All agents throttled simultaneously.* `_select_agent` returns `None` and the main
-  loop breaks with "All agents over budget or no agent selected." Pre-existing
-  behaviour, unchanged. Under a rate limiter this is now recoverable rather than
-  terminal, so the message is reworded to say the run stopped with agents throttled.
+- *All agents throttled simultaneously.* `_select_agent` returns `None`. The loop used
+  to **break** here, which under a sliding-window limiter is wrong: throttling and the
+  per-agent `turn_delay_seconds` cooldown both lapse with time, so breaking converts a
+  temporary bench into a permanent whole-run stop — strictly worse than the failure this
+  design replaces, and reachable on any roster small enough for aggregate demand to meet
+  aggregate allowance. The loop now consults `_terminal_stall_reason()`: it logs, applies
+  the shared idle backoff and **continues**, and breaks only for the two conditions that
+  cannot recover — an empty roster, or the legacy `--budget` cap armed (`> 0`) and blown
+  by *every* agent. `max_runtime` and SIGTERM still end the run via the loop condition,
+  and the backoff sleep (which returns early on stop) is what keeps this from spinning.
 - *Clock skew / non-monotonic time.* `call_times` uses `time.time()`, consistent with
   `last_selected` and `last_phase5_action_time`. A backwards jump can only delay
   pruning, never bench an agent permanently.
