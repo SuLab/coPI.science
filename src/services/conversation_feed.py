@@ -27,6 +27,8 @@ handed.
 
 from __future__ import annotations
 
+import logging
+
 from sqlalchemy import ColumnElement, and_, false, func, or_, select, true
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -34,6 +36,8 @@ from src.config import get_settings
 from src.models import AgentMessage, AgentRegistry, Cohort, CohortMembership
 from src.services.cohorts import compute_gates
 from src.visibility import VISIBILITY_COLLAB_PRIVATE
+
+logger = logging.getLogger(__name__)
 
 
 def gate_clause(gate: set[str] | None) -> ColumnElement[bool]:
@@ -98,9 +102,12 @@ async def resolve_agent_gate(db: AsyncSession, agent_id: str) -> set[str] | None
     deliberate difference: the roster is the active agents **plus the viewing
     agent**. ``/agent/{id}/conversations`` admits ``status in ("active",
     "inactive")``, but ``compute_gates`` only returns keys for the roster it is
-    handed, so an inactive viewer would KeyError. Adding it can only *raise*
-    ``live_members``, which the preflight compares against zero — so it cannot
-    turn a refusal into a silent roster-wide isolation.
+    handed. Widening the roster here is what stops an inactive viewer falling
+    through ``gates.get(agent_id)`` below to its default of ``None`` — i.e.
+    silently getting an UNGATED feed — rather than an ergonomic nicety to dodge
+    a ``KeyError`` (``dict.get`` never raises). Adding the viewer can only
+    *raise* ``live_members``, which the preflight compares against zero — so it
+    cannot turn a refusal into a silent roster-wide isolation.
     """
     settings = get_settings()
     roster = {
@@ -116,7 +123,7 @@ async def resolve_agent_gate(db: AsyncSession, agent_id: str) -> set[str] | None
         select(func.count()).select_from(Cohort)
     )).scalar() or 0
 
-    gates, _preflight_error = compute_gates(
+    gates, preflight_error = compute_gates(
         membership_rows=[(r[0], r[1]) for r in rows],
         agent_ids=sorted(roster),
         isolation_enabled=settings.cohort_isolation_enabled,
@@ -124,4 +131,19 @@ async def resolve_agent_gate(db: AsyncSession, agent_id: str) -> set[str] | None
         cohort_count=cohort_count,
         has_db=True,
     )
+    if preflight_error is not None and settings.cohort_isolation_enabled:
+        # This is the fail-open engine semantics `compute_gates`/`preflight_reason`
+        # deliberately implement (src/services/cohorts.py) — do NOT change it here.
+        # But it is silent by default: an admin can reach this state with one click
+        # ("all / none" on every column of /admin/cohorts/topology, then save), and
+        # nothing short of this line says so. Every gate this call resolves is
+        # `None` while the condition holds, which means every PI conversations feed
+        # and thread-expand read is UNGATED — the isolation the operator turned on
+        # is not applying to any agent, not just this one.
+        logger.warning(
+            "[conversation_feed] preflight forced the cohort gate OFF for agent "
+            "%r (%s) — PI-facing reads via resolve_agent_gate are consequently "
+            "UNGATED for every agent until this is resolved",
+            agent_id, preflight_error,
+        )
     return gates.get(agent_id)

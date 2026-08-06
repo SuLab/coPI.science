@@ -10,7 +10,7 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import distinct, func, select
+from sqlalchemy import distinct, func, select, tuple_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -809,20 +809,25 @@ async def agent_conversations(
 
         # Reply counts, gated with the SAME clause (including the own-post
         # carve-out) so the badge can never promise turns the expansion will not
-        # show. No channel_name filter here, unlike the roots query above — that
-        # is safe only because `uq_agent_messages_run_ts`
-        # (src/models/agent_activity.py) makes message_ts unique per run, so
-        # matching on `thread_ts IN (root_ts)` within one run cannot pull in a
-        # same-named thread from a different channel. A future change to that
-        # constraint would silently widen this query.
-        root_ts = [r.message_ts for r in roots if r.message_ts]
+        # show. The real invariant a reply query must honour is that a reply
+        # lives in ITS ROOT's channel — `uq_agent_messages_run_ts`
+        # (src/models/agent_activity.py) only proves root ids don't collide
+        # across channels within a run; it says nothing about where a reply
+        # naming that root as `thread_ts` was posted. Nothing else enforces that
+        # a `collab_private` reply's `thread_ts` can't coincide with a public
+        # root's `message_ts` — and `gate_clause`'s unconditional
+        # `collab_private` pass would let such a reply count toward (and, via
+        # the expand endpoint, render into) a conversation it does not belong
+        # to. So this matches `(thread_ts, channel_name)` pairs against each
+        # root's own channel, not `thread_ts` alone.
+        root_pairs = [(r.message_ts, r.channel_name) for r in roots if r.message_ts]
         counts: dict[str, int] = {}
-        if root_ts:
+        if root_pairs:
             count_rows = await db.execute(
                 select(AgentMessage.thread_ts, func.count(AgentMessage.id))
                 .where(
                     AgentMessage.simulation_run_id == run_id,
-                    AgentMessage.thread_ts.in_(root_ts),
+                    tuple_(AgentMessage.thread_ts, AgentMessage.channel_name).in_(root_pairs),
                     gated,
                 )
                 .group_by(AgentMessage.thread_ts)
@@ -912,11 +917,15 @@ async def agent_thread_replies(
     if root is None:
         raise HTTPException(status_code=404)
 
+    # Scoped to the root's OWN channel, not just `thread_ts` — see the count
+    # query's comment in `agent_conversations` for why `thread_ts` alone is not
+    # the invariant a reply query can rely on.
     reply_rows = await db.execute(
         select(AgentMessage)
         .where(
             AgentMessage.simulation_run_id == run_id,
             AgentMessage.thread_ts == message_ts,
+            AgentMessage.channel_name == root.channel_name,
             gated,
         )
         .order_by(AgentMessage.posted_at.asc(), AgentMessage.created_at.asc(),
