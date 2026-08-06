@@ -1,0 +1,34 @@
+# Logging override — the EC2 instance role (copi-ec2-ses-role) lacks
+# logs:CreateLogStream, so the awslogs driver in docker-compose.prod.yml makes
+# every container fail to start with an AccessDeniedException. This forces the
+# local json-file driver instead.
+#
+# Originally added 2026-05-26 when the instance role was swapped; that copy was
+# never committed and was later deleted from the working tree, which is how the
+# stack ended up running from the dev docker-compose.yml (no restart policy) and
+# failed to come back after the 2026-08-06 host freeze.
+#
+# Remove this file once the admin adds CloudWatch Logs perms to the role
+# (or restores the previous role with the SES policy attached).
+services:
+  postgres:
+    logging:
+      driver: json-file
+  app:
+    logging:
+      driver: json-file
+  worker:
+    logging:
+      driver: json-file
+  agent:
+    logging:
+      driver: json-file
+  grantbot:
+    logging:
+      driver: json-file
+  nginx:
+    logging:
+      driver: json-file
+  certbot:
+    logging:
+      driver: json-file

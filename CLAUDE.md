@@ -6,27 +6,64 @@ Run `python -m pytest tests/ -v` before committing. All tests must pass.
 Tests run inside Docker: `docker compose exec app python -m pytest tests/ -v`
 (may need `pip install pytest pytest-asyncio` first if the container was rebuilt).
 
+## Compose file set (read this before any `docker compose` command)
+
+**Production is `docker-compose.prod.yml` + `docker-compose.override.yml`. Always pass
+both `-f` flags.** A bare `docker compose up` reads only `docker-compose.yml`, which is
+the **dev** file: it has no `restart:` policy, runs `uvicorn --reload`, and publishes
+port 8001. Recreating prod services from it leaves them with `restart: no`, so they do
+not come back after a reboot. (This is exactly what happened on 2026-08-06: a host
+freeze rebooted the box and app/worker/postgres/grantbot stayed dead while nginx
+crash-looped on `host not found in upstream "app:8000"`.)
+
+`docker-compose.override.yml` forces the `json-file` log driver. It is required because
+`docker-compose.prod.yml` sets `logging.driver: awslogs` on every service and the EC2
+instance role (`copi-ec2-ses-role`) lacks `logs:CreateLogStream` — without the override,
+every container dies at start with `AccessDeniedException`.
+
+To avoid repeating the flags, export this once per shell:
+
+```bash
+export COMPOSE_FILE=docker-compose.prod.yml:docker-compose.override.yml
+```
+
+Verify you used the right file set — all six services must report `unless-stopped`:
+
+```bash
+docker inspect copi-python-app-1 -f '{{.HostConfig.RestartPolicy.Name}}'
+```
+
 ## Running the Agent Simulation
 
 The simulation runs in a one-off container named `agent-run`:
 
 ```bash
+C="-f docker-compose.prod.yml -f docker-compose.override.yml"
+
 # Resume an existing run (no budget limit):
-docker compose --profile agent run -d --name agent-run agent python -m src.agent.main --budget 0
+docker compose $C --profile agent run -d --name agent-run agent python -m src.agent.main --budget 0
 
 # Resume with a budget cap (e.g. 50 LLM calls per agent):
-docker compose --profile agent run -d --name agent-run agent python -m src.agent.main --budget 50
+docker compose $C --profile agent run -d --name agent-run agent python -m src.agent.main --budget 50
 
 # Fresh run (wipes agent_messages/channels, keeps proposals):
-docker compose --profile agent run -d --name agent-run agent python -m src.agent.main --fresh --budget 0
+docker compose $C --profile agent run -d --name agent-run agent python -m src.agent.main --fresh --budget 0
 
 # With a time limit (minutes):
-docker compose --profile agent run -d --name agent-run agent python -m src.agent.main --max-runtime 60 --budget 0
+docker compose $C --profile agent run -d --name agent-run agent python -m src.agent.main --max-runtime 60 --budget 0
 ```
+
+On resume the sim fetches Slack history for each bot in roster order before reaching
+turn 1. Slack throttles this hard — expect ~10 minutes of
+`[<first-agent>] Rate limited, retrying in 10s (attempt 1/3)` before the first
+`=== Turn 1 ===`. Repeated `attempt 1/3` (never `2/3`) means each call 429s once then
+succeeds on retry — that is forward progress, not a hang.
 
 **Before restarting**, always save logs and rebuild containers:
 
 ```bash
+C="-f docker-compose.prod.yml -f docker-compose.override.yml"
+
 # 1. Save logs
 docker logs agent-run > logs/run_$(date +%s).log 2>&1
 ls -t logs/run_*.log | tail -n +11 | xargs rm -f
@@ -35,13 +72,27 @@ ls -t logs/run_*.log | tail -n +11 | xargs rm -f
 docker rm -f agent-run
 
 # 3. Rebuild app + worker (picks up code changes)
-docker compose up -d --build app worker
+docker compose $C up -d --build app worker
 
-# 4. Start the new run
-docker compose --profile agent run -d --name agent-run agent python -m src.agent.main --budget 0
+# 4. Rebuild the agent image too — prod bakes code into the image, so skipping
+#    this silently runs whatever source was current at the last build.
+docker compose $C --profile agent build agent
+
+# 5. Start the new run
+docker compose $C --profile agent run -d --name agent-run agent python -m src.agent.main --budget 0
 ```
 
-**Note:** The agent-run container uses mounted source code but the Python process only loads modules at startup. **Code** changes require a container restart to take effect. **After any code change that affects the running agent process, flag this to the user so they can decide whether to restart.** (Roster changes — activating/inactivating agents or setting a new `slack_bot_token` in `AgentRegistry` — do NOT need a restart; they're picked up live by `_sync_roster_from_db`.)
+Never pass `--remove-orphans`: it deletes the prod nginx/certbot containers.
+
+**Note:** Under prod (`docker-compose.prod.yml`) the agent image **bakes** the source in
+— only `profiles/`, `prompts/`, and `data/` are bind-mounted, so **code changes require
+`build agent`, not just a container restart.** (The dev `docker-compose.yml` bind-mounts
+the whole repo at `/app`, which is why this used to be a restart-only step.)
+
+**After any code change that affects the running agent process, flag this to the user so
+they can decide whether to restart.** Roster changes — activating/inactivating agents or
+setting a new `slack_bot_token` in `AgentRegistry` — do NOT need a restart; they're
+picked up live by `_sync_roster_from_db`.
 
 ## Adding New PIs
 
