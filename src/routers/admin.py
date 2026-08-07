@@ -658,15 +658,25 @@ async def admin_discussions(
         s = t["status"]
         counts[s] = counts.get(s, 0) + 1
 
-    # Collect available agents from threads
+    # Collect available agents from threads.
+    #
+    # Every add is None-guarded, including the poster's. `agent_id` is nullable
+    # on agent_messages and really is NULL in production: _rebuild_state_from_slack
+    # records a real Slack message whose sender maps to no known bot as
+    # `is_bot=True, agent_id=NULL` (measured: 7 rows, all from one raw Slack user
+    # id). This set is sorted() below, so a single None took the whole page down
+    # with "'<' not supported between instances of 'NoneType' and 'str'". The
+    # replier and decision adds were already guarded; the poster's was not.
     available_agents = set()
     for t in threads:
-        available_agents.add(t["agent_id"])
-        if t.get("replier"):
-            available_agents.add(t["replier"])
-        if t.get("decision"):
-            available_agents.add(t["decision"].agent_a)
-            available_agents.add(t["decision"].agent_b)
+        for candidate in (
+            t["agent_id"],
+            t.get("replier"),
+            t["decision"].agent_a if t.get("decision") else None,
+            t["decision"].agent_b if t.get("decision") else None,
+        ):
+            if candidate:
+                available_agents.add(candidate)
 
     # Apply filters
     if channel_filter:

@@ -163,3 +163,35 @@ async def test_unsubscribe_invalid_token_renders_error_200(client):
     r = await client.get("/settings/unsubscribe/bogus-token")
     assert r.status_code == 200
     assert "text/html" in r.headers["content-type"]
+
+
+# --- /admin/discussions: nullable agent_id on Slack-imported posts ------------
+
+
+async def test_admin_discussions_survives_a_bot_post_with_no_agent_id(client, db_session):
+    """Regression: /admin/discussions 500'd in production.
+
+    `_rebuild_state_from_slack` records real Slack messages whose sender cannot
+    be mapped to a known bot as `is_bot=True, agent_id=NULL` — measured: 7 such
+    rows, all from raw Slack user id U0BKJ6US485. The handler collected them
+    into `available_agents` unguarded (every sibling `.add()` IS guarded) and
+    then `sorted()` the set, so one NULL took the whole page down with
+    `TypeError: '<' not supported between instances of 'NoneType' and 'str'`.
+    """
+    u = await factories.make_user(db_session, is_admin=True)
+    run = await factories.make_simulation_run(db_session)
+    # A normal bot post, so the set is genuinely mixed rather than all-None.
+    await factories.make_agent_message(
+        db_session, run=run, agent_id="gill", is_bot=True,
+        message_ts="1786000000.000100", thread_ts=None, channel_name="general",
+    )
+    # The Slack-imported post with no mappable sender.
+    await factories.make_agent_message(
+        db_session, run=run, agent_id=None, is_bot=True,
+        message_ts="1786000000.000200", thread_ts=None, channel_name="general",
+        sender_name="U0BKJ6US485",
+    )
+    await db_session.flush()
+
+    r = await client.get("/admin/discussions", headers=_auth_headers(u.id))
+    assert r.status_code == 200
