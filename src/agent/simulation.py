@@ -4552,10 +4552,11 @@ class SimulationEngine:
             to_remove = current - set(desired)
             to_add = set(desired) - current
             if not to_remove and not to_add:
-                # Recompute the gate FIRST; the directory rebuild below reads it.
-                # _recompute_allowed_sender_ids refreshes the directory itself
-                # whenever the gate signature moves, so only a role change needs
-                # an unconditional rebuild here.
+                # Recompute the gate FIRST: _recompute_allowed_sender_ids ends by
+                # refreshing the directory (step 4), so after this line the
+                # directory already agrees with the gate. The role branch stays
+                # because a role change alters the directory's *contents*
+                # (pi_name headings) without moving the gate at all.
                 await self._recompute_allowed_sender_ids()
                 if role_changed:
                     self.refresh_lab_directories()
@@ -4611,7 +4612,6 @@ class SimulationEngine:
             # Recompute cohort interaction sets after roster changes so newly
             # active agents get their gate populated this tick.
             await self._recompute_allowed_sender_ids()
-            self.refresh_lab_directories()
         except Exception as exc:
             # A transient DB hiccup must never crash the main loop.
             logger.warning("[roster] roster sync failed: %s", exc)
