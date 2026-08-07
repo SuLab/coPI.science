@@ -502,7 +502,6 @@ class SimulationEngine:
         # them too — otherwise the handover message wouldn't land in the
         # message log until the first per-turn poll tick.
         await self._sync_private_channels_from_db()
-        self._build_lab_directories()
         await self._load_pi_mappings()
         # The DB is the primary conversation store. Register the persist hook,
         # hydrate the log from the DB, then (only when Slack is connected)
@@ -528,6 +527,9 @@ class SimulationEngine:
         # starts at 0.0), but doing it here means no turn can ever run with an
         # unset gate while isolation is on. See .notes/cohort-system-v2.md §8.
         await self._recompute_allowed_sender_ids()
+        # AFTER the gate, never before: the filter inside reads
+        # agent.allowed_sender_ids, which is None until the line above runs.
+        self.refresh_lab_directories()
         # Record which topology this run actually started with, so the run's output
         # stays attributable to its configuration (v2 §13.1).
         await self._record_topology_snapshot()
@@ -3453,6 +3455,13 @@ class SimulationEngine:
                 sections.append("")
             agent._lab_directory = "\n".join(sections) if sections else None
 
+    # Public alias. `_build_lab_directories` is called from three places whose
+    # ordering relative to the cohort gate is the whole bug this name documents:
+    # it must run AFTER _recompute_allowed_sender_ids, never before.
+    def refresh_lab_directories(self) -> None:
+        """Rebuild every agent's lab directory against its CURRENT gate."""
+        self._build_lab_directories()
+
     async def _backfill_foa_cache(self) -> None:
         """Ensure locally cached FOA details exist for all previously posted opportunities."""
         from sqlalchemy import select as sa_select
@@ -4328,12 +4337,13 @@ class SimulationEngine:
             to_remove = current - set(desired)
             to_add = set(desired) - current
             if not to_remove and not to_add:
-                if role_changed:
-                    # Persona/tooling changed but membership did not — refresh the
-                    # derived structures a role can influence.
-                    self._build_lab_directories()
-                # Roster unchanged, but cohort membership may have — recompute.
+                # Recompute the gate FIRST; the directory rebuild below reads it.
+                # _recompute_allowed_sender_ids refreshes the directory itself
+                # whenever the gate signature moves, so only a role change needs
+                # an unconditional rebuild here.
                 await self._recompute_allowed_sender_ids()
+                if role_changed:
+                    self.refresh_lab_directories()
                 return
 
             # --- Removals: agent no longer active ---------------------------
@@ -4376,7 +4386,6 @@ class SimulationEngine:
                 logger.info("[roster] Added newly-active agent %s to live roster", aid)
 
             # Rebuild cross-agent derived structures after any membership change.
-            self._build_lab_directories()
             self.message_log.set_bot_name_map(self._bot_name_to_id)
             # Rebuild PI mappings from scratch (clear in place — PIHandler shares
             # this dict by reference; _load_pi_mappings appends, so it must start
@@ -4387,6 +4396,7 @@ class SimulationEngine:
             # Recompute cohort interaction sets after roster changes so newly
             # active agents get their gate populated this tick.
             await self._recompute_allowed_sender_ids()
+            self.refresh_lab_directories()
         except Exception as exc:
             # A transient DB hiccup must never crash the main loop.
             logger.warning("[roster] roster sync failed: %s", exc)
@@ -4416,6 +4426,7 @@ class SimulationEngine:
         if not settings.cohort_isolation_enabled:
             self._cohort_preflight_error = None
             self._disable_all_gates()
+            self.refresh_lab_directories()
             self._cohort_gate_active = False
             self._cohort_log_signature = None
             # Reconcile state even on the disabled path: turning isolation off must
@@ -4458,6 +4469,7 @@ class SimulationEngine:
                 logger.error("[cohort] isolation forced OFF: %s", reason)
             self._cohort_preflight_error = reason
             self._disable_all_gates()
+            self.refresh_lab_directories()
             self._cohort_gate_active = False
             self._apply_cohort_gate_to_state()
             return
@@ -4495,6 +4507,9 @@ class SimulationEngine:
             topology_changed = False
 
         self._apply_cohort_gate_to_state()
+        # The directory is derived from the gate, so it is refreshed on the same
+        # cadence. Cheap: it re-reads in-memory profiles, no I/O.
+        self.refresh_lab_directories()
         if topology_changed:
             # The topology moved mid-run — snapshot the new one so the run stays
             # attributable to every configuration it actually ran under (v2 §13.1).
