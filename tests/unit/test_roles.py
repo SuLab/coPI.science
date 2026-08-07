@@ -473,3 +473,64 @@ def test_gating_values_in_assessment_skeleton_are_tristate_strings():
     # The prose gating item uses the same three words the JSON keys expect.
     assert "met" in body and "not met" in body and "unconfirmed" in body
     assert '"met"' in body and '"not_met"' in body and '"unconfirmed"' in body
+
+
+def test_missing_manifest_yields_default_post_types():
+    from src.agent.post_types import DEFAULT_POST_TYPES
+
+    spec = load_role("definitely_not_a_role_dir")
+    assert spec.post_types == DEFAULT_POST_TYPES
+
+
+def test_manifest_post_types_are_parsed(tmp_path, monkeypatch):
+    _write_role(
+        tmp_path, monkeypatch, "widget",
+        'label = "Widget"\n'
+        '[[post_types]]\nname = "paper"\n'
+        '[[post_types]]\nname = "pitch"\ntargets = ["scout_hub"]\n',
+    )
+    spec = load_role("widget")
+    assert [s.name for s in spec.post_types] == ["paper", "pitch"]
+    assert dict((s.name, s.targets) for s in spec.post_types)["pitch"] == frozenset(
+        {"scout_hub"}
+    )
+
+
+def test_manifest_unknown_post_type_is_dropped(tmp_path, monkeypatch, caplog):
+    caplog.set_level(logging.WARNING)
+    _write_role(
+        tmp_path, monkeypatch, "widget",
+        'label = "Widget"\n'
+        '[[post_types]]\nname = "paper"\n'
+        '[[post_types]]\nname = "nonsense"\n',
+    )
+    spec = load_role("widget")
+    assert [s.name for s in spec.post_types] == ["paper"]
+    assert "nonsense" in caplog.text
+
+
+def test_malformed_toml_still_yields_default_post_types(tmp_path, monkeypatch):
+    from src.agent.post_types import DEFAULT_POST_TYPES
+
+    _write_role(tmp_path, monkeypatch, "broken", "label = = =\n")
+    assert load_role("broken").post_types == DEFAULT_POST_TYPES
+
+
+def test_scout_hub_declares_its_two_post_types():
+    spec = load_role("scout_hub")
+    assert {s.name for s in spec.post_types} == {
+        "opportunity_assessment", "funding_collab",
+    }
+    assert dict((s.name, s.targets) for s in spec.post_types)[
+        "funding_collab"
+    ] == frozenset({"pi_lab"})
+    assert dict((s.name, s.targets) for s in spec.post_types)[
+        "opportunity_assessment"
+    ] == frozenset()
+
+
+def test_scout_hub_cannot_post_a_cross_lab_idea():
+    """The hub is not a party to the science — brokering is explicitly not its
+    job (prompts/roles/scout_hub/agent-system.md)."""
+    assert "idea_crosslab" not in {s.name for s in load_role("scout_hub").post_types}
+    assert "pitch" not in {s.name for s in load_role("scout_hub").post_types}

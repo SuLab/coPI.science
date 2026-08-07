@@ -1,2 +1,23 @@
 label = "Scout Hub"
 tools = ["retrieve_profile", "retrieve_abstract", "retrieve_full_text", "search_prior_art"]
+
+# Layer 1: what this role may post as a NEW top-level post. `action: "reply"` is
+# not governed here. An absent `post_types` key would fall back to
+# DEFAULT_POST_TYPES (see src/agent/post_types.py) — declared explicitly so that
+# adding a new type to the default set never silently hands it to the hub.
+#
+# `targets` names the AgentRegistry roles this post type may address. Empty or
+# absent means the post addresses no one (a broadcast). A type whose targets
+# cannot be satisfied from the agent's live cohort gate is dropped from the menu
+# and rejected at dispatch.
+
+[[post_types]]
+name = "opportunity_assessment"
+# The screening artifact. Stands on its own for Blackbird staff and the PI, so it
+# addresses no one and carries no targets.
+
+[[post_types]]
+name = "funding_collab"
+targets = ["pi_lab"]
+# A funding-fit note about ONE PI's idea. Tags only that PI's own agent — never a
+# second lab (see phase5-new-post.md, Option B).
