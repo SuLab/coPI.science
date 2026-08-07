@@ -3,14 +3,18 @@
 Pure functions over plain data — no DB, no engine, no Agent. See
 docs/specs/2026-08-06-role-topology-post-type-gating-design.md §2, §3.
 """
+import logging
+
 from src.agent.post_types import (
     CANONICAL,
     DEFAULT_POST_TYPES,
     FUNDING_POST_TYPES,
+    LEGACY_POST_TYPE_ALIASES,
     available_for,
     eligible_targets,
     parse_post_types,
     render_menu,
+    resolve_post_type_name,
 )
 
 # The star: a spoke may reach only itself, the hub, and grantbot (which has no
@@ -38,6 +42,29 @@ def test_idea_is_not_a_type_anymore():
     """`idea` and `idea_crosslab` were both in the old enum with no documented
     difference and no code distinguishing them. Collapsed to one."""
     assert "idea" not in CANONICAL
+    assert "idea" not in _by_name(DEFAULT_POST_TYPES)
+
+
+def test_the_retired_idea_name_still_resolves():
+    """Retired in the vocabulary, still accepted on input. A mesh deployment
+    whose prompts lag the code must not have its posts silently deleted."""
+    assert resolve_post_type_name("idea") == "idea_crosslab"
+
+
+def test_resolve_passes_current_and_unknown_names_through():
+    assert resolve_post_type_name("paper") == "paper"
+    assert resolve_post_type_name("nonsense") == "nonsense"
+
+
+def test_an_alias_is_never_offered_as_a_type():
+    """Resolving on input must not put the retired name back in circulation."""
+    for alias in LEGACY_POST_TYPE_ALIASES:
+        assert alias not in CANONICAL
+        out = render_menu(
+            DEFAULT_POST_TYPES, gate=None, roles_by_agent=MESH_ROLES,
+            self_id="gill", bot_names=BOT_NAMES,
+        )
+        assert f"**`{alias}`**" not in out
 
 
 def test_default_post_types_is_the_pi_lab_set():
@@ -76,12 +103,16 @@ def test_eligible_targets_finds_the_hub_for_pitch():
 
 
 def test_eligible_targets_ignores_agents_with_no_known_role():
-    """grantbot has cohort memberships but no AgentRegistry row, so it matches
-    no `targets` — it is a funding announcer, not a pitch recipient."""
-    got = eligible_targets(
-        CANONICAL["pitch"], gate=STAR_GATE, roles_by_agent=STAR_ROLES, self_id="gill"
-    )
-    assert "grantbot" not in got
+    """grantbot is in the gate but has no AgentRegistry row and is a separate
+    process, never an entry in self.agents — so it never appears in
+    roles_by_agent and matches no `targets`. It is a funding announcer, not a
+    pitch recipient. Asserted for BOTH addressed types so the exclusion is not
+    an accident of `pitch` happening to find the hub first."""
+    for name in ("pitch", "idea_crosslab", "funding_collab"):
+        got = eligible_targets(
+            CANONICAL[name], gate=STAR_GATE, roles_by_agent=STAR_ROLES, self_id="gill"
+        )
+        assert "grantbot" not in got
 
 
 def test_eligible_targets_is_empty_for_a_lab_peer_in_the_star():
@@ -118,7 +149,7 @@ def test_mesh_keeps_lab_peer_types_and_drops_pitch():
     }
 
 
-def test_gate_off_never_filters_a_broadcast_type():
+def test_gate_off_keeps_every_broadcast_type():
     got = available_for(
         DEFAULT_POST_TYPES, gate=None, roles_by_agent={}, self_id="gill", funding_only=False,
     )
@@ -135,8 +166,10 @@ def test_funding_only_restricts_to_funding_types():
 
 
 def test_funding_only_in_the_star_is_empty():
-    """The case that must NOT skip the turn — Option A (a funding reply) is still
-    legitimate. See spec §5."""
+    """Empty is the correct answer here, and the engine must NOT read it as
+    "skip the turn" — Option A (a funding reply) is still legitimate. That half
+    is enforced in test_post_type_enforcement.py, not here; this only pins that
+    the set really is empty. See spec §5."""
     got = available_for(
         DEFAULT_POST_TYPES, gate=STAR_GATE, roles_by_agent=STAR_ROLES,
         self_id="gill", funding_only=True,
@@ -155,8 +188,15 @@ def test_available_for_preserves_declaration_order():
 
 # --- parse_post_types -------------------------------------------------------
 
-def test_parse_none_yields_the_defaults():
+def test_parse_none_yields_the_defaults(caplog):
+    """Spec §5 row 1 says "DEFAULT_POST_TYPES, WARNING once". The defaults are
+    the correct answer for pi_lab, which HAS no manifest by design, so warning
+    on every load would be noise on the common path — the warning belongs to a
+    role that has a manifest and forgot the key. Pinned here so the divergence
+    from §5 is a decision on record, not a silent omission."""
+    caplog.set_level(logging.WARNING)
     assert parse_post_types(None, role="pi_lab") == DEFAULT_POST_TYPES
+    assert caplog.text == ""
 
 
 def test_parse_reads_name_and_targets():
@@ -185,11 +225,29 @@ def test_parse_drops_a_malformed_entry_and_keeps_the_rest(caplog):
 
 def test_parse_warns_when_targets_names_a_role_that_cannot_exist(caplog):
     """A typo'd role means the type is silently never offered — say so at load."""
+    caplog.set_level(logging.WARNING)
     got = parse_post_types(
         [{"name": "pitch", "targets": ["scout_hubb"]}], role="pi_lab"
     )
     assert _by_name(got) == {"pitch"}
     assert "scout_hubb" in caplog.text
+
+
+def test_a_typod_target_role_really_is_never_offered(caplog):
+    """The other half of that §5 row. The WARNING is only useful if the
+    behaviour it predicts is real: no agent can ever satisfy `scout_hubb`, so
+    the type is filtered out of every menu on every topology."""
+    caplog.set_level(logging.WARNING)
+    declared = parse_post_types(
+        [{"name": "paper"}, {"name": "pitch", "targets": ["scout_hubb"]}],
+        role="pi_lab",
+    )
+    for gate, roles in ((STAR_GATE, STAR_ROLES), (None, MESH_ROLES)):
+        got = available_for(
+            declared, gate=gate, roles_by_agent=roles, self_id="gill",
+            funding_only=False,
+        )
+        assert _by_name(got) == {"paper"}
 
 
 def test_parse_of_a_non_list_yields_the_defaults(caplog):
