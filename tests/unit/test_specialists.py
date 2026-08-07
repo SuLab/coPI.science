@@ -153,3 +153,51 @@ def test_requirement_derivation_never_raises_on_junk():
     would be logged as 'Failed to persist assessment' after the row committed."""
     for junk in (None, [], "string", {"gating": "not a dict"}, {"scores": 7}):
         assert isinstance(required_domains_for(junk), frozenset)
+
+
+# --- the persona files -------------------------------------------------------
+
+def test_every_domain_has_a_persona_file_on_disk():
+    for domain in SPECIALIST_DOMAINS:
+        p = persona_path(domain)
+        assert p.is_file(), f"missing persona file for {domain}: {p}"
+        assert p.read_text(encoding="utf-8").strip(), f"empty persona file: {p}"
+
+
+def test_no_orphan_persona_files():
+    """A file with no domain is a file nothing can ever load."""
+    from src.agent.specialists import SPECIALISTS_DIR
+
+    on_disk = {p.stem for p in SPECIALISTS_DIR.glob("*.md")}
+    assert on_disk == set(SPECIALIST_DOMAINS)
+
+
+def test_every_persona_states_the_opinion_contract():
+    """Each persona must ask for the structured fields, or parse_opinion
+    degrades every answer to caution/low and the panel is decoration."""
+    for domain in SPECIALIST_DOMAINS:
+        body = persona_path(domain).read_text(encoding="utf-8")
+        for field in ("verdict_signal", "concerns", "questions_to_ask", "confidence"):
+            assert field in body, f"{domain} persona omits {field}"
+        for signal in ("blocking", "caution", "clear"):
+            assert signal in body, f"{domain} persona omits the {signal} signal"
+
+
+def test_the_science_personas_carry_the_vocabulary_the_rubric_lacked():
+    """The audit found these words absent from every scout_hub prompt and from
+    the rubric. They are the reason these two personas exist."""
+    sci = persona_path("scientific").read_text(encoding="utf-8").lower()
+    for term in ("control", "power", "interpretab", "translatab"):
+        assert term in sci, f"scientific persona omits {term!r}"
+
+    chem = persona_path("chemistry").read_text(encoding="utf-8").lower()
+    for term in ("development candidate", "off-target", "tolerab", "selectivit"):
+        assert term in chem, f"chemistry persona omits {term!r}"
+
+
+def test_no_persona_claims_to_decide():
+    """A specialist advises; the hub integrates. A persona that says 'reject'
+    invites the hub to outsource a judgement it owns."""
+    for domain in SPECIALIST_DOMAINS:
+        body = persona_path(domain).read_text(encoding="utf-8").lower()
+        assert "you do not decide" in body, f"{domain} persona omits the advisory boundary"
