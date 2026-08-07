@@ -3,9 +3,9 @@ data/Blackbird_initial_priorities-criteria_v1.pdf, transcribed in
 profiles/private/blackbird.md).
 
 The score is computed here rather than taken from the model's own
-``weighted_score`` field: nine weights times nine 1-5 scores is precisely the
-arithmetic an LLM gets plausibly wrong, and the band it lands in decides whether
-a proposal advances.
+``weighted_score`` field: thirteen weights times thirteen 1-5 scores is
+precisely the arithmetic an LLM gets plausibly wrong, and the band it lands in
+decides whether a proposal advances.
 
 Two failure modes matter enough to call out explicitly:
 
@@ -27,17 +27,31 @@ import math
 
 logger = logging.getLogger(__name__)
 
-# Percentage weights, exactly as tabulated in Part C.3. Sums to 100.
+# Percentage weights. Sums to 100. Commercial dimensions (60) were tabulated
+# in Part C.3; the four scientific dimensions (40) were added because the
+# target-level scientific checklist carried zero weight even though it is
+# where BBL's actual rejections land — see the audit referenced in the module
+# docstring above.
 RUBRIC_WEIGHTS: dict[str, int] = {
-    "differentiation": 20,
-    "market_unmet_need": 15,
-    "team": 15,
-    "external_signals": 15,
-    "ip_fto": 10,
-    "platform": 8,
-    "dev_regulatory_feasibility": 7,
-    "workplan_capital_efficiency": 5,
-    "exit_thesis": 5,
+    # Commercial — 60. Was 100; compressed to make room for science.
+    "differentiation": 15,
+    "market_unmet_need": 12,
+    "team": 10,
+    "external_signals": 8,
+    # 10 -> 6: FTO decides 1 of the 15 documented rejections and already
+    # carries a gating criterion, a red flag and a dedicated tool. Its old
+    # weight double-counted an over-instrumented concern.
+    "ip_fto": 6,
+    "platform": 4,
+    "dev_regulatory_feasibility": 3,
+    "workplan_capital_efficiency": 1,
+    "exit_thesis": 1,
+    # Scientific — 40. New. Before this, the target-level scientific checklist
+    # carried ZERO weight, so the modal BBL rejection had nowhere to land.
+    "mechanism_validation": 12,   # 5 of 15 rejections
+    "toxicity_selectivity": 10,   # 4 of 15
+    "experimental_rigor": 10,     # the whole "what we don't want" list
+    "chemistry_dc_path": 8,       # 4 of 15
 }
 
 _MIN_SCORE = 1
@@ -64,7 +78,7 @@ assert all(round(t, 2) == t for t in _BAND_THRESHOLDS), (
 
 
 def weighted_score(scores: dict[str, object] | None) -> float:
-    """Weighted mean of the nine dimensions, on the same 1-5 scale.
+    """Weighted mean of the thirteen dimensions, on the same 1-5 scale.
 
     A dimension that is missing, not a number, or not finite (NaN, +inf,
     -inf) counts as 0 — an unscored dimension must drag the total down, never
@@ -107,7 +121,7 @@ def weighted_score(scores: dict[str, object] | None) -> float:
         # This just makes a malformed/misspelled verdict findable instead of
         # a silently low score.
         logger.warning(
-            "weighted_score: verdict has key(s) not in the nine rubric "
+            "weighted_score: verdict has key(s) not in the thirteen rubric "
             "dimensions, scored as unset: %s", unmatched,
         )
     return _round_for_band(total / _TOTAL_WEIGHT)

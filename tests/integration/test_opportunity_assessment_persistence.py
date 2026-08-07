@@ -161,7 +161,8 @@ async def test_persist_assessment_recomputes_the_score_it_is_handed(engine):
             "differentiation": 4, "market_unmet_need": 4, "team": 4,
             "external_signals": 1, "ip_fto": 2, "platform": 3,
             "dev_regulatory_feasibility": 3, "workplan_capital_efficiency": 3,
-            "exit_thesis": 2,
+            "exit_thesis": 2, "mechanism_validation": 4, "toxicity_selectivity": 3,
+            "experimental_rigor": 4, "chemistry_dc_path": 2,
         },
         # Tri-state strings — the current contract (see corrections to Task 11:
         # the prompt emits "met"/"not_met"/"unconfirmed", never booleans).
@@ -179,7 +180,10 @@ async def test_persist_assessment_recomputes_the_score_it_is_handed(engine):
                     OpportunityAssessment.simulation_run_id == run_id
                 )
             )).scalar_one()
-            assert row.weighted_score == pytest.approx(3.05)  # computed, not 4.8
+            # Hand-computed under the thirteen-dimension rubric (see
+            # test_a_real_verdict_scores_as_hand_computed in
+            # tests/unit/test_blackbird_rubric.py for the same fixture and math).
+            assert row.weighted_score == pytest.approx(3.28)  # computed, not 4.8
             assert row.band == "conditional"
             assert row.subject_agent_id == "wang"
             assert row.agent_id == "blackbird"
@@ -1040,6 +1044,8 @@ async def test_admin_assessments_page_renders_rationale_and_scores(
             "differentiation": 4, "market_unmet_need": 4, "team": 4,
             "ip_fto": 2, "platform": 3, "dev_regulatory_feasibility": 3,
             "workplan_capital_efficiency": 3, "exit_thesis": 2,
+            "mechanism_validation": 4, "toxicity_selectivity": 3,
+            "experimental_rigor": 4, "chemistry_dc_path": 2,
         },
     ))
     await db_session.flush()
@@ -1051,14 +1057,15 @@ async def test_admin_assessments_page_renders_rationale_and_scores(
     assert "Differentiated metabolic angle" in html, "rationale not rendered"
 
     # Scored dimensions carry their value and their weight.
-    assert _score_cell(html, "differentiation") == "differentiation 4 /20%"
-    assert _score_cell(html, "exit_thesis") == "exit thesis 2 /5%"
+    assert _score_cell(html, "differentiation") == "differentiation 4 /15%"
+    assert _score_cell(html, "exit_thesis") == "exit thesis 2 /1%"
 
     # The omitted dimension is still listed, as a gap rather than a zero.
-    assert _score_cell(html, "external_signals") == "external signals — /15%"
+    assert _score_cell(html, "external_signals") == "external signals — /8%"
 
-    # All nine appear, in descending weight order, so the dimensions that move
-    # the score read first.
+    # All thirteen appear, in RUBRIC_WEIGHTS order (the template renders
+    # `rubric_weights.items()` verbatim) — commercial dimensions first, then
+    # the four scientific ones.
     order = [
         m.group(1)
         for m in re.finditer(r'<span class="score-([a-z_]+)', html)
@@ -1067,6 +1074,8 @@ async def test_admin_assessments_page_renders_rationale_and_scores(
         "differentiation", "market_unmet_need", "team", "external_signals",
         "ip_fto", "platform", "dev_regulatory_feasibility",
         "workplan_capital_efficiency", "exit_thesis",
+        "mechanism_validation", "toxicity_selectivity", "experimental_rigor",
+        "chemistry_dc_path",
     ], order
 
 

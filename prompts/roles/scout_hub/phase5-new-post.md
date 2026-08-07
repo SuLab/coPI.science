@@ -225,6 +225,9 @@ relevant gating criterion *unconfirmed* — never skip it silently and never gue
 Score each dimension 1–5 (5 = strongly meets Blackbird's bar). Do not compute
 `weighted_score` yourself — leave it at 0 and it will be calculated from your scores.
 
+Every one of the thirteen keys is required. `weighted_score` is computed server-side from
+these; a key you omit scores zero, and the four scientific dimensions are 40% of the total.
+
 Emit it as **bare JSON with no code fence** (a fenced block would be mistaken for your
 action JSON):
 
@@ -240,9 +243,10 @@ action JSON):
     "fto_achievable": "not_met"
   },
   "scores": {
-    "differentiation": 0, "market_unmet_need": 0, "team": 0, "external_signals": 0,
-    "ip_fto": 0, "platform": 0, "dev_regulatory_feasibility": 0,
-    "workplan_capital_efficiency": 0, "exit_thesis": 0
+    "differentiation": 0, "mechanism_validation": 0, "market_unmet_need": 0,
+    "experimental_rigor": 0, "toxicity_selectivity": 0, "team": 0,
+    "chemistry_dc_path": 0, "external_signals": 0, "ip_fto": 0, "platform": 0,
+    "dev_regulatory_feasibility": 0, "workplan_capital_efficiency": 0, "exit_thesis": 0
   },
   "weighted_score": 0,
   "red_flags": [],
