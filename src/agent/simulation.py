@@ -249,6 +249,14 @@ class SimulationEngine:
         # above: load_role() hits the disk on every call.
         self._role_post_types_cache: dict[str, tuple[PostTypeSpec, ...]] = {}
 
+        # thread_id -> the specialist domains consulted during that interview.
+        # In-memory on purpose: it is read by _persist_assessment one LLM call
+        # later, in the SAME process. A restart clears it, and the floor then
+        # fails OPEN for threads that predate the restart — see
+        # _persist_assessment. Blocking every assessment on every resumed thread
+        # would be worse than one unvetted verdict.
+        self._specialist_consults: dict[str, set[str]] = {}
+
         self._start_time: datetime | None = None
         self._running = False
         self.message_log = MessageLog()
@@ -1365,7 +1373,10 @@ class SimulationEngine:
         # Create tool executor bound to this thread's state
         async def tool_executor(tool_name: str, tool_input: dict) -> str:
             return await execute_tool(
-                tool_name, tool_input, agent.agent_id, thread, role=agent.role
+                tool_name, tool_input, agent.agent_id, thread, role=agent.role,
+                on_consult=lambda domain, _tid=thread.thread_id: self._record_consult(
+                    _tid, domain
+                ),
             )
 
         agent.record_api_call()
@@ -2733,6 +2744,14 @@ class SimulationEngine:
             cached = load_role(role).post_types
             self._role_post_types_cache[role] = cached
         return cached
+
+    def _record_consult(self, thread_id: str, domain: str) -> None:
+        """Note that a specialist was successfully consulted on this thread."""
+        self._specialist_consults.setdefault(thread_id, set()).add(domain)
+
+    def _consulted_domains(self, thread_id: str) -> frozenset[str]:
+        """Domains consulted on this thread; empty for a thread we never saw."""
+        return frozenset(self._specialist_consults.get(thread_id, ()))
 
     def _available_post_types(
         self, agent: "Agent", *, funding_restricted: bool
