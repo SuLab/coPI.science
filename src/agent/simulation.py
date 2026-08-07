@@ -23,6 +23,7 @@ from src.agent.funding_rules import (
 from src.agent.ids import WRITER_ENGINE, TsMinter
 from src.agent.message_log import LogEntry, MessageLog, is_funding_post
 from src.agent.post_types import (
+    TERMINAL_POST_TYPES,
     PostTypeSpec,
     available_for,
     eligible_targets,
@@ -2082,7 +2083,22 @@ class SimulationEngine:
         has_thread_foas = any(
             ts.foa_number for ts in agent.state.active_threads.values()
         )
-        if not available_posts and blocked_for_regular and not has_funding_interesting and not has_thread_foas:
+        # A blocked agent with nothing to reply to normally has nothing to do,
+        # and bailing here saves an LLM call. But "nothing to reply to" is not
+        # the same as "nothing to post": a hub saturated with interviews still
+        # owes an assessment for each one it finished, and that is precisely
+        # the state this early return used to strand it in. Ask the post-type
+        # layer whether anything is actually postable before giving up.
+        nothing_postable = not self._available_post_types(
+            agent, funding_restricted=blocked_for_regular
+        )
+        if (
+            not available_posts
+            and blocked_for_regular
+            and not has_funding_interesting
+            and not has_thread_foas
+            and nothing_postable
+        ):
             logger.debug("[%s] Phase 5: Skipped (blocked, no funding/PI posts available)", agent.agent_id)
             return
 
@@ -2286,6 +2302,12 @@ class SimulationEngine:
                     and self.message_log.is_funding_thread(target_post_id)
                 )
                 is_funding_post = action == "new_post" and post_type == "funding_collab"
+                # A terminal artifact reports finished work, so the
+                # start-new-work backpressure does not apply to it. Same shape
+                # as the funding bypass above; see TERMINAL_POST_TYPES.
+                is_terminal_post = (
+                    action == "new_post" and post_type in TERMINAL_POST_TYPES
+                )
                 is_private_reply = False
                 if action == "reply" and target_post_id:
                     target_entry = self.message_log.get_entry(target_post_id)
@@ -2294,7 +2316,7 @@ class SimulationEngine:
                         == VISIBILITY_COLLAB_PRIVATE
                     ):
                         is_private_reply = True
-                if not is_funding_reply and not is_funding_post and not is_private_reply:
+                if not (is_funding_reply or is_funding_post or is_private_reply or is_terminal_post):
                     logger.info(
                         "[%s] Phase 5: Blocked non-funding action while proposals pending",
                         agent.agent_id,

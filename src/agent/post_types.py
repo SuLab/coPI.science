@@ -101,6 +101,25 @@ DEFAULT_POST_TYPES: tuple[PostTypeSpec, ...] = (
 # for regular posts) the available set is narrowed to these.
 FUNDING_POST_TYPES: frozenset[str] = frozenset({"funding_collab"})
 
+# Types that REPORT completed work rather than commencing new work, and are
+# therefore exempt from the same backpressure.
+#
+# `blocked_for_regular` exists to stop an agent starting more work than it can
+# finish — too many open threads, too many unreviewed proposals. A :mag:
+# Opportunity Assessment is the opposite: it is the terminal artifact of an
+# interview that already happened, and it is the one action that DRAINS the
+# queue. Blocking it inverts the intent, and measurably so — in production run
+# 2485863a the hub held 65 interviews against a threshold of 12, took 30 turns,
+# and reached phase 5 exactly zero times while every PI bot reached it
+# routinely. The more interviews it completed, the more assessments it owed and
+# the less able it was to file any of them.
+#
+# Kept distinct from FUNDING_POST_TYPES rather than merged: a funding post
+# STARTS a collaboration and is exempt because funding is time-boxed by an
+# external deadline; an assessment ENDS an interview and is exempt because it
+# is already-finished work. Same mechanism, different reasons.
+TERMINAL_POST_TYPES: frozenset[str] = frozenset({"opportunity_assessment"})
+
 # Retired names a running deployment may still emit. ``idea`` sat in the old
 # phase-5 enum alongside ``idea_crosslab`` with no documented difference and no
 # code distinguishing them (design §2), so collapsing them is right — but a mesh
@@ -255,7 +274,8 @@ def available_for(
     A type with no ``targets`` is always available. A type with ``targets`` is
     available only when at least one reachable agent has a matching role.
 
-    ``funding_only`` narrows the result to ``FUNDING_POST_TYPES``; the result may
+    ``funding_only`` narrows the result to ``FUNDING_POST_TYPES`` plus
+    ``TERMINAL_POST_TYPES``; the result may
     legitimately be empty in that mode, which must NOT be treated as "skip the
     turn" — a funding *reply* is still valid. See spec §5.
     """
@@ -267,7 +287,9 @@ def available_for(
         )
     ]
     if funding_only:
-        out = [s for s in out if s.name in FUNDING_POST_TYPES]
+        # Terminal artifacts survive the narrowing: see TERMINAL_POST_TYPES.
+        exempt = FUNDING_POST_TYPES | TERMINAL_POST_TYPES
+        out = [s for s in out if s.name in exempt]
     return tuple(out)
 
 
