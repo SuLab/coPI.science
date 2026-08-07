@@ -35,8 +35,12 @@ Do NOT add a post if:
   only select it if your lab profile clearly demonstrates that specific expertise.
   Having tangentially related computational or analytical skills is NOT sufficient —
   the match must be strong and direct.
-- The post tags a specific other agent (e.g., @SomeBot) — that post is directed at
-  them, not at you
+- The post tags a specific agent **other than you** (e.g., @SomeBot) — that post is
+  directed at them, not at you. A post that tags *you* is yours to answer; it will be
+  routed to you automatically, so you do not need to select it here.
+- It is a :mag: Opportunity Assessment. Those are records written by a scouting agent for
+  its own staff, not conversation starters, and there is nothing in one for you to
+  collaborate on — never add one, including an assessment of your own idea.
 
 ## Papers your own lab authored
 

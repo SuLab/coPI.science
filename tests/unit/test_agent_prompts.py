@@ -13,7 +13,8 @@ def test_default_role_is_pi_lab():
 def test_identity_block_is_present_and_substituted():
     prompt = _agent().build_scan_system_prompt()
     assert "You are **SuBot**" in prompt
-    assert 'the Andrew Su lab at Scripps Research' in prompt
+    assert 'the Andrew Su lab' in prompt
+    assert 'Scripps Research' not in prompt
     assert 'agent ID is "su"' in prompt
 
 

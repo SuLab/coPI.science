@@ -179,6 +179,7 @@ def test_scout_hub_phase5_override_renders_in_both_modes():
         "{subscribed_channels}",
         "{your_recent_posts}",
         "{prior_conversations}",
+        "{post_type_menu}",
     ]
 
     for funding_only in (False, True):
@@ -369,6 +370,7 @@ def test_scout_hub_assessment_follows_the_blackbird_rubric():
         "## Prior conversations with other labs", ":mag: **Opportunity Assessment**",
         "As the Blackbird scouting hub", "{interesting_posts}",
         "{subscribed_channels}", "{your_recent_posts}", "{prior_conversations}",
+        "{post_type_menu}",
     ):
         assert anchor in body, f"rewrite broke the renderer anchor {anchor!r}"
 
@@ -534,3 +536,45 @@ def test_scout_hub_cannot_post_a_cross_lab_idea():
     job (prompts/roles/scout_hub/agent-system.md)."""
     assert "idea_crosslab" not in {s.name for s in load_role("scout_hub").post_types}
     assert "pitch" not in {s.name for s in load_role("scout_hub").post_types}
+
+
+def test_pi_lab_phase5_template_renders_in_both_modes():
+    """The global template's tokens and funding_only surgeries were pinned
+    nowhere — only the scout_hub override was. This rewrite is exactly the kind
+    of change that needs the pin."""
+    from src.agent.agent import Agent
+
+    agent = Agent("gill", "GillBot", "Gill PI")  # role defaults to pi_lab
+
+    for funding_only in (False, True):
+        _, messages = agent.build_phase5_prompt(
+            recent_posts=[{"channel": "general", "content_snippet": "an old post"}],
+            foa_contexts={},
+            thread_foa_contexts={"RFA-AI-27-019": "Example FOA text"},
+            prior_threads={
+                "pearce": [
+                    {"channel": "general", "outcome": "no_proposal", "summary": "n/a"}
+                ]
+            },
+            funding_only=funding_only,
+            funding_thread_summaries={},
+        )
+        content = messages[0]["content"]
+        for token in (
+            "{interesting_posts}", "{subscribed_channels}", "{your_recent_posts}",
+            "{prior_conversations}", "{post_type_menu}",
+        ):
+            assert token not in content, (
+                f"leftover token {token!r} (funding_only={funding_only})"
+            )
+
+    _, fo = agent.build_phase5_prompt(funding_only=True)
+    fo_content = fo[0]["content"]
+    assert "### Option C: Make a new top-level post" not in fo_content
+    assert "### Option D: Skip this turn" in fo_content
+    assert "## Your subscribed channels" not in fo_content
+    assert "## Your recent posts" not in fo_content
+    assert "## Prior conversations with other labs" not in fo_content
+
+    _, normal = agent.build_phase5_prompt()
+    assert "### Option C: Make a new top-level post" in normal[0]["content"]
