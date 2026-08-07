@@ -2626,7 +2626,7 @@ class SimulationEngine:
                 ))
                 await db.commit()
             logger.info(
-                "[%s] Assessment stored: %s -> %s (%.2f, %s)",
+                "[%s] Assessment stored: %s -> %s (%s, %s)",
                 agent_id, subject_agent_id or "?",
                 recommendation or "?", computed_score, computed_band,
             )

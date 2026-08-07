@@ -679,6 +679,39 @@ async def test_phase5_empty_sidecar_object_still_persists_a_row(engine, monkeypa
 
 
 @pytest.mark.asyncio
+async def test_phase5_unscored_sidecar_logs_success_not_a_false_failure(
+    engine, monkeypatch, caplog
+):
+    """A verdict with no `scores` key legitimately leaves `computed_score`/
+    `computed_band` as None (F6 — see `test_persist_assessment_empty_scores_dict_
+    stores_null_score_and_band` above). `_persist_assessment`'s success log line
+    formatted that None with `%.2f`, which raises TypeError *after* the row is
+    already committed; the outer `except` then logs "Failed to persist
+    assessment" for a write that actually succeeded — a false failure that looks
+    like data loss for every unscored verdict, which is most of them."""
+    response = (
+        _ACTION_JSON + _SLACK_BODY + "\n\n"
+        '<assessment_json>\n'
+        '{"subject_agent_id": "wang", "recommendation": "advance"}\n'
+        '</assessment_json>'
+    )
+    with caplog.at_level("INFO"):
+        agent, client, factory, run_id = await _drive_phase5_new_post(
+            engine, monkeypatch, response
+        )
+    try:
+        assert len(client.posted) == 1
+        rows = await _assessment_rows(factory, run_id)
+        assert len(rows) == 1  # the row really was written
+        assert rows[0].weighted_score is None
+        assert rows[0].band is None
+        assert "Assessment stored" in caplog.text
+        assert "Failed to persist assessment" not in caplog.text
+    finally:
+        await _delete_run(factory, run_id)
+
+
+@pytest.mark.asyncio
 async def test_phase5_no_sidecar_persists_nothing_and_logs_its_absence(
     engine, monkeypatch, caplog
 ):

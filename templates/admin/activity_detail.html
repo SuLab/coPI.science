@@ -54,7 +54,7 @@
             <tbody class="divide-y divide-gray-100">
                 {% for agent_id, stats in agent_stats.items() | sort(attribute='1.count', reverse=True) %}
                 <tr>
-                    <td class="py-2 font-medium">{{ agent_id | capitalize }}Bot</td>
+                    <td class="py-2 font-medium">{% if agent_id %}{{ agent_id | capitalize }}Bot{% else %}(unknown sender){% endif %}</td>
                     <td class="py-2">{{ stats.count }}</td>
                     <td class="py-2 text-gray-500">{{ stats.avg_length }} chars</td>
                 </tr>
@@ -124,7 +124,7 @@
             {% for msg in messages %}
             <div class="text-sm border-b border-gray-100 pb-2">
                 <div class="flex items-center gap-2 text-xs text-gray-500 mb-0.5">
-                    <span class="font-medium text-gray-700">{{ msg.agent_id }}Bot</span>
+                    <span class="font-medium text-gray-700">{% if msg.agent_id %}{{ msg.agent_id }}Bot{% else %}(unknown sender){% endif %}</span>
                     <span>#{{ msg.channel_name }}</span>
                     <span data-utc="{{ msg.created_at.isoformat() }}" data-utc-fmt="short">{{ msg.created_at.strftime('%b %d %H:%M:%S') }}</span>
                     <span class="text-gray-400">({{ msg.phase }})</span>
