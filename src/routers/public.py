@@ -1075,9 +1075,12 @@ async def update_proposal_vote_details(
     if vote_obj is None:
         raise HTTPException(status_code=404, detail="unknown vote")
 
-    # Light ownership check: if the row has a token, a provided one must match.
+    # Light ownership check: if the row has a token, the caller must supply the
+    # matching one. A caller that simply omits `voter_token` gets `token is
+    # None`, which must NOT satisfy the check — omitting it is not a way to
+    # bypass ownership on a row that has a token.
     token = _clean_token(payload.voter_token)
-    if vote_obj.voter_token and token and vote_obj.voter_token != token:
+    if vote_obj.voter_token and vote_obj.voter_token != token:
         raise HTTPException(status_code=403, detail="token mismatch")
 
     vote_obj.details = _clean_details(payload.details)

@@ -347,12 +347,22 @@ async def admin_activity_detail(
         )
 
     # Aggregate by channel
+    #
+    # The agent add is None-guarded: `agent_id` is nullable on agent_messages
+    # and really is NULL in production — _rebuild_state_from_slack records a
+    # real Slack message whose sender maps to no known bot as
+    # `is_bot=True, agent_id=NULL`. This set is sorted() in the template
+    # (activity_detail.html), so an unguarded add of a single None took the
+    # whole page down with "'<' not supported between instances of
+    # 'NoneType' and 'str'" — the same bug class fixed for /admin/discussions
+    # in 73a78c3.
     channel_stats: dict[str, dict] = {}
     for msg in messages:
         if msg.channel_name not in channel_stats:
             channel_stats[msg.channel_name] = {"count": 0, "agents": set()}
         channel_stats[msg.channel_name]["count"] += 1
-        channel_stats[msg.channel_name]["agents"].add(msg.agent_id)
+        if msg.agent_id:
+            channel_stats[msg.channel_name]["agents"].add(msg.agent_id)
 
     return templates.TemplateResponse(
         request,
@@ -377,7 +387,7 @@ async def admin_llm_calls(
     agent: str | None = None,
     phase: str | None = None,
     model: str | None = None,
-    page: int = 1,
+    page: int = Query(1, ge=1),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_admin_user),
 ):
