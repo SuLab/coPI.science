@@ -32,6 +32,7 @@ from src.agent.post_types import (
 from src.agent.prompt_safety import delimit
 from src.agent.roles import load_role
 from src.agent.slack_client import SlackListingIncomplete, ThreadNotFound
+from src.agent.specialists import required_domains_for
 from src.agent.state import PostRef, ProposalRef, ThreadState
 from src.agent.tools import execute_tool, tools_for_role
 from src.config import get_settings
@@ -2495,8 +2496,15 @@ class SimulationEngine:
                             # minted/returned for this post (F7) — thread it
                             # through so the triage row can link back to the
                             # Slack post it summarises.
+                            #
+                            # thread_id=None: this is the "new top-level post"
+                            # branch (not a reply to an existing thread), so
+                            # there is no phase-4 interview thread to point the
+                            # specialist floor at here. That makes the floor
+                            # fail open by the same rule as a post-restart map.
                             await self._persist_assessment(
                                 agent.agent_id, channel, verdict, slack_ts=posted,
+                                thread_id=None,
                             )
                         elif _ASSESSMENT_UNCLOSED_RE.search(response or ""):
                             # An <assessment_json> opening tag is present.
@@ -2555,6 +2563,7 @@ class SimulationEngine:
 
     async def _persist_assessment(
         self, agent_id: str, channel: str, verdict: dict, slack_ts: str | None = None,
+        thread_id: str | None = None,
     ) -> None:
         """Store a scouting verdict. Best-effort: a failure here must never cost
         the Slack post that already went out.
@@ -2564,6 +2573,11 @@ class SimulationEngine:
         message it summarises. Optional and defaulted to ``None`` so every
         existing direct caller (tests driving this method on a stub) keeps
         working unchanged.
+
+        ``thread_id`` is the phase-4 interview thread this verdict came out of,
+        used to enforce the specialist floor below. ``None`` when phase 5 has
+        no thread to point to (a top-level assessment post) — the floor treats
+        that exactly like a post-restart empty map and fails open.
 
         The weighted score and band are computed here from the verdict's own
         dimension scores, never taken from the model's ``weighted_score`` field
@@ -2575,6 +2589,19 @@ class SimulationEngine:
         is kept verbatim in ``raw_verdict`` regardless of what could be parsed
         out of it, so nothing is ever lost to a parsing decision made here.
         """
+        gap = self._specialist_floor_gap(verdict, thread_id)
+        if gap:
+            subject_hint = verdict.get("subject_agent_id")
+            logger.warning(
+                "[%s] Assessment REFUSED for %s — recommendation %r requires the "
+                "%s specialist(s), which were never consulted during the "
+                "interview. Nothing persisted. Consult them in phase 4; the "
+                "assessment turn has no tools.",
+                agent_id, subject_hint or "?",
+                verdict.get("recommendation"), ", ".join(sorted(gap)),
+            )
+            return
+
         # The engine can run without a database (see __init__) — in that mode
         # this is a silent no-op, matching every other run-scoped write in
         # this class (e.g. _check_thread_outcome above, :1520 in the class).
@@ -2752,6 +2779,36 @@ class SimulationEngine:
     def _consulted_domains(self, thread_id: str) -> frozenset[str]:
         """Domains consulted on this thread; empty for a thread we never saw."""
         return frozenset(self._specialist_consults.get(thread_id, ()))
+
+    _PANEL_REQUIRED_FOR = frozenset({"advance", "conditional"})
+
+    def _specialist_floor_gap(self, verdict: dict, thread_id: str | None) -> set[str]:
+        """Domains this verdict was obliged to consult but did not.
+
+        Empty means the verdict may be persisted. Only ``advance`` and
+        ``conditional`` are held to the panel: a ``pass`` costs Blackbird
+        nothing, so requiring eight opinions to say no would burn calls on
+        exactly the ideas that do not warrant them.
+
+        FAILS OPEN when the thread has NO recorded consults at all — that is the
+        post-restart case, where the in-memory map was cleared and the interview
+        genuinely happened. It does NOT fail open once any consult exists: a hub
+        that consulted one cheap specialist must not thereby buy an exemption
+        from the rest.
+        """
+        recommendation = verdict.get("recommendation")
+        if recommendation not in self._PANEL_REQUIRED_FOR:
+            return set()
+
+        consulted = self._consulted_domains(thread_id or "")
+        if not consulted:
+            logger.info(
+                "[specialists] no consult record for thread %s — floor fails open "
+                "(process restarted mid-interview?)", thread_id,
+            )
+            return set()
+
+        return set(required_domains_for(verdict) - consulted)
 
     def _available_post_types(
         self, agent: "Agent", *, funding_restricted: bool

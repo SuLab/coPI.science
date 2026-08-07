@@ -136,7 +136,6 @@ async def test_persist_assessment_recomputes_the_score_it_is_handed(engine):
     a flattering number anyway. The stored score must be computed from its own
     dimension scores, with the original verdict kept verbatim in raw_verdict."""
     import uuid as _uuid
-    from types import SimpleNamespace
 
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -149,7 +148,13 @@ async def test_persist_assessment_recomputes_the_score_it_is_handed(engine):
         await setup.commit()
         run_id = run.id
 
-    stub = SimpleNamespace(simulation_run_id=run_id, session_factory=factory)
+    # A real (if agent-less) SimulationEngine rather than a bare SimpleNamespace:
+    # _persist_assessment's specialist-floor gate calls self._specialist_floor_gap,
+    # which in turn needs self._consulted_domains/self._specialist_consults/
+    # self._PANEL_REQUIRED_FOR — attributes a SimpleNamespace stub does not carry.
+    stub = SimulationEngine(
+        agents=[], slack_clients={}, session_factory=factory, simulation_run_id=run_id,
+    )
     await SimulationEngine._persist_assessment(stub, "blackbird", "general", {
         "subject_agent_id": "wang",
         "company_or_project": "DBT / BCAA-autophagy axis",
@@ -218,7 +223,6 @@ async def test_persist_assessment_gating_drops_only_the_invalid_key(engine):
     benefit. The invalid key is still never guessed/coerced (a legacy False is
     genuinely ambiguous between not_met and unconfirmed), so it alone is
     omitted. The original four-key map is untouched in raw_verdict regardless."""
-    from types import SimpleNamespace
 
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -231,7 +235,13 @@ async def test_persist_assessment_gating_drops_only_the_invalid_key(engine):
         await setup.commit()
         run_id = run.id
 
-    stub = SimpleNamespace(simulation_run_id=run_id, session_factory=factory)
+    # A real (if agent-less) SimulationEngine rather than a bare SimpleNamespace:
+    # _persist_assessment's specialist-floor gate calls self._specialist_floor_gap,
+    # which in turn needs self._consulted_domains/self._specialist_consults/
+    # self._PANEL_REQUIRED_FOR — attributes a SimpleNamespace stub does not carry.
+    stub = SimulationEngine(
+        agents=[], slack_clients={}, session_factory=factory, simulation_run_id=run_id,
+    )
     original_gating = {
         "baltimore_commitment": False,  # legacy boolean — the one bad key
         "life_sciences_domain": "met",
@@ -274,7 +284,6 @@ async def test_persist_assessment_gating_that_is_not_a_dict_is_dropped(engine):
     """A `gating` value that isn't even a mapping (a string, in this case) must
     become None wholesale — there are no keys to filter — while raw_verdict
     still holds the original for audit."""
-    from types import SimpleNamespace
 
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -287,7 +296,13 @@ async def test_persist_assessment_gating_that_is_not_a_dict_is_dropped(engine):
         await setup.commit()
         run_id = run.id
 
-    stub = SimpleNamespace(simulation_run_id=run_id, session_factory=factory)
+    # A real (if agent-less) SimulationEngine rather than a bare SimpleNamespace:
+    # _persist_assessment's specialist-floor gate calls self._specialist_floor_gap,
+    # which in turn needs self._consulted_domains/self._specialist_consults/
+    # self._PANEL_REQUIRED_FOR — attributes a SimpleNamespace stub does not carry.
+    stub = SimulationEngine(
+        agents=[], slack_clients={}, session_factory=factory, simulation_run_id=run_id,
+    )
     verdict = {"subject_agent_id": "wang", "gating": "all four met, trust me"}
     await SimulationEngine._persist_assessment(stub, "blackbird", "general", verdict)
 
@@ -315,14 +330,16 @@ async def test_persist_assessment_never_raises_when_the_write_fails(caplog):
     """Best-effort by contract: the Slack post has already gone out, so losing the
     DB row must never take down the turn."""
     import uuid as _uuid
-    from types import SimpleNamespace
 
     from src.agent.simulation import SimulationEngine
 
     def _boom():
         raise RuntimeError("database is gone")
 
-    stub = SimpleNamespace(simulation_run_id=_uuid.uuid4(), session_factory=_boom)
+    stub = SimulationEngine(
+        agents=[], slack_clients={}, session_factory=_boom,
+        simulation_run_id=_uuid.uuid4(),
+    )
     await SimulationEngine._persist_assessment(
         stub, "blackbird", "general", {"scores": {}}
     )
@@ -335,11 +352,10 @@ async def test_persist_assessment_skips_quietly_without_a_database(caplog):
     simulation_run_id are both None in that mode (see __init__). Persistence must
     be a silent no-op then, never an attempted write against a null session
     factory or a null simulation_run_id foreign key."""
-    from types import SimpleNamespace
 
     from src.agent.simulation import SimulationEngine
 
-    stub = SimpleNamespace(simulation_run_id=None, session_factory=None)
+    stub = SimulationEngine(agents=[], slack_clients={}, session_factory=None, simulation_run_id=None)
     with caplog.at_level("DEBUG"):
         await SimulationEngine._persist_assessment(
             stub, "blackbird", "general", {"scores": {"differentiation": 5}}
@@ -352,7 +368,6 @@ async def test_persist_assessment_skips_quietly_without_a_database(caplog):
 async def test_persist_assessment_tolerates_a_sparse_verdict(engine):
     """A partly-unparseable verdict must still be recorded — losing the assessment
     is strictly worse than storing an incomplete one."""
-    from types import SimpleNamespace
 
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -365,7 +380,13 @@ async def test_persist_assessment_tolerates_a_sparse_verdict(engine):
         await setup.commit()
         run_id = run.id
 
-    stub = SimpleNamespace(simulation_run_id=run_id, session_factory=factory)
+    # A real (if agent-less) SimulationEngine rather than a bare SimpleNamespace:
+    # _persist_assessment's specialist-floor gate calls self._specialist_floor_gap,
+    # which in turn needs self._consulted_domains/self._specialist_consults/
+    # self._PANEL_REQUIRED_FOR — attributes a SimpleNamespace stub does not carry.
+    stub = SimulationEngine(
+        agents=[], slack_clients={}, session_factory=factory, simulation_run_id=run_id,
+    )
     # No scores, no gating, red_flags the wrong type entirely.
     await SimulationEngine._persist_assessment(
         stub, "blackbird", "general", {"red_flags": "not a list"}
@@ -404,7 +425,6 @@ async def test_persist_assessment_bounds_oversized_short_string_fields(engine):
     WHOLE row for. The fields must be truncated to fit before the insert, not
     left to blow up the write, and raw_verdict must still hold the untruncated
     original."""
-    from types import SimpleNamespace
 
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -419,7 +439,13 @@ async def test_persist_assessment_bounds_oversized_short_string_fields(engine):
 
     oversized_recommendation = "advance" + "!" * 200  # column is String(30)
     oversized_subject_agent_id = "w" * 200  # column is String(50)
-    stub = SimpleNamespace(simulation_run_id=run_id, session_factory=factory)
+    # A real (if agent-less) SimulationEngine rather than a bare SimpleNamespace:
+    # _persist_assessment's specialist-floor gate calls self._specialist_floor_gap,
+    # which in turn needs self._consulted_domains/self._specialist_consults/
+    # self._PANEL_REQUIRED_FOR — attributes a SimpleNamespace stub does not carry.
+    stub = SimulationEngine(
+        agents=[], slack_clients={}, session_factory=factory, simulation_run_id=run_id,
+    )
     verdict = {
         "subject_agent_id": oversized_subject_agent_id,
         "recommendation": oversized_recommendation,
@@ -461,7 +487,6 @@ async def test_persist_assessment_empty_scores_dict_stores_null_score_and_band(e
     (not just a missing key) must still store None/None, not 0.00/"pass",
     the same as the missing-key case covered by the sparse-verdict test
     above."""
-    from types import SimpleNamespace
 
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -474,7 +499,13 @@ async def test_persist_assessment_empty_scores_dict_stores_null_score_and_band(e
         await setup.commit()
         run_id = run.id
 
-    stub = SimpleNamespace(simulation_run_id=run_id, session_factory=factory)
+    # A real (if agent-less) SimulationEngine rather than a bare SimpleNamespace:
+    # _persist_assessment's specialist-floor gate calls self._specialist_floor_gap,
+    # which in turn needs self._consulted_domains/self._specialist_consults/
+    # self._PANEL_REQUIRED_FOR — attributes a SimpleNamespace stub does not carry.
+    stub = SimulationEngine(
+        agents=[], slack_clients={}, session_factory=factory, simulation_run_id=run_id,
+    )
     await SimulationEngine._persist_assessment(
         stub, "blackbird", "general", {"subject_agent_id": "wang", "scores": {}}
     )
@@ -510,7 +541,6 @@ async def test_persist_assessment_drops_non_string_text_fields_instead_of_dying(
     then drops the ENTIRE row for, losing everything else in the verdict too.
     Both fields must degrade to None per-field, the same as every other
     wrong-typed field on this row."""
-    from types import SimpleNamespace
 
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -523,7 +553,13 @@ async def test_persist_assessment_drops_non_string_text_fields_instead_of_dying(
         await setup.commit()
         run_id = run.id
 
-    stub = SimpleNamespace(simulation_run_id=run_id, session_factory=factory)
+    # A real (if agent-less) SimulationEngine rather than a bare SimpleNamespace:
+    # _persist_assessment's specialist-floor gate calls self._specialist_floor_gap,
+    # which in turn needs self._consulted_domains/self._specialist_consults/
+    # self._PANEL_REQUIRED_FOR — attributes a SimpleNamespace stub does not carry.
+    stub = SimulationEngine(
+        agents=[], slack_clients={}, session_factory=factory, simulation_run_id=run_id,
+    )
     verdict = {
         "subject_agent_id": "wang",
         "company_or_project": ["DBT", "BCAA-autophagy axis"],  # wrong type
@@ -559,8 +595,8 @@ async def test_persist_assessment_drops_non_string_text_fields_instead_of_dying(
 # --- Phase 5 wiring: the real "New top-level post" branch, not the
 # _persist_assessment stub (Task 11 fix round 1, Finding 2) -----------------
 #
-# Every test above drives _persist_assessment directly on a SimpleNamespace
-# stub, which bypasses the `if verdict is not None:` gate in
+# Every test above drives _persist_assessment directly on an agent-less
+# SimulationEngine stub, which bypasses the `if verdict is not None:` gate in
 # SimulationEngine._phase5_new_post entirely — exactly why Finding 1 (a valid
 # `{}` sidecar misrouted to the "verdict lost" branch) had zero coverage. These
 # tests build a real SimulationEngine + Agent + FakeSlackClient and drive
