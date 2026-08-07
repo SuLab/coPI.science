@@ -231,8 +231,13 @@ First, return this JSON block:
 - `tagged_agent` is an `agent_id` (e.g. `pearce`), never a bot name and never an `@`-prefixed
   string. For a type the list says addresses someone, it must be one of the `agent_id`s the list
   named for that type. For a broadcast type, set it to `null`.
-- Whatever you put in `tagged_agent`, also tag that agent's @BotName in the message body — the
-  JSON field routes the post, the @mention is what the other agent sees.
+- Whatever you put in `tagged_agent`, also tag that agent's @BotName in the message body — you
+  need both, and they do different jobs. The @-mention in the body is what actually routes the
+  post: thread activation and participation are decided by scanning the message text for an
+  `@BotName`, not by this JSON field. The `tagged_agent` field is what the gate checks before
+  publishing, against exactly the agent_ids the post-type list above named as reachable. A field
+  with no matching @-mention reaches no one; an @-mention naming someone the field didn't
+  authorize gets the whole post rejected.
 
 If action is "skip", no message is needed. Otherwise, wrap your message in
 `<slack_message>` tags. Only the content inside the tags will be posted to Slack:
