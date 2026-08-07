@@ -1376,8 +1376,8 @@ class SimulationEngine:
         async def tool_executor(tool_name: str, tool_input: dict) -> str:
             return await execute_tool(
                 tool_name, tool_input, agent.agent_id, thread, role=agent.role,
-                on_consult=lambda domain, _tid=thread.thread_id: self._record_consult(
-                    _tid, domain
+                on_consult=lambda domain, _pi=thread.other_agent_id: self._record_consult(
+                    _pi, domain
                 ),
             )
 
@@ -2526,7 +2526,6 @@ class SimulationEngine:
                             # fail open by the same rule as a post-restart map.
                             await self._persist_assessment(
                                 agent.agent_id, channel, verdict, slack_ts=posted,
-                                thread_id=None,
                             )
                         elif _ASSESSMENT_UNCLOSED_RE.search(response or ""):
                             # An <assessment_json> opening tag is present.
@@ -2585,7 +2584,6 @@ class SimulationEngine:
 
     async def _persist_assessment(
         self, agent_id: str, channel: str, verdict: dict, slack_ts: str | None = None,
-        thread_id: str | None = None,
     ) -> None:
         """Store a scouting verdict. Best-effort: a failure here must never cost
         the Slack post that already went out.
@@ -2611,7 +2609,7 @@ class SimulationEngine:
         is kept verbatim in ``raw_verdict`` regardless of what could be parsed
         out of it, so nothing is ever lost to a parsing decision made here.
         """
-        gap = self._specialist_floor_gap(verdict, thread_id)
+        gap = self._specialist_floor_gap(verdict)
         if gap:
             subject_hint = verdict.get("subject_agent_id")
             logger.warning(
@@ -2794,17 +2792,26 @@ class SimulationEngine:
             self._role_post_types_cache[role] = cached
         return cached
 
-    def _record_consult(self, thread_id: str, domain: str) -> None:
-        """Note that a specialist was successfully consulted on this thread."""
-        self._specialist_consults.setdefault(thread_id, set()).add(domain)
+    def _record_consult(self, pi_agent_id: str, domain: str) -> None:
+        """Note a successful consult, keyed on the PI the interview is about.
 
-    def _consulted_domains(self, thread_id: str) -> frozenset[str]:
-        """Domains consulted on this thread; empty for a thread we never saw."""
-        return frozenset(self._specialist_consults.get(thread_id, ()))
+        Keyed on the PI rather than the interview thread because the reader
+        cannot see a thread: an assessment is a NEW TOP-LEVEL post, so
+        ``_persist_assessment`` is called with no thread to join on. The thread
+        knows the PI as ``other_agent_id`` and the verdict names the same PI as
+        ``subject_agent_id`` — that is the only identifier both ends share.
+        """
+        if not pi_agent_id:
+            return
+        self._specialist_consults.setdefault(pi_agent_id, set()).add(domain)
+
+    def _consulted_domains(self, pi_agent_id: str) -> frozenset[str]:
+        """Domains consulted about this PI; empty for a PI we have no record of."""
+        return frozenset(self._specialist_consults.get(pi_agent_id, ()))
 
     _PANEL_REQUIRED_FOR = frozenset({"advance", "conditional"})
 
-    def _specialist_floor_gap(self, verdict: dict, thread_id: str | None) -> set[str]:
+    def _specialist_floor_gap(self, verdict: dict) -> set[str]:
         """Domains this verdict was obliged to consult but did not.
 
         Empty means the verdict may be persisted. Only ``advance`` and
@@ -2812,9 +2819,28 @@ class SimulationEngine:
         nothing, so requiring eight opinions to say no would burn calls on
         exactly the ideas that do not warrant them.
 
-        FAILS OPEN when the thread has NO recorded consults at all — that is the
-        post-restart case, where the in-memory map was cleared and the interview
-        genuinely happened. It does NOT fail open once any consult exists: a hub
+        The record is keyed on the PI (``subject_agent_id``), not on a thread:
+        an assessment is a new top-level post, so there is no interview thread
+        to join on at this point. An earlier version keyed on ``thread_id``,
+        which was always None here — the floor read an empty set every time and
+        failed open on every verdict, enforcing nothing while looking enforced.
+
+        FAILS OPEN in two cases, both of which mean "we have no record", never
+        "the panel approved":
+        - the verdict names no ``subject_agent_id``, so there is nothing to
+          join on;
+        - the consult map is EMPTY OVERALL, which means this process has never
+          recorded a consult for anyone — the post-restart case, where the
+          in-memory map was cleared and the interview genuinely happened.
+
+        Note the second condition is about the whole map, not this PI's slot.
+        An earlier version failed open whenever the SUBJECT had no consults,
+        which quietly excused the commonest failure of all: a hub that simply
+        never convenes a panel. If the map holds entries for other PIs, this
+        process demonstrably records consults, so an absent PI means the panel
+        really was skipped for them — and the floor bites.
+
+        It does not fail open once any consult exists for that PI either: a hub
         that consulted one cheap specialist must not thereby buy an exemption
         from the rest.
         """
@@ -2822,14 +2848,22 @@ class SimulationEngine:
         if recommendation not in self._PANEL_REQUIRED_FOR:
             return set()
 
-        consulted = self._consulted_domains(thread_id or "")
-        if not consulted:
+        subject = verdict.get("subject_agent_id")
+        if not isinstance(subject, str) or not subject:
             logger.info(
-                "[specialists] no consult record for thread %s — floor fails open "
-                "(process restarted mid-interview?)", thread_id,
+                "[specialists] verdict names no subject_agent_id — floor fails "
+                "open, nothing to join a consult record to",
             )
             return set()
 
+        if not self._specialist_consults:
+            logger.info(
+                "[specialists] no consult record for ANY PI — floor fails open "
+                "(process restarted mid-interview?)",
+            )
+            return set()
+
+        consulted = self._consulted_domains(subject)
         return set(required_domains_for(verdict) - consulted)
 
     def _available_post_types(
