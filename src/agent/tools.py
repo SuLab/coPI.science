@@ -1,11 +1,18 @@
 """Tool definitions and execution for Anthropic tool-use API (Phase 4 thread replies)."""
 
 import logging
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 from src.agent.prompt_safety import delimit
 from src.agent.roles import load_role
+from src.agent.specialists import (
+    SPECIALIST_DOMAINS,
+    parse_opinion,
+    persona_path,
+)
+from src.services.llm import generate_agent_response
 from src.services.patents import PriorArtResult, search_prior_art
 from src.services.pubmed import fetch_abstract, fetch_full_text
 
@@ -113,6 +120,57 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
             "required": ["query"],
         },
     },
+    {
+        "name": "consult_specialist",
+        "description": (
+            "Ask one member of the Blackbird evaluation panel for an opinion in "
+            "their domain. Use this DURING an interview, as soon as the PI says "
+            "something that falls in a specialist's area — their questions_to_ask "
+            "become your next question to the PI, which is worth far more than "
+            "asking them after you have already formed a view.\n\n"
+            "Domains: 'scientific' (rigor, controls, power, interpretability, "
+            "mouse-to-human translatability), 'chemistry' (path to a development "
+            "candidate, medchem tractability, tolerability, in-family off-targets), "
+            "'clinical' (unmet need vs standard of care, indication, patient "
+            "numbers), 'commercial' (competitive landscape, named competing "
+            "programs, deal comps), 'legal' (FTO, licensing, research-tool "
+            "encumbrance), 'technologic' (platform feasibility, whether the work "
+            "would test it), 'talent' (execution probability, conflicts of "
+            "interest, over-commitment), 'budget' (scope against Blackbird's grant "
+            "bands and 12-24 month durations).\n\n"
+            "An advance or conditional verdict is REFUSED if the domains the idea "
+            "touches were never consulted, and you cannot consult during the "
+            "assessment turn — only here, in the interview. Consult early."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "domain": {
+                    "type": "string",
+                    "enum": [
+                        "scientific", "chemistry", "clinical", "commercial",
+                        "legal", "technologic", "talent", "budget",
+                    ],
+                    "description": "Which specialist to ask.",
+                },
+                "question": {
+                    "type": "string",
+                    "description": (
+                        "The specific question, in your own words. Not 'what do you "
+                        "think' — name the claim you want tested."
+                    ),
+                },
+                "context": {
+                    "type": "string",
+                    "description": (
+                        "The relevant part of the interview so far: what the PI "
+                        "actually said about this. Quote them where you can."
+                    ),
+                },
+            },
+            "required": ["domain", "question", "context"],
+        },
+    },
 ]
 
 _PATENT_CAVEAT = (
@@ -137,6 +195,8 @@ async def execute_tool(
     agent_id: str,
     thread_state: Any | None = None,
     role: str = "pi_lab",
+    *,
+    on_consult: Callable[[str], None] | None = None,
 ) -> str:
     """
     Execute a tool call and return the result as a string.
@@ -144,6 +204,9 @@ async def execute_tool(
     Enforces per-thread rate limits for retrieve_abstract (other lab) and
     retrieve_full_text. Refuses (without raising) any tool not allowed for
     ``role``.
+
+    ``on_consult`` is forwarded to ``consult_specialist`` and fires only on a
+    fully successful consult — see ``_execute_consult_specialist``.
     """
     if tool_name not in load_role(role).tools:
         logger.warning("[tools] %s: role %r may not call %s", agent_id, role, tool_name)
@@ -177,6 +240,15 @@ async def execute_tool(
 
         elif tool_name == "search_prior_art":
             return await _execute_search_prior_art(tool_input["query"])
+
+        elif tool_name == "consult_specialist":
+            return await _execute_consult_specialist(
+                tool_input["domain"],
+                tool_input["question"],
+                tool_input["context"],
+                agent_id=agent_id,
+                on_consult=on_consult,
+            )
 
         else:
             return f"Unknown tool: {tool_name}"
@@ -369,3 +441,59 @@ async def _execute_search_prior_art(query: str) -> str:
         # external text (SEC-14); fence it.
         lines.append(delimit(block, "patent"))
     return "\n\n".join(lines)
+
+
+async def _execute_consult_specialist(
+    domain: str,
+    question: str,
+    context: str,
+    *,
+    agent_id: str,
+    on_consult: Callable[[str], None] | None = None,
+) -> str:
+    """Ask one specialist persona for an opinion.
+
+    ``on_consult`` is invoked with the domain ONLY on a successful call. A
+    refused domain, a missing persona file, or a failed LLM call must not
+    satisfy the enforcement floor — otherwise "the specialist was unreachable"
+    would silently become "the specialist approved".
+    """
+    spec = SPECIALIST_DOMAINS.get(domain)
+    if spec is None:
+        return (
+            f"Unknown specialist domain {domain!r}. Valid domains: "
+            + ", ".join(sorted(SPECIALIST_DOMAINS))
+        )
+
+    path = persona_path(domain)
+    if not path.is_file():
+        logger.error("[specialists] persona file missing for %s: %s", domain, path)
+        return (
+            f"The {domain} specialist is unavailable (persona file missing). "
+            "Proceed without this opinion; it will not count as consulted."
+        )
+
+    persona = path.read_text(encoding="utf-8")
+    try:
+        raw = await generate_agent_response(
+            system_prompt=persona,
+            messages=[{
+                "role": "user",
+                "content": f"## Question from the hub\n\n{question}\n\n"
+                           f"## What the PI has said\n\n{context}",
+            }],
+            max_tokens=900,
+            log_meta={"agent_id": agent_id, "phase": f"consult_{domain}"},
+        )
+    except Exception as exc:  # noqa: BLE001 — a dead specialist must not kill the turn
+        logger.error("[specialists] %s consult failed: %s", domain, exc)
+        return f"Error consulting the {domain} specialist: {exc}"
+
+    opinion = parse_opinion(raw, domain=domain)
+    if on_consult is not None:
+        on_consult(domain)
+    logger.info(
+        "[specialists] %s consulted %s -> %s (%s)",
+        agent_id, domain, opinion.verdict_signal, opinion.confidence,
+    )
+    return f"{spec.title} — signal: {opinion.verdict_signal}\n\n{opinion.raw}"

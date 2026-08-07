@@ -1,5 +1,5 @@
 label = "Scout Hub"
-tools = ["retrieve_profile", "retrieve_abstract", "retrieve_full_text", "search_prior_art"]
+tools = ["retrieve_profile", "retrieve_abstract", "retrieve_full_text", "search_prior_art", "consult_specialist"]
 
 # Layer 1: what this role may post as a NEW top-level post. `action: "reply"` is
 # not governed here. An absent `post_types` key would fall back to
