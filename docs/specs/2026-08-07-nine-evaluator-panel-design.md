@@ -297,21 +297,33 @@ is **5–7 additional calls per assessed idea** and **zero** for the majority of
 that end without an assessment. Against a 12-turn interview at ~290k input tokens, that is
 roughly a 10% increase on the ideas that reach a verdict.
 
-### The constraint that actually bites: `max_tool_rounds`
+### The constraint that actually bites: only phase 4 has a tool loop
 
-`generate_agent_response_with_tools` defaults to `max_tool_rounds: int = 5`
-(`src/services/llm.py:305`), and the loop is `for round_num in range(max_tool_rounds + 1)`
-(`:336`). The hub already has four tools competing for those rounds — `retrieve_profile`,
-`retrieve_abstract`, `retrieve_full_text`, `search_prior_art`.
+**`consult_specialist` can only be called during the interview, never during the
+assessment.** Verified: `_reply_to_thread` calls `generate_with_tools`
+(`src/agent/simulation.py:1373`) and is the *only* call site that passes tools; the phase-5
+assessment turn calls plain `generate_agent_response` (`:2179`), as do scan (`:1056`) and
+memory (`:5487`). Phase 5 has no `tool_executor` and no tool loop.
 
-A four-domain floor plus a prior-art search plus a profile lookup can exhaust the budget. A
-round may contain several `tool_use` blocks, so a model that batches its consults fits
-comfortably; a model that serialises them does not.
+Two consequences, and they shape the whole design:
 
-**Resolution:** raise `max_tool_rounds` for the `scout_hub` phase-5 turn specifically, and
-have the phase-5 prompt instruct the hub to request all outstanding consults in **one**
-round. Do not raise it globally — a higher cap on every `pi_lab` turn is a cost regression
-for 55 agents to fix a problem one agent has.
+1. **All consultation happens in phase 4.** That is the right place anyway — the value of
+   `questions_to_ask` is that it steers the *next question to the PI*, which only exists
+   during the interview.
+2. **The floor is a check, not a prompt.** At `_persist_assessment` the hub cannot be told
+   "go consult Chemistry now" — that turn has no tools. The floor can only *refuse* a
+   verdict whose homework was not done during the interview, and the hub must learn to
+   consult earlier. The rejection WARNING must therefore name the missing domains so the
+   next interview does better, and the phase-4 prompt must say plainly that an unconsulted
+   domain will cost the verdict later.
+
+`max_tool_rounds` defaults to 5 (`src/services/llm.py:305`), and the hub's four existing
+tools compete for those rounds *within a single turn*. Because an interview runs up to 12
+turns, each with its own budget of 5, consults spread naturally across turns and the cap is
+not a practical constraint. **No change to `max_tool_rounds` is required** — an earlier draft
+of this design proposed raising it for phase 5, which was wrong, because phase 5 never
+enters the loop.
+
 
 ## 7. Error handling
 
@@ -343,7 +355,9 @@ where that would silence the hub entirely.
    and logs the reason. This one matters: it is the difference between a degraded system and
    a stopped one.
 7. **A failed consult does not satisfy the floor** — missing persona file, and LLM error.
-8. **`max_tool_rounds`** — a phase-5 turn requesting four consults in one round completes.
+8. **Consults survive the phase boundary** — a domain consulted during a phase-4 turn is
+   still in `_specialist_consults[thread_id]` when the separate phase-5 assessment turn
+   reads it. This is the seam the whole floor rests on and it spans two LLM calls.
 9. **No `pi_lab` regression** — a `pi_lab` phase-4 turn's tool list and round budget are
    byte-identical to today.
 
