@@ -22,6 +22,13 @@ from src.agent.funding_rules import (
 )
 from src.agent.ids import WRITER_ENGINE, TsMinter
 from src.agent.message_log import LogEntry, MessageLog, is_funding_post
+from src.agent.post_types import (
+    PostTypeSpec,
+    available_for,
+    eligible_targets,
+    render_menu,
+    resolve_post_type_name,
+)
 from src.agent.prompt_safety import delimit
 from src.agent.roles import load_role
 from src.agent.slack_client import SlackListingIncomplete, ThreadNotFound
@@ -237,6 +244,10 @@ class SimulationEngine:
 
         # role name -> calls_per_load_per_window override (or None). See _calls_per_load.
         self._role_rate_cache: dict[str, int | None] = {}
+
+        # role name -> declared post_types. Same reason as _role_rate_cache
+        # above: load_role() hits the disk on every call.
+        self._role_post_types_cache: dict[str, tuple[PostTypeSpec, ...]] = {}
 
         self._start_time: datetime | None = None
         self._running = False
@@ -2127,6 +2138,21 @@ class SimulationEngine:
         )
         funding_only = blocked_for_regular and not has_available_non_funding
 
+        # blocked_for_regular, NOT funding_only — see _available_post_types'
+        # docstring. funding_only is the narrower "blocked AND nothing
+        # non-funding to reply to"; keying the menu on it would advertise
+        # `paper` to an agent the block below rejects for posting one.
+        available_types = self._available_post_types(
+            agent, funding_restricted=blocked_for_regular,
+        )
+        post_type_menu = render_menu(
+            available_types,
+            gate=agent.allowed_sender_ids,
+            roles_by_agent=self._roles_by_agent(),
+            self_id=agent.agent_id,
+            bot_names={aid: a.bot_name for aid, a in self.agents.items()},
+        )
+
         system_prompt, messages = agent.build_phase5_prompt(
             recent_posts=recent_posts,
             foa_contexts=foa_contexts,
@@ -2136,6 +2162,7 @@ class SimulationEngine:
             funding_thread_summaries=funding_thread_summaries,
             visibility=current_visibility,
             channel_id=private_channel_id,
+            post_type_menu=post_type_menu,
         )
 
         # Restore
@@ -2229,7 +2256,7 @@ class SimulationEngine:
                     action == "reply" and target_post_id
                     and self.message_log.is_funding_thread(target_post_id)
                 )
-                is_funding_post = post_type == "funding_collab"
+                is_funding_post = action == "new_post" and post_type == "funding_collab"
                 is_private_reply = False
                 if action == "reply" and target_post_id:
                     target_entry = self.message_log.get_entry(target_post_id)
@@ -2360,6 +2387,25 @@ class SimulationEngine:
                         )
 
             else:
+                # New top-level post. Layers 1-3, against the SAME set that was
+                # rendered into the prompt above. Reject rather than strip-and-
+                # publish: a mention stripped out of an addressed post leaves a
+                # dangling ask no one can answer (259 such posts, 0.8% reply
+                # rate). WARNING, not DEBUG — the cohort strip was logged at
+                # DEBUG and 200 of them produced no operator-visible signal.
+                rejection = self._post_type_rejection(
+                    agent,
+                    post_type,
+                    action_data.get("tagged_agent"),
+                    available_types,
+                )
+                if rejection is not None:
+                    logger.warning(
+                        "[%s] Phase 5: rejected new post in #%s — %s",
+                        agent.agent_id, channel, rejection,
+                    )
+                    agent.state.consecutive_phase5_skips += 1
+                    return
                 # New top-level post
                 posted = await self._post_message(agent.agent_id, channel, message_text)
                 if not posted:
@@ -2609,6 +2655,111 @@ class SimulationEngine:
         cleaned = re.sub(r"(?<=\S)[ \t]{2,}", " ", cleaned)
         cleaned = re.sub(r"(?m)[ \t]+$", "", cleaned)
         return cleaned.lstrip(" \t") if cleaned[:1] in (" ", "\t") else cleaned
+
+    def _roles_by_agent(self) -> dict[str, str]:
+        """Live roster agent_id -> role. Agents absent from this map (e.g.
+        ``grantbot``, which has cohort memberships but no AgentRegistry row and
+        is a separate process, not an entry in self.agents) match no post type's
+        ``targets``."""
+        return {aid: a.role for aid, a in self.agents.items()}
+
+    def _post_types_for_role(self, role: str) -> tuple[PostTypeSpec, ...]:
+        """``load_role(role).post_types``, cached.
+
+        load_role() reads TOML from disk on every call — the same reason
+        _role_rate_cache exists (see _calls_per_load). This runs once per
+        phase-5 turn per agent; the cache keeps it off the disk. A role's
+        manifest cannot change without a container rebuild, so there is nothing
+        to invalidate.
+        """
+        cached = self._role_post_types_cache.get(role)
+        if cached is None:
+            cached = load_role(role).post_types
+            self._role_post_types_cache[role] = cached
+        return cached
+
+    def _available_post_types(
+        self, agent: "Agent", *, funding_restricted: bool
+    ) -> tuple[PostTypeSpec, ...]:
+        """Layer 1 ∩ layer 2: what this agent may post as a NEW top-level post.
+
+        The SAME tuple is rendered into the prompt and used to judge the
+        response, so the menu and the gate cannot disagree.
+
+        ``funding_restricted`` is the caller's ``blocked_for_regular``, NOT its
+        ``funding_only``. The two differ: ``funding_only = blocked_for_regular
+        and not has_available_non_funding``, so a blocked agent that has a
+        non-funding post available has ``funding_only=False`` — and keying on
+        that would advertise ``paper`` to an agent whose next non-funding post
+        the block at the top of this handler rejects anyway. ``funding_only``
+        still drives the prompt-template surgery; only this set uses
+        ``blocked_for_regular``.
+        """
+        return available_for(
+            self._post_types_for_role(agent.role),
+            gate=agent.allowed_sender_ids,
+            roles_by_agent=self._roles_by_agent(),
+            self_id=agent.agent_id,
+            funding_only=funding_restricted,
+        )
+
+    def _post_type_rejection(
+        self,
+        agent: "Agent",
+        post_type: str,
+        tagged_agent: str | None,
+        available: tuple[PostTypeSpec, ...],
+    ) -> str | None:
+        """Why this new top-level post must not be published, or None.
+
+        Applies only to ``action: "new_post"`` — a reply is never gated here.
+        """
+        by_name = {s.name: s for s in available}
+        # Resolve retired names on the way in (see LEGACY_POST_TYPE_ALIASES).
+        # The rejection message below still quotes what the model actually said.
+        spec = by_name.get(resolve_post_type_name(post_type))
+        if spec is None:
+            return (
+                f"post_type {post_type!r} is not available to role "
+                f"{agent.role!r} with this topology "
+                f"(available: {sorted(by_name) or 'none'})"
+            )
+        # Layers 2 and 3 are inert when the gate is off, so a mesh deployment's
+        # behaviour is byte-identical after this change. Today a hallucinated
+        # tagged_agent there is logged and the post ships; tightening that is a
+        # separate decision, not a side effect of this one.
+        if agent.allowed_sender_ids is None:
+            return None
+        allowed = eligible_targets(
+            spec,
+            gate=agent.allowed_sender_ids,
+            roles_by_agent=self._roles_by_agent(),
+            self_id=agent.agent_id,
+        )
+        if not spec.targets:
+            # A broadcast type addresses no one, so the tag is redundant — but
+            # redundant is not wrong. The hub posts its :mag: assessment into
+            # the PI's own channel and naming that PI is the natural thing to
+            # do; rejecting it would destroy the artifact and the whole
+            # interview behind it over a field nothing routes on. Ignore a
+            # REACHABLE tag; an unreachable one is still the dangling-ask bug.
+            if tagged_agent and tagged_agent not in agent.allowed_sender_ids:
+                return (
+                    f"post_type {post_type!r} addresses no one and "
+                    f"tagged_agent={tagged_agent!r} is not reachable"
+                )
+            return None
+        if not tagged_agent:
+            return (
+                f"post_type {post_type!r} must address one of "
+                f"{sorted(allowed)}, but tagged_agent was null"
+            )
+        if tagged_agent not in allowed:
+            return (
+                f"tagged_agent={tagged_agent!r} is not reachable for post_type "
+                f"{post_type!r} (allowed: {sorted(allowed)})"
+            )
+        return None
 
     def _parse_phase5_response(self, response: str) -> tuple[dict | None, str | None]:
         """Parse Phase 5 response into (json_data, message_text).

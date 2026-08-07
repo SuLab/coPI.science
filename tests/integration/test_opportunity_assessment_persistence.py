@@ -581,7 +581,7 @@ async def _drive_phase5_new_post(engine, monkeypatch, response_text):
         await setup.commit()
         run_id = run.id
 
-    agent = Agent("blackbird", "BlackbirdBot", "Blackbird")
+    agent = Agent("blackbird", "BlackbirdBot", "Blackbird", role="scout_hub")
     client = FakeSlackClient(agent_id="blackbird")
     sim = SimulationEngine(
         agents=[agent], slack_clients={"blackbird": client},
