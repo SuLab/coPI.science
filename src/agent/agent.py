@@ -5,8 +5,9 @@ import re
 import time
 from pathlib import Path
 
+from src.agent.post_types import render_menu
 from src.agent.prompt_safety import delimit
-from src.agent.roles import DEFAULT_ROLE, resolve_prompt_path
+from src.agent.roles import DEFAULT_ROLE, load_role, resolve_prompt_path
 from src.agent.state import AgentState, ThreadState
 from src.agent.thread_guidance import phase4_guidance
 from src.models.agent_activity import VISIBILITY_COLLAB_PRIVATE, VISIBILITY_PUBLIC
@@ -518,6 +519,7 @@ Use these to reference other labs' work in conversations. Include links when cit
         funding_thread_summaries: dict[str, str] | None = None,
         visibility: str = VISIBILITY_PUBLIC,
         channel_id: str | None = None,
+        post_type_menu: str | None = None,
     ) -> tuple[str, list[dict]]:
         """
         Build system + messages for Phase 5 new post.
@@ -535,6 +537,12 @@ Use these to reference other labs' work in conversations. Include links when cit
             always operates in a public channel. The parameters are plumbed
             through for symmetry with the other phase builders; future work
             that lets agents initiate private-channel posts will use them.
+
+        post_type_menu: pre-rendered {post_type_menu} block. The engine computes
+            it from the role's allow-list filtered by the live cohort gate, and
+            enforces the SAME set when the response comes back. None renders
+            THIS AGENT'S ROLE's declared set with no topology filtering — used by
+            direct callers and tests that have no topology to apply.
         """
         system_prompt = self.build_system_prompt(visibility=visibility, channel_id=channel_id)
         phase5_template = self._load_prompt(
@@ -637,6 +645,23 @@ Use these to reference other labs' work in conversations. Include links when cit
         prompt_text = prompt_text.replace("{subscribed_channels}", channels_text)
         prompt_text = prompt_text.replace("{your_recent_posts}", recent_text)
         prompt_text = prompt_text.replace("{prior_conversations}", prior_text)
+        if post_type_menu is None:
+            # No topology supplied — render THIS agent's role set with no
+            # filtering, matching the "gate is None means no filtering" rule.
+            # Role-aware, not DEFAULT_POST_TYPES: a scout_hub agent built by a
+            # direct caller would otherwise get the pi_lab menu, offering it
+            # three types its own role.toml forbids.
+            #
+            # gate=None also makes render_menu emit guidance instead of an
+            # enumeration for an addressed type. There is no roster here to
+            # enumerate, and the enumeration would come out as the literal
+            # "one of: ." — in a live prompt, and in test_phase5_prompt_gm's
+            # committed snapshot.
+            post_type_menu = render_menu(
+                load_role(self.role).post_types, gate=None, roles_by_agent={},
+                self_id=self.agent_id, bot_names={},
+            )
+        prompt_text = prompt_text.replace("{post_type_menu}", post_type_menu)
 
         # Inject pre-loaded FOA details for Option B (funding collaborations)
         if thread_foa_contexts:

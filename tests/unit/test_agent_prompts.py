@@ -79,3 +79,79 @@ def test_phase2_scan_prune_and_phase4_honour_role_overrides(tmp_path, monkeypatc
         other_agent_lab="O Lab",
     )
     assert "WIDGET REPLY" in reply_messages[0]["content"]
+
+
+def test_phase5_menu_token_is_always_substituted():
+    """No caller may leak the raw token into a prompt. prompts/ is bind-mounted
+    and re-read per call while src/ is baked into the agent image, so a template
+    that ships ahead of its renderer would put `{post_type_menu}` in front of a
+    live model."""
+    from src.agent.agent import Agent
+
+    a = Agent("gill", "GillBot", "Gill")
+    _, messages = a.build_phase5_prompt()
+    assert "{post_type_menu}" not in messages[0]["content"]
+
+
+def test_phase5_menu_defaults_to_the_unfiltered_pi_lab_set():
+    """Assert on the MENU's own rendering, not on bare names: the Option C body
+    also mentions `idea_crosslab` and `pitch`, so `name in content` would pass
+    with no menu rendered at all."""
+    from src.agent.agent import Agent
+    from src.agent.post_types import DEFAULT_POST_TYPES
+
+    a = Agent("gill", "GillBot", "Gill")
+    _, messages = a.build_phase5_prompt()
+    content = messages[0]["content"]
+    for spec in DEFAULT_POST_TYPES:
+        assert f"**`{spec.name}`**" in content
+
+
+def test_phase5_default_menu_is_the_agents_own_role_not_pi_lab():
+    """A scout_hub agent must not be handed a menu offering `paper`,
+    `idea_crosslab` and `pitch` — its role.toml allows none of them."""
+    from src.agent.agent import Agent
+
+    hub = Agent("blackbird", "BlackbirdBot", "Blackbird", role="scout_hub")
+    _, messages = hub.build_phase5_prompt()
+    content = messages[0]["content"]
+    assert "**`opportunity_assessment`**" in content
+    for forbidden in ("**`paper`**", "**`idea_crosslab`**", "**`pitch`**"):
+        assert forbidden not in content
+
+
+def test_phase5_default_menu_never_prints_an_empty_enumeration():
+    """The default path has no roster to enumerate from. Guarded here as well as
+    in test_post_types because this is the caller that reaches a snapshot."""
+    from src.agent.agent import Agent
+
+    a = Agent("gill", "GillBot", "Gill")
+    _, messages = a.build_phase5_prompt()
+    assert "one of: ." not in messages[0]["content"]
+
+
+def test_phase5_menu_uses_the_caller_supplied_text_when_given():
+    from src.agent.agent import Agent
+
+    a = Agent("gill", "GillBot", "Gill")
+    _, messages = a.build_phase5_prompt(post_type_menu="- ONLY THIS ONE")
+    content = messages[0]["content"]
+    assert "- ONLY THIS ONE" in content
+    # The rendered menu is gone; the Option C prose that *names* the types is
+    # not, and must not be — that is the per-type guidance.
+    assert "**`idea_crosslab`**" not in content
+
+
+def test_phase5_menu_survives_funding_only_surgery():
+    """funding_only strips Option C but the menu section sits above ## Instructions
+    and must still render — the engine narrows its contents instead."""
+    from src.agent.agent import Agent
+
+    a = Agent("gill", "GillBot", "Gill")
+    _, messages = a.build_phase5_prompt(
+        funding_only=True, post_type_menu="- **`funding_collab`** — only this"
+    )
+    content = messages[0]["content"]
+    assert "- **`funding_collab`** — only this" in content
+    assert "### Option C: Make a new top-level post" not in content
+    assert "### Option D: Skip this turn" in content
