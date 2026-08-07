@@ -142,7 +142,14 @@ def parse_post_types(raw: object, *, role: str) -> tuple[PostTypeSpec, ...]:
         )
         return DEFAULT_POST_TYPES
 
-    kept: list[PostTypeSpec] = []
+    # A dict, not a list: a later `[[post_types]]` entry for a name already
+    # seen replaces the earlier one (last wins) rather than appending a second,
+    # contradictory line to the rendered menu while enforcement (`by_name` in
+    # `_post_type_rejection`, also last-wins by construction) silently keeps
+    # only the last. Re-assigning an existing key does not move it, so
+    # declaration order is still the position of the FIRST occurrence of each
+    # name — stable between turns, per this function's docstring.
+    kept: dict[str, PostTypeSpec] = {}
     for entry in raw:
         if not isinstance(entry, dict):
             logger.warning(
@@ -184,13 +191,17 @@ def parse_post_types(raw: object, *, role: str) -> tuple[PostTypeSpec, ...]:
                         "type will never be offered",
                         role, name, sorted(unknown),
                     )
-        kept.append(
-            PostTypeSpec(
-                name=base.name, emoji=base.emoji, label=base.label,
-                when_to_use=base.when_to_use, targets=targets,
+        if base.name in kept:
+            logger.warning(
+                "[post_types] %s: duplicate post_types entry for %r — the "
+                "later one wins",
+                role, base.name,
             )
+        kept[base.name] = PostTypeSpec(
+            name=base.name, emoji=base.emoji, label=base.label,
+            when_to_use=base.when_to_use, targets=targets,
         )
-    return tuple(kept)
+    return tuple(kept.values())
 
 
 def eligible_targets(
@@ -309,7 +320,9 @@ def render_menu(
             continue
         named = ", ".join(f"`{aid}` (@{bot_names.get(aid, aid + 'Bot')})" for aid in reachable)
         lines.append(
-            head + f" Set `tagged_agent` to exactly one of: {named}. "
-            "Tagging anyone else gets the post rejected."
+            head + f" Set `tagged_agent` to exactly one of: {named}, AND tag "
+            "that same agent's @BotName in the message body — tagged_agent "
+            "alone does not deliver the post; the @-mention is what routes "
+            "it. Tagging anyone else gets the post rejected."
         )
     return "\n".join(lines) if lines else _EMPTY_MENU

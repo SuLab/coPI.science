@@ -260,6 +260,41 @@ def test_parse_targets_override_replaces_the_canonical_default():
     assert got[0].targets == frozenset()
 
 
+def test_parse_dedupes_a_repeated_name_and_the_last_entry_wins(caplog):
+    """Two [[post_types]] tables for the same name used to produce two
+    contradictory lines in the rendered menu while enforcement (`by_name` in
+    `_post_type_rejection`) silently kept only the last — so the model could
+    read a permission the gate had already revoked. Last-wins, with a WARNING,
+    matches `by_name`'s own last-wins-by-construction behaviour."""
+    caplog.set_level("WARNING")
+    got = parse_post_types(
+        [
+            {"name": "pitch", "targets": ["scout_hub"]},
+            {"name": "pitch", "targets": []},
+        ],
+        role="pi_lab",
+    )
+    assert _by_name(got) == {"pitch"}
+    assert len(got) == 1
+    assert got[0].targets == frozenset()
+    assert "duplicate" in caplog.text.lower()
+    assert "pitch" in caplog.text
+
+
+def test_parse_dedupe_preserves_first_occurrence_position():
+    """Declaration order is the menu's rendering order and must stay stable
+    between turns even when a later duplicate wins on content."""
+    got = parse_post_types(
+        [
+            {"name": "paper"},
+            {"name": "pitch", "targets": ["scout_hub"]},
+            {"name": "paper"},  # duplicate, later — content wins, position doesn't move
+        ],
+        role="pi_lab",
+    )
+    assert [s.name for s in got] == ["paper", "pitch"]
+
+
 # --- render_menu ------------------------------------------------------------
 
 def test_render_menu_names_every_available_type_with_its_emoji():
@@ -313,6 +348,19 @@ def test_render_menu_enumerates_when_the_gate_is_on():
     )
     assert "one of:" in out
     assert "blackbird" in out
+
+
+def test_render_menu_enumerated_branch_also_requires_the_body_mention():
+    """tagged_agent alone routes nothing (phase-3 activation and thread
+    participation both scan the message BODY for an @-mention — see
+    src/agent/message_log.py). The gate-set branch is the production path (a
+    star topology), so it must say so, the same as the gate=None branch
+    already does."""
+    out = render_menu(
+        [CANONICAL["pitch"]], gate=STAR_GATE, roles_by_agent=STAR_ROLES,
+        self_id="gill", bot_names=BOT_NAMES,
+    )
+    assert "@BotName" in out or "message body" in out.lower()
 
 
 def test_render_menu_names_the_reachable_agent_for_an_addressed_type():

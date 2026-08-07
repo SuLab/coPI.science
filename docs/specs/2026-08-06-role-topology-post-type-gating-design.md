@@ -107,7 +107,9 @@ Mirrors the existing `tools` key and is enforced the two ways `tools_for_role` i
 (`src/agent/tools.py:128` filters what the model sees; `:148` refuses at dispatch).
 
 Shape of the key (illustrative — `targets` names the `AgentRegistry` roles a type may
-address; empty or absent means the type addresses no one):
+address; an EXPLICIT empty list means the type addresses no one, while an ABSENT key
+instead inherits that type's CANONICAL default, which may not be empty — `paper` here
+has no `targets` line only because its canonical default already is empty):
 
 ```toml
 [[post_types]]

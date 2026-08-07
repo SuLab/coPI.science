@@ -321,6 +321,73 @@ async def test_a_rejected_post_re_increments_the_skip_backoff(monkeypatch):
     assert gill.state.consecutive_phase5_skips == 1
 
 
+async def test_repeated_rejections_accumulate_instead_of_pinning_at_one(monkeypatch):
+    """The reset (`consecutive_phase5_skips = 0`, applied to every "real
+    action" before the post-type gate runs) used to erase the streak on every
+    single turn, so the rejection right after it always landed on a bare `1`
+    no matter how many times in a row this agent got rejected. That pins the
+    proactive-selection damping (`skips >= 3` in _select_next_agent) off
+    forever for an agent that keeps reaching for an unavailable type — it gets
+    rejected at full weight and full cadence, burning a max_tokens=2500 Opus
+    call every time. Three consecutive rejections of the same agent must climb
+    1, 2, 3 — not sit at 1."""
+    gill = _spoke("gill")
+    gill.allowed_sender_ids = {"gill", "blackbird"}
+    hub, pearce = _hub(), _spoke("pearce")
+    hub.allowed_sender_ids = {"gill", "blackbird", "pearce"}
+    pearce.allowed_sender_ids = {"pearce", "blackbird"}
+    from tests.fakes import FakeSlackClient
+
+    client = FakeSlackClient(agent_id="gill")
+    eng = SimulationEngine(agents=[gill, hub, pearce], slack_clients={"gill": client})
+
+    async def _fake_generate(**kwargs):
+        return _REJECTED_L1
+
+    monkeypatch.setattr(
+        "src.agent.simulation.get_settings",
+        lambda: types.SimpleNamespace(
+            daily_post_cap=50, active_thread_threshold=12,
+            unreviewed_proposal_block_count=3, phase5_skip_probability=0.0,
+            llm_agent_model_opus="test-model",
+        ),
+    )
+    monkeypatch.setattr(gill, "build_phase5_prompt", lambda **kw: ("sys", []))
+    monkeypatch.setattr("src.agent.simulation.generate_agent_response", _fake_generate)
+
+    streak = []
+    for _ in range(3):
+        await eng._phase5_new_post(gill)
+        streak.append(gill.state.consecutive_phase5_skips)
+
+    assert streak == [1, 2, 3]
+
+
+# Layer 1-3 all pass this one: `paper` is a broadcast type and tagged_agent is
+# null. But the BODY names an agent gill's cohort gate forbids — the exact
+# scenario the JSON-only gate does not catch. `_strip_disallowed_tags` would
+# silently delete " @PearceBot" and publish ":newspaper: Paper —, your recent
+# finding..." if nothing rejected it first.
+_MUTILATED_BODY = _response(
+    "paper", None, ":newspaper: Paper — @PearceBot, your recent finding on X was great."
+)
+
+
+async def test_an_unreachable_mention_in_the_body_publishes_nothing(monkeypatch, caplog):
+    """The gate validates the JSON declaration, but the mutilation it exists to
+    prevent is driven by the message BODY, which the JSON-only checks above
+    never look at. Production evidence: 42 of 259 posts named a lab in prose
+    with no tag set. This must reject outright rather than strip-and-publish."""
+    caplog.set_level("WARNING")
+    eng, gill, client = await _drive(monkeypatch, _MUTILATED_BODY)
+
+    assert client.posted == []
+    assert gill.message_count == 0
+    assert gill.state.consecutive_phase5_skips == 1
+    assert "rejected new post" in caplog.text
+    assert "mention" in caplog.text.lower()
+
+
 async def test_an_allowed_post_still_goes_out(monkeypatch):
     """The other half: enforcement that rejects everything would also pass the
     tests above."""

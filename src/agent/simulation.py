@@ -2223,7 +2223,18 @@ class SimulationEngine:
                 logger.warning("[%s] Phase 5: No message text in response", agent.agent_id)
                 return
 
-            # Real action — reset skip backoff
+            # Real action — reset skip backoff. Capture the pre-reset value
+            # first: several rejection paths below (back-to-back private-
+            # channel post, funding announcement-only/acknowledgment-only
+            # replies, the post-type rejection further down) re-increment the
+            # streak AFTER this reset zeroes it, so a bare `+= 1` there always
+            # lands on 1 no matter how many times in a row this agent gets
+            # rejected — the damping at _select_next_agent (`skips >= 3`) never
+            # engages and a hopeless agent gets picked, and burns an
+            # LLM call, every bit as often as a productive one. Pre-existing
+            # bug at the back-to-back/funding-reply rejections below — not
+            # fixed here — but the post-type rejection uses `previous + 1`.
+            previous_skips = agent.state.consecutive_phase5_skips
             agent.state.consecutive_phase5_skips = 0
             agent.state.last_phase5_action_time = time.time()
 
@@ -2280,7 +2291,20 @@ class SimulationEngine:
             # covers every outbound path instead of only this one. Phase 5 still
             # needs the *cleaned* text locally, though: the tagged_agent decision
             # and _check_private_channel_outcome below both read message_text.
+            #
+            # The JSON `post_type`/`tagged_agent` pair is not the only place a
+            # disallowed mention can hide — a spoke can also name an
+            # unreachable lab in PROSE with tagged_agent left null, which
+            # layers 1-3 below wave through (a broadcast type addresses no one
+            # by declaration). Recording whether THIS strip actually removed
+            # something lets the new-post branch reject that case instead of
+            # publishing a body with the mention silently deleted out from
+            # under it — see the mutilation check below.
+            tags_stripped_before = self._cohort_tags_stripped.get(agent.agent_id, 0)
             message_text = self._strip_disallowed_tags(message_text, agent)
+            body_mention_was_stripped = (
+                self._cohort_tags_stripped.get(agent.agent_id, 0) > tags_stripped_before
+            )
 
             if action == "reply" and target_post_id:
                 # Enforce thread participation rules
@@ -2404,7 +2428,26 @@ class SimulationEngine:
                         "[%s] Phase 5: rejected new post in #%s — %s",
                         agent.agent_id, channel, rejection,
                     )
-                    agent.state.consecutive_phase5_skips += 1
+                    agent.state.consecutive_phase5_skips = previous_skips + 1
+                    return
+                # Layer 1-3 judge the JSON declaration, but the mutilation this
+                # whole gate exists to prevent is driven by the message BODY.
+                # A broadcast type with tagged_agent=null sails through the
+                # check above even when the body itself @-mentions an
+                # unreachable lab in prose — and the strip above would then
+                # publish the post with that mention silently deleted,
+                # producing exactly the dangling-ask artifact (measured in
+                # production: 42 of 259 posts named a lab in prose with no
+                # tag). Reject instead of publishing a mutilated body.
+                if body_mention_was_stripped:
+                    logger.warning(
+                        "[%s] Phase 5: rejected new post in #%s — the message "
+                        "body @-mentions an agent this cohort gate cannot "
+                        "reach; publishing it would silently delete that "
+                        "mention rather than deliver it (post_type=%r)",
+                        agent.agent_id, channel, post_type,
+                    )
+                    agent.state.consecutive_phase5_skips = previous_skips + 1
                     return
                 # New top-level post
                 posted = await self._post_message(agent.agent_id, channel, message_text)

@@ -6,8 +6,10 @@ tools = ["retrieve_profile", "retrieve_abstract", "retrieve_full_text", "search_
 # DEFAULT_POST_TYPES (see src/agent/post_types.py) — declared explicitly so that
 # adding a new type to the default set never silently hands it to the hub.
 #
-# `targets` names the AgentRegistry roles this post type may address. Empty or
-# absent means the post addresses no one (a broadcast). A type whose targets
+# `targets` names the AgentRegistry roles this post type may address. An
+# EXPLICIT empty list (`targets = []`) means the post addresses no one (a
+# broadcast); an ABSENT key instead inherits that type's CANONICAL default
+# from src/agent/post_types.py, which may not be empty. A type whose targets
 # cannot be satisfied from the agent's live cohort gate is dropped from the menu
 # and rejected at dispatch.
 
