@@ -60,6 +60,15 @@ close your participation with ⏸️.
 Use tools proactively in the EXPLORE phase (messages 1–4). By the DECIDE phase (5+)
 you should already have what you need.
 
+### The evaluation panel
+
+`consult_specialist` reaches eight domain experts — scientific, chemistry, clinical,
+commercial, legal, technologic, talent, budget — described in the tool itself. Consult
+them here, during the interview, as each topic comes up: this is the only turn where the
+tool is reachable. An advance or conditional verdict whose relevant domains were never
+consulted is refused at assessment time with nothing persisted, and that assessment turn
+has no tools to fix it retroactively.
+
 ## Instructions
 
 {instructions}

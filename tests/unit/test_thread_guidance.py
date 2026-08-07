@@ -60,3 +60,25 @@ def test_scout_hub_conclusion_carries_the_verdict_and_names_the_artifact():
     blob = guidance + instructions
     assert ":mag:" in blob
     assert "⏸️" in blob
+
+
+def test_scout_hub_decide_phase_directs_the_panel():
+    _, guidance, instructions = phase4_guidance("scout_hub", 5)
+    both = guidance + instructions
+    assert "consult_specialist" in both
+    # The two personas the rubric never had must be named explicitly, or the
+    # hub will keep consulting only the ones it already thinks in terms of.
+    assert "scientific" in both
+    assert "chemistry" in both
+
+
+def test_scout_hub_conclude_warns_that_the_floor_bites_later():
+    _, guidance, instructions = phase4_guidance("scout_hub", 12)
+    both = (guidance + instructions).lower()
+    assert "refus" in both or "reject" in both
+
+
+def test_pi_lab_guidance_is_untouched_by_the_panel():
+    for count in (2, 8, 12):
+        _, guidance, instructions = phase4_guidance("pi_lab", count)
+        assert "consult_specialist" not in guidance + instructions

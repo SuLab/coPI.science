@@ -83,7 +83,13 @@ _SCOUT_HUB = {
         "whether selective modulation is achievable and by what modality, and whether "
         "proof of mechanism is established. If the idea clearly cannot clear the bar, "
         "start your reply with ⏸️ and say so specifically — an honest 'no' is more "
-        "useful to Blackbird than an inflated maybe.",
+        "useful to Blackbird than an inflated maybe.\n\n"
+        "Consult the panel as you go, with consult_specialist — not at the end. Their "
+        "questions_to_ask become your next question to the PI, which is the whole value; "
+        "asking after you have formed a view wastes them. Consult `scientific` whenever "
+        "the PI makes an experimental claim and `chemistry` whenever chemical matter or a "
+        "modality comes up: those two decide most real Blackbird rejections and are the "
+        "two this rubric historically had no way to ask about.",
         "Write a reply that closes the biggest gap in your screen. Ask about the gating "
         "criteria you still cannot answer — Baltimore commitment, licensable IP, FTO — or "
         "about differentiation, market, or external validation. One or two specific "
@@ -106,7 +112,11 @@ _SCOUT_HUB = {
         "2. Start your reply with ⏸️ and close gracefully, naming the specific missing "
         "piece that would make this assessable.\n\n"
         "Option 2 is perfectly acceptable — most interviews should end there. Never close "
-        "by proposing that the two labs work together.",
+        "by proposing that the two labs work together.\n\n"
+        "If you are heading for advance or conditional, the domains this idea touches must "
+        "ALREADY have been consulted — the assessment turn has no tools, so a verdict whose "
+        "panel was never convened is refused and nothing is persisted. If you have not "
+        "consulted them by now, either consult them in this reply or conclude at pass.",
     ),
 }
 
