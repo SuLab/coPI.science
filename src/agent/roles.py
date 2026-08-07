@@ -13,6 +13,8 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
+from src.agent.post_types import DEFAULT_POST_TYPES, PostTypeSpec, parse_post_types
+
 logger = logging.getLogger(__name__)
 
 PROMPTS_DIR = Path("prompts")
@@ -36,6 +38,10 @@ class RoleSpec:
     # None means "use the global setting". This exists to pin a specific agent;
     # it is NOT the mechanism — the load signal is (design §4.4). No role sets it.
     calls_per_load_per_window: int | None = None
+    # Layer 1 of post-type gating: what this role may emit as a NEW top-level
+    # post. Defaults to DEFAULT_POST_TYPES, which IS the pi_lab set (pi_lab has
+    # no role.toml — the absence of overrides is pi_lab).
+    post_types: tuple[PostTypeSpec, ...] = DEFAULT_POST_TYPES
 
 
 def available_roles() -> list[str]:
@@ -111,6 +117,8 @@ def load_role(name: str) -> RoleSpec:
             "got %r — ignored", name, rate,
         )
         rate = None
+    post_types = parse_post_types(data.get("post_types"), role=name)
     return RoleSpec(
-        name=name, label=label, tools=tools, calls_per_load_per_window=rate,
+        name=name, label=label, tools=tools,
+        calls_per_load_per_window=rate, post_types=post_types,
     )

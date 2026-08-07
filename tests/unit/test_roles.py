@@ -121,3 +121,46 @@ def test_role_rate_override_rejects_non_int(tmp_path, monkeypatch, caplog):
 def test_missing_manifest_yields_no_rate_override(tmp_path, monkeypatch):
     monkeypatch.setattr(roles, "ROLES_DIR", tmp_path / "roles")
     assert load_role("pi_lab").calls_per_load_per_window is None
+
+
+def test_missing_manifest_yields_default_post_types():
+    from src.agent.post_types import DEFAULT_POST_TYPES
+
+    spec = load_role("definitely_not_a_role_dir")
+    assert spec.post_types == DEFAULT_POST_TYPES
+
+
+def test_manifest_post_types_are_parsed(tmp_path, monkeypatch):
+    _write_role(
+        tmp_path, monkeypatch, "widget",
+        'label = "Widget"\n'
+        '[[post_types]]\nname = "paper"\n'
+        '[[post_types]]\nname = "pitch"\ntargets = ["scout_hub"]\n',
+    )
+    spec = load_role("widget")
+    assert [s.name for s in spec.post_types] == ["paper", "pitch"]
+    assert dict((s.name, s.targets) for s in spec.post_types)["pitch"] == frozenset(
+        {"scout_hub"}
+    )
+
+
+def test_manifest_unknown_post_type_is_dropped(tmp_path, monkeypatch, caplog):
+    caplog.set_level(logging.WARNING)
+    _write_role(
+        tmp_path, monkeypatch, "widget",
+        'label = "Widget"\n'
+        '[[post_types]]\nname = "paper"\n'
+        '[[post_types]]\nname = "nonsense"\n',
+    )
+    spec = load_role("widget")
+    assert [s.name for s in spec.post_types] == ["paper"]
+    assert "nonsense" in caplog.text
+
+
+def test_malformed_toml_still_yields_default_post_types(tmp_path, monkeypatch):
+    from src.agent.post_types import DEFAULT_POST_TYPES
+
+    _write_role(tmp_path, monkeypatch, "broken", "label = = =\n")
+    assert load_role("broken").post_types == DEFAULT_POST_TYPES
+
+
