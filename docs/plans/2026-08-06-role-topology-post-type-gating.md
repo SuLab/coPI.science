@@ -4,7 +4,7 @@
 
 **Goal:** Stop `pi_lab` agents from emitting top-level posts addressed to agents their cohort gate forbids, by making the set of post types an agent may use a function of its role *and* its live topology, enforced in code rather than requested in prose.
 
-**Architecture:** One new dependency-free module, `src/agent/post_types.py`, owns the post-type vocabulary and the filter. `src/agent/roles.py` gains a `post_types` field parsed from `role.toml`. `SimulationEngine` computes the available set once per phase-5 turn, renders it into the prompt as `{post_type_menu}`, and enforces the *same* set when the model answers — so the prompt and the gate can never disagree. A separate ordering fix makes the existing cohort filter on the lab directory actually run.
+**Architecture:** One new dependency-free module, `src/agent/post_types.py`, owns the post-type vocabulary and the filter. `src/agent/roles.py` gains a `post_types` field parsed from `role.toml`. `SimulationEngine` computes the available set once per phase-5 turn, renders it into the prompt as `{post_type_menu}`, and enforces the *same* set when the model answers — so the prompt and the gate can never disagree. A separate ordering fix makes the existing cohort filter on the lab directory actually run. The prompt drafts add the `pitch` type's own guidance and worked example, a hub-thread exception in phase 4, and the two `scout_hub` phase-2 overrides that never existed.
 
 **Tech Stack:** Python 3.11, `tomllib`, pytest + syrupy (snapshot), SQLAlchemy async, Docker Compose.
 
@@ -18,11 +18,20 @@
 - **No migration in this work.** `post_types` is config; `AgentRegistry.role` already exists. Do not add one.
 - **`src/agent/post_types.py` and `src/agent/roles.py` must stay dependency-free** — no `src.models`, no DB, no `Agent` import. That is what makes them unit-testable without a database.
 - **Never run `pytest --snapshot-update` as a blanket command.** Task 6 regenerates exactly eight named snapshots and requires a line-by-line diff review. The `pi_lab` EXPLORE/DECIDE/CONCLUDE strings in `src/agent/thread_guidance.py` must appear **unchanged** in that diff.
-- **`prompts/identity.md` has no trailing newline, deliberately.** `_DEFAULT_IDENTITY` (`src/agent/agent.py:753`) must match it byte-for-byte; see the comment at `:750`.
-- **Do not reword** `### Option C: Make a new top-level post`, `### Option D: Skip this turn`, `## Your subscribed channels`, `## Your recent posts`, `## Prior conversations with other labs`, or the two-line phase-5 intro paragraph. Four regexes in `src/agent/agent.py:599-633` key on them byte-exactly.
-- **The allow-list governs `action: "new_post"` only.** `action: "reply"` is never gated by it.
-- **Gate `None` means no filtering.** Layers 2 and 3 must be provably inert when `agent.allowed_sender_ids is None`, so org1's mesh deployment is unaffected.
+- **`prompts/identity.md` has no trailing newline, deliberately.** `_DEFAULT_IDENTITY` (`src/agent/agent.py:753`) must match it byte-for-byte; see the comment block at `:748-752`.
+- **Do not reword** `### Option C: Make a new top-level post`, `### Option D: Skip this turn`, `## Your subscribed channels`, `## Your recent posts`, `## Prior conversations with other labs`, or the two-line phase-5 intro paragraph. Four regexes plus the intro `.replace()` in `src/agent/agent.py:599-634` key on them byte-exactly.
+- **Do not rename the `{post_type_menu}` token or move its section below `## Instructions`.** The `## Prior conversations with other labs` surgery is non-greedy up to `{prior_conversations}\n`, so the section survives `funding_only` only where it currently sits.
+- **The allow-list governs `action: "new_post"` only.** `action: "reply"` is never gated by it. The one reply-path change in this plan (step 6a) is to the *blocked-agent bypass*, not to the allow-list.
+- **Gate `None`: layer 3 is skipped outright; layer 2 stops filtering by *reachability* only.** `_post_type_rejection` returns `None` immediately once layer 1 passes. `available_for`/`eligible_targets` still run — they stop restricting to gate members, but a `targets` type is still dropped when no agent of a matching role exists on the roster at all. That is deliberate: it is what makes `pitch` disappear in a mesh with no hub, with no per-deployment configuration. Do **not** “fix” it into a full no-op.
+- **`blocked_for_regular` ≠ `funding_only`.** One boolean travels under three names, so be precise: `available_for(funding_only=…)` in `post_types.py` means *“narrow to `FUNDING_POST_TYPES`”* and must receive **`blocked_for_regular`**; the engine passes it through a keyword named `funding_restricted` to keep the two apart at the call site. The handler's own `funding_only` local (`= blocked_for_regular and not has_available_non_funding`) keeps its existing job of driving the template surgery and must **never** reach `_available_post_types`. Passing it there recreates the prompt-versus-enforcement disagreement this plan exists to remove.
+- **A tag on a broadcast type is tolerated if it is reachable.** Rejecting it would destroy a `:mag:` assessment — and the interview behind it — over a field nothing routes on.
 - **Commit style:** end every commit message with `Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>`.
+- **⚠️ Line numbers in this plan are stale on arrival.** `blackbird` takes concurrent commits;
+  `simulation.py` moved twice while this plan was being written (`f7a9f68`/`a247ed8`, then
+  `e116feb`/`44f09be`/`c6943d4`/`f32a83e`/`517a564`, by up to 46 lines). Values here are re-verified at `517a564`; `agent.py`, `roles.py` and `prompts/` were untouched by all five, so only `simulation.py` numbers moved. Every
+  insertion point is also quoted verbatim — **match the quote, not the number**, and re-derive
+  with the `grep` in the spec's §4 before starting. `git log --oneline -1` first: if HEAD is not
+  `517a564`, assume every `simulation.py` number is wrong.
 
 ## File Structure
 
@@ -31,9 +40,9 @@
 | `src/agent/post_types.py` *(new)* | The canonical vocabulary, `DEFAULT_POST_TYPES`, `parse_post_types`, `available_for`, `eligible_targets`, `render_menu`. Pure functions over plain data. |
 | `src/agent/roles.py` *(modify)* | Add `RoleSpec.post_types`; parse and degrade the `role.toml` key. |
 | `prompts/roles/scout_hub/role.toml` *(modify)* | Declare the hub's two post types. |
-| `src/agent/agent.py` *(modify)* | Substitute `{post_type_menu}` in `build_phase5_prompt`. |
-| `src/agent/simulation.py` *(modify)* | Compute the set, pass the menu, enforce L1/L2/L3; fix the lab-directory ordering and add the gate-change rebuild. |
-| `prompts/*.md`, `prompts/roles/scout_hub/*.md` *(modify)* | Install the reviewed drafts. |
+| `src/agent/agent.py` *(modify)* | Substitute `{post_type_menu}` in `build_phase5_prompt`, defaulting to the agent's own role set. |
+| `src/agent/simulation.py` *(modify)* | Compute the set, pass the menu, enforce L1/L2/L3; close the reply-path `funding_collab` bypass; fix the lab-directory ordering and add the gate-change rebuild. |
+| `prompts/*.md`, `prompts/roles/scout_hub/*.md` *(modify/create)* | Install the reviewed drafts — 7 modified, 2 new `scout_hub` phase-2 overrides. |
 | `tests/unit/test_post_types.py` *(new)* | The vocabulary, filter, and renderer. |
 | `tests/unit/test_roles.py` *(modify)* | `post_types` parsing + degradation; add `{post_type_menu}` to the two token lists. |
 | `tests/unit/test_lab_directory_ordering.py` *(new)* | The production-order regression and the gate-change rebuild. |
@@ -58,6 +67,7 @@
   - `available_for(declared, *, gate, roles_by_agent, self_id, funding_only: bool) -> tuple[PostTypeSpec, ...]`
   - `render_menu(specs, *, gate, roles_by_agent, self_id, bot_names: dict[str, str]) -> str`
   - `FUNDING_POST_TYPES: frozenset[str]` — `{"funding_collab"}`
+  - `LEGACY_POST_TYPE_ALIASES: dict[str, str]` and `resolve_post_type_name(name) -> str`
 
 - [ ] **Step 1: Write the failing test**
 
@@ -69,14 +79,18 @@ Create `tests/unit/test_post_types.py`:
 Pure functions over plain data — no DB, no engine, no Agent. See
 docs/specs/2026-08-06-role-topology-post-type-gating-design.md §2, §3.
 """
+import logging
+
 from src.agent.post_types import (
     CANONICAL,
     DEFAULT_POST_TYPES,
     FUNDING_POST_TYPES,
+    LEGACY_POST_TYPE_ALIASES,
     available_for,
     eligible_targets,
     parse_post_types,
     render_menu,
+    resolve_post_type_name,
 )
 
 # The star: a spoke may reach only itself, the hub, and grantbot (which has no
@@ -104,6 +118,29 @@ def test_idea_is_not_a_type_anymore():
     """`idea` and `idea_crosslab` were both in the old enum with no documented
     difference and no code distinguishing them. Collapsed to one."""
     assert "idea" not in CANONICAL
+    assert "idea" not in _by_name(DEFAULT_POST_TYPES)
+
+
+def test_the_retired_idea_name_still_resolves():
+    """Retired in the vocabulary, still accepted on input. A mesh deployment
+    whose prompts lag the code must not have its posts silently deleted."""
+    assert resolve_post_type_name("idea") == "idea_crosslab"
+
+
+def test_resolve_passes_current_and_unknown_names_through():
+    assert resolve_post_type_name("paper") == "paper"
+    assert resolve_post_type_name("nonsense") == "nonsense"
+
+
+def test_an_alias_is_never_offered_as_a_type():
+    """Resolving on input must not put the retired name back in circulation."""
+    for alias in LEGACY_POST_TYPE_ALIASES:
+        assert alias not in CANONICAL
+        out = render_menu(
+            DEFAULT_POST_TYPES, gate=None, roles_by_agent=MESH_ROLES,
+            self_id="gill", bot_names=BOT_NAMES,
+        )
+        assert f"**`{alias}`**" not in out
 
 
 def test_default_post_types_is_the_pi_lab_set():
@@ -142,12 +179,16 @@ def test_eligible_targets_finds_the_hub_for_pitch():
 
 
 def test_eligible_targets_ignores_agents_with_no_known_role():
-    """grantbot has cohort memberships but no AgentRegistry row, so it matches
-    no `targets` — it is a funding announcer, not a pitch recipient."""
-    got = eligible_targets(
-        CANONICAL["pitch"], gate=STAR_GATE, roles_by_agent=STAR_ROLES, self_id="gill"
-    )
-    assert "grantbot" not in got
+    """grantbot is in the gate but has no AgentRegistry row and is a separate
+    process, never an entry in self.agents — so it never appears in
+    roles_by_agent and matches no `targets`. It is a funding announcer, not a
+    pitch recipient. Asserted for BOTH addressed types so the exclusion is not
+    an accident of `pitch` happening to find the hub first."""
+    for name in ("pitch", "idea_crosslab", "funding_collab"):
+        got = eligible_targets(
+            CANONICAL[name], gate=STAR_GATE, roles_by_agent=STAR_ROLES, self_id="gill"
+        )
+        assert "grantbot" not in got
 
 
 def test_eligible_targets_is_empty_for_a_lab_peer_in_the_star():
@@ -184,7 +225,7 @@ def test_mesh_keeps_lab_peer_types_and_drops_pitch():
     }
 
 
-def test_gate_off_never_filters_a_broadcast_type():
+def test_gate_off_keeps_every_broadcast_type():
     got = available_for(
         DEFAULT_POST_TYPES, gate=None, roles_by_agent={}, self_id="gill", funding_only=False,
     )
@@ -201,8 +242,10 @@ def test_funding_only_restricts_to_funding_types():
 
 
 def test_funding_only_in_the_star_is_empty():
-    """The case that must NOT skip the turn — Option A (a funding reply) is still
-    legitimate. See spec §5."""
+    """Empty is the correct answer here, and the engine must NOT read it as
+    "skip the turn" — Option A (a funding reply) is still legitimate. That half
+    is enforced in test_post_type_enforcement.py, not here; this only pins that
+    the set really is empty. See spec §5."""
     got = available_for(
         DEFAULT_POST_TYPES, gate=STAR_GATE, roles_by_agent=STAR_ROLES,
         self_id="gill", funding_only=True,
@@ -221,8 +264,15 @@ def test_available_for_preserves_declaration_order():
 
 # --- parse_post_types -------------------------------------------------------
 
-def test_parse_none_yields_the_defaults():
+def test_parse_none_yields_the_defaults(caplog):
+    """Spec §5 row 1 says "DEFAULT_POST_TYPES, WARNING once". The defaults are
+    the correct answer for pi_lab, which HAS no manifest by design, so warning
+    on every load would be noise on the common path — the warning belongs to a
+    role that has a manifest and forgot the key. Pinned here so the divergence
+    from §5 is a decision on record, not a silent omission."""
+    caplog.set_level(logging.WARNING)
     assert parse_post_types(None, role="pi_lab") == DEFAULT_POST_TYPES
+    assert caplog.text == ""
 
 
 def test_parse_reads_name_and_targets():
@@ -251,11 +301,29 @@ def test_parse_drops_a_malformed_entry_and_keeps_the_rest(caplog):
 
 def test_parse_warns_when_targets_names_a_role_that_cannot_exist(caplog):
     """A typo'd role means the type is silently never offered — say so at load."""
+    caplog.set_level(logging.WARNING)
     got = parse_post_types(
         [{"name": "pitch", "targets": ["scout_hubb"]}], role="pi_lab"
     )
     assert _by_name(got) == {"pitch"}
     assert "scout_hubb" in caplog.text
+
+
+def test_a_typod_target_role_really_is_never_offered(caplog):
+    """The other half of that §5 row. The WARNING is only useful if the
+    behaviour it predicts is real: no agent can ever satisfy `scout_hubb`, so
+    the type is filtered out of every menu on every topology."""
+    caplog.set_level(logging.WARNING)
+    declared = parse_post_types(
+        [{"name": "paper"}, {"name": "pitch", "targets": ["scout_hubb"]}],
+        role="pi_lab",
+    )
+    for gate, roles in ((STAR_GATE, STAR_ROLES), (None, MESH_ROLES)):
+        got = available_for(
+            declared, gate=gate, roles_by_agent=roles, self_id="gill",
+            funding_only=False,
+        )
+        assert _by_name(got) == {"paper"}
 
 
 def test_parse_of_a_non_list_yields_the_defaults(caplog):
@@ -282,6 +350,45 @@ def test_render_menu_names_every_available_type_with_its_emoji():
         assert CANONICAL[name].emoji in out
         assert name in out
     assert "idea_crosslab" not in out
+
+
+def test_render_menu_never_prints_an_empty_enumeration():
+    """The bug this exists to stop: `Set tagged_agent to exactly one of: .`
+
+    build_phase5_prompt renders a default menu when no caller supplies one, and
+    test_phase5_prompt_gm goes down that path — so an empty enumeration would be
+    committed into a characterization snapshot and shipped to a live model.
+    """
+    for gate, roles in ((None, {}), (None, MESH_ROLES), ({"gill"}, {"gill": "pi_lab"})):
+        out = render_menu(
+            DEFAULT_POST_TYPES, gate=gate, roles_by_agent=roles,
+            self_id="gill", bot_names={},
+        )
+        assert "one of: ." not in out
+        assert "one of: \n" not in out
+        assert out.strip()
+
+
+def test_render_menu_does_not_enumerate_when_the_gate_is_off():
+    """A mesh has ~50 reachable labs. Enumerating them in every phase-5 prompt
+    would recreate the 46 KB lab directory this design is shrinking, so gate
+    None renders guidance instead of a list."""
+    out = render_menu(
+        [CANONICAL["idea_crosslab"]], gate=None, roles_by_agent=MESH_ROLES,
+        self_id="gill", bot_names=BOT_NAMES,
+    )
+    assert "pearce" not in out and "wu" not in out
+    assert "pi_lab" in out
+    assert "agent_id" in out
+
+
+def test_render_menu_enumerates_when_the_gate_is_on():
+    out = render_menu(
+        [CANONICAL["pitch"]], gate=STAR_GATE, roles_by_agent=STAR_ROLES,
+        self_id="gill", bot_names=BOT_NAMES,
+    )
+    assert "one of:" in out
+    assert "blackbird" in out
 
 
 def test_render_menu_names_the_reachable_agent_for_an_addressed_type():
@@ -437,6 +544,24 @@ DEFAULT_POST_TYPES: tuple[PostTypeSpec, ...] = (
 # for regular posts) the available set is narrowed to these.
 FUNDING_POST_TYPES: frozenset[str] = frozenset({"funding_collab"})
 
+# Retired names a running deployment may still emit. ``idea`` sat in the old
+# phase-5 enum alongside ``idea_crosslab`` with no documented difference and no
+# code distinguishing them (design §2), so collapsing them is right — but a mesh
+# deployment whose bind-mounted prompts lag the baked-in code would otherwise
+# have every ``idea`` post rejected by layer 1 and silently publish nothing.
+# That is a regression in a deployment this change is not supposed to touch.
+#
+# Aliases resolve on INPUT only. They are deliberately absent from CANONICAL,
+# from any role's declared list, and from every rendered menu, so nothing here
+# re-offers a name the vocabulary retired.
+LEGACY_POST_TYPE_ALIASES: dict[str, str] = {"idea": "idea_crosslab"}
+
+
+def resolve_post_type_name(name: str) -> str:
+    """Map a retired post-type name onto its current one; pass anything else through."""
+    return LEGACY_POST_TYPE_ALIASES.get(name, name)
+
+
 # Roles a `targets` entry may name. Kept here rather than imported from roles.py
 # to avoid a cycle; roles.available_roles() is filesystem-derived and would make
 # this module depend on the prompts directory.
@@ -586,9 +711,16 @@ def render_menu(
 ) -> str:
     """Render the available set as the prompt's ``{post_type_menu}``.
 
-    Never returns an empty string: an empty set renders an explicit statement
-    plus the two actions that remain valid, because a blank menu under a heading
-    promising a list reads to the model as a rendering bug.
+    Never returns an empty string, and never prints an empty enumeration. An
+    addressed type has two renderings:
+
+    - **gate set** — enumerate the reachable agents, because the list is short
+      and naming them is the whole point.
+    - **gate None** — guidance only. A mesh has ~50 reachable labs; enumerating
+      them into every phase-5 prompt would recreate the lab directory this
+      design is shrinking. It is also the path a caller with no topology takes
+      (``build_phase5_prompt`` with no menu), where the enumeration would come
+      out as the literal ``one of: .`` and land in a snapshot.
     """
     if not specs:
         return _EMPTY_MENU
@@ -599,17 +731,31 @@ def render_menu(
             lines.append(head + " Addresses no one — do not tag anyone; set "
                                 "`tagged_agent` to `null`.")
             continue
+        if gate is None:
+            roles = " or ".join(sorted(s.targets))
+            lines.append(
+                head + f" Addresses one agent whose role is {roles} — set "
+                "`tagged_agent` to that agent's `agent_id` and tag its @BotName "
+                "in the message body."
+            )
+            continue
         reachable = sorted(
             eligible_targets(
                 s, gate=gate, roles_by_agent=roles_by_agent, self_id=self_id
             )
         )
+        if not reachable:
+            # available_for already drops these, so reaching here means the
+            # caller passed an unfiltered list. Drop it rather than printing
+            # "Set tagged_agent to exactly one of: ." — offering a type with an
+            # empty target list is worse than not offering it.
+            continue
         named = ", ".join(f"`{aid}` (@{bot_names.get(aid, aid + 'Bot')})" for aid in reachable)
         lines.append(
             head + f" Set `tagged_agent` to exactly one of: {named}. "
             "Tagging anyone else gets the post rejected."
         )
-    return "\n".join(lines)
+    return "\n".join(lines) if lines else _EMPTY_MENU
 ```
 
 - [ ] **Step 4: Run the tests to verify they pass**
@@ -740,7 +886,7 @@ Add the field to `RoleSpec` (after `calls_per_load_per_window`):
 
 `RoleSpec` is `@dataclass(frozen=True)` and `post_types` has a default, so it must come after every other defaulted field. `calls_per_load_per_window` already has a default, so appending is correct.
 
-In `load_role`, both early returns must now name it explicitly (they already pass `tools=DEFAULT_TOOLS`; the `post_types` default applies automatically, so **no change is needed to the two early returns**). Add the parse before the final `return RoleSpec(`:
+**The two early returns need no change.** Both (`roles.py:84-85` no manifest, `:88-90` malformed TOML) construct `RoleSpec(name=name, label=name, tools=DEFAULT_TOOLS)`, and the new field's default supplies `DEFAULT_POST_TYPES` — which is exactly the right answer on both paths. Add the parse before the final `return RoleSpec(`:
 
 ```python
     post_types = parse_post_types(data.get("post_types"), role=name)
@@ -760,9 +906,13 @@ and extend the final return:
 Replace `prompts/roles/scout_hub/role.toml` with the reviewed draft:
 
 ```bash
-cp docs/specs/2026-08-06-post-type-gating-prompts-draft/roles/scout_hub/role.toml \
+cp docs/specs/2026-08-06-post-type-gating-prompts-draft/prompts/roles/scout_hub/role.toml \
    prompts/roles/scout_hub/role.toml
+git diff --stat prompts/roles/scout_hub/role.toml   # must show exactly this one file
 ```
+
+Note the `prompts/` path segment: the draft directory mirrors `prompts/`, so the source is
+`…-draft/prompts/roles/scout_hub/role.toml`, not `…-draft/roles/scout_hub/role.toml`.
 
 - [ ] **Step 5: Run the tests**
 
@@ -785,10 +935,10 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 
 ### Task 3: Fix the lab-directory ordering
 
-This task is independent of Tasks 1, 2, 4, 5 and can be done in any order relative to them. It is the change that makes the *existing* cohort filter run at all.
+This task is independent of Tasks 1, 2, 4 and 5 in its *logic*, but **not** in its file: Task 3 and Task 5 both edit `src/agent/simulation.py` and both commit it with a bare `git add src/agent/simulation.py`. Do Task 3 **before** Task 5, or Task 3's commit sweeps up whatever Task 5 has left uncommitted. It is the change that makes the *existing* cohort filter run at all.
 
 **Files:**
-- Modify: `src/agent/simulation.py` (`start()` `:508`/`:533`; `_sync_roster_from_db` `:4500`/`:4502` and `:4545`/`:4555`; `_recompute_allowed_sender_ids` tail `:4641-4667`)
+- Modify: `src/agent/simulation.py` (`start()` `:508`/`:533`; `_sync_roster_from_db` `:4549`/`:4551` and `:4594`/`:4604`; `_recompute_allowed_sender_ids` tail)
 - Test: `tests/unit/test_lab_directory_ordering.py` *(new)*
 
 **Interfaces:**
@@ -802,7 +952,7 @@ Create `tests/unit/test_lab_directory_ordering.py`:
 ```python
 """The lab directory must be gate-scoped in the order production builds it.
 
-src/agent/simulation.py:3615 filters the directory by allowed_sender_ids, but
+src/agent/simulation.py's _build_lab_directories filters the directory by allowed_sender_ids, but
 start() built it at :508 and only computed the gate at :533 — so every gate was
 still None and the filter no-opped. On a stable roster it was never rebuilt.
 
@@ -876,14 +1026,85 @@ def test_gate_off_still_lists_every_other_lab():
     eng = SimulationEngine(agents=[a, b], slack_clients={})
     eng.refresh_lab_directories()
     assert "paper B" in (a._lab_directory or "")
+
+
+# --- the two that pin the actual bug ----------------------------------------
+#
+# Everything above calls refresh_lab_directories() by hand, which is what the
+# PRE-EXISTING test did — and it is why the bug survived. The predicate was
+# never broken; the ORDER was. These two guard the order.
+
+
+def test_start_computes_the_gate_before_it_builds_the_directory():
+    """A source assertion, deliberately.
+
+    start() does too much I/O to drive in a unit test, and the failure mode is a
+    reordering — exactly the edit a future refactor makes silently, and exactly
+    what no behavioural test in this file would catch. Reading the source is
+    crude but it is the thing that was actually wrong.
+    """
+    import inspect
+
+    src = inspect.getsource(SimulationEngine.start)
+    gate = src.index("_recompute_allowed_sender_ids")
+    build = src.index("refresh_lab_directories")
+    assert gate < build, (
+        "start() builds the lab directory before computing the cohort gate; "
+        "every agent's allowed_sender_ids is still None at that point, so the "
+        "filter inside _build_lab_directories no-ops"
+    )
+
+
+async def test_recompute_refreshes_the_directory_when_it_disables_the_gate(monkeypatch):
+    """The durable half of the fix, driven through the real method.
+
+    _recompute_allowed_sender_ids owns the gate, so it must own the directory
+    derived from it. The isolation-disabled path is the cheap way to prove that
+    without a database: it sets every gate to None, and the directory must widen
+    to match instead of staying scoped to a gate that no longer applies.
+    """
+    import types
+
+    monkeypatch.setattr(
+        "src.agent.simulation.get_settings",
+        lambda: types.SimpleNamespace(cohort_isolation_enabled=False),
+    )
+    a, b = _agent("a", "paper A"), _agent("b", "paper B")
+    a.allowed_sender_ids = {"a"}          # isolated under the old topology
+    b.allowed_sender_ids = {"b"}
+    eng = SimulationEngine(agents=[a, b], slack_clients={})
+    eng.refresh_lab_directories()
+    assert a._lab_directory is None       # correctly empty while isolated
+
+    await eng._recompute_allowed_sender_ids()
+
+    assert a.allowed_sender_ids is None
+    assert "paper B" in (a._lab_directory or ""), (
+        "the gate was disabled but the directory still reflects the old one"
+    )
 ```
+
+The isolation-disabled path returns before it touches `self.session_factory`, so the
+`SimpleNamespace` needs only `cohort_isolation_enabled` — see
+`_recompute_allowed_sender_ids`'s first branch. `tests/unit/test_cohort_isolation.py:126`
+has a fuller `_settings()` helper if a later test needs the gate *on*.
 
 - [ ] **Step 2: Run to verify it fails**
 
 Run: `.venv-test/bin/python -m pytest tests/unit/test_lab_directory_ordering.py -q`
-Expected: FAIL — `AttributeError: 'SimulationEngine' object has no attribute 'refresh_lab_directories'`
 
-- [ ] **Step 3: Add the public alias and fix the three call sites**
+Expected: every test FAILS, but **not all for the same reason** — check which:
+- the four that construct an engine: `AttributeError: 'SimulationEngine' object has no attribute 'refresh_lab_directories'`
+- `test_start_computes_the_gate_before_it_builds_the_directory`: `ValueError: substring not found`, from `src.index("refresh_lab_directories")`. It never touches an instance.
+- `test_recompute_refreshes_the_directory_when_it_disables_the_gate`: same `AttributeError`, from the setup call.
+
+- [ ] **Step 3a: Add the alias and route the existing call sites through it — WITHOUT reordering**
+
+This half exists so the ordering test can fail for the reason it claims. If you add the alias and
+fix the order in one edit, there is no state in which `test_start_computes_the_gate_before_it_builds_the_directory`
+fails on its *assertion*, so nothing ever proves it can detect the bug.
+
+In `src/agent/simulation.py`, immediately after the `_build_lab_directories` definition, add:
 
 In `src/agent/simulation.py`, immediately after the `_build_lab_directories` definition, add:
 
@@ -896,7 +1117,20 @@ In `src/agent/simulation.py`, immediately after the `_build_lab_directories` def
         self._build_lab_directories()
 ```
 
-In `start()`, delete the call at `:508` and add one after `:533`:
+Then swap the three existing `self._build_lab_directories()` call sites (`:508`, `:4549`,
+`:4594`) to `self.refresh_lab_directories()` — **same positions, no reordering yet.**
+
+Now re-run: `.venv-test/bin/python -m pytest tests/unit/test_lab_directory_ordering.py -q`
+
+Expected: `test_start_computes_the_gate_before_it_builds_the_directory` now fails on its
+**assertion** (`start() builds the lab directory before computing the cohort gate`), and
+`test_recompute_refreshes_the_directory_when_it_disables_the_gate` fails on the stale directory.
+Those two failures are the bug, reproduced. If either passes here, the test is not measuring
+what it claims and step 3b will not prove anything.
+
+- [ ] **Step 3b: Reorder — the actual fix**
+
+In `start()`, delete the `self.refresh_lab_directories()` at `:508` and add one after `:533`:
 
 ```python
         await self._recompute_allowed_sender_ids()
@@ -919,22 +1153,20 @@ Replace with:
 
 ```python
             if not to_remove and not to_add:
-                # Recompute the gate FIRST; the directory rebuild below reads it.
-                # _recompute_allowed_sender_ids refreshes the directory itself
-                # whenever the gate signature moves, so only a role change needs
-                # an unconditional rebuild here.
+                # Recompute the gate FIRST: _recompute_allowed_sender_ids ends by
+                # refreshing the directory (step 4), so after this line the
+                # directory already agrees with the gate. The role branch stays
+                # because a role change alters the directory's *contents*
+                # (pi_name headings) without moving the gate at all.
                 await self._recompute_allowed_sender_ids()
                 if role_changed:
                     self.refresh_lab_directories()
                 return
 ```
 
-In the membership-change path, delete the `self._build_lab_directories()` at `:4545` and let the existing `await self._recompute_allowed_sender_ids()` at `:4555` handle it — then add one line after it:
+In the membership-change path, delete the `self._build_lab_directories()` at `:4594` outright. The existing `await self._recompute_allowed_sender_ids()` at `:4604` now refreshes the directory itself (step 4), so **add nothing** — an extra call here would be a second full rebuild on every roster change for no benefit.
 
-```python
-            await self._recompute_allowed_sender_ids()
-            self.refresh_lab_directories()
-```
+The net effect of steps 3 and 4 together: the directory is rebuilt exactly once per gate recompute, plus once more only when a role changed without the gate moving.
 
 - [ ] **Step 4: Rebuild the directory whenever the gate moves**
 
@@ -954,23 +1186,11 @@ In `_recompute_allowed_sender_ids`, the early returns set every gate to `None` a
 Run: `.venv-test/bin/python -m pytest tests/unit/test_lab_directory_ordering.py tests/unit/test_simulation_logic.py tests/unit/test_roster_sync.py -q`
 Expected: PASS. `test_roster_sync.py:108` stubs `_build_lab_directories` out with a lambda; because `refresh_lab_directories` delegates to it, that stub still works. If it fails, update the stub to patch `refresh_lab_directories` instead.
 
-- [ ] **Step 6: Verify the production-order bug is actually gone**
+- [ ] **Step 6: Confirm the two ordering tests are the ones that moved**
 
-Run:
+Run: `.venv-test/bin/python -m pytest tests/unit/test_lab_directory_ordering.py -q -k "start_computes or recompute_refreshes" -v`
 
-```bash
-.venv-test/bin/python - <<'PY'
-import asyncio, inspect
-from src.agent.simulation import SimulationEngine
-src = inspect.getsource(SimulationEngine.start)
-build = src.index("refresh_lab_directories")
-gate  = src.index("_recompute_allowed_sender_ids")
-print("start(): gate before directory =", gate < build)
-assert gate < build, "start() still builds the directory before the gate exists"
-PY
-```
-
-Expected: `start(): gate before directory = True`
+Expected: both PASS. You already watched both fail on their *assertions* at the end of step 3a — that is what makes this pass meaningful. A test that only ever failed on `AttributeError` proves the method exists, not that the bug is gone.
 
 - [ ] **Step 7: Commit**
 
@@ -995,7 +1215,7 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 ### Task 4: Substitute `{post_type_menu}` in the phase-5 prompt
 
 **Files:**
-- Modify: `src/agent/agent.py` (`build_phase5_prompt` signature `:511-521`; token block `:636-639`)
+- Modify: `src/agent/agent.py` (`build_phase5_prompt` signature `:511-521`; token block `:636-639` — in `agent.py`, unmoved)
 - Test: `tests/unit/test_agent_prompts.py` (append)
 
 **Interfaces:**
@@ -1020,6 +1240,9 @@ def test_phase5_menu_token_is_always_substituted():
 
 
 def test_phase5_menu_defaults_to_the_unfiltered_pi_lab_set():
+    """Assert on the MENU's own rendering, not on bare names: the Option C body
+    also mentions `idea_crosslab` and `pitch`, so `name in content` would pass
+    with no menu rendered at all."""
     from src.agent.agent import Agent
     from src.agent.post_types import DEFAULT_POST_TYPES
 
@@ -1027,7 +1250,30 @@ def test_phase5_menu_defaults_to_the_unfiltered_pi_lab_set():
     _, messages = a.build_phase5_prompt()
     content = messages[0]["content"]
     for spec in DEFAULT_POST_TYPES:
-        assert spec.name in content
+        assert f"**`{spec.name}`**" in content
+
+
+def test_phase5_default_menu_is_the_agents_own_role_not_pi_lab():
+    """A scout_hub agent must not be handed a menu offering `paper`,
+    `idea_crosslab` and `pitch` — its role.toml allows none of them."""
+    from src.agent.agent import Agent
+
+    hub = Agent("blackbird", "BlackbirdBot", "Blackbird", role="scout_hub")
+    _, messages = hub.build_phase5_prompt()
+    content = messages[0]["content"]
+    assert "**`opportunity_assessment`**" in content
+    for forbidden in ("**`paper`**", "**`idea_crosslab`**", "**`pitch`**"):
+        assert forbidden not in content
+
+
+def test_phase5_default_menu_never_prints_an_empty_enumeration():
+    """The default path has no roster to enumerate from. Guarded here as well as
+    in test_post_types because this is the caller that reaches a snapshot."""
+    from src.agent.agent import Agent
+
+    a = Agent("gill", "GillBot", "Gill")
+    _, messages = a.build_phase5_prompt()
+    assert "one of: ." not in messages[0]["content"]
 
 
 def test_phase5_menu_uses_the_caller_supplied_text_when_given():
@@ -1037,7 +1283,9 @@ def test_phase5_menu_uses_the_caller_supplied_text_when_given():
     _, messages = a.build_phase5_prompt(post_type_menu="- ONLY THIS ONE")
     content = messages[0]["content"]
     assert "- ONLY THIS ONE" in content
-    assert "idea_crosslab" not in content
+    # The rendered menu is gone; the Option C prose that *names* the types is
+    # not, and must not be — that is the per-type guidance.
+    assert "**`idea_crosslab`**" not in content
 
 
 def test_phase5_menu_survives_funding_only_surgery():
@@ -1058,7 +1306,19 @@ def test_phase5_menu_survives_funding_only_surgery():
 - [ ] **Step 2: Run to verify it fails**
 
 Run: `.venv-test/bin/python -m pytest tests/unit/test_agent_prompts.py -q -k menu`
-Expected: FAIL — `TypeError: build_phase5_prompt() got an unexpected keyword argument 'post_type_menu'`
+
+Expected: FAIL, in two different ways — check both are present:
+- `test_phase5_menu_uses_the_caller_supplied_text_when_given` and
+  `test_phase5_menu_survives_funding_only_surgery`:
+  `TypeError: build_phase5_prompt() got an unexpected keyword argument 'post_type_menu'`
+- `test_phase5_menu_defaults_to_the_unfiltered_pi_lab_set` and
+  `test_phase5_default_menu_is_the_agents_own_role_not_pi_lab`: `AssertionError` — they pass no
+  kwarg, so they fail on the missing menu text instead.
+
+`test_phase5_menu_token_is_always_substituted` and
+`test_phase5_default_menu_never_prints_an_empty_enumeration` pass here and keep passing; both are
+guards against a *future* regression rather than drivers of this change, and neither can fail
+until Task 6 puts the token in the template.
 
 (The first test, `test_phase5_menu_token_is_always_substituted`, will pass before the change and after — the token does not exist in the template yet. It starts guarding once Task 6 installs the template. Keep it.)
 
@@ -1075,15 +1335,17 @@ Add to the docstring:
 ```
         post_type_menu: pre-rendered {post_type_menu} block. The engine computes
             it from the role's allow-list filtered by the live cohort gate, and
-            enforces the SAME set when the response comes back. None renders the
-            unfiltered pi_lab defaults — used by direct callers and tests that
-            have no topology to apply.
+            enforces the SAME set when the response comes back. None renders
+            THIS AGENT'S ROLE's declared set with no topology filtering — used by
+            direct callers and tests that have no topology to apply.
 ```
 
-Add the import at the top of the module:
+Add the import at the top of the module (`resolve_prompt_path` is already imported from
+`src.agent.roles` at `:9`; extend that line rather than adding a second import):
 
 ```python
-from src.agent.post_types import DEFAULT_POST_TYPES, render_menu
+from src.agent.post_types import render_menu
+from src.agent.roles import DEFAULT_ROLE, load_role, resolve_prompt_path
 ```
 
 Extend the token block at `:636-639`:
@@ -1091,10 +1353,19 @@ Extend the token block at `:636-639`:
 ```python
         prompt_text = prompt_text.replace("{prior_conversations}", prior_text)
         if post_type_menu is None:
-            # No topology supplied — render the defaults unfiltered, matching the
-            # "gate is None means no filtering" rule. Never leave the token raw.
+            # No topology supplied — render THIS agent's role set with no
+            # filtering, matching the "gate is None means no filtering" rule.
+            # Role-aware, not DEFAULT_POST_TYPES: a scout_hub agent built by a
+            # direct caller would otherwise get the pi_lab menu, offering it
+            # three types its own role.toml forbids.
+            #
+            # gate=None also makes render_menu emit guidance instead of an
+            # enumeration for an addressed type. There is no roster here to
+            # enumerate, and the enumeration would come out as the literal
+            # "one of: ." — in a live prompt, and in test_phase5_prompt_gm's
+            # committed snapshot.
             post_type_menu = render_menu(
-                DEFAULT_POST_TYPES, gate=None, roles_by_agent={},
+                load_role(self.role).post_types, gate=None, roles_by_agent={},
                 self_id=self.agent_id, bot_names={},
             )
         prompt_text = prompt_text.replace("{post_type_menu}", post_type_menu)
@@ -1103,7 +1374,26 @@ Extend the token block at `:636-639`:
 - [ ] **Step 4: Run the tests**
 
 Run: `.venv-test/bin/python -m pytest tests/unit/test_agent_prompts.py tests/unit/test_post_types.py -q`
-Expected: PASS
+
+**Expected: 4 FAILURES, and that is correct at this point in the sequence.** `{post_type_menu}`
+does not exist in `prompts/phase5-new-post.md` or the `scout_hub` override until Task 6 installs
+them, so the `.replace()` you just added is a no-op and no menu text reaches the prompt. These
+four fail here and pass in Task 6 step 7:
+
+- `test_phase5_menu_defaults_to_the_unfiltered_pi_lab_set`
+- `test_phase5_default_menu_is_the_agents_own_role_not_pi_lab`
+- `test_phase5_menu_uses_the_caller_supplied_text_when_given`
+- `test_phase5_menu_survives_funding_only_surgery`
+
+**Do not "fix" them by editing the tests, the templates, or the substitution.** They are the
+tests that prove Task 6's template install actually took effect; that is exactly why Task 6's
+header says Tasks 4 and 6 must land in the same change. The other two —
+`test_phase5_menu_token_is_always_substituted` and
+`test_phase5_default_menu_never_prints_an_empty_enumeration` — pass now (vacuously, since the
+token is absent) and keep passing after Task 6, which is their point.
+
+Everything in `tests/unit/test_post_types.py` must PASS. If anything there fails, that is a real
+Task 1 regression — stop and fix it before continuing.
 
 - [ ] **Step 5: Commit**
 
@@ -1123,12 +1413,13 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 ### Task 5: Compute the menu and enforce it
 
 **Files:**
-- Modify: `src/agent/simulation.py` (phase-5 handler: `build_phase5_prompt` call at `:2111`; new-post branch at `:2323-2380`)
+- Modify: `src/agent/simulation.py` (phase-5 handler: `build_phase5_prompt` call at `:2128`; funding bypass at `:2230`; new-post branch at `:2360`; `__init__` cache at `:239`)
+- Modify: `tests/integration/test_opportunity_assessment_persistence.py:584` (one word — see step 7b)
 - Test: `tests/unit/test_post_type_enforcement.py` *(new)*
 
 **Interfaces:**
 - Consumes: `available_for`, `render_menu`, `eligible_targets` (Task 1); `load_role(...).post_types` (Task 2); `build_phase5_prompt(post_type_menu=...)` (Task 4).
-- Produces: `SimulationEngine._available_post_types(agent, funding_only)` returning `tuple[PostTypeSpec, ...]`, and `SimulationEngine._post_type_rejection(agent, post_type, tagged_agent, available)` returning `str | None` — the reason, or `None` when the post is allowed.
+- Produces: `SimulationEngine._available_post_types(agent, *, funding_restricted: bool) -> tuple[PostTypeSpec, ...]` (keyword-only — it receives `blocked_for_regular`, never `funding_only`), `SimulationEngine._post_types_for_role(role) -> tuple[PostTypeSpec, ...]` (cached), and `SimulationEngine._post_type_rejection(agent, post_type, tagged_agent, available) -> str | None` — the reason, or `None` when the post is allowed.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1143,6 +1434,8 @@ phase-5 posts that declared a tagged_agent named an agent the poster's cohort
 gate forbade. The mention was stripped and the post published anyway, leaving
 259 :bulb: posts with a 0.8% reply rate against 9.0% for :newspaper: papers.
 """
+import types
+
 from src.agent.agent import Agent
 from src.agent.simulation import SimulationEngine
 
@@ -1172,34 +1465,34 @@ def _star():
 
 def test_star_spoke_cannot_use_idea_crosslab():
     eng, gill, _, _ = _star()
-    names = {s.name for s in eng._available_post_types(gill, funding_only=False)}
+    names = {s.name for s in eng._available_post_types(gill, funding_restricted=False)}
     assert "idea_crosslab" not in names
     assert "funding_collab" not in names
 
 
 def test_star_spoke_can_pitch_to_the_hub():
     eng, gill, _, _ = _star()
-    names = {s.name for s in eng._available_post_types(gill, funding_only=False)}
+    names = {s.name for s in eng._available_post_types(gill, funding_restricted=False)}
     assert "pitch" in names
 
 
 def test_star_spoke_keeps_every_broadcast_type():
     eng, gill, _, _ = _star()
-    names = {s.name for s in eng._available_post_types(gill, funding_only=False)}
+    names = {s.name for s in eng._available_post_types(gill, funding_restricted=False)}
     assert {"paper", "help_wanted", "introduction"} <= names
 
 
 def test_mesh_spoke_keeps_idea_crosslab_and_loses_pitch():
     gill, pearce = _spoke("gill"), _spoke("pearce")
     eng = _engine(gill, pearce)  # gates stay None
-    names = {s.name for s in eng._available_post_types(gill, funding_only=False)}
+    names = {s.name for s in eng._available_post_types(gill, funding_restricted=False)}
     assert "idea_crosslab" in names
     assert "pitch" not in names
 
 
 def test_hub_may_only_post_its_assessment():
     eng, _, hub, _ = _star()
-    names = {s.name for s in eng._available_post_types(hub, funding_only=False)}
+    names = {s.name for s in eng._available_post_types(hub, funding_restricted=False)}
     assert "opportunity_assessment" in names
     assert "idea_crosslab" not in names
     assert "paper" not in names
@@ -1207,14 +1500,14 @@ def test_hub_may_only_post_its_assessment():
 
 def test_funding_only_in_the_star_is_empty_but_that_is_not_a_skip():
     eng, gill, _, _ = _star()
-    assert eng._available_post_types(gill, funding_only=True) == ()
+    assert eng._available_post_types(gill, funding_restricted=True) == ()
 
 
 # --- rejection -------------------------------------------------------------
 
 def test_layer1_rejects_a_type_the_role_never_declared():
     eng, gill, _, _ = _star()
-    avail = eng._available_post_types(gill, funding_only=False)
+    avail = eng._available_post_types(gill, funding_restricted=False)
     reason = eng._post_type_rejection(gill, "opportunity_assessment", None, avail)
     assert reason is not None
     assert "opportunity_assessment" in reason
@@ -1222,7 +1515,7 @@ def test_layer1_rejects_a_type_the_role_never_declared():
 
 def test_layer2_rejects_a_type_with_no_reachable_counterparty():
     eng, gill, _, _ = _star()
-    avail = eng._available_post_types(gill, funding_only=False)
+    avail = eng._available_post_types(gill, funding_restricted=False)
     reason = eng._post_type_rejection(gill, "idea_crosslab", "pearce", avail)
     assert reason is not None
 
@@ -1230,63 +1523,119 @@ def test_layer2_rejects_a_type_with_no_reachable_counterparty():
 def test_layer3_rejects_the_exact_production_case():
     """{"post_type": "idea_crosslab", "tagged_agent": "pearce"} from markham."""
     eng, gill, _, _ = _star()
-    avail = eng._available_post_types(gill, funding_only=False)
+    avail = eng._available_post_types(gill, funding_restricted=False)
     assert eng._post_type_rejection(gill, "idea_crosslab", "pearce", avail) is not None
 
 
 def test_layer3_rejects_a_tag_toward_an_unreachable_agent_on_an_allowed_type():
     eng, gill, _, _ = _star()
-    avail = eng._available_post_types(gill, funding_only=False)
+    avail = eng._available_post_types(gill, funding_restricted=False)
     reason = eng._post_type_rejection(gill, "pitch", "pearce", avail)
     assert reason is not None
     assert "pearce" in reason
 
 
-def test_layer3_rejects_a_tag_on_a_broadcast_type():
+def test_layer3_tolerates_a_reachable_tag_on_a_broadcast_type():
+    """Redundant is not wrong. The hub posts its :mag: assessment into the PI's
+    own channel; naming that PI is the natural thing for the model to do, and
+    rejecting it would destroy the artifact and the interview behind it over a
+    field nothing routes on."""
     eng, gill, _, _ = _star()
-    avail = eng._available_post_types(gill, funding_only=False)
-    reason = eng._post_type_rejection(gill, "paper", "blackbird", avail)
+    avail = eng._available_post_types(gill, funding_restricted=False)
+    assert eng._post_type_rejection(gill, "paper", "blackbird", avail) is None
+
+
+def test_layer3_rejects_an_unreachable_tag_on_a_broadcast_type():
+    """The dangling-ask bug does not stop being one because the type is a
+    broadcast: the mention gets stripped and the sentence around it survives."""
+    eng, gill, _, _ = _star()
+    avail = eng._available_post_types(gill, funding_restricted=False)
+    reason = eng._post_type_rejection(gill, "paper", "pearce", avail)
     assert reason is not None
+    assert "pearce" in reason
+
+
+def test_the_hubs_assessment_is_accepted_tagged_or_not():
+    """Both shapes must publish. The prompt asks for tagged_agent=null, but a
+    model that names the PI anyway must not lose the assessment."""
+    eng, _, hub, _ = _star()
+    avail = eng._available_post_types(hub, funding_restricted=False)
+    assert eng._post_type_rejection(hub, "opportunity_assessment", None, avail) is None
+    assert eng._post_type_rejection(hub, "opportunity_assessment", "gill", avail) is None
+
+
+def test_the_hubs_funding_note_must_address_a_reachable_pi():
+    eng, _, hub, _ = _star()
+    avail = eng._available_post_types(hub, funding_restricted=False)
+    assert eng._post_type_rejection(hub, "funding_collab", "gill", avail) is None
+    assert eng._post_type_rejection(hub, "funding_collab", None, avail) is not None
+    assert eng._post_type_rejection(hub, "funding_collab", "nobody", avail) is not None
 
 
 def test_layer3_rejects_an_unknown_agent_id():
     eng, gill, _, _ = _star()
-    avail = eng._available_post_types(gill, funding_only=False)
+    avail = eng._available_post_types(gill, funding_restricted=False)
     assert eng._post_type_rejection(gill, "pitch", "nobody", avail) is not None
 
 
 def test_a_valid_pitch_at_the_hub_is_accepted():
     eng, gill, _, _ = _star()
-    avail = eng._available_post_types(gill, funding_only=False)
+    avail = eng._available_post_types(gill, funding_restricted=False)
     assert eng._post_type_rejection(gill, "pitch", "blackbird", avail) is None
 
 
 def test_a_valid_broadcast_with_no_tag_is_accepted():
     eng, gill, _, _ = _star()
-    avail = eng._available_post_types(gill, funding_only=False)
+    avail = eng._available_post_types(gill, funding_restricted=False)
     assert eng._post_type_rejection(gill, "paper", None, avail) is None
 
 
 def test_an_empty_post_type_is_rejected_for_a_new_post():
     """post_type defaults to "" when the model omits it."""
     eng, gill, _, _ = _star()
-    avail = eng._available_post_types(gill, funding_only=False)
+    avail = eng._available_post_types(gill, funding_restricted=False)
     assert eng._post_type_rejection(gill, "", None, avail) is not None
 
 
 def test_gate_off_accepts_everything_the_role_declared():
-    """Layers 2 and 3 must be inert in a mesh so org1 is unaffected."""
+    """Layers 2 and 3 must be inert in a mesh so org1 is unaffected.
+
+    Inert means *skipped*, not "happens to pass": a tag toward an agent that is
+    not on the roster at all, and an addressed type with no tag, both still
+    publish, exactly as they do today. Anything else is a behaviour change to a
+    deployment this work is not supposed to touch.
+    """
     gill, pearce = _spoke("gill"), _spoke("pearce")
     eng = _engine(gill, pearce)
-    avail = eng._available_post_types(gill, funding_only=False)
+    avail = eng._available_post_types(gill, funding_restricted=False)
     assert eng._post_type_rejection(gill, "idea_crosslab", "pearce", avail) is None
     assert eng._post_type_rejection(gill, "paper", None, avail) is None
+    assert eng._post_type_rejection(gill, "idea_crosslab", "ghost", avail) is None
+    assert eng._post_type_rejection(gill, "idea_crosslab", None, avail) is None
+
+
+def test_mesh_still_accepts_the_retired_idea_post_type():
+    """A mesh deployment's bind-mounted prompts may still say `idea` while the
+    baked-in code has moved on. Layer 1 must not silently delete those posts —
+    that is a regression in a deployment this change is not supposed to touch."""
+    gill, pearce = _spoke("gill"), _spoke("pearce")
+    eng = _engine(gill, pearce)
+    avail = eng._available_post_types(gill, funding_restricted=False)
+    assert eng._post_type_rejection(gill, "idea", "pearce", avail) is None
+
+
+def test_the_star_still_rejects_the_retired_idea_post_type():
+    """Resolving the alias must not smuggle the type past the topology filter:
+    `idea` resolves to `idea_crosslab`, which a star spoke still cannot use."""
+    eng, gill, _, _ = _star()
+    avail = eng._available_post_types(gill, funding_restricted=False)
+    assert eng._post_type_rejection(gill, "idea", "pearce", avail) is not None
 
 
 def test_gate_off_still_rejects_a_type_the_role_never_declared():
     gill = _spoke("gill")
     eng = _engine(gill)
-    avail = eng._available_post_types(gill, funding_only=False)
+    avail = eng._available_post_types(gill, funding_restricted=False)
     assert eng._post_type_rejection(gill, "opportunity_assessment", None, avail) is not None
 ```
 
@@ -1297,27 +1646,68 @@ Expected: FAIL — `AttributeError: 'SimulationEngine' object has no attribute '
 
 - [ ] **Step 3: Add the two helpers**
 
-In `src/agent/simulation.py`, add these methods next to `_strip_disallowed_tags`. Add the import at the top: `from src.agent.post_types import available_for, eligible_targets, render_menu`.
+In `src/agent/simulation.py`, add these methods next to `_strip_disallowed_tags`. Add the import at the top:
+
+```python
+from src.agent.post_types import (
+    PostTypeSpec,
+    available_for,
+    eligible_targets,
+    render_menu,
+    resolve_post_type_name,
+)
+```
+
+`PostTypeSpec` is imported for the return annotations below — write them out in full
+(`tuple[PostTypeSpec, ...]`), not as a bare `tuple`. `ruff`'s `I` rule is on, so keep the block
+alphabetised inside the parentheses.
 
 ```python
     def _roles_by_agent(self) -> dict[str, str]:
         """Live roster agent_id -> role. Agents absent from this map (e.g.
-        ``grantbot``, which has cohort memberships but no AgentRegistry row)
-        match no post type's ``targets``."""
+        ``grantbot``, which has cohort memberships but no AgentRegistry row and
+        is a separate process, not an entry in self.agents) match no post type's
+        ``targets``."""
         return {aid: a.role for aid, a in self.agents.items()}
 
-    def _available_post_types(self, agent: "Agent", funding_only: bool) -> tuple:
+    def _post_types_for_role(self, role: str) -> tuple[PostTypeSpec, ...]:
+        """``load_role(role).post_types``, cached.
+
+        load_role() reads TOML from disk on every call — the same reason
+        _role_rate_cache exists (see _calls_per_load). This runs once per
+        phase-5 turn per agent; the cache keeps it off the disk. A role's
+        manifest cannot change without a container rebuild, so there is nothing
+        to invalidate.
+        """
+        cached = self._role_post_types_cache.get(role)
+        if cached is None:
+            cached = load_role(role).post_types
+            self._role_post_types_cache[role] = cached
+        return cached
+
+    def _available_post_types(
+        self, agent: "Agent", *, funding_restricted: bool
+    ) -> tuple[PostTypeSpec, ...]:
         """Layer 1 ∩ layer 2: what this agent may post as a NEW top-level post.
 
         The SAME tuple is rendered into the prompt and used to judge the
         response, so the menu and the gate cannot disagree.
+
+        ``funding_restricted`` is the caller's ``blocked_for_regular``, NOT its
+        ``funding_only``. The two differ: ``funding_only = blocked_for_regular
+        and not has_available_non_funding``, so a blocked agent that has a
+        non-funding post available has ``funding_only=False`` — and keying on
+        that would advertise ``paper`` to an agent whose next non-funding post
+        the block at the top of this handler rejects anyway. ``funding_only``
+        still drives the prompt-template surgery; only this set uses
+        ``blocked_for_regular``.
         """
         return available_for(
-            load_role(agent.role).post_types,
+            self._post_types_for_role(agent.role),
             gate=agent.allowed_sender_ids,
             roles_by_agent=self._roles_by_agent(),
             self_id=agent.agent_id,
-            funding_only=funding_only,
+            funding_only=funding_restricted,
         )
 
     def _post_type_rejection(
@@ -1325,26 +1715,27 @@ In `src/agent/simulation.py`, add these methods next to `_strip_disallowed_tags`
         agent: "Agent",
         post_type: str,
         tagged_agent: str | None,
-        available: tuple,
+        available: tuple[PostTypeSpec, ...],
     ) -> str | None:
         """Why this new top-level post must not be published, or None.
 
         Applies only to ``action: "new_post"`` — a reply is never gated here.
         """
         by_name = {s.name: s for s in available}
-        spec = by_name.get(post_type)
+        # Resolve retired names on the way in (see LEGACY_POST_TYPE_ALIASES).
+        # The rejection message below still quotes what the model actually said.
+        spec = by_name.get(resolve_post_type_name(post_type))
         if spec is None:
             return (
                 f"post_type {post_type!r} is not available to role "
                 f"{agent.role!r} with this topology "
                 f"(available: {sorted(by_name) or 'none'})"
             )
-        if not spec.targets:
-            if tagged_agent:
-                return (
-                    f"post_type {post_type!r} addresses no one, but "
-                    f"tagged_agent={tagged_agent!r} was set"
-                )
+        # Layers 2 and 3 are inert when the gate is off, so a mesh deployment's
+        # behaviour is byte-identical after this change. Today a hallucinated
+        # tagged_agent there is logged and the post ships; tightening that is a
+        # separate decision, not a side effect of this one.
+        if agent.allowed_sender_ids is None:
             return None
         allowed = eligible_targets(
             spec,
@@ -1352,6 +1743,19 @@ In `src/agent/simulation.py`, add these methods next to `_strip_disallowed_tags`
             roles_by_agent=self._roles_by_agent(),
             self_id=agent.agent_id,
         )
+        if not spec.targets:
+            # A broadcast type addresses no one, so the tag is redundant — but
+            # redundant is not wrong. The hub posts its :mag: assessment into
+            # the PI's own channel and naming that PI is the natural thing to
+            # do; rejecting it would destroy the artifact and the whole
+            # interview behind it over a field nothing routes on. Ignore a
+            # REACHABLE tag; an unreachable one is still the dangling-ask bug.
+            if tagged_agent and tagged_agent not in agent.allowed_sender_ids:
+                return (
+                    f"post_type {post_type!r} addresses no one and "
+                    f"tagged_agent={tagged_agent!r} is not reachable"
+                )
+            return None
         if not tagged_agent:
             return (
                 f"post_type {post_type!r} must address one of "
@@ -1365,6 +1769,14 @@ In `src/agent/simulation.py`, add these methods next to `_strip_disallowed_tags`
         return None
 ```
 
+Add the cache to `__init__`, next to `_role_rate_cache` (`:239`):
+
+```python
+        # role name -> declared post_types. Same reason as _role_rate_cache
+        # above: load_role() hits the disk on every call.
+        self._role_post_types_cache: dict[str, tuple[PostTypeSpec, ...]] = {}
+```
+
 - [ ] **Step 4: Run the helper tests**
 
 Run: `.venv-test/bin/python -m pytest tests/unit/test_post_type_enforcement.py -q`
@@ -1372,10 +1784,16 @@ Expected: PASS
 
 - [ ] **Step 5: Pass the menu into the prompt**
 
-At the `build_phase5_prompt` call (`:2111`), compute the set first and pass the rendered menu. Insert directly above the call:
+At the `build_phase5_prompt` call (`:2128`), compute the set first and pass the rendered menu. Insert directly above the call:
 
 ```python
-        available_types = self._available_post_types(agent, funding_only)
+        # blocked_for_regular, NOT funding_only — see _available_post_types'
+        # docstring. funding_only is the narrower "blocked AND nothing
+        # non-funding to reply to"; keying the menu on it would advertise
+        # `paper` to an agent the block below rejects for posting one.
+        available_types = self._available_post_types(
+            agent, funding_restricted=blocked_for_regular,
+        )
         post_type_menu = render_menu(
             available_types,
             gate=agent.allowed_sender_ids,
@@ -1387,9 +1805,35 @@ At the `build_phase5_prompt` call (`:2111`), compute the set first and pass the 
 
 and add `post_type_menu=post_type_menu,` to the call's keyword arguments.
 
-- [ ] **Step 6: Enforce in the new-post branch**
+`blocked_for_regular` is already a local at this point (it is what `funding_only` is derived
+from on the lines above). `funding_only` keeps its existing job — the template surgery — and is
+still passed unchanged.
 
-In the `else:` branch at `:2323`, insert before `posted = await self._post_message(...)`:
+- [ ] **Step 6a: Close the reply-path `funding_collab` bypass**
+
+At `:2230` the blocked-agent bypass reads `post_type` regardless of `action`:
+
+```python
+                is_funding_post = post_type == "funding_collab"
+```
+
+so `{"action": "reply", "target_post_id": <any non-funding thread>, "post_type":
+"funding_collab"}` walks straight past the block. Layers 1-3 do not catch it — they govern
+`new_post` only. One clause:
+
+```python
+                is_funding_post = action == "new_post" and post_type == "funding_collab"
+```
+
+A genuine funding *reply* is already covered by `is_funding_reply` on the lines above, which
+checks the thread rather than the model's self-declaration. This belongs in this change because
+this is the change that makes `post_type` a load-bearing, enforced field.
+
+- [ ] **Step 6b: Enforce in the new-post branch**
+
+> **⚠️ Two call sites look identical.** `posted = await self._post_message(agent.agent_id, channel, message_text)` appears **twice** — at `:2293` inside the `if is_private_channel:` *reply* branch, and at `:2362` in the new-top-level-post branch. Anchor on the `else:` + `# New top-level post` comment pair below, not on the `_post_message` line. Applying this at `:2293` would gate replies, which the plan forbids.
+
+In the `else:` branch at `:2360` (the one whose first body line is the comment `# New top-level post`), replace those two lines with:
 
 ```python
             else:
@@ -1416,35 +1860,277 @@ In the `else:` branch at `:2323`, insert before `posted = await self._post_messa
                 posted = await self._post_message(agent.agent_id, channel, message_text)
 ```
 
-`consecutive_phase5_skips` is zeroed at `:2180`, before this branch, so a rejection must re-increment it to keep the existing backoff working.
+`consecutive_phase5_skips` is zeroed earlier in the handler, before this branch, so a rejection must re-increment it to keep the existing backoff working.
 
-- [ ] **Step 7: Write the integration test that nothing is posted**
+- [ ] **Step 7: Write the end-to-end test that nothing is posted**
 
-Add `import pytest` as the first import in `tests/unit/test_post_type_enforcement.py`
-(it is unused until now, and `ruff` must report zero findings on `tests/`), then append:
+This must drive `_phase5_new_post` itself. Calling `_post_type_rejection` directly and then
+asserting a stubbed `_post_message` was not called proves nothing — the helper never calls it
+either way, so such a test passes just as happily when step 6b was never applied. It is the one
+test standing between "helpers written" and "helpers wired up".
+
+The working pattern is `tests/unit/test_simulation_logic.py:1166`
+(`TestPhase5ReplyActionSuppression`): stub `build_phase5_prompt`, monkeypatch
+`generate_agent_response`, `await engine._phase5_new_post(agent)`, assert on the fake client.
+
+Append to `tests/unit/test_post_type_enforcement.py`:
 
 ```python
-@pytest.mark.asyncio
-async def test_a_rejected_post_reaches_neither_slack_nor_the_log(monkeypatch):
-    """The assertion that makes "reject" honest rather than cosmetic."""
-    eng, gill, _, _ = _star()
+def _response(post_type, tagged_agent, body):
+    tag = "null" if tagged_agent is None else f'"{tagged_agent}"'
+    return (
+        '```json\n'
+        '{"action": "new_post", "channel": "general", '
+        f'"post_type": "{post_type}", "tagged_agent": {tag}'
+        '}\n```\n\n'
+        f'<slack_message>{body}</slack_message>'
+    )
 
-    calls = []
 
-    async def _spy(agent_id, channel, text, thread_ts=None):
-        calls.append((agent_id, channel, text))
-        return "1234.5678"
+# Layer 1: the exact production JSON. `idea_crosslab` is not in a star spoke's
+# available set at all, so this never reaches the tag check — the reason names
+# the TYPE, not the tag.
+_REJECTED_L1 = _response(
+    "idea_crosslab", "pearce", ":bulb: Idea — @PearceBot, your recent finding…"
+)
+# Layer 3: an AVAILABLE type aimed at an unreachable agent. This is the branch
+# whose reason names the tag.
+_REJECTED_L3 = _response(
+    "pitch", "pearce", ":bulb: @PearceBot — our unpublished assay…"
+)
+_ACCEPTED = _response("paper", None, ":newspaper: Paper — we published a thing.")
 
-    monkeypatch.setattr(eng, "_post_message", _spy)
 
-    before = gill.message_count
-    avail = eng._available_post_types(gill, funding_only=False)
-    rejection = eng._post_type_rejection(gill, "idea_crosslab", "pearce", avail)
+async def _drive(monkeypatch, response, *, capture=None):
+    """One spoke with a real fake Slack client, driven through the real handler.
 
-    assert rejection is not None
-    assert calls == []
-    assert gill.message_count == before
+    ``capture``, if given, is a dict the build_phase5_prompt stub fills with the
+    kwargs it was called with — the only way to observe step 5, since stubbing
+    that method is what makes driving the handler cheap in the first place.
+    """
+    from tests.fakes import FakeSlackClient
+
+    gill = _spoke("gill")
+    gill.allowed_sender_ids = {"gill", "blackbird"}
+    hub, pearce = _hub(), _spoke("pearce")
+    hub.allowed_sender_ids = {"gill", "blackbird", "pearce"}
+    pearce.allowed_sender_ids = {"pearce", "blackbird"}
+    client = FakeSlackClient(agent_id="gill")
+    eng = SimulationEngine(
+        agents=[gill, hub, pearce], slack_clients={"gill": client},
+    )
+
+    async def _fake_generate(**kwargs):
+        return response
+
+    def _stub_prompt(**kw):
+        if capture is not None:
+            capture.update(kw)
+        return ("sys", [])
+
+    # Pin the settings this handler reads. Without this, a future
+    # PHASE5_SKIP_PROBABILITY in the environment turns every rejection
+    # assertion below into a silent skip that passes for the wrong reason.
+    monkeypatch.setattr(
+        "src.agent.simulation.get_settings",
+        lambda: types.SimpleNamespace(
+            daily_post_cap=50, active_thread_threshold=12,
+            unreviewed_proposal_block_count=3, phase5_skip_probability=0.0,
+            llm_agent_model_opus="test-model",
+        ),
+    )
+    monkeypatch.setattr(gill, "build_phase5_prompt", _stub_prompt)
+    monkeypatch.setattr(
+        "src.agent.simulation.generate_agent_response", _fake_generate
+    )
+    await eng._phase5_new_post(gill)
+    return eng, gill, client
+
+
+async def test_a_rejected_post_reaches_neither_slack_nor_the_counter(monkeypatch, caplog):
+    """The exact production case, end to end:
+    {"post_type": "idea_crosslab", "tagged_agent": "pearce"} from a spoke that
+    cannot reach pearce. Before this change the mention was stripped and
+    ":bulb: Idea —, your recent finding…" was published anyway — 113 times.
+
+    The reason names the TYPE, not the tag: `idea_crosslab` is absent from the
+    available set, so layer 1 rejects before the tag is ever examined.
+    """
+    caplog.set_level("WARNING")
+    eng, gill, client = await _drive(monkeypatch, _REJECTED_L1)
+
+    assert client.posted == []
+    assert gill.message_count == 0
+    assert "rejected new post" in caplog.text
+    assert "idea_crosslab" in caplog.text
+
+
+async def test_layer3_rejection_names_the_unreachable_tag_end_to_end(monkeypatch, caplog):
+    """`pitch` IS available to a star spoke, so this reaches layer 3 and the
+    reason must name the agent that could not be reached. Without this test the
+    layer-3 branch is never exercised through the handler at all — every other
+    star-topology rejection short-circuits at layer 1."""
+    caplog.set_level("WARNING")
+    eng, gill, client = await _drive(monkeypatch, _REJECTED_L3)
+
+    assert client.posted == []
+    assert gill.message_count == 0
+    assert "rejected new post" in caplog.text
+    assert "pearce" in caplog.text
+
+
+async def test_a_rejected_post_re_increments_the_skip_backoff(monkeypatch):
+    """consecutive_phase5_skips is zeroed before the branch, so a rejection that
+    forgets to re-increment silently disables the backoff for that agent."""
+    eng, gill, _ = await _drive(monkeypatch, _REJECTED_L1)
+    assert gill.state.consecutive_phase5_skips == 1
+
+
+async def test_an_allowed_post_still_goes_out(monkeypatch):
+    """The other half: enforcement that rejects everything would also pass the
+    tests above."""
+    eng, gill, client = await _drive(monkeypatch, _ACCEPTED)
+    assert len(client.posted) == 1
+    assert client.posted[0]["text"].startswith(":newspaper:")
+    assert gill.message_count == 1
+
+
+async def test_the_menu_handed_to_the_prompt_is_the_set_that_is_enforced(monkeypatch):
+    """Step 5's ONLY test. Every other end-to-end test stubs build_phase5_prompt
+    away, so without this one `post_type_menu=` could be deleted from the call
+    and the whole suite would still pass.
+
+    Spec §6 test 7: the rendered menu names exactly the post-layer-2 set.
+    """
+    from src.agent.post_types import CANONICAL
+
+    capture = {}
+    eng, gill, _ = await _drive(monkeypatch, _ACCEPTED, capture=capture)
+
+    menu = capture["post_type_menu"]
+    available = {
+        s.name for s in eng._available_post_types(gill, funding_restricted=False)
+    }
+    assert available == {"paper", "help_wanted", "introduction", "pitch"}
+    for name in available:
+        assert f"**`{name}`**" in menu
+    for name in set(CANONICAL) - available:
+        assert f"**`{name}`**" not in menu
+    # The hub is the one reachable counterparty, so the addressed type names it.
+    assert "blackbird" in menu
+
+
+# --- step 6a: the reply-path bypass -----------------------------------------
+
+async def test_a_blocked_agent_cannot_self_declare_funding_collab_on_a_reply(
+    monkeypatch, caplog
+):
+    """The bypass (`is_funding_post`) read post_type regardless of action, so
+    {"action": "reply", "post_type": "funding_collab"} to a NON-funding thread
+    walked past the unreviewed-proposal block. Layers 1-3 do not catch it —
+    they govern new_post only."""
+    from src.agent.message_log import LogEntry
+    from src.agent.state import ProposalRef, ThreadState
+    from tests.fakes import FakeSlackClient
+
+    caplog.set_level("INFO")
+    gill = _spoke("gill")
+    gill.allowed_sender_ids = {"gill", "blackbird"}
+    client = FakeSlackClient(agent_id="gill")
+    eng = SimulationEngine(agents=[gill, _hub()], slack_clients={"gill": client})
+
+    # Blocked: one unreviewed non-funding proposal.
+    gill.state.pending_proposals.append(
+        ProposalRef(
+            thread_id="t1", channel="general", other_agent_id="blackbird",
+            summary_text=":memo: Summary — a proposal", proposed_at=0.0,
+        )
+    )
+    # A thread carrying an FOA, so the "blocked and nothing to do" early
+    # return (`if not available_posts and blocked_for_regular ...`, :2054)
+    # does not fire before we reach the bypass.
+    gill.state.active_threads["t9"] = ThreadState(
+        thread_id="t9", channel="funding", other_agent_id="blackbird",
+        message_count=1, foa_number="RFA-AI-27-019",
+    )
+    # A plain, non-funding thread to aim the reply at.
+    eng.message_log.load_entry(LogEntry(
+        ts="t1", channel="general", sender_agent_id="blackbird",
+        sender_name="BlackbirdBot", content="not a funding post", posted_at=0.0,
+        slack_ts="t1",
+    ))
+
+    monkeypatch.setattr(
+        "src.agent.simulation.get_settings",
+        lambda: types.SimpleNamespace(
+            daily_post_cap=50, active_thread_threshold=12,
+            unreviewed_proposal_block_count=1, phase5_skip_probability=0.0,
+            llm_agent_model_opus="test-model",
+        ),
+    )
+    monkeypatch.setattr(gill, "build_phase5_prompt", lambda **kw: ("sys", []))
+
+    async def _fake_generate(**kwargs):
+        return (
+            '```json\n'
+            '{"action": "reply", "target_post_id": "t1", "channel": "general", '
+            '"post_type": "funding_collab", "tagged_agent": null}\n'
+            '```\n\n'
+            '<slack_message>:moneybag: RFA-AI-27-019 — unrelated.</slack_message>'
+        )
+
+    monkeypatch.setattr(
+        "src.agent.simulation.generate_agent_response", _fake_generate
+    )
+
+    await eng._phase5_new_post(gill)
+
+    assert client.posted == []
+    assert "Blocked non-funding action" in caplog.text
 ```
+
+Field names verified against the dataclasses: `ThreadState` is `src/agent/state.py:22`,
+`ProposalRef` is `:49`. `UNBLOCK_EXEMPT_AGENTS = {"schultz"}` (`simulation.py:200`) does not
+contain `gill`, so the block really applies — if this test passes *before* step 6a, something
+else is short-circuiting and the test is not measuring the bypass.
+
+`asyncio_mode = "auto"` (`pyproject.toml:72`), so no test in this file needs
+`@pytest.mark.asyncio` and the file needs no `import pytest`. (The repo is inconsistent here —
+the tests `e116feb` added to `test_simulation_logic.py` do carry the marker. Either works; follow
+this plan's convention so the new file is internally consistent.) `import types` is in step 1's
+header block, used by both settings stubs.
+
+- [ ] **Step 7b: Give the hub fixture its role — 6 integration tests depend on it**
+
+`tests/integration/test_opportunity_assessment_persistence.py:584` builds the hub with no role:
+
+```python
+    agent = Agent("blackbird", "BlackbirdBot", "Blackbird")
+```
+
+`Agent.__init__` defaults `role=DEFAULT_ROLE` = `"pi_lab"` (`agent.py:68-69`, `roles.py:20`), and
+`_drive_phase5_new_post` then posts `_ACTION_JSON` with `"post_type": "opportunity_assessment"`.
+Layer 1 rejects that for a `pi_lab` agent — and layer 1 runs *before* the gate-`None`
+short-circuit, so the gate being off does not save it (that is exactly what
+`test_gate_off_still_rejects_a_type_the_role_never_declared` asserts). All six callers at
+`:645`, `:665`, `:686`, `:704`, `:726`, `:753` would get `client.posted == []` and no assessment
+row.
+
+One word, and it must land in **this** commit — the fixture was always describing the hub, it
+just never had to say so:
+
+```python
+    agent = Agent("blackbird", "BlackbirdBot", "Blackbird", role="scout_hub")
+```
+
+Verify:
+
+```bash
+.venv-test/bin/python -m pytest tests/integration/test_opportunity_assessment_persistence.py -q
+```
+
+Expected: PASS. This is the only `new_post`-driving phase-5 test outside `tests/unit`;
+`tests/unit/test_assessment_sidecar.py` calls `_parse_phase5_response` directly and is unaffected.
 
 - [ ] **Step 8: Run the full affected suite**
 
@@ -1453,15 +2139,20 @@ Run:
 ```bash
 .venv-test/bin/python -m pytest tests/unit/test_post_type_enforcement.py \
   tests/unit/test_post_types.py tests/unit/test_roles.py \
-  tests/unit/test_simulation_logic.py tests/unit/test_agent_prompts.py -q
+  tests/unit/test_simulation_logic.py tests/unit/test_agent_prompts.py \
+  tests/integration/test_opportunity_assessment_persistence.py -q
+.venv-test/bin/python -m ruff check tests/unit/test_post_type_enforcement.py src/agent/simulation.py
 ```
 
-Expected: PASS
+Expected: PASS, and `All checks passed!` from ruff. The ruff run is not optional here: Task 5
+adds a test file with function-local imports and `ci.sh` demands **zero** findings across
+`tests/`, so an `E402` or an unused `F401` surfaces now rather than at the final gate.
 
 - [ ] **Step 9: Commit**
 
 ```bash
-git add src/agent/simulation.py tests/unit/test_post_type_enforcement.py
+git add src/agent/simulation.py tests/unit/test_post_type_enforcement.py \
+        tests/integration/test_opportunity_assessment_persistence.py
 git commit -m "feat(phase5): enforce role+topology post-type gating on new posts
 
 The menu rendered into the prompt and the set used to judge the response are
@@ -1469,8 +2160,29 @@ one value, so they cannot drift. A disallowed type or an unreachable
 tagged_agent is rejected at WARNING and publishes nothing, instead of having
 its mention stripped and the mutilated post published anyway.
 
-Applies to action:\"new_post\" only; replies are untouched. Inert when the
-cohort gate is off, so a mesh deployment is unaffected.
+That set is keyed on blocked_for_regular, not funding_only. The two differ
+(funding_only also requires nothing non-funding to reply to), and keying on the
+narrower one would advertise \`paper\` to an agent the block then rejects — the
+same prompt-versus-enforcement disagreement, under a new name.
+
+A tag on a broadcast type is tolerated when the tagged agent is reachable. The
+hub posts its :mag: assessment into the PI's own channel and naming that PI is
+the natural thing to do; rejecting it would destroy the artifact and the
+interview behind it over a field nothing routes on. An unreachable tag on a
+broadcast type is still the dangling-ask bug and is still rejected.
+
+Also closes the reply-path funding bypass: is_funding_post read post_type
+regardless of action, so a blocked agent could self-declare funding_collab on a
+reply to any thread. Layers 1-3 do not cover it — they govern new_post only.
+
+Applies to action:\"new_post\" only; replies are untouched.
+
+Mesh impact, stated precisely rather than as \"unaffected\": layer 3 is skipped
+outright with the gate off, and layer 2 stops filtering by reachability. Layer 1
+still applies, so a mesh agent emitting the retired post_type \"idea\" would post
+nothing where it used to post — LEGACY_POST_TYPE_ALIASES maps it to
+idea_crosslab so that cannot happen. What does change in a mesh is that `pitch`
+is not offered when no scout_hub exists, which is the intended behaviour.
 
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 ```
@@ -1480,10 +2192,24 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 ### Task 6: Install the prompts and regenerate the snapshots
 
 **Files:**
-- Modify: `prompts/identity.md`, `prompts/agent-system.md`, `prompts/phase5-new-post.md`, `prompts/roles/scout_hub/phase5-new-post.md`, `prompts/roles/scout_hub/agent-system.md`
-- Modify: `src/agent/agent.py:753` (`_DEFAULT_IDENTITY`)
+- Modify: `prompts/identity.md`, `prompts/agent-system.md`, `prompts/phase2-scan-filter.md`, `prompts/phase4-thread-reply.md`, `prompts/phase5-new-post.md`, `prompts/roles/scout_hub/agent-system.md`, `prompts/roles/scout_hub/phase5-new-post.md`
+- Create: `prompts/roles/scout_hub/phase2-scan-filter.md`, `prompts/roles/scout_hub/phase2-prune.md`
+- Modify: `src/agent/agent.py:753` (`_DEFAULT_IDENTITY`) **and `:758-759` (`_default_system_prompt`)**
+- Modify: `tests/unit/test_agent_prompts.py:16` (pins the old institution literal — see step 5a)
 - Modify: `tests/unit/test_roles.py:178` and `:370` (token lists)
 - Modify: `tests/characterization/__snapshots__/test_agent_turn_gm.ambr` (8 of 9 snapshots)
+
+**The draft directory mirrors `prompts/`** and holds every file each role resolves: **7** changed
+`.md` files, the **2** new `scout_hub` overrides, `role.toml` (already installed by Task 2), and
+verbatim copies of the **3** that do not change (`phase2-prune.md`,
+`roles/scout_hub/identity.md`, `roles/scout_hub/phase4-thread-reply.md`).
+Its `README.md` is the change-by-change rationale and the reviewer's entry point.
+
+**The two new `scout_hub` phase-2 overrides are beyond the approved spec** (recorded in the spec's
+prompt-changes list and in the draft README). They are separable: skip both `cp`s and everything
+else in this plan still holds. Without them the hub keeps scanning against "your lab's core
+expertise", "Papers your own lab authored", and "labs whose capabilities complement yours" — the
+`pi_lab` criteria, for an agent with no lab, in the phase that decides which PIs get interviewed.
 
 **Interfaces:**
 - Consumes: `{post_type_menu}` substitution (Task 4).
@@ -1554,13 +2280,38 @@ def test_pi_lab_phase5_template_renders_in_both_modes():
 
 - [ ] **Step 3: Install the reviewed drafts**
 
+The draft mirrors `prompts/`, so this is one command. Files that did not change are byte-identical
+copies, and copying them is a no-op:
+
 ```bash
 DRAFT=docs/specs/2026-08-06-post-type-gating-prompts-draft
-cp $DRAFT/identity.md                          prompts/identity.md
-cp $DRAFT/agent-system.md                      prompts/agent-system.md
-cp $DRAFT/phase5-new-post.md                   prompts/phase5-new-post.md
-cp $DRAFT/roles/scout_hub/phase5-new-post.md   prompts/roles/scout_hub/phase5-new-post.md
-cp $DRAFT/roles/scout_hub/agent-system.md      prompts/roles/scout_hub/agent-system.md
+cp -r $DRAFT/prompts/. prompts/
+git status --short prompts/
+```
+
+Expected from `git status`: exactly seven `M` and two `??` —
+
+```
+ M prompts/agent-system.md
+ M prompts/identity.md
+ M prompts/phase2-scan-filter.md
+ M prompts/phase4-thread-reply.md
+ M prompts/phase5-new-post.md
+ M prompts/roles/scout_hub/agent-system.md
+ M prompts/roles/scout_hub/phase5-new-post.md
+?? prompts/roles/scout_hub/phase2-prune.md
+?? prompts/roles/scout_hub/phase2-scan-filter.md
+```
+
+`prompts/roles/scout_hub/role.toml` is not in that list because Task 2 step 4 already installed
+it. Anything else showing as modified means a draft went stale against a concurrent edit — stop
+and diff before continuing.
+
+To skip the two out-of-spec overrides, delete them from the draft first:
+
+```bash
+rm $DRAFT/prompts/roles/scout_hub/phase2-scan-filter.md \
+   $DRAFT/prompts/roles/scout_hub/phase2-prune.md
 ```
 
 - [ ] **Step 4: Verify `identity.md` kept its missing trailing newline**
@@ -1573,9 +2324,30 @@ tail -c 1 prompts/identity.md | xxd | grep -q '0a' \
 
 Expected: `OK: no trailing newline`
 
-- [ ] **Step 5: Update the code fallback to match byte-for-byte**
+- [ ] **Step 5a: Fix the one existing assertion the identity change breaks**
 
-In `src/agent/agent.py`, change `_DEFAULT_IDENTITY` (`:753`) to drop `at Scripps Research`:
+`tests/unit/test_agent_prompts.py:16` pins the old literal:
+
+```python
+    assert 'the Andrew Su lab at Scripps Research' in prompt
+```
+
+The institution now comes from the public profile, not this line, so the assertion becomes:
+
+```python
+    assert 'the Andrew Su lab' in prompt
+    assert 'Scripps Research' not in prompt
+```
+
+The negative half is the point — without it the test stops guarding anything, and a future
+re-introduction of a hardcoded institution would sail through. (`_agent()` in that file supplies
+no public profile, so nothing else can put the string there.)
+
+- [ ] **Step 5: Update BOTH code fallbacks to match**
+
+Two fallbacks name the institution, not one. The plan's earlier drafts pinned only the first.
+
+**`_DEFAULT_IDENTITY` (`src/agent/agent.py:753`)** — drop `at Scripps Research`:
 
 ```python
 _DEFAULT_IDENTITY = """## Your Identity
@@ -1583,19 +2355,38 @@ You are **{bot_name}**, the AI agent representing the {pi_name} lab.
 Your agent ID is "{agent_id}". When communicating, represent your lab professionally."""
 ```
 
-Verify it matches the file exactly:
+**`_default_system_prompt()` (`src/agent/agent.py:758-759`)** — the fallback behind
+`agent-system.md`, which the same institution edit touches. Its first line currently reads:
+
+```python
+    return """You are an AI agent representing a research lab at Scripps Research in a Slack workspace
+```
+
+Drop the institution the same way:
+
+```python
+    return """You are an AI agent representing a research lab in a Slack workspace
+```
+
+Leaving it is not cosmetic: it is the text a container with a missing or unreadable
+`prompts/agent-system.md` would actually send, so the two fallbacks would disagree with the
+shipped prompts and with each other.
+
+Verify both:
 
 ```bash
 .venv-test/bin/python - <<'PY'
 from pathlib import Path
-from src.agent.agent import _DEFAULT_IDENTITY
+from src.agent.agent import _DEFAULT_IDENTITY, _default_system_prompt
 disk = Path("prompts/identity.md").read_text(encoding="utf-8")
 assert disk == _DEFAULT_IDENTITY, "fallback and prompts/identity.md have diverged"
-print("identity fallback matches the file byte-for-byte")
+assert "Scripps" not in _DEFAULT_IDENTITY
+assert "Scripps" not in _default_system_prompt()
+print("identity fallback matches the file byte-for-byte; neither fallback names an institution")
 PY
 ```
 
-Expected: `identity fallback matches the file byte-for-byte`
+Expected: `identity fallback matches the file byte-for-byte; neither fallback names an institution`
 
 - [ ] **Step 6: Confirm the surgeries and anchors still match the installed files**
 
@@ -1614,7 +2405,45 @@ for p in ("prompts/phase5-new-post.md", "prompts/roles/scout_hub/phase5-new-post
     assert all(re.search(x, t, re.DOTALL) for x in pats), f"{p}: a funding_only surgery broke"
     assert intro in t, f"{p}: the intro replacement target broke"
     assert "{post_type_menu}" in t, f"{p}: menu token missing"
-print("all surgeries, the intro target, and the menu token are present in both templates")
+    # After the surgery the menu must survive and Option C must be gone.
+    s = t
+    for x in pats:
+        s = re.sub(x, "", s, flags=re.DOTALL)
+    assert "{post_type_menu}" in s, f"{p}: surgery ate the menu section"
+    assert "### Option C: Make a new top-level post" not in s, f"{p}: Option C survived"
+    assert "### Option D: Skip this turn" in s, f"{p}: Option D was stripped"
+
+# Every token in every role-resolved template must still be substitutable.
+tokens = {
+    "prompts/phase2-scan-filter.md": ["{new_posts}"],
+    "prompts/roles/scout_hub/phase2-scan-filter.md": ["{new_posts}"],
+    "prompts/phase2-prune.md": ["{interesting_posts}"],
+    "prompts/roles/scout_hub/phase2-prune.md": ["{interesting_posts}"],
+    "prompts/phase4-thread-reply.md": [
+        "{channel_name}", "{other_agent_name}", "{other_agent_lab}", "{message_count}",
+        "{thread_phase}", "{foa_number}", "{thread_history}", "{funding_thread_context}",
+        "{phase_guidance}", "{instructions}",
+    ],
+}
+for p, toks in tokens.items():
+    if not Path(p).is_file():
+        print(f"  (skipped, not installed: {p})")
+        continue
+    t = Path(p).read_text()
+    missing = [x for x in toks if x not in t]
+    assert not missing, f"{p}: missing {missing}"
+
+# The one-word fix that decides whether a pitch reaches its recipient.
+for p in ("prompts/phase2-scan-filter.md",
+          "prompts/roles/scout_hub/phase2-scan-filter.md",
+          "prompts/roles/scout_hub/phase5-new-post.md"):
+    if not Path(p).is_file():
+        raise SystemExit(f"{p} missing — the scout_hub phase-2 overrides were skipped; "
+                         "drop this path from the list deliberately, do not ignore it")
+    assert "other than you" in Path(p).read_text(), f"{p}: 'other than you' missing"
+
+print("all surgeries, the intro target, the menu token, every phase-2/4 token, "
+      "and the 'other than you' fix are present")
 PY
 ```
 
@@ -1631,6 +2460,13 @@ Run: `.venv-test/bin/python -m pytest tests/characterization/test_agent_turn_gm.
 
 Expected: 8 failures, in `test_scan_system_prompt_gm`, `test_system_prompt_public_vs_private_gm`, `test_thread_reply_system_prompt_gm`, `test_phase2_scan_prompt_flags_self_authored_gm`, `test_phase4_prompt_phase_progression_gm`, `test_phase4_prompt_pi_context_and_funding_gm`, `test_reply_turn_composes_prompt_and_posts_gm`, `test_phase5_prompt_gm`. `test_decide_phase_parses_scripted_json_gm` must still pass.
 
+Still 8, but for more reasons than the spec's original table listed. The first three move only
+because `agent-system.md` + `identity.md` are in every system prompt. The next four also capture
+a template *body* in `messages`: `test_phase2_scan_prompt_flags_self_authored_gm` picks up the two
+new `phase2-scan-filter.md` exclusions, and the three phase-4 snapshots pick up the new
+`### If the other party is a scouting hub` section. `test_phase5_prompt_gm` moves most: the whole
+Option C rewrite, the new menu section, and the rendered default menu.
+
 **If any other test fails, or if `test_decide_phase_parses_scripted_json_gm` fails, STOP** — something beyond the prompt text moved.
 
 - [ ] **Step 9: Regenerate those eight, then review the diff line by line**
@@ -1641,7 +2477,7 @@ git diff tests/characterization/__snapshots__/test_agent_turn_gm.ambr > /tmp/sna
 wc -l /tmp/snap.diff
 ```
 
-Now read `/tmp/snap.diff` in full and confirm **every** hunk is text originating in the five edited prompt files. Then prove the guidance strings did not move:
+Now read `/tmp/snap.diff` in full and confirm **every** hunk is text originating in the seven edited prompt files. Then prove the guidance strings did not move:
 
 ```bash
 grep -E "^[+-]" /tmp/snap.diff | grep -E "EXPLORE phase|DECIDE phase|MUST CONCLUDE|message 12" \
@@ -1655,12 +2491,37 @@ Also confirm the intended removals actually happened:
 
 ```bash
 A=tests/characterization/__snapshots__/test_agent_turn_gm.ambr
-for s in "at Scripps Research" ":test_tube: Experiment" ":package: Resource" "@WisemanBot"; do
-  printf "%-28s %s remaining\n" "$s" "$(grep -c "$s" $A)"
+for s in "at Scripps Research" ":test_tube: Experiment" ":package: Resource" \
+         "@WisemanBot" "Quality bar for :bulb:"; do
+  printf "%-28s %s remaining\n" "$s" "$(grep -cF "$s" $A)"
 done
+printf "%-28s %s remaining\n" "one of: ." "$(grep -cF 'one of: .' $A)"
 ```
 
 Expected: `0 remaining` for each.
+
+Two of these deserve a word, because "it went to zero" is not self-explanatory:
+
+- **`Quality bar for :bulb:`** goes to zero by *renaming*, not by deletion. `:bulb:` is now two
+  types, so the single shared bar is replaced by `#### \`idea_crosslab\`` and `#### \`pitch\``
+  sections, each with its own bar. If you built the prompt from this plan's prose instead of
+  `cp`-ing the draft and wrote a `:bulb:`-keyed bar, this check is what catches you.
+- **`one of: .`** is the empty-enumeration bug. If it appears here it has also reached live
+  prompts, and the fix is in `render_menu`, not in the snapshot. `grep -cF` is required: as a
+  BRE the `.` matches any character, so `grep -c` would also fire on a legitimate
+  ``one of: `blackbird` ``.
+
+Then confirm the intended *additions* actually landed, so a silently-empty substitution cannot
+pass as success:
+
+```bash
+for s in "Post types available to you this turn" "If the other party is a scouting hub" \
+         "offering one of your own ideas to the scouting hub" "other than you"; do
+  printf "%-46s %s\n" "$s" "$(grep -ci "$s" $A)"
+done
+```
+
+Expected: non-zero for each.
 
 - [ ] **Step 10: Full suite**
 
@@ -1671,6 +2532,7 @@ Expected: PASS
 
 ```bash
 git add prompts/ src/agent/agent.py tests/unit/test_roles.py \
+        tests/unit/test_agent_prompts.py \
         tests/characterization/__snapshots__/test_agent_turn_gm.ambr
 git commit -m "feat(prompts): render the post-type menu; tell agents who they can reach
 
@@ -1680,6 +2542,23 @@ exists is not evidence you can reach it, and introduces the scouting hub, which
 appeared nowhere in a spoke's prompt before. Drops :test_tube:/:package: (offered
 as labels, defined nowhere) and marks :question: reply-only. Collapses idea into
 idea_crosslab.
+
+pitch gets its own quality bar and worked example: the old single bar asked for
+'what each lab would contribute' and 'a concrete first experiment', which are
+unfollowable against a hub with no bench. The 'always consider sharing a paper
+first' preference is restored as an explicit rule — deferring Option C to the
+menu had dropped it, and paper is the one type with a 9.0% reply rate.
+
+phase4-thread-reply.md gains a hub-thread section. A pitch opens a thread whose
+pi_lab phase-4 guidance tells the PI bot to build toward a :memo: naming what
+each lab brings; those strings are pinned in thread_guidance.py, so the
+exception goes in the template. Both roles' phase-2 filters now say 'tags a
+specific agent other than you' — one word, and without it a pitch can be
+filtered out by its own recipient.
+
+scout_hub gains phase-2 scan and prune overrides. It had none, so it was
+selecting interview candidates against 'your lab's core expertise' and 'papers
+your own lab authored' — for an agent with no lab.
 
 Identity goes institution-neutral: 57 of 60 public profiles say Johns Hopkins,
 the one saying Scripps is the test bot being retired, and two name no
@@ -1917,24 +2796,43 @@ State plainly: the artifact count, whether any rejections fired and for what, an
 | §4 data flow / placement / skips re-increment | 5 step 6 |
 | §5 degradation table | 1 (`parse_post_types`), 2 |
 | §5 empty menu is not a skip | 1 (`_EMPTY_MENU`, `test_funding_only_in_the_star_is_empty`) |
-| §6 tests 1-2 | 3 |
-| §6 tests 3-7 | 1, 5 |
+| §6 tests 1-2 (ordering, driven for real) | 3 (`test_start_computes_the_gate_before…`, `test_recompute_refreshes_the_directory…`) |
+| §6 tests 3-4, 6-7 | 1, 5 |
+| §6 test 5 (rejection posts nothing, end to end) | 5 step 7 |
 | §6 test 8 (mesh inert) | 5 (`test_gate_off_*`) |
 | §6 tests 9-10 (token pins) | 6 steps 1-2 |
+| §6 test 11 (role-aware default menu) | 4 (`test_phase5_default_menu_is_the_agents_own_role…`) |
+| §6 test 12 (no empty enumeration) | 1 (`test_render_menu_never_prints_an_empty_enumeration`), 4 |
+| §6 test 13 (reply-path funding bypass) | 5 steps 6a and 7 |
 | §6 snapshot rule | 6 steps 8-9 |
 | §6 atomic landing | 6 header note, Task 4 test 1 |
 | §7 operational items | 7 |
 
 §8 is explicitly out of scope and has no task, by design.
 
+**Beyond the spec, deliberately, and separable:** the two new `scout_hub` phase-2 overrides
+(Task 6). Flagged in the spec's prompt-changes list, in the draft `README.md`, and in Task 6's
+header, with the one command that drops them.
+
 **Placeholder scan:** none — every code step carries the actual code, every verification step carries the actual command and its expected output.
 
-**Type consistency:** `PostTypeSpec` fields (`name`, `emoji`, `label`, `when_to_use`, `targets`) are used identically in Tasks 1, 2, 4, 5. `available_for` / `eligible_targets` / `render_menu` keep the same keyword-only signatures at every call site. `_available_post_types(agent, funding_only)` and `_post_type_rejection(agent, post_type, tagged_agent, available)` match between their definitions in Task 5 step 3 and their uses in steps 5-7 and the tests. `refresh_lab_directories()` is defined in Task 3 step 3 and used only there.
+**Type consistency:** `PostTypeSpec` fields (`name`, `emoji`, `label`, `when_to_use`, `targets`) are used identically in Tasks 1, 2, 4, 5. `available_for` / `eligible_targets` / `render_menu` keep the same keyword-only signatures at every call site. `_available_post_types(agent, *, funding_restricted)` and `_post_type_rejection(agent, post_type, tagged_agent, available)` match between their definitions in Task 5 step 3 and their uses in steps 5-7 and the tests — note the engine helper's keyword is `funding_restricted` (it receives `blocked_for_regular`), while the pure function `available_for` keeps `funding_only` (it means "narrow to FUNDING_POST_TYPES"). `refresh_lab_directories()` is defined in Task 3 step 3 and used in Task 3 only.
 
-**Two details resolved against the source rather than left as caveats:**
+**Details resolved against the source rather than left as caveats:**
 `_write_role(tmp_path, monkeypatch, name, toml_text)` patches `roles.ROLES_DIR`
 itself (`tests/unit/test_roles.py:7`), so Task 2's tests use its real arity and add
-no second `setattr`; and `AgentSlackClient` routes every Slack call through
+no second `setattr`. `AgentSlackClient` routes every Slack call through
 `self._api(method, **kwargs)` (`src/agent/slack_client.py:294`), enforced by
 `tests/unit/test_slack_client_contract.py`, so Task 7's cleanup uses `_api` rather
-than reaching for a public handle that does not exist.
+than reaching for a public handle that does not exist. `ProposalRef`
+(`src/agent/state.py:49`) and `ThreadState` (`:22`) field names are taken from the
+dataclasses. `pyproject.toml:72` sets `asyncio_mode = "auto"`, so no async test in this
+plan carries a marker. `grantbot` is a separate process (`src/agent/grantbot.py`), never an
+entry in `self.agents`, so `_roles_by_agent()` correctly gives it no role and it matches no
+`targets` — the star worked example in the spec depends on this and it holds.
+
+**Line numbers:** re-verified against `517a564`. `agent.py`, `roles.py`, `tests/unit/test_roles.py`
+and all of `prompts/` were untouched by the five concurrent commits, so every reference to those
+is exact. Only `simulation.py` moved, and both documents now carry the current values plus a
+correction table (spec §4). If a cited line does not contain what the plan says it does, trust
+the quoted code, not the number — and re-run the spec's `grep` to re-derive.
