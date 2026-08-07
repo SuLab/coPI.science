@@ -4,6 +4,7 @@ Pure functions over plain data — no DB, no engine, no Agent. See
 docs/specs/2026-08-06-role-topology-post-type-gating-design.md §2, §3.
 """
 import logging
+import re
 
 from src.agent.post_types import (
     CANONICAL,
@@ -260,6 +261,15 @@ def test_parse_targets_override_replaces_the_canonical_default():
     assert got[0].targets == frozenset()
 
 
+def test_parse_targets_absent_inherits_the_canonical_default():
+    """The other half of the pair above: an ABSENT `targets` key is not the same
+    as an explicit `targets = []`. Absent must inherit CANONICAL's default
+    (non-empty, for `pitch`); only an explicit empty list means "broadcast"."""
+    got = parse_post_types([{"name": "pitch"}], role="pi_lab")
+    assert got[0].targets == CANONICAL["pitch"].targets
+    assert got[0].targets == frozenset({"scout_hub"})
+
+
 def test_parse_dedupes_a_repeated_name_and_the_last_entry_wins(caplog):
     """Two [[post_types]] tables for the same name used to produce two
     contradictory lines in the rendered menu while enforcement (`by_name` in
@@ -307,7 +317,10 @@ def test_render_menu_names_every_available_type_with_its_emoji():
     )
     for name in ("paper", "help_wanted", "introduction", "pitch"):
         assert CANONICAL[name].emoji in out
-        assert name in out
+        # The stronger form: `name in out` alone would also pass for a menu
+        # that merely echoes the name in prose somewhere, without actually
+        # naming it as a selectable `post_type` value.
+        assert f"**`{name}`**" in out
     assert "idea_crosslab" not in out
 
 
@@ -317,14 +330,18 @@ def test_render_menu_never_prints_an_empty_enumeration():
     build_phase5_prompt renders a default menu when no caller supplies one, and
     test_phase5_prompt_gm goes down that path — so an empty enumeration would be
     committed into a characterization snapshot and shipped to a live model.
+
+    Checks a regex rather than the two exact literals ("one of: ." and
+    "one of: \\n") so a spacing variant — an extra space before the period, a
+    trailing space before the newline — cannot slip the same bug past this test.
     """
     for gate, roles in ((None, {}), (None, MESH_ROLES), ({"gill"}, {"gill": "pi_lab"})):
         out = render_menu(
             DEFAULT_POST_TYPES, gate=gate, roles_by_agent=roles,
             self_id="gill", bot_names={},
         )
-        assert "one of: ." not in out
-        assert "one of: \n" not in out
+        assert not re.search(r"one of:\s*\.", out)
+        assert not re.search(r"one of:\s*$", out, re.MULTILINE)
         assert out.strip()
 
 

@@ -86,6 +86,15 @@
             {% else %}none{% endif %}
         </p>
         <p>
+            New-post rejections (unavailable post type, missing/unreachable tagged_agent, or a
+            mutilated-mention reject):
+            {% if counters.get('post_type_rejections') %}
+                {% for aid, n in counters['post_type_rejections'].items() %}<code>{{ aid }}={{ n }}</code>{% if not loop.last %}, {% endif %}{% endfor %}
+                — a high rate means a role or model is reaching for a type or target this
+                topology forbids.
+            {% else %}none{% endif %}
+        </p>
+        <p>
             Grandfathered threads (partner left the cohort, thread allowed to conclude):
             {{ counters.get('grandfathered_threads') | length if counters.get('grandfathered_threads') else 0 }}
         </p>

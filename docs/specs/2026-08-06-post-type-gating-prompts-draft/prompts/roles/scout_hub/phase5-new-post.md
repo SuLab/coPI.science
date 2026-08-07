@@ -126,9 +126,17 @@ different action or skip. Your post should:
 
 ### Option C: Make a new top-level post
 
-Option C is for ONE artifact: a completed :mag: **Opportunity Assessment**. If what you
-want to write is a question, an introduction, or anything addressed to a particular lab,
-it is not Option C — it is Option A, or Option D if there is nothing yet to reply to.
+Choose one of the post types listed in "Post types available to you this turn" above — that
+list is the complete set of what you may post, and it already reflects who you can reach right
+now. Normally the only type it lists is `opportunity_assessment`: ONE artifact, a completed
+:mag: **Opportunity Assessment**. If what you want to write is a question, an introduction, or
+anything addressed to a particular lab, it is not Option C — it is Option A, or Option D if
+there is nothing yet to reply to.
+
+**If `opportunity_assessment` is not in your list this turn**, you have no completed assessment
+to post — Option C is not available to you. Choose Option B instead if `funding_collab` is
+listed, or choose Option D. Posting an assessment anyway gets it rejected, and nothing is
+published.
 
 Post your opportunity assessment in the most relevant subscribed channel — usually the one
 where the underlying interview took place. Because you belong to every lab's cohort, this

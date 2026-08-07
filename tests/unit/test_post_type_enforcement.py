@@ -150,6 +150,66 @@ def test_layer3_rejects_an_unknown_agent_id():
     assert eng._post_type_rejection(gill, "pitch", "nobody", avail) is not None
 
 
+# --- FIX B: tagged_agent normalisation --------------------------------------
+#
+# The menu line a model reads offers both forms adjacent — `` `blackbird`
+# (@BlackbirdBot) `` — so any of these near-miss spellings is one slip away
+# from the exact agent_id the gate compares against. Before normalisation all
+# four rejected and published nothing.
+
+
+def test_a_leading_at_sign_on_the_tagged_agent_still_resolves():
+    eng, gill, _, _ = _star()
+    avail = eng._available_post_types(gill, funding_restricted=False)
+    assert eng._post_type_rejection(gill, "pitch", "@blackbird", avail) is None
+
+
+def test_a_bot_name_instead_of_an_agent_id_still_resolves():
+    eng, gill, _, _ = _star()
+    avail = eng._available_post_types(gill, funding_restricted=False)
+    assert eng._post_type_rejection(gill, "pitch", "BlackbirdBot", avail) is None
+
+
+def test_a_capitalized_agent_id_still_resolves():
+    eng, gill, _, _ = _star()
+    avail = eng._available_post_types(gill, funding_restricted=False)
+    assert eng._post_type_rejection(gill, "pitch", "Blackbird", avail) is None
+
+
+def test_stray_whitespace_around_the_tagged_agent_still_resolves():
+    eng, gill, _, _ = _star()
+    avail = eng._available_post_types(gill, funding_restricted=False)
+    assert eng._post_type_rejection(gill, "pitch", " blackbird", avail) is None
+
+
+def test_normalisation_does_not_launder_a_genuinely_unreachable_agent():
+    """Conservative on purpose: resolving the spelling must not resolve the
+    reachability question too. pearce is a real agent_id, just not one gill's
+    gate permits for `pitch` — every near-miss spelling of it must still be
+    rejected, and the reason must still quote what the model actually sent."""
+    eng, gill, _, _ = _star()
+    avail = eng._available_post_types(gill, funding_restricted=False)
+    for spelling in ("pearce", "@pearce", "PearceBot", " pearce"):
+        reason = eng._post_type_rejection(gill, "pitch", spelling, avail)
+        assert reason is not None, f"{spelling!r} must still be rejected"
+        assert spelling in reason, "the reason must quote what was actually sent"
+
+
+def test_a_rejection_increments_the_per_agent_counter():
+    """Mirrors _cohort_tags_stripped: a deployment where every pitch is
+    rejected on a format slip must be visible without grepping logs."""
+    eng, gill, _, _ = _star()
+    avail = eng._available_post_types(gill, funding_restricted=False)
+    assert eng._post_type_rejections.get(gill.agent_id, 0) == 0
+    assert eng._post_type_rejection(gill, "pitch", "nobody", avail) is not None
+    assert eng._post_type_rejections[gill.agent_id] == 1
+    assert eng._post_type_rejection(gill, "pitch", "pearce", avail) is not None
+    assert eng._post_type_rejections[gill.agent_id] == 2
+    # An accepted post must not move the counter.
+    assert eng._post_type_rejection(gill, "pitch", "blackbird", avail) is None
+    assert eng._post_type_rejections[gill.agent_id] == 2
+
+
 def test_a_valid_pitch_at_the_hub_is_accepted():
     eng, gill, _, _ = _star()
     avail = eng._available_post_types(gill, funding_restricted=False)
@@ -395,6 +455,45 @@ async def test_an_allowed_post_still_goes_out(monkeypatch):
     assert len(client.posted) == 1
     assert client.posted[0]["text"].startswith(":newspaper:")
     assert gill.message_count == 1
+
+
+# --- a non-string post_type/tagged_agent must not publish -------------------
+#
+# Both currently raise into _phase5_new_post's blanket `except Exception` —
+# fail-closed, but unpinned before these two tests. A future refactor that
+# narrows that except clause needs to notice these cases rather than silently
+# starting to publish a malformed action.
+
+_NON_STRING_POST_TYPE = (
+    '```json\n'
+    '{"action": "new_post", "channel": "general", '
+    '"post_type": ["idea_crosslab"], "tagged_agent": null}\n```\n\n'
+    '<slack_message>:bulb: Idea — something specific.</slack_message>'
+)
+_NON_STRING_TAGGED_AGENT = (
+    '```json\n'
+    '{"action": "new_post", "channel": "general", '
+    '"post_type": "paper", "tagged_agent": ["pearce"]}\n```\n\n'
+    '<slack_message>:newspaper: Paper — something specific.</slack_message>'
+)
+
+
+async def test_a_non_string_post_type_does_not_publish(monkeypatch, caplog):
+    """resolve_post_type_name's dict.get on an unhashable key (a list, here)
+    raises TypeError before layer 1 ever runs."""
+    caplog.set_level("ERROR")
+    eng, gill, client = await _drive(monkeypatch, _NON_STRING_POST_TYPE)
+    assert client.posted == []
+    assert gill.message_count == 0
+
+
+async def test_a_non_string_tagged_agent_does_not_publish(monkeypatch, caplog):
+    """An unhashable tagged_agent (a list, here) raises TypeError out of the
+    `in`/`not in` set-membership checks in _post_type_rejection."""
+    caplog.set_level("ERROR")
+    eng, gill, client = await _drive(monkeypatch, _NON_STRING_TAGGED_AGENT)
+    assert client.posted == []
+    assert gill.message_count == 0
 
 
 async def test_the_menu_handed_to_the_prompt_is_the_set_that_is_enforced(monkeypatch):

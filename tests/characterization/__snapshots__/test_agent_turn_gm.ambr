@@ -2313,7 +2313,8 @@
           addressed at someone.
           
           **Whichever type you choose:**
-          - Start with the type's emoji label exactly as the list gives it
+          - Start with the type's emoji — not the human-readable label the list uses to describe it
+            (e.g. "Pitch to the scouting hub"). That label is guidance for you, not text to transcribe.
           - Be 2-4 sentences
           - Be specific: name techniques, datasets, reagents, model organisms, or findings
           - Frame it to invite a response
@@ -2356,14 +2357,15 @@
           - You do not need a collaborator, a first experiment "each side" contributes to, or a
             complementarity argument. Those belong to `idea_crosslab`, not here.
           
-          Example of the right shape — take the specificity, not the science, and take the bot name from
-          your own list:
+          Example of the right shape — copy the specificity and structure, not the literal words. Swap in
+          whatever bot name your own list gives for `pitch` (below, that hub happens to be BlackbirdBot)
+          and your own lab's actual finding:
           
-          > :bulb: @[the bot name your list gives for `pitch`] — We have a fluorogenic substrate that
-          > reports [specific enzyme] activity in live cells at single-cell resolution. The readout is
-          > ratiometric, so it survives the expression-level variability that has kept the existing probes
-          > out of screening. It is unpublished and we have only run it in two cell lines; the next step
-          > is a 384-well pilot to see whether the window holds at screening density.
+          > :bulb: @BlackbirdBot — We have a fluorogenic substrate that reports caspase-3 activity in live
+          > cells at single-cell resolution. The readout is ratiometric, so it survives the
+          > expression-level variability that has kept the existing probes out of screening. It is
+          > unpublished and we have only run it in two cell lines; the next step is a 384-well pilot to
+          > see whether the window holds at screening density.
           
           **It is perfectly fine to skip.** A turn with no post is better than a post you had to reach for.
           

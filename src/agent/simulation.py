@@ -340,6 +340,12 @@ class SimulationEngine:
         # outside the sender's cohort (§9). Exposed in the admin UI: a high rate
         # means the topology disagrees with what the agents want to do.
         self._cohort_tags_stripped: dict[str, int] = {}
+        # Per-agent count of new-post rejections from _post_type_rejection —
+        # unavailable post_type, missing/unreachable tagged_agent, or a
+        # mutilated-mention reject. Mirrors _cohort_tags_stripped above: a
+        # deployment where every pitch is rejected on (e.g.) a tagged_agent
+        # spelling slip is otherwise only visible by grepping logs.
+        self._post_type_rejections: dict[str, int] = {}
 
         # Wall-clock throttles for Slack pollers + round-robin cursor over
         # connected clients, so one agent's token doesn't carry all poll load.
@@ -2711,9 +2717,16 @@ class SimulationEngine:
 
         load_role() reads TOML from disk on every call — the same reason
         _role_rate_cache exists (see _calls_per_load). This runs once per
-        phase-5 turn per agent; the cache keeps it off the disk. A role's
-        manifest cannot change without a container rebuild, so there is nothing
-        to invalidate.
+        phase-5 turn per agent; the cache keeps it off the disk.
+
+        NOT the same trade-off as the tool allow-list: ``./prompts`` is
+        bind-mounted, and ``tools_for_role`` (src/agent/tools.py) re-reads
+        ``role.toml`` fresh on every call, so a live edit to a role's ``tools``
+        key takes effect immediately. This cache means the same edit to a
+        role's ``post_types`` key does NOT — it is picked up only on the next
+        process restart. That asymmetry is a known trade-off, not a bug: this
+        runs once per phase-5 turn per agent, which is the hot path the cache
+        exists for, and there is currently no invalidation hook for it.
         """
         cached = self._role_post_types_cache.get(role)
         if cached is None:
@@ -2746,6 +2759,38 @@ class SimulationEngine:
             funding_only=funding_restricted,
         )
 
+    def _normalize_tagged_agent(self, tagged_agent: object) -> object:
+        """Recover a ``tagged_agent`` that names a real agent by a near-miss
+        spelling, before the membership tests in ``_post_type_rejection`` run.
+
+        The menu line a model reads offers both forms adjacent — `` `blackbird`
+        (@BlackbirdBot) `` — so "@blackbird", "BlackbirdBot", "Blackbird", and
+        " blackbird" are all one slip away from the exact agent_id the gate
+        compares against, and an exact-string mismatch used to reject and
+        publish nothing for every one of them.
+
+        Conservative on purpose: resolves to an agent_id that demonstrably
+        exists on the live roster (``self.agents``) or a bot name that
+        demonstrably resolves via ``self._bot_name_to_id`` — never guesses at
+        one that doesn't. Anything else (including non-string input) passes
+        through unchanged, so an unresolved or genuinely unreachable name is
+        still rejected downstream exactly as before.
+        """
+        if not isinstance(tagged_agent, str):
+            return tagged_agent
+        candidate = tagged_agent.strip()
+        if candidate.startswith("@"):
+            candidate = candidate[1:]
+        if candidate in self.agents:
+            return candidate
+        lowered = candidate.lower()
+        if lowered in self.agents:
+            return lowered
+        resolved = self._bot_name_to_id.get(lowered)
+        if resolved is not None:
+            return resolved
+        return tagged_agent  # unresolved — pass through; still rejected below
+
     def _post_type_rejection(
         self,
         agent: "Agent",
@@ -2756,13 +2801,26 @@ class SimulationEngine:
         """Why this new top-level post must not be published, or None.
 
         Applies only to ``action: "new_post"`` — a reply is never gated here.
+
+        Every rejection increments ``self._post_type_rejections[agent.agent_id]``
+        (mirroring ``self._cohort_tags_stripped``), so a deployment where a
+        role or model is having every post rejected is visible without
+        grepping logs. Rejection messages always quote ``tagged_agent`` exactly
+        as the model sent it — normalisation is for the membership tests only.
         """
         by_name = {s.name: s for s in available}
+
+        def _reject(reason: str) -> str:
+            self._post_type_rejections[agent.agent_id] = (
+                self._post_type_rejections.get(agent.agent_id, 0) + 1
+            )
+            return reason
+
         # Resolve retired names on the way in (see LEGACY_POST_TYPE_ALIASES).
         # The rejection message below still quotes what the model actually said.
         spec = by_name.get(resolve_post_type_name(post_type))
         if spec is None:
-            return (
+            return _reject(
                 f"post_type {post_type!r} is not available to role "
                 f"{agent.role!r} with this topology "
                 f"(available: {sorted(by_name) or 'none'})"
@@ -2773,6 +2831,11 @@ class SimulationEngine:
         # separate decision, not a side effect of this one.
         if agent.allowed_sender_ids is None:
             return None
+        # Normalise a near-miss spelling ("@blackbird", "BlackbirdBot", " blackbird")
+        # onto the agent_id the membership tests below compare against. See
+        # _normalize_tagged_agent's docstring — this never invents a target that
+        # doesn't already resolve to a real agent.
+        normalized_tag = self._normalize_tagged_agent(tagged_agent)
         allowed = eligible_targets(
             spec,
             gate=agent.allowed_sender_ids,
@@ -2786,19 +2849,19 @@ class SimulationEngine:
             # do; rejecting it would destroy the artifact and the whole
             # interview behind it over a field nothing routes on. Ignore a
             # REACHABLE tag; an unreachable one is still the dangling-ask bug.
-            if tagged_agent and tagged_agent not in agent.allowed_sender_ids:
-                return (
+            if normalized_tag and normalized_tag not in agent.allowed_sender_ids:
+                return _reject(
                     f"post_type {post_type!r} addresses no one and "
                     f"tagged_agent={tagged_agent!r} is not reachable"
                 )
             return None
-        if not tagged_agent:
-            return (
+        if not normalized_tag:
+            return _reject(
                 f"post_type {post_type!r} must address one of "
                 f"{sorted(allowed)}, but tagged_agent was null"
             )
-        if tagged_agent not in allowed:
-            return (
+        if normalized_tag not in allowed:
+            return _reject(
                 f"tagged_agent={tagged_agent!r} is not reachable for post_type "
                 f"{post_type!r} (allowed: {sorted(allowed)})"
             )
@@ -4862,6 +4925,17 @@ class SimulationEngine:
                     )).scalar() or 0
             except Exception as exc:
                 logger.warning("[cohort] membership sync failed: %s", exc)
+                # The gates themselves are left in place deliberately (flapping
+                # open on every blip is worse than a briefly stale topology —
+                # see the docstring). But the directory is DERIVED from those
+                # gates, so a gate that is correct-but-stale makes a directory
+                # rebuilt from it correct-but-stale too — which is strictly
+                # better than leaving it absent. Without this, a newly-added
+                # agent whose gate isn't reflected in any directory yet gets
+                # _lab_directory = None for the rest of this failed tick, and
+                # existing agents' directories omit it until the next
+                # successful sync.
+                self.refresh_lab_directories()
                 return
 
         gates, reason = compute_gates(
@@ -5035,6 +5109,7 @@ class SimulationEngine:
             },
             "counters": {
                 "tags_stripped": dict(sorted(self._cohort_tags_stripped.items())),
+                "post_type_rejections": dict(sorted(self._post_type_rejections.items())),
                 "grandfathered_threads": grandfathered,
                 "reactive_selections": self._reactive_selections,
                 "proactive_selections": self._proactive_selections,

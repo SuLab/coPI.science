@@ -119,9 +119,14 @@ def resolve_post_type_name(name: str) -> str:
     return LEGACY_POST_TYPE_ALIASES.get(name, name)
 
 
-# Roles a `targets` entry may name. Kept here rather than imported from roles.py
-# to avoid a cycle; roles.available_roles() is filesystem-derived and would make
-# this module depend on the prompts directory.
+# Roles a `targets` entry may name. Hardcoded rather than sourced from
+# roles.available_roles() — not to dodge an import cycle (available_roles()
+# only lists a directory, so importing it would not actually create one), but
+# because this module is dependency-free by design (no src.models, no DB, no
+# Agent import — see the module docstring) so it stays unit-testable with no
+# filesystem or database at all. The cost: this constant does not know about a
+# role directory added after this list was last updated, which is exactly the
+# case the WARNING below is worded to describe.
 _KNOWN_ROLES: frozenset[str] = frozenset({"pi_lab", "scout_hub"})
 
 
@@ -187,8 +192,12 @@ def parse_post_types(raw: object, *, role: str) -> tuple[PostTypeSpec, ...]:
                 unknown = targets - _KNOWN_ROLES
                 if unknown:
                     logger.warning(
-                        "[post_types] %s: %s targets name unknown role(s) %s — the "
-                        "type will never be offered",
+                        "[post_types] %s: %s targets role(s) %s with no role "
+                        "directory known to this module — if that role directory "
+                        "does not actually exist the type will never be offered, "
+                        "but if it does (e.g. it was added after _KNOWN_ROLES was "
+                        "last updated) it WILL be offered whenever a live agent "
+                        "holds that role; this warning cannot tell the two apart",
                         role, name, sorted(unknown),
                     )
         if base.name in kept:

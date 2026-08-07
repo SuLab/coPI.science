@@ -582,6 +582,38 @@ class TestPreflight:
             "a DB blip must not flap the gate open"
         )
 
+    async def test_transient_db_error_still_refreshes_the_directory(self, monkeypatch):
+        """FIX F: the gates are deliberately left in place on a DB blip (test
+        above), but the directory derived from them must not be left stale to
+        the point of absent. Without this, a newly-added agent whose gate was
+        set on some earlier tick gets no directory at all — and existing
+        agents' directories omit it — until the next successful sync. A
+        directory rebuilt from a correct-but-stale gate is strictly better."""
+        _patch(monkeypatch, cohort_isolation_enabled=True)
+        c1 = uuid.uuid4()
+        eng = _engine(["su", "wiseman"], membership_rows=[(c1, "su"), (c1, "wiseman")])
+        await eng._recompute_allowed_sender_ids()
+
+        class _Boom:
+            async def execute(self, _s):
+                raise RuntimeError("connection reset")
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *e):
+                return False
+
+        eng.session_factory = lambda: _Boom()
+        calls = []
+        monkeypatch.setattr(eng, "refresh_lab_directories", lambda: calls.append(1))
+        await eng._recompute_allowed_sender_ids()
+
+        assert calls, (
+            "the membership query raised, but the directory derived from the "
+            "gate left in place must still be refreshed"
+        )
+
 
 # ---------------------------------------------------------------------------
 # §6 — gated reads
@@ -1229,6 +1261,16 @@ class TestTopologySnapshot:
         c = eng.cohort_topology_snapshot()["counters"]
         assert c["tags_stripped"] == {"su": 4}
         assert c["grandfathered_threads"] == ["su:1"]
+
+    async def test_snapshot_carries_the_post_type_rejection_counter(self, monkeypatch):
+        """Mirrors tags_stripped above — see _post_type_rejection (FIX B)."""
+        _patch(monkeypatch, cohort_isolation_enabled=True)
+        c1 = uuid.uuid4()
+        eng = _engine(["su", "cravatt"], membership_rows=[(c1, "su")])
+        await eng._recompute_allowed_sender_ids()
+        eng._post_type_rejections["su"] = 3
+        c = eng.cohort_topology_snapshot()["counters"]
+        assert c["post_type_rejections"] == {"su": 3}
 
     async def test_snapshot_is_json_serialisable(self, monkeypatch):
         import json
