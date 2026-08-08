@@ -1,116 +1,18 @@
 # PI / lab bot — complete prompt set
 
-**Companion to** `docs/specs/2026-08-07-pi-pitch-reframe-design.md` and
-`docs/specs/2026-08-07-hub-bot-prompts.md`.
+*Companion document: [BlackbirdBot (hub) — complete prompt set](2026-08-07-hub-bot-prompts.md).*
 
-**Revision 3 (2026-08-07)** — four decisions are now baked in:
+This document reproduces the full set of instructions given to a **PI / lab bot**. There is one such bot for each participating lab; it represents that lab in a Slack workspace run by **Blackbird Laboratories**, and BlackbirdBot — Blackbird's scouting hub — is the only party it ever talks to.
 
-1. **GrantBot is removed.** No FOAs, no funding threads, no `retrieve_foa`.
-2. **No PI↔PI communication of any kind.** BlackbirdBot is the sole counterparty.
-3. **The purpose of every conversation is to identify opportunities aligned with
-   Blackbird's incubation and venture interests** — not federal grants, not collaboration.
-4. **Private profiles are removed from the prompt system entirely** (new in revision 3).
-   The `## Your Private Instructions` block is gone from every phase of every agent, and
-   the PI DM standing-instruction path is removed with it.
+The bot never receives all of this as a single block. A standing **system prompt** (its rules, and what Blackbird is looking for) together with its **identity** and its lab profile are present in every interaction. On top of that, exactly one situation-specific prompt is added depending on what the bot is doing that turn: scanning newly posted messages, replying inside an interview, or deciding whether to make a new post of its own. Each section below is one of these prompts, reproduced in full.
 
-**Standing assumption, stated because it shaped every prompt below:** removing GrantBot
-removes the *FOA feed*, not the concept of funding. "Fundable" means **fundable by
-Blackbird** — a non-dilutive incubation grant from Blackbird Laboratories, or equity from
-Blackbird BioVentures — plus the Maryland non-dilutive stack. A generic NIH R01 is not an
-outcome this system looks for.
-
-**Status of the text below:** every block marked **PROPOSED** is new text, not yet on disk.
-Blocks marked **UNCHANGED** are current repo contents, reproduced so this document stands
-alone.
-
-**Role:** `pi_lab` — the default role, which is *the absence of overrides*
-(`src/agent/roles.py:61-71`), so every file below is the global under `prompts/`.
+Text in `{curly_braces}` is a placeholder filled in at runtime — the channel name, the running message count, the conversation so far, and so on.
 
 ---
 
-## How these assemble
+## 1. System prompt (present in every interaction)
 
-`Agent._compose_system_prompt` (`agent.py:269-314`) stacks the system prompt in this fixed
-order for every phase. **Revision 3 removes one block from that stack:**
-
-```
-prompts/agent-system.md              §1   the role framing and standing rules
-prompts/identity.md                  §2   "You are {bot_name}, agent for the {pi_name} lab"
-## Your Lab Profile (Public)              profiles/public/{agent_id}.md  (generated)
-## Your Private Instructions              ← DELETED in revision 3
-## Your Working Memory                    profiles/memory/{agent_id}/public.md  (accrued)
-## Other Labs' Recent Publications        never renders — gate-filtered to empty
-```
-
-| Phase | File | Status |
-|---|---|---|
-| 2 — scan | §3 | **Can never select anything.** Minimal prompt; real fix is a code guard. |
-| 2 — prune | §4 | **Can never fire.** Minimal prompt. |
-| 4 — thread reply | §5 | The only live conversation the bot has |
-| 5 — new post | §7 | Collapses to pitch / paper / skip |
-
-§6 is not a file: `phase4_guidance()` (`thread_guidance.py`) returns two strings substituted
-into §5's `{phase_guidance}` and `{instructions}`.
-
-### Why the private profile is gone, and where its content went
-
-PI bots never had one. `profiles/private/` contains exactly one file — `blackbird.md` — so
-every PI bot has always rendered the literal fallback from `agent.py:114-120`:
-
-```
-## Your Private Instructions
-No private instructions yet.
-```
-
-Revision 2 proposed creating one per PI. Revision 3 abandons that. The content it would
-have carried is redistributed:
-
-| Was going to be in the private profile | Now lives in |
-|---|---|
-| Blackbird's funnel, instruments, and check sizes | §1, "What Blackbird Is Looking For" — it is *public* information, stated openly in `profiles/public/blackbird.md` |
-| "What is worth pitching" | §1, Pitch Quality Standards — already covered there |
-| Standing founder-intent answers | **Nowhere.** The bot answers "I'd need to ask my PI" and the hub asks cold in each interview. |
-
-That last row is a deliberate, accepted cost: the Baltimore / would-you-found / IP-status
-questions now consume one or two messages of a twelve-message interview, every time. The
-alternative was a per-PI store that could not be made safe — `_execute_retrieve_profile`
-(`tools.py:303-310`) reads `profiles/public/{agent_id}.md` off disk **with no cohort gate**,
-so any agent that guesses an `agent_id` can read any PI's public profile. Founder intent
-does not belong there.
-
-### Code changes these prompts assume
-
-Out of scope for this document; the prompts are wrong without them.
-
-1. **Delete the private-instructions block** from the header f-string in
-   `_compose_system_prompt` (`agent.py:288-296`). Everything else in that method — the
-   `include_memory` / `include_lab_directory` flags, the private-channel rules, all three
-   builders — is unaffected.
-2. **Remove the `standing_instruction` branch** from `pi_handler.py:103-146`, the
-   `<standing_instructions>` injection at `pi_handler.py:288`, and the
-   `standing_instruction` category from `prompts/pi-dm-classify.md`. Without this the PI DM
-   path still runs, still rewrites and persists a profile, and nothing reads it — a feature
-   that confirms success and changes nothing. `prompts/pi-profile-rewrite.md` becomes
-   unused.
-3. **Drop the private half of `own_publication_dois`** (`agent.py:172-174`), or drop the
-   mechanism. Both consumers are inert under star: `agent.py:364`'s `⚠️ SELF-AUTHORED` flag
-   feeds a Phase-2 prompt that is now a no-op, and `agent.py:445`'s own-paper branch fires
-   on *every* PI thread, since every PI thread is about the PI's own work.
-4. **`retrieve_foa` out of `DEFAULT_TOOLS`** (`roles.py:27-29`).
-5. **`{foa_number}` out of the Phase-4 template.** `agent.py:502` substitutes the literal
-   `"none"` when a thread has no FOA — after GrantBot, every thread.
-6. **`#funding-opportunities` out of `_UNIVERSAL_CHANNELS`** (`simulation.py:148`).
-   Otherwise every agent auto-joins a permanently empty channel that renders into
-   `{subscribed_channels}` in §7 every turn.
-
-The DB column `private_profile_md`, the onboarding flow, and the admin profile editor may
-all stay in place — they simply stop feeding any prompt. Note that
-`routers/onboarding.py:194-293` currently asks a new PI to *write* a private profile; that
-becomes a form whose output nothing consumes, and should be removed from the flow.
-
----
-
-## §1 · `prompts/agent-system.md` — **PROPOSED**
+*Source: `prompts/agent-system.md`*
 
 ````markdown
 # Agent System Prompt
@@ -435,10 +337,9 @@ unpublished.
 
 ---
 
-## §2 · `prompts/identity.md` — **UNCHANGED**
+## 2. Identity
 
-Rendered by `_render_identity` (`agent.py:257-267`) using `str.replace`, not `str.format`,
-so profile text containing bare curly braces is safe.
+*Source: `prompts/identity.md`*
 
 ````markdown
 ## Your Identity
@@ -446,23 +347,11 @@ You are **{bot_name}**, the AI agent representing the {pi_name} lab.
 Your agent ID is "{agent_id}". When communicating, represent your lab professionally.
 ````
 
-> The file has **no trailing newline**, and `_DEFAULT_IDENTITY` (`agent.py:778-780`) must
-> stay byte-identical to it.
-
 ---
 
-## §3 · `prompts/phase2-scan-filter.md` — **PROPOSED (minimal)**
+## 3. Scanning new posts
 
-> ### This phase can no longer succeed. The real fix is a code guard, not a prompt.
->
-> `_phase2_scan_filter` feeds `get_new_top_level_posts(..., allowed_sender_ids=gate)`
-> (`simulation.py:1035-1040`). With GrantBot gone and no PI↔PI traffic, a PI bot's gate is
-> `{blackbird}` — so the feed contains **only** hub posts, and the only top-level post the
-> hub makes is a `:mag:` Opportunity Assessment, which no PI bot should ever select.
->
-> **Every Phase-2 call for a PI bot must therefore return `[]`, on every turn, forever.**
-> Skipping the phase for `pi_lab` saves one LLM call per PI per turn. Until that guard
-> exists, the prompt below is the cheapest correct thing to send.
+*Source: `prompts/phase2-scan-filter.md`*
 
 ````markdown
 # Phase 2: Scan & Filter New Posts
@@ -496,11 +385,9 @@ Return ONLY this JSON — no other text, no markdown, no explanation:
 
 ---
 
-## §4 · `prompts/phase2-prune.md` — **PROPOSED (minimal)**
+## 4. Trimming the watch-list
 
-Fires only when the interesting-posts list exceeds `settings.interesting_posts_cap` (20).
-Given §3 can never add an entry, the list can never reach 20 and this can never fire. Kept
-as a safe no-op in case a legacy list survives a deployment change.
+*Source: `prompts/phase2-prune.md`*
 
 ````markdown
 # Phase 2: Prune Interesting Posts
@@ -527,11 +414,9 @@ Return ONLY this JSON — no other text:
 
 ---
 
-## §5 · `prompts/phase4-thread-reply.md` — **PROPOSED**
+## 5. Replying during an interview
 
-The funding branch, `retrieve_foa`, and the `**FOA Number:** {foa_number}` line are gone
-(the last rendered as the literal `none` in every thread). Revision 3 also removes the
-"answer from your standing instructions" guidance — there are no standing instructions.
+*Source: `prompts/phase4-thread-reply.md`*
 
 ````markdown
 # Phase 4: Interview Reply
@@ -639,23 +524,17 @@ further replies after that.
 
 ---
 
-## §6 · `_PI_LAB` phase guidance — **PROPOSED**
+## 6. Interview phase guidance
 
-Not a file. `phase4_guidance(role, message_count)` (`thread_guidance.py:126-139`) selects a
-phase by message count and returns two strings, substituted into §5's `{phase_guidance}`
-and `{instructions}`.
+*Source: `src/agent/thread_guidance.py` — the `_PI_LAB` phase-guidance strings (Python, not a Markdown prompt file).*
+
+An interview runs in three phases, chosen by how many messages have been exchanged so far. Each phase supplies two blocks of text that fill the `{phase_guidance}` and `{instructions}` placeholders in the interview-reply prompt above.
 
 | Message count | Phase |
 |---|---|
 | 1–4 | `EXPLORE` |
 | 5–11 | `DECIDE` |
-| 12+ | `MUST CONCLUDE` |
-
-> **This replaces strings the repo currently declares immutable.** See the design doc §0 —
-> the byte-identical rule protected a mesh deployment that lives only in org1's repo, and
-> the 12 pinned snapshot blocks in `test_agent_turn_gm.ambr` must be regenerated as a
-> reviewed diff. **These are reflowed here for readability and are not directly
-> copy-pasteable into Python.**
+| 12 | `MUST CONCLUDE` |
 
 ### EXPLORE (messages 1–4)
 
@@ -735,15 +614,9 @@ and never ask to be introduced to another lab.
 
 ---
 
-## §7 · `prompts/phase5-new-post.md` — **PROPOSED**
+## 7. Making a new post
 
-The "reply to an interesting post" option is gone — `{interesting_posts}` is permanently
-empty (§3), so that branch could never fire. All funding content is gone with GrantBot. The
-remaining choice is pitch, result, or skip.
-
-`{post_type_menu}` is rendered by `render_menu` (`post_types.py:303-359`) from the *same*
-tuple used to judge the response, so the menu and the gate cannot disagree. Under the
-narrowed `DEFAULT_POST_TYPES` it lists exactly `pitch` and `paper`.
+*Source: `prompts/phase5-new-post.md`*
 
 ````markdown
 # Phase 5: New Post
@@ -894,94 +767,3 @@ Your message here — written exactly as it should appear in Slack.
 ```
 ````
 
----
-
-## Appendix A · `DEFAULT_POST_TYPES` — **PROPOSED**
-
-`pi_lab` has no `role.toml`, so this tuple in `post_types.py:91-98` *is* its declared
-post-type list. Narrowed from six types to two.
-
-````python
-DEFAULT_POST_TYPES: tuple[PostTypeSpec, ...] = (
-    CANONICAL["pitch"],
-    CANONICAL["paper"],
-)
-````
-
-| Removed | Why it cannot work |
-|---|---|
-| `help_wanted` | The only reachable counterparty explicitly refuses to broker. Declares no `targets`, so `available_for` cannot drop it automatically. |
-| `introduction` | The hub's scan filter excludes introductions by name. Also targetless, so also undroppable automatically. |
-| `idea_crosslab` | `targets={"pi_lab"}` — no reachable peer, now permanently. |
-| `funding_collab` | **GrantBot removed.** No FOAs exist, so "must include the FOA number" can never be satisfied. |
-
-Two further edits belong with this one: `CANONICAL["paper"]`'s `label` and `when_to_use`
-should say *result* rather than *publication*, to match §7; and `FUNDING_POST_TYPES` becomes
-an empty frozenset. **`TERMINAL_POST_TYPES` must not be merged into it** — the funding half
-of the backpressure exemption is dead, but the `opportunity_assessment` half is the fix for
-the production incident recorded at `post_types.py:110-120`.
-
----
-
-## Appendix B · `_default_system_prompt()` — **PROPOSED**
-
-`agent.py:783-813`. Used only if `prompts/agent-system.md` is missing from disk. It has
-already drifted from the on-disk file, so leaving it would make it a silent mesh-era
-fallback.
-
-````python
-def _default_system_prompt() -> str:
-    return """You are an AI agent representing a research lab in a Slack workspace run by
-Blackbird Laboratories, which turns academic research into venture-scale companies anchored
-in Baltimore — funding them first with non-dilutive incubation grants, then with equity. You
-are your lab's advocate: bring forward the work from your own lab that could become a
-licensable asset, a fundable de-risking program, or a company, and make the strongest honest
-case for it.
-
-## Core Principles
-
-1. **Name the thing, not the area.** An idea is a compound, construct, assay, cell line,
-   device, dataset, algorithm, or method — not a research direction.
-
-2. **Say what stage it is actually at.** Unpublished and early is often better than
-   published; inflated is worse than nothing.
-
-3. **Name what would have to happen next** — the specific experiment, prototype, or missing
-   evidence that would move it to the next stage.
-
-4. **Something must be ownable.** A beautiful result with nothing ownable attached is a
-   paper, not an opportunity.
-
-5. **Silence is better than noise.** A weak pitch spends attention you will want later.
-
-## Communication Style
-- Professional but not stiff — like a postdoc presenting to an investor's diligence lead
-- Specific and concrete
-- Willing to say "we haven't tested that" and "I'd need to check with my PI"
-- Does not oversell or overcommit
-
-## Rules
-- BlackbirdBot is your only counterparty; there are no other reachable labs
-- Never propose joint work, and never suggest two other labs should talk
-- Cannot commit effort, resources, licensing terms, or a decision to found a company, and
-  cannot answer on your PI's behalf whether they would do any of those
-- Cannot DM other labs' PIs (only DM your own PI)"""
-````
-
----
-
-## Appendix C · Removed and dormant
-
-| Thing | Status |
-|---|---|
-| `## Your Private Instructions` block (`agent.py:288-296`) | **Removed** — revision 3. |
-| `pi_handler.py:103-146` `standing_instruction` branch, `pi_handler.py:288` `<standing_instructions>` injection, the `standing_instruction` category in `pi-dm-classify.md`, and `pi-profile-rewrite.md` | **Removed** — without this the DM path keeps running and nothing reads the result. |
-| `own_publication_dois` private half (`agent.py:172-174`) and both `cites_own_paper` consumers | **Removable** — the `⚠️ SELF-AUTHORED` flag feeds a no-op Phase 2, and the Phase-4 own-paper branch now fires on every thread. |
-| `routers/onboarding.py:194-293` private-profile step | Should leave the onboarding flow — it collects text nothing consumes. |
-| `grantbot.py`, `services/grants.py`, `foa_cache.py`, `models/grantbot_posted.py`, `funding_rules.py`, `retrieve_foa`, `WRITER_GRANTBOT` | Dead. GrantBot is a standalone process, never scheduled by the simulation. |
-| `#funding-opportunities` in `_UNIVERSAL_CHANNELS` (`simulation.py:148`) | **Must be removed** — renders into `{subscribed_channels}` every turn as a channel that can never contain anything. |
-| `{foa_number}` / `{funding_thread_context}` | **Must be removed** from §5 — `agent.py:502` substitutes the literal `"none"`. |
-| `PRIVATE_CHANNEL_RULES` (`agent.py:35-60`) | Dormant — injected only at `collab_private` visibility, which this topology never produces. |
-| `prompts/email-reply-classify.md` | Dormant — `Proposal` rows come only from the `:memo:`→`✅` path at `simulation.py:1489`, which no longer fires. |
-| `## Other Labs' Recent Publications` | Self-disabling; gate-filtered to empty. |
-| DB column `private_profile_md`, admin profile editor | May stay — they simply stop feeding any prompt. |

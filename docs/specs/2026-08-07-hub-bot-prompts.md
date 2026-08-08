@@ -1,106 +1,18 @@
 # BlackbirdBot (hub) — complete prompt set
 
-**Companion to** `docs/specs/2026-08-07-pi-pitch-reframe-design.md` and
-`docs/specs/2026-08-07-pi-bot-prompts.md`.
+*Companion document: [PI / lab bot — complete prompt set](2026-08-07-pi-bot-prompts.md).*
 
-**Revision 3 (2026-08-07)** — four decisions are now baked in:
+This document reproduces the full set of instructions given to **BlackbirdBot**, Blackbird's scouting hub. There is a single hub bot. It represents **Blackbird Laboratories** — not a research lab — and its job is to interview one PI at a time about their recent work, screen each idea against Blackbird's priorities, and write up the promising ones as opportunity assessments. It never brokers introductions between labs.
 
-1. **GrantBot is removed.** No FOAs, no funding threads, no `funding_collab`.
-2. **No PI↔PI communication of any kind.** Every conversation is one PI ↔ this hub.
-3. **The purpose of every conversation is to identify opportunities aligned with
-   Blackbird's incubation and venture interests.**
-4. **Private profiles are removed from the prompt system entirely** (new in revision 3).
-   For this role that means the screening rubric moves out of
-   `profiles/private/blackbird.md` and **into `prompts/roles/scout_hub/agent-system.md`** —
-   see §1.
+The bot never receives all of this as a single block. A standing **system prompt** — its rules, the assessment-quality standards, and Blackbird's full screening rubric — together with its **identity** and public profile are present in every interaction. On top of that, exactly one situation-specific prompt is added depending on what the hub is doing that turn: scanning the PIs' posts, replying inside an interview, or posting a completed assessment. The final section reproduces the eight domain-specialist prompts the hub can consult while an interview is under way.
 
-**Standing assumption, same as the PI document:** removing GrantBot removes the *FOA feed*,
-not the concept of funding. "Fundable" means fundable **by Blackbird** — a non-dilutive
-incubation grant from Blackbird Laboratories, or equity from Blackbird BioVentures — plus
-the Maryland non-dilutive stack. Naming an NIH mechanism is no longer a useful assessment
-output.
-
-**Also resolved:** revision 1 left open the question of the hub broadcasting a specific
-description of one PI's unpublished idea to every lab. Per-PI channels were considered and
-**rejected**; this is now handled in prose, in §8, by constraining what the *visible*
-assessment may contain.
-
-**Status of the text below:** blocks marked **PROPOSED** are new or edited text, not yet on
-disk. Blocks marked **UNCHANGED** are current repo contents, reproduced so this document
-stands alone.
+Text in `{curly_braces}` is a placeholder filled in at runtime.
 
 ---
 
-## How these assemble
+## 1. System prompt (present in every interaction)
 
-`Agent._compose_system_prompt` (`agent.py:269-314`) stacks the system prompt in this fixed
-order for every phase. **Revision 3 removes one block from that stack:**
-
-```
-prompts/roles/scout_hub/agent-system.md   §1   framing, standing rules, AND the rubric
-prompts/roles/scout_hub/identity.md       §2   "You are {bot_name}, scouting agent"
-## Your Lab Profile (Public)                   profiles/public/blackbird.md
-## Your Private Instructions                   ← DELETED in revision 3
-## Your Working Memory                         profiles/memory/blackbird/public.md
-## Other Labs' Recent Publications             every PI — the hub's gate contains them all
-```
-
-| Phase | File |
-|---|---|
-| 2 — scan | §4 `phase2-scan-filter.md` |
-| 2 — prune | §5 `phase2-prune.md` |
-| 4 — interview reply | §6 `phase4-thread-reply.md` |
-| 5 — new post | §8 `phase5-new-post.md` |
-
-§7 is not a file: `phase4_guidance("scout_hub", n)` returns two strings substituted into
-§6's `{phase_guidance}` and `{instructions}`. **Appendix A** holds the eight specialist
-prompts, reached by `consult_specialist`, which §3 grants to this role and no other.
-
-### Why the rubric moved, and what it costs
-
-`profiles/private/blackbird.md` was **role content in a per-agent file**. BlackbirdBot is a
-single agent, so there is no per-agent variation for that mechanism to express;
-`prompts/roles/scout_hub/` is the correct home and already exists. Since
-`_compose_system_prompt` loads only `agent-system.md` and `identity.md` from a role
-directory, the rubric folds into the first of those.
-
-Three things verified before proposing this:
-
-- **`blackbird_rubric.py` does not read the file.** Its line-3 reference is a docstring
-  citation; the thirteen weights are hardcoded in Python. Score computation is unaffected.
-- **No token cost changes.** The private profile was already injected into every phase
-  including the Phase-2 scan (`build_scan_system_prompt` omits memory and the lab directory
-  but keeps the header), so the rubric was already in every prompt it will now be in.
-- **Live-reload actually improves.** `private_profile` is cached on the Agent and cleared
-  only by `reload_profiles()`; `_load_prompt` re-reads from disk on every call, and
-  `./prompts` is bind-mounted. An edited rubric now takes effect on the next turn.
-
-The cost: **the admin-UI rubric editor stops working.** `agent_page.py:1117` saves
-`profiles/private/{agent_id}.md`, so the rubric becomes a git-tracked, deploy-time file
-rather than something editable through the web app.
-
-### The knock-on effect from the PI side
-
-PI bots no longer carry standing instructions of any kind, so a PI agent **can never answer
-a founder-intent question** — whether its PI would anchor a company in Baltimore, found one,
-or license the IP. It will say "that's a question for my PI," and that is the correct
-answer, not evasion.
-
-The rule for this hub follows: **ask each intent question once, accept the deferral, record
-the criterion as `unconfirmed`, and move on.** Pressing a bot that structurally cannot
-answer burns messages out of a twelve-message budget and produces nothing. `unconfirmed`
-does not block an assessment — it is exactly the state the rubric designed for "we never
-established this." §1, §6, §7 and §8 all say so.
-
----
-
-## §1 · `prompts/roles/scout_hub/agent-system.md` — **PROPOSED**
-
-Changes from the current file: the workspace name is corrected; the funding-fit principle is
-re-pointed at Blackbird's own vehicles; the "Funding Opportunities" section is deleted;
-`:moneybag:` leaves the label table; a paragraph reconciling the two roles' confidence
-scales is added; the intent-question rule above is added; and **the entire screening rubric
-is folded in** as a new section, its headings demoted one level.
+*Source: `prompts/roles/scout_hub/agent-system.md`*
 
 ````markdown
 # Agent System Prompt
@@ -447,7 +359,9 @@ always attach the caveat: title-only, US-only.
 
 ---
 
-## §2 · `prompts/roles/scout_hub/identity.md` — **UNCHANGED**
+## 2. Identity
+
+*Source: `prompts/roles/scout_hub/identity.md`*
 
 ````markdown
 ## Your Identity
@@ -459,39 +373,9 @@ ideas that may be patentable, fundable, or commercializable. Your agent ID is
 
 ---
 
-## §3 · `prompts/roles/scout_hub/role.toml` — **PROPOSED**
+## 3. Scanning new posts
 
-`funding_collab` is removed: with GrantBot gone there are no FOAs, so the type's "must
-include the FOA number" requirement can never be satisfied. `opportunity_assessment` becomes
-the hub's only declared post type — and since it declares no `targets`, `available_for` will
-always offer it and `render_menu` will always render exactly one line.
-
-````toml
-label = "Scout Hub"
-tools = ["retrieve_profile", "retrieve_abstract", "retrieve_full_text", "search_prior_art", "consult_specialist"]
-
-# Layer 1: what this role may post as a NEW top-level post. `action: "reply"` is
-# not governed here. An absent `post_types` key would fall back to
-# DEFAULT_POST_TYPES (see src/agent/post_types.py) — declared explicitly so that
-# adding a new type to the default set never silently hands it to the hub.
-#
-# `funding_collab` was removed when GrantBot was retired: with no FOA feed, a
-# funding-fit note can never satisfy its own "reference the specific FOA number"
-# requirement. The hub now has exactly one top-level post type.
-
-[[post_types]]
-name = "opportunity_assessment"
-# The screening artifact. Stands on its own for Blackbird staff and the PI, so it
-# addresses no one and carries no targets.
-````
-
----
-
-## §4 · `prompts/roles/scout_hub/phase2-scan-filter.md` — **PROPOSED**
-
-The funding clauses are deleted. Everything else stands — and this phase matters *more* now,
-because with the PI-side scan reduced to a no-op, this is the hub's only way to find an idea
-a PI did not think to pitch.
+*Source: `prompts/roles/scout_hub/phase2-scan-filter.md`*
 
 ````markdown
 # Phase 2: Scan & Filter New Posts
@@ -576,11 +460,9 @@ If no posts are worth an interview, return:
 
 ---
 
-## §5 · `prompts/roles/scout_hub/phase2-prune.md` — **PROPOSED**
+## 4. Trimming the watch-list
 
-The FOA removal criterion is deleted. The two breadth edits from revision 1 are retained:
-with pitches arriving on the PIs' initiative, an unqualified breadth preference would make
-the hub drop an active PI's pitch in favour of a quiet PI's stale result.
+*Source: `prompts/roles/scout_hub/phase2-prune.md`*
 
 ````markdown
 # Phase 2: Prune Interesting Posts
@@ -634,11 +516,9 @@ Return ONLY this JSON — no other text:
 
 ---
 
-## §6 · `prompts/roles/scout_hub/phase4-thread-reply.md` — **PROPOSED**
+## 5. Replying during an interview
 
-The funding branch is deleted and the `**FOA Number:** {foa_number}` line is removed
-(`agent.py:502` substituted the literal `"none"` there). Revision 3 replaces the
-standing-answer section with the deferral rule.
+*Source: `prompts/roles/scout_hub/phase4-thread-reply.md`*
 
 ````markdown
 # Phase 4: Scouting Interview Reply
@@ -740,12 +620,17 @@ closes the thread. If the other agent has already posted ⏸️, you may reply w
 
 ---
 
-## §7 · `_SCOUT_HUB` phase guidance — **PROPOSED**
+## 6. Interview phase guidance
 
-`phase4_guidance("scout_hub", message_count)` (`thread_guidance.py:51-121`) returns two
-strings substituted into §6's `{phase_guidance}` and `{instructions}`. EXPLORE now names
-Blackbird's instruments; DECIDE now says to ask the Baltimore question once and accept the
-deferral.
+*Source: `src/agent/thread_guidance.py` — the `_SCOUT_HUB` phase-guidance strings (Python, not a Markdown prompt file).*
+
+An interview runs in three phases, chosen by how many messages have been exchanged so far. Each phase supplies two blocks of text that fill the `{phase_guidance}` and `{instructions}` placeholders in the interview-reply prompt above.
+
+| Message count | Phase |
+|---|---|
+| 1–4 | `EXPLORE` |
+| 5–11 | `DECIDE` |
+| 12 | `MUST CONCLUDE` |
 
 ### EXPLORE (messages 1–4)
 
@@ -855,13 +740,9 @@ either consult them in this reply or conclude at pass.
 
 ---
 
-## §8 · `prompts/roles/scout_hub/phase5-new-post.md` — **PROPOSED**
+## 7. Making a new post
 
-Three changes. **The funding-fit note option is deleted** and the remaining options
-renumbered A / B / C. All funding rules blocks are gone. And the confidentiality question
-left open in revision 1 is resolved in prose, in the "Quality bar for the visible message"
-block: the visible note may describe the idea only at the level the PI has already made
-public, with anything learned in confidence confined to the stripped sidecar.
+*Source: `prompts/roles/scout_hub/phase5-new-post.md`*
 
 ````markdown
 # Phase 5: New Post
@@ -1166,21 +1047,15 @@ Your message here — written exactly as it should appear in Slack.
 
 ---
 
-## Appendix A · The eight specialist prompts — **UNCHANGED**
+## 8. The specialist panel
 
-Reached by `consult_specialist`, granted only to `scout_hub` by §3's `tools` list. Each is
-a separate LLM call: the hub asks one question about one opportunity, the specialist
-answers within its own domain and returns JSON. All eight share the same structure —
-*what you own* / *what you do not own* / *you do not decide* / *answer format* — and all
-eight are told explicitly that `questions_to_ask` is their most valuable output, because it
-becomes the hub's next question to the PI.
+*Sources: the eight files in `prompts/specialists/`, one per specialist below.*
 
-**None are affected by the GrantBot removal or the private-profile removal.** The budget
-specialist is worth noting: it was already written against Blackbird's *own* funding bands
-rather than federal mechanisms, which is exactly the alignment §1's revised principle 3 now
-brings to the rest of the system.
+During an interview the hub can consult eight domain specialists through `consult_specialist`. Each consult is a separate call: the hub asks one question about one opportunity, and the specialist answers only within its own domain and returns a short JSON verdict. All eight share the same structure — *what you own* / *what you do not own* / *you do not decide* / *answer format* — and each is told that `questions_to_ask` is its most valuable output, because that question becomes the hub's next question to the PI.
 
-### A.1 · `prompts/specialists/scientific.md`
+### Scientific specialist
+
+*Source: `prompts/specialists/scientific.md`*
 
 ````markdown
 # Scientific Specialist
@@ -1238,7 +1113,9 @@ question to the PI. Write questions a scientist would actually ask out loud, not
 checklist item.
 ````
 
-### A.2 · `prompts/specialists/chemistry.md`
+### Chemistry specialist
+
+*Source: `prompts/specialists/chemistry.md`*
 
 ````markdown
 # Chemistry Specialist
@@ -1303,7 +1180,9 @@ question to the PI. Write questions a medicinal chemist would actually ask out l
 checklist item.
 ````
 
-### A.3 · `prompts/specialists/clinical.md`
+### Clinical specialist
+
+*Source: `prompts/specialists/clinical.md`*
 
 ````markdown
 # Clinical Specialist
@@ -1363,7 +1242,9 @@ question to the PI. Write questions a clinician would actually ask out loud, not
 checklist item.
 ````
 
-### A.4 · `prompts/specialists/commercial.md`
+### Commercial specialist
+
+*Source: `prompts/specialists/commercial.md`*
 
 ````markdown
 # Commercial Specialist
@@ -1422,7 +1303,9 @@ question to the PI. Write questions an investor or business-development lead wou
 actually ask out loud, not a checklist item.
 ````
 
-### A.5 · `prompts/specialists/legal.md`
+### Legal specialist
+
+*Source: `prompts/specialists/legal.md`*
 
 ````markdown
 # Legal Specialist
@@ -1481,7 +1364,9 @@ question to the PI. Write questions a technology-transfer or patent counsel woul
 ask out loud, not a checklist item.
 ````
 
-### A.6 · `prompts/specialists/technologic.md`
+### Technologic specialist
+
+*Source: `prompts/specialists/technologic.md`*
 
 ````markdown
 # Technologic Specialist
@@ -1541,7 +1426,9 @@ question to the PI. Write questions a platform technologist would actually ask o
 not a checklist item.
 ````
 
-### A.7 · `prompts/specialists/talent.md`
+### Talent specialist
+
+*Source: `prompts/specialists/talent.md`*
 
 ````markdown
 # Talent Specialist
@@ -1598,7 +1485,9 @@ question to the PI. Write questions a hiring manager or program officer would ac
 out loud, not a checklist item.
 ````
 
-### A.8 · `prompts/specialists/budget.md`
+### Budget specialist
+
+*Source: `prompts/specialists/budget.md`*
 
 ````markdown
 # Budget Specialist
@@ -1658,25 +1547,3 @@ question to the PI. Write questions a program officer would actually ask out lou
 checklist item.
 ````
 
----
-
-## Appendix B · Code changes these prompts assume
-
-Out of scope for this document, but the prompts above are wrong without them.
-
-| Change | Where | Why |
-|---|---|---|
-| **Delete the private-instructions block** from the header f-string | `agent.py:288-296` | The whole point of revision 3. Affects both roles; everything else in `_compose_system_prompt` is untouched. |
-| **Delete `profiles/private/blackbird.md`** after §1 lands | — | Its content now lives in `prompts/roles/scout_hub/agent-system.md`. Leaving both invites drift. |
-| Remove `{foa_number}` from the Phase-4 template | `agent.py:502` | Substitutes the literal `"none"`; after GrantBot that is every thread. §6 drops the line. |
-| Remove `#funding-opportunities` from `_UNIVERSAL_CHANNELS` | `simulation.py:148` | Otherwise every agent auto-joins a permanently empty channel that renders into `{subscribed_channels}` in §8 every turn. |
-| `FUNDING_POST_TYPES` becomes empty | `post_types.py:102` | No funding types remain on any role. |
-| **Do not merge `TERMINAL_POST_TYPES` into it** | `post_types.py:110-121` | The funding half of the backpressure exemption is dead; the `opportunity_assessment` half is the fix for the recorded incident where the hub held 65 interviews and reached Phase 5 zero times. |
-| Retire the GrantBot process and its cohort memberships | `agent/grantbot.py` | Standalone process, never scheduled by the simulation. |
-
-**Not affected, verified:** `blackbird_rubric.py` never read `profiles/private/blackbird.md`
-— its line-3 reference is a docstring citation and the thirteen weights are hardcoded — so
-moving the rubric into a prompt does not touch score computation.
-
-**Lost, accepted:** the admin-UI rubric editor (`agent_page.py:1117` writes
-`profiles/private/{agent_id}.md`). The rubric becomes a git-tracked, deploy-time file.
