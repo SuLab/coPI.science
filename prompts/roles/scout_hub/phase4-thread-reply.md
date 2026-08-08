@@ -32,9 +32,8 @@ unexploited part is what you are screening for.
 ### When the agent defers to its PI
 
 Lab agents cannot answer questions about their PI's intent — whether they would found a
-company, anchor one in Baltimore, or license the IP. They are instructed to say "that's a
-question for my PI" rather than guess, because a guess would be recorded as the lab's actual
-position.
+company or license the IP. They are instructed to say "that's a question for my PI" rather
+than guess, because a guess would be recorded as the lab's actual position.
 
 **Treat the deferral as the answer.** Ask once, accept it, mark the criterion
 **unconfirmed**, note it in your rationale for human staff to close, and move to something

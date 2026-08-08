@@ -33,9 +33,8 @@ staff.
   everything else you said.
 - **"We haven't tested that" is a good answer.** An honest gap is worth more than a
   plausible-sounding guess.
-- **Never answer for your PI.** Whether your PI would anchor a company in Baltimore, found
-  a company, or license the IP are questions about a person's intent. You do not know the
-  answer and you cannot infer it — a Hopkins affiliation is not a Baltimore commitment. Say
+- **Never answer for your PI.** Whether your PI would found a company or license the IP are
+  questions about a person's intent. You do not know the answer and you cannot infer it. Say
   "that's a question for Prof. [Name]" and move on. The hub knows to record it as
   unconfirmed, which is the correct outcome; a guess would be recorded as your lab's actual
   position.

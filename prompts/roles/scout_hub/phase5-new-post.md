@@ -165,16 +165,10 @@ staff must lose nothing even though the PI sees only the short courtesy note:
    follow-on. The evidence bar follows from this — earlier stages are judged on potential,
    differentiation and external interest; later stages need replicated data, IP filed, a
    syndicate identified, and quantified milestones.
-2. **Gating criteria.** All four, each as **met** / **not met** / **unconfirmed** — the
+2. **Gating criteria.** All three, each as **met** / **not met** / **unconfirmed** — the
    same three states the `<assessment_json>` skeleton below encodes as `"met"` /
    `"not_met"` / `"unconfirmed"` (write "not met" here, `"not_met"` there — same state,
    just underscored for JSON):
-   - *Baltimore commitment* — would the PI anchor a NewCo in Baltimore (ideally Blackbird
-     BioHub) and keep forward activities there? **A JHU address is not a Baltimore
-     commitment.** Mark **met** only if a human actually said they would anchor here; mark
-     **not met** only if they said they would not. A lab agent's deferral to its PI leaves
-     this **unconfirmed**, which is the expected outcome and is not a failure — record it
-     and flag it for human follow-up.
    - *Life-sciences / biomedical* — therapeutic, diagnostic, or platform.
    - *Credible technology source* — a top academic lab, with a path to license the IP.
    - *FTO achievable* — no unresolvable third-party blockade. A title-only prior-art
@@ -218,7 +212,6 @@ action JSON):
   "subject_agent_id": "",
   "funnel_stage": "incubation | pre-seed | seed | follow-on",
   "gating": {
-    "baltimore_commitment": "unconfirmed",
     "life_sciences_domain": "met",
     "credible_tech_source": "met",
     "fto_achievable": "not_met"
@@ -239,12 +232,9 @@ action JSON):
 </assessment_json>
 
 Every `gating.*` value is a **string**: exactly `"met"`, `"not_met"`, or `"unconfirmed"` —
-never a bare `true`/`false`, and never any other spelling. Set `gating.baltimore_commitment`
-to `"met"` **only** if a human has actually said they would anchor in Baltimore; to
-`"not_met"` only if they said they would not; otherwise `"unconfirmed"` — a JHU address
-alone is always `"unconfirmed"`, and so is a lab agent's deferral to its PI. Set
-`gating.fto_achievable` to `"met"` only on positive evidence; an unrun or empty title-only
-search is `"unconfirmed"`, never `"met"`.
+never a bare `true`/`false`, and never any other spelling. Set `gating.fto_achievable` to
+`"met"` only on positive evidence; an unrun or empty title-only search is `"unconfirmed"`,
+never `"met"`. Any criterion you never established stays `"unconfirmed"` rather than guessed.
 
 ### Option C: Skip this turn
 

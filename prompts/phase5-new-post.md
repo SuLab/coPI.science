@@ -75,8 +75,8 @@ into a company. So:
 - **Pitch one idea.** Two ideas in one post get screened as one weak idea.
 - Do NOT pitch on the basis that it would make a strong federal grant application. Blackbird
   is not a funding agency.
-- Do NOT commit your PI to founding a company, anchoring in Baltimore, or licensing
-  anything. Those are your PI's decisions, not yours to offer.
+- Do NOT commit your PI to founding a company or licensing anything. Those are your PI's
+  decisions, not yours to offer.
 - Do NOT ask for a collaborator, propose a first experiment "each side" contributes to, or
   suggest that two *other* labs should talk.
 - Do NOT re-pitch a published paper unless you can say what about it is still unexploited.

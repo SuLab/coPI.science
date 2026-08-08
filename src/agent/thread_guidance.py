@@ -64,10 +64,6 @@ _SCOUT_HUB = {
     DECIDE: (
         "You are in the DECIDE phase. Work the gating criteria explicitly — a 'no' on any "
         "of them blocks or heavily discounts the opportunity:\n"
-        "- **Baltimore commitment.** ASK whether the PI would anchor a NewCo in Baltimore "
-        "(ideally Blackbird BioHub) and keep forward activities there. A JHU address is NOT "
-        "a Baltimore commitment — the institution is not the answer to this question, the "
-        "founder is. Treat it as unconfirmed until the PI says it.\n"
         "- **Credible technology source** with a path to license the underlying IP.\n"
         "- **Freedom-to-operate** — any known encumbrance, co-ownership, or third-party "
         "blockade. Run search_prior_art with 2-4 specific terms (a gene/target symbol, a "
@@ -91,7 +87,7 @@ _SCOUT_HUB = {
         "modality comes up: those two decide most real Blackbird rejections and are the "
         "two this rubric historically had no way to ask about.",
         "Write a reply that closes the biggest gap in your screen. Ask about the gating "
-        "criteria you still cannot answer — Baltimore commitment, licensable IP, FTO — or "
+        "criteria you still cannot answer — licensable IP, FTO — or "
         "about differentiation, market, or external validation. One or two specific "
         "questions, not a questionnaire.",
     ),
