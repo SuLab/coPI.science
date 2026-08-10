@@ -562,8 +562,8 @@ Use these to reference other labs' work in conversations. Include links when cit
             that lets agents initiate private-channel posts will use them.
         """
         system_prompt = self.build_system_prompt(visibility=visibility, channel_id=channel_id)
-        phase5_template = self._load_file(
-            PROMPTS_DIR / "phase5-new-post.md",
+        phase5_template = self._load_prompt(
+            "phase5-new-post.md",
             "Choose to reply to an interesting post or make a new top-level post.",
         )
 
