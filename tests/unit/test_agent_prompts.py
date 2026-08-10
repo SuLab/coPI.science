@@ -79,3 +79,27 @@ def test_phase2_scan_prune_and_phase4_honour_role_overrides(tmp_path, monkeypatc
         other_agent_lab="O Lab",
     )
     assert "WIDGET REPLY" in reply_messages[0]["content"]
+
+
+def test_phase5_menu_token_is_always_substituted():
+    """No caller may leak the raw token into a prompt. prompts/ is bind-mounted
+    and re-read per call while src/ is baked into the agent image, so a template
+    that ships ahead of its renderer would put `{post_type_menu}` in front of a
+    live model."""
+    from src.agent.agent import Agent
+
+    a = Agent("gill", "GillBot", "Gill")
+    _, messages = a.build_phase5_prompt()
+    assert "{post_type_menu}" not in messages[0]["content"]
+
+
+def test_phase5_default_menu_never_prints_an_empty_enumeration():
+    """The default path has no roster to enumerate from. Guarded here as well as
+    in test_post_types because this is the caller that reaches a snapshot."""
+    from src.agent.agent import Agent
+
+    a = Agent("gill", "GillBot", "Gill")
+    _, messages = a.build_phase5_prompt()
+    assert "one of: ." not in messages[0]["content"]
+
+
