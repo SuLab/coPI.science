@@ -2145,7 +2145,18 @@ class SimulationEngine:
                 logger.warning("[%s] Phase 5: Could not parse response", agent.agent_id)
                 return
 
-            action = action_data.get("action", "new_post")
+            # A missing `action` is an unparseable response, not a license to
+            # post something anyway — defaulting to "new_post" here is what lets
+            # a malformed action dict fall through into posting to #general with
+            # an empty post_type instead of being rejected outright.
+            action = action_data.get("action")
+            if not action:
+                logger.warning(
+                    "[%s] Phase 5: parsed JSON had no 'action' field — "
+                    "treating as unparseable",
+                    agent.agent_id,
+                )
+                return
             if action == "skip":
                 agent.state.consecutive_phase5_skips += 1
                 logger.info(
