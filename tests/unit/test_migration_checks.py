@@ -786,8 +786,8 @@ def test_redact_url_is_a_no_op_when_there_is_no_password():
 # --------------------------------------------------------------------------- #
 
 
-def test_planned_objects_between_0018_and_0023_is_everything():
-    assert set(pf.planned_objects_between("0018", "0023")) == set(pf.PLANNED_OBJECTS)
+def test_planned_objects_between_0018_and_the_target_is_everything():
+    assert set(pf.planned_objects_between("0018", pf.DEFAULT_TARGET)) == set(pf.PLANNED_OBJECTS)
 
 
 def test_planned_objects_between_0019_and_0023_excludes_what_0019_already_made():
@@ -835,7 +835,7 @@ def test_planned_objects_matches_what_the_migration_files_actually_create():
         "column": re.compile(r'add_column\(\s*\n?\s*"[^"]+",\s*\n?\s*sa\.Column\("([^"]+)"'),
         "constraint": re.compile(r'create_unique_constraint\(\s*\n?\s*"([^"]+)"'),
     }
-    for revision in ("0019", "0020", "0021", "0022", "0023"):
+    for revision in ("0019", "0020", "0021", "0022", "0023", "0024"):
         matches = list(versions_dir.glob(f"{revision}_*.py"))
         assert len(matches) == 1, (revision, matches)
         source = matches[0].read_text()

@@ -1,4 +1,4 @@
-# Production migration to alembic 0023 (`cohort-db-conversations`)
+# Production migration to alembic 0024 (`org1-parity`)
 
 **Audience: an operator or agent who has not done any of the analysis behind this.**
 You do not need to understand the branch to run this. You do need to follow the order,
@@ -56,6 +56,7 @@ Five revisions, applied as one chain:
 | `0020 -> 0021` | 2 indexes for the DB inbox pollers' `created_at` cursor. |
 | `0021 -> 0022` | Creates `cohorts`, `cohort_memberships`, `cohort_audit_events` (+4 indexes). |
 | `0022 -> 0023` | 3 synthesis-provenance columns on `researcher_profiles`. |
+| `0023 -> 0024` | One `VARCHAR(20) NOT NULL DEFAULT 'pi_lab'` column on `agents`. Postgres 11+ fills a non-volatile default without a table rewrite, and `agents` is small, so this is seconds at any size. |
 
 Verified properties of the chain, measured rather than assumed:
 

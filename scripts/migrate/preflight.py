@@ -72,7 +72,9 @@ EXIT_BLOCKED = 1
 EXIT_WARN = 2
 
 DEFAULT_TARGET = "0024"
-#: Revisions this migration path has been exercised from. 0023 means "already done".
+#: 0023 is supported because it is where a deployment that already took the cohort
+#: migration sits. org1 is at 0018 (see docs/production-migration.md); do not read
+#: this tuple as a statement about any one deployment's current stamp.
 #:
 #: 0020 and 0021 are here because origin/main's own alembic head is 0021 (PR19). A
 #: deployment that tracks main is therefore stamped 0021, and the first version of this
@@ -197,6 +199,8 @@ PLANNED_OBJECTS: tuple[PlannedObject, ...] = (
     PlannedObject("0023", "column", "synthesis_validated", "researcher_profiles"),
     PlannedObject("0023", "column", "evidence_pmid_count", "researcher_profiles"),
     PlannedObject("0023", "column", "evidence_pub_count", "researcher_profiles"),
+    # 0024_add_agent_role
+    PlannedObject("0024", "column", "role", "agents"),
 )
 
 REVISION_ORDER = ("0018", "0019", "0020", "0021", "0022", "0023", "0024")

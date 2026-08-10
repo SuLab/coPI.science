@@ -124,6 +124,9 @@ EXPECTED_COLUMNS: tuple[tuple[str, str, str, bool, str | None], ...] = (
     ("researcher_profiles", "synthesis_validated", "boolean", True, ""),
     ("researcher_profiles", "evidence_pmid_count", "integer", True, ""),
     ("researcher_profiles", "evidence_pub_count", "integer", True, ""),
+    # 0024. NOT NULL with a server_default, so every existing agent reads as pi_lab
+    # — which is exactly the pre-0024 behaviour.
+    ("agents", "role", "character varying", False, "'pi_lab'::character varying"),
 )
 
 EXPECTED_TABLES = ("pi_dm_messages", "cohorts", "cohort_memberships", "cohort_audit_events")
