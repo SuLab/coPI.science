@@ -71,11 +71,17 @@ dropped, so the original reasoning stays findable on `origin/blackbird`.
 
 ## 4. The port set
 
-**54 commits ported in full, 8 in part, 57 excluded entirely. Branch: 64 commits.**
+**53 commits ported in full, 9 in part, 57 excluded entirely. Branch: 64 commits.**
 
-Ported in part: `9714f26`, `6b76f27`, `29fc8f1`, `f32a83e`, `e116feb`, `1b44e1c`,
-`0a57e41`, `10d598f`. Each contributes one or more generic hunks to a hand-applied
-commit; the rest of each is dropped.
+Ported in part: `9714f26`, `6b76f27`, `21869e2`, `29fc8f1`, `f32a83e`, `e116feb`,
+`1b44e1c`, `0a57e41`, `10d598f`. Each contributes one or more generic hunks to a
+hand-applied commit; the rest of each is dropped.
+
+`21869e2` is hand-applied rather than cherry-picked: its hunk anchors to a
+`_strip_assessment_sidecar(text)` call this branch does not have, its comment has to be
+reworded around that absence, and the return contract it needs comes from a different
+commit (`29fc8f1`). One fresh commit citing both is cleaner than a pick plus three
+in-flight edits.
 
 ### Phase 0 — `git merge origin/copi-prod` (1 commit)
 
@@ -270,17 +276,19 @@ Final content: the mechanism tests from `a655ede` and `46a8391`, five rate-overr
 tests from `9932645`, four `post_types` tests from `dc371af`. Every one uses `tmp_path`
 and a monkeypatched roles directory; none touches `prompts/`.
 
-### Phase 5 — Role prompt completion and generic fixes (7 picks + 3 hand-applied)
+### Phase 5 — Role prompt completion and generic fixes (6 picks + 4 hand-applied)
 
 ```
 2467229  fix(agent): phases 2 and 4 must honour role prompt overrides
 bc40d20  fix(agent): phase2-prune must also honour role prompt overrides
 683c09a  feat(scout_hub): drive the interview off the screening rubric  [thread_guidance extraction]
 44f09be  fix(llm): detect and log a still-truncated retry; let callers count it
-21869e2  fix(sched): suppress a post that strips to nothing instead of ghost-posting it
 73a78c3  fix(admin): a Slack post with no mappable sender must not 500 /admin/discussions
 5fb68c0  fix(admin,public): close the null-agent_id 500 class, an unauthenticated vote-tamper hole
 ```
+
+Plus four hand-applied: the `_post_message` suppression and `-> bool` contract
+(`21869e2` + `29fc8f1`), and hand-applied C, D and E below.
 
 `683c09a` extracts `thread_guidance.py`; its `_PI_LAB` strings are byte-identical to
 the pre-refactor `agent.py` literals and are pinned by the snapshot. Its `_SCOUT_HUB`
@@ -505,7 +513,7 @@ begins.
 
 `6b76f27` and `29fc8f1` are *not* listed here — each contributes one generic hunk (the
 phase-5 `_load_prompt` fix; the `-> bool` return contract) and is otherwise dropped.
-`54 + 8 + 57 = 119`.
+`53 + 9 + 57 = 119`.
 
 `0e1ac52` is the one never to take: it strips "at Scripps Research" from
 `agent-system.md`, `identity.md` and `_DEFAULT_IDENTITY` because, in its own words,
