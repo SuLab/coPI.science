@@ -205,6 +205,13 @@ async def test_slack_globally_enabled_tri_state(
     else:
         monkeypatch.setenv("SLACK_ENABLED", "true" if setting else "false")
     _clear_settings_cache()
+    if setting is None:
+        # `delenv` cannot make "auto" true on this host: pydantic-settings falls
+        # back to the .env *file* when the process env var is absent, and the
+        # deployed .env sets SLACK_ENABLED=true. Absence of an env var is not
+        # expressible through the env layer, so pin the resolved attribute
+        # directly — the one lever that actually forces auto-detect.
+        monkeypatch.setattr(get_settings(), "slack_enabled", None)
     try:
         if has_token:
             u = await factories.make_user(db_session, email=f"{name[:8]}@example.org")

@@ -591,6 +591,14 @@ async def test_the_proposal_notification_is_addressed_but_the_delivery_leg_is_un
     """
     from src.services import email_notifications as en
 
+    # Hermetic: this test's premise is an unrestricted outbound allowlist (the
+    # field's own default, "" = send to everyone) — the fictitious lab.pi_*_email
+    # addresses must reach _process_user_notifications' is_allowed_recipient
+    # check. Pin it rather than inherit the deployed .env's
+    # OUTBOUND_EMAIL_ALLOWLIST on this host, which would otherwise suppress
+    # both sends and turn `sent` into 0.
+    monkeypatch.setattr(get_settings(), "outbound_email_allowlist", "")
+
     recorded: list[dict] = []
 
     async def _recording_double(

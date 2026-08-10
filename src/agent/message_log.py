@@ -2,8 +2,8 @@
 
 import logging
 import re
-from dataclasses import dataclass, field
-from typing import Any, Callable
+from dataclasses import dataclass
+from typing import Callable
 
 from src.visibility import VISIBILITY_COLLAB_PRIVATE
 
