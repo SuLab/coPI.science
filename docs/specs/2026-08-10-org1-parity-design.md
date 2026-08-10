@@ -604,3 +604,42 @@ The org1-specific role facts that would otherwise have lived in that document:
    that never renders (§7.1).
 3. **`copi-prod`'s future.** After this branch merges to `main`, `copi-prod` should
    either be deleted or reduced to a deploy tag, so a fifth line does not re-accumulate.
+
+## 10. Audit corrections (2026-08-10, pre-execution rehearsal)
+
+A full adversarial rehearsal — the merge, every pick, every hand-edit, ending in a
+green `./scripts/ci.sh` (single head 0024, clean round trip, tests/ lint 0, src/
+256/260, 1654 passed, coverage 64.66%, 20 snapshots) — corrected the following
+claims in this document. The plan carries the executable versions.
+
+- **§4 partition.** `f2cbfe9` joins the ported-in-part set: four of its tests assert
+  the phase-5 menu *renders*, which needs the `{post_type_menu}` token only the
+  excluded `0e1ac52` adds. Final split: **52 in full, 10 in part, 57 excluded.**
+  (§7's "the 8 partials" undercounted even the original nine.)
+- **§4 conflict map.** `9932645` conflicts only in `test_roles.py` — `0621ef3`'s
+  USPTO block never landed here, so `src/config.py` merges clean and there is
+  nothing to delete. `0929870`, `73a78c3` and `3fd8a91` apply clean outright (the
+  plan's own earlier hand-edits align their contexts). `46d3a61` — assumed clean —
+  conflicts in `src/config.py` against copi-prod's `audit_recipient_list` property;
+  the `_guard_rate_limiter_settings` validator arrives in `46d3a61`, not `9932645`.
+- **§4 Phase-4 trim.** "There is nothing to lint" was wrong: `from pathlib import
+  Path` is present-and-unused from `46a8391` onward, and `3a23e73`'s removal of it
+  must be taken or `ci.sh`'s tests-at-zero gate fails at every checkpoint.
+- **Hand-applied D** covers **four** call sites, not three: the phase-5 new-post
+  guard is `29fc8f1` caller-side code, which the `-> bool` port deliberately leaves
+  behind.
+- **Phase 0.** The post-merge added-file check shows exactly the two onboarding
+  templates — no pre-0019 alembic files appear. The merge also (a) carries
+  copi-prod's `prompts/daily_audit.md` edit (`9ab5555`), so every "prompts/ diff is
+  identity.md only" check reads two lines, and (b) collides *semantically* with
+  `tests/unit/test_config_secret_redaction.py`: the new `audit_recipients` field
+  must be classified non-secret or two tests fail with no textual conflict to warn
+  anyone.
+- **§6.** The `f2cbfe9` claim was half right: the token-absence assertion passes,
+  but its four menu-presence siblings cannot; they are dropped with a `Ported-from:
+  f2cbfe9 (partial)` trailer. `test_admin_can_set_agent_role` (from `4ec8ab7`)
+  needs a tmp roles dir for the same structural reason — `available_roles()` has no
+  scout_hub here, and the route correctly refuses the write.
+- **Counts.** Expect ~74 commits in `rev-list cohort..HEAD` (5 docs + 65 port-side
+  + copi-prod's 4, which the merge brings into the count) and **10** `Ported-from:`
+  trailers citing eleven blackbird shas.
