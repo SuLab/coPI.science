@@ -1,5 +1,4 @@
 import logging
-from pathlib import Path
 
 from src.agent import roles
 from src.agent.roles import DEFAULT_TOOLS, RoleSpec, load_role
