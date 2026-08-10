@@ -22,8 +22,8 @@ Usage (runs inside the app container — needs DB + network):
     docker compose exec app python scripts/audit_pub_dois.py
 
     # Audit + fix specific users by ORCID:
-    docker compose exec app python scripts/audit_pub_dois.py \\
-        --orcids 0000-0002-9943-7557 --fix
+    docker compose exec app python scripts/audit_pub_dois.py \
+        --orcids 0000-0000-0000-0001 --fix
 
     # Audit + fix specific agents, or everyone:
     docker compose exec app python scripts/audit_pub_dois.py --agents liu bollong --fix

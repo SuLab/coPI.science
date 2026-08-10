@@ -20,8 +20,8 @@ below the floor are audited but not persisted, so a human can review.
 Usage (runs inside the app container — needs DB + prompts + profiles):
 
     docker compose cp scripts/generate_sparsedata_user.py app:/app/scripts/
-    docker compose exec app python scripts/generate_sparsedata_user.py \\
-        --file newuserlist02.tsv --force
+    docker compose exec app python scripts/generate_sparsedata_user.py \
+        --file data/cohorts/newuserlist02.tsv --force
 
 Outputs:
   - DB rows

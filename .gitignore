@@ -86,3 +86,19 @@ mutants/
 # Production migration dumps (scripts/migrate/run_migration.sh). Never commit these:
 # they are full database copies containing message bodies and tokens.
 backups/
+# Local Claude Code state
+.claude/
+
+# Log/backup artifacts (broadens the earlier logs/*.log rule)
+logs/
+
+# One-off scratch scripts and their inputs
+scripts/_*
+
+# Editor/tool backups
+*.bak.*
+
+# Third-party personal data (cohort seed lists, contact lists, CV/web context for
+# profile synthesis, profile QA reviews, decks) lives under the ignored `data/`
+# tree above — see data/cohorts/README.md. This repo is public; the roster of
+# record is Postgres, not git.

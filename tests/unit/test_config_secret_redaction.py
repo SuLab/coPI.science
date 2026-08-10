@@ -137,6 +137,9 @@ def test_reading_database_url_still_returns_the_real_dsn():
 # a signing key, or a password. Adding a field to Settings that renders in the clear
 # forces an edit here, i.e. an explicit classification.
 NON_SECRET_STR_FIELDS = {
+    # Comma-separated daily-audit recipient emails (copi-prod's 9ab5555) —
+    # addresses, not credentials.
+    "audit_recipients",
     "environment",
     "orcid_client_id",       # OAuth *public* client id; ships in the browser redirect
     "orcid_redirect_uri",

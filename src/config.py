@@ -150,6 +150,9 @@ class Settings(BaseSettings):
     outbound_email_allowlist: str = ""
     # When False, the worker skips inbound S3 polling (avoids log spam if S3 isn't set up).
     enable_inbound_email: bool = False
+    # Comma-separated recipients of the daily activity audit email
+    # (prompts/daily_audit.md). Read via audit_recipient_list.
+    audit_recipients: str = "asu@scripps.edu,malanjary@scripps.edu,ahuebschen@scripps.edu"
 
     # Email notification scheduling
     notification_check_interval: int = 300  # seconds (5 minutes)
@@ -402,6 +405,11 @@ class Settings(BaseSettings):
                 self.environment,
             )
         return self
+
+    @property
+    def audit_recipient_list(self) -> list[str]:
+        """Daily-audit recipients, parsed from the comma-separated setting."""
+        return [e.strip() for e in self.audit_recipients.split(",") if e.strip()]
 
     def get_slack_tokens(self) -> dict[str, str]:
         """Return slack bot tokens keyed by agent_id."""
