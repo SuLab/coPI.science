@@ -4453,6 +4453,15 @@ class SimulationEngine:
                     )).scalar() or 0
             except Exception as exc:
                 logger.warning("[cohort] membership sync failed: %s", exc)
+                # The gates from the last successful tick are kept above (see the
+                # docstring). But the directory is DERIVED from those gates, so a
+                # gate that is correct-but-stale makes a directory rebuilt from it
+                # correct-but-stale too — which is strictly better than leaving it
+                # absent. Without this, a newly-added agent whose gate isn't
+                # reflected in any directory yet gets _lab_directory = None for the
+                # rest of this failed tick, and existing agents' directories omit
+                # it until the next successful sync.
+                self.refresh_lab_directories()
                 return
 
         gates, reason = compute_gates(

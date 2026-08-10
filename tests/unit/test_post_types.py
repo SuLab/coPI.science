@@ -353,3 +353,19 @@ def test_render_menu_never_returns_an_empty_string():
             specs, gate=None, roles_by_agent=MESH_ROLES, self_id="gill", bot_names=BOT_NAMES,
         )
         assert out.strip()
+
+
+def test_duplicate_post_type_entries_collapse_last_wins(caplog):
+    """Two [[post_types]] entries for one name must yield ONE spec — the later
+    one — not two contradictory entries."""
+    raw = [
+        {"name": "idea_crosslab", "targets": ["pi_lab"]},
+        {"name": "paper"},
+        {"name": "idea_crosslab", "targets": []},
+    ]
+    with caplog.at_level("WARNING"):
+        out = parse_post_types(raw, role="probe")
+    names = [s.name for s in out]
+    assert names == ["idea_crosslab", "paper"], names          # first-occurrence order
+    assert out[0].targets == frozenset()                        # last wins
+    assert any("duplicate post_types entry" in r.message for r in caplog.records)
