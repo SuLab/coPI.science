@@ -952,3 +952,36 @@ class TestBuildLabDirectoriesCohortGate:
 
         assert "A's distinctive paper on topic A" in b._lab_directory
         assert "C's distinctive paper on topic C" in b._lab_directory
+
+
+# ---------------------------------------------------------------
+# _post_message — a text that strips to nothing must be suppressed,
+# and the caller must be told.
+# ---------------------------------------------------------------
+
+class TestPostMessageSuppressesEmptyText:
+    def _engine(self):
+        from src.agent.agent import Agent
+        su = Agent("su", "SuBot", "Andrew Su")
+        # slack_clients={} puts _post_message in MOCK mode: no network, but it
+        # still mints a ts and appends a LogEntry, which is what we are testing.
+        return SimulationEngine(agents=[su], slack_clients={}), su
+
+    @pytest.mark.asyncio
+    async def test_text_that_strips_to_nothing_is_suppressed(self):
+        engine, _su = self._engine()
+
+        posted = await engine._post_message("su", "general", "<slack_message></slack_message>")
+
+        assert posted is False
+        assert engine.message_log._entries == []
+
+    @pytest.mark.asyncio
+    async def test_a_real_message_is_recorded_and_reports_true(self):
+        engine, _su = self._engine()
+
+        posted = await engine._post_message("su", "general", "a real message")
+
+        assert posted is True
+        assert len(engine.message_log._entries) == 1
+        assert engine.message_log._entries[0].content == "a real message"

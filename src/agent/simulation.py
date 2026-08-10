@@ -3068,10 +3068,33 @@ class SimulationEngine:
         channel: str,
         text: str,
         thread_ts: str | None = None,
-    ) -> None:
-        """Post a message to Slack and record it in the message log + DB."""
+    ) -> bool:
+        """Post a message to Slack and record it in the message log + DB.
+
+        Returns whether a message was actually recorded — ``False`` when the
+        text stripped to nothing, or the reply's parent thread was found to be
+        deleted. In either case nothing was posted and no log entry was written,
+        so a caller must not count the turn, clear backoff state, or move posts
+        between ``interesting_posts`` and ``active_threads``.
+        """
         # Final safety: strip any leaked <slack_message> tags
         text = re.sub(r"</?slack_message>", "", text).strip()
+
+        # A truncated response can strip to nothing — the whole body may have been
+        # tags. Slack rejects empty text anyway, but bailing here also matters for
+        # what happens *after* posting: without this guard _post_message still
+        # mints a ts and writes a LogEntry with content="" and slack_ts=None — a DB
+        # row with no corresponding Slack message, breaking the
+        # row-count-matches-Slack-message-count invariant documented below — and the
+        # caller still counts the turn as published even though nothing went out.
+        # Return before any of that: no Slack call, no minted ts, no log entry.
+        if not text:
+            logger.warning(
+                "[%s] Suppressed a post to #%s: text was empty after stripping the "
+                "slack_message tags — likely a truncated response with no real body.",
+                agent_id, channel,
+            )
+            return False
 
         client = self.slack_clients.get(agent_id)
         agent = self.agents.get(agent_id)
@@ -3112,7 +3135,7 @@ class SimulationEngine:
                     "[%s] Skipped reply to deleted thread %s in #%s",
                     agent_id, thread_ts, channel,
                 )
-                return
+                return False
         else:
             logger.info("[%s] MOCK post to #%s: %s...", agent_id, channel, text[:60])
 
@@ -3182,6 +3205,7 @@ class SimulationEngine:
             # Persisted to agent_messages via the MessageLog append callback
             # (_enqueue_persist → _flush_persisted). The DB is the primary store.
             self.message_log.append(entry)
+        return True
 
     @staticmethod
     def _mirrored_messages(
