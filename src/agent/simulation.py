@@ -1404,17 +1404,23 @@ class SimulationEngine:
                     return
 
             # Post the reply
-            await self._post_message(
+            posted = await self._post_message(
                 agent.agent_id, thread.channel, response_text,
                 thread_ts=thread.thread_id,
             )
-            agent.message_count += 1
-            thread.has_pending_reply = False
-            thread.funding_reject_count = 0
-            thread.empty_response_count = 0
+            if not posted:
+                logger.info(
+                    "[%s] Suppressed post in #%s — not counted, nothing persisted",
+                    agent.agent_id, thread.channel,
+                )
+            else:
+                agent.message_count += 1
+                thread.has_pending_reply = False
+                thread.funding_reject_count = 0
+                thread.empty_response_count = 0
 
-            # Check for thread outcome
-            await self._check_thread_outcome(agent, thread, response_text)
+                # Check for thread outcome
+                await self._check_thread_outcome(agent, thread, response_text)
 
         except Exception as exc:
             logger.error(
@@ -2248,71 +2254,89 @@ class SimulationEngine:
                 )
 
                 if is_private_channel:
-                    await self._post_message(agent.agent_id, channel, message_text)
-                    agent.message_count += 1
-                    # Consume the interesting post (we acted on it) but do not
-                    # create an active_thread — private channels don't thread.
-                    agent.state.interesting_posts = [
-                        p for p in agent.state.interesting_posts
-                        if p.post_id != target_post_id
-                    ]
-                    logger.info(
-                        "[%s] Phase 5: Posted flat follow-up to %s in private #%s",
-                        agent.agent_id, target_post_id, channel,
-                    )
+                    posted = await self._post_message(agent.agent_id, channel, message_text)
+                    if not posted:
+                        logger.info(
+                            "[%s] Suppressed post in #%s — not counted, nothing persisted",
+                            agent.agent_id, channel,
+                        )
+                    else:
+                        agent.message_count += 1
+                        # Consume the interesting post (we acted on it) but do not
+                        # create an active_thread — private channels don't thread.
+                        agent.state.interesting_posts = [
+                            p for p in agent.state.interesting_posts
+                            if p.post_id != target_post_id
+                        ]
+                        logger.info(
+                            "[%s] Phase 5: Posted flat follow-up to %s in private #%s",
+                            agent.agent_id, target_post_id, channel,
+                        )
                 else:
                     # Reply to an interesting post → creates a new thread
-                    await self._post_message(
+                    posted = await self._post_message(
                         agent.agent_id, channel, message_text,
                         thread_ts=target_post_id,
                     )
-                    agent.message_count += 1
-
-                    # Move from interesting_posts to active_threads
-                    agent.state.interesting_posts = [
-                        p for p in agent.state.interesting_posts
-                        if p.post_id != target_post_id
-                    ]
-                    # Determine the other agent from the original post
-                    original_entry = self.message_log.get_entry(target_post_id)
-                    other_id = original_entry.sender_agent_id if original_entry else None
-                    if other_id:
-                        # Carry FOA number from the PostRef if this is a funding post
-                        post_foa = None
-                        for p in original_posts:
-                            if p.post_id == target_post_id:
-                                post_foa = p.foa_number
-                                break
-                        agent.state.active_threads[target_post_id] = ThreadState(
-                            thread_id=target_post_id,
-                            channel=channel,
-                            other_agent_id=other_id,
-                            message_count=2,  # original + this reply
-                            foa_number=post_foa,
+                    if not posted:
+                        logger.info(
+                            "[%s] Suppressed post in #%s — not counted, nothing persisted",
+                            agent.agent_id, channel,
                         )
+                    else:
+                        agent.message_count += 1
 
-                    logger.info(
-                        "[%s] Phase 5: Replied to post %s in #%s",
-                        agent.agent_id, target_post_id, channel,
-                    )
+                        # Move from interesting_posts to active_threads
+                        agent.state.interesting_posts = [
+                            p for p in agent.state.interesting_posts
+                            if p.post_id != target_post_id
+                        ]
+                        # Determine the other agent from the original post
+                        original_entry = self.message_log.get_entry(target_post_id)
+                        other_id = original_entry.sender_agent_id if original_entry else None
+                        if other_id:
+                            # Carry FOA number from the PostRef if this is a funding post
+                            post_foa = None
+                            for p in original_posts:
+                                if p.post_id == target_post_id:
+                                    post_foa = p.foa_number
+                                    break
+                            agent.state.active_threads[target_post_id] = ThreadState(
+                                thread_id=target_post_id,
+                                channel=channel,
+                                other_agent_id=other_id,
+                                message_count=2,  # original + this reply
+                                foa_number=post_foa,
+                            )
+
+                        logger.info(
+                            "[%s] Phase 5: Replied to post %s in #%s",
+                            agent.agent_id, target_post_id, channel,
+                        )
 
             else:
                 # New top-level post
-                await self._post_message(agent.agent_id, channel, message_text)
-                agent.message_count += 1
-
-                # Check if it tags another agent
-                tagged_agent = action_data.get("tagged_agent")
-                if tagged_agent:
+                posted = await self._post_message(agent.agent_id, channel, message_text)
+                if not posted:
                     logger.info(
-                        "[%s] Phase 5: New post in #%s tagging @%s",
-                        agent.agent_id, channel, tagged_agent,
-                    )
-                else:
-                    logger.info(
-                        "[%s] Phase 5: New post in #%s",
+                        "[%s] Suppressed post in #%s — not counted, nothing persisted",
                         agent.agent_id, channel,
                     )
+                else:
+                    agent.message_count += 1
+
+                    # Check if it tags another agent
+                    tagged_agent = action_data.get("tagged_agent")
+                    if tagged_agent:
+                        logger.info(
+                            "[%s] Phase 5: New post in #%s tagging @%s",
+                            agent.agent_id, channel, tagged_agent,
+                        )
+                    else:
+                        logger.info(
+                            "[%s] Phase 5: New post in #%s",
+                            agent.agent_id, channel,
+                        )
 
             # In a collab_private channel, a :memo: Summary + ✅ handshake
             # finalizes the refined proposal (the flat path has no
