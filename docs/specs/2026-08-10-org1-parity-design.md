@@ -451,12 +451,18 @@ it to ~253; the feature work adds ~+5 (`agent_page.py` +2, `admin.py` +2,
 both directions. **Measured, not assumed, at every checkpoint.** If it lands over 260
 the fix is paying down debt in the files we touched — `SRC_LINT_MAX` is not raised.
 
-**One test must be inverted.** `tests/unit/test_agent_prompts.py:17` asserts
-`'Scripps Research' not in prompt`. Our `prompts/identity.md` keeps "at Scripps
-Research", so it fails. Invert to `assert 'Scripps Research' in prompt` — turning
-blackbird's Johns-Hopkins-driven assertion into a guard that a future port cannot
-silently de-institutionalise org1's prompts. Line 16 (`'the Andrew Su lab'`) passes
-either way.
+**The institution guard arrives correct — do not edit it.** Blackbird's
+`tests/unit/test_agent_prompts.py:17` reads `assert 'Scripps Research' not in prompt`,
+which would fail here. But that line is written by the **excluded** `0e1ac52`. The
+version `ac2da9e` creates — the one this branch gets — asserts
+`'the Andrew Su lab at Scripps Research' in prompt`, and no other ported commit
+(`2467229`, `bc40d20`, `f2cbfe9`) touches it. So it lands as a guard that a future port
+cannot silently de-institutionalise org1's prompts, and it is *stronger* than an
+inverted `'Scripps Research' in prompt` because it pins the whole phrase.
+
+The related assertion `"{post_type_menu}" not in messages[0]["content"]` (from
+`f2cbfe9`) also passes unchanged: org1's `prompts/phase5-new-post.md` carries no such
+token, so there is nothing to leave unsubstituted.
 
 **Checkpoints.** `ci.sh` takes ~6 minutes, so it runs after Phase 1 (proves headroom
 bought), after Phase 3 (largest surface), after Phase 4 (largest behavioural risk), and
