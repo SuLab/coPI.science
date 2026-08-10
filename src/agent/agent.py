@@ -3,11 +3,10 @@
 import logging
 import re
 from pathlib import Path
-from typing import Any
 
 from src.agent.prompt_safety import delimit
 from src.agent.roles import DEFAULT_ROLE, resolve_prompt_path
-from src.agent.state import AgentState, PostRef, ThreadState
+from src.agent.state import AgentState, ThreadState
 from src.models.agent_activity import VISIBILITY_COLLAB_PRIVATE, VISIBILITY_PUBLIC
 
 logger = logging.getLogger(__name__)
