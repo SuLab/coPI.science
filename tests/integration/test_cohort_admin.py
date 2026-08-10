@@ -59,7 +59,14 @@ async def _cohort(db_session, name, admin, members=()):
 # --- agent role editing (task 11) -------------------------------------------
 
 
-async def test_admin_can_set_agent_role(client, db_session, admin, roster):
+async def test_admin_can_set_agent_role(client, db_session, admin, roster, tmp_path, monkeypatch):
+    # org1 ships no prompts/roles/ tree, so give the validator a real second
+    # role the same way tests/unit/test_roles.py does: a tmp roles dir.
+    from src.agent import roles as roles_mod
+    d = tmp_path / "roles" / "scout_hub"
+    d.mkdir(parents=True)
+    (d / "role.toml").write_text('label = "Scout Hub"\n', encoding="utf-8")
+    monkeypatch.setattr(roles_mod, "ROLES_DIR", tmp_path / "roles")
     agent = roster["su"]
     assert agent.role == "pi_lab"
     r = await client.post(
