@@ -5012,7 +5012,11 @@ Keep it concise — under 300 words.""",
             response = await generate_agent_response(
                 system_prompt=system_prompt,
                 messages=messages,
-                max_tokens=800,
+                # 4000, not 800: Opus 5 writes longer syntheses, and 800 (retried at
+                # 1600) truncated every memory turn in the migration rehearsal. The
+                # cap is a ceiling, not a target — unused headroom costs nothing —
+                # and this call is not pinned by the characterization snapshots.
+                max_tokens=4000,
                 log_meta={"agent_id": agent.agent_id, "phase": "memory"},
             )
             if not response or not response.strip():

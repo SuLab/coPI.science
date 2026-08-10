@@ -184,6 +184,7 @@ async def generate_agent_response(
         message = client.messages.create(
             model=model,
             max_tokens=max_tokens,
+            thinking={"type": "disabled"},
             system=system_prompt,
             messages=messages,
         )
@@ -218,6 +219,7 @@ async def generate_agent_response(
             retry_msg = client.messages.create(
                 model=model,
                 max_tokens=retry_max,
+                thinking={"type": "disabled"},
                 system=system_prompt,
                 messages=messages,
             )
@@ -337,6 +339,7 @@ async def generate_with_tools(
         message = client.messages.create(
             model=model,
             max_tokens=max_tokens,
+            thinking={"type": "disabled"},
             system=system_prompt,
             messages=conversation,
             tools=tools,
@@ -365,6 +368,7 @@ async def generate_with_tools(
                 retry_msg = client.messages.create(
                     model=model,
                     max_tokens=retry_max,
+                    thinking={"type": "disabled"},
                     system=system_prompt,
                     messages=conversation,
                 )
@@ -438,6 +442,7 @@ async def generate_with_tools(
     message = client.messages.create(
         model=model,
         max_tokens=max_tokens,
+        thinking={"type": "disabled"},
         system=system_prompt,
         messages=conversation,
     )
@@ -458,6 +463,7 @@ async def generate_with_tools(
         retry_msg = client.messages.create(
             model=model,
             max_tokens=retry_max,
+            thinking={"type": "disabled"},
             system=system_prompt,
             messages=conversation,
         )

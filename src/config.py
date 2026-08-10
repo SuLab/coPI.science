@@ -294,8 +294,14 @@ class Settings(BaseSettings):
 
     # LLM models
     llm_profile_model: str = "claude-opus-4-6"
-    llm_agent_model: str = "claude-sonnet-4-6"
-    llm_agent_model_opus: str = "claude-opus-4-6"
+    # Agent-turn models. Opus 5 thinks by default and max_tokens caps
+    # thinking + text together, so the agent-path LLM calls pin
+    # thinking={"type": "disabled"} (src/services/llm.py) to keep today's
+    # token/latency envelope — the per-phase max_tokens values are pinned by
+    # the characterization golden masters. Revisit (adaptive thinking + larger
+    # caps + effort) when prompts unfreeze.
+    llm_agent_model: str = "claude-opus-5"
+    llm_agent_model_opus: str = "claude-opus-5"
     llm_agent_model_sonnet: str = "claude-sonnet-4-6"
 
     # Worker
