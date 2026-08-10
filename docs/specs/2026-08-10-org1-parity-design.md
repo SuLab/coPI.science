@@ -245,12 +245,30 @@ Conflict resolutions in this phase:
   the remaining test hermeticity fixes for `test_agent_page.py`, `test_cohort_admin.py`
   and `test_roles.py`.
 
-**`test_roles.py` trim.** 27 tests. The 17 that build synthetic role dirs under
-`tmp_path` protect the role *mechanism* and are kept. The 10 that read the real
-`prompts/roles/scout_hub/` tree are **deleted** — they assert
-`"search_prior_art" in spec.tools`, quote the Blackbird rubric, and check the Baltimore
-gating criterion, so keeping them would drag `patents.py`, `blackbird_rubric.py` and
-`specialists.py` onto this branch. Forced by decision 1.
+**`test_roles.py` — nothing is deleted; the scout_hub tests never arrive.** Blackbird's
+copy ends at 27 tests, of which 10 read the real `prompts/roles/scout_hub/` tree. Those
+10 are *introduced* by excluded commits (`6b76f27`, `2bd0289`, `9d5a1d7`, `3f1f91d`,
+`eadde02`, `988eac1`, `5114905`, `f7a9f68`), so on this branch they are never written in
+the first place. Keeping them would have dragged `patents.py`, `blackbird_rubric.py` and
+`specialists.py` along — they assert `"search_prior_art" in spec.tools`, quote the
+Blackbird rubric, and check the Baltimore gating criterion.
+
+What that means operationally is *conflict resolution, not deletion*. Three ported
+commits patch this file and each needs a specific decision:
+
+- `9932645` adds five `tmp_path`-based rate-override tests. **Keep all five.** The
+  conflict is purely positional — they append after scout_hub tests that do not exist.
+- `dc371af` adds six tests. **Keep the four `tmp_path`-based `post_types` tests; drop
+  `test_scout_hub_declares_its_two_post_types` and
+  `test_scout_hub_cannot_post_a_cross_lab_idea`**, which call
+  `load_role("scout_hub")` and need the `role.toml` this branch does not ship.
+- `3a23e73`'s hunk edits the `from pathlib import Path` and `_load_role_real` import
+  lines. **Drop the hunk entirely** — both imports exist only to serve the scout_hub
+  tests, so neither is present here and there is nothing to lint.
+
+Final content: the mechanism tests from `a655ede` and `46a8391`, five rate-override
+tests from `9932645`, four `post_types` tests from `dc371af`. Every one uses `tmp_path`
+and a monkeypatched roles directory; none touches `prompts/`.
 
 ### Phase 5 — Role prompt completion and generic fixes (7 picks + 3 hand-applied)
 
