@@ -143,3 +143,53 @@ def validate_authorship_claims(
                 )
 
     return AuthorshipVerdict(ok=True)
+
+
+# Memory-synthesis hygiene. Working-memory notes are compressed tables; the
+# issue-#29 poisoned row was the subject-less 'Co-authored "Desiderata"
+# paper.' — first-person by default when re-read in a later prompt. A line
+# with an authorship verb survives only if it either (a) names another lab as
+# the explicit subject immediately before the verb, or (b) cites DOI(s) all
+# present in this lab's own records.
+
+_AUTHORSHIP_VERB_LINE_RE = re.compile(
+    r"\b(?:co-?authored|co-?wrote|authored together|published together"
+    r"|our (?:joint )?paper|joint publication|we (?:published|wrote|authored))\b",
+    re.IGNORECASE,
+)
+
+# "Wu Lab co-authored", "Wu Lab (@WuBot) co-authored", "Su and Wu Labs
+# co-authored" — the lab-name subject must sit directly before the verb
+# (an intervening table-cell "|" breaks the match, by design).
+_OTHER_LAB_SUBJECT_RE = re.compile(
+    r"\b(?!(?:Our|My)\s)[A-Z][\w.'-]*(?:\s+(?:and\s+)?[A-Z][\w.'-]*)*\s+[Ll]abs?\b"
+    r"(?:\s*\(@\w+\))?\s+(?:recently\s+)?co-?(?:authored|wrote)",
+)
+
+
+def strip_ungrounded_authorship_lines(
+    memory_text: str,
+    own: LabPublicationRecord,
+) -> tuple[str, list[str]]:
+    """Drop memory lines asserting authorship the lab's records can't back.
+
+    Returns ``(cleaned_text, stripped_lines)``. Conservative by construction:
+    a stripped true fact costs one lost memory note; a kept false fact is
+    re-injected into every future prompt (see issue #29).
+    """
+    kept: list[str] = []
+    stripped: list[str] = []
+    for line in memory_text.splitlines():
+        if _AUTHORSHIP_VERB_LINE_RE.search(line):
+            if _OTHER_LAB_SUBJECT_RE.search(line):
+                kept.append(line)
+                continue
+            line_dois = _extract_dois(line)
+            grounded = (
+                own.has_records and bool(line_dois) and line_dois <= own.dois
+            )
+            if not grounded:
+                stripped.append(line)
+                continue
+        kept.append(line)
+    return "\n".join(kept), stripped

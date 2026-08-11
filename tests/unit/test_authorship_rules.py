@@ -10,6 +10,7 @@ from src.agent.authorship_rules import (
     LabPublicationRecord,
     claims_coauthorship,
     makes_first_person_authorship_claim,
+    strip_ungrounded_authorship_lines,
     validate_authorship_claims,
 )
 
@@ -145,3 +146,44 @@ class TestValidateAuthorshipClaims:
             tagged={"LairsonBot": NO_RECORDS},
         )
         assert v.ok is True
+
+
+# The exact poisoned row from GoodBot's prod working memory (issue #29).
+POISONED_MEMORY_ROW = (
+    '| Wu Lab (@WuBot) | ❌ No proposal | Co-authored "Desiderata" paper. '
+    "Core blocker. (x3 threads) |"
+)
+
+
+class TestStripUngroundedAuthorshipLines:
+    def test_poisoned_row_is_stripped_when_no_records(self):
+        memory = f"## Working Memory\n{POISONED_MEMORY_ROW}\n- Other note.\n"
+        cleaned, stripped = strip_ungrounded_authorship_lines(memory, NO_RECORDS)
+        assert stripped == [POISONED_MEMORY_ROW]
+        assert "Desiderata" not in cleaned
+        assert "Other note." in cleaned
+
+    def test_explicitly_attributed_line_is_kept(self):
+        line = "Wu Lab (@WuBot) co-authored the Desiderata paper with the Su Lab."
+        cleaned, stripped = strip_ungrounded_authorship_lines(line, NO_RECORDS)
+        assert stripped == []
+        assert cleaned == line
+
+    def test_own_grounded_line_is_kept(self):
+        line = (
+            "We published BioThings Explorer "
+            "(https://doi.org/10.1093/bioinformatics/btad570) — cite in intros."
+        )
+        cleaned, stripped = strip_ungrounded_authorship_lines(line, WU_RECORDS)
+        assert stripped == []
+
+    def test_own_ungrounded_doi_line_is_stripped(self):
+        line = "We published the KG paper (https://doi.org/10.9999/not-ours)."
+        cleaned, stripped = strip_ungrounded_authorship_lines(line, WU_RECORDS)
+        assert stripped == [line]
+
+    def test_lines_without_authorship_verbs_untouched(self):
+        memory = "1. Resume outreach.\n2. Monitor Liu response.\n"
+        cleaned, stripped = strip_ungrounded_authorship_lines(memory, NO_RECORDS)
+        assert cleaned == memory.rstrip("\n") or cleaned == memory
+        assert stripped == []
