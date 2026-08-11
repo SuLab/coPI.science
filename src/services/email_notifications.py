@@ -331,8 +331,13 @@ async def send_proposal_notification(
     db.add(notification)
     await db.flush()
 
-    # Build email
-    reply_to = f"review+{reply_token}@{settings.ses_reply_domain}"
+    # Build email. Soliciting a reply is only honest when the inbound pipeline
+    # is actually on — otherwise PIs answer a dead reply domain and get
+    # silence (this is exactly what happened on prod through 2026-08).
+    reply_enabled = settings.enable_inbound_email
+    reply_to = (
+        f"review+{reply_token}@{settings.ses_reply_domain}" if reply_enabled else None
+    )
     dashboard_url = f"{settings.base_url}/agent/{agent.agent_id}/dashboard"
     unsubscribe_token = _generate_unsubscribe_token(str(user.id))
     unsubscribe_url = f"{settings.base_url}/settings/unsubscribe/{unsubscribe_token}"
@@ -373,24 +378,57 @@ async def send_proposal_notification(
             f"Review all proposals</a>.</p></div>"
         )
 
+    if reply_enabled:
+        review_options_text = (
+            f"To review this proposal, you can:\n\n"
+            f"1. Reply to this email with a rating (1-4) and any comments:\n"
+            f"   1 = Not a good idea (not interesting, or multiple major weaknesses)\n"
+            f"   2 = Good idea (medium interest, or one major weakness)\n"
+            f"   3 = Great idea (high interest, minor weaknesses only)\n"
+            f"   4 = Excellent idea (high interest, no notable weaknesses)\n\n"
+            f"2. Reply with instructions for your agent (e.g., \"focus on the\n"
+            f'   mitochondrial angle instead") and it will re-engage to refine\n'
+            f"   the proposal.\n\n"
+            f"3. Review on the web: {dashboard_url}\n"
+        )
+    else:
+        review_options_text = (
+            f"To review this proposal, rate it on your dashboard: {dashboard_url}\n"
+            f"   1 = Not a good idea (not interesting, or multiple major weaknesses)\n"
+            f"   2 = Good idea (medium interest, or one major weakness)\n"
+            f"   3 = Great idea (high interest, minor weaknesses only)\n"
+            f"   4 = Excellent idea (high interest, no notable weaknesses)\n"
+        )
+
     text_body = (
         f"{agent.bot_name} and {other_bot_name} developed a collaboration proposal in #{channel}:\n\n"
         f"---\n{summary}\n---\n\n"
-        f"To review this proposal, you can:\n\n"
-        f"1. Reply to this email with a rating (1-4) and any comments:\n"
-        f"   1 = Not a good idea (not interesting, or multiple major weaknesses)\n"
-        f"   2 = Good idea (medium interest, or one major weakness)\n"
-        f"   3 = Great idea (high interest, minor weaknesses only)\n"
-        f"   4 = Excellent idea (high interest, no notable weaknesses)\n\n"
-        f"2. Reply with instructions for your agent (e.g., \"focus on the\n"
-        f'   mitochondrial angle instead") and it will re-engage to refine\n'
-        f"   the proposal.\n\n"
-        f"3. Review on the web: {dashboard_url}\n"
+        f"{review_options_text}"
         f"{backlog_text}\n"
         f"---\n"
         f"Unsubscribe: {unsubscribe_url}\n"
         f"Manage preferences: {settings_url}\n"
     )
+
+    rating_legend_html = (
+        '<p style="color: #9ca3af; font-size: 12px; margin: 0 0 20px;">\n'
+        "            1 = Not a good idea &bull; 2 = Good idea &bull; 3 = Great idea &bull; 4 = Excellent idea\n"
+        "        </p>"
+    )
+    if reply_enabled:
+        review_options_html = (
+            '<p style="color: #374151; font-size: 14px; font-weight: 600; margin: 0 0 8px;">Reply to this email to review:</p>\n'
+            '        <ul style="color: #374151; line-height: 1.8; margin: 0 0 8px; padding-left: 20px; font-size: 14px;">\n'
+            "            <li><strong>Rate it</strong> with a number 1-4 and any comments</li>\n"
+            "            <li><strong>Give instructions</strong> to refine the proposal</li>\n"
+            "        </ul>\n"
+            f"        {rating_legend_html}"
+        )
+    else:
+        review_options_html = (
+            '<p style="color: #374151; font-size: 14px; font-weight: 600; margin: 0 0 8px;">Rate it on your dashboard:</p>\n'
+            f"        {rating_legend_html}"
+        )
 
     html_body = email_shell_open() + f"""
     <div style="background: #fff; border: 1px solid #e5e7eb; border-radius: 12px; padding: 32px;">
@@ -402,14 +440,7 @@ async def send_proposal_notification(
             <p style="color: #374151; line-height: 1.6; margin: 0; font-size: 14px; white-space: pre-wrap;">{summary_html}</p>
         </div>
 
-        <p style="color: #374151; font-size: 14px; font-weight: 600; margin: 0 0 8px;">Reply to this email to review:</p>
-        <ul style="color: #374151; line-height: 1.8; margin: 0 0 8px; padding-left: 20px; font-size: 14px;">
-            <li><strong>Rate it</strong> with a number 1-4 and any comments</li>
-            <li><strong>Give instructions</strong> to refine the proposal</li>
-        </ul>
-        <p style="color: #9ca3af; font-size: 12px; margin: 0 0 20px;">
-            1 = Not a good idea &bull; 2 = Good idea &bull; 3 = Great idea &bull; 4 = Excellent idea
-        </p>
+        {review_options_html}
 
         <div style="text-align: center; margin: 24px 0;">
             <a href="{dashboard_url}"
@@ -433,7 +464,8 @@ async def send_proposal_notification(
         raw_msg["From"] = settings.ses_sender_email
         raw_msg["To"] = user.email
         raw_msg["Subject"] = subject
-        raw_msg["Reply-To"] = reply_to
+        if reply_to:
+            raw_msg["Reply-To"] = reply_to
         raw_msg["List-Unsubscribe"] = f"<{unsubscribe_url}>"
         raw_msg["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click"
 
@@ -967,7 +999,12 @@ async def _send_new_proposal_email(
 
     summary = td.summary_text or "(No summary available)"
     channel = td.channel or "unknown"
-    reply_to = f"review+{reply_token}@{settings.ses_reply_domain}"
+    # Same gating as send_proposal_notification: never solicit a reply while
+    # the inbound pipeline is off.
+    reply_enabled = settings.enable_inbound_email
+    reply_to = (
+        f"review+{reply_token}@{settings.ses_reply_domain}" if reply_enabled else None
+    )
     dashboard_url = f"{settings.base_url}/agent/{agent.agent_id}/dashboard"
     unsubscribe_token = _generate_unsubscribe_token(str(user.id))
     unsubscribe_url = f"{settings.base_url}/settings/unsubscribe/{unsubscribe_token}"
@@ -982,11 +1019,28 @@ async def _send_new_proposal_email(
 
     subject = f"{clean_subject(agent.bot_name)} proposed a collaboration with {clean_subject(other_bot_name)}"
 
+    if reply_enabled:
+        review_line = (
+            f"Reply to this email to rate it (1-4) or give your agent instructions, "
+            f"or review on the web: {dashboard_url}"
+        )
+        review_html = (
+            '<p style="color:#374151;font-size:14px;margin:0 0 8px;">\n'
+            "            Reply to this email to <strong>rate it (1–4)</strong> or <strong>give instructions</strong>.\n"
+            "        </p>"
+        )
+    else:
+        review_line = f"Rate it (1-4) on the web: {dashboard_url}"
+        review_html = (
+            '<p style="color:#374151;font-size:14px;margin:0 0 8px;">\n'
+            "            <strong>Rate it (1–4)</strong> or <strong>give instructions</strong> on your dashboard.\n"
+            "        </p>"
+        )
+
     text_body = (
         f"{agent.bot_name} just proposed a collaboration with {other_bot_name} in #{channel}:\n\n"
         f"---\n{summary}\n---\n\n"
-        f"Reply to this email to rate it (1-4) or give your agent instructions, "
-        f"or review on the web: {dashboard_url}\n\n"
+        f"{review_line}\n\n"
         f"---\n"
         f"Unsubscribe: {unsubscribe_url}\n"
         f"Manage preferences: {settings_url}\n"
@@ -999,9 +1053,7 @@ async def _send_new_proposal_email(
         <div style="background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 8px; padding: 16px; margin-bottom: 24px;">
             <p style="color: #374151; line-height: 1.6; margin: 0; font-size: 14px; white-space: pre-wrap;">{summary_html}</p>
         </div>
-        <p style="color:#374151;font-size:14px;margin:0 0 8px;">
-            Reply to this email to <strong>rate it (1–4)</strong> or <strong>give instructions</strong>.
-        </p>
+        {review_html}
         <div style="text-align:center;margin:24px 0;">
             <a href="{dashboard_url}" style="display:inline-block;padding:12px 32px;background:#4f46e5;color:#fff;text-decoration:none;border-radius:8px;font-weight:600;font-size:14px;">Review this proposal</a>
         </div>
