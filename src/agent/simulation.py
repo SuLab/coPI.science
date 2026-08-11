@@ -4294,7 +4294,21 @@ class SimulationEngine:
                     ).where(AgentRegistry.status == "active")
                 )).all()
 
-                await self._load_publication_records(db)
+                # Isolated from the roster query above: a publications-join
+                # failure must never abort the roster sync (add/remove/role-
+                # diff below never runs otherwise, since both queries were
+                # sharing the outer try/except). Stale grounding data is
+                # preferable to a silently no-op'd roster tick — leave
+                # _agent_publications (and each Agent's db_publication_dois)
+                # exactly as they were on failure; absent agents still fail
+                # closed regardless. See issue #29 review.
+                try:
+                    await self._load_publication_records(db)
+                except Exception as exc:
+                    logger.warning(
+                        "[roster] publication-record load failed (grounding data "
+                        "may be stale): %s", exc,
+                    )
 
             desired = {r.agent_id: r for r in rows}
 
