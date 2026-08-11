@@ -208,6 +208,15 @@ async def _execute_retrieve_abstract(pmid_or_doi: str) -> str:
     # Title/abstract come from PubMed — untrusted external text (SEC-14).
     parts = [
         f"Title: {delimit(result['title'], 'paper_title')}",
+    ]
+    authors = result.get("authors") or []
+    if authors:
+        shown = ", ".join(authors[:20])
+        if len(authors) > 20:
+            shown += f", … (+{len(authors) - 20} more)"
+        # Author names come from PubMed — untrusted external text (SEC-14).
+        parts.append(f"Authors: {delimit(shown, 'paper_authors')}")
+    parts += [
         f"Journal: {result.get('journal', 'Unknown')} ({result.get('year', '?')})",
         f"PMID: {result['pmid']}",
         "",
@@ -224,6 +233,15 @@ async def _execute_retrieve_full_text(pmid_or_doi: str) -> str:
     # Title/abstract/methods come from PubMed/PMC — untrusted external text (SEC-14).
     parts = [
         f"Title: {delimit(result['title'], 'paper_title')}",
+    ]
+    authors = result.get("authors") or []
+    if authors:
+        shown = ", ".join(authors[:20])
+        if len(authors) > 20:
+            shown += f", … (+{len(authors) - 20} more)"
+        # Author names come from PubMed — untrusted external text (SEC-14).
+        parts.append(f"Authors: {delimit(shown, 'paper_authors')}")
+    parts += [
         f"Journal: {result.get('journal', 'Unknown')} ({result.get('year', '?')})",
         f"PMID: {result['pmid']}",
     ]

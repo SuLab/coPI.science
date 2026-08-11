@@ -69,6 +69,7 @@ async def test_fetch_pubmed_records_parses_article_scoped_fields():
     assert r["year"] == 2020
     assert r["pub_types"] == ["Journal Article"]
     assert r["author_count"] == 2
+    assert r["authors"] == ["Smith", "Jones"]
 
 
 async def test_fetch_pubmed_records_empty_input_no_http():

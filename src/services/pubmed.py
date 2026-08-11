@@ -238,9 +238,24 @@ def _parse_pubmed_xml(xml_text: str) -> list[dict[str, Any]]:
         ]
         record["pub_types"] = pub_types
 
-        # Authors to determine position
+        # Authors — count for position heuristics, names for tool output.
+        # Names let an agent CHECK authorship before claiming it (issue #29:
+        # the origin exchange retrieved this very paper and the tool answer
+        # had no author list to falsify the false co-authorship claim).
         authors = article.findall(".//Author")
         record["author_count"] = len(authors)
+        names: list[str] = []
+        for author in authors:
+            collective = author.findtext("CollectiveName")
+            if collective:
+                names.append(collective.strip())
+                continue
+            last = author.findtext("LastName")
+            if not last:
+                continue
+            initials = author.findtext("Initials")
+            names.append(f"{last} {initials}".strip() if initials else last.strip())
+        record["authors"] = names
 
         results.append(record)
 
@@ -430,6 +445,7 @@ async def fetch_abstract(pmid_or_doi: str) -> dict[str, Any]:
         "abstract": rec.get("abstract", ""),
         "journal": rec.get("journal", ""),
         "year": rec.get("year"),
+        "authors": rec.get("authors", []),
     }
 
 
