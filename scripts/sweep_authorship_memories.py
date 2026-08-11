@@ -39,20 +39,45 @@ def sweep(
     records: dict[str, LabPublicationRecord],
     fix: bool,
 ) -> list[tuple[str, list[str]]]:
-    """Scan every profiles/memory/<agent_id>/public.md; return (agent_id, stripped_lines)."""
+    """Scan every agent memory file; return (agent_id, stripped_lines) per hit.
+
+    Covers both layouts Agent.public_working_memory reads from: the
+    partitioned profiles/memory/<agent_id>/public.md, and the legacy flat
+    profiles/memory/<agent_id>.md that agents not yet migrated still use.
+    (``*.md.pre-sweep`` backups are excluded from the legacy scan so a
+    second run doesn't re-sweep its own backups.) If an agent somehow has
+    both, each is scanned and reported separately.
+
+    A single file that can't be read or written (permission error, bad
+    encoding, ...) is reported to stdout and skipped, not raised — one bad
+    file must not abort the run or hide findings already gathered from
+    others.
+    """
     findings: list[tuple[str, list[str]]] = []
-    for memory_file in sorted(memory_root.glob("*/public.md")):
-        agent_id = memory_file.parent.name
-        own = records.get(agent_id, LabPublicationRecord(dois=set(), has_records=False))
-        original = memory_file.read_text(encoding="utf-8")
-        cleaned, stripped = strip_ungrounded_authorship_lines(original, own)
-        if not stripped:
+    candidates: list[tuple[Path, bool]] = [
+        (p, False) for p in sorted(memory_root.glob("*/public.md"))
+    ]
+    candidates += [
+        (p, True)
+        for p in sorted(memory_root.glob("*.md"))
+        if not p.name.endswith(".pre-sweep")
+    ]
+    for memory_file, is_legacy in candidates:
+        agent_id = memory_file.stem if is_legacy else memory_file.parent.name
+        try:
+            own = records.get(agent_id, LabPublicationRecord(dois=set(), has_records=False))
+            original = memory_file.read_text(encoding="utf-8")
+            cleaned, stripped = strip_ungrounded_authorship_lines(original, own)
+            if not stripped:
+                continue
+            findings.append((agent_id, stripped))
+            if fix:
+                backup = memory_file.with_suffix(".md.pre-sweep")
+                backup.write_text(original, encoding="utf-8")
+                memory_file.write_text(cleaned + "\n", encoding="utf-8")
+        except Exception as exc:
+            print(f"[{agent_id}] ERROR: {exc}")
             continue
-        findings.append((agent_id, stripped))
-        if fix:
-            backup = memory_file.with_suffix(".md.pre-sweep")
-            backup.write_text(original, encoding="utf-8")
-            memory_file.write_text(cleaned + "\n", encoding="utf-8")
     return findings
 
 
