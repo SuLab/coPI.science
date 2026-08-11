@@ -185,5 +185,5 @@ class TestStripUngroundedAuthorshipLines:
     def test_lines_without_authorship_verbs_untouched(self):
         memory = "1. Resume outreach.\n2. Monitor Liu response.\n"
         cleaned, stripped = strip_ungrounded_authorship_lines(memory, NO_RECORDS)
-        assert cleaned == memory.rstrip("\n") or cleaned == memory
+        assert cleaned == memory.rstrip("\n")
         assert stripped == []
