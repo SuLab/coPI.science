@@ -28,11 +28,43 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from src.agent.agent import _extract_dois  # noqa: E402
 from src.agent.authorship_rules import (  # noqa: E402
     LabPublicationRecord,
     lab_self_names,
     strip_ungrounded_authorship_lines,
 )
+
+
+def _augment_with_profile_dois(
+    records: dict[str, LabPublicationRecord],
+    profiles_root: Path,
+) -> dict[str, LabPublicationRecord]:
+    """Union each agent's profile-parsed DOIs into its record, in place.
+
+    Mirrors the runtime guard (_reject_ungrounded_authorship), whose ground
+    truth is publications-table rows ∪ profile DOIs (public AND private
+    profiles — Agent.own_publication_dois). Audit finding I6: without this,
+    --fix deleted TRUE memory whose only grounding was the profile.
+    """
+    for subdir in ("public", "private"):
+        profile_dir = profiles_root / subdir
+        if not profile_dir.is_dir():
+            continue
+        for profile in sorted(profile_dir.glob("*.md")):
+            try:
+                dois = _extract_dois(profile.read_text(encoding="utf-8"))
+            except Exception as exc:
+                print(f"[{profile.stem}] profile read ERROR: {exc}")
+                continue
+            if not dois:
+                continue
+            rec = records.setdefault(
+                profile.stem, LabPublicationRecord(set(), False)
+            )
+            rec.dois |= dois
+            rec.has_records = True
+    return records
 
 
 def sweep(
@@ -134,9 +166,16 @@ def main() -> int:
         type=Path,
         default=Path(__file__).resolve().parent.parent / "profiles" / "memory",
     )
+    parser.add_argument(
+        "--profiles-root",
+        type=Path,
+        default=Path(__file__).resolve().parent.parent / "profiles",
+        help="root containing public/ and private/ profile dirs (DOI grounding)",
+    )
     args = parser.parse_args()
 
     records, identities = asyncio.run(_load_records())
+    _augment_with_profile_dois(records, args.profiles_root)
     findings = sweep(args.memory_root, records, fix=args.fix, identities=identities)
     if not findings:
         print("No ungrounded authorship lines found.")

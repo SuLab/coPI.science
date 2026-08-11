@@ -75,6 +75,48 @@ def test_legacy_flat_layout_is_swept(tmp_path):
     assert "Desiderata" in backup.read_text()
 
 
+def test_profile_grounded_memory_survives_fix(tmp_path):
+    # Audit finding I6: _load_records was DB-only while the runtime guard is
+    # DB ∪ profile — so --fix deleted TRUE memory grounded only in the
+    # agent's profile DOIs. The sweep must union profile DOIs exactly like
+    # _reject_ungrounded_authorship does.
+    from scripts.sweep_authorship_memories import _augment_with_profile_dois
+
+    profiles = tmp_path / "profiles"
+    (profiles / "public").mkdir(parents=True)
+    (profiles / "public" / "wu.md").write_text(
+        "Representative publication: BioThings Explorer — "
+        "https://doi.org/10.1093/bioinformatics/btad570\n",
+        encoding="utf-8",
+    )
+    memory_root = tmp_path / "memory"
+    line = (
+        "We published BioThings Explorer "
+        "(https://doi.org/10.1093/bioinformatics/btad570) - cite in intros."
+    )
+    p = _write_memory(memory_root, "wu", f"{line}\n")
+
+    records = _augment_with_profile_dois({}, profiles)  # zero DB rows
+    findings = sweep(memory_root, records, fix=True)
+
+    assert findings == []
+    assert p.read_text() == f"{line}\n"
+
+
+def test_private_profile_dois_also_count(tmp_path):
+    # Mirrors Agent.own_publication_dois: public AND private profiles.
+    from scripts.sweep_authorship_memories import _augment_with_profile_dois
+
+    profiles = tmp_path / "profiles"
+    (profiles / "private").mkdir(parents=True)
+    (profiles / "private" / "wu.md").write_text(
+        "Own paper: 10.1093/bioadv/vbag036\n", encoding="utf-8"
+    )
+    records = _augment_with_profile_dois({}, profiles)
+    assert records["wu"].has_records is True
+    assert "10.1093/bioadv/vbag036" in records["wu"].dois
+
+
 def test_unreadable_file_does_not_abort_the_sweep(tmp_path, monkeypatch, capsys):
     # One agent's file is fine; another's raises on read (permission error,
     # bad encoding, whatever). The error must be reported, not raised — and
