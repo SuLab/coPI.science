@@ -196,6 +196,65 @@ class TestValidateAuthorshipClaims:
         assert v.ok is True
 
 
+# Audit finding I2: joint-authorship phrasings that dodge the literal
+# "co-author" stem. Each tags a lab with no records while the sender (Wu)
+# genuinely owns the DOI — exactly the WUBOT_ORIGIN shape, reworded.
+I2_JOINT_AUTHORSHIP_PROBES = [
+    "We wrote the Desiderata paper together with @GoodBot — "
+    "https://doi.org/10.1093/bioadv/vbag036",
+    "Our joint paper with @GoodBot: *Desiderata* — "
+    "https://doi.org/10.1093/bioadv/vbag036",
+    "We published the Desiderata paper with @GoodBot "
+    "(https://doi.org/10.1093/bioadv/vbag036).",
+]
+
+
+class TestJointAuthorshipSynonyms:
+    @pytest.mark.parametrize("text", I2_JOINT_AUTHORSHIP_PROBES)
+    def test_joint_phrasing_is_a_coauthorship_claim(self, text):
+        assert claims_coauthorship(text) is True
+
+    @pytest.mark.parametrize("text", I2_JOINT_AUTHORSHIP_PROBES)
+    def test_joint_phrasing_enforces_tagged_lab_records(self, text):
+        v = validate_authorship_claims(
+            text, WU_RECORDS, tagged={"GoodBot": NO_RECORDS}
+        )
+        assert v.ok is False
+        assert "GoodBot" in v.reason
+
+    def test_own_paper_share_is_still_not_a_coauthorship_claim(self):
+        assert claims_coauthorship(OWN_PAPER_SHARE) is False
+
+
+class TestClaimDoiSentenceScoping:
+    # Audit finding I3: a fabricated-title claim must not be satisfied by an
+    # own-DOI attached to DIFFERENT work elsewhere in the message.
+    I3_DOI_GAMING_PROBE = (
+        "We co-authored the *Desiderata* knowledge-network paper — building "
+        "on our earlier BioThings work "
+        "(https://doi.org/10.1093/bioinformatics/btad570)."
+    )
+
+    def test_doi_for_other_work_does_not_ground_the_claim(self):
+        # Wu owns btad570, but the co-authorship claim is about a paper whose
+        # DOI is never cited — unverifiable, rejected.
+        v = validate_authorship_claims(self.I3_DOI_GAMING_PROBE, WU_RECORDS)
+        assert v.ok is False
+        assert "without a DOI" in v.reason
+
+    def test_own_paper_share_with_dash_delimited_doi_still_passes(self):
+        v = validate_authorship_claims(OWN_PAPER_SHARE, WU_RECORDS)
+        assert v.ok is True
+
+    def test_claim_followed_by_bare_doi_sentence_passes(self):
+        v = validate_authorship_claims(
+            "We published BioThings Explorer. "
+            "https://doi.org/10.1093/bioinformatics/btad570",
+            WU_RECORDS,
+        )
+        assert v.ok is True
+
+
 # The exact poisoned row from GoodBot's prod working memory (issue #29).
 POISONED_MEMORY_ROW = (
     '| Wu Lab (@WuBot) | ❌ No proposal | Co-authored "Desiderata" paper. '

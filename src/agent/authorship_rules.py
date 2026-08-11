@@ -22,7 +22,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-from src.agent.agent import _extract_dois
+from src.agent.agent import _DOI_RE, _extract_dois
 
 
 @dataclass
@@ -119,7 +119,17 @@ _FIRST_PERSON_CLAIM_RE = re.compile(
     re.IGNORECASE,
 )
 
-_COAUTHOR_STEM_RE = re.compile(r"\bco-?author(?:ed|ship|s|ing)?\b", re.IGNORECASE)
+# Co-authorship phrasing, any subject. Not just the literal "co-author" stem
+# (audit finding I2): joint-authorship synonyms — "wrote ... together with",
+# "our joint paper with", "published ... with" — assert the same shared-credit
+# relationship and must trigger the tagged-lab records check.
+_COAUTHOR_STEM_RE = re.compile(
+    r"\bco-?author(?:ed|ship|s|ing)?\b"
+    r"|\bjointly\s+(?:co-?)?(?:authored|wrote|published)\b"
+    r"|\bjoint\s+(?:paper|publication|preprint|article|manuscript)\b"
+    r"|\b(?:wrote|authored|published)\b[^.!?\n]{0,60}?\b(?:together\s+)?with\b",
+    re.IGNORECASE,
+)
 
 
 def makes_first_person_authorship_claim(text: str | None) -> bool:
@@ -130,10 +140,69 @@ def makes_first_person_authorship_claim(text: str | None) -> bool:
 
 
 def claims_coauthorship(text: str | None) -> bool:
-    """True if ``text`` contains a co-authorship stem (any subject)."""
+    """True if ``text`` asserts shared authorship (any subject, any phrasing)."""
     if not text:
         return False
-    return bool(_COAUTHOR_STEM_RE.search(text))
+    return bool(_COAUTHOR_STEM_RE.search(normalize_claim_text(text)))
+
+
+# --- claim → DOI association --------------------------------------------------
+# Audit finding I3: letting ANY own-DOI anywhere in the message satisfy a
+# claim lets a fabricated-title claim ride on a citation of unrelated own
+# work ("We co-authored the Desiderata paper — building on our earlier
+# BioThings work (btad570)"). A DOI grounds a claim only when it sits in the
+# claim's own sentence with no intervening first-person re-anchor ("our
+# earlier ... work") between the claim and the DOI, or immediately follows
+# in a DOI-only sentence.
+
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+|\n+")
+_REANCHOR_RE = re.compile(r"\b(?:our|my)\s+\w+", re.IGNORECASE)
+_DOI_DECOR_RE = re.compile(
+    r"https?://(?:dx\.)?doi\.org/|\bdoi\b:?", re.IGNORECASE
+)
+
+
+def _is_doi_only(sentence: str) -> str | None:
+    """The sentence, if it contains nothing but DOI(s) and decoration."""
+    rest = _DOI_RE.sub("", sentence)
+    rest = _DOI_DECOR_RE.sub("", rest)
+    return sentence if not re.search(r"\w", rest) else None
+
+
+def _claim_scoped_dois(text: str) -> tuple[set[str], bool]:
+    """DOIs that ground each first-person claim, sentence-scoped.
+
+    Returns ``(claimed_dois, has_unverifiable_claim)``. Matching runs on the
+    normalized text; a DOI containing stripped emphasis characters therefore
+    normalizes to a value not in any record set — which fails closed.
+    """
+    sentences = [
+        s for s in _SENTENCE_SPLIT_RE.split(normalize_claim_text(text)) if s
+    ]
+    claimed: set[str] = set()
+    unverifiable = False
+    for idx, sentence in enumerate(sentences):
+        claim_matches = list(_FIRST_PERSON_CLAIM_RE.finditer(sentence))
+        if not claim_matches:
+            continue
+        eligible: set[str] = set()
+        for doi_match in _DOI_RE.finditer(sentence):
+            for claim in claim_matches:
+                between = sentence[claim.end():doi_match.start()]
+                if doi_match.start() < claim.end() or not _REANCHOR_RE.search(
+                    between
+                ):
+                    eligible.add(doi_match.group(0).rstrip(".,;").lower())
+                    break
+        if not eligible and idx + 1 < len(sentences):
+            follow_on = _is_doi_only(sentences[idx + 1])
+            if follow_on:
+                eligible = _extract_dois(follow_on)
+        if eligible:
+            claimed |= eligible
+        else:
+            unverifiable = True
+    return claimed, unverifiable
 
 
 def validate_authorship_claims(
@@ -153,8 +222,6 @@ def validate_authorship_claims(
     if not makes_first_person_authorship_claim(text):
         return AuthorshipVerdict(ok=True)
 
-    claimed_dois = _extract_dois(text)
-
     if not own.has_records:
         return AuthorshipVerdict(
             ok=False,
@@ -163,12 +230,15 @@ def validate_authorship_claims(
                 "records to verify against (fail closed)"
             ),
         )
-    if not claimed_dois:
+
+    claimed_dois, has_unverifiable = _claim_scoped_dois(text or "")
+    if has_unverifiable or not claimed_dois:
         return AuthorshipVerdict(
             ok=False,
             reason=(
-                "first-person authorship claim without a DOI — unverifiable "
-                "(cite the paper's DOI from your publication list)"
+                "first-person authorship claim without a DOI in the claim's "
+                "own sentence — unverifiable (cite the paper's DOI from your "
+                "publication list)"
             ),
         )
     unknown = claimed_dois - own.dois
