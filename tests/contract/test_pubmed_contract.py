@@ -72,6 +72,58 @@ async def test_fetch_pubmed_records_parses_article_scoped_fields():
     assert r["authors"] == ["Smith", "Jones"]
 
 
+EFETCH_XML_AUTHOR_EDGE_CASES = """<?xml version="1.0"?>
+<PubmedArticleSet>
+  <PubmedArticle>
+    <MedlineCitation>
+      <PMID>32000000</PMID>
+      <Article>
+        <Journal>
+          <Title>Cell</Title>
+          <JournalIssue><PubDate><Year>2021</Year></PubDate></JournalIssue>
+        </Journal>
+        <ArticleTitle>Another Great Paper</ArticleTitle>
+        <Abstract>
+          <AbstractText>Some abstract.</AbstractText>
+        </Abstract>
+        <AuthorList>
+          <Author><LastName>Wu</LastName><Initials>C</Initials></Author>
+          <Author><CollectiveName>The Consortium Group</CollectiveName></Author>
+          <Author><ForeName>NoLastName</ForeName></Author>
+        </AuthorList>
+      </Article>
+    </MedlineCitation>
+    <PubmedData>
+      <ArticleIdList>
+        <ArticleId IdType="pubmed">32000000</ArticleId>
+      </ArticleIdList>
+    </PubmedData>
+  </PubmedArticle>
+</PubmedArticleSet>
+"""
+
+
+@respx.mock
+async def test_fetch_pubmed_records_authors_collective_name_and_skip():
+    """Exercises the three branches the hand-built contract fixture above
+    (LastName-only) doesn't reach: LastName+Initials concatenation, the
+    CollectiveName (group-authorship) branch, and the skip case for an
+    <Author> with neither LastName nor CollectiveName.
+    """
+    respx.get(f"{EUTILS}/efetch.fcgi").mock(
+        return_value=httpx.Response(200, text=EFETCH_XML_AUTHOR_EDGE_CASES)
+    )
+    recs = await pubmed.fetch_pubmed_records(["32000000"])
+    assert len(recs) == 1
+    r = recs[0]
+    # All three <Author> elements count toward author_count, including the
+    # one that gets skipped from the names list below.
+    assert r["author_count"] == 3
+    # The third <Author> (ForeName only, no LastName/CollectiveName) is
+    # absent — skipped, not rendered as an empty/garbage entry.
+    assert r["authors"] == ["Wu C", "The Consortium Group"]
+
+
 async def test_fetch_pubmed_records_empty_input_no_http():
     assert await pubmed.fetch_pubmed_records([]) == []
 
