@@ -6,6 +6,10 @@ after WuBot originated the same false claim. Both messages are pinned here
 verbatim from the prod llm_call_logs forensics.
 """
 
+import time
+
+import pytest
+
 from src.agent.authorship_rules import (
     LabPublicationRecord,
     claims_coauthorship,
@@ -87,6 +91,50 @@ class TestClaimDetection:
         assert claims_coauthorship(GOODBOT_INCIDENT) is True
         assert claims_coauthorship(WUBOT_ORIGIN) is True
         assert claims_coauthorship(OWN_PAPER_SHARE) is False
+
+
+# Adversarial-audit probes (2026-08-11, finding C1): realistic paraphrases the
+# original verb-anchored grammar failed OPEN on — every one bypassed the whole
+# deterministic layer. Pinned verbatim from the audit.
+C1_PARAPHRASE_PROBES = [
+    "We're co-authors on the *Desiderata* paper — https://doi.org/10.1093/bioadv/vbag036",
+    "Our lab has co-authored the *Desiderata* paper with @WuBot",
+    "We've co-authored the *Desiderata* paper",
+    # The pinned incident text with Slack *emphasis* wrapping the verb.
+    ":newspaper: Paper — Our lab *recently co-authored* with @WuBot and @SuBot: "
+    "*Desiderata* — https://doi.org/10.1093/bioadv/vbag036",
+    "As co-authors of the Desiderata paper, we'd be glad to discuss",
+    "Happy to weigh in as a co-author on that",
+    "Our lab is behind the recent Desiderata paper",
+    "Our team published the Desiderata paper",
+    "Our group co-authored it",
+    "we have published, together with the Su lab, the Desiderata paper",
+    "It was our privilege to co-author that",
+    "I was senior author on the Desiderata paper",
+    "our lab's contribution to the Desiderata paper",
+    "a paper of ours",
+    "We co‐authored the Desiderata paper",  # U+2010 unicode hyphen
+    "We’ve co-authored the Desiderata paper",  # U+2019 unicode apostrophe
+]
+
+
+class TestClaimDetectionParaphrases:
+    @pytest.mark.parametrize("text", C1_PARAPHRASE_PROBES)
+    def test_paraphrase_is_detected(self, text):
+        assert makes_first_person_authorship_claim(text) is True
+
+    def test_correct_attribution_still_not_a_claim(self):
+        assert makes_first_person_authorship_claim(CORRECT_ATTRIBUTION) is False
+
+    def test_third_party_attribution_still_not_a_claim(self):
+        assert makes_first_person_authorship_claim(
+            "The Su lab published a strong KG paper — worth reading."
+        ) is False
+
+    def test_your_paper_still_not_a_claim(self):
+        assert makes_first_person_authorship_claim(
+            "Your paper on RIG-I mimetics (10.1000/x) is a great fit for our assay."
+        ) is False
 
 
 class TestValidateAuthorshipClaims:
@@ -187,3 +235,13 @@ class TestStripUngroundedAuthorshipLines:
         cleaned, stripped = strip_ungrounded_authorship_lines(memory, NO_RECORDS)
         assert cleaned == memory.rstrip("\n")
         assert stripped == []
+
+    def test_pathological_capitalized_run_returns_quickly(self):
+        # Audit finding M1: _OTHER_LAB_SUBJECT_RE backtracked quadratically —
+        # this 4000-token line took ~1.9s pre-fix (~85s at 20k tokens), on the
+        # event loop. Post-fix it completes in milliseconds; the 1s bound
+        # leaves lots of headroom for a loaded CI machine.
+        line = "Co-authored notes: " + ("Wu " * 4000) + "end"
+        start = time.perf_counter()
+        strip_ungrounded_authorship_lines(line, NO_RECORDS)
+        assert time.perf_counter() - start < 1.0

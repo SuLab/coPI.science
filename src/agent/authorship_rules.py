@@ -39,21 +39,81 @@ class AuthorshipVerdict:
     reason: str | None = None
 
 
-# First-person authorship phrasing. Deliberately verb-anchored: "our lab
-# co-authored", "we published", "our recent paper". Mentions of *other*
-# people's work ("your paper", "the Su lab published") do not match.
-_ADVERB = r"(?:recently|actually|just|also|previously|proudly)\s+"
-_VERBS = r"(?:co-?authored|co-?wrote|authored|published|wrote)"
+# --- text normalization -----------------------------------------------------
+# Slack renders *bold*/_italic_/~strike~ by wrapping (or splitting) words; the
+# 2026-08-11 audit's pinned incident text wrapped the verb itself
+# ("*recently co-authored*"), which pushed a "*" inside what the claim grammar
+# expects to be a word boundary. Unicode hyphens (co‐authored, U+2010) and
+# apostrophes (we’ve, U+2019) similarly dodge "co-?" and "'ve". Both are folded
+# away before any claim matching. Normalized text is used for DETECTION only —
+# DOI *values* are still extracted from the raw text where it matters, since a
+# DOI may legitimately contain "_".
+
+_UNICODE_FOLD = str.maketrans({
+    "‐": "-",  # hyphen
+    "‑": "-",  # non-breaking hyphen
+    "‒": "-",  # figure dash
+    "–": "-",  # en dash
+    "‘": "'",  # left single quotation mark
+    "’": "'",  # right single quotation mark (Slack's apostrophe)
+    "ʼ": "'",  # modifier letter apostrophe
+})
+
+_EMPHASIS_RUN_RE = re.compile(r"[*~_]+")
+
+
+def normalize_claim_text(text: str) -> str:
+    """Fold unicode hyphen/apostrophe variants; strip Slack emphasis runs."""
+    return _EMPHASIS_RUN_RE.sub("", text.translate(_UNICODE_FOLD))
+
+
+# --- first-person authorship grammar -----------------------------------------
+# Runs against normalize_claim_text() output. Subjects are first-person only —
+# "we", "I", "ours", "our/my lab|labs|team|group" — so mentions of *other*
+# people's work ("your paper", "the Su lab published") do not match. Widened
+# per the 2026-08-11 audit (finding C1): auxiliaries ("has co-authored"),
+# contractions ("we've"), noun forms ("we're co-authors on", "as a co-author
+# of", "I was senior author on"), "behind the ... paper", "contribution to the
+# ... paper", "a paper of ours", and dash/paren inserts between subject and
+# verb ("Our labs — ours and the Good lab's — co-authored").
+_ADVERB = r"(?:recently|actually|just|also|previously|proudly|jointly|together)\s+"
+_AUX = r"(?:have|has|had|are|were|is|was|am|been|'ve|'re|'m|'d)\s+"
+_VERBS = r"(?:co-?authored|co-?wrote|co-?published|authored|published|wrote)"
+_VERBS_INF = r"(?:co-?author|co-?write|author|publish|write)"
 _PAPER_NOUN = r"(?:paper|publication|preprint|article|manuscript)"
+_FP_GROUP = r"(?:labs?|team|group)"
+_AUTHOR_QUAL = r"(?:senior|first|last|corresponding|lead)"
+# A parenthetical / dash- or comma-delimited insert between subject and verb.
+# Bounded and delimiter-anchored so free-running prose ("our lab admires what
+# the Su lab published") cannot bridge the gap.
+_INSERT = r"(?:—[^—.!?\n]{0,80}—\s*|\([^()!?\n]{0,80}\)\s*|,[^,.!?\n]{0,80},\s*)?"
 
 _FIRST_PERSON_CLAIM_RE = re.compile(
     "|".join(
         [
-            rf"\b(?:our|my)\s+labs?(?:['’]s)?\s+(?:{_ADVERB})?{_VERBS}\b",
+            # "our lab (has) (recently) co-authored", "our team published",
+            # "Our labs — ours and the Good lab's — actually co-authored"
+            rf"\b(?:our|my)\s+{_FP_GROUP}(?:'s)?\s+{_INSERT}(?:{_AUX})*(?:{_ADVERB})*{_VERBS}\b",
+            # "our co-authored ..." / "my published ..." (possessive + verb)
             rf"\b(?:our|my)\s+(?:{_ADVERB})?{_VERBS}\b",
-            rf"\bwe\s+(?:{_ADVERB})?{_VERBS}\b",
-            rf"\bI\s+(?:{_ADVERB})?{_VERBS}\b",
-            rf"\b(?:our|my)\s+(?:lab(?:['’]s)?\s+)?(?:recent\s+|new\s+|latest\s+|joint\s+)?{_PAPER_NOUN}\b",
+            # "we (have) (just) published", "we've co-authored", "I wrote"
+            rf"\b(?:we|I|ours)\b\s*(?:{_AUX})*(?:{_ADVERB})*{_VERBS}\b",
+            # "we're co-authors on", "I am a co-author of"
+            rf"\b(?:we|I)\b\s*(?:{_AUX})?(?:all\s+|both\s+)?(?:a\s+|the\s+)?co-?authors?\b",
+            # "as co-authors of the ... paper", "as a co-author on that"
+            rf"\b(?:as|being)\s+(?:a\s+|the\s+)?(?:co-?authors?|{_AUTHOR_QUAL}\s+authors?)\s+(?:on|of)\b",
+            # "I was senior author on", "we are corresponding authors"
+            rf"\b(?:we|I)\b\s*(?:{_AUX})+(?:a\s+|the\s+)?{_AUTHOR_QUAL}\s+authors?\b",
+            # "our lab is behind the ... paper"
+            rf"\b(?:we|ours|I|(?:our|my)\s+{_FP_GROUP})\b\s+(?:is|are|was|were|am)\s+behind\s+[^.!?\n]{{0,80}}?{_PAPER_NOUN}\b",
+            # "our (lab's) (recent) paper"
+            rf"\b(?:our|my)\s+(?:{_FP_GROUP}(?:'s)?\s+)?(?:recent\s+|new\s+|latest\s+|joint\s+)?{_PAPER_NOUN}\b",
+            # "a paper of ours"
+            rf"\b{_PAPER_NOUN}s?\s+of\s+(?:ours|mine)\b",
+            # "it was our privilege to co-author that"
+            rf"\b(?:our|my)\s+(?:privilege|honou?r|pleasure)\s+to\s+(?:{_ADVERB})*{_VERBS_INF}\b",
+            # "our lab's contribution to the ... paper"
+            rf"\b(?:our|my)\s+(?:{_FP_GROUP}(?:'s)?\s+)?contributions?\s+to\s+[^.!?\n]{{0,80}}?{_PAPER_NOUN}\b",
         ]
     ),
     re.IGNORECASE,
@@ -66,7 +126,7 @@ def makes_first_person_authorship_claim(text: str | None) -> bool:
     """True if ``text`` asserts, in the first person, authorship of a paper."""
     if not text:
         return False
-    return bool(_FIRST_PERSON_CLAIM_RE.search(text))
+    return bool(_FIRST_PERSON_CLAIM_RE.search(normalize_claim_text(text)))
 
 
 def claims_coauthorship(text: str | None) -> bool:
@@ -161,8 +221,11 @@ _AUTHORSHIP_VERB_LINE_RE = re.compile(
 # "Wu Lab co-authored", "Wu Lab (@WuBot) co-authored", "Su and Wu Labs
 # co-authored" — the lab-name subject must sit directly before the verb
 # (an intervening table-cell "|" breaks the match, by design).
+# The capitalized-token run is bounded at 6 tokens: the unbounded "*" form
+# backtracked quadratically on long capitalized runs (audit finding M1 —
+# ~85s at 20k tokens, on the event loop). No real lab-name subject is longer.
 _OTHER_LAB_SUBJECT_RE = re.compile(
-    r"\b(?!(?:Our|My)\s)[A-Z][\w.'-]*(?:\s+(?:and\s+)?[A-Z][\w.'-]*)*\s+[Ll]abs?\b"
+    r"\b(?!(?:Our|My)\s)[A-Z][\w.'-]*(?:\s+(?:and\s+)?[A-Z][\w.'-]*){0,6}\s+[Ll]abs?\b"
     r"(?:\s*\(@\w+\))?\s+(?:recently\s+)?co-?(?:authored|wrote)",
 )
 
