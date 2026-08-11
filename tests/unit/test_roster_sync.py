@@ -69,9 +69,18 @@ class _FakeResult:
 class _FakeDB:
     def __init__(self, rows):
         self._rows = rows
+        self._call_count = 0
 
     async def execute(self, _stmt):
-        return _FakeResult(self._rows)
+        # _sync_roster_from_db now issues a second query inside the same
+        # session block (_load_publication_records' AgentRegistry/Publication
+        # join). Serve the roster rows on the first call and treat every
+        # later call as "no publication rows" — these tests aren't seeding
+        # any, and _agent_publications isn't part of what they assert.
+        self._call_count += 1
+        if self._call_count == 1:
+            return _FakeResult(self._rows)
+        return _FakeResult([])
 
     async def __aenter__(self):
         return self

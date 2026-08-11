@@ -11,6 +11,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from src.agent.agent import PROFILES_DIR, Agent
+from src.agent.authorship_rules import LabPublicationRecord
 from src.agent.channels import SEEDED_CHANNELS
 from src.agent.foa_cache import extract_foa_number, format_foa_for_prompt
 from src.agent.funding_rules import (
@@ -247,6 +248,12 @@ class SimulationEngine:
             a.bot_name.lower(): a.agent_id for a in agents
         }
         self.message_log.set_bot_name_map(self._bot_name_to_id)
+
+        # agent_id → LabPublicationRecord (publications-table ground truth for
+        # the authorship emit guard). Populated by _load_publication_records at
+        # roster sync; an agent absent from this dict has NO records and every
+        # first-person authorship claim from it fails closed. See issue #29.
+        self._agent_publications: dict[str, LabPublicationRecord] = {}
 
         # LLM call log buffer
         self._llm_log_buffer: list[dict] = []
@@ -4287,6 +4294,8 @@ class SimulationEngine:
                     ).where(AgentRegistry.status == "active")
                 )).all()
 
+                await self._load_publication_records(db)
+
             desired = {r.agent_id: r for r in rows}
 
             # Role-diff for surviving agents (agents present in both current and
@@ -4400,6 +4409,39 @@ class SimulationEngine:
         except Exception as exc:
             # A transient DB hiccup must never crash the main loop.
             logger.warning("[roster] roster sync failed: %s", exc)
+
+    async def _load_publication_records(self, db) -> None:
+        """Refresh per-agent publication ground truth from the publications table.
+
+        DOIs are normalized to the same form _extract_dois produces
+        (lowercase, trailing punctuation stripped) so emit-guard set
+        membership works. A lab with registry rows but zero publications is
+        deliberately ABSENT from the map — the guard treats that as
+        "cannot verify → fail closed" (issue #29 acceptance criterion).
+        """
+        from sqlalchemy import select as sa_select
+
+        from src.models import AgentRegistry, Publication
+
+        rows = (await db.execute(
+            sa_select(AgentRegistry.agent_id, Publication.doi)
+            .join(Publication, Publication.user_id == AgentRegistry.user_id)
+        )).all()
+
+        records: dict[str, LabPublicationRecord] = {}
+        for agent_id, doi in rows:
+            record = records.setdefault(
+                agent_id, LabPublicationRecord(dois=set(), has_records=True)
+            )
+            if doi:
+                record.dois.add(doi.strip().rstrip(".,;").lower())
+        self._agent_publications = records
+
+        # Push DB DOIs onto live Agent objects so the intake guard
+        # (cites_own_paper) sees them too.
+        for agent_id, agent in self.agents.items():
+            record = records.get(agent_id)
+            agent.db_publication_dois = record.dois if record else set()
 
     def _disable_all_gates(self) -> None:
         """Set every agent's gate to None (no filtering). See v2 §5.4."""
