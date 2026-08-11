@@ -13,6 +13,7 @@ from typing import Any
 from src.agent.agent import PROFILES_DIR, Agent
 from src.agent.authorship_rules import (
     LabPublicationRecord,
+    normalize_claim_text,
     strip_ungrounded_authorship_lines,
     validate_authorship_claims,
 )
@@ -200,6 +201,17 @@ REBUILD_WINDOW_S = 14 * 24 * 3600  # 14 days
 # new posts no matter how many of their proposals are awaiting review. Scoped to
 # SchultzBot (the reunion host) so he stays active without a human reviewer.
 UNBLOCK_EXEMPT_AGENTS = {"schultz"}
+
+# Prose-named lab mentions ("the Good lab", "Su Lab's") for the authorship
+# guard (audit finding I4): a fabricated co-author named in prose instead of
+# @-tagged must still be resolved against the roster. Possessive/article
+# words that precede "lab(s)" without naming one are excluded.
+_PROSE_LAB_RE = re.compile(r"\b([A-Z][\w-]+)(?:['’]s)?\s+[Ll]abs?\b")
+_PROSE_LAB_STOPWORDS = frozenset({
+    "our", "my", "their", "your", "his", "her", "its", "the", "a", "an",
+    "this", "that", "these", "those", "each", "every", "both", "all", "any",
+    "other", "another", "wet", "dry", "which", "whose", "one", "two",
+})
 
 
 class SimulationEngine:
@@ -2256,14 +2268,12 @@ class SimulationEngine:
             if self._llm_log_buffer:
                 self._llm_log_buffer[-1]["channel"] = channel
 
-            # Cross-cohort mention stripping now happens in _post_message, which
-            # covers every outbound path instead of only this one. Phase 5 still
-            # needs the *cleaned* text locally, though: the tagged_agent decision
-            # and _check_private_channel_outcome below both read message_text.
-            message_text = self._strip_disallowed_tags(message_text, agent)
-
             # Authorship guard (issue #29) — one gate for both the reply and
-            # new-post branches below.
+            # new-post branches below. Runs on the ORIGINAL draft, BEFORE the
+            # cohort-tag strip: stripping a disallowed co-author's @tag first
+            # would blind the tagged-co-author check to exactly the
+            # fabrication it exists to catch (audit finding I1). The gate is
+            # read-only, so the swap is safe.
             authorship_reason = self._reject_ungrounded_authorship(agent, message_text)
             if authorship_reason:
                 logger.warning(
@@ -2271,6 +2281,12 @@ class SimulationEngine:
                 )
                 agent.state.consecutive_phase5_skips += 1
                 return
+
+            # Cross-cohort mention stripping now happens in _post_message, which
+            # covers every outbound path instead of only this one. Phase 5 still
+            # needs the *cleaned* text locally, though: the tagged_agent decision
+            # and _check_private_channel_outcome below both read message_text.
+            message_text = self._strip_disallowed_tags(message_text, agent)
 
             if action == "reply" and target_post_id:
                 # Enforce thread participation rules
@@ -2502,17 +2518,52 @@ class SimulationEngine:
             target_id = self._bot_name_to_id.get(bot_name.lower())
             if target_id is None or target_id == agent.agent_id:
                 continue
-            target_rec = self._agent_publications.get(target_id)
-            target_agent = self.agents.get(target_id)
-            target_profile_dois = (
-                target_agent.own_publication_dois if target_agent else set()
-            )
-            tagged[bot_name] = LabPublicationRecord(
-                dois=(target_rec.dois if target_rec else set()) | target_profile_dois,
-                has_records=bool(target_rec) or bool(target_profile_dois),
-            )
+            tagged[bot_name] = self._lab_record_for(target_id)
+
+        # Prose-named labs (audit finding I4): "co-authored ... with the Good
+        # lab" dodges the @-tag scan above. Resolve capitalized "<Name> lab"
+        # mentions through the roster (PI last name or agent_id) and enforce
+        # their records exactly like a tagged bot's. Deliberately
+        # conservative: an unresolved name is left alone — the roster is the
+        # only ground truth available, and gating arbitrary capitalized words
+        # would block legit mentions of outside labs. Same-surname collisions
+        # (wu vs pwu) get the benefit of the doubt: the union record stands
+        # if ANY namesake lab can back the claim.
+        name_to_ids: dict[str, set[str]] = {}
+        for aid, roster_agent in self.agents.items():
+            name_to_ids.setdefault(aid.lower(), set()).add(aid)
+            pi_name = (roster_agent.pi_name or "").strip()
+            if pi_name:
+                name_to_ids.setdefault(pi_name.split()[-1].lower(), set()).add(aid)
+        for m in _PROSE_LAB_RE.finditer(normalize_claim_text(text)):
+            name = m.group(1)
+            if name.lower() in _PROSE_LAB_STOPWORDS:
+                continue
+            candidate_ids = name_to_ids.get(name.lower(), set()) - {agent.agent_id}
+            if not candidate_ids:
+                continue
+            merged = LabPublicationRecord()
+            bot_names: list[str] = []
+            for cid in sorted(candidate_ids):
+                rec = self._lab_record_for(cid)
+                merged.dois |= rec.dois
+                merged.has_records = merged.has_records or rec.has_records
+                roster_agent = self.agents.get(cid)
+                bot_names.append(roster_agent.bot_name if roster_agent else cid)
+            tagged.setdefault("/".join(bot_names), merged)
+
         verdict = validate_authorship_claims(text, own, tagged)
         return None if verdict.ok else verdict.reason
+
+    def _lab_record_for(self, agent_id: str) -> LabPublicationRecord:
+        """A lab's ground truth: publications-table rows ∪ profile DOIs."""
+        rec = self._agent_publications.get(agent_id)
+        roster_agent = self.agents.get(agent_id)
+        profile_dois = roster_agent.own_publication_dois if roster_agent else set()
+        return LabPublicationRecord(
+            dois=(rec.dois if rec else set()) | profile_dois,
+            has_records=bool(rec) or bool(profile_dois),
+        )
 
     def _parse_phase5_response(self, response: str) -> tuple[dict | None, str | None]:
         """Parse Phase 5 response into (json_data, message_text).

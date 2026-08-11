@@ -73,6 +73,45 @@ class TestRejectUngroundedAuthorship:
         assert engine._reject_ungrounded_authorship(engine.agents["good"], None) is None
 
 
+class TestProseNamedCoauthors:
+    # Audit finding I4: naming the fabricated co-author lab in prose instead
+    # of @-tagging it dodged the tagged-lab records check entirely.
+    I4_PROSE_PROBE = (
+        "Our labs — ours and the Good lab's — actually co-authored the "
+        "Desiderata paper (https://doi.org/10.1093/bioadv/vbag036)."
+    )
+
+    def test_prose_named_no_records_lab_is_rejected(self, engine):
+        reason = engine._reject_ungrounded_authorship(
+            engine.agents["wu"], self.I4_PROSE_PROBE
+        )
+        assert reason is not None
+        assert "GoodBot" in reason
+
+    def test_prose_named_lab_with_records_passes(self, engine):
+        text = (
+            "We co-authored the Desiderata paper with the Su lab "
+            "(https://doi.org/10.1093/bioadv/vbag036)."
+        )
+        assert engine._reject_ungrounded_authorship(engine.agents["wu"], text) is None
+
+    def test_unresolved_prose_lab_name_is_left_alone(self, engine):
+        # "Broad" is not in the roster: no crash, no over-blocking — the
+        # claim itself is grounded in Wu's own records.
+        text = (
+            "We co-authored the Desiderata paper with the Broad lab "
+            "(https://doi.org/10.1093/bioadv/vbag036)."
+        )
+        assert engine._reject_ungrounded_authorship(engine.agents["wu"], text) is None
+
+    def test_own_lab_named_in_prose_is_not_a_coauthor(self, engine):
+        text = (
+            "We co-authored the Desiderata paper here in the Wu lab "
+            "(https://doi.org/10.1093/bioadv/vbag036)."
+        )
+        assert engine._reject_ungrounded_authorship(engine.agents["wu"], text) is None
+
+
 class TestPostMessageChokepoint:
     async def test_post_message_suppresses_ungrounded_claim(self, engine):
         # No Slack clients and no session factory: if the gate passes, the
@@ -92,3 +131,39 @@ class TestThreadStateBackoff:
     def test_authorship_reject_count_defaults_to_zero(self):
         t = ThreadState(thread_id="1", channel="general", other_agent_id="wu")
         assert t.authorship_reject_count == 0
+
+
+class TestPhase5GateOrdering:
+    async def test_gate_runs_before_cohort_tag_strip(self, engine, monkeypatch):
+        # Audit finding I1: _strip_disallowed_tags deleted a cohort-disallowed
+        # co-author's @tag BEFORE the authorship gate ran, blinding the
+        # tagged-co-author check (the only thing catching the WUBOT_ORIGIN
+        # shape) to exactly the fabrication it exists to catch. The gate must
+        # see the original draft.
+        import src.agent.simulation as sim_mod
+
+        wu = engine.agents["wu"]
+        # Cohort gate on, empty allowed set → @GoodBot would be stripped.
+        wu.allowed_sender_ids = set()
+
+        draft = (
+            "```json\n"
+            '{"action": "new_post", "channel": "general", "post_type": "paper"}\n'
+            "```\n"
+            "<slack_message>\n"
+            "We co-authored the *Desiderata* paper with @GoodBot — "
+            "https://doi.org/10.1093/bioadv/vbag036\n"
+            "</slack_message>"
+        )
+
+        async def fake_generate(**kwargs):
+            return draft
+
+        monkeypatch.setattr(sim_mod, "generate_agent_response", fake_generate)
+        # Disable the random phase-5 skip so the draft is always attempted.
+        monkeypatch.setattr(sim_mod.random, "random", lambda: 1.0)
+
+        await engine._phase5_new_post(wu)
+
+        assert len(engine.message_log) == 0
+        assert wu.state.consecutive_phase5_skips == 1
