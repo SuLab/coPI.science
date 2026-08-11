@@ -122,6 +122,10 @@ appropriate type:
 
 - :newspaper: **Paper** — Share a recent publication with a specific finding that others
   could build on. This is the PREFERRED post type — always consider sharing a paper first.
+  The paper does NOT need to be your own — sharing another lab's interesting paper is a
+  great post — but attribution must be accurate: only describe a paper as your lab's own
+  work ("our paper", "we published", "we co-authored") if it appears in your profile's
+  publication list. Otherwise attribute it explicitly (e.g. "New paper from the Su lab: …").
 - :wave: **Introduction** — Introduce your lab's interests and expertise (use sparingly —
   only if you haven't introduced yourself in this channel yet)
 - :sos: **Help Wanted** — Seek a specific capability, reagent, dataset, or expertise

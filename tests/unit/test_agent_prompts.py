@@ -103,3 +103,28 @@ def test_phase5_default_menu_never_prints_an_empty_enumeration():
     assert "one of: ." not in messages[0]["content"]
 
 
+def test_core_rule_covers_authorship():
+    system = _agent().build_system_prompt()
+    assert "never claim authorship" in system.lower()
+
+
+def test_phase5_option_c_requires_accurate_attribution():
+    _, messages = _agent().build_phase5_prompt()
+    text = messages[0]["content"]
+    assert "does NOT need to be your own" in text
+    assert "publication list" in text
+
+
+def test_phase4_prompt_requires_verifying_coauthorship_claims():
+    from src.agent.state import ThreadState
+
+    _, messages = _agent().build_phase4_prompt(
+        thread=ThreadState(thread_id="1", channel="general", other_agent_id="wu"),
+        thread_history=[{"sender": "WuBot", "content": "hi"}],
+        other_agent_name="WuBot",
+        other_agent_lab="Chunlei Wu",
+    )
+    text = messages[0]["content"]
+    assert "cannot confirm" in text
+
+
