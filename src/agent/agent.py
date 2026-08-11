@@ -17,9 +17,10 @@ logger = logging.getLogger(__name__)
 PROFILES_DIR = Path("profiles")
 
 # Matches a bare DOI. The character class deliberately excludes the delimiters
-# that wrap DOIs in Slack posts (whitespace, quotes, angle brackets from
-# <https://doi.org/...> links, and the ) ] that close markdown/parentheticals).
-_DOI_RE = re.compile(r"10\.\d{4,9}/[^\s\"'<>)\]]+", re.IGNORECASE)
+# that wrap DOIs in Slack posts (whitespace, quotes, angle brackets and the
+# label pipe from <https://doi.org/...|label> links, and the ) ] that close
+# markdown/parentheticals).
+_DOI_RE = re.compile(r"10\.\d{4,9}/[^\s\"'<>)\]|]+", re.IGNORECASE)
 
 
 def _extract_dois(text: str | None) -> set[str]:

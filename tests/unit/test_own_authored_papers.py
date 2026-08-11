@@ -38,6 +38,12 @@ class TestExtractDois:
         text = f"published here: <https://doi.org/{SCOPE_DOI}>"
         assert _extract_dois(text) == {SCOPE_DOI}
 
+    def test_doi_in_slack_pipe_link(self):
+        # Audit finding M2: Slack's labeled-link form <url|label> leaked the
+        # pipe and label into the extracted DOI ("10.x/y|our").
+        text = f"see <https://doi.org/{SCOPE_DOI}|our SCOPE paper> for details"
+        assert _extract_dois(text) == {SCOPE_DOI}
+
     def test_strips_trailing_paren_and_period(self):
         # Mirrors the messy form seen in real posts: "...3c01557)>"
         assert _extract_dois("(10.1021/acscentsci.3c01557)") == {"10.1021/acscentsci.3c01557"}
