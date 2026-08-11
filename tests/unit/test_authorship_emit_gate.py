@@ -133,6 +133,69 @@ class TestThreadStateBackoff:
         assert t.authorship_reject_count == 0
 
 
+class TestPhase4AuthorshipBackoff:
+    async def test_two_rejections_back_off_the_thread(self, engine, monkeypatch):
+        # Audit finding O-I4(a): the phase-4 gate + backoff is the only
+        # loop-breaker for a model that keeps regenerating the same
+        # ungrounded reply — pin the real _reply_to_thread block: two
+        # rejections drive authorship_reject_count to 2 and flip
+        # has_pending_reply False, with nothing ever posted.
+        import src.agent.simulation as sim_mod
+
+        good = engine.agents["good"]
+        thread = ThreadState(
+            thread_id="1700000000.000100",
+            channel="general",
+            other_agent_id="wu",
+            has_pending_reply=True,
+        )
+        good.state.active_threads[thread.thread_id] = thread
+
+        async def fake_generate(**kwargs):
+            return f"<slack_message>{GOODBOT_INCIDENT}</slack_message>"
+
+        monkeypatch.setattr(sim_mod, "generate_with_tools", fake_generate)
+
+        await engine._reply_to_thread(good, thread)
+        assert thread.authorship_reject_count == 1
+        assert thread.has_pending_reply is True  # retried next turn
+        assert len(engine.message_log) == 0
+
+        await engine._reply_to_thread(good, thread)
+        assert thread.authorship_reject_count == 2
+        assert thread.has_pending_reply is False  # backed off
+        assert len(engine.message_log) == 0
+
+
+class TestPhase5AuthorshipSkip:
+    async def test_ungrounded_draft_increments_skip_streak_and_posts_nothing(
+        self, engine, monkeypatch
+    ):
+        # Audit finding O-I4(b): pin the real _phase5_new_post gate block —
+        # an ungrounded draft bumps consecutive_phase5_skips and nothing is
+        # posted or persisted.
+        import src.agent.simulation as sim_mod
+
+        good = engine.agents["good"]
+        draft = (
+            "```json\n"
+            '{"action": "new_post", "channel": "general", "post_type": "paper"}\n'
+            "```\n"
+            f"<slack_message>\n{GOODBOT_INCIDENT}\n</slack_message>"
+        )
+
+        async def fake_generate(**kwargs):
+            return draft
+
+        monkeypatch.setattr(sim_mod, "generate_agent_response", fake_generate)
+        monkeypatch.setattr(sim_mod.random, "random", lambda: 1.0)
+
+        await engine._phase5_new_post(good)
+
+        assert len(engine.message_log) == 0
+        assert good.state.consecutive_phase5_skips == 1
+
+
 class TestPhase5GateOrdering:
     async def test_gate_runs_before_cohort_tag_strip(self, engine, monkeypatch):
         # Audit finding I1: _strip_disallowed_tags deleted a cohort-disallowed
