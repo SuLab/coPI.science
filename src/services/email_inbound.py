@@ -25,6 +25,39 @@ logger = logging.getLogger(__name__)
 # Rate limit: max replies per token per hour
 MAX_REPLIES_PER_TOKEN_PER_HOUR = 10
 
+# Processing attempts per S3 object before it is quarantined under failed/.
+MAX_S3_PROCESS_ATTEMPTS = 3
+
+# token -> recent reply timestamps (monotonic-ish epoch seconds).
+_RECENT_REPLY_TIMES: dict[str, list[float]] = {}
+
+# s3 key -> consecutive processing failures (in-memory; resets on restart).
+_S3_FAILURE_COUNTS: dict[str, int] = {}
+
+
+def _reply_rate_ok(token: str, now: float | None = None) -> bool:
+    """Sliding one-hour window per reply token, capped at
+    MAX_REPLIES_PER_TOKEN_PER_HOUR. In-memory: the worker is a single
+    long-lived process, and a restart merely resets the window."""
+    import time
+
+    ts = time.time() if now is None else now
+    window = [t for t in _RECENT_REPLY_TIMES.get(token, []) if ts - t < 3600]
+    if len(window) >= MAX_REPLIES_PER_TOKEN_PER_HOUR:
+        _RECENT_REPLY_TIMES[token] = window
+        return False
+    window.append(ts)
+    _RECENT_REPLY_TIMES[token] = window
+    return True
+
+
+def _is_auto_submitted(msg: email.message.Message) -> bool:
+    """RFC 3834: any Auto-Submitted value other than "no" marks auto-generated
+    mail (out-of-office replies, list expansions). Processing those — and
+    answering them with a help email — is how mail loops start."""
+    auto = (msg.get("Auto-Submitted") or "").strip().lower()
+    return bool(auto) and auto != "no" and not auto.startswith("no ")
+
 # Auth verdicts (from the SES-stamped Authentication-Results header) that mean
 # the message failed a check — any of these on spf/dkim/dmarc rejects the reply.
 # ("none" is intentionally excluded: it means the sender domain publishes no
@@ -50,13 +83,26 @@ def _authentication_results_ok(msg: email.message.Message) -> bool:
         logger.warning("Rejecting inbound reply: no Authentication-Results header")
         return False
 
+    # Trust ONLY the topmost header. SES prepends its own Authentication-
+    # Results on receipt, so a sender-forged header always sits below it —
+    # merging verdicts across all headers ("a pass wins") let a self-stamped
+    # spf=pass override SES's spf=fail. The topmost header must also carry
+    # SES's authserv-id: anything else did not transit our SES receipt path.
+    header = headers[0]
+    authserv_id = header.split(";", 1)[0].strip().lower()
+    if authserv_id != "amazonses.com":
+        logger.warning(
+            "Rejecting inbound reply: topmost Authentication-Results is from %r, "
+            "not amazonses.com",
+            authserv_id,
+        )
+        return False
+
     verdicts: dict[str, str] = {}
-    for header in headers:
-        for mech, result in _AUTH_VERDICT_RE.findall(header):
-            mech_l, result_l = mech.lower(), result.lower()
-            # Keep the strongest verdict seen for each mechanism (a pass wins).
-            if mech_l not in verdicts or result_l == "pass":
-                verdicts[mech_l] = result_l
+    for mech, result in _AUTH_VERDICT_RE.findall(header):
+        # First occurrence wins: the leading verdict is the mechanism's result;
+        # later matches can come from propagated or commented values.
+        verdicts.setdefault(mech.lower(), result.lower())
 
     for mech in ("spf", "dkim", "dmarc"):
         if verdicts.get(mech) in _AUTH_FAIL_VERDICTS:
@@ -108,10 +154,33 @@ async def poll_inbound_emails(session_factory: async_sessionmaker) -> int:
 
                 # Delete processed email from S3
                 s3.delete_object(Bucket=bucket, Key=key)
+                _S3_FAILURE_COUNTS.pop(key, None)
                 processed += 1
 
             except Exception as exc:
                 logger.error("Error processing inbound email %s: %s", key, exc, exc_info=True)
+                # A poison message would otherwise be retried every poll
+                # forever. After MAX_S3_PROCESS_ATTEMPTS consecutive failures,
+                # quarantine it under failed/ (outside the polled prefix) for
+                # manual inspection. The counter is in-memory, so a restart
+                # grants a fresh round of attempts — acceptable.
+                _S3_FAILURE_COUNTS[key] = _S3_FAILURE_COUNTS.get(key, 0) + 1
+                if _S3_FAILURE_COUNTS[key] >= MAX_S3_PROCESS_ATTEMPTS:
+                    try:
+                        failed_key = "failed/" + key.removeprefix(prefix)
+                        s3.copy_object(
+                            Bucket=bucket,
+                            CopySource={"Bucket": bucket, "Key": key},
+                            Key=failed_key,
+                        )
+                        s3.delete_object(Bucket=bucket, Key=key)
+                        _S3_FAILURE_COUNTS.pop(key, None)
+                        logger.error(
+                            "Quarantined inbound email %s to %s after %d failed attempts",
+                            key, failed_key, MAX_S3_PROCESS_ATTEMPTS,
+                        )
+                    except Exception:
+                        logger.error("Failed to quarantine %s", key, exc_info=True)
 
     except Exception as exc:
         logger.error("Error polling inbound emails: %s", exc, exc_info=True)
@@ -130,11 +199,23 @@ async def process_inbound_email(raw_email: bytes, db: AsyncSession) -> None:
     if not _authentication_results_ok(msg):
         return
 
+    # Auto-generated mail (OOO replies, etc.) must never be answered — our
+    # help email replying to an auto-responder is a mail loop.
+    if _is_auto_submitted(msg):
+        logger.info("Ignoring auto-submitted inbound mail (Auto-Submitted header)")
+        return
+
     # Extract reply token from To header
     to_addr = msg.get("To", "")
     token = _extract_reply_token(to_addr)
     if not token:
         logger.warning("No reply token found in To address: %s", to_addr)
+        return
+
+    if not _reply_rate_ok(token):
+        logger.warning(
+            "Rate limit exceeded for reply token %s... — dropping reply", token[:8]
+        )
         return
 
     # Look up notification by token
@@ -259,19 +340,50 @@ def _extract_email_address(from_header: str) -> str | None:
     return None
 
 
+def _decode_part(part: email.message.Message) -> str:
+    charset = part.get_content_charset() or "utf-8"
+    payload = part.get_payload(decode=True) or b""
+    return payload.decode(charset, errors="replace")
+
+
+def _html_to_text(html_body: str) -> str:
+    """Best-effort text extraction for HTML-only replies.
+
+    Quoted history is dropped structurally (<blockquote>/gmail_quote) because
+    the '>' line-prefix convention below only exists in plain text."""
+    import html as html_mod
+
+    text = re.sub(r"(?is)<(script|style)\b.*?</\1>", "", html_body)
+    text = re.sub(r'(?is)<div[^>]*class="[^"]*gmail_quote[^"]*".*', "", text)
+    text = re.sub(r"(?is)<blockquote\b.*?</blockquote>", "", text)
+    text = re.sub(r"(?i)<br\s*/?>|</p>|</div>", "\n", text)
+    text = re.sub(r"(?s)<[^>]+>", "", text)
+    return html_mod.unescape(text)
+
+
 def _extract_reply_body(msg: email.message.Message) -> str:
-    """Extract the reply body, stripping quoted content and signatures."""
+    """Extract the reply body, stripping quoted content and signatures.
+
+    Prefers text/plain; falls back to tag-stripped text/html so an HTML-only
+    reply (some corporate clients) is not silently dropped."""
     body = ""
+    html_body = ""
 
     if msg.is_multipart():
         for part in msg.walk():
-            if part.get_content_type() == "text/plain":
-                charset = part.get_content_charset() or "utf-8"
-                body = part.get_payload(decode=True).decode(charset, errors="replace")
+            ctype = part.get_content_type()
+            if ctype == "text/plain":
+                body = _decode_part(part)
                 break
+            if ctype == "text/html" and not html_body:
+                html_body = _decode_part(part)
+    elif msg.get_content_type() == "text/html":
+        html_body = _decode_part(msg)
     else:
-        charset = msg.get_content_charset() or "utf-8"
-        body = msg.get_payload(decode=True).decode(charset, errors="replace")
+        body = _decode_part(msg)
+
+    if not body.strip() and html_body:
+        body = _html_to_text(html_body)
 
     # Strip quoted content (lines starting with >)
     lines = body.split("\n")
