@@ -279,14 +279,66 @@ def validate_authorship_claims(
 # issue-#29 poisoned row was the subject-less 'Co-authored "Desiderata"
 # paper.' — first-person by default when re-read in a later prompt. A line
 # with an authorship verb survives only if it either (a) names another lab as
-# the explicit subject immediately before the verb, or (b) cites DOI(s) all
-# present in this lab's own records.
+# the explicit subject immediately before the verb — AND does not smuggle a
+# self co-authorship claim in via "with our lab"/"with us" or by naming the
+# agent's OWN lab as the third-person subject (audit finding I5) — or
+# (b) cites DOI(s) all present in this lab's own records.
 
 _AUTHORSHIP_VERB_LINE_RE = re.compile(
-    r"\b(?:co-?authored|co-?wrote|authored together|published together"
-    r"|our (?:joint )?paper|joint publication|we (?:published|wrote|authored))\b",
+    r"\b(?:co-?authored|co-?wrote"
+    r"|jointly\s+(?:co-?)?(?:authored|wrote|published)"
+    r"|(?:authored|published|wrote)\b[^\n]{0,80}?\b(?:together|with)\b"
+    r"|our\s+(?:joint\s+)?paper|joint\s+publication"
+    r"|we\s+(?:published|wrote|authored))\b",
     re.IGNORECASE,
 )
+
+# First-person tokens that make an "other-lab-subject" line still be about
+# US ("Wu Lab co-authored the Desiderata paper *with our lab*").
+_SELF_REFERENCE_RE = re.compile(r"\b(?:we|us|ours|our|my|mine)\b", re.IGNORECASE)
+
+
+def lab_self_names(
+    agent_id: str | None, bot_name: str | None, pi_name: str | None
+) -> tuple[str, ...]:
+    """Names identifying an agent's own lab, for identity-aware stripping.
+
+    E.g. ``("GoodBot", "Benjamin Good", "Good")`` for the good agent. The
+    agent_id is title-cased (bare lowercase "good" is an English word, not a
+    lab name).
+    """
+    pi = (pi_name or "").strip()
+    names: list[str] = []
+    for candidate in (
+        (bot_name or "").strip(),
+        pi,
+        pi.split()[-1] if pi else "",
+        (agent_id or "").strip().title(),
+    ):
+        if candidate and candidate not in names:
+            names.append(candidate)
+    return tuple(names)
+
+
+def _compile_self_lab_re(self_names: tuple[str, ...] | list[str]) -> re.Pattern[str] | None:
+    """Matches the agent's own lab named as if it were a third party.
+
+    Case-sensitive for lab names ("Good Lab" is the lab; "a good lab" is
+    prose), case-insensitive for @BotName mentions.
+    """
+    alternatives: list[str] = []
+    for name in self_names:
+        name = (name or "").strip()
+        if not name:
+            continue
+        escaped = re.escape(name)
+        if name.lower().endswith("bot"):
+            alternatives.append(rf"(?i:@?{escaped})\b")
+        else:
+            alternatives.append(rf"\b{escaped}(?:['’]s)?\s+Labs?\b")
+            if " " in name:  # full PI name, e.g. "Benjamin Good"
+                alternatives.append(rf"\b{escaped}\b")
+    return re.compile("|".join(alternatives)) if alternatives else None
 
 # "Wu Lab co-authored", "Wu Lab (@WuBot) co-authored", "Su and Wu Labs
 # co-authored" — the lab-name subject must sit directly before the verb
@@ -303,18 +355,34 @@ _OTHER_LAB_SUBJECT_RE = re.compile(
 def strip_ungrounded_authorship_lines(
     memory_text: str,
     own: LabPublicationRecord,
+    self_names: tuple[str, ...] | list[str] = (),
 ) -> tuple[str, list[str]]:
     """Drop memory lines asserting authorship the lab's records can't back.
+
+    ``self_names`` (see :func:`lab_self_names`) identifies the agent's own
+    lab: the other-lab-subject exemption is void when the line ALSO refers to
+    the agent in the first person or names its own lab/PI — otherwise
+    "Wu Lab co-authored X with our lab" and "Good Lab co-authored X" (in
+    good's own memory) launder a self-claim through a third-person subject.
 
     Returns ``(cleaned_text, stripped_lines)``. Conservative by construction:
     a stripped true fact costs one lost memory note; a kept false fact is
     re-injected into every future prompt (see issue #29).
     """
+    self_lab_re = _compile_self_lab_re(self_names)
     kept: list[str] = []
     stripped: list[str] = []
     for line in memory_text.splitlines():
-        if _AUTHORSHIP_VERB_LINE_RE.search(line):
-            if _OTHER_LAB_SUBJECT_RE.search(line):
+        # Detection runs on the normalized line (emphasis/unicode folded);
+        # keep/strip and DOI extraction use the original.
+        norm_line = normalize_claim_text(line)
+        if _AUTHORSHIP_VERB_LINE_RE.search(norm_line):
+            exempt = (
+                _OTHER_LAB_SUBJECT_RE.search(norm_line)
+                and not _SELF_REFERENCE_RE.search(norm_line)
+                and not (self_lab_re and self_lab_re.search(norm_line))
+            )
+            if exempt:
                 kept.append(line)
                 continue
             line_dois = _extract_dois(line)

@@ -13,6 +13,7 @@ from typing import Any
 from src.agent.agent import PROFILES_DIR, Agent
 from src.agent.authorship_rules import (
     LabPublicationRecord,
+    lab_self_names,
     normalize_claim_text,
     strip_ungrounded_authorship_lines,
     validate_authorship_claims,
@@ -5230,7 +5231,11 @@ your own lab as an author of a paper unless it appears in your own publication l
                 has_records=bool(own_db) or bool(profile_dois),
             )
             response, stripped_lines = strip_ungrounded_authorship_lines(
-                response, own_record
+                response,
+                own_record,
+                self_names=lab_self_names(
+                    agent.agent_id, agent.bot_name, agent.pi_name
+                ),
             )
             for line in stripped_lines:
                 logger.warning(

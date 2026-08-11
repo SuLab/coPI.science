@@ -40,6 +40,22 @@ def test_grounded_memory_untouched(tmp_path):
     assert p.read_text() == text
 
 
+def test_sweep_strips_own_lab_third_person_claim_with_identity(tmp_path):
+    # Audit finding I5: "Good Lab co-authored ..." in GOOD's own memory is a
+    # self-claim wearing a third-person subject. The sweep must pass each
+    # agent's identity so the exemption doesn't shield it.
+    from src.agent.authorship_rules import lab_self_names
+
+    line = "Good Lab co-authored the Desiderata paper."
+    p = _write_memory(tmp_path, "good", f"{line}\n- Keep me.\n")
+    identities = {"good": lab_self_names("good", "GoodBot", "Benjamin Good")}
+
+    findings = sweep(tmp_path, records={}, fix=True, identities=identities)
+    assert findings == [("good", [line])]
+    assert "Desiderata" not in p.read_text()
+    assert "Keep me." in p.read_text()
+
+
 def test_legacy_flat_layout_is_swept(tmp_path):
     # Agents not yet migrated to the partitioned layout keep their working
     # memory at profiles/memory/<agent_id>.md (no subdirectory) — see

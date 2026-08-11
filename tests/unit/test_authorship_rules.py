@@ -13,6 +13,7 @@ import pytest
 from src.agent.authorship_rules import (
     LabPublicationRecord,
     claims_coauthorship,
+    lab_self_names,
     makes_first_person_authorship_claim,
     strip_ungrounded_authorship_lines,
     validate_authorship_claims,
@@ -294,6 +295,38 @@ class TestStripUngroundedAuthorshipLines:
         cleaned, stripped = strip_ungrounded_authorship_lines(memory, NO_RECORDS)
         assert cleaned == memory.rstrip("\n")
         assert stripped == []
+
+    # Audit finding I5: memory lines that launder a self co-authorship claim
+    # through an other-lab subject ("Wu Lab co-authored ... with our lab"),
+    # the agent's OWN lab in the third person, or subject-less joint verbs.
+    # For a no-records agent every one of these must be stripped.
+    I5_LAUNDERED_MEMORY_LINES = [
+        "Wu Lab (@WuBot) co-authored the Desiderata paper with our lab.",
+        "Wu Lab (@WuBot) co-authored the Desiderata paper with us.",
+        "Good Lab co-authored the Desiderata paper.",
+        'Jointly authored "Desiderata" with Wu Lab.',
+        'Wrote the "Desiderata" paper with Wu Lab.',
+        "Our lab and Wu Lab published the Desiderata paper together.",
+    ]
+
+    GOOD_SELF_NAMES = lab_self_names("good", "GoodBot", "Benjamin Good")
+
+    @pytest.mark.parametrize("line", I5_LAUNDERED_MEMORY_LINES)
+    def test_laundered_self_authorship_line_is_stripped(self, line):
+        cleaned, stripped = strip_ungrounded_authorship_lines(
+            line, NO_RECORDS, self_names=self.GOOD_SELF_NAMES
+        )
+        assert stripped == [line]
+        assert "Desiderata" not in cleaned
+
+    def test_pure_third_party_line_is_still_kept(self):
+        # No self-reference, no own-lab mention — legit third-party fact.
+        line = "Wu Lab co-authored the Desiderata paper with the Su Lab."
+        cleaned, stripped = strip_ungrounded_authorship_lines(
+            line, NO_RECORDS, self_names=self.GOOD_SELF_NAMES
+        )
+        assert stripped == []
+        assert cleaned == line
 
     def test_pathological_capitalized_run_returns_quickly(self):
         # Audit finding M1: _OTHER_LAB_SUBJECT_RE backtracked quadratically —
