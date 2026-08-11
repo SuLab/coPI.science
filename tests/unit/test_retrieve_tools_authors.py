@@ -64,6 +64,35 @@ async def test_retrieve_abstract_no_truncation_suffix_at_exactly_20_authors(monk
     assert "more" not in out
 
 
+async def test_retrieve_abstract_includes_doi(monkeypatch):
+    # Issue #29 rollout (audit O-I3): without the DOI in the tool answer, the
+    # legit first-person path is unsatisfiable — the emit gate requires a
+    # cited DOI, and the model had nowhere to get one.
+    async def fake_fetch(pmid_or_doi):
+        d = dict(FAKE)
+        d["doi"] = "10.1093/bioadv/vbag036"
+        return d
+
+    monkeypatch.setattr(tools_mod, "fetch_abstract", fake_fetch)
+    out = await tools_mod._execute_retrieve_abstract("40000001")
+    assert "DOI:" in out
+    assert "<paper_doi>" in out
+    assert "</paper_doi>" in out
+    assert "10.1093/bioadv/vbag036" in out
+    # Sits in the metadata block with the other identifiers.
+    assert out.index("PMID:") < out.index("<paper_doi>") < out.index("Abstract:")
+
+
+async def test_retrieve_abstract_omits_doi_line_when_absent(monkeypatch):
+    async def fake_fetch(pmid_or_doi):
+        return dict(FAKE)  # no "doi" key
+
+    monkeypatch.setattr(tools_mod, "fetch_abstract", fake_fetch)
+    out = await tools_mod._execute_retrieve_abstract("40000001")
+    assert "DOI:" not in out
+    assert "<paper_doi>" not in out
+
+
 FAKE_FULL_TEXT = {
     "pmid": "40000002",
     "title": "Full text of a great collaboration",
@@ -105,3 +134,26 @@ async def test_retrieve_full_text_omits_line_when_no_authors(monkeypatch):
     out = await tools_mod._execute_retrieve_full_text("40000002")
     assert "Authors:" not in out
     assert "<paper_authors>" not in out
+
+
+async def test_retrieve_full_text_includes_doi(monkeypatch):
+    async def fake_fetch(pmid_or_doi):
+        d = dict(FAKE_FULL_TEXT)
+        d["doi"] = "10.1016/j.cell.2025.01.001"
+        return d
+
+    monkeypatch.setattr(tools_mod, "fetch_full_text", fake_fetch)
+    out = await tools_mod._execute_retrieve_full_text("40000002")
+    assert "DOI:" in out
+    assert "<paper_doi>" in out
+    assert "10.1016/j.cell.2025.01.001" in out
+
+
+async def test_retrieve_full_text_omits_doi_line_when_absent(monkeypatch):
+    async def fake_fetch(pmid_or_doi):
+        return dict(FAKE_FULL_TEXT)  # no "doi" key
+
+    monkeypatch.setattr(tools_mod, "fetch_full_text", fake_fetch)
+    out = await tools_mod._execute_retrieve_full_text("40000002")
+    assert "DOI:" not in out
+    assert "<paper_doi>" not in out

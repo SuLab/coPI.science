@@ -219,6 +219,12 @@ async def _execute_retrieve_abstract(pmid_or_doi: str) -> str:
     parts += [
         f"Journal: {result.get('journal', 'Unknown')} ({result.get('year', '?')})",
         f"PMID: {result['pmid']}",
+    ]
+    if result.get("doi"):
+        # From PubMed — untrusted external text (SEC-14). Cited so a lab
+        # sharing its own paper can ground the claim in a DOI (issue #29).
+        parts.append(f"DOI: {delimit(result['doi'], 'paper_doi')}")
+    parts += [
         "",
         f"Abstract: {delimit(result.get('abstract', 'No abstract available.'), 'paper_abstract')}",
     ]
@@ -245,6 +251,10 @@ async def _execute_retrieve_full_text(pmid_or_doi: str) -> str:
         f"Journal: {result.get('journal', 'Unknown')} ({result.get('year', '?')})",
         f"PMID: {result['pmid']}",
     ]
+    if result.get("doi"):
+        # From PubMed — untrusted external text (SEC-14). Cited so a lab
+        # sharing its own paper can ground the claim in a DOI (issue #29).
+        parts.append(f"DOI: {delimit(result['doi'], 'paper_doi')}")
     if result.get("pmcid"):
         parts.append(f"PMCID: {result['pmcid']}")
     parts.append("")

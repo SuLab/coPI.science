@@ -129,6 +129,19 @@ async def test_fetch_pubmed_records_empty_input_no_http():
 
 
 @respx.mock
+async def test_fetch_abstract_surfaces_the_doi():
+    """Issue #29 rollout (audit O-I3): fetch_abstract must pass the parsed DOI
+    through to its return dict — the retrieve tools cite it so the emit gate's
+    DOI requirement is satisfiable for a legit first-person share."""
+    respx.get(f"{EUTILS}/efetch.fcgi").mock(
+        return_value=httpx.Response(200, text=EFETCH_XML)
+    )
+    out = await pubmed.fetch_abstract("31000000")
+    assert out["doi"] == "10.1038/xyz"
+    assert out["authors"] == ["Smith", "Jones"]
+
+
+@respx.mock
 async def test_fetch_pubmed_records_swallows_non_200_returns_empty():
     route = respx.get(f"{EUTILS}/efetch.fcgi").mock(return_value=httpx.Response(500, text="err"))
     assert await pubmed.fetch_pubmed_records(["31000000"]) == []

@@ -446,6 +446,10 @@ async def fetch_abstract(pmid_or_doi: str) -> dict[str, Any]:
         "journal": rec.get("journal", ""),
         "year": rec.get("year"),
         "authors": rec.get("authors", []),
+        # The paper's own DOI (article-scoped, see _parse_pubmed_xml). Cited
+        # by the retrieve tools so an agent sharing its own paper can satisfy
+        # the emit gate's DOI requirement (issue #29).
+        "doi": rec.get("doi", ""),
     }
 
 
