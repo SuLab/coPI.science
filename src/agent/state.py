@@ -34,6 +34,7 @@ class ThreadState:
     message_count_offset: int = 0  # subtract from message_count for PI-reopened threads
     foa_number: str | None = None  # FOA number for funding threads
     funding_reject_count: int = 0  # drafts rejected by funding-rules validators
+    authorship_reject_count: int = 0  # drafts rejected by the authorship guard (issue #29)
     empty_response_count: int = 0  # consecutive empty/unparseable Phase 4 replies
     # Cohort gate: True when `other_agent_id` is no longer a permitted sender for
     # the owning agent (membership changed, or — on every resumed run — the DB

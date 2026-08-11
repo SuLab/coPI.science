@@ -11,7 +11,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from src.agent.agent import PROFILES_DIR, Agent
-from src.agent.authorship_rules import LabPublicationRecord
+from src.agent.authorship_rules import LabPublicationRecord, validate_authorship_claims
 from src.agent.channels import SEEDED_CHANNELS
 from src.agent.foa_cache import extract_foa_number, format_foa_for_prompt
 from src.agent.funding_rules import (
@@ -1412,6 +1412,26 @@ class SimulationEngine:
                         )
                     return
 
+            # Authorship guard (issue #29): reject drafts claiming authorship
+            # the publication records cannot verify — mirrors the funding
+            # validators' reject-and-back-off pattern, but applies to EVERY
+            # thread, funding or not.
+            authorship_reason = self._reject_ungrounded_authorship(agent, response_text)
+            if authorship_reason:
+                thread.authorship_reject_count += 1
+                logger.warning(
+                    "[%s] Phase 4: Rejected reply to thread %s — %s (count=%d)",
+                    agent.agent_id, thread.thread_id, authorship_reason,
+                    thread.authorship_reject_count,
+                )
+                if thread.authorship_reject_count >= 2:
+                    thread.has_pending_reply = False
+                    logger.info(
+                        "[%s] Phase 4: Backing off thread %s after %d authorship rejections",
+                        agent.agent_id, thread.thread_id, thread.authorship_reject_count,
+                    )
+                return
+
             # Post the reply
             posted = await self._post_message(
                 agent.agent_id, thread.channel, response_text,
@@ -1426,6 +1446,7 @@ class SimulationEngine:
                 agent.message_count += 1
                 thread.has_pending_reply = False
                 thread.funding_reject_count = 0
+                thread.authorship_reject_count = 0
                 thread.empty_response_count = 0
 
                 # Check for thread outcome
@@ -2237,6 +2258,16 @@ class SimulationEngine:
             # and _check_private_channel_outcome below both read message_text.
             message_text = self._strip_disallowed_tags(message_text, agent)
 
+            # Authorship guard (issue #29) — one gate for both the reply and
+            # new-post branches below.
+            authorship_reason = self._reject_ungrounded_authorship(agent, message_text)
+            if authorship_reason:
+                logger.warning(
+                    "[%s] Phase 5: Rejected draft — %s", agent.agent_id, authorship_reason,
+                )
+                agent.state.consecutive_phase5_skips += 1
+                return
+
             if action == "reply" and target_post_id:
                 # Enforce thread participation rules
                 allowed = self.message_log.get_thread_allowed_agents(target_post_id)
@@ -2441,6 +2472,43 @@ class SimulationEngine:
         cleaned = re.sub(r"(?<=\S)[ \t]{2,}", " ", cleaned)
         cleaned = re.sub(r"(?m)[ \t]+$", "", cleaned)
         return cleaned.lstrip(" \t") if cleaned[:1] in (" ", "\t") else cleaned
+
+    def _reject_ungrounded_authorship(self, agent: Agent, text: str | None) -> str | None:
+        """Return a rejection reason if ``text`` makes an authorship claim the
+        publication records cannot back; None when the draft is clean.
+
+        Ground truth is the publications table (loaded per roster sync into
+        ``_agent_publications``) unioned with the agent's profile-parsed DOIs.
+        Tagged bots are resolved through ``_bot_name_to_id`` and their labs'
+        records are enforced on co-authorship claims — the issue-#29 origin
+        message fails HERE, not on the own-DOI check. Fails closed on every
+        unverifiable claim.
+        """
+        if not text:
+            return None
+        own_db = self._agent_publications.get(agent.agent_id)
+        profile_dois = agent.own_publication_dois
+        own = LabPublicationRecord(
+            dois=(own_db.dois if own_db else set()) | profile_dois,
+            has_records=bool(own_db) or bool(profile_dois),
+        )
+        tagged: dict[str, LabPublicationRecord] = {}
+        for m in re.finditer(r"@(\w+[Bb]ot)\b", text):
+            bot_name = m.group(1)
+            target_id = self._bot_name_to_id.get(bot_name.lower())
+            if target_id is None or target_id == agent.agent_id:
+                continue
+            target_rec = self._agent_publications.get(target_id)
+            target_agent = self.agents.get(target_id)
+            target_profile_dois = (
+                target_agent.own_publication_dois if target_agent else set()
+            )
+            tagged[bot_name] = LabPublicationRecord(
+                dois=(target_rec.dois if target_rec else set()) | target_profile_dois,
+                has_records=bool(target_rec) or bool(target_profile_dois),
+            )
+        verdict = validate_authorship_claims(text, own, tagged)
+        return None if verdict.ok else verdict.reason
 
     def _parse_phase5_response(self, response: str) -> tuple[dict | None, str | None]:
         """Parse Phase 5 response into (json_data, message_text).
@@ -3143,6 +3211,20 @@ class SimulationEngine:
 
         client = self.slack_clients.get(agent_id)
         agent = self.agents.get(agent_id)
+
+        # Authorship guard, chokepoint pass (issue #29). The phase gates have
+        # already run for phase-4/phase-5 drafts (they own the backoff
+        # counters); this pass exists so no future call site can bypass the
+        # guard. Idempotent — a clean draft validates twice at negligible
+        # cost. Skipped for senders without an Agent (system posts).
+        if agent is not None:
+            authorship_reason = self._reject_ungrounded_authorship(agent, text)
+            if authorship_reason:
+                logger.warning(
+                    "[%s] Suppressed post to #%s at _post_message: %s",
+                    agent_id, channel, authorship_reason,
+                )
+                return False
 
         # Cohort gate, outbound side. Placed here rather than in a phase so it
         # covers every caller — Phase 4 replies, Phase 5 posts, private-channel
