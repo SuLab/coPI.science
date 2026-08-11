@@ -11,7 +11,11 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from src.agent.agent import PROFILES_DIR, Agent
-from src.agent.authorship_rules import LabPublicationRecord, validate_authorship_claims
+from src.agent.authorship_rules import (
+    LabPublicationRecord,
+    strip_ungrounded_authorship_lines,
+    validate_authorship_claims,
+)
 from src.agent.channels import SEEDED_CHANNELS
 from src.agent.foa_cache import extract_foa_number, format_foa_for_prompt
 from src.agent.funding_rules import (
@@ -5142,7 +5146,11 @@ entries that are still relevant, and remove anything outdated. Summarize:
 (b) Feedback or directions from your PI (if any)
 (c) Current priorities
 
-Keep it concise — under 300 words.""",
+Keep it concise — under 300 words.
+
+Authorship notes: when recording that a paper was (co)authored, name the authoring lab(s) explicitly
+(e.g. "Wu Lab co-authored the Desiderata paper"), never a subject-less "Co-authored X". Never record
+your own lab as an author of a paper unless it appears in your own publication list.""",
                 }
             ]
 
@@ -5160,6 +5168,25 @@ Keep it concise — under 300 words.""",
             if not response or not response.strip():
                 logger.warning("[%s] Memory update: empty response", agent.agent_id)
                 return
+
+            # Authorship hygiene (issue #29): a false authorship note written
+            # here is re-injected into every future prompt. Strip lines the
+            # publication records can't back before persisting.
+            own_db = self._agent_publications.get(agent.agent_id)
+            profile_dois = agent.own_publication_dois
+            own_record = LabPublicationRecord(
+                dois=(own_db.dois if own_db else set()) | profile_dois,
+                has_records=bool(own_db) or bool(profile_dois),
+            )
+            response, stripped_lines = strip_ungrounded_authorship_lines(
+                response, own_record
+            )
+            for line in stripped_lines:
+                logger.warning(
+                    "[%s] Memory update: stripped ungrounded authorship line: %s",
+                    agent.agent_id, line[:160],
+                )
+
             agent.update_working_memory_file(
                 response, visibility=visibility, channel_id=channel_id,
             )
