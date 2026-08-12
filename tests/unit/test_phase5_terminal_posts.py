@@ -17,7 +17,7 @@ queue. Blocking it inverts the intent: the more interviews the hub completes,
 the more assessments it owes and the less able it is to file any of them.
 
 Three gates stopped it, and all three must yield or the hub is still stuck:
-  1. available_for(funding_only=True) narrowed the menu to funding types
+  1. available_for(terminal_only=True) narrowed the menu to funding types
   2. the early return bailed before a prompt was ever built
   3. the blocked-action gate rejected the post_type
 """
@@ -50,15 +50,6 @@ def _settings(**over):
 
 # --- gate 1: the menu ---------------------------------------------------------
 
-def test_terminal_types_are_distinct_from_funding_types():
-    from src.agent.post_types import FUNDING_POST_TYPES, TERMINAL_POST_TYPES
-
-    """They are exempt for different reasons and must not be conflated: a
-    funding post STARTS a collaboration, an assessment ENDS an interview."""
-    assert TERMINAL_POST_TYPES == frozenset({"opportunity_assessment"})
-    assert not (TERMINAL_POST_TYPES & FUNDING_POST_TYPES)
-
-
 def test_a_blocked_hub_keeps_its_assessment_in_the_menu():
     from src.agent.roles import load_role
 
@@ -68,7 +59,7 @@ def test_a_blocked_hub_keeps_its_assessment_in_the_menu():
         gate={"blackbird", "gill"},
         roles_by_agent={"blackbird": "scout_hub", "gill": "pi_lab"},
         self_id="blackbird",
-        funding_only=True,          # i.e. blocked_for_regular
+        terminal_only=True,          # i.e. blocked_for_regular
     )
     names = {s.name for s in got}
     assert "opportunity_assessment" in names, (
@@ -78,7 +69,7 @@ def test_a_blocked_hub_keeps_its_assessment_in_the_menu():
 
 def test_a_blocked_pi_lab_agent_is_unaffected():
     """The exemption must not widen anything for pi_lab — no pi_lab role
-    declares a terminal type, so its blocked menu is funding-only as before."""
+    declares a terminal type, so its blocked menu is empty, same as before."""
     from src.agent.post_types import DEFAULT_POST_TYPES
 
     got = available_for(
@@ -86,9 +77,9 @@ def test_a_blocked_pi_lab_agent_is_unaffected():
         gate=None,
         roles_by_agent={"gill": "pi_lab", "pearce": "pi_lab"},
         self_id="gill",
-        funding_only=True,
+        terminal_only=True,
     )
-    assert {s.name for s in got} == {"funding_collab"}
+    assert got == ()
 
 
 # --- gates 2 and 3: the handler ----------------------------------------------
@@ -138,9 +129,9 @@ _ASSESSMENT = (
 _REGULAR = (
     '```json\n'
     '{"action": "new_post", "channel": "general", '
-    '"post_type": "paper", "tagged_agent": null}\n'
+    '"post_type": "pitch", "tagged_agent": null}\n'
     '```\n\n'
-    '<slack_message>:newspaper: Paper — a thing.</slack_message>'
+    '<slack_message>:bulb: Pitch — a thing.</slack_message>'
 )
 
 
@@ -161,7 +152,7 @@ async def test_a_saturated_hub_can_post_its_assessment(monkeypatch):
 
 async def test_a_saturated_hub_still_cannot_post_a_regular_type(monkeypatch):
     """The backpressure must survive. Only the terminal artifact is exempt —
-    if `paper` also got through, the exemption is a hole, not a valve."""
+    if `pitch` also got through, the exemption is a hole, not a valve."""
     _eng, hub, client, _seen = await _drive(monkeypatch, _REGULAR)
     assert client.posted == []
     assert hub.message_count == 0

@@ -488,11 +488,11 @@ def test_manifest_post_types_are_parsed(tmp_path, monkeypatch):
     _write_role(
         tmp_path, monkeypatch, "widget",
         'label = "Widget"\n'
-        '[[post_types]]\nname = "paper"\n'
+        '[[post_types]]\nname = "opportunity_assessment"\n'
         '[[post_types]]\nname = "pitch"\ntargets = ["scout_hub"]\n',
     )
     spec = load_role("widget")
-    assert [s.name for s in spec.post_types] == ["paper", "pitch"]
+    assert [s.name for s in spec.post_types] == ["opportunity_assessment", "pitch"]
     assert dict((s.name, s.targets) for s in spec.post_types)["pitch"] == frozenset(
         {"scout_hub"}
     )
@@ -503,11 +503,11 @@ def test_manifest_unknown_post_type_is_dropped(tmp_path, monkeypatch, caplog):
     _write_role(
         tmp_path, monkeypatch, "widget",
         'label = "Widget"\n'
-        '[[post_types]]\nname = "paper"\n'
+        '[[post_types]]\nname = "opportunity_assessment"\n'
         '[[post_types]]\nname = "nonsense"\n',
     )
     spec = load_role("widget")
-    assert [s.name for s in spec.post_types] == ["paper"]
+    assert [s.name for s in spec.post_types] == ["opportunity_assessment"]
     assert "nonsense" in caplog.text
 
 
@@ -518,14 +518,9 @@ def test_malformed_toml_still_yields_default_post_types(tmp_path, monkeypatch):
     assert load_role("broken").post_types == DEFAULT_POST_TYPES
 
 
-def test_scout_hub_declares_its_two_post_types():
+def test_scout_hub_declares_only_the_assessment():
     spec = load_role("scout_hub")
-    assert {s.name for s in spec.post_types} == {
-        "opportunity_assessment", "funding_collab",
-    }
-    assert dict((s.name, s.targets) for s in spec.post_types)[
-        "funding_collab"
-    ] == frozenset({"pi_lab"})
+    assert {s.name for s in spec.post_types} == {"opportunity_assessment"}
     assert dict((s.name, s.targets) for s in spec.post_types)[
         "opportunity_assessment"
     ] == frozenset()

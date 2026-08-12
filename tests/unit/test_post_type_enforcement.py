@@ -35,118 +35,84 @@ def _star():
 
 # --- the available set ------------------------------------------------------
 
-def test_star_spoke_cannot_use_idea_crosslab():
-    eng, gill, _, _ = _star()
-    names = {s.name for s in eng._available_post_types(gill, funding_restricted=False)}
-    assert "idea_crosslab" not in names
-    assert "funding_collab" not in names
-
-
 def test_star_spoke_can_pitch_to_the_hub():
     eng, gill, _, _ = _star()
-    names = {s.name for s in eng._available_post_types(gill, funding_restricted=False)}
+    names = {s.name for s in eng._available_post_types(gill, restricted=False)}
     assert "pitch" in names
 
 
-def test_star_spoke_keeps_every_broadcast_type():
-    eng, gill, _, _ = _star()
-    names = {s.name for s in eng._available_post_types(gill, funding_restricted=False)}
-    assert {"paper", "help_wanted", "introduction"} <= names
-
-
-def test_mesh_spoke_keeps_idea_crosslab_and_loses_pitch():
+def test_mesh_spoke_loses_pitch_with_no_reachable_hub():
     gill, pearce = _spoke("gill"), _spoke("pearce")
-    eng = _engine(gill, pearce)  # gates stay None
-    names = {s.name for s in eng._available_post_types(gill, funding_restricted=False)}
-    assert "idea_crosslab" in names
-    assert "pitch" not in names
+    eng = _engine(gill, pearce)  # gates stay None, neither is a scout_hub
+    names = {s.name for s in eng._available_post_types(gill, restricted=False)}
+    assert names == set()
 
 
 def test_hub_may_only_post_its_assessment():
     eng, _, hub, _ = _star()
-    names = {s.name for s in eng._available_post_types(hub, funding_restricted=False)}
+    names = {s.name for s in eng._available_post_types(hub, restricted=False)}
     assert "opportunity_assessment" in names
-    assert "idea_crosslab" not in names
-    assert "paper" not in names
+    assert "pitch" not in names
 
 
-def test_funding_only_in_the_star_is_empty_but_that_is_not_a_skip():
+def test_terminal_only_in_the_star_can_be_empty_but_that_is_not_a_skip():
     eng, gill, _, _ = _star()
-    assert eng._available_post_types(gill, funding_restricted=True) == ()
+    assert eng._available_post_types(gill, restricted=True) == ()
 
 
 # --- rejection -------------------------------------------------------------
 
 def test_layer1_rejects_a_type_the_role_never_declared():
     eng, gill, _, _ = _star()
-    avail = eng._available_post_types(gill, funding_restricted=False)
+    avail = eng._available_post_types(gill, restricted=False)
     reason = eng._post_type_rejection(gill, "opportunity_assessment", None, avail)
     assert reason is not None
     assert "opportunity_assessment" in reason
 
 
 def test_layer2_rejects_a_type_with_no_reachable_counterparty():
-    eng, gill, _, _ = _star()
-    avail = eng._available_post_types(gill, funding_restricted=False)
-    reason = eng._post_type_rejection(gill, "idea_crosslab", "pearce", avail)
+    """pitch IS declared for pi_lab, but this spoke's gate excludes the hub —
+    so the type is dropped by topology (layer 2), not by role declaration
+    (layer 1)."""
+    gill = _spoke("gill")
+    gill.allowed_sender_ids = {"gill"}
+    eng = _engine(gill, _hub())
+    avail = eng._available_post_types(gill, restricted=False)
+    assert "pitch" not in {s.name for s in avail}
+    reason = eng._post_type_rejection(gill, "pitch", None, avail)
     assert reason is not None
-
-
-def test_layer3_rejects_the_exact_production_case():
-    """{"post_type": "idea_crosslab", "tagged_agent": "pearce"} from markham."""
-    eng, gill, _, _ = _star()
-    avail = eng._available_post_types(gill, funding_restricted=False)
-    assert eng._post_type_rejection(gill, "idea_crosslab", "pearce", avail) is not None
 
 
 def test_layer3_rejects_a_tag_toward_an_unreachable_agent_on_an_allowed_type():
     eng, gill, _, _ = _star()
-    avail = eng._available_post_types(gill, funding_restricted=False)
+    avail = eng._available_post_types(gill, restricted=False)
     reason = eng._post_type_rejection(gill, "pitch", "pearce", avail)
     assert reason is not None
     assert "pearce" in reason
 
 
-def test_layer3_tolerates_a_reachable_tag_on_a_broadcast_type():
-    """Redundant is not wrong. The hub posts its :mag: assessment into the PI's
-    own channel; naming that PI is the natural thing for the model to do, and
-    rejecting it would destroy the artifact and the interview behind it over a
-    field nothing routes on."""
-    eng, gill, _, _ = _star()
-    avail = eng._available_post_types(gill, funding_restricted=False)
-    assert eng._post_type_rejection(gill, "paper", "blackbird", avail) is None
-
-
 def test_layer3_rejects_an_unreachable_tag_on_a_broadcast_type():
     """The dangling-ask bug does not stop being one because the type is a
     broadcast: the mention gets stripped and the sentence around it survives."""
-    eng, gill, _, _ = _star()
-    avail = eng._available_post_types(gill, funding_restricted=False)
-    reason = eng._post_type_rejection(gill, "paper", "pearce", avail)
+    eng, _, hub, _ = _star()
+    avail = eng._available_post_types(hub, restricted=False)
+    reason = eng._post_type_rejection(hub, "opportunity_assessment", "nobody", avail)
     assert reason is not None
-    assert "pearce" in reason
+    assert "nobody" in reason
 
 
 def test_the_hubs_assessment_is_accepted_tagged_or_not():
     """Both shapes must publish. The prompt asks for tagged_agent=null, but a
     model that names the PI anyway must not lose the assessment."""
     eng, _, hub, _ = _star()
-    avail = eng._available_post_types(hub, funding_restricted=False)
+    avail = eng._available_post_types(hub, restricted=False)
     assert eng._post_type_rejection(hub, "opportunity_assessment", None, avail) is None
     assert eng._post_type_rejection(hub, "opportunity_assessment", "gill", avail) is None
 
 
-def test_the_hubs_funding_note_must_address_a_reachable_pi():
-    eng, _, hub, _ = _star()
-    avail = eng._available_post_types(hub, funding_restricted=False)
-    assert eng._post_type_rejection(hub, "funding_collab", "gill", avail) is None
-    assert eng._post_type_rejection(hub, "funding_collab", None, avail) is not None
-    assert eng._post_type_rejection(hub, "funding_collab", "nobody", avail) is not None
-
-
 def test_layer3_rejects_an_unknown_agent_id():
     eng, gill, _, _ = _star()
-    avail = eng._available_post_types(gill, funding_restricted=False)
+    avail = eng._available_post_types(gill, restricted=False)
     assert eng._post_type_rejection(gill, "pitch", "nobody", avail) is not None
 
 
@@ -160,25 +126,25 @@ def test_layer3_rejects_an_unknown_agent_id():
 
 def test_a_leading_at_sign_on_the_tagged_agent_still_resolves():
     eng, gill, _, _ = _star()
-    avail = eng._available_post_types(gill, funding_restricted=False)
+    avail = eng._available_post_types(gill, restricted=False)
     assert eng._post_type_rejection(gill, "pitch", "@blackbird", avail) is None
 
 
 def test_a_bot_name_instead_of_an_agent_id_still_resolves():
     eng, gill, _, _ = _star()
-    avail = eng._available_post_types(gill, funding_restricted=False)
+    avail = eng._available_post_types(gill, restricted=False)
     assert eng._post_type_rejection(gill, "pitch", "BlackbirdBot", avail) is None
 
 
 def test_a_capitalized_agent_id_still_resolves():
     eng, gill, _, _ = _star()
-    avail = eng._available_post_types(gill, funding_restricted=False)
+    avail = eng._available_post_types(gill, restricted=False)
     assert eng._post_type_rejection(gill, "pitch", "Blackbird", avail) is None
 
 
 def test_stray_whitespace_around_the_tagged_agent_still_resolves():
     eng, gill, _, _ = _star()
-    avail = eng._available_post_types(gill, funding_restricted=False)
+    avail = eng._available_post_types(gill, restricted=False)
     assert eng._post_type_rejection(gill, "pitch", " blackbird", avail) is None
 
 
@@ -188,7 +154,7 @@ def test_normalisation_does_not_launder_a_genuinely_unreachable_agent():
     gate permits for `pitch` — every near-miss spelling of it must still be
     rejected, and the reason must still quote what the model actually sent."""
     eng, gill, _, _ = _star()
-    avail = eng._available_post_types(gill, funding_restricted=False)
+    avail = eng._available_post_types(gill, restricted=False)
     for spelling in ("pearce", "@pearce", "PearceBot", " pearce"):
         reason = eng._post_type_rejection(gill, "pitch", spelling, avail)
         assert reason is not None, f"{spelling!r} must still be rejected"
@@ -199,7 +165,7 @@ def test_a_rejection_increments_the_per_agent_counter():
     """Mirrors _cohort_tags_stripped: a deployment where every pitch is
     rejected on a format slip must be visible without grepping logs."""
     eng, gill, _, _ = _star()
-    avail = eng._available_post_types(gill, funding_restricted=False)
+    avail = eng._available_post_types(gill, restricted=False)
     assert eng._post_type_rejections.get(gill.agent_id, 0) == 0
     assert eng._post_type_rejection(gill, "pitch", "nobody", avail) is not None
     assert eng._post_type_rejections[gill.agent_id] == 1
@@ -212,20 +178,20 @@ def test_a_rejection_increments_the_per_agent_counter():
 
 def test_a_valid_pitch_at_the_hub_is_accepted():
     eng, gill, _, _ = _star()
-    avail = eng._available_post_types(gill, funding_restricted=False)
+    avail = eng._available_post_types(gill, restricted=False)
     assert eng._post_type_rejection(gill, "pitch", "blackbird", avail) is None
 
 
 def test_a_valid_broadcast_with_no_tag_is_accepted():
-    eng, gill, _, _ = _star()
-    avail = eng._available_post_types(gill, funding_restricted=False)
-    assert eng._post_type_rejection(gill, "paper", None, avail) is None
+    eng, _, hub, _ = _star()
+    avail = eng._available_post_types(hub, restricted=False)
+    assert eng._post_type_rejection(hub, "opportunity_assessment", None, avail) is None
 
 
 def test_an_empty_post_type_is_rejected_for_a_new_post():
     """post_type defaults to "" when the model omits it."""
     eng, gill, _, _ = _star()
-    avail = eng._available_post_types(gill, funding_restricted=False)
+    avail = eng._available_post_types(gill, restricted=False)
     assert eng._post_type_rejection(gill, "", None, avail) is not None
 
 
@@ -233,41 +199,33 @@ def test_gate_off_accepts_everything_the_role_declared():
     """Layers 2 and 3 must be inert in a mesh so org1 is unaffected.
 
     Inert means *skipped*, not "happens to pass": a tag toward an agent that is
-    not on the roster at all, and an addressed type with no tag, both still
+    not on the roster at all, and a null tag on an addressed type, both still
     publish, exactly as they do today. Anything else is a behaviour change to a
     deployment this work is not supposed to touch.
     """
-    gill, pearce = _spoke("gill"), _spoke("pearce")
-    eng = _engine(gill, pearce)
-    avail = eng._available_post_types(gill, funding_restricted=False)
-    assert eng._post_type_rejection(gill, "idea_crosslab", "pearce", avail) is None
-    assert eng._post_type_rejection(gill, "paper", None, avail) is None
-    assert eng._post_type_rejection(gill, "idea_crosslab", "ghost", avail) is None
-    assert eng._post_type_rejection(gill, "idea_crosslab", None, avail) is None
-
-
-def test_mesh_still_accepts_the_retired_idea_post_type():
-    """A mesh deployment's bind-mounted prompts may still say `idea` while the
-    baked-in code has moved on. Layer 1 must not silently delete those posts —
-    that is a regression in a deployment this change is not supposed to touch."""
-    gill, pearce = _spoke("gill"), _spoke("pearce")
-    eng = _engine(gill, pearce)
-    avail = eng._available_post_types(gill, funding_restricted=False)
-    assert eng._post_type_rejection(gill, "idea", "pearce", avail) is None
+    gill = _spoke("gill")
+    wu = Agent("wu", "WuBot", "Wu Lab", role="scout_hub")
+    eng = _engine(gill, wu)
+    avail = eng._available_post_types(gill, restricted=False)
+    assert "pitch" in {s.name for s in avail}
+    assert eng._post_type_rejection(gill, "pitch", "wu", avail) is None
+    assert eng._post_type_rejection(gill, "pitch", "ghost", avail) is None
+    assert eng._post_type_rejection(gill, "pitch", None, avail) is None
 
 
 def test_the_star_still_rejects_the_retired_idea_post_type():
     """Resolving the alias must not smuggle the type past the topology filter:
-    `idea` resolves to `idea_crosslab`, which a star spoke still cannot use."""
+    `idea` resolves to `idea_crosslab`, which no longer exists in the
+    vocabulary at all — a star spoke still cannot use it."""
     eng, gill, _, _ = _star()
-    avail = eng._available_post_types(gill, funding_restricted=False)
+    avail = eng._available_post_types(gill, restricted=False)
     assert eng._post_type_rejection(gill, "idea", "pearce", avail) is not None
 
 
 def test_gate_off_still_rejects_a_type_the_role_never_declared():
     gill = _spoke("gill")
     eng = _engine(gill)
-    avail = eng._available_post_types(gill, funding_restricted=False)
+    avail = eng._available_post_types(gill, restricted=False)
     assert eng._post_type_rejection(gill, "opportunity_assessment", None, avail) is not None
 
 
@@ -283,8 +241,8 @@ def _response(post_type, tagged_agent, body):
 
 
 # Layer 1: the exact production JSON. `idea_crosslab` is not in a star spoke's
-# available set at all, so this never reaches the tag check — the reason names
-# the TYPE, not the tag.
+# available set at all (it no longer exists in the vocabulary), so this never
+# reaches the tag check — the reason names the TYPE, not the tag.
 _REJECTED_L1 = _response(
     "idea_crosslab", "pearce", ":bulb: Idea — @PearceBot, your recent finding…"
 )
@@ -293,7 +251,9 @@ _REJECTED_L1 = _response(
 _REJECTED_L3 = _response(
     "pitch", "pearce", ":bulb: @PearceBot — our unpublished assay…"
 )
-_ACCEPTED = _response("paper", None, ":newspaper: Paper — we published a thing.")
+_ACCEPTED = _response(
+    "pitch", "blackbird", ":bulb: @BlackbirdBot — our unpublished assay on X."
+)
 
 
 async def _drive(monkeypatch, response, *, capture=None):
@@ -423,13 +383,15 @@ async def test_repeated_rejections_accumulate_instead_of_pinning_at_one(monkeypa
     assert streak == [1, 2, 3]
 
 
-# Layer 1-3 all pass this one: `paper` is a broadcast type and tagged_agent is
-# null. But the BODY names an agent gill's cohort gate forbids — the exact
-# scenario the JSON-only gate does not catch. `_strip_disallowed_tags` would
-# silently delete " @PearceBot" and publish ":newspaper: Paper —, your recent
-# finding..." if nothing rejected it first.
+# Layer 1-3 all pass this one: `pitch` is declared and reachable, and
+# tagged_agent matches. But the BODY names an agent gill's cohort gate
+# forbids — the exact scenario the JSON-only gate does not catch.
+# `_strip_disallowed_tags` would silently delete " @PearceBot" and publish
+# ":bulb: @BlackbirdBot — ..., your recent finding..." if nothing rejected it
+# first.
 _MUTILATED_BODY = _response(
-    "paper", None, ":newspaper: Paper — @PearceBot, your recent finding on X was great."
+    "pitch", "blackbird",
+    ":bulb: @BlackbirdBot — @PearceBot, your recent finding on X was great.",
 )
 
 
@@ -453,7 +415,7 @@ async def test_an_allowed_post_still_goes_out(monkeypatch):
     tests above."""
     eng, gill, client = await _drive(monkeypatch, _ACCEPTED)
     assert len(client.posted) == 1
-    assert client.posted[0]["text"].startswith(":newspaper:")
+    assert client.posted[0]["text"].startswith(":bulb:")
     assert gill.message_count == 1
 
 
@@ -473,8 +435,8 @@ _NON_STRING_POST_TYPE = (
 _NON_STRING_TAGGED_AGENT = (
     '```json\n'
     '{"action": "new_post", "channel": "general", '
-    '"post_type": "paper", "tagged_agent": ["pearce"]}\n```\n\n'
-    '<slack_message>:newspaper: Paper — something specific.</slack_message>'
+    '"post_type": "pitch", "tagged_agent": ["pearce"]}\n```\n\n'
+    '<slack_message>:bulb: Pitch — something specific.</slack_message>'
 )
 
 
@@ -488,8 +450,9 @@ async def test_a_non_string_post_type_does_not_publish(monkeypatch, caplog):
 
 
 async def test_a_non_string_tagged_agent_does_not_publish(monkeypatch, caplog):
-    """An unhashable tagged_agent (a list, here) raises TypeError out of the
-    `in`/`not in` set-membership checks in _post_type_rejection."""
+    """`pitch` is declared and reachable, so layer 1 passes and this reaches
+    the tag check — an unhashable tagged_agent (a list, here) raises TypeError
+    out of the `in`/`not in` set-membership checks in _post_type_rejection."""
     caplog.set_level("ERROR")
     eng, gill, client = await _drive(monkeypatch, _NON_STRING_TAGGED_AGENT)
     assert client.posted == []
@@ -510,81 +473,12 @@ async def test_the_menu_handed_to_the_prompt_is_the_set_that_is_enforced(monkeyp
 
     menu = capture["post_type_menu"]
     available = {
-        s.name for s in eng._available_post_types(gill, funding_restricted=False)
+        s.name for s in eng._available_post_types(gill, restricted=False)
     }
-    assert available == {"paper", "help_wanted", "introduction", "pitch"}
+    assert available == {"pitch"}
     for name in available:
         assert f"**`{name}`**" in menu
     for name in set(CANONICAL) - available:
         assert f"**`{name}`**" not in menu
     # The hub is the one reachable counterparty, so the addressed type names it.
     assert "blackbird" in menu
-
-
-# --- step 6a: the reply-path bypass -----------------------------------------
-
-async def test_a_blocked_agent_cannot_self_declare_funding_collab_on_a_reply(
-    monkeypatch, caplog
-):
-    """The bypass (`is_funding_post`) read post_type regardless of action, so
-    {"action": "reply", "post_type": "funding_collab"} to a NON-funding thread
-    walked past the unreviewed-proposal block. Layers 1-3 do not catch it —
-    they govern new_post only."""
-    from src.agent.message_log import LogEntry
-    from src.agent.state import ProposalRef, ThreadState
-    from tests.fakes import FakeSlackClient
-
-    caplog.set_level("INFO")
-    gill = _spoke("gill")
-    gill.allowed_sender_ids = {"gill", "blackbird"}
-    client = FakeSlackClient(agent_id="gill")
-    eng = SimulationEngine(agents=[gill, _hub()], slack_clients={"gill": client})
-
-    # Blocked: one unreviewed non-funding proposal.
-    gill.state.pending_proposals.append(
-        ProposalRef(
-            thread_id="t1", channel="general", other_agent_id="blackbird",
-            summary_text=":memo: Summary — a proposal", proposed_at=0.0,
-        )
-    )
-    # A thread carrying an FOA, so the "blocked and nothing to do" early
-    # return (`if not available_posts and blocked_for_regular ...`, :2054)
-    # does not fire before we reach the bypass.
-    gill.state.active_threads["t9"] = ThreadState(
-        thread_id="t9", channel="funding", other_agent_id="blackbird",
-        message_count=1, foa_number="RFA-AI-27-019",
-    )
-    # A plain, non-funding thread to aim the reply at.
-    eng.message_log.load_entry(LogEntry(
-        ts="t1", channel="general", sender_agent_id="blackbird",
-        sender_name="BlackbirdBot", content="not a funding post", posted_at=0.0,
-        slack_ts="t1",
-    ))
-
-    monkeypatch.setattr(
-        "src.agent.simulation.get_settings",
-        lambda: types.SimpleNamespace(
-            daily_post_cap=50, active_thread_threshold=12,
-            unreviewed_proposal_block_count=1, phase5_skip_probability=0.0,
-            llm_agent_model_opus="test-model",
-        ),
-    )
-    monkeypatch.setattr(gill, "build_phase5_prompt", lambda **kw: ("sys", []))
-
-    async def _fake_generate(**kwargs):
-        return (
-            '```json\n'
-            '{"action": "reply", "target_post_id": "t1", "channel": "general", '
-            '"post_type": "funding_collab", "tagged_agent": null}\n'
-            '```\n\n'
-            '<slack_message>:moneybag: RFA-AI-27-019 — unrelated.</slack_message>'
-        )
-
-    monkeypatch.setattr(
-        "src.agent.simulation.generate_agent_response", _fake_generate
-    )
-
-    await eng._phase5_new_post(gill)
-
-    assert client.posted == []
-    assert "Blocked non-funding action" in caplog.text

@@ -2090,7 +2090,7 @@ class SimulationEngine:
         # the state this early return used to strand it in. Ask the post-type
         # layer whether anything is actually postable before giving up.
         nothing_postable = not self._available_post_types(
-            agent, funding_restricted=blocked_for_regular
+            agent, restricted=blocked_for_regular
         )
         if (
             not available_posts
@@ -2174,11 +2174,22 @@ class SimulationEngine:
 
         # blocked_for_regular, NOT funding_only — see _available_post_types'
         # docstring. funding_only is the narrower "blocked AND nothing
-        # non-funding to reply to"; keying the menu on it would advertise
-        # `paper` to an agent the block below rejects for posting one.
+        # non-funding to reply to"; keying the menu on it would advertise a
+        # regular type to an agent the block below rejects for posting one.
         available_types = self._available_post_types(
-            agent, funding_restricted=blocked_for_regular,
+            agent, restricted=blocked_for_regular,
         )
+        if not available_types and not blocked_for_regular:
+            # Not restricted, yet nothing satisfies role ∩ topology — either a
+            # misconfigured role.toml or a cohort gate that leaves this agent
+            # with no reachable counterparty for anything it declares. Quiet
+            # for a blocked agent (restricted=True): an empty menu there is
+            # the expected, unremarkable shape for e.g. a pi_lab agent with no
+            # terminal type to report (design §6 C4).
+            logger.warning(
+                "[%s] Phase 5: no post type satisfiable — check cohort/roster "
+                "for role %r", agent.agent_id, agent.role,
+            )
         post_type_menu = render_menu(
             available_types,
             gate=agent.allowed_sender_ids,
@@ -2867,28 +2878,28 @@ class SimulationEngine:
         return set(required_domains_for(verdict) - consulted)
 
     def _available_post_types(
-        self, agent: "Agent", *, funding_restricted: bool
+        self, agent: "Agent", *, restricted: bool
     ) -> tuple[PostTypeSpec, ...]:
         """Layer 1 ∩ layer 2: what this agent may post as a NEW top-level post.
 
         The SAME tuple is rendered into the prompt and used to judge the
         response, so the menu and the gate cannot disagree.
 
-        ``funding_restricted`` is the caller's ``blocked_for_regular``, NOT its
+        ``restricted`` is the caller's ``blocked_for_regular``, NOT its
         ``funding_only``. The two differ: ``funding_only = blocked_for_regular
         and not has_available_non_funding``, so a blocked agent that has a
         non-funding post available has ``funding_only=False`` — and keying on
-        that would advertise ``paper`` to an agent whose next non-funding post
-        the block at the top of this handler rejects anyway. ``funding_only``
-        still drives the prompt-template surgery; only this set uses
-        ``blocked_for_regular``.
+        that would advertise a regular type to an agent whose next non-funding
+        post the block at the top of this handler rejects anyway.
+        ``funding_only`` still drives the prompt-template surgery; only this
+        set uses ``blocked_for_regular``.
         """
         return available_for(
             self._post_types_for_role(agent.role),
             gate=agent.allowed_sender_ids,
             roles_by_agent=self._roles_by_agent(),
             self_id=agent.agent_id,
-            funding_only=funding_restricted,
+            terminal_only=restricted,
         )
 
     def _normalize_tagged_agent(self, tagged_agent: object) -> object:

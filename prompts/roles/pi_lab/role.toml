@@ -1,0 +1,9 @@
+label = "PI Lab"
+tools = ["retrieve_profile", "retrieve_abstract", "retrieve_full_text"]
+
+# Layer 1: the lab's single top-level post type. Declared explicitly so a new
+# type added to DEFAULT_POST_TYPES can never silently reach labs (same rule as
+# the hub's role.toml).
+
+[[post_types]]
+name = "pitch"

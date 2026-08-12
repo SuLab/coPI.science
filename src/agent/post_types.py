@@ -45,37 +45,11 @@ CANONICAL: dict[str, PostTypeSpec] = {
     s.name: s
     for s in (
         PostTypeSpec(
-            "paper", ":newspaper:", "Paper",
-            "Share a recent publication with a specific finding others could build on.",
-        ),
-        PostTypeSpec(
-            "help_wanted", ":sos:", "Help Wanted",
-            "Seek a specific capability, reagent, dataset, or expertise your lab "
-            "genuinely needs and cannot produce in-house.",
-        ),
-        PostTypeSpec(
-            "introduction", ":wave:", "Introduction",
-            "Introduce your lab's interests and expertise. Use sparingly — only if "
-            "you have not introduced yourself in this channel yet.",
-        ),
-        PostTypeSpec(
-            "idea_crosslab", ":bulb:", "Idea (cross-lab)",
-            "Propose an idea at the interface between your lab and another specific "
-            "lab. Name a concrete first experiment or dataset exchange.",
-            targets=frozenset({"pi_lab"}),
-        ),
-        PostTypeSpec(
             "pitch", ":bulb:", "Pitch to the scouting hub",
             "Offer one of your OWN lab's ideas for screening — something that might "
             "be patentable, fundable, or commercializable. Not a collaboration "
             "proposal, and never a suggestion that two other labs should talk.",
             targets=frozenset({"scout_hub"}),
-        ),
-        PostTypeSpec(
-            "funding_collab", ":moneybag:", "Funding collaboration",
-            "Start a funding-originated collaboration around a specific FOA. Must "
-            "include the FOA number.",
-            targets=frozenset({"pi_lab"}),
         ),
         PostTypeSpec(
             "opportunity_assessment", ":mag:", "Opportunity Assessment",
@@ -89,17 +63,8 @@ CANONICAL: dict[str, PostTypeSpec] = {
 # CANONICAL", for the same reason roles.DEFAULT_TOOLS is: adding a new type must
 # never silently hand it to every role.
 DEFAULT_POST_TYPES: tuple[PostTypeSpec, ...] = (
-    CANONICAL["paper"],
-    CANONICAL["help_wanted"],
-    CANONICAL["introduction"],
-    CANONICAL["idea_crosslab"],
     CANONICAL["pitch"],
-    CANONICAL["funding_collab"],
 )
-
-# Types that count as funding actions. In funding_only mode (the agent is blocked
-# for regular posts) the available set is narrowed to these.
-FUNDING_POST_TYPES: frozenset[str] = frozenset({"funding_collab"})
 
 # Types that REPORT completed work rather than commencing new work, and are
 # therefore exempt from the same backpressure.
@@ -114,10 +79,6 @@ FUNDING_POST_TYPES: frozenset[str] = frozenset({"funding_collab"})
 # routinely. The more interviews it completed, the more assessments it owed and
 # the less able it was to file any of them.
 #
-# Kept distinct from FUNDING_POST_TYPES rather than merged: a funding post
-# STARTS a collaboration and is exempt because funding is time-boxed by an
-# external deadline; an assessment ENDS an interview and is exempt because it
-# is already-finished work. Same mechanism, different reasons.
 TERMINAL_POST_TYPES: frozenset[str] = frozenset({"opportunity_assessment"})
 
 # Retired names a running deployment may still emit. ``idea`` sat in the old
@@ -266,7 +227,7 @@ def available_for(
     gate: set[str] | None,
     roles_by_agent: dict[str, str],
     self_id: str,
-    funding_only: bool,
+    terminal_only: bool,
 ) -> tuple[PostTypeSpec, ...]:
     """The post types this agent may use as a new top-level post, right now.
 
@@ -274,10 +235,9 @@ def available_for(
     A type with no ``targets`` is always available. A type with ``targets`` is
     available only when at least one reachable agent has a matching role.
 
-    ``funding_only`` narrows the result to ``FUNDING_POST_TYPES`` plus
-    ``TERMINAL_POST_TYPES``; the result may
-    legitimately be empty in that mode, which must NOT be treated as "skip the
-    turn" — a funding *reply* is still valid. See spec §5.
+    ``terminal_only`` narrows the result to ``TERMINAL_POST_TYPES``; the result
+    may legitimately be empty in that mode — a role with nothing terminal to
+    report has nothing left to post. See spec §5.
     """
     out = [
         s for s in declared
@@ -286,17 +246,15 @@ def available_for(
             s, gate=gate, roles_by_agent=roles_by_agent, self_id=self_id
         )
     ]
-    if funding_only:
-        # Terminal artifacts survive the narrowing: see TERMINAL_POST_TYPES.
-        exempt = FUNDING_POST_TYPES | TERMINAL_POST_TYPES
-        out = [s for s in out if s.name in exempt]
+    if terminal_only:
+        out = [s for s in out if s.name in TERMINAL_POST_TYPES]
     return tuple(out)
 
 
 _EMPTY_MENU = (
     "**No new top-level post type is available to you this turn.** Do not use "
-    "`action: \"new_post\"` — it will be rejected and nothing will be posted. "
-    "Reply to an existing post (Option A) or skip (Option D)."
+    '`action: "new_post"` — it will be rejected and nothing will be posted. '
+    'Return `{"action": "skip"}`.'
 )
 
 

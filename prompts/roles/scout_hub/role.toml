@@ -17,9 +17,3 @@ tools = ["retrieve_profile", "retrieve_abstract", "retrieve_full_text", "search_
 name = "opportunity_assessment"
 # The screening artifact. Stands on its own for Blackbird staff and the PI, so it
 # addresses no one and carries no targets.
-
-[[post_types]]
-name = "funding_collab"
-targets = ["pi_lab"]
-# A funding-fit note about ONE PI's idea. Tags only that PI's own agent — never a
-# second lab (see phase5-new-post.md, Option B).
