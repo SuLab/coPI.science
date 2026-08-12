@@ -928,9 +928,6 @@ class SimulationEngine:
         # Phase 1: Channel discovery
         self._phase1_channel_discovery(agent)
 
-        # Phase 2: Scan & filter new posts
-        await self._phase2_scan_filter(agent)
-
         # Phase 3: Activate threads from tags and replies
         self._phase3_activate_threads(agent)
 
@@ -944,7 +941,6 @@ class SimulationEngine:
 
         # State-change gate: skip Phase 5 (no LLM call) unless there's
         # new actionable state or the spontaneous post timer has expired.
-        phase2_ran = agent.api_call_count > api_calls_before
         has_interesting = len(agent.state.interesting_posts) > 0
         has_phase4_work = len(phase4_thread_ids) > 0
         has_pi = agent.state.has_pi_directive
@@ -958,7 +954,7 @@ class SimulationEngine:
         since_last_action = time.time() - agent.state.last_phase5_action_time
         spontaneous_ready = since_last_action >= spontaneous_interval
 
-        has_new_work = has_interesting or has_phase4_work or phase2_ran or has_pi
+        has_new_work = has_interesting or has_phase4_work or has_pi
 
         if has_new_work or spontaneous_ready:
             await self._phase5_new_post(agent, phase4_thread_ids)
@@ -1006,7 +1002,11 @@ class SimulationEngine:
     # ------------------------------------------------------------------
 
     async def _phase2_scan_filter(self, agent: Agent) -> None:
-        """Scan new top-level posts and decide which to add to interesting_posts."""
+        """Scan new top-level posts and decide which to add to interesting_posts.
+
+        Disabled: no caller since the pitch-only reconciliation; prompts/phase2-*.md
+        carry the matching preamble.
+        """
         settings = get_settings()
 
         # Get new top-level posts since agent's last turn
@@ -1077,7 +1077,11 @@ class SimulationEngine:
             await self._phase2_prune(agent)
 
     async def _phase2_prune(self, agent: Agent) -> None:
-        """Prune interesting_posts to ≤ cap."""
+        """Prune interesting_posts to ≤ cap.
+
+        Disabled: no caller since the pitch-only reconciliation; prompts/phase2-*.md
+        carry the matching preamble.
+        """
         system_prompt, messages = agent.build_phase2_prune_prompt()
 
         agent.record_api_call()
@@ -1752,10 +1756,12 @@ class SimulationEngine:
         # every subsequent turn re-fires Phase 5, burning an LLM call per turn.
         agent.state.last_phase5_action_time = time.time()
 
-        # Daily post cap
+        # Daily post cap — pi_lab is capped to one pitch per day (design §9);
+        # other roles (e.g. scout_hub) keep the general cap.
         today_posts = self._count_today_posts(agent)
-        if today_posts >= settings.daily_post_cap:
-            logger.debug("[%s] Phase 5: Skipped (daily cap %d/%d)", agent.agent_id, today_posts, settings.daily_post_cap)
+        cap = settings.lab_daily_post_cap if agent.role == "pi_lab" else settings.daily_post_cap
+        if today_posts >= cap:
+            logger.debug("[%s] Phase 5: Skipped (daily cap %d/%d)", agent.agent_id, today_posts, cap)
             return
 
         # Check preconditions

@@ -322,18 +322,10 @@ Use these to reference other labs' work in conversations. Include links when cit
             "Evaluate posts and return JSON with selected_post_ids.",
         )
 
-        # Format posts for the prompt. Flag any post that cites a paper this
-        # lab authored so the model applies the "Papers your own lab authored"
-        # rule (see issue #7).
+        # Format posts for the prompt.
         post_blocks: list[str] = []
         for p in new_posts:
             header = f"**Post ID: {p['post_id']}** in #{p['channel']} by {p['sender']}:"
-            if self.cites_own_paper(p.get("content_snippet")):
-                header += (
-                    "\n⚠️ SELF-AUTHORED: this post cites a paper your own lab authored. "
-                    "Per the \"Papers your own lab authored\" rule, do NOT add it unless "
-                    "you can take it in a genuinely new direction."
-                )
             # Post bodies come from other labs' agents — fence as untrusted
             # peer content so an injected instruction can't hijack the scan
             # decision (SEC-14).
