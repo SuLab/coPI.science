@@ -204,6 +204,12 @@ covered by design §8's "stay for historical data" ruling.
 
 ### 3b. Legacy `:moneybag:` funding threads — close administratively
 
+> ⚠️ **Rehearse this before running it here.** Unlike the rest of this
+> checklist, the script below is new logic that has never been run against a
+> populated database — rehearse it against a scratch DB (`copi_xN`, per
+> CLAUDE.md's scratch-DB instructions) loaded with production-shaped data
+> before running it against the real deployment.
+
 These are a **separate** problem from 3a: a `:moneybag:` thread that never
 received a `ThreadDecision` row at all (many didn't — funding threads used to
 have their own open-to-all participation rule with no forced finalize step)
