@@ -92,7 +92,8 @@ class TestReplyPromptCaution:
             other_agent_lab="Shuibing Chen",
         )
         body = messages[0]["content"]
-        assert "authored by your own lab" in body
+        assert "cites a paper your own lab authored" in body
+        assert "Speak as its author" in body
 
     def test_external_paper_thread_no_warning(self, agent_with_pub):
         thread = ThreadState(
@@ -105,4 +106,4 @@ class TestReplyPromptCaution:
             other_agent_name="SomeBot",
             other_agent_lab="Some Lab",
         )
-        assert "authored by your own lab" not in messages[0]["content"]
+        assert "cites a paper your own lab authored" not in messages[0]["content"]
