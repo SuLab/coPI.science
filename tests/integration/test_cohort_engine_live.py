@@ -1307,20 +1307,21 @@ async def test_start_computes_the_gate_and_records_a_snapshot(live, monkeypatch)
     _cfg(monkeypatch, enabled=True, policy="isolated")
     eng = _engine(factory, run_id)
 
-    original = eng._backfill_foa_cache
+    original = eng._record_topology_snapshot
     order = []
 
     async def _stop_after_setup():
-        # By the time this runs, start() has computed the gate and written the
-        # snapshot. Record what the gate looked like at that instant.
+        # By the time this runs, start() has already computed the gate — this
+        # IS the call that writes the snapshot, so record the gate first, then
+        # delegate to the real snapshot write.
         order.append({a: x.allowed_sender_ids for a, x in eng.agents.items()})
         eng.request_stop()
         return await original()
 
-    monkeypatch.setattr(eng, "_backfill_foa_cache", _stop_after_setup)
+    monkeypatch.setattr(eng, "_record_topology_snapshot", _stop_after_setup)
     await eng.start()
 
-    assert order, "setup never reached _backfill_foa_cache — start() aborted early"
+    assert order, "setup never reached _record_topology_snapshot — start() aborted early"
     assert order[0]["su"] == {"su", "wiseman"}, (
         f"the gate was not in force before the loop: {order[0]}"
     )
@@ -1353,13 +1354,13 @@ async def test_start_records_a_snapshot_even_when_the_gate_is_off(live, monkeypa
     _cfg(monkeypatch, enabled=False)
     eng = _engine(factory, run_id)
 
-    original = eng._backfill_foa_cache
+    original = eng._record_topology_snapshot
 
     async def _stop_after_setup():
         eng.request_stop()
         return await original()
 
-    monkeypatch.setattr(eng, "_backfill_foa_cache", _stop_after_setup)
+    monkeypatch.setattr(eng, "_record_topology_snapshot", _stop_after_setup)
     await eng.start()
 
     async with factory() as db:

@@ -1047,10 +1047,11 @@ async def test_sigterm_and_restart_lose_nothing_and_duplicate_nothing(full_run):
     rec2 = TurnRecord()
     rebuilt: dict[str, set] = {}
 
-    # _backfill_foa_cache is the first setup step after all three rebuild passes
-    # (DB -> Slack reconcile -> agent state), so it is where "what did resume
-    # reconstruct" can be read before any new turn muddies it.
-    original_backfill = eng2._backfill_foa_cache
+    # _record_topology_snapshot is the last setup step after all three rebuild
+    # passes (DB -> Slack reconcile -> agent state) and the cohort gate
+    # recompute, so it is where "what did resume reconstruct" can be read
+    # before any new turn muddies it.
+    original_snapshot = eng2._record_topology_snapshot
 
     async def _snapshot_after_rebuild():
         rebuilt["log"] = {e.ts for e in eng2.message_log._entries}
@@ -1058,9 +1059,9 @@ async def test_sigterm_and_restart_lose_nothing_and_duplicate_nothing(full_run):
             aid: set(a.state.active_threads) for aid, a in eng2.agents.items()
         }
         rebuilt["calls"] = {aid: a.api_call_count for aid, a in eng2.agents.items()}
-        return await original_backfill()
+        return await original_snapshot()
 
-    eng2._backfill_foa_cache = _snapshot_after_rebuild
+    eng2._record_topology_snapshot = _snapshot_after_rebuild
     await _drive(eng2, rec2, turns=RESTART_TURNS_B)
     await eng2.stop()
 

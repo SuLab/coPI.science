@@ -48,62 +48,6 @@ from src.services.llm import (
     set_call_log_callback,
 )
 
-# TASK-6-REMOVES: src.agent.foa_cache and src.agent.funding_rules were deleted in
-# Task 3 (GrantBot/FOA leaf-surface removal). The Phase 3/4/5 funding call sites
-# below that still reference these names are Task 4-6's territory, untouched
-# here, so these are minimal inline no-op stand-ins — matching the deleted
-# modules' signatures closely enough that every existing call site keeps
-# running without crashing — purely to keep this module importable in the
-# meantime. Task 6 deletes this whole block along with every call site it feeds.
-#
-# Task 4 additionally deleted message_log.is_funding_post/MessageLog.is_funding_thread
-# (the funding open-to-all participation exception; locked decision: ex-funding
-# thread roots follow the normal 2-party/tag rule, no replacement exception). Every
-# call site below that read those two symbols is inlined to `False`/dead-branch,
-# each marked `# TASK-6-REMOVES` individually, so Task 6 can find and delete them
-# alongside the foa_number/funding_only plumbing they feed.
-#
-# Task 5 removed the FOA/funding_only params from Agent.build_phase4_prompt/
-# build_phase5_prompt themselves (no FOA plumbing or funding_only template
-# surgery left in the prompt builders) and deleted the dict/bool assembly in
-# this file that existed only to feed those params. The stub functions below
-# still have live callers (is_funding-gated dead branches), so they stay for
-# Task 6.
-def extract_foa_number(content: str) -> str | None:
-    return None
-
-
-def format_foa_for_prompt(foa_number: str) -> str | None:
-    return None
-
-
-class _FundingThreadSummaryStub:
-    """No-op stand-in for the deleted funding_rules.FundingThreadSummary."""
-
-    def is_empty(self) -> bool:
-        return True
-
-
-def summarize_funding_thread(message_log, thread_ts, viewer_agent_id=None):
-    return _FundingThreadSummaryStub()
-
-
-def format_funding_thread_summary(summary) -> str:
-    return "(no prior activity in this thread)"
-
-
-def format_your_prior_messages(entries) -> str:
-    return "(none — this would be your first reply)"
-
-
-def is_acknowledgment_only_funding_reply(text: str) -> bool:
-    return False
-
-
-def is_announcement_only_funding_reply(text: str) -> bool:
-    return False
-
-
 logger = logging.getLogger(__name__)
 
 
@@ -534,16 +478,9 @@ class SimulationEngine:
         agent.state.throttled = not ok
         return ok
 
-    def _non_funding_thread_count(self, agent: Agent) -> int:
-        """Count active threads that are NOT funding-related."""
-        # TASK-6-REMOVES: was `if not self.message_log.is_funding_thread(t.thread_id)`;
-        # is_funding_thread deleted from message_log.py in Task 4 (no funding
-        # participation exception). Inlined `not False` keeps this method's callers
-        # working; Task 6 collapses this to len(agent.state.active_threads).
-        return sum(
-            1 for t in agent.state.active_threads.values()
-            if not False
-        )
+    def _active_thread_count(self, agent: Agent) -> int:
+        """Count this agent's active threads."""
+        return len(agent.state.active_threads)
 
     def _count_today_posts(self, agent: Agent) -> int:
         """Count top-level posts by this agent in public channels, in the current Pacific time day.
@@ -615,9 +552,6 @@ class SimulationEngine:
         # Record which topology this run actually started with, so the run's output
         # stays attributable to its configuration (v2 §13.1).
         await self._record_topology_snapshot()
-
-        # Backfill FOA cache for any previously posted opportunities
-        await self._backfill_foa_cache()
 
         # Initialize PI handler after mappings are loaded
         from src.agent.pi_handler import PIHandler
@@ -1134,23 +1068,12 @@ class SimulationEngine:
             # Add selected posts to interesting_posts
             for post in new_posts:
                 if post.ts in selected_ids:
-                    foa_num = None
-                    snippet_len = 200
-                    # TASK-6-REMOVES: was `if is_funding_post(post.content):`;
-                    # is_funding_post deleted from message_log.py in Task 4 (no
-                    # funding participation exception). is_funding inlined False;
-                    # this dead branch (and foa_num/foa_number) is Task 6's to delete.
-                    is_funding = False
-                    if is_funding:
-                        foa_num = extract_foa_number(post.content)
-                        snippet_len = 500  # funding posts need more context
                     agent.state.interesting_posts.append(PostRef(
                         post_id=post.ts,
                         channel=post.channel,
                         sender_agent_id=post.sender_agent_id or post.sender_name,
-                        content_snippet=post.content[:snippet_len],
+                        content_snippet=post.content[:200],
                         posted_at=post.posted_at,
-                        foa_number=foa_num,
                     ))
 
             logger.info(
@@ -1222,10 +1145,6 @@ class SimulationEngine:
                 continue
             if thread_id in self._closed_thread_ids:
                 continue
-            # TASK-6-REMOVES: was self.message_log.is_funding_thread(thread_id);
-            # deleted from message_log.py in Task 4 (no funding participation
-            # exception).
-            is_funding = False
             # Threshold gates Phase 5 (starting new threads), not Phase 3.
             # Ignoring an explicit @-mention is worse than running over the cap.
             # Check thread participation rules
@@ -1239,19 +1158,12 @@ class SimulationEngine:
             # Determine the other agent
             other_id = self._infer_agent_id(entry.sender_name) or entry.sender_agent_id
             if other_id and other_id != agent.agent_id:
-                # Extract FOA number from root post for funding threads
-                foa_num = None
-                if is_funding:
-                    root = self.message_log.get_entry(thread_id)
-                    if root:
-                        foa_num = extract_foa_number(root.content)
                 agent.state.active_threads[thread_id] = ThreadState(
                     thread_id=thread_id,
                     channel=entry.channel,
                     other_agent_id=other_id,
                     message_count=self.message_log.get_thread_message_count(thread_id),
                     has_pending_reply=True,
-                    foa_number=foa_num,
                 )
                 logger.info(
                     "[%s] Phase 3: Activated thread %s (tagged by %s)",
@@ -1271,10 +1183,6 @@ class SimulationEngine:
                 continue
             if thread_id in self._closed_thread_ids:
                 continue
-            # TASK-6-REMOVES: was self.message_log.is_funding_thread(thread_id);
-            # deleted from message_log.py in Task 4 (no funding participation
-            # exception).
-            is_funding = False
             # Threshold gates Phase 5 (starting new threads), not Phase 3.
             # Ghosting a reply to our own post is worse than running over the cap.
             # Check thread participation rules
@@ -1283,19 +1191,12 @@ class SimulationEngine:
                 continue
             other_id = self._infer_agent_id(entry.sender_name) or entry.sender_agent_id
             if other_id and other_id != agent.agent_id:
-                # Extract FOA number from root post for funding threads
-                foa_num = None
-                if is_funding:
-                    root = self.message_log.get_entry(thread_id)
-                    if root:
-                        foa_num = extract_foa_number(root.content)
                 agent.state.active_threads[thread_id] = ThreadState(
                     thread_id=thread_id,
                     channel=entry.channel,
                     other_agent_id=other_id,
                     message_count=self.message_log.get_thread_message_count(thread_id),
                     has_pending_reply=True,
-                    foa_number=foa_num,
                 )
                 logger.info(
                     "[%s] Phase 3: Activated thread %s (reply from %s)",
@@ -1404,15 +1305,6 @@ class SimulationEngine:
         other_name = other_agent.bot_name if other_agent else thread.other_agent_id
         other_lab = other_agent.pi_name if other_agent else "Unknown"
 
-        # TASK-6-REMOVES: was self.message_log.is_funding_thread(thread.thread_id);
-        # deleted from message_log.py in Task 4 (no funding participation
-        # exception). Task 5 removed build_phase4_prompt's funding-context
-        # params (is_funding_thread/your_prior_messages/thread_activity_summary),
-        # so the self-dedup/late-joiner-summary assembly that used to feed them
-        # is gone with this call site. `is_funding` itself survives only for
-        # the funding-draft-validator gate below — Task 6 deletes both.
-        is_funding = False
-
         # Resolve the thread's channel visibility for G1 prompt scoping. In v1
         # all threads live in public channels, so this is effectively always
         # VISIBILITY_PUBLIC; the lookup hook is in place for when migrations
@@ -1473,31 +1365,6 @@ class SimulationEngine:
                     )
                 return
 
-            # Funding-thread draft validators: reject announcement-only and
-            # acknowledgment-only replies before they hit Slack.
-            if is_funding:
-                rejected_reason = None
-                if is_announcement_only_funding_reply(response_text):
-                    rejected_reason = "announcement-only"
-                elif is_acknowledgment_only_funding_reply(response_text):
-                    rejected_reason = "acknowledgment-only"
-                if rejected_reason:
-                    thread.funding_reject_count += 1
-                    logger.info(
-                        "[%s] Phase 4: Rejected %s draft in funding thread %s (count=%d)",
-                        agent.agent_id, rejected_reason, thread.thread_id,
-                        thread.funding_reject_count,
-                    )
-                    if thread.funding_reject_count >= 2:
-                        # Back off: drop the pending-reply flag so the agent
-                        # stops re-attempting this thread for a while.
-                        thread.has_pending_reply = False
-                        logger.info(
-                            "[%s] Phase 4: Backing off funding thread %s after %d rejections",
-                            agent.agent_id, thread.thread_id, thread.funding_reject_count,
-                        )
-                    return
-
             # Post the reply
             posted = await self._post_message(
                 agent.agent_id, thread.channel, response_text,
@@ -1519,7 +1386,6 @@ class SimulationEngine:
                 return
             agent.message_count += 1
             thread.has_pending_reply = False
-            thread.funding_reject_count = 0
             thread.empty_response_count = 0
 
             # Check for thread outcome
@@ -2061,19 +1927,16 @@ class SimulationEngine:
             return
 
         # Check preconditions
-        at_thread_threshold = self._non_funding_thread_count(agent) >= settings.active_thread_threshold
-        # TASK-6-REMOVES: was `not self.message_log.is_funding_thread(p.thread_id)`;
-        # is_funding_thread deleted from message_log.py in Task 4 (no funding
-        # participation exception).
-        unreviewed_non_funding_count = sum(
+        at_thread_threshold = self._active_thread_count(agent) >= settings.active_thread_threshold
+        unreviewed_count = sum(
             1 for p in agent.state.pending_proposals
-            if not p.reviewed and not False
+            if not p.reviewed
         )
-        has_unreviewed_non_funding = (
+        has_unreviewed = (
             agent.agent_id not in UNBLOCK_EXEMPT_AGENTS
-            and unreviewed_non_funding_count >= settings.unreviewed_proposal_block_count
+            and unreviewed_count >= settings.unreviewed_proposal_block_count
         )
-        blocked_for_regular = at_thread_threshold or has_unreviewed_non_funding
+        blocked_for_regular = at_thread_threshold or has_unreviewed
 
         # Check for PI-priority posts — these bypass random skip and blocking
         has_pi_priority = any(p.pi_priority for p in agent.state.interesting_posts)
@@ -2091,15 +1954,11 @@ class SimulationEngine:
             if post.post_id in agent.state.active_threads:
                 continue
 
-            # TASK-6-REMOVES: was self.message_log.is_funding_thread(post.post_id);
-            # deleted from message_log.py in Task 4 (no funding participation
-            # exception).
-            is_funding = False
             # Posts in collab_private channels are by definition PI-engaged
             # refinement; they must bypass the unreviewed-proposal block for
-            # the same reason pi_priority and funding posts do. Without this,
-            # an agent with any unrelated pending proposal would silently skip
-            # the handover message that migrated the conversation into the
+            # the same reason pi_priority posts do. Without this, an agent
+            # with any unrelated pending proposal would silently skip the
+            # handover message that migrated the conversation into the
             # private channel in the first place.
             is_private = (
                 self._channel_visibility.get(post.channel) == VISIBILITY_COLLAB_PRIVATE
@@ -2111,8 +1970,8 @@ class SimulationEngine:
             if post.channel in self._finalized_private_channels:
                 continue
 
-            # PI-priority, funding, and private-channel posts bypass regular blocking
-            if blocked_for_regular and not is_funding and not post.pi_priority and not is_private:
+            # PI-priority and private-channel posts bypass regular blocking
+            if blocked_for_regular and not post.pi_priority and not is_private:
                 continue
 
             # Turn-taking in flat private channels: don't reply if we were
@@ -2138,18 +1997,6 @@ class SimulationEngine:
                 continue
             available_posts.append(post)
 
-        # If blocked and no available posts to reply to, still allow Phase 5
-        # so the agent can create funding collaboration posts (Option B)
-        # TASK-6-REMOVES: was self.message_log.is_funding_thread(p.post_id);
-        # deleted from message_log.py in Task 4 (no funding participation
-        # exception).
-        has_funding_interesting = any(
-            False  # was self.message_log.is_funding_thread(p.post_id)
-            for p in agent.state.interesting_posts
-        )
-        has_thread_foas = any(
-            ts.foa_number for ts in agent.state.active_threads.values()
-        )
         # A blocked agent with nothing to reply to normally has nothing to do,
         # and bailing here saves an LLM call. But "nothing to reply to" is not
         # the same as "nothing to post": a hub saturated with interviews still
@@ -2159,14 +2006,8 @@ class SimulationEngine:
         nothing_postable = not self._available_post_types(
             agent, restricted=blocked_for_regular
         )
-        if (
-            not available_posts
-            and blocked_for_regular
-            and not has_funding_interesting
-            and not has_thread_foas
-            and nothing_postable
-        ):
-            logger.debug("[%s] Phase 5: Skipped (blocked, no funding/PI posts available)", agent.agent_id)
+        if not available_posts and blocked_for_regular and nothing_postable:
+            logger.debug("[%s] Phase 5: Skipped (blocked, nothing postable)", agent.agent_id)
             return
 
         # Temporarily replace interesting_posts for prompt building
@@ -2179,15 +2020,6 @@ class SimulationEngine:
             {"channel": e.channel, "content_snippet": e.content[:150]}
             for e in recent_entries
         ]
-
-        # TASK-6-REMOVES: was the "Pre-load cached FOA text for funding posts"
-        # and "Also pre-load FOAs from active/closed threads for Option B"
-        # blocks, assembling foa_contexts/funding_thread_summaries/
-        # thread_foa_contexts for build_phase5_prompt. Task 5 removed those
-        # params from build_phase5_prompt (no FOA plumbing left in the prompt
-        # builders), so the dicts they fed have no consumer left. `post.foa_number`/
-        # `ts.foa_number` reads themselves (and the fields on PostRef/ThreadState)
-        # are Task 6/8's territory, untouched here.
 
         # Resolve the visibility context for the prompt. Phase 5 now also drives
         # collab_private refinement (flat follow-ups). When the agent's only
@@ -2214,15 +2046,6 @@ class SimulationEngine:
             agent.agent_id, current_visibility=current_visibility,
         )
 
-        # TASK-6-REMOVES: was the "funding_only strips the prompt to funding
-        # actions" computation (has_available_non_funding / funding_only),
-        # keyed off self.message_log.is_funding_thread(p.post_id) — deleted
-        # from message_log.py in Task 4 (no funding participation exception).
-        # Task 5 removed build_phase5_prompt's funding_only param and its
-        # template-surgery branch, so this local has no consumer left.
-        #
-        # available_types below still keys on blocked_for_regular, not the
-        # now-gone funding_only — see _available_post_types' docstring.
         available_types = self._available_post_types(
             agent, restricted=blocked_for_regular,
         )
@@ -2312,16 +2135,15 @@ class SimulationEngine:
                 return
 
             # Real action — reset skip backoff. Capture the pre-reset value
-            # first: several rejection paths below (back-to-back private-
-            # channel post, funding announcement-only/acknowledgment-only
-            # replies, the post-type rejection further down) re-increment the
-            # streak AFTER this reset zeroes it, so a bare `+= 1` there always
-            # lands on 1 no matter how many times in a row this agent gets
-            # rejected — the damping at _select_next_agent (`skips >= 3`) never
-            # engages and a hopeless agent gets picked, and burns an
-            # LLM call, every bit as often as a productive one. Pre-existing
-            # bug at the back-to-back/funding-reply rejections below — not
-            # fixed here — but the post-type rejection uses `previous + 1`.
+            # first: the back-to-back private-channel post rejection below
+            # re-increments the streak AFTER this reset zeroes it, so its bare
+            # `+= 1` always lands on 1 no matter how many times in a row this
+            # agent gets rejected — the damping at _select_next_agent
+            # (`skips >= 3`) never engages and a hopeless agent gets picked,
+            # and burns an LLM call, every bit as often as a productive one.
+            # Pre-existing bug at that rejection below — not fixed here — but
+            # the unsupported-action, post-type, and body-mention rejections
+            # further down all use `previous_skips + 1`.
             previous_skips = agent.state.consecutive_phase5_skips
             agent.state.consecutive_phase5_skips = 0
             agent.state.last_phase5_action_time = time.time()
@@ -2347,21 +2169,14 @@ class SimulationEngine:
                 agent.state.consecutive_phase5_skips += 1
                 return
 
-            # If agent is blocked, only allow bypass-eligible actions: funding
-            # replies, funding posts, or replies to a post in a collab_private
-            # channel (the PI has explicitly engaged that refinement).
+            # If agent is blocked, only allow bypass-eligible actions: a
+            # terminal artifact reporting finished work, or a reply to a post
+            # in a collab_private channel (the PI has explicitly engaged that
+            # refinement).
             if blocked_for_regular:
-                # TASK-6-REMOVES: was self.message_log.is_funding_thread(target_post_id);
-                # deleted from message_log.py in Task 4 (no funding participation
-                # exception).
-                is_funding_reply = (
-                    action == "reply" and target_post_id
-                    and False
-                )
-                is_funding_post = action == "new_post" and post_type == "funding_collab"
                 # A terminal artifact reports finished work, so the
-                # start-new-work backpressure does not apply to it. Same shape
-                # as the funding bypass above; see TERMINAL_POST_TYPES.
+                # start-new-work backpressure does not apply to it. See
+                # TERMINAL_POST_TYPES.
                 is_terminal_post = (
                     action == "new_post" and post_type in TERMINAL_POST_TYPES
                 )
@@ -2373,9 +2188,9 @@ class SimulationEngine:
                         == VISIBILITY_COLLAB_PRIVATE
                     ):
                         is_private_reply = True
-                if not (is_funding_reply or is_funding_post or is_private_reply or is_terminal_post):
+                if not (is_private_reply or is_terminal_post):
                     logger.info(
-                        "[%s] Phase 5: Blocked non-funding action while proposals pending",
+                        "[%s] Phase 5: Blocked action while proposals pending",
                         agent.agent_id,
                     )
                     return
@@ -2403,232 +2218,132 @@ class SimulationEngine:
                 self._cohort_tags_stripped.get(agent.agent_id, 0) > tags_stripped_before
             )
 
-            if action == "reply" and target_post_id:
-                # Enforce thread participation rules
-                allowed = self.message_log.get_thread_allowed_agents(target_post_id)
-                if allowed and agent.agent_id not in allowed:
-                    logger.info(
-                        "[%s] Phase 5: Blocked reply to %s — not in allowed set %s",
-                        agent.agent_id, target_post_id, allowed,
-                    )
-                    return
-
-                # Funding-thread draft validators (atomic spin-off + no-ack rules)
-                # TASK-6-REMOVES: was self.message_log.is_funding_thread(target_post_id);
-                # deleted from message_log.py in Task 4 (no funding participation
-                # exception).
-                if False:
-                    if is_announcement_only_funding_reply(message_text):
-                        logger.info(
-                            "[%s] Phase 5: Rejected announcement-only funding reply to %s",
-                            agent.agent_id, target_post_id,
-                        )
-                        agent.state.consecutive_phase5_skips += 1
-                        return
-                    if is_acknowledgment_only_funding_reply(message_text):
-                        logger.info(
-                            "[%s] Phase 5: Rejected acknowledgment-only funding reply to %s",
-                            agent.agent_id, target_post_id,
-                        )
-                        agent.state.consecutive_phase5_skips += 1
-                        return
-
-                # In a collab_private channel, the whole channel IS the
-                # discussion — post flat (no thread_ts) and don't create an
-                # active_thread. The other agent will see this as a new
-                # top-level post on its next Phase 2 scan and continue the
-                # flat conversation. See specs/privacy-and-channel-visibility.md.
-                is_private_channel = (
-                    self._channel_visibility.get(channel) == VISIBILITY_COLLAB_PRIVATE
+            if action != "new_post":
+                logger.info(
+                    "[%s] Phase 5: unsupported action %r — skipping",
+                    agent.agent_id, action,
                 )
+                agent.state.consecutive_phase5_skips = previous_skips + 1
+                return
 
-                if is_private_channel:
-                    posted = await self._post_message(agent.agent_id, channel, message_text)
-                    if not posted:
-                        # _post_message already logged why (e.g. the text
-                        # stripped to empty). Nothing reached Slack, so this
-                        # turn must not count and the post must not be
-                        # consumed from interesting_posts (Task 11 fix round
-                        # 1, Finding 3, applied here too).
-                        logger.info(
-                            "[%s] Phase 5: flat follow-up to %s in private "
-                            "#%s suppressed — not counted, nothing persisted",
-                            agent.agent_id, target_post_id, channel,
-                        )
-                    else:
-                        agent.message_count += 1
-                        # Consume the interesting post (we acted on it) but do not
-                        # create an active_thread — private channels don't thread.
-                        agent.state.interesting_posts = [
-                            p for p in agent.state.interesting_posts
-                            if p.post_id != target_post_id
-                        ]
-                        logger.info(
-                            "[%s] Phase 5: Posted flat follow-up to %s in private #%s",
-                            agent.agent_id, target_post_id, channel,
-                        )
-                else:
-                    # Reply to an interesting post → creates a new thread
-                    posted = await self._post_message(
-                        agent.agent_id, channel, message_text,
-                        thread_ts=target_post_id,
-                    )
-                    if not posted:
-                        logger.info(
-                            "[%s] Phase 5: reply to post %s in #%s suppressed "
-                            "— not counted, nothing persisted",
-                            agent.agent_id, target_post_id, channel,
-                        )
-                    else:
-                        agent.message_count += 1
-
-                        # Move from interesting_posts to active_threads
-                        agent.state.interesting_posts = [
-                            p for p in agent.state.interesting_posts
-                            if p.post_id != target_post_id
-                        ]
-                        # Determine the other agent from the original post
-                        original_entry = self.message_log.get_entry(target_post_id)
-                        other_id = original_entry.sender_agent_id if original_entry else None
-                        if other_id:
-                            # Carry FOA number from the PostRef if this is a funding post
-                            post_foa = None
-                            for p in original_posts:
-                                if p.post_id == target_post_id:
-                                    post_foa = p.foa_number
-                                    break
-                            agent.state.active_threads[target_post_id] = ThreadState(
-                                thread_id=target_post_id,
-                                channel=channel,
-                                other_agent_id=other_id,
-                                message_count=2,  # original + this reply
-                                foa_number=post_foa,
-                            )
-
-                        logger.info(
-                            "[%s] Phase 5: Replied to post %s in #%s",
-                            agent.agent_id, target_post_id, channel,
-                        )
-
+            # New top-level post. Layers 1-3, against the SAME set that was
+            # rendered into the prompt above. Reject rather than strip-and-
+            # publish: a mention stripped out of an addressed post leaves a
+            # dangling ask no one can answer (259 such posts, 0.8% reply
+            # rate). WARNING, not DEBUG — the cohort strip was logged at
+            # DEBUG and 200 of them produced no operator-visible signal.
+            rejection = self._post_type_rejection(
+                agent,
+                post_type,
+                action_data.get("tagged_agent"),
+                available_types,
+            )
+            if rejection is not None:
+                logger.warning(
+                    "[%s] Phase 5: rejected new post in #%s — %s",
+                    agent.agent_id, channel, rejection,
+                )
+                agent.state.consecutive_phase5_skips = previous_skips + 1
+                return
+            # Layer 1-3 judge the JSON declaration, but the mutilation this
+            # whole gate exists to prevent is driven by the message BODY.
+            # A broadcast type with tagged_agent=null sails through the
+            # check above even when the body itself @-mentions an
+            # unreachable lab in prose — and the strip above would then
+            # publish the post with that mention silently deleted,
+            # producing exactly the dangling-ask artifact (measured in
+            # production: 42 of 259 posts named a lab in prose with no
+            # tag). Reject instead of publishing a mutilated body.
+            if body_mention_was_stripped:
+                logger.warning(
+                    "[%s] Phase 5: rejected new post in #%s — the message "
+                    "body @-mentions an agent this cohort gate cannot "
+                    "reach; publishing it would silently delete that "
+                    "mention rather than deliver it (post_type=%r)",
+                    agent.agent_id, channel, post_type,
+                )
+                agent.state.consecutive_phase5_skips = previous_skips + 1
+                return
+            # New top-level post
+            posted = await self._post_message(agent.agent_id, channel, message_text)
+            if not posted:
+                # _post_message already logged why (e.g. the text stripped to
+                # empty). Nothing reached Slack, so neither the turn counter
+                # nor an assessment row may be written for it — either would
+                # be a phantom record with no corresponding Slack message
+                # (Task 11 fix round 1, Finding 3).
+                logger.info(
+                    "[%s] Phase 5: New post in #%s suppressed — not counted, "
+                    "nothing persisted",
+                    agent.agent_id, channel,
+                )
             else:
-                # New top-level post. Layers 1-3, against the SAME set that was
-                # rendered into the prompt above. Reject rather than strip-and-
-                # publish: a mention stripped out of an addressed post leaves a
-                # dangling ask no one can answer (259 such posts, 0.8% reply
-                # rate). WARNING, not DEBUG — the cohort strip was logged at
-                # DEBUG and 200 of them produced no operator-visible signal.
-                rejection = self._post_type_rejection(
-                    agent,
-                    post_type,
-                    action_data.get("tagged_agent"),
-                    available_types,
-                )
-                if rejection is not None:
-                    logger.warning(
-                        "[%s] Phase 5: rejected new post in #%s — %s",
-                        agent.agent_id, channel, rejection,
-                    )
-                    agent.state.consecutive_phase5_skips = previous_skips + 1
-                    return
-                # Layer 1-3 judge the JSON declaration, but the mutilation this
-                # whole gate exists to prevent is driven by the message BODY.
-                # A broadcast type with tagged_agent=null sails through the
-                # check above even when the body itself @-mentions an
-                # unreachable lab in prose — and the strip above would then
-                # publish the post with that mention silently deleted,
-                # producing exactly the dangling-ask artifact (measured in
-                # production: 42 of 259 posts named a lab in prose with no
-                # tag). Reject instead of publishing a mutilated body.
-                if body_mention_was_stripped:
-                    logger.warning(
-                        "[%s] Phase 5: rejected new post in #%s — the message "
-                        "body @-mentions an agent this cohort gate cannot "
-                        "reach; publishing it would silently delete that "
-                        "mention rather than deliver it (post_type=%r)",
-                        agent.agent_id, channel, post_type,
-                    )
-                    agent.state.consecutive_phase5_skips = previous_skips + 1
-                    return
-                # New top-level post
-                posted = await self._post_message(agent.agent_id, channel, message_text)
-                if not posted:
-                    # _post_message already logged why (e.g. the text stripped to
-                    # empty). Nothing reached Slack, so neither the turn counter
-                    # nor an assessment row may be written for it — either would
-                    # be a phantom record with no corresponding Slack message
-                    # (Task 11 fix round 1, Finding 3).
-                    logger.info(
-                        "[%s] Phase 5: New post in #%s suppressed — not counted, "
-                        "nothing persisted",
-                        agent.agent_id, channel,
-                    )
-                else:
-                    agent.message_count += 1
+                agent.message_count += 1
 
-                    # A :mag: Opportunity Assessment carries a machine-readable
-                    # verdict sidecar (stripped from the Slack body). Persist it —
-                    # the whole point of the artifact is that staff can triage it
-                    # later. ``verdict`` can legitimately be ``{}`` (an empty but
-                    # parsed sidecar) — that is falsy but not a failure, so the
-                    # gate is `is not None`, never a truthiness check (Finding 1).
-                    if post_type == "opportunity_assessment":
-                        verdict = _extract_assessment_json(response)
-                        if verdict is not None:
-                            # `posted` is the canonical id _post_message just
-                            # minted/returned for this post (F7) — thread it
-                            # through so the triage row can link back to the
-                            # Slack post it summarises.
-                            #
-                            # thread_id=None: this is the "new top-level post"
-                            # branch (not a reply to an existing thread), so
-                            # there is no phase-4 interview thread to point the
-                            # specialist floor at here. That makes the floor
-                            # fail open by the same rule as a post-restart map.
-                            await self._persist_assessment(
-                                agent.agent_id, channel, verdict, slack_ts=posted,
-                            )
-                        elif _ASSESSMENT_UNCLOSED_RE.search(response or ""):
-                            # An <assessment_json> opening tag is present.
-                            # _extract_assessment_json already logged the
-                            # per-block reason; this names the consequence
-                            # without re-claiming "no sidecar" (Finding 1) —
-                            # and without calling a block that parsed fine but
-                            # was the wrong shape (e.g. a JSON array)
-                            # "unparseable", which it was not (Finding A3).
-                            if _sidecar_has_valid_json_block(response or ""):
-                                logger.warning(
-                                    "[%s] Phase 5: opportunity_assessment "
-                                    "post's <assessment_json> sidecar parsed "
-                                    "as valid JSON but was not an object — "
-                                    "verdict lost",
-                                    agent.agent_id,
-                                )
-                            else:
-                                logger.warning(
-                                    "[%s] Phase 5: opportunity_assessment post's "
-                                    "<assessment_json> sidecar was present but "
-                                    "unparseable — verdict lost",
-                                    agent.agent_id,
-                                )
-                        else:
+                # A :mag: Opportunity Assessment carries a machine-readable
+                # verdict sidecar (stripped from the Slack body). Persist it —
+                # the whole point of the artifact is that staff can triage it
+                # later. ``verdict`` can legitimately be ``{}`` (an empty but
+                # parsed sidecar) — that is falsy but not a failure, so the
+                # gate is `is not None`, never a truthiness check (Finding 1).
+                if post_type == "opportunity_assessment":
+                    verdict = _extract_assessment_json(response)
+                    if verdict is not None:
+                        # `posted` is the canonical id _post_message just
+                        # minted/returned for this post (F7) — thread it
+                        # through so the triage row can link back to the
+                        # Slack post it summarises.
+                        #
+                        # thread_id=None: this is the "new top-level post"
+                        # branch (not a reply to an existing thread), so
+                        # there is no phase-4 interview thread to point the
+                        # specialist floor at here. That makes the floor
+                        # fail open by the same rule as a post-restart map.
+                        await self._persist_assessment(
+                            agent.agent_id, channel, verdict, slack_ts=posted,
+                        )
+                    elif _ASSESSMENT_UNCLOSED_RE.search(response or ""):
+                        # An <assessment_json> opening tag is present.
+                        # _extract_assessment_json already logged the
+                        # per-block reason; this names the consequence
+                        # without re-claiming "no sidecar" (Finding 1) —
+                        # and without calling a block that parsed fine but
+                        # was the wrong shape (e.g. a JSON array)
+                        # "unparseable", which it was not (Finding A3).
+                        if _sidecar_has_valid_json_block(response or ""):
                             logger.warning(
-                                "[%s] Phase 5: opportunity_assessment post had no "
-                                "<assessment_json> sidecar present — verdict lost",
+                                "[%s] Phase 5: opportunity_assessment "
+                                "post's <assessment_json> sidecar parsed "
+                                "as valid JSON but was not an object — "
+                                "verdict lost",
                                 agent.agent_id,
                             )
-
-                    # Check if it tags another agent
-                    tagged_agent = action_data.get("tagged_agent")
-                    if tagged_agent:
-                        logger.info(
-                            "[%s] Phase 5: New post in #%s tagging @%s",
-                            agent.agent_id, channel, tagged_agent,
-                        )
+                        else:
+                            logger.warning(
+                                "[%s] Phase 5: opportunity_assessment post's "
+                                "<assessment_json> sidecar was present but "
+                                "unparseable — verdict lost",
+                                agent.agent_id,
+                            )
                     else:
-                        logger.info(
-                            "[%s] Phase 5: New post in #%s",
-                            agent.agent_id, channel,
+                        logger.warning(
+                            "[%s] Phase 5: opportunity_assessment post had no "
+                            "<assessment_json> sidecar present — verdict lost",
+                            agent.agent_id,
                         )
+
+                # Check if it tags another agent
+                tagged_agent = action_data.get("tagged_agent")
+                if tagged_agent:
+                    logger.info(
+                        "[%s] Phase 5: New post in #%s tagging @%s",
+                        agent.agent_id, channel, tagged_agent,
+                    )
+                else:
+                    logger.info(
+                        "[%s] Phase 5: New post in #%s",
+                        agent.agent_id, channel,
+                    )
 
             # In a collab_private channel, a :memo: Summary + ✅ handshake
             # finalizes the refined proposal (the flat path has no
@@ -3230,10 +2945,9 @@ class SimulationEngine:
                             # it the entry looks DB-origin, and _slack_parent_ts then
                             # reports "no Slack root" for any thread rooted here —
                             # silently keeping every reply off Slack. The roots this
-                            # branch ingests are another workspace bot's posts, i.e.
-                            # GrantBot's funding posts, whose threads are open to all
-                            # agents. Slack-origin ⇒ canonical id *is* the Slack ts,
-                            # so the thread parent needs no translation.
+                            # branch ingests are another workspace bot's posts.
+                            # Slack-origin ⇒ canonical id *is* the Slack ts, so the
+                            # thread parent needs no translation.
                             slack_ts=ts or None,
                             slack_channel_id=ch_id,
                             slack_thread_ts=msg.get("thread_ts"),
@@ -4122,26 +3836,6 @@ class SimulationEngine:
     def refresh_lab_directories(self) -> None:
         """Rebuild every agent's lab directory against its CURRENT gate."""
         self._build_lab_directories()
-
-    async def _backfill_foa_cache(self) -> None:
-        """Ensure locally cached FOA details exist for all previously posted opportunities."""
-        from sqlalchemy import select as sa_select
-
-        from src.agent.foa_cache import backfill_cache
-        from src.models import GrantbotPostedFoa
-
-        if not self.session_factory:
-            return
-        try:
-            async with self.session_factory() as db:
-                result = await db.execute(sa_select(GrantbotPostedFoa.foa_number))
-                posted_numbers = [n for n in result.scalars().all() if n]
-            if posted_numbers:
-                count = await backfill_cache(posted_numbers)
-                if count:
-                    logger.info("Backfilled FOA cache for %d opportunities", count)
-        except Exception as exc:
-            logger.warning("FOA cache backfill failed: %s", exc)
 
     async def _rebuild_state_from_db(self) -> None:
         """Hydrate the MessageLog from agent_messages — the primary store.
