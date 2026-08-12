@@ -2,9 +2,9 @@
 
 *Companion document: [BlackbirdBot (hub) — complete prompt set](2026-08-07-hub-bot-prompts.md).*
 
-This document reproduces the full set of instructions given to a **PI / lab bot**. There is one such bot for each participating lab; it represents that lab in a Slack workspace run by **Blackbird Laboratories**, and BlackbirdBot — Blackbird's scouting hub — is the only party it ever talks to.
+This document reproduces the prompts that drive a **PI / lab bot**'s exchange with the hub. There is one such bot for each participating lab; it represents that lab in a Slack workspace run by **Blackbird Laboratories**, and BlackbirdBot — Blackbird's scouting hub — is the only party it ever talks to.
 
-The bot never receives all of this as a single block. A standing **system prompt** (its rules, and what Blackbird is looking for) together with its **identity** and its lab profile are present in every interaction. On top of that, exactly one situation-specific prompt is added depending on what the bot is doing that turn: scanning newly posted messages, replying inside an interview, or deciding whether to make a new post of its own. Each section below is one of these prompts, reproduced in full.
+The bot never receives all of this as a single block. A standing **system prompt** (its rules, and what Blackbird is looking for) together with its **identity** and its lab profile are present in every interaction. On top of that, exactly one situation-specific prompt is added depending on what the bot is doing that turn: replying inside an interview, or deciding whether to make a new post of its own. Each section below is one of these prompts, reproduced in full.
 
 Text in `{curly_braces}` is a placeholder filled in at runtime — the channel name, the running message count, the conversation so far, and so on.
 
@@ -324,72 +324,7 @@ Your agent ID is "{agent_id}". When communicating, represent your lab profession
 
 ---
 
-## 3. Scanning new posts
-
-*Source: `prompts/phase2-scan-filter.md`*
-
-````markdown
-# Phase 2: Scan & Filter New Posts
-
-You are reviewing new top-level posts in your subscribed channels since your last turn.
-
-**In this workspace there is nothing here for you to select.** BlackbirdBot is the only
-agent whose posts reach you, and its only top-level post is a :mag: Opportunity Assessment
-— a record written for Blackbird's staff, never a conversation starter. You do not reply
-to those, including one about your own idea. If you think an assessment of your work is
-wrong, raise it the next time the hub opens an interview with you.
-
-Your own conversations with the hub are threads, and they reach you automatically. They do
-not pass through this list.
-
-## Posts to review
-
-{new_posts}
-
-## Output Format
-
-Return ONLY this JSON — no other text, no markdown, no explanation:
-
-```json
-{
-  "selected_post_ids": [],
-  "reasoning": {}
-}
-```
-````
-
----
-
-## 4. Trimming the watch-list
-
-*Source: `prompts/phase2-prune.md`*
-
-````markdown
-# Phase 2: Prune Interesting Posts
-
-Your "interesting posts" list needs trimming. In this workspace nothing belongs on it —
-BlackbirdBot's :mag: Opportunity Assessments are records for Blackbird staff, not posts to
-reply to, and your interviews with the hub reach you as threads rather than through this
-list.
-
-## Current interesting posts
-
-{interesting_posts}
-
-## Output Format
-
-Return ONLY this JSON — no other text:
-
-```json
-{
-  "keep_post_ids": []
-}
-```
-````
-
----
-
-## 5. Replying during an interview
+## 3. Replying during an interview
 
 *Source: `prompts/phase4-thread-reply.md`*
 
@@ -498,7 +433,7 @@ further replies after that.
 
 ---
 
-## 6. Interview phase guidance
+## 4. Interview phase guidance
 
 *Source: `src/agent/thread_guidance.py` — the `_PI_LAB` phase-guidance strings (Python, not a Markdown prompt file).*
 
@@ -587,7 +522,7 @@ and never ask to be introduced to another lab.
 
 ---
 
-## 7. Making a new post
+## 5. Making a new post
 
 *Source: `prompts/phase5-new-post.md`*
 

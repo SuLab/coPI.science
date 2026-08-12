@@ -2,9 +2,9 @@
 
 *Companion document: [PI / lab bot — complete prompt set](2026-08-07-pi-bot-prompts.md).*
 
-This document reproduces the full set of instructions given to **BlackbirdBot**, Blackbird's scouting hub. There is a single hub bot. It represents **Blackbird Laboratories** — not a research lab — and its job is to interview one PI at a time about their recent work, screen each idea against Blackbird's priorities, and write up the promising ones as opportunity assessments. It never brokers introductions between labs.
+This document reproduces the prompts that drive an exchange between **BlackbirdBot** — Blackbird's scouting hub — and a lab. There is a single hub bot. It represents **Blackbird Laboratories** — not a research lab — and its job is to interview one PI at a time about their recent work, screen each idea against Blackbird's priorities, and write up the promising ones as opportunity assessments. It never brokers introductions between labs.
 
-The bot never receives all of this as a single block. A standing **system prompt** — its rules, the assessment-quality standards, and Blackbird's full screening rubric — together with its **identity** and public profile are present in every interaction. On top of that, exactly one situation-specific prompt is added depending on what the hub is doing that turn: scanning the PIs' posts, replying inside an interview, or posting a completed assessment. The final section reproduces the eight domain-specialist prompts the hub can consult while an interview is under way.
+The bot never receives all of this as a single block. A standing **system prompt** — its rules, the assessment-quality standards, and Blackbird's full screening rubric — together with its **identity** and public profile are present in every interaction. On top of that, exactly one situation-specific prompt is added depending on what the hub is doing that turn: replying inside an interview, or posting a completed assessment. The final section reproduces the eight domain-specialist prompts the hub can consult while an interview is under way.
 
 Text in `{curly_braces}` is a placeholder filled in at runtime.
 
@@ -353,68 +353,7 @@ ideas that may be patentable, fundable, or commercializable. Your agent ID is
 
 ---
 
-## 3. Scanning new posts
-
-*Source: `prompts/roles/scout_hub/phase2-scan-filter.md`*
-
-````markdown
-# Phase 2: Scan & Filter New Posts
-
-You are reviewing new top-level posts in your subscribed channels.
-
-**In this workspace there is nothing here for you to select.** An interview begins only when
-a PI's agent opens a `:bulb:` pitch addressed to you — and those reach you automatically as
-threads, not through this list. You do not scout unsolicited posts and you never open an
-interview at a lab yourself. The only other top-level posts you see are your own `:mag:`
-Opportunity Assessments, which you never reply to.
-
-## Posts to review
-
-{new_posts}
-
-## Output Format
-
-Return ONLY this JSON — no other text, no markdown, no explanation:
-
-```json
-{
-  "selected_post_ids": [],
-  "reasoning": {}
-}
-```
-````
-
----
-
-## 4. Trimming the watch-list
-
-*Source: `prompts/roles/scout_hub/phase2-prune.md`*
-
-````markdown
-# Phase 2: Prune Interesting Posts
-
-Your "interesting posts" list needs trimming. In this workspace nothing belongs on it: you
-do not scout unsolicited posts, and the pitches you interview reach you automatically as
-threads rather than through this list.
-
-## Current interesting posts
-
-{interesting_posts}
-
-## Output Format
-
-Return ONLY this JSON — no other text:
-
-```json
-{
-  "keep_post_ids": []
-}
-```
-````
-
----
-
-## 5. Replying during an interview
+## 3. Replying during an interview
 
 *Source: `prompts/roles/scout_hub/phase4-thread-reply.md`*
 
@@ -517,7 +456,7 @@ closes the thread. If the other agent has already posted ⏸️, you may reply w
 
 ---
 
-## 6. Interview phase guidance
+## 4. Interview phase guidance
 
 *Source: `src/agent/thread_guidance.py` — the `_SCOUT_HUB` phase-guidance strings (Python, not a Markdown prompt file).*
 
@@ -632,7 +571,7 @@ either consult them in this reply or conclude at pass.
 
 ---
 
-## 7. Making a new post
+## 5. Making a new post
 
 *Source: `prompts/roles/scout_hub/phase5-new-post.md`*
 
@@ -877,7 +816,7 @@ Your message here — written exactly as it should appear in Slack.
 
 ---
 
-## 8. The specialist panel
+## 6. The specialist panel
 
 *Sources: the eight files in `prompts/specialists/`, one per specialist below.*
 
