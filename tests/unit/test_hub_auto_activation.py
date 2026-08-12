@@ -14,6 +14,7 @@ already-active / `get_thread_allowed_agents` guards exactly.
 from src.agent.agent import Agent
 from src.agent.message_log import LogEntry
 from src.agent.simulation import SimulationEngine
+from src.agent.state import ThreadState
 
 
 def _post(ts, channel, agent_id, name, content, thread_ts=None):
@@ -69,16 +70,39 @@ def test_untagged_lab_post_activates_a_hub_thread():
 
 def test_tagged_post_activates_exactly_one_thread_no_dupe_with_tag_loop():
     """A post that both tags the hub AND is a new top-level post must not be
-    double-activated by the tag loop and the new hub loop."""
+    double-activated (i.e. re-processed/overwritten) by the hub loop after the
+    tag loop has already activated it.
+
+    Pins the hub loop's own `already active` guard specifically, not just the
+    outcome: a sentinel ThreadState (a distinctive message_count=99, which
+    `get_thread_message_count` could never produce for this 1-message thread)
+    is pre-seeded under the thread id before `_phase3_activate_threads` runs.
+    If the hub loop's guard fires, the sentinel is untouched. A same-shape
+    ThreadState from a real activation (built via the tag loop, or a
+    from-scratch hub-loop activation) would NOT carry message_count=99, so an
+    unguarded second write is caught even though it would otherwise look like
+    a harmless overwrite. Verified empirically: deleting the hub loop's
+    `if thread_id in agent.state.active_threads: continue` line makes this
+    test fail (the sentinel gets clobbered); restoring it passes again.
+    """
     hub, lab = _hub(), _lab()
     eng = _engine(hub, lab)
     eng.message_log.append(
         _post("1", "general", "gill", "GillBot", "@BlackbirdBot take a look at this")
     )
+    sentinel = ThreadState(
+        thread_id="1", channel="general", other_agent_id="gill", message_count=99,
+    )
+    hub.state.active_threads["1"] = sentinel
 
     eng._phase3_activate_threads(hub)
 
     assert list(hub.state.active_threads.keys()) == ["1"]
+    assert hub.state.active_threads["1"] is sentinel
+    assert hub.state.active_threads["1"].message_count == 99, (
+        "the sentinel was overwritten — the hub loop's already-active guard "
+        "did not fire"
+    )
 
 
 def test_pi_lab_agent_does_not_auto_activate_on_anothers_post():
