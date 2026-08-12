@@ -72,6 +72,8 @@ _FORBIDDEN = [
     "Baltimore",
     "genuine complementarity",
     "build toward a :memo:",
+    "collaboration preferences",
+    "wet-lab partners",
 ]
 
 
