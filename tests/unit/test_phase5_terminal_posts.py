@@ -69,15 +69,22 @@ def test_a_blocked_hub_keeps_its_assessment_in_the_menu():
 
 def test_a_blocked_pi_lab_agent_is_unaffected():
     """The exemption must not widen anything for pi_lab — no pi_lab role
-    declares a terminal type, so its blocked menu is empty, same as before."""
+    declares a terminal type, so a blocked lab's menu is empty even though a
+    reachable hub is present in the fixture (so `pitch` really is otherwise
+    available — this must discriminate on `terminal_only`, not just observe a
+    set `pitch` was never going to be in for an unrelated reason)."""
     from src.agent.post_types import DEFAULT_POST_TYPES
 
+    roles = {"gill": "pi_lab", "pearce": "pi_lab", "blackbird": "scout_hub"}
+    unblocked = available_for(
+        DEFAULT_POST_TYPES, gate=None, roles_by_agent=roles,
+        self_id="gill", terminal_only=False,
+    )
+    assert {s.name for s in unblocked} == {"pitch"}
+
     got = available_for(
-        DEFAULT_POST_TYPES,
-        gate=None,
-        roles_by_agent={"gill": "pi_lab", "pearce": "pi_lab"},
-        self_id="gill",
-        terminal_only=True,
+        DEFAULT_POST_TYPES, gate=None, roles_by_agent=roles,
+        self_id="gill", terminal_only=True,
     )
     assert got == ()
 

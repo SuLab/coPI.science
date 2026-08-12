@@ -150,12 +150,23 @@ def test_gate_off_keeps_a_broadcast_type_even_with_no_known_roles():
 
 
 def test_terminal_only_keeps_only_terminal_types():
-    got = available_for(
-        (CANONICAL["pitch"], CANONICAL["opportunity_assessment"]),
-        gate=STAR_GATE, roles_by_agent=STAR_ROLES,
-        self_id="blackbird", terminal_only=True,
+    """The subject is a lab (`gill`), with a reachable hub in the fixture, so
+    `pitch` is otherwise available — the assertions below must actually
+    discriminate on `terminal_only`, not just observe a set that was already
+    going to exclude `pitch` for an unrelated (topology) reason."""
+    declared = (CANONICAL["pitch"], CANONICAL["opportunity_assessment"])
+
+    kept = available_for(
+        declared, gate=STAR_GATE, roles_by_agent=STAR_ROLES,
+        self_id="gill", terminal_only=False,
     )
-    assert _by_name(got) == {"opportunity_assessment"}
+    assert _by_name(kept) == {"pitch", "opportunity_assessment"}
+
+    narrowed = available_for(
+        declared, gate=STAR_GATE, roles_by_agent=STAR_ROLES,
+        self_id="gill", terminal_only=True,
+    )
+    assert _by_name(narrowed) == {"opportunity_assessment"}
 
 
 def test_terminal_only_in_the_star_can_be_empty():
