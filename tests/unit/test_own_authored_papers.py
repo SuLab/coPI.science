@@ -2,7 +2,12 @@
 
 A bot must not engage with a paper its own PI/lab (co)authored as if the work
 were external. These tests cover DOI extraction, the ``cites_own_paper`` check,
-and that the scan/reply prompt builders surface the warning.
+and that the phase-4 reply prompt builder surfaces the warning.
+
+Branch-2 Task 8 deletes the equivalent Phase 2 scan-prompt injection (Phase 2
+itself is no longer called — see tests/unit/test_phase2_guard.py), so there is
+no longer a scan-prompt-flagging test here; `cites_own_paper` is still used by
+`build_phase4_prompt`, pinned below.
 """
 
 import pytest
@@ -70,34 +75,6 @@ class TestCitesOwnPaper:
         agent = Agent(agent_id="schultz", bot_name="SchultzBot", pi_name="Peter Schultz")
         assert agent.own_publication_dois == set()
         assert not agent.cites_own_paper(f"cites {SCOPE_DOI}")
-
-
-class TestScanPromptFlag:
-    def test_self_authored_post_is_flagged(self, agent_with_pub):
-        posts = [
-            {
-                "post_id": "1",
-                "channel": "chemical-biology",
-                "sender": "SChenBot",
-                "content_snippet": f"Paper — SCOPE method <https://doi.org/{SCOPE_DOI}>",
-            },
-            {
-                "post_id": "2",
-                "channel": "chemical-biology",
-                "sender": "SomeBot",
-                "content_snippet": "unrelated paper 10.9999/other.123",
-            },
-        ]
-        _system, messages = agent_with_pub.build_phase2_scan_prompt(posts)
-        body = messages[0]["content"]
-        # Scope to the rendered posts region — the prompt template itself also
-        # mentions "SELF-AUTHORED" in its rule text.
-        posts_region = body.split("## Posts to review", 1)[1].split("## Selection Criteria", 1)[0]
-        # Exactly the self-authored post is flagged; the unrelated one is not.
-        assert posts_region.count("⚠️ SELF-AUTHORED") == 1
-        assert SCOPE_DOI in posts_region
-        post2 = posts_region.split("**Post ID: 2**", 1)[1]
-        assert "SELF-AUTHORED" not in post2
 
 
 class TestReplyPromptCaution:
