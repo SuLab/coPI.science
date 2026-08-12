@@ -30,36 +30,6 @@ def _extract_dois(text: str | None) -> set[str]:
     return out
 
 
-# Private Channel Rules block — appended to the system prompt when the agent is
-# acting in a collab_private channel. See specs/privacy-and-channel-visibility.md §G4.
-PRIVATE_CHANNEL_RULES = """
-## Private channel rules
-You are in a private channel with a small membership (two bots plus up to two
-PIs). Anything said here must not be referenced by name or specific detail in
-any public channel, any other private channel, or any proposal visible outside
-this channel's membership. If someone outside this channel asks about progress,
-say "we're still refining; I'll post when we have a shareable summary."
-
-## Converging on a revised proposal (IMPORTANT — this channel must conclude)
-This channel exists to refine ONE proposal using the PI's guidance, then finish.
-Do not let it become an open-ended discussion. After a couple of substantive
-exchanges that address the PI's guidance, STOP adding new angles and CONVERGE:
-- If the other bot has just posted a revised `:memo: Summary`, reply with ✅ to
-  confirm it (or propose a specific edit, but move toward ✅ quickly).
-- Otherwise, once the guidance is addressed and the proposal is materially
-  stronger, YOU post the revised `:memo: Summary` — the same structure as a
-  normal proposal (what each lab brings, the specific scientific question, a
-  concrete first experiment, why the collaboration wins, and a confidence
-  label). The other bot then replies ✅.
-
-The `:memo: Summary` + ✅ handshake locks in the revised proposal for the PIs to
-review and ends the refinement. Bias toward producing the summary sooner rather
-than continuing to elaborate — a good revised proposal now beats endless
-discussion. The summary must stand on its own and must not quote the PI's
-private guidance verbatim.
-"""
-
-
 class Agent:
     """
     Represents a single lab agent (Slack bot).
@@ -201,8 +171,7 @@ class Agent:
 
         visibility: the visibility class of the channel the agent is about to
         act in. When 'collab_private', the private-channel memory segment for
-        ``channel_id`` is also injected and a Private Channel Rules block is
-        appended. See specs/privacy-and-channel-visibility.md §G1, §G4.
+        ``channel_id`` is also injected. See specs/privacy-and-channel-visibility.md §G1.
         """
         return self._compose_system_prompt(
             include_memory=True,
@@ -234,8 +203,7 @@ class Agent:
         Includes working memory since it may contain thread-relevant context.
 
         visibility/channel_id: same semantics as build_system_prompt — determines
-        which memory segment is injected and whether the Private Channel Rules
-        block is appended.
+        which memory segment is injected.
         """
         return self._compose_system_prompt(
             include_memory=True,
@@ -283,7 +251,6 @@ class Agent:
         """
         base_prompt = self._load_prompt("agent-system.md", _default_system_prompt())
         identity = self._render_identity()
-        private_rules = PRIVATE_CHANNEL_RULES if visibility == VISIBILITY_COLLAB_PRIVATE else ""
 
         header = f"""{base_prompt}
 
@@ -309,9 +276,9 @@ class Agent:
 Use these to reference other labs' work in conversations. Include links when citing.
 {self._lab_directory}
 """
-            return f"{header}{memory_block}\n{lab_directory_section}{private_rules}"
+            return f"{header}{memory_block}\n{lab_directory_section}"
 
-        return f"{header}{memory_block}{private_rules}"
+        return f"{header}{memory_block}"
 
     def _compose_working_memory(
         self,

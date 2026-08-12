@@ -3,10 +3,12 @@ the email seam.
 
 Scope, stated once so the gap stays visible:
 
-* **In scope.** The engine's thread-conclusion path (`_check_thread_outcome` ->
-  `_close_thread`) writing a `ThreadDecision`; the agent dashboard rendering it; the
-  `/review` and `/reopen` endpoints and the `ProposalReview` rows they write; the
-  private-channel migration the reopen action triggers.
+* **In scope.** The agent dashboard rendering a `ThreadDecision`; the `/review` and
+  `/reopen` endpoints and the `ProposalReview` rows they write; the private-channel
+  migration the reopen action triggers. The engine's thread-conclusion path
+  (`_check_thread_outcome` -> `_close_thread`) writing a `ThreadDecision` with
+  outcome='no_proposal' (the ⏸️ close) or 'timeout' is also in scope and driven for
+  real; outcome='proposal' is NOT — see the note on `_conclude_thread` below.
 * **Out of scope by instruction.** Everything inside `src/services/email.py` and
   `src/services/email_notifications.py` below `send_proposal_notification`: MIME
   assembly, the Reply-To / unsubscribe token wiring, and the SES call itself. The one
@@ -14,6 +16,19 @@ Scope, stated once so the gap stays visible:
   recording double and says so in every assertion message, so a reader cannot mistake a
   green run here for "proposal email is covered". It is not covered. See
   `.notes/full-system-test-plan.md` § Global Constraints.
+
+**outcome='proposal' is legacy-only as of the pitch-only reconciliation (Task 7,
+docs/plans/2026-08-12-pr34-branch2-engine-reconciliation.md).** The live ✅-confirms-
+:memo: handshake that used to write these rows was retired: `_check_thread_outcome` has
+no arm left that produces outcome='proposal', and `_check_private_channel_outcome` /
+`_finalize_private_proposal` (the collab_private analog) no longer exist at all. The
+review/reopen/dashboard machinery below still has to keep serving proposals that
+already exist in the DB, so every fixture in this module that needs one (`proposal`,
+via `_conclude_thread(outcome="proposal", ...)`) fabricates the row directly instead of
+driving the (now nonexistent) live path — see that helper's docstring. This is a
+deliberate scope narrowing, not test debt: `test_a_concluded_thread_records_a_proposal_
+decision` is the control that pins what the live handshake actually does now (produces
+no ThreadDecision at all), alongside the ⏸️ path it still does drive for real.
 
 Dependencies: the database is REAL (the rolled-back `db_session` from
 tests/conftest.py). The LLM, Slack and SES are all doubled — and the autouse
@@ -24,7 +39,7 @@ than a silent network call.
 anywhere; "reviewed" is the *existence* of a `ProposalReview` row for
 (thread_decision_id, agent_id), and the rating column doubles as the discriminator:
 
-    thread concluded (ThreadDecision.outcome='proposal')   -- no review row
+    thread concluded (ThreadDecision.outcome='proposal', legacy rows only)  -- no review row
         -- POST /review   rating 1..4  -->  decided, terminal for this agent
         -- POST /reopen   rating 0     -->  reopened, ALSO terminal for this agent
                                             (+ collab_private channel,
@@ -202,13 +217,42 @@ def _marker() -> str:
 async def _conclude_thread(
     db_session, lab, llm_calls, *, channel: str, outcome: str, body: str,
 ) -> str:
-    """Drive the REAL conclusion path and return the thread_id.
+    """Produce a concluded thread's ThreadDecision row and return its thread_id.
 
-    Not a factory call: the point of this task's first bullet is that a concluded
-    thread produces the decision row, so the row has to come out of
-    `_check_thread_outcome`. ``outcome='proposal'`` replays the :memo:-Summary -> ✅
-    handshake; ``outcome='no_proposal'`` replays the ⏸️ close.
+    ``outcome='no_proposal'`` drives the REAL conclusion path — replays the ⏸️
+    close through the live `_check_thread_outcome` -> `_close_thread` — because
+    that arm survived the pitch-only reconciliation (see
+    docs/plans/2026-08-12-pr34-branch2-engine-reconciliation.md Task 7).
+
+    ``outcome='proposal'`` does NOT drive the engine. The ✅-confirms-:memo:
+    handshake that used to produce these rows was retired by that same task —
+    `_check_thread_outcome` has no arm left that can write outcome='proposal'
+    (see `_check_private_channel_outcome` too: also gone). A row with this
+    outcome is legacy data only, so this branch fabricates exactly the row
+    shape a legacy run would have left behind, directly via the DB, so the
+    review/reopen/dashboard machinery below — which still has to serve
+    existing proposals regardless of how they were created — has one to
+    serve. It is NOT simulating reachable behavior: see
+    `test_a_concluded_thread_records_a_proposal_decision`'s control pair for
+    what the live handshake actually does now (nothing).
     """
+    root_ts = f"{1_700_000_000 + len(channel) * 7 + abs(hash(channel)) % 9000}.000100"
+
+    if outcome == "proposal":
+        summary = f":memo: **Summary — Joint programme**\n\n{body}"
+        db_session.add(ThreadDecision(
+            simulation_run_id=lab.run_id,
+            thread_id=root_ts,
+            channel=channel,
+            agent_a="alpha",
+            agent_b="beta",
+            outcome="proposal",
+            summary_text=summary,
+        ))
+        await db_session.flush()
+        db_session.expire_all()
+        return root_ts
+
     agents = [
         Agent(agent_id="alpha", bot_name="AlphaBot", pi_name="Ada Alpha"),
         Agent(agent_id="beta", bot_name="BetaBot", pi_name="Bo Beta"),
@@ -219,7 +263,6 @@ async def _conclude_thread(
         session_factory=_FixtureSessionFactory(db_session),
         simulation_run_id=lab.run_id,
     )
-    root_ts = f"{1_700_000_000 + len(channel) * 7 + abs(hash(channel)) % 9000}.000100"
     engine.message_log.append(LogEntry(
         ts=root_ts, channel=channel, sender_agent_id="beta", sender_name="BetaBot",
         content="Opening the discussion.", posted_at=float(root_ts),
@@ -227,23 +270,14 @@ async def _conclude_thread(
     thread = ThreadState(thread_id=root_ts, channel=channel, other_agent_id="beta")
     agents[0].state.active_threads[root_ts] = thread
 
-    if outcome == "proposal":
-        summary = f":memo: **Summary — Joint programme**\n\n{body}"
-        engine.message_log.append(LogEntry(
-            ts=f"{float(root_ts) + 1:.6f}", channel=channel, sender_agent_id="beta",
-            sender_name="BetaBot", content=summary, thread_ts=root_ts,
-            posted_at=float(root_ts) + 1,
-        ))
-        await engine._check_thread_outcome(agents[0], thread, "✅ Agreed, let's do it.")
-    else:
-        engine.message_log.append(LogEntry(
-            ts=f"{float(root_ts) + 1:.6f}", channel=channel, sender_agent_id="beta",
-            sender_name="BetaBot", content=body, thread_ts=root_ts,
-            posted_at=float(root_ts) + 1,
-        ))
-        await engine._check_thread_outcome(
-            agents[0], thread, f"⏸️ No viable overlap. {body}",
-        )
+    engine.message_log.append(LogEntry(
+        ts=f"{float(root_ts) + 1:.6f}", channel=channel, sender_agent_id="beta",
+        sender_name="BetaBot", content=body, thread_ts=root_ts,
+        posted_at=float(root_ts) + 1,
+    ))
+    await engine._check_thread_outcome(
+        agents[0], thread, f"⏸️ No viable overlap. {body}",
+    )
 
     assert llm_calls, (
         "the working-memory synthesis never ran, so the conclusion path was not "
@@ -262,7 +296,11 @@ async def _decision(db_session, thread_id: str) -> ThreadDecision:
 
 @pytest.fixture
 async def proposal(db_session, lab, llm):
-    """One concluded PROPOSAL thread, produced by the engine, ready to review."""
+    """One concluded PROPOSAL thread, fabricated as a legacy row, ready to review.
+
+    ``llm`` is accepted (and unused) only to keep this fixture's shape stable for
+    the tests that request it alongside other fixtures needing the double.
+    """
     body = _marker()
     thread_id = await _conclude_thread(
         db_session, lab, llm, channel="degrader-chem", outcome="proposal", body=body,
@@ -277,51 +315,83 @@ async def proposal(db_session, lab, llm):
 # ---------------------------------------------------------------------------
 
 
-async def test_a_concluded_thread_records_a_proposal_decision(db_session, lab, llm):
-    """The ✅-confirms-:memo: handshake writes a ThreadDecision with outcome='proposal'
-    and the summary text starting at the :memo: marker.
-
-    Control: the SAME engine, same session, driven with ⏸️ instead, writes
-    outcome='no_proposal'. Without it, `outcome == 'proposal'` would also be satisfied
-    by a `_close_thread` that hard-coded the value.
+async def test_the_no_proposal_close_still_produces_a_thread_decision(db_session, lab, llm):
+    """Control half 1/2. The ⏸️ close survived the pitch-only reconciliation — pin
+    that `_check_thread_outcome` -> `_close_thread` still writes a ThreadDecision
+    for the arm that remains, with no ProposalReview yet (concluding a thread
+    leaves the proposal UNREVIEWED and waiting; the review row is created only
+    by a PI action).
     """
-    yes_body, no_body = _marker(), _marker()
-    yes_ts = await _conclude_thread(
-        db_session, lab, llm, channel="degrader-chem", outcome="proposal", body=yes_body,
+    body = _marker()
+    thread_id = await _conclude_thread(
+        db_session, lab, llm, channel="cold-lead", outcome="no_proposal", body=body,
     )
-    no_ts = await _conclude_thread(
-        db_session, lab, llm, channel="cold-lead", outcome="no_proposal", body=no_body,
-    )
+    decision = await _decision(db_session, thread_id)
 
-    yes = await _decision(db_session, yes_ts)
-    no = await _decision(db_session, no_ts)
-
-    assert yes.outcome == "proposal", (
-        f"the ✅/:memo: handshake did not close the thread as a proposal: {yes.outcome}"
+    assert decision.outcome == "no_proposal", (
+        f"the ⏸️ close did not record outcome='no_proposal': {decision.outcome}"
     )
-    assert no.outcome == "no_proposal", (
-        "the ⏸️ control also came back as 'proposal', so outcome is not being derived "
-        f"from the conversation at all: {no.outcome}"
-    )
-    assert yes.summary_text.startswith(":memo:"), (
-        f"the summary was not extracted from the :memo: marker: {yes.summary_text!r}"
-    )
-    assert yes_body in yes.summary_text
-    assert {yes.agent_a, yes.agent_b} == {"alpha", "beta"}
-    assert yes.origin_visibility == "public"
-    assert yes.refined_in_channel is None, (
-        "a freshly concluded thread must not already point at a refinement channel"
-    )
-
-    # No ProposalReview exists yet. This is the state machine's real entry point: the
-    # review row is created by the PI's action, never by the thread concluding.
+    assert {decision.agent_a, decision.agent_b} == {"alpha", "beta"}
     assert (await db_session.scalar(
         select(func.count(ProposalReview.id)).where(
-            ProposalReview.thread_decision_id.in_([yes.id, no.id])
+            ProposalReview.thread_decision_id == decision.id
         )
     )) == 0, (
         "a ProposalReview row appeared without any PI action — concluding a thread is "
         "supposed to leave the proposal UNREVIEWED and waiting"
+    )
+
+
+async def test_a_memo_and_check_mark_reply_no_longer_produces_a_thread_decision(
+    db_session, lab,
+):
+    """Control half 2/2 — and the actual regression pin for Task 7.
+
+    Before the pitch-only reconciliation this was
+    `test_a_concluded_thread_records_a_proposal_decision`'s "yes" half: replaying
+    a `:memo: Summary` + ✅ reply through the REAL, live `_check_thread_outcome`
+    used to write a ThreadDecision with outcome='proposal'. That handshake is
+    retired now (see the module docstring) — this asserts it does NOTHING: no
+    ThreadDecision is written and the thread is not closed. No `llm` double is
+    installed because nothing here should reach `_close_thread`, which is the
+    only path that would call it.
+    """
+    channel = "degrader-chem"
+    agents = [
+        Agent(agent_id="alpha", bot_name="AlphaBot", pi_name="Ada Alpha"),
+        Agent(agent_id="beta", bot_name="BetaBot", pi_name="Bo Beta"),
+    ]
+    engine = SimulationEngine(
+        agents=agents,
+        slack_clients={},
+        session_factory=_FixtureSessionFactory(db_session),
+        simulation_run_id=lab.run_id,
+    )
+    root_ts = "1700000000.000100"
+    engine.message_log.append(LogEntry(
+        ts=root_ts, channel=channel, sender_agent_id="beta", sender_name="BetaBot",
+        content="Opening the discussion.", posted_at=float(root_ts),
+    ))
+    thread = ThreadState(thread_id=root_ts, channel=channel, other_agent_id="beta")
+    agents[0].state.active_threads[root_ts] = thread
+
+    summary = f":memo: **Summary — Joint programme**\n\n{_marker()}"
+    engine.message_log.append(LogEntry(
+        ts=f"{float(root_ts) + 1:.6f}", channel=channel, sender_agent_id="beta",
+        sender_name="BetaBot", content=summary, thread_ts=root_ts,
+        posted_at=float(root_ts) + 1,
+    ))
+    await engine._check_thread_outcome(agents[0], thread, "✅ Agreed, let's do it.")
+
+    assert (await db_session.scalar(
+        select(func.count(ThreadDecision.id)).where(ThreadDecision.thread_id == root_ts)
+    )) == 0, (
+        "a ✅ reply to a :memo: Summary wrote a ThreadDecision — the retired "
+        "handshake is still live somewhere in _check_thread_outcome"
+    )
+    assert thread.status != "closed", "the thread was closed by the retired handshake"
+    assert root_ts in agents[0].state.active_threads, (
+        "the thread was evicted from active_threads by the retired handshake"
     )
 
 
