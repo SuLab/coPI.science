@@ -75,10 +75,16 @@ async def live(engine, monkeypatch):
         await db.commit()
 
 
-def _engine(factory, run_id, agent_ids=AGENT_IDS):
-    """A real SimulationEngine with Slack off."""
+def _engine(factory, run_id, agent_ids=AGENT_IDS, roles=None):
+    """A real SimulationEngine with Slack off.
+
+    ``roles`` (agent_id -> role) defaults every agent to ``pi_lab`` — pass it to
+    build a ``scout_hub`` agent for a star-shaped topology (task 10).
+    """
+    roles = roles or {}
     agents = [
-        Agent(agent_id=a, bot_name=f"{a.capitalize()}Bot", pi_name=f"PI {a}")
+        Agent(agent_id=a, bot_name=f"{a.capitalize()}Bot", pi_name=f"PI {a}",
+              role=roles.get(a, "pi_lab"))
         for a in agent_ids
     ]
     eng = SimulationEngine(
@@ -1301,11 +1307,18 @@ async def test_start_computes_the_gate_and_records_a_snapshot(live, monkeypatch)
     first turn — has never actually been exercised. `request_stop()` is triggered from
     a setup step that runs after both, which is the least invasive way to let setup
     complete and skip the loop.
+
+    Star-shaped (task 10): `start()` now fails fast on a non-star cohort layout, so
+    the topology here is `{lab, hub}` per lab rather than the lab-to-lab cohort this
+    test used before that validation existed — see
+    `test_start_raises_when_cohorts_are_not_star_shaped` for that shape as the
+    negative case.
     """
     factory, run_id = live
-    await _topology(factory, {"alpha": ["su", "wiseman"]})
+    await _topology(factory, {"alpha": ["su", "blackbird"], "beta": ["wiseman", "blackbird"]})
     _cfg(monkeypatch, enabled=True, policy="isolated")
-    eng = _engine(factory, run_id)
+    eng = _engine(factory, run_id, agent_ids=("su", "wiseman", "blackbird"),
+                  roles={"blackbird": "scout_hub"})
 
     original = eng._record_topology_snapshot
     order = []
@@ -1322,10 +1335,10 @@ async def test_start_computes_the_gate_and_records_a_snapshot(live, monkeypatch)
     await eng.start()
 
     assert order, "setup never reached _record_topology_snapshot — start() aborted early"
-    assert order[0]["su"] == {"su", "wiseman"}, (
+    assert order[0]["su"] == {"su", "blackbird"}, (
         f"the gate was not in force before the loop: {order[0]}"
     )
-    assert order[0]["cravatt"] == set()
+    assert order[0]["wiseman"] == {"wiseman", "blackbird"}
 
     async with factory() as db:
         snaps = (await db.execute(
@@ -1338,9 +1351,24 @@ async def test_start_computes_the_gate_and_records_a_snapshot(live, monkeypatch)
         f"start() must record exactly one startup snapshot, got {len(snaps)}"
     )
     topo = snaps[0].topology
-    assert topo["agents"]["su"] == ["su", "wiseman"]
+    assert topo["agents"]["su"] == ["blackbird", "su"]
     assert topo["cohort_default_policy"] == "isolated"
     assert topo["cohort_isolation_enabled"] is True
+
+
+async def test_start_raises_when_cohorts_are_not_star_shaped(live, monkeypatch):
+    """Task 10's actual deliverable, end to end: a lab-to-lab cohort — the shape
+    every other test in this module still uses via `_recompute_allowed_sender_ids()`
+    directly — must fail `start()` fast rather than let a hub-unreachable, lab-to-lab
+    roster run.
+    """
+    factory, run_id = live
+    await _topology(factory, {"alpha": ["su", "wiseman"]})
+    _cfg(monkeypatch, enabled=True, policy="isolated")
+    eng = _engine(factory, run_id)
+
+    with pytest.raises(RuntimeError, match="Star-topology validation failed"):
+        await eng.start()
 
 
 async def test_start_records_a_snapshot_even_when_the_gate_is_off(live, monkeypatch):

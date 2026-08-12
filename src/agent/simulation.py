@@ -535,6 +535,17 @@ class SimulationEngine:
         # starts at 0.0), but doing it here means no turn can ever run with an
         # unset gate while isolation is on. See .notes/cohort-system-v2.md §8.
         await self._recompute_allowed_sender_ids()
+        # Fail fast: a cohort layout that isn't star-shaped ({lab, hub} per lab,
+        # no lab-to-lab cohort) makes the hub-and-spoke design unrunnable — a lab
+        # that can reach another lab directly, or can't reach the hub at all, has
+        # no way to land a pitch. Only the startup path raises; a mid-run
+        # recompute (roster sync) logs instead — see
+        # _recompute_allowed_sender_ids's call sites.
+        violations = self._validate_star_topology()
+        if violations:
+            raise RuntimeError(
+                "Star-topology validation failed: " + "; ".join(violations)
+            )
         # AFTER the gate, never before: the filter inside reads
         # agent.allowed_sender_ids, which is None until the line above runs.
         self.refresh_lab_directories()
@@ -4551,6 +4562,59 @@ class SimulationEngine:
         for agent in self.agents.values():
             agent.allowed_sender_ids = None
 
+    def _validate_star_topology(self) -> list[str]:
+        """Check the live cohort gates against the hub-and-spoke ("star") design.
+
+        The design (docs/plans/2026-08-12-pr34-pitch-only-reconciliation-design.md
+        §5) is strictly hub-and-spoke: every ``pi_lab`` agent's cohort is
+        ``{lab, hub}`` — it may reach the ``scout_hub`` agent and nothing else. Two
+        ways a gate can violate that, checked for every ``pi_lab`` agent whose gate
+        is not None (``gate is None`` means isolation is off for that agent, which
+        is vacuously fine — an ungated agent can always reach the hub):
+
+        (a) the gate contains another ``pi_lab`` agent — labs can reach each other
+            directly, which the hub-only design forbids.
+        (b) the gate contains no ``scout_hub`` agent — the hub is unreachable, so
+            the agent has nowhere to land a pitch.
+
+        Returns one human-readable violation string per broken rule (a lab-to-lab
+        pair is reported once, not once per side); empty when the topology is
+        star-shaped, including when every gate is None.
+        """
+        violations: list[str] = []
+        reported_pairs: set[frozenset[str]] = set()
+        for agent_id, agent in self.agents.items():
+            if agent.role != "pi_lab":
+                continue
+            gate = agent.allowed_sender_ids
+            if gate is None:
+                continue
+
+            has_hub = False
+            for other_id in gate:
+                other = self.agents.get(other_id)
+                if other is None or other_id == agent_id:
+                    continue
+                if other.role == "scout_hub":
+                    has_hub = True
+                elif other.role == "pi_lab":
+                    pair = frozenset((agent_id, other_id))
+                    if pair not in reported_pairs:
+                        reported_pairs.add(pair)
+                        violations.append(
+                            f"{agent_id} and {other_id} are both pi_lab agents but "
+                            "can reach each other directly — labs may only be "
+                            "cohorted with the hub"
+                        )
+
+            if not has_hub:
+                violations.append(
+                    f"{agent_id} has no scout_hub agent in its cohort gate — the "
+                    "hub is unreachable, so pitch targets are unsatisfiable"
+                )
+
+        return violations
+
     async def _recompute_allowed_sender_ids(self) -> None:
         """Recompute each live agent's cohort-mate set for the interaction gate.
 
@@ -4670,6 +4734,13 @@ class SimulationEngine:
             # The topology moved mid-run — snapshot the new one so the run stays
             # attributable to every configuration it actually ran under (v2 §13.1).
             await self._record_topology_snapshot()
+
+        # Star-topology check: log only. The startup call site (start(), right
+        # after the FIRST invocation of this method) raises instead — a live run
+        # must not crash on an admin's transient cohort edit, but the edit still
+        # needs to show up somewhere an operator will see it.
+        for violation in self._validate_star_topology():
+            logger.error("[cohort] star-topology violation: %s", violation)
 
     def _apply_cohort_gate_to_state(self) -> None:
         """Reconcile in-memory agent state with the freshly computed gate.
