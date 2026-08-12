@@ -1196,6 +1196,45 @@ class SimulationEngine:
                     agent.agent_id, thread_id, other_id,
                 )
 
+        # Hub auto-activation: the scout hub opens an interview thread on
+        # every new lab top-level post, no @-mention required. Gated on the
+        # plain `agent.role` attribute (NOT `self._roles_by_agent()` — see
+        # INV-E structural note 4, a separate, separately-recomputed
+        # consumer of role knowledge).
+        if agent.role == "scout_hub":
+            new_posts = self.message_log.get_new_top_level_posts(
+                since=cursor,
+                channels=agent.state.subscribed_channels,
+                exclude_agent_id=agent.agent_id,
+                allowed_sender_ids=agent.allowed_sender_ids,
+            )
+            for entry in new_posts:
+                # Private channels are flat — no thread activation.
+                if self._channel_visibility.get(entry.channel) == VISIBILITY_COLLAB_PRIVATE:
+                    continue
+                thread_id = entry.thread_ts or entry.ts
+                if thread_id in agent.state.active_threads:
+                    continue
+                if thread_id in self._closed_thread_ids:
+                    continue
+                # Check thread participation rules
+                allowed = self.message_log.get_thread_allowed_agents(thread_id)
+                if allowed and agent.agent_id not in allowed:
+                    continue
+                other_id = self._infer_agent_id(entry.sender_name) or entry.sender_agent_id
+                if other_id and other_id != agent.agent_id:
+                    agent.state.active_threads[thread_id] = ThreadState(
+                        thread_id=thread_id,
+                        channel=entry.channel,
+                        other_agent_id=other_id,
+                        message_count=self.message_log.get_thread_message_count(thread_id),
+                        has_pending_reply=True,
+                    )
+                    logger.info(
+                        "[%s] Phase 3: Auto-activated interview thread %s (lab post by %s)",
+                        agent.agent_id, thread_id, other_id,
+                    )
+
     # ------------------------------------------------------------------
     # Phase 4: Reply to Active Threads (parallel)
     # ------------------------------------------------------------------
