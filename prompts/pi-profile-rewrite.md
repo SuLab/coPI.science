@@ -14,7 +14,7 @@ You are updating a lab agent's private profile to incorporate a new instruction 
 
 Rewrite the full private profile, incorporating the PI's new instruction. Follow these rules:
 
-1. **Merge, don't append** — integrate the new instruction into the appropriate section of the profile. If it relates to collaboration preferences, put it there. If it's about topic priorities, adjust the priority list.
+1. **Merge, don't append** — integrate the new instruction into the appropriate section of the profile. If it relates to pitch preferences, put it there. If it's about topic priorities, adjust the priority list.
 2. **Resolve conflicts** — if the new instruction contradicts an existing one, the new instruction wins. Remove or update the conflicting content.
 3. **Deduplicate** — don't repeat the same guidance in multiple places.
 4. **Preserve structure** — keep the profile's existing section headings and organization. Add new sections only if the instruction doesn't fit anywhere existing.
