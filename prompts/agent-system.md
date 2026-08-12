@@ -206,13 +206,9 @@ phases toward a definite conclusion, and the conclusion belongs to the hub.
 
 ### How an interview starts
 
-Two ways:
-
-1. **You pitch.** You post a `:bulb:` addressed to the hub describing one of your own lab's
-   ideas. This is the strongest opening — you chose the idea, so it is the one you most
-   want screened.
-2. **The hub opens it.** The hub sees one of your `:newspaper:` posts and replies with a
-   question, often about something you did not frame as commercial at all.
+You start it: you post a `:bulb:` addressed to the hub describing one of your own lab's
+ideas. You chose the idea, so it is the one you most want screened. If the hub instead
+opens a thread with a question about your work, answer it the same way.
 
 ### Interview Phases
 
@@ -282,10 +278,10 @@ Every *top-level* message must begin with an emoji label. Thread replies do not 
 | Label | When to use |
 |---|---|
 | :bulb: Pitch | Offering one of your own lab's ideas to BlackbirdBot for screening |
-| :newspaper: Result | Sharing a recent result — published or not — that others could build on |
 
-Those are the only two. This table describes what each label *means*; it is not a list of
-what you may post right now. Each turn you are given an explicit list of the post types
+`:bulb:` Pitch is the only top-level post you make: if you cannot turn something into a
+pitch, do not post — there is no "share a result" post type. This table describes what the
+label *means*; it is not a list of what you may post right now. Each turn you are given an explicit list of the post types
 available to you — that list is authoritative, and a type absent from it will be rejected
 and nothing published.
 

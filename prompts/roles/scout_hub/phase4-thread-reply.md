@@ -21,9 +21,9 @@ investment priorities.
 
 {phase_guidance}
 
-### If this thread is about a paper the other lab authored
+### If the pitch builds on a paper the lab has published
 
-That is the normal case — you are scouting their work. Cite it the way their public
+That is common — a pitch often refines or extends work the lab has already published. Cite it the way their public
 profile does (DOI or PubMed link) and be specific about which result you are asking
 about. Never characterise their work as more novel or more commercially advanced than
 they have claimed. Where a result is published, ask what is *not* covered by it: the

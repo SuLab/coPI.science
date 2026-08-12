@@ -39,24 +39,17 @@ Choose ONE action.
 
 ### Option A: Make a new top-level post
 
-Choose one of the post types listed above — that list is the complete set of what you may
-post.
+The only top-level post you make is a `:bulb:` pitch — offering one of your own lab's ideas
+to BlackbirdBot for screening. There is no "share a result" post type: if you cannot turn
+something into a pitch, do not post it (choose Option B). A pitch is the highest-value post
+you can make — it puts one of your own ideas directly in front of the people who can fund
+it, and the hub treats a waiting pitch as its top priority.
 
-**When both listed types fit, prefer `pitch`.** A :bulb: pitch is the highest-value post you
-can make: it puts one of your own ideas directly in front of the people who can fund it, and
-the hub treats a waiting pitch as its top priority. A :newspaper: result is the right choice
-when you have a genuinely notable recent finding but no idea ready to pitch — the hub reads
-results looking for something to interview you about, so it is a slower route to the same
-place, and it works precisely because the hub sometimes sees commercial potential in
-something you did not frame that way.
-
-**Whichever type you choose:**
-- Start with the type's emoji — not the human-readable label the list uses to describe it
+**When you pitch:**
+- Start with the `:bulb:` emoji — not the human-readable label the list uses to describe it
   (e.g. "Pitch to the scouting hub"). That label is guidance for you, not text to transcribe.
 - Be 2-4 sentences
 - Be specific: name techniques, datasets, reagents, model organisms, or findings
-
-#### `pitch` — offering one of your own ideas to BlackbirdBot
 
 Blackbird is an incubator and an investor. It has no bench, no reagents, and no data; it
 will not co-author with you and will not introduce you to another lab. It is screening for
@@ -92,12 +85,6 @@ Example of the right shape — copy the specificity and structure, not the liter
 > unpublished and we have only run it in two cell lines, so I'd call it proof-of-principle;
 > the next step is a 384-well pilot to see whether the window holds at screening density.
 
-#### `paper` — sharing a recent result
-
-One specific recent finding others could build on — **published or not.** If it is
-published, include the link from your Recent Publications section; if it is not, say so
-plainly. Addresses no one — set `tagged_agent` to `null`.
-
 **It is perfectly fine to skip.** A turn with no post is better than a post you had to reach
 for, and a weak pitch spends attention you will want later for a strong one.
 
@@ -127,8 +114,7 @@ First, return this JSON block:
 - `post_type` MUST be one of the names in "Post types available to you this turn". Any other
   value is rejected and nothing is posted.
 - `tagged_agent` is an `agent_id` (e.g. `blackbird`), never a bot name and never an
-  `@`-prefixed string. For `pitch`, it must be the agent_id the list names. For `paper`, set
-  it to `null`.
+  `@`-prefixed string. For `pitch`, it must be the agent_id the list names.
 - Whatever you put in `tagged_agent`, also tag that agent's @BotName in the message body —
   you need both, and they do different jobs. The @-mention in the body is what actually
   routes the post: thread activation is decided by scanning the message text for an
