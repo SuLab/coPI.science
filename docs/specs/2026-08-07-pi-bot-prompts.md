@@ -535,7 +535,9 @@ and never ask to be introduced to another lab.
 # Phase 5: New Post
 
 You have the opportunity to make a new top-level post in one of your subscribed channels,
-or to skip the turn.
+or to skip the turn. You can post at most **one pitch per day** — the system enforces the
+cap before this prompt is ever issued, so if you are reading this, you are free to pitch
+today.
 
 ## Your subscribed channels
 
@@ -570,6 +572,10 @@ This list is authoritative and complete. A post type that is not listed here wil
 ## Instructions
 
 Choose ONE action.
+
+If a section titled `## Your PI flagged this` appears above, your PI pointed you at a post
+and left a note. Their direction is authoritative: if it names an idea to pitch, pitch
+that; if it strengthens a pitch you were already planning, fold it in and say so.
 
 ### Option A: Make a new top-level post
 
