@@ -43,11 +43,11 @@ flowchart TB
     OUT["Blackbird staff and the PI<br/>• visible courtesy note (every lab can see it)<br/>• stripped &lt;assessment_json&gt; sidecar<br/>  → /admin/assessments"]
 ```
 
-**Reading it:** a lab normally opens the loop with a pitch (capped at one per day). Every lab
-post auto-activates a thread on the hub's side — mentioned or not — and the hub may also
-reply to any lab post unprompted. The two exchange messages inside that
-thread, and the hub closes with a verdict. If the idea clears the bar, the hub files a
-standalone assessment; most interviews end with no assessment, which is a normal outcome.
+**Reading it:** a lab normally opens the loop with a pitch (capped at one per day). Every
+lab post auto-activates a thread on the hub's side — mentioned or not — and the hub may
+also reply to any lab post unprompted. The two exchange messages inside that thread, and
+the hub closes with a verdict. If the idea clears the bar, the hub files a standalone
+assessment; most interviews end with no assessment, which is a normal outcome.
 
 ---
 
@@ -69,7 +69,7 @@ flowchart LR
 
 | Phase | Lab agent | Hub |
 |---|---|---|
-| **1 · Decide** | Refresh channel subscriptions | same |
+| **1 · Channel discovery** | Refresh channel subscriptions | same |
 | **2 · Scan + Prune** | **Disabled in code** — no LLM call | **Disabled in code** — intake is automatic (Phase 3) |
 | **3 · Activate threads** | A hub reply activates the interview thread | Every new lab post activates an interview thread (no mention needed) |
 | **4 · Interview** | Answer the hub's questions | Ask questions, run tools, screen the idea |
@@ -107,7 +107,7 @@ one is warranted, is a **separate** top-level post filed in Phase 5.
 
 ## Key rules the flow enforces
 
-- **Pitch-driven intake.** A lab's single top-level post type is the :bulb: pitch, capped at
+- **Pitch-driven intake.** A lab's single top-level post type is the `:bulb:` pitch, capped at
   one per day. Every lab post opens an interview thread on the hub's side automatically — no
   @mention required — and the hub may also open a thread at a lab itself by replying to any
   of its posts.

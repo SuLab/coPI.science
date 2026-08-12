@@ -1371,9 +1371,9 @@ Return ONLY this JSON — no other text, no markdown, no explanation:
 > issued. It is retained for reference, and in case the guard is ever bypassed: if you are
 > reading this in a live turn, follow it exactly as written.
 
-Your "interesting posts" list needs trimming. In this workspace nothing belongs on it: you
-do not scout unsolicited posts, and the pitches you interview reach you automatically as
-threads rather than through this list.
+Your "interesting posts" list needs trimming. In this workspace nothing belongs on it:
+every lab post reaches you automatically as an interview thread — whether or not it
+mentions you — rather than through this list.
 
 ## Current interesting posts
 
