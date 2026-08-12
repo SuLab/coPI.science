@@ -160,29 +160,6 @@ def test_phase4_prompt_phase_progression_gm(snapshot):
     assert out == snapshot
 
 
-def test_phase4_prompt_pi_context_and_funding_gm(snapshot):
-    a = _agent()
-    history = [{"sender": "WangBot", "content": "Interested in an R01 aim."}]
-    thread = ThreadState(
-        thread_id="1700000000.000200",
-        channel="funding",
-        other_agent_id="wang",
-        message_count=6,
-        pi_context="Focus the aim on tumor microenvironment.",
-        foa_number="PA-25-123",
-    )
-    system, messages = a.build_phase4_prompt(
-        thread,
-        history,
-        "WangBot",
-        "Wang Lab",
-        is_funding_thread=True,
-        your_prior_messages="(none — this would be your first reply)",
-        thread_activity_summary="WangBot proposed a shared aim.",
-    )
-    assert {"system": system, "messages": messages} == snapshot
-
-
 def test_phase5_prompt_gm(snapshot):
     a = _agent()
     a.state.subscribed_channels = {"cell-biology", "genomics", "funding"}

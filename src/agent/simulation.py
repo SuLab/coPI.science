@@ -62,6 +62,13 @@ from src.services.llm import (
 # call site below that read those two symbols is inlined to `False`/dead-branch,
 # each marked `# TASK-6-REMOVES` individually, so Task 6 can find and delete them
 # alongside the foa_number/funding_only plumbing they feed.
+#
+# Task 5 removed the FOA/funding_only params from Agent.build_phase4_prompt/
+# build_phase5_prompt themselves (no FOA plumbing or funding_only template
+# surgery left in the prompt builders) and deleted the dict/bool assembly in
+# this file that existed only to feed those params. The stub functions below
+# still have live callers (is_funding-gated dead branches), so they stay for
+# Task 6.
 def extract_foa_number(content: str) -> str | None:
     return None
 
@@ -1397,22 +1404,14 @@ class SimulationEngine:
         other_name = other_agent.bot_name if other_agent else thread.other_agent_id
         other_lab = other_agent.pi_name if other_agent else "Unknown"
 
-        # Funding-thread context (self-dedup + late-joiner summary)
         # TASK-6-REMOVES: was self.message_log.is_funding_thread(thread.thread_id);
         # deleted from message_log.py in Task 4 (no funding participation
-        # exception).
+        # exception). Task 5 removed build_phase4_prompt's funding-context
+        # params (is_funding_thread/your_prior_messages/thread_activity_summary),
+        # so the self-dedup/late-joiner-summary assembly that used to feed them
+        # is gone with this call site. `is_funding` itself survives only for
+        # the funding-draft-validator gate below — Task 6 deletes both.
         is_funding = False
-        your_prior_text: str | None = None
-        thread_activity_text: str | None = None
-        if is_funding:
-            your_prior_entries = [
-                e for e in history_entries if e.sender_agent_id == agent.agent_id
-            ]
-            your_prior_text = format_your_prior_messages(your_prior_entries)
-            summary = summarize_funding_thread(
-                self.message_log, thread.thread_id, viewer_agent_id=agent.agent_id,
-            )
-            thread_activity_text = format_funding_thread_summary(summary)
 
         # Resolve the thread's channel visibility for G1 prompt scoping. In v1
         # all threads live in public channels, so this is effectively always
@@ -1427,9 +1426,6 @@ class SimulationEngine:
             thread_history=thread_history,
             other_agent_name=other_name,
             other_agent_lab=other_lab,
-            is_funding_thread=is_funding,
-            your_prior_messages=your_prior_text,
-            thread_activity_summary=thread_activity_text,
             visibility=thread_visibility,
             channel_id=thread_channel_id,
         )
@@ -2184,32 +2180,14 @@ class SimulationEngine:
             for e in recent_entries
         ]
 
-        # Pre-load cached FOA text for funding posts so Phase 5 has full context
-        foa_contexts: dict[str, str] = {}
-        funding_thread_summaries: dict[str, str] = {}
-        for post in available_posts:
-            if post.foa_number:
-                foa_text = format_foa_for_prompt(post.foa_number)
-                if foa_text:
-                    foa_contexts[post.post_id] = foa_text
-            # TASK-6-REMOVES: was self.message_log.is_funding_thread(post.post_id);
-            # deleted from message_log.py in Task 4 (no funding participation
-            # exception).
-            if False:
-                summary = summarize_funding_thread(
-                    self.message_log, post.post_id, viewer_agent_id=agent.agent_id,
-                )
-                if not summary.is_empty():
-                    funding_thread_summaries[post.post_id] = format_funding_thread_summary(summary)
-
-        # Also pre-load FOAs from active/closed threads for Option B
-        # (starting a new funding collab from a previously seen FOA)
-        thread_foa_contexts: dict[str, str] = {}
-        for ts in agent.state.active_threads.values():
-            if ts.foa_number and ts.foa_number not in thread_foa_contexts:
-                foa_text = format_foa_for_prompt(ts.foa_number)
-                if foa_text:
-                    thread_foa_contexts[ts.foa_number] = foa_text
+        # TASK-6-REMOVES: was the "Pre-load cached FOA text for funding posts"
+        # and "Also pre-load FOAs from active/closed threads for Option B"
+        # blocks, assembling foa_contexts/funding_thread_summaries/
+        # thread_foa_contexts for build_phase5_prompt. Task 5 removed those
+        # params from build_phase5_prompt (no FOA plumbing left in the prompt
+        # builders), so the dicts they fed have no consumer left. `post.foa_number`/
+        # `ts.foa_number` reads themselves (and the fields on PostRef/ThreadState)
+        # are Task 6/8's territory, untouched here.
 
         # Resolve the visibility context for the prompt. Phase 5 now also drives
         # collab_private refinement (flat follow-ups). When the agent's only
@@ -2236,23 +2214,15 @@ class SimulationEngine:
             agent.agent_id, current_visibility=current_visibility,
         )
 
-        # funding_only strips the prompt to funding actions. Only apply when
-        # the agent is actually funding-restricted — if any available post is
-        # non-funding (e.g., a private-channel handover that also bypasses
-        # blocking), the LLM needs the regular reply path.
-        # TASK-6-REMOVES: was self.message_log.is_funding_thread(p.post_id);
-        # deleted from message_log.py in Task 4 (no funding participation
-        # exception).
-        has_available_non_funding = any(
-            not False  # was self.message_log.is_funding_thread(p.post_id)
-            for p in available_posts
-        )
-        funding_only = blocked_for_regular and not has_available_non_funding
-
-        # blocked_for_regular, NOT funding_only — see _available_post_types'
-        # docstring. funding_only is the narrower "blocked AND nothing
-        # non-funding to reply to"; keying the menu on it would advertise a
-        # regular type to an agent the block below rejects for posting one.
+        # TASK-6-REMOVES: was the "funding_only strips the prompt to funding
+        # actions" computation (has_available_non_funding / funding_only),
+        # keyed off self.message_log.is_funding_thread(p.post_id) — deleted
+        # from message_log.py in Task 4 (no funding participation exception).
+        # Task 5 removed build_phase5_prompt's funding_only param and its
+        # template-surgery branch, so this local has no consumer left.
+        #
+        # available_types below still keys on blocked_for_regular, not the
+        # now-gone funding_only — see _available_post_types' docstring.
         available_types = self._available_post_types(
             agent, restricted=blocked_for_regular,
         )
@@ -2277,11 +2247,7 @@ class SimulationEngine:
 
         system_prompt, messages = agent.build_phase5_prompt(
             recent_posts=recent_posts,
-            foa_contexts=foa_contexts,
-            thread_foa_contexts=thread_foa_contexts,
             prior_threads=prior_threads,
-            funding_only=funding_only,
-            funding_thread_summaries=funding_thread_summaries,
             visibility=current_visibility,
             channel_id=private_channel_id,
             post_type_menu=post_type_menu,
@@ -2968,14 +2934,11 @@ class SimulationEngine:
         The SAME tuple is rendered into the prompt and used to judge the
         response, so the menu and the gate cannot disagree.
 
-        ``restricted`` is the caller's ``blocked_for_regular``, NOT its
-        ``funding_only``. The two differ: ``funding_only = blocked_for_regular
-        and not has_available_non_funding``, so a blocked agent that has a
-        non-funding post available has ``funding_only=False`` — and keying on
-        that would advertise a regular type to an agent whose next non-funding
-        post the block at the top of this handler rejects anyway.
-        ``funding_only`` still drives the prompt-template surgery; only this
-        set uses ``blocked_for_regular``.
+        ``restricted`` is the caller's ``blocked_for_regular``. It used to be
+        distinguished from a narrower ``funding_only`` local (``blocked_for_regular
+        and not has_available_non_funding``) that drove a since-removed prompt-
+        template surgery in ``build_phase5_prompt`` — that local is gone (Task 5),
+        and this set has always used ``blocked_for_regular`` alone.
         """
         return available_for(
             self._post_types_for_role(agent.role),

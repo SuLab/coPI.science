@@ -110,8 +110,7 @@ def test_scout_hub_phase4_override_renders_and_drops_the_tool_it_lacks():
     tokens = (
         "{channel_name}", "{other_agent_name}", "{other_agent_lab}",
         "{message_count}", "{thread_phase}", "{thread_history}",
-        "{phase_guidance}", "{instructions}", "{foa_number}",
-        "{funding_thread_context}",
+        "{phase_guidance}", "{instructions}",
     )
 
     # Pin the raw template on disk: every token must actually be present in the
@@ -152,8 +151,6 @@ def test_scout_hub_phase4_override_renders_and_drops_the_tool_it_lacks():
     # Every substitution token was consumed.
     for token in tokens:
         assert token not in content, f"leftover token {token!r}"
-    # The Task 5 DECIDE guidance landed in the rendered prompt.
-    assert "Baltimore commitment" in content
 
 
 def test_scout_hub_phase5_override_renders_in_both_modes():
@@ -162,12 +159,8 @@ def test_scout_hub_phase5_override_renders_in_both_modes():
     prompts/roles/scout_hub/phase5-new-post.md, not the global pi_lab template.
 
     This guards the byte-for-byte scaffolding that build_phase5_prompt's
-    .replace()/regex substitution depends on:
-      - the four substitution tokens are each replaced exactly once
-      - the funding_only regexes (keyed to '## Your subscribed channels',
-        '## Your recent posts', '## Prior conversations with other labs',
-        and the 'Option C ... Option D' block) still find their targets
-        in the scout_hub override, in both normal and funding_only mode.
+    .replace() substitution depends on: the five substitution tokens are each
+    replaced exactly once, with or without a supplied post_type_menu.
     """
     from src.agent.agent import Agent
 
@@ -181,50 +174,32 @@ def test_scout_hub_phase5_override_renders_in_both_modes():
         "{post_type_menu}",
     ]
 
-    for funding_only in (False, True):
-        system_prompt, messages = agent.build_phase5_prompt(
-            recent_posts=[{"channel": "general", "content_snippet": "an old post"}],
-            foa_contexts={},
-            thread_foa_contexts={"RFA-AI-27-019": "Example FOA text"},
-            prior_threads={
-                "wiseman": [
-                    {"channel": "general", "outcome": "no_proposal", "summary": "n/a"}
-                ]
-            },
-            funding_only=funding_only,
-            funding_thread_summaries={},
+    system_prompt, messages = agent.build_phase5_prompt(
+        recent_posts=[{"channel": "general", "content_snippet": "an old post"}],
+        prior_threads={
+            "wiseman": [
+                {"channel": "general", "outcome": "no_proposal", "summary": "n/a"}
+            ]
+        },
+    )
+    assert isinstance(system_prompt, str)
+    content = messages[0]["content"]
+
+    # All five tokens were substituted — none survive as raw placeholders.
+    for token in leftover_tokens:
+        assert token not in content, (
+            f"leftover token {token!r} in scout_hub phase5 prompt"
         )
-        assert isinstance(system_prompt, str)
-        content = messages[0]["content"]
 
-        # All four tokens were substituted — none survive as raw placeholders.
-        for token in leftover_tokens:
-            assert token not in content, (
-                f"leftover token {token!r} in scout_hub phase5 prompt "
-                f"(funding_only={funding_only})"
-            )
-
-        # Confirms the scout_hub override actually rendered (not a silent
-        # fallback to the global pi_lab template).
-        assert "As the Blackbird scouting hub" in content
-
-    # funding_only=True must strip Option C (the regular new-post artifact)
-    # while keeping Option D (skip) — this is the hardcoded regex in
-    # agent.py keyed to these exact headings.
-    _, funding_only_messages = agent.build_phase5_prompt(funding_only=True)
-    funding_only_content = funding_only_messages[0]["content"]
-    assert "### Option C: Make a new top-level post" not in funding_only_content
-    assert "### Option D: Skip this turn" in funding_only_content
-    assert "## Your subscribed channels" not in funding_only_content
-    assert "## Your recent posts" not in funding_only_content
-    assert "## Prior conversations with other labs" not in funding_only_content
-
-    # Non-funding_only mode keeps the full option set, including the
-    # opportunity-assessment artifact instructions.
-    _, normal_messages = agent.build_phase5_prompt()
-    normal_content = normal_messages[0]["content"]
-    assert "### Option C: Make a new top-level post" in normal_content
-    assert ":mag: **Opportunity Assessment**" in normal_content
+    # Confirms the scout_hub override actually rendered (not a silent
+    # fallback to the global pi_lab template).
+    assert "Your one top-level post here is a completed" in content
+    assert "### Option A: Post a completed Opportunity Assessment" in content
+    assert "### Option B: Skip this turn" in content
+    assert "## Your subscribed channels" in content
+    assert "## Your recent posts" in content
+    assert "## Prior conversations with other labs" in content
+    assert ":mag: **Opportunity Assessment**" in content
 
 
 def test_role_rate_override_is_read_when_positive(tmp_path, monkeypatch):
@@ -351,8 +326,6 @@ def test_scout_hub_assessment_follows_the_blackbird_rubric():
         "suggested_derisking_milestones",
     ):
         assert required in body, f"assessment template omits {required!r}"
-    # The Baltimore gate is asked, never inferred from the institution.
-    assert "JHU address is not" in body
     # Maryland non-dilutive leverage, not a generic NIH-mechanism frame.
     assert "TEDCO" in body and "BIITC" in body
     # The sidecar must NOT be fenced — _parse_phase5_response takes the last
@@ -364,24 +337,15 @@ def test_scout_hub_assessment_follows_the_blackbird_rubric():
     assert '"funnel_stage"' in sidecar
     # Scaffolding the existing renderer depends on must survive the rewrite.
     for anchor in (
-        "### Option C: Make a new top-level post", "### Option D: Skip this turn",
+        "### Option A: Post a completed Opportunity Assessment",
+        "### Option B: Skip this turn",
         "## Your subscribed channels", "## Your recent posts",
         "## Prior conversations with other labs", ":mag: **Opportunity Assessment**",
-        "As the Blackbird scouting hub", "{interesting_posts}",
+        "Your one top-level post here is a completed",
         "{subscribed_channels}", "{your_recent_posts}", "{prior_conversations}",
         "{post_type_menu}",
     ):
         assert anchor in body, f"rewrite broke the renderer anchor {anchor!r}"
-
-
-def test_baltimore_is_a_question_not_an_inference():
-    from pathlib import Path
-
-    body = (Path("prompts/roles/scout_hub") / "agent-system.md").read_text(
-        encoding="utf-8"
-    )
-    assert "Baltimore" in body
-    assert "is not a Baltimore commitment" in body
 
 
 def test_visible_body_hides_the_verdict_the_sidecar_still_carries():
@@ -404,11 +368,11 @@ def test_visible_body_hides_the_verdict_the_sidecar_still_carries():
     # would silently cover the wrong text, so pin their relative order.
     visible_start = body.index("Label it :mag: **Opportunity Assessment**")
     sidecar_start = body.index("**Also emit the machine-readable verdict.**")
-    option_d_start = body.index("### Option D: Skip this turn")
-    assert visible_start < sidecar_start < option_d_start
+    option_b_start = body.index("### Option B: Skip this turn")
+    assert visible_start < sidecar_start < option_b_start
 
     visible_instructions = body[visible_start:sidecar_start]
-    sidecar_instructions = body[sidecar_start:option_d_start]
+    sidecar_instructions = body[sidecar_start:option_b_start]
 
     # The PI-facing instructions must not ask for (or even name) the internal
     # verdict machinery.
@@ -533,42 +497,30 @@ def test_scout_hub_cannot_post_a_cross_lab_idea():
 
 
 def test_pi_lab_phase5_template_renders_in_both_modes():
-    """The global template's tokens and funding_only surgeries were pinned
-    nowhere — only the scout_hub override was. This rewrite is exactly the kind
-    of change that needs the pin."""
+    """The global template's substitution tokens were pinned nowhere — only the
+    scout_hub override was. This rewrite is exactly the kind of change that
+    needs the pin. ("both modes" now just means "with and without a supplied
+    post_type_menu" — the funding_only mode this test used to also exercise
+    was removed with the template surgery it depended on."""
     from src.agent.agent import Agent
 
     agent = Agent("gill", "GillBot", "Gill PI")  # role defaults to pi_lab
 
-    for funding_only in (False, True):
-        _, messages = agent.build_phase5_prompt(
-            recent_posts=[{"channel": "general", "content_snippet": "an old post"}],
-            foa_contexts={},
-            thread_foa_contexts={"RFA-AI-27-019": "Example FOA text"},
-            prior_threads={
-                "pearce": [
-                    {"channel": "general", "outcome": "no_proposal", "summary": "n/a"}
-                ]
-            },
-            funding_only=funding_only,
-            funding_thread_summaries={},
-        )
-        content = messages[0]["content"]
-        for token in (
-            "{interesting_posts}", "{subscribed_channels}", "{your_recent_posts}",
-            "{prior_conversations}", "{post_type_menu}",
-        ):
-            assert token not in content, (
-                f"leftover token {token!r} (funding_only={funding_only})"
-            )
-
-    _, fo = agent.build_phase5_prompt(funding_only=True)
-    fo_content = fo[0]["content"]
-    assert "### Option C: Make a new top-level post" not in fo_content
-    assert "### Option D: Skip this turn" in fo_content
-    assert "## Your subscribed channels" not in fo_content
-    assert "## Your recent posts" not in fo_content
-    assert "## Prior conversations with other labs" not in fo_content
+    _, messages = agent.build_phase5_prompt(
+        recent_posts=[{"channel": "general", "content_snippet": "an old post"}],
+        prior_threads={
+            "pearce": [
+                {"channel": "general", "outcome": "no_proposal", "summary": "n/a"}
+            ]
+        },
+    )
+    content = messages[0]["content"]
+    for token in (
+        "{interesting_posts}", "{subscribed_channels}", "{your_recent_posts}",
+        "{prior_conversations}", "{post_type_menu}",
+    ):
+        assert token not in content, f"leftover token {token!r}"
 
     _, normal = agent.build_phase5_prompt()
-    assert "### Option C: Make a new top-level post" in normal[0]["content"]
+    assert "### Option A: Make a new top-level post" in normal[0]["content"]
+    assert "### Option B: Skip this turn" in normal[0]["content"]

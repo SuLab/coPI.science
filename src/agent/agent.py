@@ -404,9 +404,6 @@ Use these to reference other labs' work in conversations. Include links when cit
         thread_history: list[dict[str, str]],
         other_agent_name: str,
         other_agent_lab: str,
-        is_funding_thread: bool = False,
-        your_prior_messages: str | None = None,
-        thread_activity_summary: str | None = None,
         visibility: str = VISIBILITY_PUBLIC,
         channel_id: str | None = None,
     ) -> tuple[str, list[dict]]:
@@ -460,37 +457,6 @@ Use these to reference other labs' work in conversations. Include links when cit
                 f"\"{thread.pi_context}\""
             )
 
-        # Funding-thread context block: rendered only when this is a :moneybag: thread.
-        if is_funding_thread:
-            funding_ctx_lines = [
-                "## Funding thread — additional rules",
-                "",
-                "This is a :moneybag: funding thread. In addition to the normal reply rules:",
-                "",
-                "- **No announcement-only replies.** Do not post replies that merely announce "
-                "a future spin-off ('I'll start a new thread', 'watch for my post', "
-                "'posting it now', 'thread wrapped'). Either create the spin-off post this "
-                "turn via a new top-level :moneybag: post, or reply only with substantive "
-                "content (a new aim, a specific contribution, a scoping question).",
-                "- **No acknowledgment-only replies.** 'Sounds good', 'thanks', 'see you "
-                "there', 'agreed' are not allowed. Every reply must add substantive content.",
-                "- **Self-dedup.** If you have already replied in this thread, your next "
-                "reply must build on the discussion — do not repost the same alignment "
-                "pitch. See your prior messages below.",
-                "",
-                "### Your prior messages in this thread",
-                "",
-                your_prior_messages or "(none — this would be your first reply)",
-                "",
-                "### Prior activity in this thread",
-                "",
-                thread_activity_summary or "(no prior activity)",
-                "",
-            ]
-            funding_context = "\n".join(funding_ctx_lines)
-        else:
-            funding_context = ""
-
         prompt_text = phase4_template.replace("{channel_name}", thread.channel)
         prompt_text = prompt_text.replace("{other_agent_name}", other_agent_name)
         prompt_text = prompt_text.replace("{other_agent_lab}", other_agent_lab)
@@ -499,8 +465,6 @@ Use these to reference other labs' work in conversations. Include links when cit
         prompt_text = prompt_text.replace("{thread_history}", history_text)
         prompt_text = prompt_text.replace("{phase_guidance}", phase_guidance)
         prompt_text = prompt_text.replace("{instructions}", instructions)
-        prompt_text = prompt_text.replace("{foa_number}", thread.foa_number or "none")
-        prompt_text = prompt_text.replace("{funding_thread_context}", funding_context)
 
         messages = [{"role": "user", "content": prompt_text}]
         return system_prompt, messages
@@ -512,11 +476,7 @@ Use these to reference other labs' work in conversations. Include links when cit
     def build_phase5_prompt(
         self,
         recent_posts: list[dict[str, str]] | None = None,
-        foa_contexts: dict[str, str] | None = None,
-        thread_foa_contexts: dict[str, str] | None = None,
         prior_threads: dict[str, list[dict]] | None = None,
-        funding_only: bool = False,
-        funding_thread_summaries: dict[str, str] | None = None,
         visibility: str = VISIBILITY_PUBLIC,
         channel_id: str | None = None,
         post_type_menu: str | None = None,
@@ -524,13 +484,8 @@ Use these to reference other labs' work in conversations. Include links when cit
         """
         Build system + messages for Phase 5 new post.
         recent_posts: [{channel, content_snippet}] — agent's own recent top-level posts.
-        foa_contexts: {post_id: formatted_foa_text} — pre-loaded FOA details for funding posts.
-        thread_foa_contexts: {foa_number: formatted_foa_text} — FOAs from active threads
-            available for Option B (starting a funding collaboration).
         prior_threads: {other_agent_id: [{channel, outcome, summary}]} — all closed threads
             grouped by other agent, for dedup context.
-        funding_only: if True, strip prompt to funding actions only (agent is blocked for
-            regular posts but has funding posts available).
         Returns (system_prompt, messages).
 
         visibility/channel_id: Phase 5 is the "new post" phase, which in v1
@@ -550,7 +505,7 @@ Use these to reference other labs' work in conversations. Include links when cit
             "Choose to reply to an interesting post or make a new top-level post.",
         )
 
-        # Format interesting posts, injecting FOA details for funding posts
+        # Format interesting posts (Task 8 owns retiring this rendering path).
         if self.state.interesting_posts:
             parts = []
             for p in self.state.interesting_posts:
@@ -558,14 +513,6 @@ Use these to reference other labs' work in conversations. Include links when cit
                     f"**Post ID: {p.post_id}** in #{p.channel} by {p.sender_agent_id}:\n"
                     f"{delimit(p.content_snippet, 'post_content')}"
                 )
-                if foa_contexts and p.post_id in foa_contexts:
-                    part += f"\n\n<foa_details foa_number=\"{p.foa_number}\">\n{foa_contexts[p.post_id]}\n</foa_details>"
-                if funding_thread_summaries and p.post_id in funding_thread_summaries:
-                    part += (
-                        f"\n\n<thread_activity post_id=\"{p.post_id}\">\n"
-                        f"{funding_thread_summaries[p.post_id]}\n"
-                        f"</thread_activity>"
-                    )
                 parts.append(part)
             interesting_text = "\n\n".join(parts)
         else:
@@ -604,43 +551,6 @@ Use these to reference other labs' work in conversations. Include links when cit
         else:
             prior_text = "(none)"
 
-        if funding_only:
-            # Strip prompt to funding-only actions: reply to funding posts,
-            # start a funding collab, or skip. Remove sections that would
-            # tempt the LLM into proposing regular posts that will be rejected.
-            import re
-            phase5_template = re.sub(
-                r"## Your subscribed channels\n.*?\n\{subscribed_channels\}\n",
-                "",
-                phase5_template,
-                flags=re.DOTALL,
-            )
-            phase5_template = re.sub(
-                r"## Your recent posts\n.*?\{your_recent_posts\}\n",
-                "",
-                phase5_template,
-                flags=re.DOTALL,
-            )
-            phase5_template = re.sub(
-                r"## Prior conversations with other labs\n.*?\{prior_conversations\}\n",
-                "",
-                phase5_template,
-                flags=re.DOTALL,
-            )
-            phase5_template = re.sub(
-                r"### Option C: Make a new top-level post\n.*?(?=### Option D:)",
-                "",
-                phase5_template,
-                flags=re.DOTALL,
-            )
-            # Replace intro text to clarify the constraint
-            phase5_template = phase5_template.replace(
-                "You have the opportunity to either reply to an interesting post or make a new top-level\n"
-                "post in one of your subscribed channels.",
-                "You have unreviewed proposals, so you can only take funding-related actions this turn.\n"
-                "Reply to a funding post, start a funding collaboration, or skip.",
-            )
-
         prompt_text = phase5_template.replace("{interesting_posts}", interesting_text)
         prompt_text = prompt_text.replace("{subscribed_channels}", channels_text)
         prompt_text = prompt_text.replace("{your_recent_posts}", recent_text)
@@ -662,15 +572,6 @@ Use these to reference other labs' work in conversations. Include links when cit
                 self_id=self.agent_id, bot_names={},
             )
         prompt_text = prompt_text.replace("{post_type_menu}", post_type_menu)
-
-        # Inject pre-loaded FOA details for Option B (funding collaborations)
-        if thread_foa_contexts:
-            foa_section = "\n\n## Available FOA details for funding collaborations\n\n"
-            foa_section += "\n\n".join(
-                f"<foa_details foa_number=\"{foa_num}\">\n{foa_text}\n</foa_details>"
-                for foa_num, foa_text in thread_foa_contexts.items()
-            )
-            prompt_text += foa_section
 
         messages = [{"role": "user", "content": prompt_text}]
         return system_prompt, messages

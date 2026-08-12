@@ -141,18 +141,3 @@ def test_phase5_menu_uses_the_caller_supplied_text_when_given():
     # The rendered menu is gone; the Option C prose that *names* the types is
     # not, and must not be — that is the per-type guidance.
     assert "**`idea_crosslab`**" not in content
-
-
-def test_phase5_menu_survives_funding_only_surgery():
-    """funding_only strips Option C but the menu section sits above ## Instructions
-    and must still render — the engine narrows its contents instead."""
-    from src.agent.agent import Agent
-
-    a = Agent("gill", "GillBot", "Gill")
-    _, messages = a.build_phase5_prompt(
-        funding_only=True, post_type_menu="- **`funding_collab`** — only this"
-    )
-    content = messages[0]["content"]
-    assert "- **`funding_collab`** — only this" in content
-    assert "### Option C: Make a new top-level post" not in content
-    assert "### Option D: Skip this turn" in content
