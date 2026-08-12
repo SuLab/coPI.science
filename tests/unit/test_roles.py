@@ -99,7 +99,6 @@ def test_scout_hub_ships_with_the_hub_tool_set():
     spec = _load_role_real("scout_hub")
     assert spec.label == "Scout Hub"
     assert "search_prior_art" in spec.tools
-    assert "retrieve_foa" not in spec.tools  # GrantBot fetches FOAs, not the hub
 
 
 def test_scout_hub_phase4_override_renders_and_drops_the_tool_it_lacks():

@@ -33,7 +33,6 @@ from src.models.email_notification import (
     EmailNotification,
     EmailNotificationPreference,
 )
-from src.models.grantbot_posted import GrantbotPostedFoa
 from src.models.job import Job
 from src.models.opportunity import OpportunityAssessment
 from src.models.profile_revision import ProfileRevision
@@ -80,7 +79,6 @@ __all__ = [
     "ProfileRevision",
     "AccessAllowlist",
     "WaitlistSignup",
-    "GrantbotPostedFoa",
     "AppSetting",
     "SlackAppProvision",
 ]

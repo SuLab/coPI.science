@@ -12,14 +12,6 @@ from typing import Any
 
 from src.agent.agent import PROFILES_DIR, Agent
 from src.agent.channels import SEEDED_CHANNELS
-from src.agent.foa_cache import extract_foa_number, format_foa_for_prompt
-from src.agent.funding_rules import (
-    format_funding_thread_summary,
-    format_your_prior_messages,
-    is_acknowledgment_only_funding_reply,
-    is_announcement_only_funding_reply,
-    summarize_funding_thread,
-)
 from src.agent.ids import WRITER_ENGINE, TsMinter
 from src.agent.message_log import LogEntry, MessageLog, is_funding_post
 from src.agent.post_types import (
@@ -55,6 +47,48 @@ from src.services.llm import (
     generate_with_tools,
     set_call_log_callback,
 )
+
+# TASK-6-REMOVES: src.agent.foa_cache and src.agent.funding_rules were deleted in
+# Task 3 (GrantBot/FOA leaf-surface removal). The Phase 3/4/5 funding call sites
+# below that still reference these names are Task 4-6's territory, untouched
+# here, so these are minimal inline no-op stand-ins — matching the deleted
+# modules' signatures closely enough that every existing call site keeps
+# running without crashing — purely to keep this module importable in the
+# meantime. Task 6 deletes this whole block along with every call site it feeds.
+def extract_foa_number(content: str) -> str | None:
+    return None
+
+
+def format_foa_for_prompt(foa_number: str) -> str | None:
+    return None
+
+
+class _FundingThreadSummaryStub:
+    """No-op stand-in for the deleted funding_rules.FundingThreadSummary."""
+
+    def is_empty(self) -> bool:
+        return True
+
+
+def summarize_funding_thread(message_log, thread_ts, viewer_agent_id=None):
+    return _FundingThreadSummaryStub()
+
+
+def format_funding_thread_summary(summary) -> str:
+    return "(no prior activity in this thread)"
+
+
+def format_your_prior_messages(entries) -> str:
+    return "(none — this would be your first reply)"
+
+
+def is_acknowledgment_only_funding_reply(text: str) -> bool:
+    return False
+
+
+def is_announcement_only_funding_reply(text: str) -> bool:
+    return False
+
 
 logger = logging.getLogger(__name__)
 
@@ -145,7 +179,7 @@ _CHANNEL_KEYWORDS: dict[str, list[str]] = {
         "activity-based", "abpp", "chemical probe", "mass spectrom",
     ],
 }
-_UNIVERSAL_CHANNELS = {"general", "funding-opportunities"}
+_UNIVERSAL_CHANNELS = {"general"}
 
 # Slack poll throttles. PI messages come from humans, so sub-turn latency is
 # unnecessary; polling every turn was saturating one bot token's rate limit.

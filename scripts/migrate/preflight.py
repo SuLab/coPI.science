@@ -1543,7 +1543,7 @@ async def check_blocking_sessions(conn, max_xact_age_s: float = DEFAULT_MAX_TOLE
             "Stop the writers first — the agent simulation is the main one, and it must be "
             "stopped GRACEFULLY or the in-flight turn's messages are lost:",
             "  docker stop -t 30 agent-run",
-            "  docker compose stop app worker grantbot",
+            "  docker compose stop app worker",
             "Then re-check, and only terminate what is left if you know what it is:",
             "  SELECT pid, state, now()-xact_start AS age, query FROM pg_stat_activity\n"
             "   WHERE datname = current_database() AND xact_start IS NOT NULL;",
@@ -1687,7 +1687,7 @@ async def check_sizing(conn, rev: str | None = None):
     if status != PASS:
         rem = [
             "Announce the window and stop the writers for its duration:",
-            "  docker stop -t 30 agent-run && docker compose stop app worker grantbot",
+            "  docker stop -t 30 agent-run && docker compose stop app worker",
             "There is no CONCURRENTLY option available here: alembic runs the whole chain "
             "in one transaction and CREATE INDEX CONCURRENTLY cannot run inside one.",
         ]

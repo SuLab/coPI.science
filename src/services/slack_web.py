@@ -12,8 +12,8 @@ This module is the second half of that boundary. `tests/unit/test_slack_boundary
 asserts that `slack_sdk` is imported in exactly two modules, so a ninth bypass is
 a failing test rather than a defect discovered in production.
 
-The core is synchronous, because ``slack_sdk.WebClient`` is and because GrantBot
-and one route helper have no event loop. **Async callers must use the ``_async``
+The core is synchronous, because ``slack_sdk.WebClient`` is and because one route
+helper has no event loop. **Async callers must use the ``_async``
 wrappers at the bottom of this module, not the sync functions.** Six of the seven
 call sites are FastAPI route handlers, and a synchronous ``time.sleep`` inside one
 of those stalls the whole event loop, not just that request — see ``_call``.
@@ -260,7 +260,7 @@ def post_message(
 #
 # asyncio.to_thread moves the whole thing to a worker thread, so the wait costs
 # that request its latency and nothing else. Six of the seven call sites are async;
-# GrantBot and _resolve_delegate_names are sync and use the plain functions.
+# _resolve_delegate_names is the remaining sync caller and uses the plain functions.
 # ---------------------------------------------------------------------------
 
 

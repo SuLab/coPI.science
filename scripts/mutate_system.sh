@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
-# Mutation check for the subsystems T1–T11 claim to protect: ORCID, PubMed/NCBI, the
+# Mutation check for the subsystems T1–T10 claim to protect: ORCID, PubMed/NCBI, the
 # job-queue worker, the profile pipeline, the public graph, onboarding/impersonation/
-# profile export, the agent page, and GrantBot's FOA dedup.
+# profile export, and the agent page.
 #
 # Each mutant must be KILLED — at least one test in the named selection must fail with it
 # applied. A SURVIVING mutant means the suite does not actually test that behaviour,
@@ -54,10 +54,9 @@
 #   killed 6/6 real mutants        M4, M5 (worker); M7 (graph); M8, M9 (onboarding);
 #                                  M10 (agentpage)
 #   inert controls 4/4 survived    M12c, M12e, M12f, M12g
-#   11 skipped for credentials     orcid: M12a, M1, M1b
+#   9 skipped for credentials      orcid: M12a, M1, M1b
 #                                  pubmed: M12b, M2, M3
 #                                  pipeline: M12d, M6, M6b
-#                                  grantbot: M12h, M11
 #   src/ clean, exit 0
 #
 # NO REAL MUTANT SURVIVED ANY TIER THAT COULD BE RUN. The list below is therefore not a
@@ -188,12 +187,11 @@ declare -A TIER_SELECT=(
   [graph]="tests/integration/test_public_graph.py"
   [onboarding]="tests/integration/test_onboarding_flow.py"
   [agentpage]="tests/integration/test_agent_page.py"
-  [grantbot]="tests/integration/test_grantbot_live.py -m 'not real_llm' -k 'test_claim_foa_is_the_dedup_primitive or test_the_claim_not_the_prefilter_is_what_stops_a_repost'"
 )
 declare -A TIER_CREDS=(
   [orcid]="live"       [pubmed_tool]="live"  [pubmed_doi]="live"  [pubmed_both]="live"
   [worker]=""          [pipeline]="live+llm" [graph]=""           [onboarding]=""
-  [agentpage]=""       [grantbot]="live"
+  [agentpage]=""
 )
 
 # tier ~~ file ~~ exact source substring ~~ replacement ~~ label
@@ -230,9 +228,6 @@ MUTANTS=(
 # --- agent page (T8) -------------------------------------------------------------------
 'agentpage~~src/routers/agent_page.py~~            "Ignoring duplicate reopen of proposal %s by %s "~~            "Ignoring a duplicate reopen of proposal %s by %s "~~M12g INERT log string — MUST SURVIVE'
 "agentpage~~src/routers/agent_page.py~~    if already_reviewed is not None:~~    if False:~~M10 the reopen idempotency guard is gone, so a replayed POST migrates the thread twice"
-# --- GrantBot (T10) --------------------------------------------------------------------
-'grantbot~~src/agent/grantbot.py~~    """Undo a claim when the Slack post itself failed, so a later run can retry."""~~    """Undo a claim when the Slack post failed, so a later run retries. [INERT EDIT]"""~~M12h INERT docstring — MUST SURVIVE'
-"grantbot~~src/agent/grantbot.py~~    return result.rowcount == 1~~    return True~~M11 _claim_foa always reports the claim as won, so two runs post the same FOA"
 )
 
 # ---------------------------------------------------------------------------

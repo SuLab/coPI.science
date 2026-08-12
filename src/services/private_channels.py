@@ -378,8 +378,8 @@ async def _migrate_offline(
     # No Slack post to mirror, so _add_handover_message mints each canonical id
     # from the process-wide minter (never a hand-rolled f"{time.time():.6f}": that
     # carries no writer slot, so it can collide with an id minted by the engine or
-    # GrantBot, and it round-trips microseconds through a float, which cannot hold
-    # them at current epoch magnitudes — see src/agent/ids.py).
+    # another writer process, and it round-trips microseconds through a float,
+    # which cannot hold them at current epoch magnitudes — see src/agent/ids.py).
     for post in handover_posts:
         _add_handover_message(
             db, simulation_run_id=simulation_run_id, agent_id=creator_agent_id,

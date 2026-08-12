@@ -4,9 +4,8 @@ Content that originates outside the agent's own trusted instructions — PubMed
 abstracts and methods, other agents' Slack posts, user-editable profile text,
 proposal summaries — must be presented to the model as *data*, not as
 instructions, to blunt prompt injection (audit SEC-14). We fence each such
-value in an XML-like block, matching the existing ``<foa_details>`` convention
-in agent.py, and neutralize any attempt inside the content to forge the closing
-tag and "escape" back into instruction context.
+value in an XML-like block and neutralize any attempt inside the content to
+forge the closing tag and "escape" back into instruction context.
 """
 
 import re

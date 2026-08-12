@@ -62,17 +62,5 @@ services:
     profiles:
       - agent
 
-  grantbot:
-    build: .
-    command: python -m src.agent.grantbot scheduler --run-hour 8 --max-per-channel 1
-    env_file: .env
-    volumes:
-      - .:/app
-      - ./profiles:/app/profiles
-      - ./prompts:/app/prompts
-    depends_on:
-      postgres:
-        condition: service_healthy
-
 volumes:
   pgdata:

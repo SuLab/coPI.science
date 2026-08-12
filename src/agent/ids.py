@@ -46,7 +46,7 @@ WRITER_SLOT_MODULUS = 100
 # they can never collide with each other either.
 WRITER_ENGINE = 0        # SimulationEngine._ts_minter (agent_messages)
 WRITER_WEB = 1           # web app process (PI messages + DMs)
-WRITER_GRANTBOT = 2      # grantbot process (funding posts)
+WRITER_GRANTBOT = 2      # GrantBot (retired 2026-08) — slot stays reserved: historical message ids carry residue 2.
 WRITER_ENGINE_AUX = 3    # module default inside the engine process (PI DMs)
 
 

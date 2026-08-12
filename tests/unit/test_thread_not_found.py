@@ -119,7 +119,7 @@ class TestEvictDeadThread:
             )
             ag.state.interesting_posts.append(PostRef(
                 post_id=dead_ts, channel="single-cell-omics",
-                sender_agent_id="grantbot", content_snippet="dead", posted_at=0.0,
+                sender_agent_id="pearce", content_snippet="dead", posted_at=0.0,
             ))
             ag.state.pending_proposals.append(ProposalRef(
                 thread_id=dead_ts, channel="single-cell-omics",

@@ -295,7 +295,6 @@ class Settings(BaseSettings):
     slack_bot_token_chang: str = ""
     slack_bot_token_yliu: str = ""
     slack_bot_token_magliery: str = ""
-    slack_bot_token_grantbot: str = ""
 
     # Analytics
     posthog_api_key: str = ""

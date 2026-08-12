@@ -746,15 +746,15 @@ async def test_polled_bot_message_keeps_its_slack_mapping(db_session):
     run = await factories.make_simulation_run(db_session)
     client = _HistoryClient([{
         "ts": "1700000123.456789",
-        "bot_id": "B0GRANT",
-        "username": "GrantBot",
-        "text": ":moneybag: *Funding Opportunity* R01 something",
+        "bot_id": "B0DIGEST",
+        "username": "DigestBot",
+        "text": "Workspace digest: 3 new posts this week",
     }])
 
     engine = _engine_for(db_session, run.id)
     engine.slack_clients = {"su": client}
-    engine._channel_id_map = {"funding-opportunities": "C0FUNDING"}
-    engine._channel_visibility = {"funding-opportunities": "public"}
+    engine._channel_id_map = {"general": "C0GENERAL"}
+    engine._channel_visibility = {"general": "public"}
     # start() registers this; the poller's append has to reach the DB buffer.
     engine.message_log.set_persist_callback(engine._enqueue_persist)
 
@@ -765,7 +765,7 @@ async def test_polled_bot_message_keeps_its_slack_mapping(db_session):
     # The mapping is what makes a reply mirrorable: without it _slack_parent_ts
     # reports "no Slack root" and _post_message keeps the reply DB-only.
     assert entry.slack_ts == "1700000123.456789"
-    assert entry.slack_channel_id == "C0FUNDING"
+    assert entry.slack_channel_id == "C0GENERAL"
     assert engine._slack_parent_ts("1700000123.456789") == "1700000123.456789"
 
     # And it survives the flush into the primary store.
@@ -775,5 +775,5 @@ async def test_polled_bot_message_keeps_its_slack_mapping(db_session):
         AgentMessage.message_ts == "1700000123.456789",
     ))).scalars().one()
     assert row.slack_ts == "1700000123.456789"
-    assert row.slack_channel_id == "C0FUNDING"
+    assert row.slack_channel_id == "C0GENERAL"
     assert row.is_bot is True

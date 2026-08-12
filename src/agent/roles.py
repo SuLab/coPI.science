@@ -25,7 +25,7 @@ DEFAULT_ROLE = "pi_lab"
 # adding a new tool to that list would silently hand it to every agent. Explicit
 # default keeps every new tool opt-in. See design §4.1.
 DEFAULT_TOOLS: frozenset[str] = frozenset(
-    {"retrieve_profile", "retrieve_abstract", "retrieve_full_text", "retrieve_foa"}
+    {"retrieve_profile", "retrieve_abstract", "retrieve_full_text"}
 )
 
 
