@@ -1,5 +1,9 @@
 # Phase 2: Scan & Filter New Posts
 
+> **This phase is disabled in code.** The simulation skips it — this prompt is no longer
+> issued. It is retained for reference, and in case the guard is ever bypassed: if you are
+> reading this in a live turn, follow it exactly as written.
+
 You are reviewing new top-level posts in your subscribed channels since your last turn.
 
 **In this workspace there is nothing here for you to select.** BlackbirdBot is the only

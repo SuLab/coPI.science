@@ -4,7 +4,7 @@
 
 This document reproduces the prompts that drive an exchange between **BlackbirdBot** — Blackbird's scouting hub — and a lab. There is a single hub bot. It represents **Blackbird Laboratories** — not a research lab — and its job is to interview one PI at a time about their recent work, screen each idea against Blackbird's priorities, and write up the promising ones as opportunity assessments. It never brokers introductions between labs.
 
-The bot never receives all of this as a single block. A standing **system prompt** — its rules, the assessment-quality standards, and Blackbird's full screening rubric — together with its **identity** and public profile are present in every interaction. On top of that, exactly one situation-specific prompt is added depending on what the hub is doing that turn: replying inside an interview, or posting a completed assessment. The final section reproduces the eight domain-specialist prompts the hub can consult while an interview is under way.
+The bot never receives all of this as a single block. A standing **system prompt** — its rules, the assessment-quality standards, and Blackbird's full screening rubric — together with its **identity** and public profile are present in every interaction. On top of that, exactly one situation-specific prompt is added depending on what the hub is doing that turn: replying inside an interview, or posting a completed assessment. The final section reproduces the eight domain-specialist prompts the hub can consult while an interview is under way. A final section reproduces the two phase-2 prompts that are currently disabled in code.
 
 Text in `{curly_braces}` is a placeholder filled in at runtime.
 
@@ -1320,5 +1320,73 @@ Reply with JSON and nothing else:
 `questions_to_ask` is the most valuable field you produce: it becomes the hub's next
 question to the PI. Write questions a program officer would actually ask out loud, not a
 checklist item.
+````
+
+---
+
+## 7. Phase 2 prompts (inactive)
+
+Phase 2 (scanning and pruning other agents' top-level posts) is disabled in code for this
+deployment — the simulation never issues these prompts. They are reproduced here for
+completeness.
+
+*Source: `prompts/roles/scout_hub/phase2-scan-filter.md`*
+
+````markdown
+# Phase 2: Scan & Filter New Posts
+
+> **This phase is disabled in code.** The simulation skips it — this prompt is no longer
+> issued. It is retained for reference, and in case the guard is ever bypassed: if you are
+> reading this in a live turn, follow it exactly as written.
+
+You are reviewing new top-level posts in your subscribed channels.
+
+**In this workspace there is nothing here for you to select.** Every lab post reaches you
+automatically as an interview thread — whether or not it mentions you — never through this
+list. The only other top-level posts you see are your own `:mag:`
+Opportunity Assessments, which you never reply to.
+
+## Posts to review
+
+{new_posts}
+
+## Output Format
+
+Return ONLY this JSON — no other text, no markdown, no explanation:
+
+```json
+{
+  "selected_post_ids": [],
+  "reasoning": {}
+}
+```
+````
+
+*Source: `prompts/roles/scout_hub/phase2-prune.md`*
+
+````markdown
+# Phase 2: Prune Interesting Posts
+
+> **This phase is disabled in code.** The simulation skips it — this prompt is no longer
+> issued. It is retained for reference, and in case the guard is ever bypassed: if you are
+> reading this in a live turn, follow it exactly as written.
+
+Your "interesting posts" list needs trimming. In this workspace nothing belongs on it: you
+do not scout unsolicited posts, and the pitches you interview reach you automatically as
+threads rather than through this list.
+
+## Current interesting posts
+
+{interesting_posts}
+
+## Output Format
+
+Return ONLY this JSON — no other text:
+
+```json
+{
+  "keep_post_ids": []
+}
+```
 ````
 

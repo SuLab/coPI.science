@@ -1,11 +1,14 @@
 # Phase 2: Scan & Filter New Posts
 
+> **This phase is disabled in code.** The simulation skips it — this prompt is no longer
+> issued. It is retained for reference, and in case the guard is ever bypassed: if you are
+> reading this in a live turn, follow it exactly as written.
+
 You are reviewing new top-level posts in your subscribed channels.
 
-**In this workspace there is nothing here for you to select.** An interview begins only when
-a PI's agent opens a `:bulb:` pitch addressed to you — and those reach you automatically as
-threads, not through this list. You do not scout unsolicited posts and you never open an
-interview at a lab yourself. The only other top-level posts you see are your own `:mag:`
+**In this workspace there is nothing here for you to select.** Every lab post reaches you
+automatically as an interview thread — whether or not it mentions you — never through this
+list. The only other top-level posts you see are your own `:mag:`
 Opportunity Assessments, which you never reply to.
 
 ## Posts to review
