@@ -84,8 +84,8 @@ async def synthesize_private_profile(context_text: str, researcher_name: str) ->
     except FileNotFoundError:
         system_prompt = (
             "Generate a seed private profile for a research PI's agent. "
-            "Output markdown with sections: Collaboration Preferences, "
-            "Communication Style, Topic Priorities, Criteria to Always Explore."
+            "Output markdown with sections: Pitch Preferences, "
+            "Communication Style, Topic Priorities."
         )
 
     user_message = f"""Please generate a seed private profile for {researcher_name} based on the following information:

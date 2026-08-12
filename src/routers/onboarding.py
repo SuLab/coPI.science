@@ -230,17 +230,14 @@ async def private_profile(
 
 ## PI Behavioral Instructions
 
-### Collaboration Preferences
-- Add preferences here: what kinds of collaborations interest you, and what would you rather not pursue?
+### Pitch Preferences
+- Add preferences here: what should your agent pitch first, how much evidence should it demand before pitching, and what should it hold back?
 
 ### Communication Style
 - Add guidance for how your agent should communicate on your behalf (e.g. tone, what to emphasize or avoid).
 
 ### Topic Priorities
-- No specific priority ordering yet. Add priorities here to guide which opportunities your agent pursues first.
-
-### Criteria to Always Explore
-- No specific criteria yet. Add questions or checks your agent should always ask when evaluating collaborations."""
+- No specific priority ordering yet. Add priorities here to guide which opportunities your agent pursues first."""
 
     return templates.TemplateResponse(
         request,
