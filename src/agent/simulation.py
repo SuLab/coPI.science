@@ -1819,9 +1819,10 @@ class SimulationEngine:
         # Check for PI-priority posts — these bypass random skip and blocking,
         # and get folded into the phase-5 prompt as an authoritative pitch
         # steer (the PI-tag reply/new-thread path was retired — see
-        # pi_handler.handle_channel_tag). Consumed once the turn's action
-        # resolves (new_post or skip), below — same turn-scoped semantics as
-        # has_pi_directive.
+        # pi_handler.handle_channel_tag). Consumed only when the turn resolves
+        # in new_post or skip, below, so a flagged entry survives
+        # rejected/blocked turns and retries (unlike has_pi_directive, which
+        # clears every turn).
         pi_flagged_posts = [p for p in agent.state.interesting_posts if p.pi_priority]
         has_pi_priority = bool(pi_flagged_posts)
 
@@ -2018,8 +2019,10 @@ class SimulationEngine:
                 )
                 # The turn's action resolved (skip) — the PI-flagged entries
                 # were surfaced in this prompt; consume them once rather than
-                # re-surfacing forever. Same turn-scoped semantics as
-                # has_pi_directive.
+                # re-surfacing forever. Consumed only when the turn resolves
+                # in new_post or skip, so a flagged entry survives
+                # rejected/blocked turns and retries (unlike has_pi_directive,
+                # which clears every turn).
                 if pi_flagged_ids:
                     agent.state.interesting_posts = [
                         p for p in agent.state.interesting_posts
@@ -2144,8 +2147,10 @@ class SimulationEngine:
                 agent.message_count += 1
 
                 # The turn's action resolved (new_post posted successfully) —
-                # consume the PI-flagged entries that shaped this pitch. Same
-                # turn-scoped semantics as has_pi_directive.
+                # consume the PI-flagged entries that shaped this pitch.
+                # Consumed only when the turn resolves in new_post or skip,
+                # so a flagged entry survives rejected/blocked turns and
+                # retries (unlike has_pi_directive, which clears every turn).
                 if pi_flagged_ids:
                     agent.state.interesting_posts = [
                         p for p in agent.state.interesting_posts
