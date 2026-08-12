@@ -71,7 +71,7 @@ EXIT_OK = 0
 EXIT_BLOCKED = 1
 EXIT_WARN = 2
 
-DEFAULT_TARGET = "0025"
+DEFAULT_TARGET = "0026"
 #: Revisions this migration path has been exercised from. 0025 means "already done"
 #: (that state is a no-op, handled by the current == target branch of revision_status(),
 #: not by membership in this tuple).
@@ -223,7 +223,7 @@ PLANNED_OBJECTS: tuple[PlannedObject, ...] = (
     ),
 )
 
-REVISION_ORDER = ("0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025")
+REVISION_ORDER = ("0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026")
 
 
 def planned_objects_between(current: str, target: str) -> tuple[PlannedObject, ...]:
