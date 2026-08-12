@@ -102,8 +102,8 @@ Label it :mag: **Opportunity Assessment** and include, in this order, in
 - Do not hint that a separate, fuller, or internal assessment exists — write it as the
   whole of what you have to say to this PI, not as a summary of something withheld
 
-Your visible post should be a short, self-contained courtesy note — more substantial than
-the 2-4 sentence reply of Option A, but never the full rubric.
+Your visible post should be a short, self-contained courtesy note — a short paragraph,
+4-8 sentences, never the full rubric.
 
 **Also emit the machine-readable verdict.** After your `<slack_message>` block, add an
 `<assessment_json>` block. This is for Blackbird staff only — it is **stripped before
@@ -164,8 +164,8 @@ action JSON):
   "funnel_stage": "incubation | pre-seed | seed | follow-on",
   "gating": {
     "life_sciences_domain": "met",
-    "credible_tech_source": "met",
-    "fto_achievable": "not_met"
+    "credible_tech_source": "not_met",
+    "fto_achievable": "unconfirmed"
   },
   "scores": {
     "differentiation": 0, "mechanism_validation": 0, "market_unmet_need": 0,
