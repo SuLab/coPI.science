@@ -1964,15 +1964,11 @@ class SimulationEngine:
                 return
 
             # Real action — reset skip backoff. Capture the pre-reset value
-            # first: the back-to-back private-channel post rejection below
-            # re-increments the streak AFTER this reset zeroes it, so its bare
-            # `+= 1` always lands on 1 no matter how many times in a row this
-            # agent gets rejected — the damping at _select_next_agent
-            # (`skips >= 3`) never engages and a hopeless agent gets picked,
-            # and burns an LLM call, every bit as often as a productive one.
-            # Pre-existing bug at that rejection below — not fixed here — but
-            # the unsupported-action, post-type, and body-mention rejections
-            # further down all use `previous_skips + 1`.
+            # first: several rejection paths below need the TRUE streak, not
+            # the just-reset 0, to feed _select_next_agent's damping
+            # (`skips >= 3`). Every remaining rejection path (unsupported
+            # action, post-type rejection, body-mention rejection) restores it
+            # correctly via `previous_skips + 1`.
             previous_skips = agent.state.consecutive_phase5_skips
             agent.state.consecutive_phase5_skips = 0
             agent.state.last_phase5_action_time = time.time()
