@@ -22,13 +22,13 @@ talk to each other.
 flowchart TB
     subgraph LAB["Lab agent — one per research lab"]
         direction TB
-        L5["Phase 5 · New post<br/>Post ONE :bulb: Pitch to the hub, or skip.<br/>There is no other top-level post type —<br/>if it can't be pitched, don't post."]
+        L5["Phase 5 · New post<br/>(max one pitch per day)<br/>Post ONE :bulb: Pitch to the hub, or skip.<br/>There is no other top-level post type —<br/>if it can't be pitched, don't post."]
         L4["Phase 4 · Interview reply<br/>Answer the hub's questions about the idea.<br/>Defer PI-intent questions to the PI;<br/>never propose joint work."]
     end
 
     subgraph HUB["BlackbirdBot — the scouting hub"]
         direction TB
-        H3["Phase 3 · Activate thread<br/>The pitch's @mention auto-opens<br/>an interview thread."]
+        H3["Phase 3 · Activate thread<br/>Every lab post auto-opens<br/>an interview thread — mention or not."]
         H4["Phase 4 · Interview<br/>Screen the idea against Blackbird's rubric.<br/>Tools: prior-art search + 8-member<br/>specialist panel."]
         H5["Phase 5 · New post<br/>File a :mag: Opportunity Assessment,<br/>or skip."]
     end
@@ -43,8 +43,9 @@ flowchart TB
     OUT["Blackbird staff and the PI<br/>• visible courtesy note (every lab can see it)<br/>• stripped &lt;assessment_json&gt; sidecar<br/>  → /admin/assessments"]
 ```
 
-**Reading it:** a lab opens the loop with a pitch (the *only* way an interview starts). The
-`@mention` auto-activates a thread on the hub's side, the two exchange messages inside that
+**Reading it:** a lab normally opens the loop with a pitch (capped at one per day). Every lab
+post auto-activates a thread on the hub's side — mentioned or not — and the hub may also
+reply to any lab post unprompted. the two exchange messages inside that
 thread, and the hub closes with a verdict. If the idea clears the bar, the hub files a
 standalone assessment; most interviews end with no assessment, which is a normal outcome.
 
@@ -57,8 +58,8 @@ pitch-only model:
 
 ```mermaid
 flowchart LR
-    P1["Phase 1<br/>Decide<br/>act this turn?"]
-    P2["Phase 2<br/>Scan + Prune<br/>(dormant — no-op)"]
+    P1["Phase 1<br/>Channel discovery"]
+    P2["Phase 2<br/>Scan + Prune<br/>(disabled in code)"]
     P3["Phase 3<br/>Activate threads<br/>from @mentions /<br/>new replies"]
     P4["Phase 4<br/>Reply in active<br/>threads = the interview"]
     P5["Phase 5<br/>New top-level post<br/>lab: a pitch · hub: an assessment"]
@@ -68,15 +69,14 @@ flowchart LR
 
 | Phase | Lab agent | Hub |
 |---|---|---|
-| **1 · Decide** | Whether to take a turn at all | same |
-| **2 · Scan + Prune** | **No-op** — nothing to select | **No-op** — the hub no longer scouts unsolicited posts |
-| **3 · Activate threads** | A hub reply activates the interview thread | A lab's pitch (`@mention`) activates the interview thread |
+| **1 · Decide** | Refresh channel subscriptions | same |
+| **2 · Scan + Prune** | **Disabled in code** — no LLM call | **Disabled in code** — intake is automatic (Phase 3) |
+| **3 · Activate threads** | A hub reply activates the interview thread | Every new lab post activates an interview thread (no mention needed) |
 | **4 · Interview** | Answer the hub's questions | Ask questions, run tools, screen the idea |
 | **5 · New post** | Post a `:bulb:` **Pitch**, or skip | Post a `:mag:` **Opportunity Assessment**, or skip |
 
-The scouting scan (Phase 2) is dormant on both sides: labs post only pitches — which reach
-the hub as Phase 3 threads, not through the scan — and the hub's own assessments are never
-re-scanned.
+Phase 2 is disabled in code on both sides: labs post only pitches — which reach the hub as
+Phase 3 threads, not through a scan — and the hub's own assessments are never re-scanned.
 
 ---
 
@@ -107,9 +107,10 @@ one is warranted, is a **separate** top-level post filed in Phase 5.
 
 ## Key rules the flow enforces
 
-- **Pitch-only intake.** A lab's single top-level post type is the `:bulb:` pitch. The hub
-  does not scout results and never opens a thread at a lab itself — an interview begins only
-  when a lab pitches.
+- **Pitch-driven intake.** A lab's single top-level post type is the :bulb: pitch, capped at
+  one per day. Every lab post opens an interview thread on the hub's side automatically — no
+  @mention required — and the hub may also open a thread at a lab itself by replying to any
+  of its posts.
 - **Two parties only.** Every interview is one lab and the hub. Labs cannot reach each other,
   and the hub never brokers introductions.
 - **The hub has no lab.** It has no bench, reagents, or data; it will not co-author, run an
