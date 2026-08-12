@@ -1770,8 +1770,14 @@ class SimulationEngine:
         )
         blocked_for_regular = at_thread_threshold or has_unreviewed
 
-        # Check for PI-priority posts — these bypass random skip and blocking
-        has_pi_priority = any(p.pi_priority for p in agent.state.interesting_posts)
+        # Check for PI-priority posts — these bypass random skip and blocking,
+        # and get folded into the phase-5 prompt as an authoritative pitch
+        # steer (the PI-tag reply/new-thread path was retired — see
+        # pi_handler.handle_channel_tag). Consumed once the turn's action
+        # resolves (new_post or skip), below — same turn-scoped semantics as
+        # has_pi_directive.
+        pi_flagged_posts = [p for p in agent.state.interesting_posts if p.pi_priority]
+        has_pi_priority = bool(pi_flagged_posts)
 
         if not has_pi_priority and random.random() < settings.phase5_skip_probability:
             logger.debug("[%s] Phase 5: Skipped (random)", agent.agent_id)
@@ -1897,12 +1903,19 @@ class SimulationEngine:
             bot_names={aid: a.bot_name for aid, a in self.agents.items()},
         )
 
+        pi_flagged = "\n\n".join(
+            f"- {p.pi_context} (post {p.post_id} in #{p.channel}: {p.content_snippet!r})"
+            for p in pi_flagged_posts
+        )
+        pi_flagged_ids = {p.post_id for p in pi_flagged_posts}
+
         system_prompt, messages = agent.build_phase5_prompt(
             recent_posts=recent_posts,
             prior_threads=prior_threads,
             visibility=current_visibility,
             channel_id=private_channel_id,
             post_type_menu=post_type_menu,
+            pi_flagged=pi_flagged or None,
         )
 
         # Restore
@@ -1957,6 +1970,15 @@ class SimulationEngine:
                     "[%s] Phase 5: Agent chose to skip (streak: %d)",
                     agent.agent_id, agent.state.consecutive_phase5_skips,
                 )
+                # The turn's action resolved (skip) — the PI-flagged entries
+                # were surfaced in this prompt; consume them once rather than
+                # re-surfacing forever. Same turn-scoped semantics as
+                # has_pi_directive.
+                if pi_flagged_ids:
+                    agent.state.interesting_posts = [
+                        p for p in agent.state.interesting_posts
+                        if p.post_id not in pi_flagged_ids
+                    ]
                 return
 
             if not message_text:
@@ -2078,6 +2100,15 @@ class SimulationEngine:
                 )
             else:
                 agent.message_count += 1
+
+                # The turn's action resolved (new_post posted successfully) —
+                # consume the PI-flagged entries that shaped this pitch. Same
+                # turn-scoped semantics as has_pi_directive.
+                if pi_flagged_ids:
+                    agent.state.interesting_posts = [
+                        p for p in agent.state.interesting_posts
+                        if p.post_id not in pi_flagged_ids
+                    ]
 
                 # A :mag: Opportunity Assessment carries a machine-readable
                 # verdict sidecar (stripped from the Slack body). Persist it —

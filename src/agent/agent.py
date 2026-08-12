@@ -447,6 +447,8 @@ Use these to reference other labs' work in conversations. Include links when cit
         visibility: str = VISIBILITY_PUBLIC,
         channel_id: str | None = None,
         post_type_menu: str | None = None,
+        *,
+        pi_flagged: str | None = None,
     ) -> tuple[str, list[dict]]:
         """
         Build system + messages for Phase 5 new post.
@@ -465,6 +467,15 @@ Use these to reference other labs' work in conversations. Include links when cit
             enforces the SAME set when the response comes back. None renders
             THIS AGENT'S ROLE's declared set with no topology filtering — used by
             direct callers and tests that have no topology to apply.
+
+        pi_flagged: pre-rendered summary of this agent's current PI-priority
+            `interesting_posts` entries (built by the engine from `PostRef`s
+            with `pi_priority=True`). When truthy, appended as a `## Your PI
+            flagged this` section after the rendered template — the PI can no
+            longer make the bot join/reply to a tagged thread (that action
+            was retired), so this is the channel that carries the tag's
+            context into the bot's next pitch instead. None/empty omits the
+            section entirely.
         """
         system_prompt = self.build_system_prompt(visibility=visibility, channel_id=channel_id)
         phase5_template = self._load_prompt(
@@ -539,6 +550,12 @@ Use these to reference other labs' work in conversations. Include links when cit
                 self_id=self.agent_id, bot_names={},
             )
         prompt_text = prompt_text.replace("{post_type_menu}", post_type_menu)
+
+        if pi_flagged:
+            prompt_text += (
+                "\n\n## Your PI flagged this\n\n" + pi_flagged +
+                "\n\nYour PI's direction is authoritative — see the Instructions section."
+            )
 
         messages = [{"role": "user", "content": prompt_text}]
         return system_prompt, messages
