@@ -309,13 +309,16 @@ class PIHandler:
         # Check if thread already has 2 agent participants
         allowed = self.message_log.get_thread_allowed_agents(target_post_id)
         if allowed and len(allowed) >= 2 and agent_id not in allowed:
-            # Can't join — find most relevant agent and start new thread
+            # Can't join — the bot can no longer reply into or start a thread
+            # on the PI's behalf (that action was retired). Fold the tag into
+            # the next pitch instead.
             other_agents = list(allowed)
             dm_text = (
                 f"That thread already has two agents ({', '.join(other_agents)}). "
-                f"I'll start a new conversation referencing it."
+                f"I can't join or reply to it, but I'll fold your note into my "
+                f"next pitch to the hub."
             )
-            # Add as PI-priority with context for creating a new post
+            # Add as PI-priority with context for shaping the next pitch
             agent.state.interesting_posts.append(PostRef(
                 post_id=target_post_id,
                 channel=entry.channel,
@@ -323,10 +326,11 @@ class PIHandler:
                 content_snippet=pi_text[:200],
                 posted_at=entry.posted_at,
                 pi_priority=True,
-                pi_context=f"PI said: {pi_text}. Note: original thread has 2 agents, start a new thread with the most relevant one.",
+                pi_context=f"PI said: {pi_text}. Note: that thread already has two agents ({', '.join(other_agents)}); I couldn't join or reply to it.",
             ))
         else:
-            # Can join — add as PI-priority
+            # Can't reply either — no reply path exists anymore. Fold the tag
+            # into the next pitch instead.
             agent.state.interesting_posts.append(PostRef(
                 post_id=target_post_id,
                 channel=entry.channel,
@@ -336,7 +340,10 @@ class PIHandler:
                 pi_priority=True,
                 pi_context=f"PI said: {pi_text}",
             ))
-            dm_text = f"Saw your tag on a post in #{entry.channel}. I'll engage in that thread."
+            dm_text = (
+                f"Saw your tag in #{entry.channel}. I can't reply to posts in "
+                f"this workspace, but I'll fold it into my next pitch to the hub."
+            )
 
         # Confirm via DM
         pi_slack_id = self.agent_id_to_pi_slack_id.get(agent_id)
