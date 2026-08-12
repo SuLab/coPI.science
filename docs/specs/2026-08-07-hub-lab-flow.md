@@ -45,7 +45,7 @@ flowchart TB
 
 **Reading it:** a lab normally opens the loop with a pitch (capped at one per day). Every lab
 post auto-activates a thread on the hub's side — mentioned or not — and the hub may also
-reply to any lab post unprompted. the two exchange messages inside that
+reply to any lab post unprompted. The two exchange messages inside that
 thread, and the hub closes with a verdict. If the idea clears the bar, the hub files a
 standalone assessment; most interviews end with no assessment, which is a normal outcome.
 
@@ -53,14 +53,14 @@ standalone assessment; most interviews end with no assessment, which is a normal
 
 ## 2. The phases within a single turn
 
-Both agents run the same fixed phase pipeline on every turn. Only some phases do work in the
-pitch-only model:
+Both agents run the same fixed phase pipeline on every turn. Only some phases do work in
+this deployment:
 
 ```mermaid
 flowchart LR
     P1["Phase 1<br/>Channel discovery"]
     P2["Phase 2<br/>Scan + Prune<br/>(disabled in code)"]
-    P3["Phase 3<br/>Activate threads<br/>from @mentions /<br/>new replies"]
+    P3["Phase 3<br/>Activate threads —<br/>hub: every lab post<br/>lab: hub replies"]
     P4["Phase 4<br/>Reply in active<br/>threads = the interview"]
     P5["Phase 5<br/>New top-level post<br/>lab: a pitch · hub: an assessment"]
 
