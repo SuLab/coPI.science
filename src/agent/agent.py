@@ -408,11 +408,9 @@ Use these to reference other labs' work in conversations. Include links when cit
         root_content = thread_history[0]["content"] if thread_history else ""
         if self.cites_own_paper(root_content):
             phase_guidance += (
-                "\n\n**⚠️ This thread's paper was authored by your own lab.** Do NOT pitch "
-                "your lab's capabilities back as if they were external — the methods in this "
-                "paper are already yours. Acknowledge the authorship plainly. Only continue "
-                "toward a collaboration if you are extending the work in a genuinely new "
-                "direction beyond the paper's scope; otherwise close gracefully with ⏸️."
+                "\n\n**⚠️ This thread's root post cites a paper your own lab authored.** "
+                "Speak as its author — do not describe it as external work — and focus on "
+                "what remains unexploited beyond the published scope."
             )
 
         # Inject PI context if the PI posted in this thread

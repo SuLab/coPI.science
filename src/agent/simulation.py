@@ -1318,6 +1318,7 @@ class SimulationEngine:
                 on_consult=lambda domain, _pi=thread.other_agent_id: self._record_consult(
                     _pi, domain
                 ),
+                own_dois=agent.own_publication_dois,
             )
 
         agent.record_api_call()

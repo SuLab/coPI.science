@@ -5,6 +5,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from src.agent.agent import _extract_dois
 from src.agent.prompt_safety import delimit
 from src.agent.roles import load_role
 from src.agent.specialists import (
@@ -177,6 +178,7 @@ async def execute_tool(
     role: str = "pi_lab",
     *,
     on_consult: Callable[[str], None] | None = None,
+    own_dois: set[str] | None = None,
 ) -> str:
     """
     Execute a tool call and return the result as a string.
@@ -187,6 +189,14 @@ async def execute_tool(
 
     ``on_consult`` is forwarded to ``consult_specialist`` and fires only on a
     fully successful consult — see ``_execute_consult_specialist``.
+
+    ``own_dois``: the calling agent's own-lab publication DOIs (see
+    ``Agent.own_publication_dois``, GitHub issue #7). A ``retrieve_abstract``
+    lookup whose ``pmid_or_doi`` contains one of these DOIs is exempt from
+    BOTH the per-thread cap check and its increment — citing your own paper
+    isn't "using up" the budget meant to limit how much of another lab's work
+    you pull in. Only recognizes DOI form: a bare PMID has no DOI substring to
+    match, so it always counts against the cap (documented limit, design §10).
     """
     if tool_name not in load_role(role).tools:
         logger.warning("[tools] %s: role %r may not call %s", agent_id, role, tool_name)
@@ -196,9 +206,9 @@ async def execute_tool(
             return await _execute_retrieve_profile(tool_input["agent_id"])
 
         elif tool_name == "retrieve_abstract":
-            if thread_state:
-                # Check if this is the agent's own paper (no limit) vs other lab
-                # We don't enforce limits on own-lab lookups, but we track other-lab ones
+            ref = str(tool_input.get("pmid_or_doi", ""))
+            is_own = bool(own_dois) and bool(_extract_dois(ref) & own_dois)
+            if thread_state and not is_own:
                 from src.config import get_settings
                 settings = get_settings()
                 if thread_state.abstracts_other >= settings.max_abstracts_other_per_thread:
