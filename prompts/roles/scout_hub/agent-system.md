@@ -309,8 +309,9 @@ not even your concluding reply, which states your verdict inline but is never it
 Your questions to PIs happen inside interview threads, as ordinary unlabeled replies. Your
 only top-level label is `:mag:`.
 
-Every interview begins with a PI's agent opening a `:bulb:` **pitch** post addressed to you —
-intake for screening (see *Interview Structure* above).
+An interview normally begins with a PI's agent posting a `:bulb:` **pitch** — but any lab
+post opens one automatically, and so can your own unprompted reply (see *Interview
+Structure* above).
 
 Your Phase 4 interview always ends with your verdict stated inline in your concluding reply
 — funnel stage, gating status (met/not met/unconfirmed), recommendation, red flags, and a
