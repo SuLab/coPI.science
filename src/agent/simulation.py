@@ -13,7 +13,7 @@ from typing import Any
 from src.agent.agent import PROFILES_DIR, Agent
 from src.agent.channels import SEEDED_CHANNELS
 from src.agent.ids import WRITER_ENGINE, TsMinter
-from src.agent.message_log import LogEntry, MessageLog, is_funding_post
+from src.agent.message_log import LogEntry, MessageLog
 from src.agent.post_types import (
     TERMINAL_POST_TYPES,
     PostTypeSpec,
@@ -55,6 +55,13 @@ from src.services.llm import (
 # modules' signatures closely enough that every existing call site keeps
 # running without crashing — purely to keep this module importable in the
 # meantime. Task 6 deletes this whole block along with every call site it feeds.
+#
+# Task 4 additionally deleted message_log.is_funding_post/MessageLog.is_funding_thread
+# (the funding open-to-all participation exception; locked decision: ex-funding
+# thread roots follow the normal 2-party/tag rule, no replacement exception). Every
+# call site below that read those two symbols is inlined to `False`/dead-branch,
+# each marked `# TASK-6-REMOVES` individually, so Task 6 can find and delete them
+# alongside the foa_number/funding_only plumbing they feed.
 def extract_foa_number(content: str) -> str | None:
     return None
 
@@ -522,9 +529,13 @@ class SimulationEngine:
 
     def _non_funding_thread_count(self, agent: Agent) -> int:
         """Count active threads that are NOT funding-related."""
+        # TASK-6-REMOVES: was `if not self.message_log.is_funding_thread(t.thread_id)`;
+        # is_funding_thread deleted from message_log.py in Task 4 (no funding
+        # participation exception). Inlined `not False` keeps this method's callers
+        # working; Task 6 collapses this to len(agent.state.active_threads).
         return sum(
             1 for t in agent.state.active_threads.values()
-            if not self.message_log.is_funding_thread(t.thread_id)
+            if not False
         )
 
     def _count_today_posts(self, agent: Agent) -> int:
@@ -846,11 +857,14 @@ class SimulationEngine:
           cohort still gets answered by Phase 4 so it can conclude, but it must not
           jump the queue ahead of gate-compliant work. Without this the gate and the
           scheduler contradict each other and the scheduler wins.
-        - **The remaining threads are read through the agent's gate.** Threads are
-          not always two-party — a funding thread is open to all
-          (``get_thread_allowed_agents`` returns None) — so a non-cohort third party
-          posting into an otherwise legal thread would otherwise manufacture
-          reactive priority for a sender the agent is not supposed to act on.
+        - **The remaining threads are read through the agent's gate.** An
+          untagged thread with fewer than 2 posters is still open
+          (``get_thread_allowed_agents`` returns None) — so a non-cohort third
+          party posting into an otherwise legal thread would otherwise
+          manufacture reactive priority for a sender the agent is not supposed
+          to act on. (Funding threads used to be unconditionally open-to-all
+          here too; that exception was removed — ex-funding thread roots now
+          follow this same normal rule. See message_log.get_thread_allowed_agents.)
         """
         cursor = agent.state.last_seen_cursor
         for thread in agent.state.active_threads.values():
@@ -1115,7 +1129,12 @@ class SimulationEngine:
                 if post.ts in selected_ids:
                     foa_num = None
                     snippet_len = 200
-                    if is_funding_post(post.content):
+                    # TASK-6-REMOVES: was `if is_funding_post(post.content):`;
+                    # is_funding_post deleted from message_log.py in Task 4 (no
+                    # funding participation exception). is_funding inlined False;
+                    # this dead branch (and foa_num/foa_number) is Task 6's to delete.
+                    is_funding = False
+                    if is_funding:
                         foa_num = extract_foa_number(post.content)
                         snippet_len = 500  # funding posts need more context
                     agent.state.interesting_posts.append(PostRef(
@@ -1196,7 +1215,10 @@ class SimulationEngine:
                 continue
             if thread_id in self._closed_thread_ids:
                 continue
-            is_funding = self.message_log.is_funding_thread(thread_id)
+            # TASK-6-REMOVES: was self.message_log.is_funding_thread(thread_id);
+            # deleted from message_log.py in Task 4 (no funding participation
+            # exception).
+            is_funding = False
             # Threshold gates Phase 5 (starting new threads), not Phase 3.
             # Ignoring an explicit @-mention is worse than running over the cap.
             # Check thread participation rules
@@ -1242,7 +1264,10 @@ class SimulationEngine:
                 continue
             if thread_id in self._closed_thread_ids:
                 continue
-            is_funding = self.message_log.is_funding_thread(thread_id)
+            # TASK-6-REMOVES: was self.message_log.is_funding_thread(thread_id);
+            # deleted from message_log.py in Task 4 (no funding participation
+            # exception).
+            is_funding = False
             # Threshold gates Phase 5 (starting new threads), not Phase 3.
             # Ghosting a reply to our own post is worse than running over the cap.
             # Check thread participation rules
@@ -1373,7 +1398,10 @@ class SimulationEngine:
         other_lab = other_agent.pi_name if other_agent else "Unknown"
 
         # Funding-thread context (self-dedup + late-joiner summary)
-        is_funding = self.message_log.is_funding_thread(thread.thread_id)
+        # TASK-6-REMOVES: was self.message_log.is_funding_thread(thread.thread_id);
+        # deleted from message_log.py in Task 4 (no funding participation
+        # exception).
+        is_funding = False
         your_prior_text: str | None = None
         thread_activity_text: str | None = None
         if is_funding:
@@ -2038,9 +2066,12 @@ class SimulationEngine:
 
         # Check preconditions
         at_thread_threshold = self._non_funding_thread_count(agent) >= settings.active_thread_threshold
+        # TASK-6-REMOVES: was `not self.message_log.is_funding_thread(p.thread_id)`;
+        # is_funding_thread deleted from message_log.py in Task 4 (no funding
+        # participation exception).
         unreviewed_non_funding_count = sum(
             1 for p in agent.state.pending_proposals
-            if not p.reviewed and not self.message_log.is_funding_thread(p.thread_id)
+            if not p.reviewed and not False
         )
         has_unreviewed_non_funding = (
             agent.agent_id not in UNBLOCK_EXEMPT_AGENTS
@@ -2064,7 +2095,10 @@ class SimulationEngine:
             if post.post_id in agent.state.active_threads:
                 continue
 
-            is_funding = self.message_log.is_funding_thread(post.post_id)
+            # TASK-6-REMOVES: was self.message_log.is_funding_thread(post.post_id);
+            # deleted from message_log.py in Task 4 (no funding participation
+            # exception).
+            is_funding = False
             # Posts in collab_private channels are by definition PI-engaged
             # refinement; they must bypass the unreviewed-proposal block for
             # the same reason pi_priority and funding posts do. Without this,
@@ -2110,8 +2144,11 @@ class SimulationEngine:
 
         # If blocked and no available posts to reply to, still allow Phase 5
         # so the agent can create funding collaboration posts (Option B)
+        # TASK-6-REMOVES: was self.message_log.is_funding_thread(p.post_id);
+        # deleted from message_log.py in Task 4 (no funding participation
+        # exception).
         has_funding_interesting = any(
-            self.message_log.is_funding_thread(p.post_id)
+            False  # was self.message_log.is_funding_thread(p.post_id)
             for p in agent.state.interesting_posts
         )
         has_thread_foas = any(
@@ -2155,7 +2192,10 @@ class SimulationEngine:
                 foa_text = format_foa_for_prompt(post.foa_number)
                 if foa_text:
                     foa_contexts[post.post_id] = foa_text
-            if self.message_log.is_funding_thread(post.post_id):
+            # TASK-6-REMOVES: was self.message_log.is_funding_thread(post.post_id);
+            # deleted from message_log.py in Task 4 (no funding participation
+            # exception).
+            if False:
                 summary = summarize_funding_thread(
                     self.message_log, post.post_id, viewer_agent_id=agent.agent_id,
                 )
@@ -2200,8 +2240,11 @@ class SimulationEngine:
         # the agent is actually funding-restricted — if any available post is
         # non-funding (e.g., a private-channel handover that also bypasses
         # blocking), the LLM needs the regular reply path.
+        # TASK-6-REMOVES: was self.message_log.is_funding_thread(p.post_id);
+        # deleted from message_log.py in Task 4 (no funding participation
+        # exception).
         has_available_non_funding = any(
-            not self.message_log.is_funding_thread(p.post_id)
+            not False  # was self.message_log.is_funding_thread(p.post_id)
             for p in available_posts
         )
         funding_only = blocked_for_regular and not has_available_non_funding
@@ -2342,9 +2385,12 @@ class SimulationEngine:
             # replies, funding posts, or replies to a post in a collab_private
             # channel (the PI has explicitly engaged that refinement).
             if blocked_for_regular:
+                # TASK-6-REMOVES: was self.message_log.is_funding_thread(target_post_id);
+                # deleted from message_log.py in Task 4 (no funding participation
+                # exception).
                 is_funding_reply = (
                     action == "reply" and target_post_id
-                    and self.message_log.is_funding_thread(target_post_id)
+                    and False
                 )
                 is_funding_post = action == "new_post" and post_type == "funding_collab"
                 # A terminal artifact reports finished work, so the
@@ -2402,7 +2448,10 @@ class SimulationEngine:
                     return
 
                 # Funding-thread draft validators (atomic spin-off + no-ack rules)
-                if self.message_log.is_funding_thread(target_post_id):
+                # TASK-6-REMOVES: was self.message_log.is_funding_thread(target_post_id);
+                # deleted from message_log.py in Task 4 (no funding participation
+                # exception).
+                if False:
                     if is_announcement_only_funding_reply(message_text):
                         logger.info(
                             "[%s] Phase 5: Rejected announcement-only funding reply to %s",

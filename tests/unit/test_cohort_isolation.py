@@ -679,7 +679,7 @@ class TestGatedReads:
         for name in (
             "get_thread_history", "get_thread_message_count",
             "get_agent_top_level_posts", "get_last_bot_sender_in_channel",
-            "get_thread_allowed_agents", "is_funding_thread", "get_entry",
+            "get_thread_allowed_agents", "get_entry",
         ):
             sig = inspect.signature(getattr(MessageLog, name))
             assert "allowed_sender_ids" not in sig.parameters, name
@@ -939,8 +939,16 @@ class TestGrandfathering:
         assert eng._owes_reply(eng.agents["su"]) is True
 
     async def test_non_cohort_third_party_cannot_manufacture_priority(self, monkeypatch):
-        """A funding thread is open to all, so a non-cohort agent can post into an
-        otherwise legal thread. That must not create reactive priority."""
+        """Locked decision (#29 branch-2 engine reconciliation): ex-funding thread
+        roots follow the NORMAL participation rule — no open-to-all exception.
+
+        A `:moneybag:` root no longer makes ``get_thread_allowed_agents`` return
+        unrestricted access. Once two distinct agents (su, wiseman) have posted,
+        a third party (cravatt — outside both the cohort and the thread) is
+        excluded exactly like on any other thread. This inverts the old vehicle
+        (a funding thread's open-to-all rule was the one case a non-cohort agent
+        could legally land a message in an otherwise-restricted thread) into a
+        direct pin that no such vehicle survives."""
         _patch(monkeypatch, cohort_isolation_enabled=True,
                cohort_default_policy=POLICY_ISOLATED)
         c1 = uuid.uuid4()
@@ -949,11 +957,16 @@ class TestGrandfathering:
         _thread(eng.agents["su"], "1", "wiseman")
         eng.message_log.append(_post("1", "general", "su", "SuBot", ":moneybag: FOA"))
         eng.message_log.append(
-            _post("2", "general", "cravatt", "CravattBot", "me too", thread_ts="1")
+            _post("2", "general", "wiseman", "WisemanBot", "on it", thread_ts="1")
+        )
+        eng.message_log.append(
+            _post("3", "general", "cravatt", "CravattBot", "me too", thread_ts="1")
         )
         eng.agents["su"].state.last_seen_cursor = 0.0
         await eng._recompute_allowed_sender_ids()
-        assert eng._owes_reply(eng.agents["su"]) is False
+        allowed = eng.message_log.get_thread_allowed_agents("1")
+        assert allowed == {"su", "wiseman"}
+        assert "cravatt" not in allowed
 
     def test_phase4_reads_ungated_so_threads_can_conclude(self):
         """Phase 4 must see a grandfathered partner's reply — the thread is open and
