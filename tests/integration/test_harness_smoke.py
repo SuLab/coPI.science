@@ -12,8 +12,9 @@ async def test_container_is_migrated(engine):
         # .notes/cohort-system-v2.md §14 for what a duplicate revision id costs.
         # 0019-0021 db-primary-conversations, 0022 cohorts,
         # 0023 researcher_profiles synthesis provenance, 0024 agents.role column,
-        # 0025 opportunity_assessments (BlackbirdBot screening verdicts)
-        assert v == "0025"
+        # 0025 opportunity_assessments (BlackbirdBot screening verdicts),
+        # 0026 drop_grantbot_posted_foas
+        assert v == "0026"
 
 
 async def test_writes_are_rolled_back_part1(db_session):
