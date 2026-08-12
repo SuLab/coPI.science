@@ -5210,10 +5210,12 @@ your own lab as an author of a paper unless it appears in your own publication l
             response = await generate_agent_response(
                 system_prompt=system_prompt,
                 messages=messages,
-                # 4000, not 800: Opus 5 writes longer syntheses, and 800 (retried at
-                # 1600) truncated every memory turn in the migration rehearsal. The
-                # cap is a ceiling, not a target — unused headroom costs nothing —
-                # and this call is not pinned by the characterization snapshots.
+                # 4000, not 800: the Claude 5 models write longer syntheses (and
+                # Sonnet 5's tokenizer spends ~30% more tokens on the same text);
+                # 800 (retried at 1600) truncated every memory turn in the
+                # migration rehearsal. The cap is a ceiling, not a target — unused
+                # headroom costs nothing — and this call is not pinned by the
+                # characterization snapshots.
                 max_tokens=4000,
                 log_meta={"agent_id": agent.agent_id, "phase": "memory"},
             )
