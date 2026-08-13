@@ -490,8 +490,8 @@ class SimulationEngine:
         await self._rebuild_agent_state()
         # Rebuild advanced last_seen_cursor to max(all_messages), which can
         # overshoot messages in private channels (typically older than the
-        # latest public chatter). Rewind member-bot cursors so Phase 2 can
-        # still scan the handover and any subsequent private-channel activity.
+        # latest public chatter). Rewind member-bot cursors so later phases can
+        # still see the handover and any subsequent private-channel activity.
         self._rewind_cursors_for_private_channels()
         set_call_log_callback(self._on_llm_call)
 
@@ -965,7 +965,8 @@ class SimulationEngine:
 
         Skipped entirely for entries in collab_private channels: those channels
         are flat discussions (no threading), so tags and replies there are
-        just content for Phase 2/5 to consider, not thread-activation signals.
+        just conversation content for later phases to read directly, not
+        thread-activation signals.
         """
         cursor = agent.state.last_seen_cursor
 
@@ -1097,8 +1098,8 @@ class SimulationEngine:
                 continue
             # Safety net: Phase 4 does threaded replies, which are never the
             # right thing in a collab_private channel. Skip any active_thread
-            # that somehow ended up pointing at a private channel — Phase 2/5
-            # handle those flat.
+            # that somehow ended up pointing at a private channel — that
+            # channel's flat conversation is handled elsewhere.
             if self._channel_visibility.get(thread.channel) == VISIBILITY_COLLAB_PRIVATE:
                 continue
             # Check if there's a new reply from the other agent. Read UNGATED
@@ -1457,8 +1458,8 @@ class SimulationEngine:
 
         - Adds to ``_channel_id_map`` and ``_channel_visibility``.
         - Adds the channel name to every member bot's ``subscribed_channels``
-          (resolved from ``private_channel_members``), so Phase 2 scans it and
-          Phase 4/5 can act in it.
+          (resolved from ``private_channel_members``), so Phase 4/5 can act
+          in it.
         - Seeds a poll cursor so the first poll picks up the handover message.
 
         Cheap to call every main-loop tick — a single query returning a handful
@@ -1555,7 +1556,7 @@ class SimulationEngine:
           older than ``_PRIVATE_CHANNEL_ACTIVE_WINDOW_S`` is considered done;
           rewinding into it would resurrect a long-dead conversation (this was
           the bug: a 2-month-old sibling channel pulled the global cursor back
-          ~2 months, burying a fresh handover under a huge Phase-2 backlog).
+          ~2 months, burying a fresh handover under a huge stale-message backlog).
         - **Caught-up bots are skipped.** If a bot has already posted after the
           newest message in a channel, it has nothing to scan there.
 
@@ -2055,7 +2056,8 @@ class SimulationEngine:
         # contract is the ordinal of the reply just generated — the same
         # correction Agent.build_phase4_prompt applies for this same reply
         # (see that call site's comment for the full rationale).
-        thread_phase, _, _ = phase4_guidance(agent.role, thread.message_count + 1)
+        message_ordinal = thread.message_count + 1
+        thread_phase, _, _ = phase4_guidance(agent.role, message_ordinal)
         if thread_phase != CONCLUDE:
             return
         if _reply_opens_with_pause(response_text):
@@ -2065,10 +2067,10 @@ class SimulationEngine:
         ):
             return
         logger.warning(
-            "[%s] Phase 4: thread %s concluded (message_count=%d) with a "
+            "[%s] Phase 4: thread %s concluded (message_ordinal=%d) with a "
             "non-decline verdict but no persistable <assessment_json> "
             "sidecar was found",
-            agent.agent_id, thread.thread_id, thread.message_count,
+            agent.agent_id, thread.thread_id, message_ordinal,
         )
 
     async def _persist_assessment(
@@ -2666,7 +2668,8 @@ class SimulationEngine:
                 # (slack_client.normalize_inbound_message). Copying it verbatim, as
                 # this loop used to, ingested a root as a reply to itself — and
                 # get_new_top_level_posts skips anything with a non-null thread_ts, so
-                # the post vanished from Phase 2 and _rebuild_state_from_db made it
+                # the post vanished from every reader of that method (e.g. the hub's
+                # Phase 3 auto-activation scan) and _rebuild_state_from_db made it
                 # permanent. The rule now lives in exactly one place.
                 for msg in messages:
                     ts = msg.get("ts", "")
@@ -2961,7 +2964,8 @@ class SimulationEngine:
                 posted_at = time.time()
             # Chunk 0 keeps the caller's canonical thread id. A continuation chunk of
             # a *root* post hangs off chunk 0 — one logical post stays one top-level
-            # post, so nobody's Phase 2 scan sees N roots where the author wrote one.
+            # post, so the hub's Phase 3 auto-activation scan doesn't see N roots
+            # where the author wrote one.
             canonical_parent = thread_ts if (thread_ts or index == 0) else root_ts
             entry = LogEntry(
                 ts=ts,
@@ -4666,11 +4670,13 @@ def _sidecar_has_valid_json_block(text: str) -> bool:
     return False
 
 
-# The prompt's tri-state gating contract (see prompts/roles/scout_hub/phase5-new-post.md):
-# every gating.* value must be exactly one of these three strings, never a bare
-# boolean — "the PI declined" (not_met) and "we never asked" (unconfirmed) are
-# different facts, and a boolean can express only the first two of these three
-# outcomes.
+# The prompt's tri-state gating contract (see the <assessment_json> skeleton in
+# prompts/roles/scout_hub/phase4-thread-reply.md — relocated there from the
+# deleted phase5-new-post.md by the 2026-08-12 removal cycle's reply-only-hub
+# reconciliation): every gating.* value must be exactly one of these three
+# strings, never a bare boolean — "the PI declined" (not_met) and "we never
+# asked" (unconfirmed) are different facts, and a boolean can express only the
+# first two of these three outcomes.
 _VALID_GATING_STATES = frozenset({"met", "not_met", "unconfirmed"})
 
 

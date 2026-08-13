@@ -55,6 +55,46 @@ def test_phase4_honours_role_overrides(tmp_path, monkeypatch):
     assert "WIDGET REPLY" in reply_messages[0]["content"]
 
 
+def test_phase4_prompt_at_prior_count_4_receives_decide_not_explore():
+    """Real-path pin for the EXPLORE/DECIDE boundary (thread_guidance.py:
+    ordinal<=4 -> EXPLORE, else DECIDE). A thread with 4 EXISTING messages
+    generates its 5th reply — ordinal 5, one past the boundary — so
+    build_phase4_prompt must feed phase4_guidance the ordinal
+    (thread.message_count + 1), not the prior count itself, or this reply is
+    silently misclassified as EXPLORE (the exact bug the ordinal fix in
+    Agent.build_phase4_prompt corrected). test_thread_guidance.py's
+    test_phase_boundaries_are_unchanged already pins phase4_guidance(role, 5)
+    directly; this test is about the engine-side +1 wiring into it, driven
+    through the real build_phase4_prompt path rather than calling
+    phase4_guidance itself.
+    """
+    from src.agent.state import ThreadState
+    from src.agent.thread_guidance import phase4_guidance
+
+    agent = Agent(agent_id="su", bot_name="SuBot", pi_name="Andrew Su")
+    thread = ThreadState(
+        thread_id="t1", channel="general", other_agent_id="o", message_count=4,
+    )
+    _, reply_messages = agent.build_phase4_prompt(
+        thread=thread,
+        thread_history=[{"sender": "o", "content": "hello"}],
+        other_agent_name="OBot",
+        other_agent_lab="O Lab",
+    )
+    prompt = reply_messages[0]["content"]
+
+    assert "**Thread phase:** DECIDE" in prompt
+    assert "**Thread phase:** EXPLORE" not in prompt
+    assert "**Message count:** 5 of 12 max" in prompt
+
+    # Cross-check against the real DECIDE guidance/instructions text for this
+    # role, so this test cannot pass on a stale {phase_guidance}/{instructions}
+    # substitution left over from EXPLORE.
+    _, decide_guidance, decide_instructions = phase4_guidance(agent.role, 5)
+    assert decide_guidance in prompt
+    assert decide_instructions in prompt
+
+
 def test_phase5_menu_token_is_always_substituted():
     """No caller may leak the raw token into a prompt. prompts/ is bind-mounted
     and re-read per call while src/ is baked into the agent image, so a template

@@ -240,8 +240,9 @@ def normalize_inbound_message(msg: dict[str, Any]) -> dict[str, Any]:
     conversations.history page hands back thread roots that look like replies to
     themselves. Anything downstream that treats a non-null ``thread_ts`` as "this
     is a reply" then loses the root entirely — ``MessageLog.get_new_top_level_posts``
-    skips it, so it never reaches Phase 2, and the next rebuild makes that
-    permanent. Nulling it here, at the one point where Slack dicts enter the
+    skips it, so it never surfaces to any reader of that method (e.g. the hub's
+    Phase 3 auto-activation scan), and the next rebuild makes that permanent.
+    Nulling it here, at the one point where Slack dicts enter the
     process, is what keeps the rule from being applied in one ingest path and
     forgotten in another.
 
@@ -767,8 +768,8 @@ class AgentSlackClient:
 
         A split *root* post keeps its continuation chunks in the root's own Slack
         thread rather than as further top-level messages: one logical post must
-        stay one top-level post, or every other agent's Phase 2 scan sees N fresh
-        roots where the author wrote one.
+        stay one top-level post, or the hub's Phase 3 auto-activation scan sees N
+        fresh roots where the author wrote one.
         """
         if not self._client:
             # Not connected: report "not posted" so the engine mints a unique

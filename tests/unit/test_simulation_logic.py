@@ -1239,6 +1239,12 @@ class TestHubConcludeMissingAssessmentWarning:
         assert len(client.posted) == 1  # confirms the reply was actually generated
         assert self._WARNING_SNIPPET in caplog.text
         assert "t1" in caplog.text
+        # The warning logs the ordinal of the reply just generated (12), not
+        # thread.message_count, the prior count (11) — the same off-by-one
+        # that build_phase4_prompt corrects for the same reply. Logging the
+        # prior count would silently mislabel every one of these warnings.
+        assert "message_ordinal=12" in caplog.text
+        assert "message_count=11" not in caplog.text
 
     @pytest.mark.asyncio
     async def test_silent_on_pause_decline_at_conclude(self, monkeypatch, caplog):
