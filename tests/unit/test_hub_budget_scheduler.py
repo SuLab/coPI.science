@@ -10,7 +10,7 @@ Implements the test plan in docs/specs/2026-08-06-hub-budget-scheduler-design.md
 - TestRestartRebuild       §4.2  step 4b repopulates call_times from llm_call_logs
 - TestScheduler            §4.3  load-proportional weight, reactive tiebreak
 - TestStallIsTransient     F1    a throttled roster must NOT end the run
-- TestPIHandlerAccounting  F2    PI-DM LLM calls go through record_api_call
+- TestPhase5CallAccounting F2    real-agent_id LLM calls go through record_api_call
 - TestRateSettingGuards    F4    non-positive rate settings are clamped, loudly
 - TestProductionRegression §8    the exact run-4f1e8395 state
 """
@@ -22,7 +22,6 @@ import time
 import types
 
 from src.agent.agent import Agent
-from src.agent.message_log import MessageLog
 from src.agent.simulation import SimulationEngine
 from src.agent.state import ThreadState
 
@@ -57,11 +56,8 @@ def _engine(agent_ids, budget_cap=0):
 # All of them are I/O (Slack, DB, disk) and none of them affect selection, so a
 # loop-level test stubs the lot and keeps only the scheduling behaviour.
 _TICK_IO = (
-    "_poll_slack_for_pi_messages",
-    "_poll_pi_dms",
-    "_poll_proposal_threads_for_pi",
+    "_poll_slack_for_human_messages",
     "_poll_inbound_from_db",
-    "_poll_pi_dms_from_db",
     "_sync_proposal_reviews_from_db",
     "_sync_private_channels_from_db",
     "_sync_roster_from_db",
@@ -560,78 +556,70 @@ class TestStallIsTransient:
         assert len(sleeps) == 1
 
 
-class TestPIHandlerAccounting:
-    """F2. `pi_handler` logged llm_call_logs rows under a real agent_id without
-    touching either counter, so those calls were invisible to the live limiter
-    but restored into `call_times` by step 4b — throttling an agent on turn 0 of
-    a resumed run for calls it never appeared to make.
+class TestPhase5CallAccounting:
+    """F2, retargeted after `pi_handler.py`'s removal (removal cycle, Task 5).
+
+    `pi_handler` used to be the call site that demonstrated this invariant
+    end-to-end: an LLM call logged under a REAL agent_id must book against
+    both `api_call_count` and the live `call_times` ledger, or a restart
+    silently throttles the agent for calls it never appeared to make (see
+    state.py's comment on `call_times`). The whole PI-interaction surface
+    (`pi_handler.py`, `PIHandler`) is gone — this removal cycle retires all
+    human-PI-to-bot interaction — so this class re-anchors the same invariant
+    to Phase 5's `_phase5_new_post`, which follows the identical pattern:
+    `agent.record_api_call()` immediately before a `generate_agent_response`
+    call logged under the agent's own real `agent_id`
+    (`log_meta={"agent_id": agent.agent_id, ...}`).
     """
 
-    def _handler(self, monkeypatch, response="answer", raises=False):
-        from src.agent import pi_handler as ph
+    _SKIP = '```json\n{"action": "skip"}\n```'
 
+    def _settings(self, **over):
+        base = dict(
+            cohort_isolation_enabled=False,
+            cohort_default_policy="open",
+            active_thread_threshold=12,
+            llm_rate_window_seconds=600,
+            llm_calls_per_load_per_window=8,
+            daily_post_cap=100,
+            lab_daily_post_cap=100,
+            unreviewed_proposal_block_count=2,
+            phase5_skip_probability=0.0,
+            llm_agent_model_opus="test-model",
+        )
+        base.update(over)
+        return types.SimpleNamespace(**base)
+
+    def _engine(self, monkeypatch, response=None, **settings_over):
         agent = Agent(agent_id="su", bot_name="SuBot", pi_name="Andrew Su")
-        handler = ph.PIHandler(
-            agents={"su": agent},
-            slack_clients={},
-            pi_slack_id_to_agent_ids={"U1": ["su"]},
-            message_log=MessageLog(),
-        )
-
-        async def _fake_llm(**kwargs):
-            if raises:
-                raise RuntimeError("anthropic is down")
-            return response
-
-        async def _fake_dm(*a, **kw):
-            return None
-
-        monkeypatch.setattr(ph, "generate_agent_response", _fake_llm)
-        monkeypatch.setattr(handler, "_send_dm", _fake_dm)
-        monkeypatch.setattr(agent, "update_private_profile", lambda text: None)
-        return handler, agent
-
-    async def test_pi_question_is_recorded_against_the_agent(self, monkeypatch):
-        handler, agent = self._handler(monkeypatch)
-        await handler._handle_question("su", "U1", "how many threads do you have?")
-        assert agent.api_call_count == 1
-        assert len(agent.state.call_times) == 1
-
-    async def test_profile_rewrite_is_recorded_against_the_agent(self, monkeypatch):
-        handler, agent = self._handler(
-            monkeypatch, response="<profile>new</profile><changes>x</changes>",
-        )
-        await handler._handle_standing_instruction("su", "U1", "always cite DOIs")
-        assert agent.api_call_count == 1
-        assert len(agent.state.call_times) == 1
-
-    async def test_a_failed_call_is_not_recorded(self, monkeypatch):
-        handler, agent = self._handler(monkeypatch, raises=True)
-        await handler._handle_question("su", "U1", "anything")
-        assert agent.api_call_count == 0
-        assert len(agent.state.call_times) == 0
-
-    async def test_dm_classification_is_not_attributed_to_the_agent(
-        self, monkeypatch
-    ):
-        """`_classify_dm` logs under the synthetic agent_id "pi_handler", so the
-        restart rebuild attributes it to nobody. Counting it live would make the
-        in-process ledger disagree in the other direction."""
-        handler, agent = self._handler(monkeypatch, response='{"category": "question"}')
-        await handler._classify_dm("what are you working on?")
-        assert agent.api_call_count == 0
-        assert len(agent.state.call_times) == 0
-
-    async def test_a_pi_dm_burst_shows_up_in_the_live_rate_limiter(
-        self, monkeypatch
-    ):
-        """The end-to-end point of F2: ten PI questions must throttle the agent
-        NOW, exactly as they would after a restart rebuilt them from the DB."""
-        _patch(monkeypatch, llm_calls_per_load_per_window=8)
-        handler, agent = self._handler(monkeypatch)
+        agent.allowed_sender_ids = None
         eng = SimulationEngine(agents=[agent], slack_clients={})
+        monkeypatch.setattr(
+            "src.agent.simulation.get_settings", lambda: self._settings(**settings_over)
+        )
+        # Stub the prompt builder — this class exercises the accounting
+        # around the LLM call, not prompt content (matches TestPIHandlerAccounting's
+        # original scope, which also never inspected prompt text).
+        monkeypatch.setattr(agent, "build_phase5_prompt", lambda **kw: ("sys", []))
+
+        async def _fake_generate(**kwargs):
+            return response if response is not None else self._SKIP
+        monkeypatch.setattr("src.agent.simulation.generate_agent_response", _fake_generate)
+        return eng, agent
+
+    async def test_new_post_call_is_recorded_against_the_agent(self, monkeypatch):
+        eng, agent = self._engine(monkeypatch)
+        await eng._phase5_new_post(agent)
+        assert agent.api_call_count == 1
+        assert len(agent.state.call_times) == 1
+
+    async def test_a_call_burst_shows_up_in_the_live_rate_limiter(self, monkeypatch):
+        """The end-to-end point of F2: repeated real-agent_id LLM calls must
+        throttle the agent NOW, exactly as they would after a restart rebuilt
+        them from the DB."""
+        eng, agent = self._engine(monkeypatch, llm_calls_per_load_per_window=8)
         for _ in range(10):
-            await handler._handle_question("su", "U1", "status?")
+            await eng._phase5_new_post(agent)
         assert agent.api_call_count == 10
         assert eng._within_rate_limit(agent, time.time()) is False
 

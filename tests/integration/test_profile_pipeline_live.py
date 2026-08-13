@@ -193,6 +193,15 @@ class PipelineProbe:
     pipeline making real calls; only the arguments and the call count are recorded. This
     is how the LLM-call count (which GM #1 and GM #4 pin) and the synthesis context
     (T4.3, T4.4) are observed from the outside.
+
+    ``private_calls`` is retained (always 0) rather than removed: the
+    private-instructions removal cycle deleted step 9b
+    (``synthesize_private_profile``) outright, so this probe can no longer
+    instrument it, but ``llm_calls`` and every call site below still add
+    ``public_calls + private_calls`` — deleting the field would be a wider,
+    out-of-scope rewrite of this file's many ``private_calls``/
+    ``private_profile_seed`` assertions (still pending a full pass; those
+    assertions are stale until then).
     """
 
     def __init__(self):
@@ -207,16 +216,11 @@ class PipelineProbe:
 
     def install(self, monkeypatch):
         real_public = profile_pipeline.synthesize_profile
-        real_private = profile_pipeline.synthesize_private_profile
         real_ctx = profile_pipeline._build_synthesis_context
 
         async def public(context_text, researcher_name):
             self.public_calls += 1
             return await real_public(context_text, researcher_name)
-
-        async def private(context_text, researcher_name):
-            self.private_calls += 1
-            return await real_private(context_text, researcher_name)
 
         def ctx(**kwargs):
             out = real_ctx(**kwargs)
@@ -225,7 +229,6 @@ class PipelineProbe:
             return out
 
         monkeypatch.setattr(profile_pipeline, "synthesize_profile", public)
-        monkeypatch.setattr(profile_pipeline, "synthesize_private_profile", private)
         monkeypatch.setattr(profile_pipeline, "_build_synthesis_context", ctx)
         return self
 

@@ -409,7 +409,6 @@ def _make_agents():
         a = Agent(agent_id=aid, bot_name=bot, pi_name=f"PI {aid}")
         # The cached-profile seam: a real profile without touching disk or the DB.
         a._public_profile = f"# {aid.capitalize()} Lab\n\n{summary}\n"
-        a._private_profile = "No private instructions yet."
         agents.append(a)
     # The hub: role=scout_hub so `_validate_star_topology` sees it. See the LIMITS
     # note on the `full_run` fixture — it exists only for that check, not to actually
@@ -418,7 +417,6 @@ def _make_agents():
     hub = Agent(agent_id=HUB_AGENT_ID, bot_name=hub_bot, pi_name="Blackbird Laboratories",
                 role="scout_hub")
     hub._public_profile = f"# Blackbird Laboratories\n\n{hub_summary}\n"
-    hub._private_profile = "No private instructions yet."
     agents.append(hub)
     return agents
 

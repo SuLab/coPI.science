@@ -11,14 +11,13 @@ from datetime import timedelta
 import pytest
 from sqlalchemy import func, select
 
-from src.agent.agent import Agent
 from src.agent.message_log import LogEntry
 from src.agent.simulation import (
     PI_INBOX_LOOKBACK_S,
     REBUILD_WINDOW_S,
     SimulationEngine,
 )
-from src.models import AgentMessage, PiDmMessage
+from src.models import AgentMessage
 from tests import factories
 
 pytestmark = pytest.mark.integration
@@ -52,16 +51,6 @@ def _engine_for(session, run_id, agents=None):
         session_factory=_FixtureSessionFactory(session),
         simulation_run_id=run_id,
     )
-
-
-class _RecordingPiHandler:
-    """Minimal PIHandler stand-in that records handle_dm calls."""
-
-    def __init__(self):
-        self.calls = []
-
-    async def handle_dm(self, agent_id, pi_user_id, content):
-        self.calls.append((agent_id, pi_user_id, content))
 
 
 async def test_flush_upsert_does_not_clobber_human_row_with_bot(db_session):
@@ -271,56 +260,6 @@ async def test_inbound_poller_delivers_a_row_from_a_skewed_writer_clock(db_sessi
     entry = engine.message_log.get_entry(skewed_ts)
     assert entry is not None
     assert entry.content == "PI message from a skewed host"
-
-
-async def test_dm_poller_ingests_below_cursor_then_dedups(db_session):
-    run = await factories.make_simulation_run(db_session)
-    agent = Agent("su", "SuBot", "Andrew Su")
-    engine = _engine_for(db_session, run.id, agents=[agent])
-    handler = _RecordingPiHandler()
-    engine._pi_handler = handler
-
-    below_ts = "1700000150.000000"
-    dm = PiDmMessage(
-        simulation_run_id=run.id, agent_id="su", pi_user_id="local:x",
-        direction="inbound", content="standing instruction",
-        sender_name="PI", ts=below_ts, posted_at=float(below_ts),
-    )
-    db_session.add(dm)
-    await db_session.flush()
-    await db_session.refresh(dm)
-    engine._pi_dm_cursor = dm.created_at + timedelta(seconds=50)
-
-    # First poll ingests the below-cursor row (H2)...
-    await engine._poll_pi_dms_from_db()
-    assert handler.calls == [("su", "local:x", "standing instruction")]
-
-    # ...and the lookback re-scan on the next poll does NOT re-process it.
-    await engine._poll_pi_dms_from_db()
-    assert len(handler.calls) == 1
-
-
-async def test_seed_pi_dm_cursor_prevents_replay_on_restart(db_session):
-    # Seeding the seen-set (not just the cursor) means the first poll's lookback
-    # re-scan doesn't replay recent history through handle_dm after a restart.
-    run = await factories.make_simulation_run(db_session)
-    ts = "1700000150.000000"
-    db_session.add(PiDmMessage(
-        simulation_run_id=run.id, agent_id="su", pi_user_id="local:x",
-        direction="inbound", content="old directive",
-        sender_name="PI", ts=ts, posted_at=float(ts),
-    ))
-    await db_session.flush()
-
-    agent = Agent("su", "SuBot", "Andrew Su")
-    engine = _engine_for(db_session, run.id, agents=[agent])
-    handler = _RecordingPiHandler()
-    engine._pi_handler = handler
-
-    await engine._seed_pi_dm_cursor()
-    assert ts in engine._pi_dm_seen
-    await engine._poll_pi_dms_from_db()
-    assert handler.calls == []
 
 
 # ---------------------------------------------------------------
@@ -758,7 +697,7 @@ async def test_polled_bot_message_keeps_its_slack_mapping(db_session):
     # start() registers this; the poller's append has to reach the DB buffer.
     engine.message_log.set_persist_callback(engine._enqueue_persist)
 
-    await engine._poll_slack_for_pi_messages()
+    await engine._poll_slack_for_human_messages()
 
     entry = engine.message_log.get_entry("1700000123.456789")
     assert entry is not None

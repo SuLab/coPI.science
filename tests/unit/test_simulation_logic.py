@@ -293,10 +293,9 @@ class TestSyncProfilesFromDisk:
         import src.agent.simulation as sim
         from src.agent.agent import Agent
 
-        (tmp_path / "private").mkdir()
         (tmp_path / "public").mkdir()
-        priv = tmp_path / "private" / "su.md"
-        priv.write_text("Focus on aging.")
+        pub = tmp_path / "public" / "su.md"
+        pub.write_text("Focus on aging.")
 
         # Point the sync method at the temp profiles tree.
         monkeypatch.setattr(sim, "PROFILES_DIR", tmp_path)
@@ -311,30 +310,30 @@ class TestSyncProfilesFromDisk:
         agent.reload_profiles = counting_reload
 
         engine = SimulationEngine(agents=[agent], slack_clients={})
-        return engine, agent, priv, calls
+        return engine, agent, pub, calls
 
     def test_first_observation_records_baseline_without_reload(self, setup):
-        engine, agent, _priv, calls = setup
+        engine, agent, _pub, calls = setup
         engine._sync_profiles_from_disk()
         assert calls == []                                  # no reload on first pass
         assert "su" in engine._profile_mtimes              # baseline recorded
 
     def test_unchanged_files_do_not_reload(self, setup):
-        engine, agent, _priv, calls = setup
+        engine, agent, _pub, calls = setup
         engine._sync_profiles_from_disk()  # baseline
         engine._sync_profiles_from_disk()  # nothing changed
         assert calls == []
 
     def test_external_edit_triggers_reload(self, setup):
         import os
-        engine, agent, priv, calls = setup
+        engine, agent, pub, calls = setup
         engine._sync_profiles_from_disk()  # baseline
 
         # Simulate the web app rewriting the file. Bump mtime explicitly so the
         # test is robust to sub-second filesystem timestamp resolution.
-        priv.write_text("Switch focus to immunology.")
+        pub.write_text("Switch focus to immunology.")
         future = engine._profile_mtimes["su"] + 10
-        os.utime(priv, (future, future))
+        os.utime(pub, (future, future))
 
         engine._sync_profiles_from_disk()
         assert calls == [1]                                 # reloaded exactly once
@@ -345,8 +344,8 @@ class TestSyncProfilesFromDisk:
         assert calls == [1]
 
     def test_missing_profile_files_are_tolerated(self, setup, tmp_path):
-        engine, agent, priv, calls = setup
-        priv.unlink()  # no profile files on disk at all
+        engine, agent, pub, calls = setup
+        pub.unlink()  # no profile files on disk at all
         engine._sync_profiles_from_disk()  # must not raise
         engine._sync_profiles_from_disk()
         assert calls == []

@@ -132,10 +132,9 @@ _CHANNEL_KEYWORDS: dict[str, list[str]] = {
 }
 _UNIVERSAL_CHANNELS = {"general"}
 
-# Slack poll throttles. PI messages come from humans, so sub-turn latency is
+# Slack poll throttles. Human channel messages are rare, so sub-turn latency is
 # unnecessary; polling every turn was saturating one bot token's rate limit.
 CHANNEL_POLL_INTERVAL = 15.0   # seconds between conversations.history sweeps
-PROPOSAL_POLL_INTERVAL = 30.0  # seconds between conversations.replies sweeps
 ROSTER_POLL_INTERVAL = 30.0    # seconds between AgentRegistry roster re-syncs
 
 # How often to log the reactive:proactive selection split. Starvation under the
@@ -247,9 +246,6 @@ class SimulationEngine:
         self._start_time: datetime | None = None
         self._running = False
         self.message_log = MessageLog()
-        self._pi_slack_id_to_agent_ids: dict[str, list[str]] = {}  # PI slack_user_id -> [agent_ids]
-        self._dm_poll_cursors: dict[str, str] = {}  # agent_id -> latest DM ts
-        self._pi_handler = None  # Initialized in start() after PI mappings loaded
 
         # Agent name lookups
         self._bot_name_to_id: dict[str, str] = {
@@ -295,12 +291,12 @@ class SimulationEngine:
         # a legacy-finalized channel stays closed for further discussion.
         self._finalized_private_channels: set[str] = set()
 
-        # Last-seen mtime of each agent's on-disk profile files (private +
-        # public), keyed by agent_id. The web editor runs in a separate process
-        # and writes profiles/{private,public}/{id}.md on a shared volume; this
-        # process caches profile content per Agent, so a per-turn mtime check
-        # tells us when an external edit happened and the cache must be
-        # invalidated. See _sync_profiles_from_disk.
+        # Last-seen mtime of each agent's on-disk public profile file, keyed by
+        # agent_id. The web editor runs in a separate process and writes
+        # profiles/public/{id}.md on a shared volume; this process caches
+        # profile content per Agent, so a per-turn mtime check tells us when an
+        # external edit happened and the cache must be invalidated. See
+        # _sync_profiles_from_disk.
         self._profile_mtimes: dict[str, float] = {}
 
         # Last agent to make an LLM call — prevents the same agent from making
@@ -341,7 +337,6 @@ class SimulationEngine:
         # Wall-clock throttles for Slack pollers + round-robin cursor over
         # connected clients, so one agent's token doesn't carry all poll load.
         self._last_channel_poll: float = 0.0
-        self._last_proposal_poll: float = 0.0
         self._poll_client_cursor: int = 0
         # Last wall-clock time the AgentRegistry roster was re-synced (live
         # add/remove of agents as their status flips). See _sync_roster_from_db.
@@ -367,13 +362,6 @@ class SimulationEngine:
         # if a DB-origin message was later mirrored to Slack). Lets the Slack
         # reconcile skip a message it already has. See _rebuild_state_from_slack.
         self._known_slack_ts: set[str] = set()
-        # High-water mark (created_at) for the DB DM inbox poller (Slack-off /
-        # web PI DMs). See _poll_pi_dms_from_db.
-        self._pi_dm_cursor: datetime = EPOCH_UTC
-        # Identity dedup for the DM poller's lookback re-scan (ts -> created_at),
-        # so a DM is processed exactly once even though the query re-scans a
-        # window behind the cursor (H2). Pruned to the lookback window each poll.
-        self._pi_dm_seen: dict[str, datetime] = {}
         # Wall-clock of the last cosmetic run-stats refresh (total_messages /
         # total_api_calls), throttled to RUN_STATS_UPDATE_INTERVAL. See
         # _flush_persisted (B1).
@@ -510,7 +498,6 @@ class SimulationEngine:
         # them too — otherwise the handover message wouldn't land in the
         # message log until the first per-turn poll tick.
         await self._sync_private_channels_from_db()
-        await self._load_pi_mappings()
         # The DB is the primary conversation store. Register the persist hook,
         # hydrate the log from the DB, then (only when Slack is connected)
         # reconcile with Slack history, and finally reconstruct per-agent state
@@ -519,7 +506,6 @@ class SimulationEngine:
         await self._rebuild_state_from_db()
         await self._rebuild_state_from_slack()
         await self._rebuild_agent_state()
-        await self._seed_pi_dm_cursor()
         # Rebuild advanced last_seen_cursor to max(all_messages), which can
         # overshoot messages in private channels (typically older than the
         # latest public chatter). Rewind member-bot cursors so Phase 2 can
@@ -552,17 +538,6 @@ class SimulationEngine:
         # Record which topology this run actually started with, so the run's output
         # stays attributable to its configuration (v2 §13.1).
         await self._record_topology_snapshot()
-
-        # Initialize PI handler after mappings are loaded
-        from src.agent.pi_handler import PIHandler
-        self._pi_handler = PIHandler(
-            agents=self.agents,
-            slack_clients=self.slack_clients,
-            pi_slack_id_to_agent_ids=self._pi_slack_id_to_agent_ids,
-            message_log=self.message_log,
-            session_factory=self.session_factory,
-            simulation_run_id=self.simulation_run_id,
-        )
 
         await self._run_main_loop()
 
@@ -629,19 +604,14 @@ class SimulationEngine:
         turn_count = 0
         consecutive_idle = 0
         while self._running and self.is_within_time_limit:
-            # Poll Slack for PI messages (channels, DMs, and proposal threads).
-            # No-ops when Slack is off (NullTransport / no connected clients).
-            await self._poll_slack_for_pi_messages()
-            await self._poll_pi_dms()
-            await self._poll_proposal_threads_for_pi()
+            # Poll Slack for human (non-bot) channel messages. No-ops when
+            # Slack is off (NullTransport / no connected clients).
+            await self._poll_slack_for_human_messages()
 
-            # DB-native inbound path: messages written by other processes (PI
-            # web interface, private-channel handover). Runs regardless of Slack,
-            # and is how PIs interact when Slack is off.
+            # DB-native inbound path: messages written by other processes
+            # (private-channel handover, and legacy human-authored rows). Runs
+            # regardless of Slack.
             await self._poll_inbound_from_db()
-            # DB-native PI DM processing (Slack DMs recorded by _poll_pi_dms and
-            # web DMs both converge here).
-            await self._poll_pi_dms_from_db()
 
             # Sync proposal reviews and any newly-created private channels from
             # the web app. Both are DB-driven, so a single tick picks them up.
@@ -954,7 +924,6 @@ class SimulationEngine:
         # new actionable state or the spontaneous post timer has expired.
         has_interesting = len(agent.state.interesting_posts) > 0
         has_phase4_work = len(phase4_thread_ids) > 0
-        has_pi = agent.state.has_pi_directive
 
         # Spontaneous post timer — allow one Phase 5 call after enough
         # idle time so agents can organically start new conversations.
@@ -965,7 +934,7 @@ class SimulationEngine:
         since_last_action = time.time() - agent.state.last_phase5_action_time
         spontaneous_ready = since_last_action >= spontaneous_interval
 
-        has_new_work = has_interesting or has_phase4_work or has_pi
+        has_new_work = has_interesting or has_phase4_work
 
         if has_new_work or spontaneous_ready:
             await self._phase5_new_post(agent, phase4_thread_ids)
@@ -975,9 +944,6 @@ class SimulationEngine:
                 agent.agent_id,
                 int(spontaneous_interval - since_last_action),
             )
-
-        # Clear PI directive flag after the turn
-        agent.state.has_pi_directive = False
 
         # Update cursor
         agent.state.last_seen_cursor = time.time()
@@ -1530,15 +1496,6 @@ class SimulationEngine:
             agent.agent_id, thread.thread_id, outcome,
         )
 
-        # Notify PI via DM
-        if self._pi_handler:
-            try:
-                await self._pi_handler.notify_thread_conclusion(
-                    agent.agent_id, thread, outcome, summary_text,
-                )
-            except Exception as exc:
-                logger.debug("Failed to notify PI of thread conclusion: %s", exc)
-
         # Update working memory for both agents
         # summary_text is derived from a cross-agent conversation, so fence it
         # as untrusted before it lands in working memory (which is later fed
@@ -1827,17 +1784,7 @@ class SimulationEngine:
         )
         blocked_for_regular = at_thread_threshold or has_unreviewed
 
-        # Check for PI-priority posts — these bypass random skip and blocking,
-        # and get folded into the phase-5 prompt as an authoritative pitch
-        # steer (the PI-tag reply/new-thread path was retired — see
-        # pi_handler.handle_channel_tag). Consumed only when the turn resolves
-        # in new_post or skip, below, so a flagged entry survives
-        # rejected/blocked turns and retries (unlike has_pi_directive, which
-        # clears every turn).
-        pi_flagged_posts = [p for p in agent.state.interesting_posts if p.pi_priority]
-        has_pi_priority = bool(pi_flagged_posts)
-
-        if not has_pi_priority and random.random() < settings.phase5_skip_probability:
+        if random.random() < settings.phase5_skip_probability:
             logger.debug("[%s] Phase 5: Skipped (random)", agent.agent_id)
             return
 
@@ -1864,8 +1811,7 @@ class SimulationEngine:
             if post.channel in self._finalized_private_channels:
                 continue
 
-            # PI-priority posts bypass regular blocking.
-            if blocked_for_regular and not post.pi_priority:
+            if blocked_for_regular:
                 continue
 
             # Turn-taking in flat private channels: don't reply if we were
@@ -1961,19 +1907,12 @@ class SimulationEngine:
             bot_names={aid: a.bot_name for aid, a in self.agents.items()},
         )
 
-        pi_flagged = "\n\n".join(
-            f"- {p.pi_context} (post {p.post_id} in #{p.channel}: {p.content_snippet!r})"
-            for p in pi_flagged_posts
-        )
-        pi_flagged_ids = {p.post_id for p in pi_flagged_posts}
-
         system_prompt, messages = agent.build_phase5_prompt(
             recent_posts=recent_posts,
             prior_threads=prior_threads,
             visibility=current_visibility,
             channel_id=private_channel_id,
             post_type_menu=post_type_menu,
-            pi_flagged=pi_flagged or None,
         )
 
         # Restore
@@ -2028,17 +1967,6 @@ class SimulationEngine:
                     "[%s] Phase 5: Agent chose to skip (streak: %d)",
                     agent.agent_id, agent.state.consecutive_phase5_skips,
                 )
-                # The turn's action resolved (skip) — the PI-flagged entries
-                # were surfaced in this prompt; consume them once rather than
-                # re-surfacing forever. Consumed only when the turn resolves
-                # in new_post or skip, so a flagged entry survives
-                # rejected/blocked turns and retries (unlike has_pi_directive,
-                # which clears every turn).
-                if pi_flagged_ids:
-                    agent.state.interesting_posts = [
-                        p for p in agent.state.interesting_posts
-                        if p.post_id not in pi_flagged_ids
-                    ]
                 return
 
             if not message_text:
@@ -2156,17 +2084,6 @@ class SimulationEngine:
                 )
             else:
                 agent.message_count += 1
-
-                # The turn's action resolved (new_post posted successfully) —
-                # consume the PI-flagged entries that shaped this pitch.
-                # Consumed only when the turn resolves in new_post or skip,
-                # so a flagged entry survives rejected/blocked turns and
-                # retries (unlike has_pi_directive, which clears every turn).
-                if pi_flagged_ids:
-                    agent.state.interesting_posts = [
-                        p for p in agent.state.interesting_posts
-                        if p.post_id not in pi_flagged_ids
-                    ]
 
                 # A :mag: Opportunity Assessment carries a machine-readable
                 # verdict sidecar (stripped from the Slack body). Persist it —
@@ -2748,10 +2665,15 @@ class SimulationEngine:
         self._poll_client_cursor += 1
         return client
 
-    async def _poll_slack_for_pi_messages(self) -> None:
+    async def _poll_slack_for_human_messages(self) -> None:
         """
         Poll all channels for new human (non-bot) messages.
         Add them to the message log.
+
+        Human-authored channel messages are ingested for observability/history
+        only — there is no human-PI interaction surface left to route them
+        into (no reopen, no @-tag routing, no directive flag). See the removal
+        cycle's PI-interaction audit map.
         """
         if not self.slack_clients:
             return
@@ -2837,9 +2759,8 @@ class SimulationEngine:
                             self._poll_cursors[ch_id] = ts
                         continue
 
-                    # Human message — resolve PI identity
+                    # Human message — ingested for history/observability only.
                     sender_name = client.resolve_user_name(user_id)
-                    pi_agent_ids = self._pi_slack_id_to_agent_ids.get(user_id, [])
                     entry = LogEntry(
                         ts=ts,
                         channel=ch_name,
@@ -2858,39 +2779,9 @@ class SimulationEngine:
                     )
                     self.message_log.append(entry)
                     logger.info(
-                        "PI message in #%s from %s: %.60s",
+                        "Human message in #%s from %s: %.60s (no action taken)",
                         ch_name, sender_name, msg.get("text", "")[:60],
                     )
-
-                    # Check if PI message references a proposal (clears pending block)
-                    self._check_pi_proposal_review(entry)
-
-                    # PI-specific handling — apply to all agents this PI controls
-                    for pi_agent_id in pi_agent_ids:
-                      agent_obj = self.agents.get(pi_agent_id)
-                      if agent_obj:
-                          agent_obj.state.has_pi_directive = True
-                      if not self._pi_handler:
-                          continue
-                      thread_ts = msg.get("thread_ts")
-
-                      # PI posted in a closed thread → reopen it
-                      if thread_ts and thread_ts in self._closed_thread_ids:
-                          await self._reopen_thread(pi_agent_id, thread_ts, entry)
-
-                      # PI posted in an active thread → set pi_context
-                      elif thread_ts:
-                          agent = self.agents.get(pi_agent_id)
-                          if agent and thread_ts in agent.state.active_threads:
-                              thread = agent.state.active_threads[thread_ts]
-                              thread.pi_context = entry.content
-                              thread.has_pending_reply = True
-                              logger.info("[%s] PI posted in active thread %s", pi_agent_id, thread_ts)
-
-                      # PI tagged their bot in a top-level post or reply
-                      bot_name = self.agents[pi_agent_id].bot_name if pi_agent_id in self.agents else None
-                      if bot_name and f"@{bot_name.lower()}" in msg.get("text", "").lower():
-                          await self._pi_handler.handle_channel_tag(pi_agent_id, entry)
 
                     # Update cursor
                     if ts:
@@ -2903,11 +2794,13 @@ class SimulationEngine:
         """Ingest messages written to the DB by other processes.
 
         The DB is the primary store, so any message this process hasn't seen —
-        PI messages and bot-authored handover posts written by the web app, and
-        (later) the Slack mirror's inbound side — must be pulled into the live
-        MessageLog. Human/PI messages are additionally routed through PI handling
-        (proposal-review clearing, thread reopen, pi_context, @bot tags). Runs
-        every tick regardless of Slack. See specs/local-db-conversations.md.
+        bot-authored handover posts written by the web app, and (later) the
+        Slack mirror's inbound side, plus any legacy human-authored row — must
+        be pulled into the live MessageLog. Bot-authored rows are the live
+        path (design §8); a human-authored (``is_bot=False``) row is ingested
+        for history/observability only — there is no PI-interaction handling
+        left to route it into. Runs every tick regardless of Slack. See
+        specs/local-db-conversations.md.
         """
         if not self.session_factory or not self.simulation_run_id:
             return
@@ -2955,369 +2848,10 @@ class SimulationEngine:
             if r.is_bot:
                 logger.info("External bot message in #%s: %.60s", entry.channel, entry.content[:60])
             else:
-                logger.info("PI (web) message in #%s: %.60s", entry.channel, entry.content[:60])
-                await self._handle_pi_inbound_entry(entry)
-
-    async def _handle_pi_inbound_entry(self, entry: LogEntry) -> None:
-        """Apply PI-message side effects, derived from the thread (no Slack map).
-
-        Clears pending-proposal blocks, reopens closed threads, sets pi_context
-        on active threads, and honors @bot tags — using the thread's own
-        participants rather than a Slack user→agent mapping, so it works with
-        Slack off.
-        """
-        # Clears any pending proposal on this thread (keyed purely by thread id).
-        self._check_pi_proposal_review(entry)
-
-        thread_ts = entry.thread_ts
-        if thread_ts:
-            # Reopen a closed thread for its participants.
-            if thread_ts in self._closed_thread_ids:
-                # Old closed threads may have been windowed out of the log at
-                # startup (B2) — pull the history back so participants resolve.
-                await self._hydrate_thread_from_db(thread_ts)
-                history = self.message_log.get_thread_history(thread_ts)
-                participants = [
-                    h.sender_agent_id for h in history
-                    if h.sender_agent_id and h.sender_agent_id in self.agents
-                ]
-                if participants:
-                    await self._reopen_thread(participants[0], thread_ts, entry)
-            else:
-                # Active thread → treat the PI message as authoritative context.
-                for agent in self.agents.values():
-                    thread = agent.state.active_threads.get(thread_ts)
-                    if thread:
-                        thread.pi_context = entry.content
-                        thread.has_pending_reply = True
-                        agent.state.has_pi_directive = True
-
-        # @bot tag → route to the tagged agent (same as the Slack path).
-        tagged_id = self.message_log._extract_tagged_agent(entry.content)
-        if tagged_id and tagged_id in self.agents and self._pi_handler:
-            self.agents[tagged_id].state.has_pi_directive = True
-            await self._pi_handler.handle_channel_tag(tagged_id, entry)
-
-    def _check_pi_proposal_review(self, entry: LogEntry) -> None:
-        """Check if a PI message clears a pending proposal for any agent."""
-        thread_ts = entry.thread_ts
-        if not thread_ts:
-            return
-
-        for agent in self.agents.values():
-            for proposal in agent.state.pending_proposals:
-                if proposal.thread_id == thread_ts and not proposal.reviewed:
-                    proposal.reviewed = True
-                    logger.info(
-                        "[%s] Proposal in thread %s reviewed by PI",
-                        agent.agent_id, thread_ts,
-                    )
-
-    async def _reopen_thread(self, agent_id: str, thread_ts: str, pi_entry: LogEntry) -> None:
-        """Reopen a closed thread when a PI posts in it."""
-        self._closed_thread_ids.discard(thread_ts)
-        agent = self.agents.get(agent_id)
-        if not agent:
-            return
-
-        # An old closed thread may have been windowed out of the log at startup
-        # (B2); pull its history so the other-agent lookup and reply budget below
-        # see the real conversation.
-        await self._hydrate_thread_from_db(thread_ts)
-        # Find the other agent from thread history
-        history = self.message_log.get_thread_history(thread_ts)
-        other_id = None
-        for entry in history:
-            if entry.sender_agent_id and entry.sender_agent_id != agent_id:
-                other_id = entry.sender_agent_id
-                break
-
-        if not other_id:
-            logger.warning("[%s] Cannot reopen thread %s — no other agent found", agent_id, thread_ts)
-            return
-
-        # Create fresh ThreadState for both agents
-        # Set message_count_offset so the bots get a fresh budget of replies
-        existing_count = len(self.message_log.get_thread_history(thread_ts))
-        agent.state.active_threads[thread_ts] = ThreadState(
-            thread_id=thread_ts,
-            channel=pi_entry.channel,
-            other_agent_id=other_id,
-            message_count=0,
-            has_pending_reply=True,
-            pi_context=pi_entry.content,
-            message_count_offset=existing_count,
-        )
-
-        other_agent = self.agents.get(other_id)
-        if other_agent:
-            other_agent.state.active_threads[thread_ts] = ThreadState(
-                thread_id=thread_ts,
-                channel=pi_entry.channel,
-                other_agent_id=agent_id,
-                message_count=0,
-                has_pending_reply=True,
-                message_count_offset=existing_count,
-            )
-
-        logger.info("[%s] PI reopened closed thread %s with %s", agent_id, thread_ts, other_id)
-
-    async def _poll_pi_dms(self) -> None:
-        """Poll Slack for PI DMs and record them as inbound rows.
-
-        Processing is unified through the DB: this method only persists inbound
-        Slack DMs to pi_dm_messages; _poll_pi_dms_from_db is the single place
-        that runs them through PIHandler (so Slack and web DMs are handled
-        identically and never double-processed). See specs/local-db-conversations.md.
-        """
-        if not self._pi_slack_id_to_agent_ids or not self.session_factory or not self.simulation_run_id:
-            return
-
-        # Default cursor to simulation start time — only process DMs sent after we started
-        default_cursor = str(self._start_time.timestamp()) if self._start_time else "0"
-
-        from src.services.pi_inbox import record_pi_dm
-
-        for pi_slack_id, agent_ids in self._pi_slack_id_to_agent_ids.items():
-            for agent_id in agent_ids:
-                client = self.slack_clients.get(agent_id)
-                if not client or not client.is_connected:
-                    continue
-
-                oldest = self._dm_poll_cursors.get(agent_id, default_cursor)
-                messages = client.poll_dm_messages(pi_slack_id, oldest=oldest)
-
-                for msg in messages:
-                    ts = msg.get("ts", "")
-                    text = msg.get("text", "").strip()
-                    if not text:
-                        continue
-                    logger.info("[%s] PI DM from %s: %s", agent_id, pi_slack_id, text[:80])
-                    try:
-                        async with self.session_factory() as db:
-                            await record_pi_dm(
-                                db, run_id=self.simulation_run_id, agent_id=agent_id,
-                                pi_user_id=pi_slack_id, direction="inbound", content=text,
-                                sender_name="PI", slack_ts=ts or None,
-                            )
-                            await db.commit()
-                    except Exception as exc:
-                        logger.error("[%s] Failed to record PI DM: %s", agent_id, exc)
-                    if ts > oldest:
-                        self._dm_poll_cursors[agent_id] = ts
-
-    async def _seed_pi_dm_cursor(self) -> None:
-        """Start the DM poller past existing inbound DMs (don't replay history).
-
-        Seeds both the cursor (max created_at — the DB server's clock, see R3)
-        and the seen-set (ts of inbound DMs within the lookback window), so the
-        first poll's lookback re-scan doesn't re-process history through
-        handle_dm on restart.
-        """
-        if not self.session_factory or not self.simulation_run_id:
-            return
-        from sqlalchemy import func as sa_func
-        from sqlalchemy import select as sa_select
-
-        from src.models import PiDmMessage
-        try:
-            async with self.session_factory() as db:
-                mx = (await db.execute(
-                    sa_select(sa_func.max(PiDmMessage.created_at)).where(
-                        PiDmMessage.simulation_run_id == self.simulation_run_id,
-                        PiDmMessage.direction == "inbound",
-                    )
-                )).scalar_one_or_none()
-                if mx:
-                    self._pi_dm_cursor = max(self._pi_dm_cursor, mx)
-                    seen = (await db.execute(
-                        sa_select(PiDmMessage.ts, PiDmMessage.created_at).where(
-                            PiDmMessage.simulation_run_id == self.simulation_run_id,
-                            PiDmMessage.direction == "inbound",
-                            PiDmMessage.created_at > self._pi_dm_cursor - PI_INBOX_LOOKBACK,
-                        )
-                    )).all()
-                    for ts, created_at in seen:
-                        if ts:
-                            self._pi_dm_seen[ts] = created_at or EPOCH_UTC
-        except Exception as exc:
-            logger.warning("PI DM cursor seed failed: %s", exc)
-
-    async def _poll_pi_dms_from_db(self) -> None:
-        """Process inbound PI DMs recorded in the DB (Slack or web-originated).
-
-        The single processor for PI DMs: reads new inbound pi_dm_messages rows
-        and runs each through PIHandler.handle_dm (classify → standing
-        instruction / feedback / question), then flips has_pi_directive so
-        Phase 5 runs. Works with Slack off. See specs/local-db-conversations.md.
-        """
-        if not self._pi_handler or not self.session_factory or not self.simulation_run_id:
-            return
-        from sqlalchemy import select as sa_select
-
-        from src.models import PiDmMessage
-        floor = self._pi_dm_cursor - PI_INBOX_LOOKBACK
-        try:
-            async with self.session_factory() as db:
-                rows = (await db.execute(
-                    sa_select(PiDmMessage)
-                    .where(
-                        PiDmMessage.simulation_run_id == self.simulation_run_id,
-                        PiDmMessage.direction == "inbound",
-                        # Lookback + seen-set dedup below, mirroring the channel
-                        # poller, so a late-committing DM row isn't skipped (H2).
-                        # created_at, not posted_at, so the window doesn't depend
-                        # on the writing process's clock (R3).
-                        PiDmMessage.created_at > floor,
-                    )
-                    .order_by(PiDmMessage.created_at.asc())
-                )).scalars().all()
-        except Exception as exc:
-            logger.warning("PI DM inbox poll failed: %s", exc)
-            return
-
-        for r in rows:
-            if r.created_at and r.created_at > self._pi_dm_cursor:
-                self._pi_dm_cursor = r.created_at
-            if r.ts and r.ts in self._pi_dm_seen:
-                continue  # already processed (lookback re-scan)
-            if r.agent_id not in self.agents:
-                continue
-            if r.ts:
-                self._pi_dm_seen[r.ts] = r.created_at or EPOCH_UTC
-            try:
-                await self._pi_handler.handle_dm(r.agent_id, r.pi_user_id, r.content)
-                self.agents[r.agent_id].state.has_pi_directive = True
-            except Exception as exc:
-                logger.error("[%s] Failed to handle PI DM (DB): %s", r.agent_id, exc)
-
-        # Prune the seen-set to the lookback window — anything at or below the new
-        # floor won't be re-queried, so it no longer needs tracking.
-        prune_floor = self._pi_dm_cursor - PI_INBOX_LOOKBACK
-        if self._pi_dm_seen:
-            self._pi_dm_seen = {
-                ts: ca for ts, ca in self._pi_dm_seen.items() if ca > prune_floor
-            }
-
-    async def _poll_proposal_threads_for_pi(self) -> None:
-        """Poll unreviewed proposal threads for PI replies.
-
-        Thread replies don't appear in channel history, so this checks
-        conversations.replies on each unreviewed proposal thread to detect
-        PI messages that would trigger a thread reopen.
-        """
-        if not self._pi_slack_id_to_agent_ids:
-            return
-
-        now = time.time()
-        if now - self._last_proposal_poll < PROPOSAL_POLL_INTERVAL:
-            return
-        self._last_proposal_poll = now
-
-        # Collect PI user IDs for quick lookup
-        pi_user_ids = set(self._pi_slack_id_to_agent_ids.keys())
-        if not pi_user_ids:
-            return
-
-        # Find unreviewed proposals from in-memory state
-        threads_to_poll: list[tuple[str, str, str]] = []  # (thread_id, channel_name, agent_id)
-        seen = set()
-        for agent in self.agents.values():
-            for proposal in agent.state.pending_proposals:
-                if not proposal.reviewed and proposal.thread_id not in seen:
-                    seen.add(proposal.thread_id)
-                    threads_to_poll.append(
-                        (proposal.thread_id, proposal.channel, agent.agent_id)
-                    )
-
-        if not threads_to_poll:
-            return
-
-        default_client = self._next_poll_client()
-        if not default_client:
-            return
-
-        default_cursor = str(self._start_time.timestamp()) if self._start_time else "0"
-
-        for thread_id, channel_name, agent_id in threads_to_poll:
-            ch_id = self._channel_id_map.get(channel_name)
-            if not ch_id:
-                continue
-
-            # Route per-channel: collab_private channels need a bot that was
-            # invited. A round-robin client will hit channel_not_found on any
-            # private channel it isn't a member of.
-            client = self._client_for_channel(ch_id, default_client)
-            if client is None:
-                logger.debug(
-                    "Skipping proposal-thread poll for private channel #%s — no connected member bot",
-                    channel_name,
-                )
-                continue
-
-            cursor_key = f"proposal_thread:{thread_id}"
-            oldest = self._poll_cursors.get(cursor_key, default_cursor)
-
-            try:
-                replies = client.get_thread_replies(ch_id, thread_id, oldest=oldest)
-            except ThreadNotFound:
-                self._evict_dead_thread(thread_id)
-                continue
-            except Exception as exc:
-                logger.debug("Failed to poll proposal thread %s: %s", thread_id, exc)
-                continue
-
-            for msg in replies:
-                ts = msg.get("ts", "")
-                user_id = msg.get("user", "")
-
-                # Skip bot messages and the root message
-                if msg.get("bot_id") or ts == thread_id:
-                    continue
-
-                # Only process PI messages
-                if user_id not in pi_user_ids:
-                    continue
-
-                sender_name = client.resolve_user_name(user_id)
-                entry = LogEntry(
-                    ts=ts,
-                    channel=channel_name,
-                    sender_agent_id=None,
-                    sender_name=sender_name,
-                    content=msg.get("text", ""),
-                    thread_ts=thread_id,
-                    posted_at=float(ts) if ts else 0.0,
-                    is_bot=False,
-                    slack_ts=ts or None,
-                    slack_channel_id=ch_id,
-                    # Slack-origin (polled from a Slack proposal thread), so the
-                    # canonical thread id is already the Slack parent ts.
-                    slack_thread_ts=thread_id,
-                )
-
-                # Avoid re-processing messages already in the log
-                if self.message_log.get_entry(ts):
-                    continue
-
-                self.message_log.append(entry)
                 logger.info(
-                    "PI message in proposal thread %s (#%s) from %s: %.60s",
-                    thread_id, channel_name, sender_name, msg.get("text", "")[:60],
+                    "Human-origin DB message in #%s: %.60s (no action taken)",
+                    entry.channel, entry.content[:60],
                 )
-
-                # Mark proposal as reviewed
-                self._check_pi_proposal_review(entry)
-
-                # Reopen the thread for all PI's agents
-                pi_agent_ids = self._pi_slack_id_to_agent_ids.get(user_id, [])
-                for pi_agent_id in pi_agent_ids:
-                    if thread_id in self._closed_thread_ids:
-                        await self._reopen_thread(pi_agent_id, thread_id, entry)
-
-                # Update cursor
-                if ts > oldest:
-                    self._poll_cursors[cursor_key] = ts
 
     # ------------------------------------------------------------------
     # Message posting
@@ -3544,40 +3078,6 @@ class SimulationEngine:
     # ------------------------------------------------------------------
     # Setup helpers
     # ------------------------------------------------------------------
-
-    async def _load_pi_mappings(self) -> None:
-        """Load PI and delegate Slack user ID -> agent ID mappings from AgentRegistry."""
-        if not self.session_factory:
-            logger.info("No DB session — skipping PI mapping load")
-            return
-        try:
-            from sqlalchemy import select
-
-            from src.models import AgentRegistry
-            async with self.session_factory() as db:
-                result = await db.execute(
-                    select(
-                        AgentRegistry.agent_id,
-                        AgentRegistry.slack_user_id,
-                        AgentRegistry.delegate_slack_ids,
-                    )
-                    .where(AgentRegistry.slack_user_id.isnot(None))
-                    .where(AgentRegistry.status == "active")
-                )
-                for row in result:
-                    # Primary PI
-                    self._pi_slack_id_to_agent_ids.setdefault(row.slack_user_id, []).append(row.agent_id)
-                    # Delegates
-                    for delegate_id in (row.delegate_slack_ids or []):
-                        self._pi_slack_id_to_agent_ids.setdefault(delegate_id, []).append(row.agent_id)
-            if self._pi_slack_id_to_agent_ids:
-                logger.info("Loaded PI mappings: %s", {
-                    k[:8] + "...": v for k, v in self._pi_slack_id_to_agent_ids.items()
-                })
-            else:
-                logger.info("No PI Slack accounts linked yet")
-        except Exception as exc:
-            logger.warning("Failed to load PI mappings: %s", exc)
 
     def _ensure_seeded_channels(self) -> None:
         """Create any missing seeded channels and join relevant bots."""
@@ -4450,22 +3950,20 @@ class SimulationEngine:
             logger.warning("Failed to flush LLM call logs: %s", exc)
 
     def _sync_profiles_from_disk(self) -> None:
-        """Reload any agent whose profile files changed on disk since last turn.
+        """Reload any agent whose public profile file changed on disk since last turn.
 
-        Private and public profiles can be edited from the web app, which runs
-        in a separate process and writes profiles/{private,public}/{id}.md on a
-        shared mounted volume. Each Agent caches its profile content in memory
-        and otherwise only invalidates that cache for in-process edits (the
-        Slack-DM path via Agent.update_private_profile). Without this check, a
-        web edit would not reach the running simulation until a restart.
+        The public profile can be edited from the web app, which runs in a
+        separate process and writes profiles/public/{id}.md on a shared
+        mounted volume. Each Agent caches its profile content in memory.
+        Without this check, a web edit would not reach the running simulation
+        until a restart.
 
-        Detection is by file mtime: cheap (two stat() calls per agent, no DB
-        round-trip) and tied to exactly what the agent reads. Re-reading the
-        same content after an in-process Slack-DM edit is harmless.
+        Detection is by file mtime: cheap (one stat() call per agent, no DB
+        round-trip) and tied to exactly what the agent reads.
         """
         for agent in self.agents.values():
             mtime = 0.0
-            for sub in ("private", "public"):
+            for sub in ("public",):
                 path = PROFILES_DIR / sub / f"{agent.agent_id}.md"
                 try:
                     mtime = max(mtime, path.stat().st_mtime)
@@ -4493,8 +3991,8 @@ class SimulationEngine:
         process restart. Tokens are read from the DB row (falling back to .env),
         so a freshly provisioned token is picked up on the next tick too.
 
-        Mutates self.agents / self.slack_clients IN PLACE: PIHandler holds those
-        dicts by reference, so they must never be reassigned.
+        Mutates self.agents / self.slack_clients IN PLACE — never reassigned —
+        in case anything else in the engine has taken a reference to either dict.
         """
         if not self.session_factory:
             return
@@ -4585,7 +4083,6 @@ class SimulationEngine:
             for aid in to_remove:
                 self.agents.pop(aid, None)
                 self.slack_clients.pop(aid, None)  # Web API only — no socket to close
-                self._dm_poll_cursors.pop(aid, None)
                 bot_name = next(
                     (n for n, a in self._bot_name_to_id.items() if a == aid), None
                 )
@@ -4614,7 +4111,6 @@ class SimulationEngine:
                     from src.agent.transport import NullTransport
                     client = NullTransport(agent_id=aid)
                 agent = Agent(agent_id=aid, bot_name=r.bot_name, pi_name=r.pi_name, role=r.role)
-                # In-place inserts (PIHandler shares these dicts by reference).
                 self.agents[aid] = agent
                 self.slack_clients[aid] = client
                 self._bot_name_to_id[agent.bot_name.lower()] = aid
@@ -4622,11 +4118,6 @@ class SimulationEngine:
 
             # Rebuild cross-agent derived structures after any membership change.
             self.message_log.set_bot_name_map(self._bot_name_to_id)
-            # Rebuild PI mappings from scratch (clear in place — PIHandler shares
-            # this dict by reference; _load_pi_mappings appends, so it must start
-            # empty to avoid accumulating duplicates).
-            self._pi_slack_id_to_agent_ids.clear()
-            await self._load_pi_mappings()
 
             # Recompute cohort interaction sets after roster changes so newly
             # active agents get their gate populated this tick.

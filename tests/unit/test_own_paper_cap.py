@@ -131,11 +131,9 @@ def agent_with_pub(tmp_path, monkeypatch):
 
     monkeypatch.setattr(agent_module, "PROFILES_DIR", tmp_path)
     (tmp_path / "public").mkdir()
-    (tmp_path / "private").mkdir()
     (tmp_path / "public" / "schultz.md").write_text(
         f"# Schultz Lab\n\nKey paper: A chemical epigenetic tool — {SCOPE_DOI}\n"
     )
-    (tmp_path / "private" / "schultz.md").write_text("No private instructions.")
     return Agent(agent_id="schultz", bot_name="SchultzBot", pi_name="Peter Schultz")
 
 

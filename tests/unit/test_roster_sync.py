@@ -1,7 +1,6 @@
 """Tests for the DB-backed agent roster: token resolution + live roster sync."""
 
 import types
-from unittest.mock import AsyncMock
 
 import pytest
 
@@ -104,7 +103,6 @@ def _make_engine(active_rows, existing_agents=()):
         session_factory=_factory_for(active_rows),
     )
     # Isolate the unit under test from cross-agent rebuild side effects.
-    engine._load_pi_mappings = AsyncMock()
     engine._build_lab_directories = lambda: None
     return engine
 

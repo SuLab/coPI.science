@@ -71,43 +71,6 @@ Return your response as valid JSON matching the specified schema."""
         raise
 
 
-async def synthesize_private_profile(context_text: str, researcher_name: str) -> str:
-    """
-    Call Claude to generate a seed private profile from assembled context.
-    Returns markdown string.
-    """
-    settings = get_settings()
-    prompt_path = "prompts/private-profile-synthesis.md"
-    try:
-        with open(prompt_path) as f:
-            system_prompt = f.read()
-    except FileNotFoundError:
-        system_prompt = (
-            "Generate a seed private profile for a research PI's agent. "
-            "Output markdown with sections: Pitch Preferences, "
-            "Communication Style, Topic Priorities."
-        )
-
-    user_message = f"""Please generate a seed private profile for {researcher_name} based on the following information:
-
-{context_text}
-
-Return ONLY the markdown profile content — no JSON, no code fences."""
-
-    client = get_anthropic_client()
-    try:
-        message = client.messages.create(
-            model=settings.llm_profile_model,
-            max_tokens=2000,
-            system=system_prompt,
-            messages=[{"role": "user", "content": user_message}],
-        )
-        return message.content[0].text.strip()
-    except Exception as exc:
-        logger.error("Failed to synthesize private profile for %s: %s", researcher_name, exc)
-        raise
-
-
 def _extract_json(text: str) -> dict[str, Any]:
     """Extract JSON object from LLM response text."""
     # Try direct parse first

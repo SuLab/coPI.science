@@ -57,7 +57,7 @@ async def slack_engine(engine, slack_clients, slack_probe_channel, monkeypatch):
     run_id = uuid.uuid4()
     name, cid = slack_probe_channel
 
-    # _poll_slack_for_pi_messages only polls channels whose name is in SEEDED_CHANNELS
+    # _poll_slack_for_human_messages only polls channels whose name is in SEEDED_CHANNELS
     # (or that are collab_private) — polling every public channel would sweep up
     # archived channels from prior sims. The probe channel is neither, so without this
     # the poller would silently skip it and every ingestion test would fail for a
@@ -239,7 +239,7 @@ async def test_a_polled_bot_message_records_its_mirror_mapping(slack_engine):
     assert out and out.get("ts")
 
     eng._last_channel_poll = 0.0
-    await eng._poll_slack_for_pi_messages()
+    await eng._poll_slack_for_human_messages()
     await eng._flush_persisted()
 
     rows = [r for r in await _rows(factory, run_id) if r.content == marker]
@@ -339,7 +339,7 @@ async def test_polling_does_not_re_ingest_our_own_mirrored_message(slack_engine)
 
     for _ in range(2):
         eng._last_channel_poll = 0.0
-        await eng._poll_slack_for_pi_messages()
+        await eng._poll_slack_for_human_messages()
         await eng._flush_persisted()
 
     rows = await _rows(factory, run_id)
@@ -352,7 +352,7 @@ async def test_polling_does_not_re_ingest_our_own_mirrored_message(slack_engine)
     eng.slack_clients["cravatt"].post_message(cid, marker)
     time.sleep(POST_GAP)
     eng._last_channel_poll = 0.0
-    await eng._poll_slack_for_pi_messages()
+    await eng._poll_slack_for_human_messages()
     await eng._flush_persisted()
     assert marker in [r.content for r in await _rows(factory, run_id)], (
         "control leg failed: the poller ingests nothing at all"

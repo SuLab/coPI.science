@@ -26,12 +26,10 @@ def agent_with_pub(tmp_path, monkeypatch):
     """Agent whose public profile lists one DOI (the SCOPE paper)."""
     monkeypatch.setattr(agent_module, "PROFILES_DIR", tmp_path)
     (tmp_path / "public").mkdir()
-    (tmp_path / "private").mkdir()
     (tmp_path / "memory").mkdir()
     (tmp_path / "public" / "schultz.md").write_text(
         f"# Schultz Lab\n\nKey paper: A chemical epigenetic tool — {SCOPE_DOI}\n"
     )
-    (tmp_path / "private" / "schultz.md").write_text("No private instructions.")
     return Agent(agent_id="schultz", bot_name="SchultzBot", pi_name="Peter Schultz")
 
 
@@ -70,7 +68,6 @@ class TestCitesOwnPaper:
         # Prose-only profile (like the real Schultz profile) yields no DOIs.
         monkeypatch.setattr(agent_module, "PROFILES_DIR", tmp_path)
         (tmp_path / "public").mkdir()
-        (tmp_path / "private").mkdir()
         (tmp_path / "public" / "schultz.md").write_text("Genetic code expansion lab. No DOIs listed.")
         agent = Agent(agent_id="schultz", bot_name="SchultzBot", pi_name="Peter Schultz")
         assert agent.own_publication_dois == set()

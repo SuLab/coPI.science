@@ -43,7 +43,6 @@ class Agent:
         self.pi_name = pi_name  # e.g., "Andrew Su"
         self.role = role  # e.g., "pi_lab" — selects prompt/role overrides
         self._public_profile: str | None = None
-        self._private_profile: str | None = None
         self._public_working_memory: str | None = None  # cached public memory segment
         self._own_publication_dois: set[str] | None = None  # cached DOIs from own profiles
         self._lab_directory: str | None = None
@@ -79,15 +78,6 @@ class Agent:
                 f"# {self.pi_name} Lab\n\nProfile not yet available.",
             )
         return self._public_profile
-
-    @property
-    def private_profile(self) -> str:
-        if self._private_profile is None:
-            self._private_profile = self._load_file(
-                PROFILES_DIR / "private" / f"{self.agent_id}.md",
-                "No private instructions yet.",
-            )
-        return self._private_profile
 
     @property
     def public_working_memory(self) -> str:
@@ -128,20 +118,21 @@ class Agent:
 
     @property
     def own_publication_dois(self) -> set[str]:
-        """DOIs of the lab's own papers, parsed from its profiles.
+        """DOIs of the lab's own papers, parsed from its public profile.
 
         Used to detect when a post or thread is about a paper this lab
-        (co)authored. Profiles list each PI's representative publications with
-        DOIs, so a DOI appearing here means the paper is the lab's own work.
-        Note this only catches papers whose DOI is present in the profile — a
-        prose-only profile yields an empty set, which is why the scan/reply
-        prompts also instruct the model to recognize its own published methods
-        semantically. See GitHub issue #7.
+        (co)authored. The public profile lists each PI's representative
+        publications with DOIs, so a DOI appearing here means the paper is the
+        lab's own work. Note this only catches papers whose DOI is present in
+        the profile — a prose-only profile yields an empty set, which is why
+        the scan/reply prompts also instruct the model to recognize its own
+        published methods semantically. See GitHub issue #7.
+
+        Derives from the public profile only — there is no private-profile
+        segment to union anymore (private instructions were removed).
         """
         if self._own_publication_dois is None:
-            self._own_publication_dois = _extract_dois(self.public_profile) | _extract_dois(
-                self.private_profile
-            )
+            self._own_publication_dois = _extract_dois(self.public_profile)
         return self._own_publication_dois
 
     def cites_own_paper(self, content: str | None) -> bool:
@@ -154,7 +145,6 @@ class Agent:
     def reload_profiles(self):
         """Reload profiles from disk."""
         self._public_profile = None
-        self._private_profile = None
         self._public_working_memory = None
         self._own_publication_dois = None
 
@@ -257,10 +247,7 @@ class Agent:
 {identity}
 
 ## Your Lab Profile (Public)
-{self.public_profile}
-
-## Your Private Instructions
-{self.private_profile}"""
+{self.public_profile}"""
 
         if not include_memory:
             return header
@@ -405,15 +392,6 @@ Use these to reference other labs' work in conversations. Include links when cit
                 "what remains unexploited beyond the published scope."
             )
 
-        # Inject PI context if the PI posted in this thread
-        if thread.pi_context:
-            phase_guidance += (
-                f"\n\n**Your PI has posted in this thread.** Their message is authoritative — "
-                f"incorporate their direction into your reply. If they corrected something you "
-                f"said, acknowledge the correction to the other agent. PI's message: "
-                f"\"{thread.pi_context}\""
-            )
-
         prompt_text = phase4_template.replace("{channel_name}", thread.channel)
         prompt_text = prompt_text.replace("{other_agent_name}", other_agent_name)
         prompt_text = prompt_text.replace("{other_agent_lab}", other_agent_lab)
@@ -437,8 +415,6 @@ Use these to reference other labs' work in conversations. Include links when cit
         visibility: str = VISIBILITY_PUBLIC,
         channel_id: str | None = None,
         post_type_menu: str | None = None,
-        *,
-        pi_flagged: str | None = None,
     ) -> tuple[str, list[dict]]:
         """
         Build system + messages for Phase 5 new post.
@@ -457,15 +433,6 @@ Use these to reference other labs' work in conversations. Include links when cit
             enforces the SAME set when the response comes back. None renders
             THIS AGENT'S ROLE's declared set with no topology filtering — used by
             direct callers and tests that have no topology to apply.
-
-        pi_flagged: pre-rendered summary of this agent's current PI-priority
-            `interesting_posts` entries (built by the engine from `PostRef`s
-            with `pi_priority=True`). When truthy, appended as a `## Your PI
-            flagged this` section after the rendered template — the PI can no
-            longer make the bot join/reply to a tagged thread (that action
-            was retired), so this is the channel that carries the tag's
-            context into the bot's next pitch instead. None/empty omits the
-            section entirely.
         """
         system_prompt = self.build_system_prompt(visibility=visibility, channel_id=channel_id)
         phase5_template = self._load_prompt(
@@ -527,12 +494,6 @@ Use these to reference other labs' work in conversations. Include links when cit
             )
         prompt_text = prompt_text.replace("{post_type_menu}", post_type_menu)
 
-        if pi_flagged:
-            prompt_text += (
-                "\n\n## Your PI flagged this\n\n" + pi_flagged +
-                "\n\nYour PI's direction is authoritative — see the Instructions section."
-            )
-
         messages = [{"role": "user", "content": prompt_text}]
         return system_prompt, messages
 
@@ -582,43 +543,6 @@ Use these to reference other labs' work in conversations. Include links when cit
         except Exception as exc:
             logger.error("[%s] Failed to update working memory: %s", self.agent_id, exc)
 
-    def update_private_profile(self, new_profile: str) -> None:
-        """Write private profile to profiles/private/{agent_id}.md (disk only).
-
-        For DB persistence, call persist_private_profile_to_db() afterward.
-        """
-        profile_path = PROFILES_DIR / "private" / f"{self.agent_id}.md"
-        try:
-            profile_path.parent.mkdir(parents=True, exist_ok=True)
-            profile_path.write_text(new_profile + "\n", encoding="utf-8")
-            self._private_profile = None  # Invalidate cache
-        except Exception as exc:
-            logger.error("[%s] Failed to update private profile: %s", self.agent_id, exc)
-
-    async def persist_private_profile_to_db(self, db: "AsyncSession") -> None:
-        """Sync the on-disk private profile to the database."""
-        from sqlalchemy import select
-        from src.models import AgentRegistry, ResearcherProfile
-
-        try:
-            agent_result = await db.execute(
-                select(AgentRegistry).where(AgentRegistry.agent_id == self.agent_id)
-            )
-            agent_reg = agent_result.scalar_one_or_none()
-            if not agent_reg:
-                return
-            profile_result = await db.execute(
-                select(ResearcherProfile).where(
-                    ResearcherProfile.user_id == agent_reg.user_id
-                )
-            )
-            profile = profile_result.scalar_one_or_none()
-            if profile:
-                profile.private_profile_md = self.private_profile
-                await db.commit()
-        except Exception as exc:
-            logger.error("[%s] Failed to persist private profile to DB: %s", self.agent_id, exc)
-
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
@@ -657,5 +581,4 @@ BlackbirdBot, Blackbird's scouting hub, and to answer its screening questions ho
 3. **Defer PI-intent questions.** For funding preference, appetite for equity, or any
    other decision only your PI can make, say you'd need to check with your PI rather
    than answering on their behalf.
-4. **Cannot commit effort, resources, or funding decisions on behalf of your PI.**
-5. **Cannot share private profile information.**"""
+4. **Cannot commit effort, resources, or funding decisions on behalf of your PI.**"""

@@ -769,42 +769,6 @@ async def test_grandfathered_thread_still_gets_a_phase4_reply(live, monkeypatch)
     assert fake.calls, "Phase 4 should have called the LLM for the grandfathered thread"
 
 
-async def test_pi_dm_path_is_unaffected_by_any_topology(live, monkeypatch):
-    """PI DMs bypass MessageLog entirely (_poll_pi_dms_from_db -> PIHandler), so no
-    cohort configuration may suppress them."""
-    from src.models import PiDmMessage
-
-    factory, run_id = live
-    await _topology(factory, {"alpha": ["su"], "beta": ["cravatt"]})
-    _cfg(monkeypatch, enabled=True, policy="isolated")
-    eng = _engine(factory, run_id)
-    await eng._recompute_allowed_sender_ids()
-    # su is maximally gated: only itself.
-    assert eng.agents["su"].allowed_sender_ids == {"su"}
-
-    handled = []
-
-    class _Handler:
-        async def handle_dm(self, agent_id, pi_user_id, content):
-            handled.append((agent_id, content))
-
-    eng._pi_handler = _Handler()
-
-    async with factory() as db:
-        db.add(PiDmMessage(
-            simulation_run_id=run_id, agent_id="su", pi_user_id="Uweb",
-            direction="inbound", content="please prioritise the immunology angle",
-            ts="1000.0081",
-        ))
-        await db.commit()
-
-    await eng._poll_pi_dms_from_db()
-    assert handled == [("su", "please prioritise the immunology angle")], (
-        "a PI DM must reach the agent under every cohort configuration"
-    )
-    assert eng.agents["su"].state.has_pi_directive is True
-
-
 # ===========================================================================
 # Concurrency: membership writes must be atomic
 # ===========================================================================

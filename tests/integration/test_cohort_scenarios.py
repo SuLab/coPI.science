@@ -328,7 +328,6 @@ def _build_engine(factory, run_id, roster, policy):
         a = Agent(agent_id=aid, bot_name=bot, pi_name=f"PI {aid}")
         # The cached-profile seam: a real profile without touching disk or the DB.
         a._public_profile = f"# {aid.capitalize()} Lab\n\n{summary}\n"
-        a._private_profile = "No private instructions yet."
         agents.append(a)
 
     eng = SimulationEngine(

@@ -9,8 +9,7 @@ Implements the pipeline from profile-ingestion.md:
 6. Prepare profile record
 7. LLM synthesis (public profile)
 8. Validation
-9. Store, gated on validation and recorded on the profile row (migration 0023),
-   + seed private profile (first creation only)
+9. Store, gated on validation and recorded on the profile row (migration 0023)
 """
 
 import hashlib
@@ -23,7 +22,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.models import Job, Publication, ResearcherProfile, User
-from src.services.llm import synthesize_private_profile, synthesize_profile
+from src.services.llm import synthesize_profile
 from src.services.orcid import fetch_orcid_grants, fetch_orcid_profile, fetch_orcid_works
 from src.services.pubmed import (
     convert_dois_to_pmids,
@@ -350,8 +349,8 @@ async def run_profile_pipeline(
     #     assigns (it only ever writes 'pending' or 'dead'), so a dead job falls
     #     through to that template's `elif profile` branch and the PI is shown the
     #     review form with empty fields and no explanation. Raising would also
-    #     skip step 9b, the markdown export and create_revision below, costing the
-    #     private-profile seed and the audit trail.
+    #     skip the markdown export and create_revision below, costing the
+    #     audit trail.
     #   * Storing nothing is indistinguishable from "the pipeline never ran" and
     #     throws away the only draft the PI has to edit. (It would not cause the
     #     /onboarding re-enqueue loop: that self-heal is gated on `job is None and
@@ -453,15 +452,6 @@ async def run_profile_pipeline(
                     f"({found} publication IDs were found): "
                     f"{profile.evidence_state}.",
                 )
-
-    # Step 9b: Generate private profile seed (if no live profile and no existing seed)
-    if not profile.private_profile_md and not profile.private_profile_seed:
-        update_progress("step9b", "Generating agent instructions seed...")
-        try:
-            seed = await synthesize_private_profile(context_text, user.name)
-            profile.private_profile_seed = seed
-        except Exception as exc:
-            logger.error("Private profile seed generation failed for %s: %s", user.name, exc)
 
     await db.flush()
 

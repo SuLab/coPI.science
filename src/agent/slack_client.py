@@ -478,12 +478,12 @@ class AgentSlackClient:
         and page 1 came back as the OLDEST pair (newest-first within the page). So
         reversing the concatenated walk — which is exactly what a single page needed, and
         what this client did — assembled the pages newest-block-first as soon as
-        pagination was added. ``_poll_slack_for_pi_messages`` advances
+        pagination was added. ``_poll_slack_for_human_messages`` advances
         ``_poll_cursors[ch_id]`` to the last message it iterates, so the cursor landed on
         the second-oldest message of the window instead of the newest, and every later
         tick re-polled messages it had already handled: idempotent ``MessageLog.append``
-        keeps that from duplicating rows, but ``_check_pi_proposal_review`` and the
-        PI-directive branch re-fire on a PI message each time.
+        keeps that from duplicating rows, but a re-polled message would otherwise be
+        re-logged each time.
 
         Sorting by ts depends on no Slack ordering at all, which is the point. The thread
         parent keeps its position for free: it is the oldest message in its thread.

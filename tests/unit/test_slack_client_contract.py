@@ -606,7 +606,7 @@ def test_polling_a_channel_pages_and_still_returns_oldest_first():
     conversations.history anchors at `oldest` and pages FORWARD in time, so page 1 is the
     OLDEST block (newest-first *within* the page). Reversing the concatenated walk — what
     a single page needed — therefore assembles the blocks backwards, and
-    `_poll_slack_for_pi_messages` advances `_poll_cursors` to the last message it
+    `_poll_slack_for_human_messages` advances `_poll_cursors` to the last message it
     iterates, so the cursor lands mid-window and the same messages are re-polled and
     re-handled on every later tick.
     """

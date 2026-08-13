@@ -13,8 +13,6 @@ class PostRef:
     sender_agent_id: str
     content_snippet: str  # first ~200 chars for LLM context
     posted_at: float
-    pi_priority: bool = False  # PI tagged this for engagement
-    pi_context: str | None = None  # PI's comment when tagging
 
 
 @dataclass
@@ -29,6 +27,13 @@ class ThreadState:
     status: str = "active"  # active | proposed | closed
     abstracts_other: int = 0  # tool-use counters
     full_text: int = 0
+    # pi_context/message_count_offset: still written by
+    # SimulationEngine._sync_proposal_reviews_from_db's web-guidance reopen path
+    # (removal of the *live* PI-Slack/DM reopen paths landed in the removal
+    # cycle's engine task; the web-proposal-review reopen is a separate,
+    # still-live mechanism scheduled for its own removal pass). Not read by
+    # anything else — Agent._compose_system_prompt's phase-4 injection that used
+    # to read pi_context was removed alongside the live paths.
     pi_context: str | None = None  # PI posted in this thread — their message
     message_count_offset: int = 0  # subtract from message_count for PI-reopened threads
     empty_response_count: int = 0  # consecutive empty/unparseable Phase 4 replies
@@ -82,4 +87,3 @@ class AgentState:
     # Phase 5 throttling (state-change gate + skip backoff)
     consecutive_phase5_skips: int = 0
     last_phase5_action_time: float = 0.0  # last time Phase 5 was evaluated (gates the spontaneous-post timer)
-    has_pi_directive: bool = False  # set when PI sends a message, cleared after Phase 5

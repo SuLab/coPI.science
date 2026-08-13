@@ -189,9 +189,6 @@ def profiles_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "src.services.profile_export.PROFILES_DIR", tmp_path / "profiles" / "public"
     )
-    monkeypatch.setattr(
-        "src.services.profile_export.PRIVATE_PROFILES_DIR", tmp_path / "profiles" / "private"
-    )
     return tmp_path / "profiles"
 
 

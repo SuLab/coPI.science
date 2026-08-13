@@ -17,7 +17,6 @@ from src.models import (
     ThreadDecision,
     User,
 )
-from src.models.agent_activity import VISIBILITY_PUBLIC
 from src.services.email_notifications import mark_notification_responded, record_engagement
 
 logger = logging.getLogger(__name__)
@@ -416,163 +415,26 @@ async def _handle_instruction(
     instruction: str,
     db: AsyncSession,
 ) -> bool:
-    """Route PI email guidance exactly like the web reopen_proposal flow.
+    """Classify-and-ignore: there is no human-PI interaction surface left.
 
-    With ``enable_private_refinement`` on and a public origin thread, the
-    guidance is taken into a new ``collab_private`` channel via
-    ``migrate_public_thread_to_private`` so the PI's text NEVER lands in the
-    public thread (SEC-5 — closes the guidance-leak on the normal PI flow).
-    Legacy mode (flag off) posts to the origin thread, matching the web
-    fallback.
+    This used to route an "instruction"-classified email reply into the
+    thread exactly like the web ``reopen_proposal`` flow — migrating a
+    ``collab_private`` channel, posting guidance to Slack or the DB inbox, and
+    recording a rating=0 "reopened" ``ProposalReview``. The removal cycle
+    retires all human-PI-to-bot interaction; the classification above
+    (``classify_reply`` -> category "instruction") is kept so the reply-type
+    breakdown stays observable, but nothing further happens with an
+    instruction reply: no thread post, no channel migration, no review row.
 
-    Returns True if the proposal was reopened. Returns False when the agent is
-    inactive (reopening re-injects it into a live discussion, blocked while
-    parked), when the proposal was already acted on, or when the reopen could
-    not be performed — the PI is emailed an explanation in those cases.
+    Always returns False (never reopened) — this also means the caller's
+    "will refine" confirmation email is never sent for this category.
     """
-    from src.config import get_settings
-
-    agent_result = await db.execute(
-        select(AgentRegistry).where(AgentRegistry.id == notification.agent_registry_id)
+    logger.info(
+        "Email instruction for proposal %s from %s logged and ignored "
+        "(human-PI interaction retired): %.200s",
+        td.thread_id, user.email, instruction,
     )
-    agent = agent_result.scalar_one()
-
-    if agent.status != "active":
-        logger.info(
-            "Agent %s is %s — not posting email reopen guidance for proposal %s",
-            agent.agent_id, agent.status, td.id,
-        )
-        _send_simple_email(
-            user.email,
-            f"{agent.bot_name} is inactive - couldn't reopen the proposal",
-            f"{agent.bot_name} is currently inactive, so it can't reopen this "
-            f"proposal for further discussion right now. Once it's reactivated, "
-            f"you can reopen the proposal from your dashboard at copi.science.",
-        )
-        return False
-
-    # Idempotency guard (mirrors reopen_proposal): a prior review/reopen means
-    # the proposal was already acted on. Without this, a replayed email would
-    # migrate the thread a second time and mint a duplicate private channel.
-    already = await db.execute(
-        select(ProposalReview).where(
-            ProposalReview.thread_decision_id == td.id,
-            ProposalReview.agent_id == agent.agent_id,
-        )
-    )
-    if already.scalar_one_or_none() is not None:
-        logger.info(
-            "Ignoring duplicate email reopen of proposal %s by %s (already acted on)",
-            td.thread_id, agent.agent_id,
-        )
-        return False
-
-    settings = get_settings()
-
-    try:
-        if settings.enable_private_refinement and td.origin_visibility == VISIBILITY_PUBLIC:
-            # Migrate to a collab_private channel before any PI text touches
-            # Slack — the guidance never lands in the public thread.
-            from src.services.private_channels import migrate_public_thread_to_private
-
-            result = await migrate_public_thread_to_private(
-                db,
-                thread_decision=td,
-                creator_agent_id=agent.agent_id,
-                creator_pi_user=user,
-                guidance_text=instruction,
-            )
-            logger.info(
-                "PI %s reopened proposal %s via email: migrated #%s → private #%s",
-                user.name, td.thread_id, td.channel, result.channel_name,
-            )
-        elif td.origin_visibility != VISIBILITY_PUBLIC:
-            # Origin already private — in-place refinement isn't implemented yet
-            # (matches the web router's 501). Point the PI at the dashboard.
-            logger.info(
-                "Email reopen on already-private origin %s not supported", td.thread_id,
-            )
-            _send_simple_email(
-                user.email,
-                f"Couldn't reopen the {agent.bot_name} proposal by email",
-                "This proposal is already in a private refinement channel. "
-                "Please continue the discussion there, or reopen it from your "
-                "dashboard at copi.science.",
-            )
-            return False
-        else:
-            # Legacy fallback: flag off → post guidance verbatim to the origin
-            # public thread (same behavior as the web legacy path).
-            from src.services.slack_tokens import slack_globally_enabled, token_for_agent_row
-
-            # Slack off → write the guidance to the DB inbox on the origin thread
-            # instead of posting to Slack.
-            if not await slack_globally_enabled(db):
-                from src.services.pi_inbox import get_latest_run_id, record_pi_message
-                run_id = await get_latest_run_id(db)
-                if run_id:
-                    await record_pi_message(
-                        db, run_id=run_id, channel_name=td.channel,
-                        content=f"PI guidance from {user.name} (via email): {instruction}",
-                        sender_name=f"{user.name} (PI)", thread_ts=td.thread_id,
-                    )
-                    logger.info("Email guidance for %s written to DB inbox (Slack off)", td.thread_id)
-                    return True
-                logger.error("No simulation run to record email guidance for %s", td.thread_id)
-                return False
-
-            # The channel lookup goes through the boundary. It used to read a
-            # single 200-item page of the paginated conversations.list, so a
-            # workspace with more channels than that reported "Channel not found"
-            # for a channel that exists; list_channel_ids follows every cursor and
-            # raises rather than returning a subset.
-            #
-            # The post goes through it too, threaded: post_message takes thread_ts
-            # precisely so this caller does not need a raw client. It also splits
-            # at 4000 characters, which the raw call did not — a long emailed
-            # instruction was silently chunked by Slack.
-            from src.services.slack_web import list_channel_ids_async, post_message_async
-
-            bot_token = token_for_agent_row(agent)
-            if not bot_token:
-                logger.error("No bot token for agent %s", agent.agent_id)
-                return False
-
-            channel_id = (await list_channel_ids_async(bot_token)).get(td.channel)
-            if not channel_id:
-                logger.error("Channel #%s not found for instruction posting", td.channel)
-                return False
-
-            await post_message_async(
-                bot_token,
-                channel_id,
-                f"*PI guidance from {user.name} (via email):*\n\n{instruction}",
-                thread_ts=td.thread_id,
-            )
-            logger.warning(
-                "LEGACY PATH: PI %s posted email guidance in public thread %s via %s "
-                "(enable_private_refinement=False)",
-                user.name, td.thread_id, agent.agent_id,
-            )
-    except Exception as exc:
-        logger.error("Failed to reopen proposal from email: %s", exc, exc_info=True)
-        return False
-
-    # rating=0 "reopened" review (mirrors the web flow — the migration sets
-    # refined_in_channel on the ThreadDecision but leaves the review to us).
-    is_owner = agent.user_id == user.id
-    review = ProposalReview(
-        thread_decision_id=td.id,
-        agent_id=agent.agent_id,
-        user_id=agent.user_id,
-        delegate_user_id=user.id if not is_owner else None,
-        reviewed_by_user_id=user.id,
-        rating=0,  # 0 = reopened with guidance
-        comment=f"[Reopened via email] {instruction[:500]}",
-        submitted_via="email",
-    )
-    db.add(review)
-    return True
+    return False
 
 
 async def _send_review_confirmation(

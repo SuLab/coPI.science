@@ -996,8 +996,12 @@ async def send_agent_dm(
 ):
     """Send a DM directive to the agent's bot (standing instruction / question).
 
-    Writes an inbound pi_dm_messages row; the sim processes it via
-    _poll_pi_dms_from_db (same path as a Slack DM). See specs/local-db-conversations.md.
+    Writes an inbound pi_dm_messages row. NOTE: as of the 2026-08-12 removal
+    cycle (private instructions + PI interaction), nothing in the running
+    simulation reads this row anymore — the engine-side poller/handler that
+    used to process it (SimulationEngine._poll_pi_dms_from_db,
+    src/agent/pi_handler.py) was removed. The row is durable history only.
+    See specs/local-db-conversations.md.
     """
     from src.services.pi_inbox import get_latest_run_id, record_pi_dm, web_pi_user_id
 

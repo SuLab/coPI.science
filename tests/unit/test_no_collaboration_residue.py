@@ -1,7 +1,7 @@
-"""Guard against the retired "Collaboration Preferences" contract reappearing.
+"""Guard against retired mesh-era / private-instructions language reappearing.
 
 Issue #29 audit (PR34 branch-2 review) found two src/ code paths that still
-hardcode the retired private-profile section contract even though the
+hardcoded the retired private-profile section contract even though the
 prompts-only phrase guard (tests/unit/test_doc_prompt_sync.py) can't see them:
 
 - src/services/llm.py: synthesize_private_profile's FileNotFoundError fallback
@@ -9,22 +9,19 @@ prompts-only phrase guard (tests/unit/test_doc_prompt_sync.py) can't see them:
 - src/routers/onboarding.py: the default template rendered for brand-new
   users with no profile anywhere yet.
 
-The authoritative replacement contract comes from the rewritten
-prompts/private-profile-synthesis.md Output Format section (landed in a
-sibling task on this deployment's pitch-only model: a PI pitches ideas to a
-scouting hub; there are no "collaborations"). That rewrite's headers are:
+The 2026-08-12 removal cycle (Task 5 of the engine-reconciliation plan) then
+deleted the private-profile feature itself outright: synthesize_private_profile
+and its FileNotFoundError fallback, the onboarding private-profile step (GET/POST
+/onboarding/private-profile), src/services/profile_export.py::export_private_profile,
+and agent.py's ``## Your Private Instructions`` prompt injection / private_profile
+property / update_private_profile / persist_private_profile_to_db. There is no
+section-list contract left to pin (test_llm_fallback_section_list_matches_new_contract
+used to pin synthesize_private_profile's fallback text; that function no longer
+exists) — this file pins the ABSENCE of the removed feature instead.
 
-    ### Pitch Preferences
-    ### Communication Style
-    ### Topic Priorities
-
-("Criteria to Always Explore" is retired outright, not renamed — the new
-"Pitch Preferences" guidance already folds in "how much evidence to demand
-before pitching".)
-
-This test does plain string checks on source text — no imports of llm.py or
-onboarding.py — so it can't be fooled by a docstring-only fix and doesn't
-need any app/DB fixtures.
+This test does plain string checks on source text — no imports of llm.py,
+onboarding.py, agent.py, or email.py — so it can't be fooled by a docstring-only
+fix and doesn't need any app/DB fixtures.
 """
 from pathlib import Path
 
@@ -34,15 +31,14 @@ ROOT = Path(__file__).resolve().parents[2]
 
 LLM_PY = ROOT / "src/services/llm.py"
 ONBOARDING_PY = ROOT / "src/routers/onboarding.py"
+EMAIL_PY = ROOT / "src/services/email.py"
+AGENT_PY = ROOT / "src/agent/agent.py"
+SIMULATION_PY = ROOT / "src/agent/simulation.py"
 
-# The Output Format headers from the rewritten private-profile-synthesis.md
-# contract. Hardcoded rather than read off prompts/private-profile-synthesis.md
-# on disk: THIS worktree forked before that rewrite landed, so its local copy
-# of the prompt still says "Collaboration Preferences" (see
-# test_doc_prompt_sync.py's docstring / the taskgap report for the fork note).
-# The src/ fallback and template must mirror the NEW contract regardless.
-NEW_SECTION_HEADERS = ["Pitch Preferences", "Communication Style", "Topic Priorities"]
-
+# The Output Format headers from the (also-deleted) private-profile-synthesis.md
+# contract. Kept only as a defensive phrase guard against these specific retired
+# terms reappearing anywhere in llm.py/onboarding.py — not a claim that the
+# feature they describe still exists in any form.
 RETIRED_PHRASES = ["collaboration preferences", "criteria to always explore"]
 
 
@@ -53,29 +49,63 @@ def test_retired_phrase_absent_from_source(path, phrase):
     assert phrase not in text, f"retired phrase {phrase!r} still present in {path}"
 
 
-def test_llm_fallback_section_list_matches_new_contract():
-    """The FileNotFoundError fallback's section list must mirror the
-    rewritten prompt's Output Format headers exactly (same order, same
-    names) — not the retired Collaboration-Preferences-era list."""
+def test_synthesize_private_profile_is_fully_removed_from_llm_py():
+    """The private-profile synthesis pipeline (function + its FileNotFoundError
+    fallback section list) is retired outright, not rewritten — pin its
+    absence rather than its former fallback contract."""
     text = LLM_PY.read_text(encoding="utf-8")
-
-    # Isolate synthesize_private_profile's fallback assignment so a match
-    # elsewhere in the file (e.g. synthesize_profile's own fallback) can't
-    # produce a false pass.
-    marker = "async def synthesize_private_profile"
-    assert marker in text, f"{LLM_PY} no longer defines synthesize_private_profile"
-    body = text[text.index(marker):]
-    fallback_start = body.index("system_prompt = (")
-    fallback_end = body.index(")", fallback_start)
-    fallback_src = body[fallback_start:fallback_end]
-
-    positions = [fallback_src.find(h) for h in NEW_SECTION_HEADERS]
-    assert all(p != -1 for p in positions), (
-        f"fallback string missing one of {NEW_SECTION_HEADERS}: {fallback_src!r}"
+    assert "synthesize_private_profile" not in text, (
+        f"{LLM_PY} still references synthesize_private_profile — the private-profile "
+        "synthesis pipeline was supposed to be removed outright"
     )
-    assert positions == sorted(positions), (
-        f"fallback string headers out of order relative to {NEW_SECTION_HEADERS}: "
-        f"{fallback_src!r}"
+
+
+ONBOARDING_PRIVATE_PROFILE_MARKERS = [
+    "/private-profile",
+    "export_private_profile",
+    "PRIVATE_PROFILES_DIR",
+    "private_profile_md",
+    "private_profile_seed",
+]
+
+
+@pytest.mark.parametrize("marker", ONBOARDING_PRIVATE_PROFILE_MARKERS)
+def test_private_profile_step_is_fully_removed_from_onboarding_py(marker):
+    """The onboarding private-profile step (GET/POST /onboarding/private-profile,
+    its live/seed/disk/template fallback chain) is retired outright — the
+    surviving final step (save_profile) now owns onboarding completion
+    (onboarding_complete flip, welcome email, invite/redirect resume)."""
+    text = ONBOARDING_PY.read_text(encoding="utf-8")
+    assert marker not in text, (
+        f"{ONBOARDING_PY} still references {marker!r} — the onboarding "
+        "private-profile step was supposed to be removed outright"
+    )
+
+
+AGENT_PY_PRIVATE_INSTRUCTION_MARKERS = [
+    "## Your Private Instructions",
+    "synthesize_private_profile",
+    "update_private_profile",
+    "persist_private_profile_to_db",
+]
+
+
+@pytest.mark.parametrize("marker", AGENT_PY_PRIVATE_INSTRUCTION_MARKERS)
+def test_private_instruction_markers_absent_from_agent_py(marker):
+    text = AGENT_PY.read_text(encoding="utf-8")
+    assert marker not in text, (
+        f"private-instruction marker {marker!r} still present in {AGENT_PY}"
+    )
+
+
+def test_weigh_in_yourself_absent_from_welcome_email():
+    """Decision 7 (removal cycle): the welcome email stays as a one-way
+    notification, but must not claim the PI can personally weigh in on the
+    bot's interview thread — there is no human-PI-to-bot interaction surface
+    left."""
+    text = EMAIL_PY.read_text(encoding="utf-8")
+    assert "weigh in yourself" not in text, (
+        f"{EMAIL_PY} still implies a PI can personally interact in the thread"
     )
 
 
@@ -89,10 +119,6 @@ def test_llm_fallback_section_list_matches_new_contract():
 # lab-to-lab collaboration or refinement handshake) in three sibling commits.
 # This guard covers all three so the phrases can't reappear silently.
 # ---------------------------------------------------------------------------
-
-EMAIL_PY = ROOT / "src/services/email.py"
-AGENT_PY = ROOT / "src/agent/agent.py"
-SIMULATION_PY = ROOT / "src/agent/simulation.py"
 
 MESH_ERA_PHRASES = [
     "collaboration opportunities",

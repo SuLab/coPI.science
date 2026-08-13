@@ -1,12 +1,16 @@
 """Task 7 — the first-run experience: onboarding, profile and settings.
 
-Fifteen HTTP endpoints across ``src/routers/onboarding.py`` (5),
+Thirteen HTTP endpoints across ``src/routers/onboarding.py`` (3),
 ``src/routers/profile.py`` (6) and ``src/routers/settings.py`` (4) had no direct
 coverage, and ``src/services/profile_export.py`` had no test referencing it at all.
 
 (It was seventeen until ``POST /onboarding/complete`` and ``GET /onboarding/done``
 were deleted as an unreachable duplicate of the terminal step — see
-``test_the_terminal_step_*`` below, which inherited their controls.)
+``test_the_terminal_step_*`` below, which inherited their controls. It dropped
+again to thirteen when the private-instructions removal cycle deleted the
+``GET``/``POST /onboarding/private-profile`` step outright and relocated its
+completion side effects onto ``POST /onboarding/save-profile``, which is now
+the terminal step.)
 
 Real ASGI requests, real Postgres, real Jinja templates, real ``profile_export``.
 Nothing external runs: the ORCID and Anthropic entry points are replaced with
@@ -83,15 +87,10 @@ def _auth_as(user_id, impersonate_id) -> dict:
 
 @pytest.fixture(autouse=True)
 def export_dirs(tmp_path, monkeypatch):
-    """Redirect both export directories so no test writes into the repo's profiles/."""
-    pub, priv = tmp_path / "public", tmp_path / "private"
+    """Redirect the export directory so no test writes into the repo's profiles/."""
+    pub = tmp_path / "public"
     monkeypatch.setattr(profile_export, "PROFILES_DIR", pub)
-    monkeypatch.setattr(profile_export, "PRIVATE_PROFILES_DIR", priv)
-    # onboarding.py bound PRIVATE_PROFILES_DIR into its own namespace at import
-    # time (the on-disk fallback in the private-profile editor), so patching the
-    # service module alone would leave that read pointed at the repo.
-    monkeypatch.setattr(onboarding_router, "PRIVATE_PROFILES_DIR", priv)
-    return SimpleNamespace(public=pub, private=priv)
+    return SimpleNamespace(public=pub)
 
 
 @pytest.fixture(autouse=True)
@@ -131,7 +130,7 @@ def no_external_calls(monkeypatch):
         "fetch_orcid_works",
     ):
         monkeypatch.setattr(f"src.services.orcid.{fn}", _boom(f"orcid.{fn}"))
-    for fn in ("synthesize_profile", "synthesize_private_profile", "generate_agent_response"):
+    for fn in ("synthesize_profile", "generate_agent_response"):
         monkeypatch.setattr(f"src.services.llm.{fn}", _boom(f"llm.{fn}"))
 
 
@@ -201,7 +200,7 @@ async def _prefs(db, uid) -> dict:
 
 
 async def _snapshot(db, uid):
-    """Everything the 13 session-authenticated endpoints between them can change.
+    """Everything the 11 session-authenticated endpoints between them can change.
 
     One tuple, so a single equality covers "this endpoint touched the victim in
     any way at all" without the sweep needing per-endpoint knowledge.
@@ -287,16 +286,9 @@ def _profile_form(u):
 
 
 ENDPOINTS: list[Ep] = [
-    # --- src/routers/onboarding.py (5) ---
+    # --- src/routers/onboarding.py (3) ---
     Ep("GET", "/onboarding", onboarding_complete=False),
     Ep("POST", "/onboarding/save-profile", _onboarding_form, onboarding_complete=False),
-    Ep("GET", "/onboarding/private-profile", onboarding_complete=False),
-    Ep(
-        "POST",
-        "/onboarding/private-profile",
-        lambda u: {"content": f"SWEEP-PRIVATE-{u.orcid}"},
-        onboarding_complete=False,
-    ),
     Ep("POST", "/onboarding/retry", lambda u: {}),
     # --- src/routers/profile.py (6) ---
     Ep("GET", "/profile"),
@@ -352,7 +344,7 @@ def test_the_endpoint_inventory_is_the_whole_first_run_surface():
         f"missing from the tests: {sorted(live - declared)}; "
         f"no longer in the code: {sorted(declared - live)}"
     )
-    assert len(ENDPOINTS) == 15
+    assert len(ENDPOINTS) == 13
 
     # The two exemptions below are asserted, not assumed: unsubscribe links are
     # clicked from an email client with no session.
@@ -381,10 +373,15 @@ async def newcomer(db_session):
 async def test_the_onboarding_walk_completes_only_at_the_final_step(
     client, db_session, newcomer, welcome_emails
 ):
-    """start -> ORCID-derived profile review -> private profile -> complete.
+    """start -> ORCID-derived profile review -> complete.
 
     onboarding_complete is checked after *every* step, so a router that set it
     early (which would drop a user into /profile with a blank agent) fails here.
+
+    Since the private-instructions removal cycle deleted the private-profile
+    step, POST /onboarding/save-profile is now the terminal step: its
+    completion side effects (onboarding_complete flip, welcome email,
+    invite/redirect resume) relocated onto it.
     """
     h = _auth(newcomer.id)
 
@@ -409,8 +406,6 @@ async def test_the_onboarding_walk_completes_only_at_the_final_step(
         research_summary="Generated summary about kinase signalling.",
         techniques=["cryo-EM"],
         keywords=["kinase"],
-        private_profile_md=None,
-        private_profile_seed="# Seeded private profile\n- prefers structural work",
     )
     await db_session.flush()
 
@@ -420,7 +415,8 @@ async def test_the_onboarding_walk_completes_only_at_the_final_step(
     assert await _job_count(db_session, newcomer.id) == 1, "self-heal re-fired with a job present"
     assert await _flag(db_session, newcomer.id) is False
 
-    # Step 3 — the PI edits and saves the public profile.
+    # Step 3 — the PI edits and saves the public profile. This is now the
+    # terminal step: it flips onboarding_complete and sends the welcome email.
     r = await client.post(
         "/onboarding/save-profile",
         headers=h,
@@ -435,51 +431,24 @@ async def test_the_onboarding_walk_completes_only_at_the_final_step(
         },
     )
     assert r.status_code == 302
-    assert r.headers["location"] == "/onboarding/private-profile"
+    assert r.headers["location"] == "/profile?onboarding_complete=1"
     prof = await _prof(db_session, newcomer.id)
     assert prof["research_summary"] == "Edited by the PI during onboarding."
     assert prof["techniques"] == ["cryo-EM", "mass spec"]
     assert prof["keywords"] == ["kinase", "structure"]
     assert prof["profile_version"] == 2
-    assert await _flag(db_session, newcomer.id) is False, "saving the profile completed onboarding"
-    assert welcome_emails == []
-
-    # Step 4 — the private-profile editor offers the seed for review.
-    r = await client.get("/onboarding/private-profile", headers=h)
-    assert r.status_code == 200
-    assert "Seeded private profile" in r.text
-    assert await _flag(db_session, newcomer.id) is False
-
-    # Step 5 — saving the private profile is the step that finishes onboarding.
-    r = await client.post(
-        "/onboarding/private-profile",
-        headers=h,
-        data={"content": "# Nadia Lab — Private\n- no industry collaborations"},
-    )
-    assert r.status_code == 302
-    assert r.headers["location"] == "/profile?onboarding_complete=1"
     assert await _flag(db_session, newcomer.id) is True
-    prof = await _prof(db_session, newcomer.id)
-    assert prof["private_profile_md"] == "# Nadia Lab — Private\n- no industry collaborations"
-    assert prof["private_profile_seed"] is None, "the seed must be cleared once the PI edits it"
     assert [e["to"] for e in welcome_emails] == ["nadia@example.org"]
 
     # And onboarding is now closed to this user.
-    for path in ("/onboarding", "/onboarding/private-profile"):
-        r = await client.get(path, headers=h)
-        assert r.status_code == 302 and r.headers["location"] == "/profile", path
+    r = await client.get("/onboarding", headers=h)
+    assert r.status_code == 302 and r.headers["location"] == "/profile"
 
 
 @pytest.mark.parametrize(
     "method,path,data",
     [
         ("GET", "/onboarding", None),
-        ("GET", "/onboarding/private-profile", None),
-        (
-            "POST",
-            "/onboarding/save-profile",
-            {"email": "nadia@example.org", "research_summary": "partial"},
-        ),
         ("POST", "/onboarding/retry", {}),
     ],
     ids=lambda v: v if isinstance(v, str) else "",
@@ -494,7 +463,7 @@ async def test_skipping_to_a_step_does_not_complete_onboarding(
     not change would fail rather than pass.
     """
     h = _auth(newcomer.id)
-    await factories.make_profile(db_session, user=newcomer, private_profile_seed="seed")
+    await factories.make_profile(db_session, user=newcomer)
 
     if method == "GET":
         r = await client.get(path, headers=h)
@@ -504,7 +473,9 @@ async def test_skipping_to_a_step_does_not_complete_onboarding(
     assert await _flag(db_session, newcomer.id) is False, f"{method} {path} completed onboarding"
 
     r = await client.post(
-        "/onboarding/private-profile", headers=h, data={"content": "done"}
+        "/onboarding/save-profile",
+        headers=h,
+        data={"email": "nadia@example.org", "research_summary": "done"},
     )
     assert r.status_code == 302
     assert await _flag(db_session, newcomer.id) is True, "the terminal step no longer completes it"
@@ -572,54 +543,9 @@ async def test_onboarding_save_profile_requires_a_valid_unused_email(client, db_
         headers=h,
         data={"email": "Fresh@Example.ORG", "research_summary": "stored"},
     )
-    assert r.headers["location"] == "/onboarding/private-profile"
+    assert r.headers["location"] == "/profile?onboarding_complete=1"
     assert (await _user_row(db_session, u.id))["email"] == "fresh@example.org"
     assert (await _prof(db_session, u.id))["research_summary"] == "stored"
-
-
-async def test_the_private_profile_editor_falls_back_live_then_seed_then_disk_then_template(
-    client, db_session, export_dirs
-):
-    """All four content sources in onboarding.private_profile, each against the next."""
-    # 1. live markdown wins over the seed
-    live = await factories.make_user(db_session, onboarding_complete=False)
-    await factories.make_profile(
-        db_session, user=live, private_profile_md="LIVE-MD", private_profile_seed="SEED-MD"
-    )
-    # 2. the seed is shown when there is no live markdown yet
-    seeded = await factories.make_user(db_session, onboarding_complete=False)
-    await factories.make_profile(
-        db_session, user=seeded, private_profile_md=None, private_profile_seed="SEED-ONLY"
-    )
-    # 3. an on-disk profile from a pre-claim pilot lab
-    disk = await factories.make_user(db_session, onboarding_complete=False)
-    await factories.make_agent(db_session, user=disk, agent_id="diskpi", bot_name="DiskPiBot")
-    await factories.make_profile(
-        db_session, user=disk, private_profile_md=None, private_profile_seed=None
-    )
-    export_dirs.private.mkdir(parents=True, exist_ok=True)
-    (export_dirs.private / "diskpi.md").write_text("ON-DISK-MD", encoding="utf-8")
-    # 4. nothing anywhere — the standard section template
-    blank = await factories.make_user(
-        db_session, name="Blank Slate", onboarding_complete=False
-    )
-    await db_session.flush()
-
-    r = await client.get("/onboarding/private-profile", headers=_auth(live.id))
-    assert "LIVE-MD" in r.text and "SEED-MD" not in r.text
-
-    r = await client.get("/onboarding/private-profile", headers=_auth(seeded.id))
-    assert "SEED-ONLY" in r.text
-
-    r = await client.get("/onboarding/private-profile", headers=_auth(disk.id))
-    assert "ON-DISK-MD" in r.text
-
-    r = await client.get("/onboarding/private-profile", headers=_auth(blank.id))
-    assert "Blank Slate Lab — Private Profile" in r.text
-    assert "PI Behavioral Instructions" in r.text
-    # control: the template is not shown to someone who has real content.
-    r = await client.get("/onboarding/private-profile", headers=_auth(live.id))
-    assert "PI Behavioral Instructions" not in r.text
 
 
 async def test_the_terminal_step_flips_the_flag_and_welcomes_exactly_once(
@@ -627,21 +553,24 @@ async def test_the_terminal_step_flips_the_flag_and_welcomes_exactly_once(
 ):
     """The replay control on ``_maybe_send_welcome``'s ``was_complete`` guard.
 
-    Aimed at POST /onboarding/private-profile because that is the only terminal
-    step left: the duplicate POST /onboarding/complete this control used to fire
-    has been deleted. Nothing stops a replay of this one — unlike the GET, the
-    POST has no ``if current_user.onboarding_complete`` short-circuit — so the
-    guard is load-bearing and a second welcome email is reachable without it.
+    Aimed at POST /onboarding/save-profile because that is now the only
+    terminal step left: the private-profile step that used to own this
+    (POST /onboarding/private-profile) was deleted with private instructions,
+    and its completion side effects relocated here. Nothing stops a replay of
+    this one — there is no ``if current_user.onboarding_complete``
+    short-circuit — so the guard is load-bearing and a second welcome email is
+    reachable without it.
     """
     h = _auth(newcomer.id)
-    r = await client.post("/onboarding/private-profile", headers=h, data={"content": "# Mine"})
+    data = {"email": "nadia@example.org", "research_summary": "# Mine"}
+    r = await client.post("/onboarding/save-profile", headers=h, data=data)
     assert r.status_code == 302
     assert r.headers["location"] == "/profile?onboarding_complete=1"
     assert await _flag(db_session, newcomer.id) is True
     assert [e["to"] for e in welcome_emails] == ["nadia@example.org"]
 
     # control on the was_complete guard: a replay must not send a second welcome.
-    r = await client.post("/onboarding/private-profile", headers=h, data={"content": "# Mine"})
+    r = await client.post("/onboarding/save-profile", headers=h, data=data)
     assert r.status_code == 302
     assert len(welcome_emails) == 1, "the welcome email is sent again on every replay"
 
@@ -649,22 +578,24 @@ async def test_the_terminal_step_flips_the_flag_and_welcomes_exactly_once(
 async def test_the_terminal_step_resumes_a_pending_invite_before_the_default_redirect(
     client, db_session, newcomer
 ):
-    """The invite branch in save_private_profile. Control: no token -> /profile.
+    """The invite branch in save_profile. Control: no token -> /profile.
 
     Also inherited from the deleted POST /onboarding/complete, which carried the
-    same branch verbatim.
+    same branch verbatim, and then from the deleted POST
+    /onboarding/private-profile after this removal cycle relocated it again.
     """
     h = _auth(newcomer.id)
-    r = await client.post("/onboarding/private-profile", headers=h, data={"content": "# Mine"})
+    data = {"email": "nadia@example.org", "research_summary": "# Mine"}
+    r = await client.post("/onboarding/save-profile", headers=h, data=data)
     assert r.headers["location"] == "/profile?onboarding_complete=1"
 
     signer = TimestampSigner(get_settings().secret_key)
     payload = {"user_id": str(newcomer.id), "pending_invite_token": "tok-123"}
     cookie = signer.sign(base64.b64encode(json.dumps(payload).encode())).decode()
     r = await client.post(
-        "/onboarding/private-profile",
+        "/onboarding/save-profile",
         headers={"Cookie": f"copi-session={cookie}"},
-        data={"content": "# Mine"},
+        data=data,
     )
     assert r.headers["location"] == "/invite/tok-123"
 
@@ -684,9 +615,12 @@ async def test_finishing_onboarding_resumes_only_a_safe_post_login_destination(
     hold here too, not only in auth.py.
 
     This was parametrised over two endpoints until POST /onboarding/complete —
-    which duplicated the same resume block — was deleted.
+    which duplicated the same resume block — was deleted. It moved again, to
+    POST /onboarding/save-profile, once the private-instructions removal
+    cycle deleted POST /onboarding/private-profile (the second such endpoint)
+    outright.
     """
-    endpoint, data = "/onboarding/private-profile", {"content": "finished"}
+    endpoint = "/onboarding/save-profile"
     for stashed, expected in (
         ("/settings", "/settings"),  # positive: a real GET page resumes
         ("https://evil.example.com/steal", "/profile?onboarding_complete=1"),
@@ -696,6 +630,9 @@ async def test_finishing_onboarding_resumes_only_a_safe_post_login_destination(
     ):
         u = await factories.make_user(db_session, onboarding_complete=False)
         await db_session.flush()
+        # email matches the user's own existing address, so save-profile's
+        # cross-user uniqueness check never fires for this loop.
+        data = {"email": u.email, "research_summary": "finished"}
         r = await client.post(
             endpoint,
             headers=_session_cookie(u.id, post_login_redirect=stashed),
@@ -898,15 +835,18 @@ async def test_delete_account_needs_the_confirmation_word(client, db_session):
 # ---------------------------------------------------------------------------
 
 
-async def test_the_public_export_round_trips_and_never_carries_the_private_profile(
+async def test_the_public_export_never_carries_the_private_profile(
     db_session, export_dirs
 ):
     """The highest-consequence assertion in this task.
 
     The public export is what any agent (and anything downstream of the agent)
-    reads. The private profile is the PI's behavioural instructions and must not
-    appear in it. The control is the private export writing the same canary —
-    without it, an export that produced an empty file would satisfy "no leak".
+    reads. ``ResearcherProfile.private_profile_md`` is the PI's confidential
+    agent-dashboard content (written from ``src/routers/agent_page.py`` — the
+    onboarding-side writer, ``export_private_profile``, was retired along with
+    the rest of private instructions) and must never appear in the public
+    export. The control asserts the canary is real, non-empty content on the
+    row — not an empty field that would make "absent from the export" trivial.
     """
     user = await factories.make_user(
         db_session, name="Export Pi", institution="Scripps", department="Mol Bio"
@@ -958,38 +898,19 @@ async def test_the_public_export_round_trips_and_never_carries_the_private_profi
         "the public profile export leaks private_profile_md"
     )
 
-    # CONTROL — the private export does contain it, so the assertion above is
-    # about where the content goes, not about the export producing nothing.
-    ppath = profile_export.export_private_profile(user, prof, "exportpi")
-    assert ppath == export_dirs.private / "exportpi.md"
-    assert "PRIVATE-CANARY-never-export-me" in ppath.read_text(encoding="utf-8")
+    # CONTROL — the canary is real content on the row, not an empty field.
+    assert prof.private_profile_md == "PRIVATE-CANARY-never-export-me"
 
 
-async def test_both_exports_are_gated_on_an_agent_registry_id(db_session, export_dirs):
+async def test_the_public_export_is_gated_on_an_agent_registry_id(db_session, export_dirs):
     user = await factories.make_user(db_session)
-    prof = await factories.make_profile(db_session, user=user, private_profile_md="x")
+    prof = await factories.make_profile(db_session, user=user)
 
     assert profile_export.export_profile_to_markdown(user, prof, None) is None
-    assert profile_export.export_private_profile(user, prof, None) is None
-    assert not export_dirs.public.exists() and not export_dirs.private.exists()
+    assert not export_dirs.public.exists()
 
-    # control: with an agent id both write.
+    # control: with an agent id the export writes.
     assert profile_export.export_profile_to_markdown(user, prof, "gated") is not None
-    assert profile_export.export_private_profile(user, prof, "gated") is not None
-
-
-async def test_the_private_export_skips_an_empty_private_profile(db_session, export_dirs):
-    user = await factories.make_user(db_session)
-    prof = await factories.make_profile(db_session, user=user, private_profile_md=None)
-    assert profile_export.export_private_profile(user, prof, "emptypi") is None
-    assert not (export_dirs.private / "emptypi.md").exists()
-
-    # control
-    prof.private_profile_md = "now there is content"
-    assert profile_export.export_private_profile(user, prof, "emptypi") is not None
-    assert (export_dirs.private / "emptypi.md").read_text(encoding="utf-8").startswith(
-        "now there is content"
-    )
 
 
 async def test_the_export_drops_a_doi_that_contradicts_the_journal(db_session):
@@ -1095,51 +1016,6 @@ async def test_saving_the_profile_writes_the_export_and_records_a_public_revisio
     assert (
         await db_session.execute(select(func.count()).select_from(ProfileRevision))
     ).scalar_one() == 1
-
-
-async def test_saving_the_private_profile_writes_the_private_file_and_a_private_revision(
-    client, db_session, export_dirs
-):
-    user = await factories.make_user(db_session, onboarding_complete=False)
-    agent = await factories.make_agent(
-        db_session, user=user, agent_id="privpi", bot_name="PrivPiBot"
-    )
-    await factories.make_profile(db_session, user=user, private_profile_md=None)
-    await db_session.flush()
-
-    r = await client.post(
-        "/onboarding/private-profile",
-        headers=_auth(user.id),
-        data={"content": "PRIVATE-VIA-ROUTE"},
-    )
-    assert r.status_code == 302
-    assert (export_dirs.private / "privpi.md").read_text(encoding="utf-8") == (
-        "PRIVATE-VIA-ROUTE\n"
-    )
-    revs = (
-        await db_session.execute(
-            select(ProfileRevision).where(ProfileRevision.agent_registry_id == agent.id)
-        )
-    ).scalars().all()
-    assert [rv.profile_type for rv in revs] == ["private"]
-    assert revs[0].content == "PRIVATE-VIA-ROUTE"
-
-    # control: clearing the private profile writes no file and records no
-    # revision, but still completes onboarding.
-    other = await factories.make_user(db_session, onboarding_complete=False)
-    await factories.make_agent(
-        db_session, user=other, agent_id="emptyroutepi", bot_name="EmptyRoutePiBot"
-    )
-    await db_session.flush()
-    r = await client.post(
-        "/onboarding/private-profile", headers=_auth(other.id), data={"content": "   "}
-    )
-    assert r.status_code == 302
-    assert not (export_dirs.private / "emptyroutepi.md").exists()
-    assert (
-        await db_session.execute(select(func.count()).select_from(ProfileRevision))
-    ).scalar_one() == 1
-    assert await _flag(db_session, other.id) is True
 
 
 # ---------------------------------------------------------------------------
