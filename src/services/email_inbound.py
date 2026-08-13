@@ -221,7 +221,11 @@ async def process_inbound_email(raw_email: bytes, db: AsyncSession) -> None:
 
     if category == "instruction":
         instruction = classification.get("instruction", body)
-        reopened = await _handle_instruction(
+        # _handle_instruction always logs-and-ignores (no thread post, no
+        # channel migration, no review row — human-PI interaction is
+        # retired) and always returns False, so there is never a "will
+        # refine" confirmation to send for this category.
+        await _handle_instruction(
             user=user,
             notification=notification,
             td=td,
@@ -230,10 +234,6 @@ async def process_inbound_email(raw_email: bytes, db: AsyncSession) -> None:
         )
         await record_engagement(user.id, db)
         await mark_notification_responded(user.id, td.id, "instruction", db)
-        # Inactive agents can't reopen; _handle_instruction already emailed the
-        # PI an explanation, so skip the "will refine" confirmation.
-        if reopened:
-            await _send_instruction_confirmation(user, notification, td, db)
         return
 
     # Unparseable
@@ -463,37 +463,6 @@ async def _send_review_confirmation(
     text_body = (
         f"Got it - you rated the {other_name} collaboration proposal a {rating}. "
         f"{agent.bot_name} is unblocked and can start new conversations."
-    )
-
-    _send_simple_email(user.email, subject, text_body)
-
-
-async def _send_instruction_confirmation(
-    user: User,
-    notification: EmailNotification,
-    td: ThreadDecision,
-    db: AsyncSession,
-) -> None:
-    """Send confirmation email after an instruction is processed."""
-    settings = get_settings()
-
-    agent_result = await db.execute(
-        select(AgentRegistry).where(AgentRegistry.id == notification.agent_registry_id)
-    )
-    agent = agent_result.scalar_one()
-
-    other_agent_id = td.agent_b if td.agent_a == agent.agent_id else td.agent_a
-    other_result = await db.execute(
-        select(AgentRegistry).where(AgentRegistry.agent_id == other_agent_id)
-    )
-    other_agent = other_result.scalar_one_or_none()
-    other_name = other_agent.bot_name if other_agent else other_agent_id
-
-    subject = f"Instructions received - {agent.bot_name} will refine proposal"
-    text_body = (
-        f"Got it - I've passed your feedback to {agent.bot_name}. "
-        f"It will re-engage with {other_name} to refine the proposal. "
-        f"You'll get another email when the revised proposal is ready."
     )
 
     _send_simple_email(user.email, subject, text_body)

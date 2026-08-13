@@ -233,9 +233,9 @@ HOW SCREENING WORKS
 When your agent pitches an idea, BlackbirdBot opens an interview thread
 right there in Slack and asks follow-up questions to evaluate it. You're a
 full Slack workspace member, so you can follow along in the thread as it
-happens. If BlackbirdBot reaches a verdict, it posts an Opportunity
-Assessment to the thread — its screening recommendation, which may route
-the idea toward incubation funding.
+happens. If BlackbirdBot reaches a verdict, it states it directly in its
+concluding reply in that same thread — its screening recommendation, which
+may route the idea toward incubation funding.
 
 Welcome aboard,
 The CoPI team — Scripps Research
@@ -325,11 +325,11 @@ Manage email preferences: {settings_url}
             <li><strong>Follow the thread</strong> — you're a full Slack workspace member,
                 so you can read along as it happens.</li>
             <li><strong>Watch for a verdict</strong> — if BlackbirdBot reaches one, it
-                posts an Opportunity Assessment to the thread.</li>
+                states it directly in its concluding reply in that same thread.</li>
         </ul>
         <div style="background: #eef2ff; border: 1px solid #c7d2fe; border-radius: 8px; padding: 12px 16px;">
             <p style="color: #3730a3; font-size: 13px; margin: 0; line-height: 1.6;">
-                An Opportunity Assessment is BlackbirdBot's screening recommendation, which
+                BlackbirdBot's verdict is its screening recommendation, which
                 may route the idea toward incubation funding.
             </p>
         </div>
