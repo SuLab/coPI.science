@@ -2033,6 +2033,12 @@ class SimulationEngine:
               derived, so the two can drift apart if ``max_thread_messages``
               is ever configured to anything else. Reading from
               thread_guidance itself keeps this check correct either way.
+              Under the default settings this fires for a genuinely real
+              reply: a thread with 11 existing messages passes the earlier
+              system-enforced-close check (11 < 12), generates a reply at
+              ordinal 12 -> CONCLUDE, and is inspected here — see
+              ``Agent.build_phase4_prompt``'s ordinal-fix comment for why
+              this was NOT true before that fix.
           (b) the posted reply does NOT open with the ⏸️ decline convention
               (see ``_reply_opens_with_pause``).
           (c) no ``<assessment_json>`` tag — well-formed or truncated — is

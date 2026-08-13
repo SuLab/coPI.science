@@ -1180,26 +1180,20 @@ class TestPhase4OrdinalGuidance:
 # ---------------------------------------------------------------
 # _warn_if_hub_conclude_missing_assessment — absent-sidecar detection gap
 # (fix round item 2). thread_guidance.py's CONCLUDE branch is a hardcoded
-# message_count >= 12, independent of settings.max_thread_messages — and
-# _reply_to_thread's own "system-enforced close" check (a few lines above
-# where the reply is actually generated) returns *before generating any
-# reply at all* once thread.message_count >= settings.max_thread_messages.
-# With the default max_thread_messages=12 those two thresholds coincide, so
-# a reply actually generated under CONCLUDE guidance can never occur in that
-# configuration — the close-as-timeout branch always wins first. Every
-# fixture below raises max_thread_messages to 20, modelling an operator who
-# widened the cap without touching thread_guidance's own hardcoded literal
-# — the scenario that makes CONCLUDE-guided replies reachable at all through
-# _reply_to_thread, and lets these tests drive the real method instead of
-# calling it in isolation.
+# ordinal >= 12. Now that the message_count/ordinal off-by-one is fixed
+# (`Agent.build_phase4_prompt` and this warning's own `phase4_guidance` call
+# both feed it `thread.message_count + 1`), a reply generated when the
+# thread already has 11 messages is ordinal 12 -> CONCLUDE, and — because
+# the system-enforced-close check just above is a check on the unmodified
+# PRIOR count (11 < 12) — that reply genuinely gets generated and posted
+# under DEFAULT settings (max_thread_messages=12). No threshold inflation
+# needed any more: every fixture below uses the real default.
 # ---------------------------------------------------------------
 
 class TestHubConcludeMissingAssessmentWarning:
     _WARNING_SNIPPET = "no persistable <assessment_json> sidecar was found"
 
-    def _engine_at(self, monkeypatch, *, message_count, max_thread_messages=20):
-        import types
-
+    def _engine_at(self, monkeypatch, *, message_count):
         from src.agent.agent import Agent
         from src.agent.state import ThreadState
         from tests.fakes import FakeSlackClient
@@ -1213,12 +1207,6 @@ class TestHubConcludeMissingAssessmentWarning:
         client = FakeSlackClient(agent_id="blackbird")
         engine = SimulationEngine(agents=[hub], slack_clients={"blackbird": client})
         _seed_thread_history(engine, "t1", "general", message_count)
-
-        settings = types.SimpleNamespace(
-            max_thread_messages=max_thread_messages,
-            llm_agent_model_opus="test-model",
-        )
-        monkeypatch.setattr("src.agent.simulation.get_settings", lambda: settings)
         monkeypatch.setattr(hub, "build_phase4_prompt", lambda **kw: ("sys", []))
         return engine, hub, thread, client
 
@@ -1236,8 +1224,10 @@ class TestHubConcludeMissingAssessmentWarning:
         self, monkeypatch, caplog,
     ):
         """The mission pin: a hub reply generated at the structural CONCLUDE
-        point that neither declines nor carries a sidecar must warn."""
-        engine, hub, thread, client = self._engine_at(monkeypatch, message_count=12)
+        point (11 EXISTING messages -> ordinal 12, under DEFAULT settings —
+        no max_thread_messages override) that neither declines nor carries a
+        sidecar must warn."""
+        engine, hub, thread, client = self._engine_at(monkeypatch, message_count=11)
         raw_response = (
             "<slack_message>\n"
             ":mag: Interesting, but I don't have enough to call it either way.\n"
@@ -1255,7 +1245,7 @@ class TestHubConcludeMissingAssessmentWarning:
         """A ⏸️-opening decline at the CONCLUDE point is an expected,
         documented outcome (thread_guidance's "Option 2 is perfectly
         acceptable" branch) — must not warn."""
-        engine, hub, thread, client = self._engine_at(monkeypatch, message_count=12)
+        engine, hub, thread, client = self._engine_at(monkeypatch, message_count=11)
         raw_response = (
             "<slack_message>⏸️ Not a fit — no credible IP path here.</slack_message>"
         )
@@ -1272,10 +1262,9 @@ class TestHubConcludeMissingAssessmentWarning:
         """Below the structural CONCLUDE point, an absent sidecar is the
         ordinary case on ~11 of every 12 turns — must stay silent (this is
         exactly what `_capture_hub_assessment`'s own docstring already
-        covers; this test pins that the NEW warning does not regress it)."""
-        engine, hub, thread, client = self._engine_at(
-            monkeypatch, message_count=8, max_thread_messages=12,
-        )
+        covers; this test pins that the NEW warning does not regress it).
+        8 EXISTING messages -> ordinal 9 -> still DECIDE."""
+        engine, hub, thread, client = self._engine_at(monkeypatch, message_count=8)
         raw_response = (
             "<slack_message>Can you say more about the assay's throughput?</slack_message>"
         )
@@ -1290,7 +1279,7 @@ class TestHubConcludeMissingAssessmentWarning:
         """A CONCLUDE reply that DOES carry a sidecar is the other
         documented, successful outcome — must not warn even though nothing
         is persisted (no database is configured in this engine)."""
-        engine, hub, thread, client = self._engine_at(monkeypatch, message_count=12)
+        engine, hub, thread, client = self._engine_at(monkeypatch, message_count=11)
         raw_response = (
             "<slack_message>:mag: Advancing — strong differentiation.</slack_message>\n\n"
             '<assessment_json>\n'
