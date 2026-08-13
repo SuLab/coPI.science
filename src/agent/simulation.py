@@ -968,6 +968,19 @@ class SimulationEngine:
         are flat discussions (no threading), so tags and replies there are
         just conversation content for later phases to read directly, not
         thread-activation signals.
+
+        Human-authored (``is_bot=False``) entries are skipped in all three loops
+        below (tags, replies, hub auto-activation) — the bot-behavior half of
+        decision 5 (2026-08-12 PI-interaction removal cycle): there is no
+        PI-bot interaction surface left for a human post to activate a thread,
+        including the substring-match trap ``_infer_agent_id`` could otherwise
+        walk into (e.g. a human sender name like "Andrew Su (PI)" contains the
+        real agent_id "su"). The GATED ``MessageLog`` reads these loops consume
+        (``get_tags_for_agent``/``get_replies_to_agent_posts``/
+        ``get_new_top_level_posts``) deliberately still return human rows —
+        they are general-purpose per-agent reads whose history/observability
+        half of decision 5 is kept — so the filter belongs here, at the actual
+        point of activation, not in those shared methods.
         """
         cursor = agent.state.last_seen_cursor
 
@@ -976,6 +989,8 @@ class SimulationEngine:
             agent.bot_name, cursor, allowed_sender_ids=agent.allowed_sender_ids
         )
         for entry in tagged_entries:
+            if not entry.is_bot:
+                continue
             # Private channels are flat — no thread activation.
             if self._channel_visibility.get(entry.channel) == VISIBILITY_COLLAB_PRIVATE:
                 continue
@@ -1014,6 +1029,8 @@ class SimulationEngine:
             agent.agent_id, cursor, allowed_sender_ids=agent.allowed_sender_ids
         )
         for entry in reply_entries:
+            if not entry.is_bot:
+                continue
             # Private channels are flat — no thread activation.
             if self._channel_visibility.get(entry.channel) == VISIBILITY_COLLAB_PRIVATE:
                 continue
@@ -1055,6 +1072,8 @@ class SimulationEngine:
                 allowed_sender_ids=agent.allowed_sender_ids,
             )
             for entry in new_posts:
+                if not entry.is_bot:
+                    continue
                 # Private channels are flat — no thread activation.
                 if self._channel_visibility.get(entry.channel) == VISIBILITY_COLLAB_PRIVATE:
                     continue
@@ -2742,12 +2761,15 @@ class SimulationEngine:
         ``reopen_proposal``'s recorded guidance) — must be pulled into the
         live MessageLog. Bot-authored rows are the live path (design §8); a
         human-authored (``is_bot=False``) row is ingested too, but purely for
-        history/observability — every GATED ``MessageLog`` read
-        (``get_new_top_level_posts``/``get_replies_to_agent_posts``/
-        ``get_tags_for_agent``/``has_new_reply_from_other``) filters
-        ``is_bot=False`` entries out, so appending one here can never set a
-        bot's ``has_pending_reply``, grant reactive priority, or activate a
-        new thread. There is no PI-interaction handling left to route it into
+        history/observability (decision 5) — it can still be *read back* by
+        the general-purpose GATED reads (``get_new_top_level_posts``/
+        ``get_replies_to_agent_posts``/``get_tags_for_agent``), but
+        ``has_new_reply_from_other`` filters ``is_bot=False`` unconditionally
+        (so appending one here can never set a bot's ``has_pending_reply`` or
+        grant reactive priority), and ``_phase3_activate_threads`` filters
+        ``is_bot`` before acting on any entry it reads (so it can never
+        activate a new thread either). There is no PI-interaction handling
+        left to route it into
         on top of that. Runs every tick regardless of Slack. See
         specs/local-db-conversations.md.
         """

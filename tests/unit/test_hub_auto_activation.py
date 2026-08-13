@@ -154,12 +154,16 @@ def test_closed_thread_id_is_not_reactivated():
 # `reopen_proposal` (via `src/services/pi_inbox.py::record_pi_message`) write
 # an `is_bot=False` row into `agent_messages`; the engine's DB-inbound poller
 # ingests it into the shared MessageLog; and — before this fix — Phase 3's
-# three `get_tags_for_agent`/`get_replies_to_agent_posts`/
-# `get_new_top_level_posts` loops (none of which checked `is_bot`) would
-# activate a thread against it, with `SimulationEngine._infer_agent_id`'s
+# three loops (fed by `get_tags_for_agent`/`get_replies_to_agent_posts`/
+# `get_new_top_level_posts`, none of which check `is_bot` — those reads
+# deliberately still return human rows for history/observability, decision 5)
+# would activate a thread against it, with `SimulationEngine._infer_agent_id`'s
 # substring match (`agent_id in name_lower or bot_name in name_lower`) able to
 # misattribute `other_agent_id` from a human sender name that happens to
-# contain a bot's agent_id (e.g. "Andrew Su (PI)" contains "su").
+# contain a bot's agent_id (e.g. "Andrew Su (PI)" contains "su"). The guard is
+# an explicit `if not entry.is_bot: continue` in each of
+# `_phase3_activate_threads`'s three loops (`src/agent/simulation.py`) — at the
+# point activation actually happens, not in the shared MessageLog reads.
 # ---------------------------------------------------------------------------
 
 

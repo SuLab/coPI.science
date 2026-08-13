@@ -627,9 +627,11 @@ class TestGatedReads:
         return ml
 
     def test_top_level_posts_filtered(self, log):
-        """Human posts never pass this read (2026-08-12 removal cycle): "3" is
-        excluded here even though it would have passed the cohort gate on its
-        own — see the absence control below."""
+        """A human post passes this read regardless of the cohort gate (decision
+        5: this is a general-purpose per-agent read, human rows stay visible for
+        history/observability). The activation-inert half of decision 5 is
+        enforced at SimulationEngine._phase3_activate_threads, not here — see
+        tests/unit/test_hub_auto_activation.py for that guarantee."""
         log.append(_post("1", "general", "wiseman", "WisemanBot", "hi"))
         log.append(_post("2", "general", "cravatt", "CravattBot", "hi"))
         log.append(_post("3", "general", None, "Dr PI", "hi", is_bot=False))
@@ -637,19 +639,7 @@ class TestGatedReads:
             since=0, channels={"general"}, exclude_agent_id="su",
             allowed_sender_ids={"wiseman"},
         )
-        assert {p.ts for p in got} == {"1"}
-
-    def test_human_top_level_post_never_returned_even_with_the_gate_off(self, log):
-        """Absence control for the human-filter itself: unlike the cohort gate
-        (which "3" would pass on its own), the human filter is unconditional —
-        it must exclude "3" even when allowed_sender_ids=None (gate fully open).
-        """
-        log.append(_post("1", "general", "wiseman", "WisemanBot", "hi"))
-        log.append(_post("2", "general", None, "Dr PI", "hi", is_bot=False))
-        got = log.get_new_top_level_posts(
-            since=0, channels={"general"}, exclude_agent_id="su", allowed_sender_ids=None
-        )
-        assert {p.ts for p in got} == {"1"}
+        assert {p.ts for p in got} == {"1", "3"}
 
     def test_top_level_posts_unfiltered_when_gate_off(self, log):
         log.append(_post("1", "general", "wiseman", "WisemanBot", "hi"))
@@ -660,13 +650,13 @@ class TestGatedReads:
         assert {p.ts for p in got} == {"1", "2"}
 
     def test_tags_filtered(self, log):
-        """Human tags never pass this read (2026-08-12 removal cycle): "3" is
-        excluded even though it would have passed the cohort gate on its own."""
+        """A human tag passes this read regardless of the cohort gate (decision
+        5, same reasoning as test_top_level_posts_filtered above)."""
         log.append(_post("1", "general", "wiseman", "WisemanBot", "hey @SuBot"))
         log.append(_post("2", "general", "cravatt", "CravattBot", "hey @SuBot"))
         log.append(_post("3", "general", None, "Dr PI", "hey @SuBot", is_bot=False))
         got = log.get_tags_for_agent("SuBot", since=0, allowed_sender_ids={"wiseman"})
-        assert {t.ts for t in got} == {"1"}
+        assert {t.ts for t in got} == {"1", "3"}
 
     def test_replies_filtered(self, log):
         log.append(_post("1", "general", "su", "SuBot", "root"))
@@ -674,27 +664,6 @@ class TestGatedReads:
         log.append(_post("3", "general", "cravatt", "CravattBot", "r", thread_ts="1"))
         got = log.get_replies_to_agent_posts("su", since=0, allowed_sender_ids={"wiseman"})
         assert {r.ts for r in got} == {"2"}
-
-    def test_human_reply_to_own_post_never_returned(self, log):
-        """A human reply to the agent's own top-level post must never surface
-        as an activation-worthy reply — even ungated, and even though its
-        sender_agent_id is None just like the null-agent_id bot row the gate
-        already fails closed on for a different reason (see
-        TestDbPrimaryPaths.test_null_agent_id_bot_row_does_not_leak)."""
-        log.append(_post("1", "general", "su", "SuBot", "root"))
-        log.append(_post("2", "general", None, "Dr PI", "r", thread_ts="1", is_bot=False))
-        assert log.get_replies_to_agent_posts("su", since=0, allowed_sender_ids=None) == []
-        assert log.get_replies_to_agent_posts("su", since=0, allowed_sender_ids={"wiseman"}) == []
-
-    def test_human_tag_never_activates_via_a_bot_name_substring(self, log):
-        """The exact trap `SimulationEngine._infer_agent_id` walks into: a
-        human sender name that happens to contain a bot's agent_id as a
-        substring (e.g. "Andrew Su (PI)" contains "su") must not be treated as
-        a tag/activation-worthy entry at all — the human filter drops it
-        before any name-matching logic downstream ever sees it."""
-        log.append(_post("1", "general", None, "Andrew Su (PI)", "hey @SuBot", is_bot=False))
-        got = log.get_tags_for_agent("SuBot", since=0, allowed_sender_ids=None)
-        assert got == []
 
     def test_has_new_reply_from_other_is_gated(self, log):
         log.append(_post("1", "general", "su", "SuBot", "root"))
@@ -833,12 +802,6 @@ class TestDbPrimaryPaths:
 
 class TestPrivateChannels:
     def test_partner_visible_in_pi_created_private_channel(self):
-        """A PI-paired collab_private channel's BOT traffic outranks the
-        cohort gate — that explicit pairing is a stronger signal than a
-        cohort grouping. The human entry in the same channel is excluded
-        regardless (2026-08-12 removal cycle: a GATED read never returns a
-        human-authored entry, private-channel bypass or not — see
-        get_new_top_level_posts's docstring)."""
         log = MessageLog()
         log.append(_post("1", "collab-priv", None, "Dr PI", "work together",
                          is_bot=False, visibility=VISIBILITY_COLLAB_PRIVATE))
@@ -848,9 +811,8 @@ class TestPrivateChannels:
             since=0, channels={"collab-priv"}, exclude_agent_id="su",
             allowed_sender_ids=set(),  # maximally isolated
         )
-        assert {p.ts for p in got} == {"2"}, (
-            "the bot's private-channel post must not be vetoed by a cohort; the "
-            "human post must never come back from a GATED read at all"
+        assert {p.ts for p in got} == {"1", "2"}, (
+            "an explicit PI pairing must not be vetoed by a cohort"
         )
 
     def test_public_channel_from_same_partner_is_still_filtered(self):

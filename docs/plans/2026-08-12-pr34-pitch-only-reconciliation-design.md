@@ -360,22 +360,37 @@ the pitch-only reconciliation and are no longer current on these four points.
    human Slack message is no longer ingested at all, not even for
    observability.
 
-   This wave also closes the trigger loop the earlier removals left open:
-   every GATED `MessageLog` read (`get_new_top_level_posts`/
-   `get_replies_to_agent_posts`/`get_tags_for_agent`/`has_new_reply_from_other`
-   — `src/agent/message_log.py`) now filters out human-authored
-   (`is_bot=False`) entries unconditionally, independent of the cohort gate.
-   Before this fix, the sole surviving `is_bot=False` producer
-   (`reopen_proposal` → `record_pi_message`) could still have set a bot's
-   `has_pending_reply`, granted reactive priority via `_owes_reply`, or (via
+   This wave also closes the trigger loop the earlier removals left open — in
+   two places, split by which half of decision 5 each one enforces. Decision 5
+   itself: a human-authored (`is_bot=False`) row stays visible through a
+   general-purpose per-agent read (history/observability is kept), but must
+   never drive BOT BEHAVIOR (pending state, reactive priority, or thread
+   activation). `has_new_reply_from_other` (`src/agent/message_log.py`) is the
+   one GATED method whose entire job IS driving bot behavior — it feeds
+   `_owes_reply`'s reactive-priority tier and `_phase4_reply_threads`'s
+   pending-reply trigger, and has no other caller — so it alone filters out
+   human rows unconditionally, independent of the cohort gate (including the
+   `allowed_sender_ids=None` case, which bypasses `_entry_allowed` entirely).
+   `get_new_top_level_posts`/`get_replies_to_agent_posts`/`get_tags_for_agent`
+   deliberately do **not** filter human rows — an earlier pass in this same
+   wave added an identical unconditional is_bot filter to all four methods,
+   which `tests/integration/test_cohort_engine_live.py::
+   test_db_ingestion_is_complete_and_reads_are_per_agent` caught as a
+   regression (it pins exactly the history/observability read those three
+   methods are for). The activation-inert half of decision 5 is instead
+   enforced at `SimulationEngine._phase3_activate_threads`
+   (`src/agent/simulation.py`) — an explicit `if not entry.is_bot: continue`
+   in each of its three loops (tag, reply, hub auto-activation), i.e. at the
+   actual point activation happens, not in the shared reads. Before this fix,
+   the sole surviving `is_bot=False` producer (`reopen_proposal` →
+   `record_pi_message`) could still have set a bot's `has_pending_reply`,
+   granted reactive priority via `_owes_reply`, or (via
    `SimulationEngine._infer_agent_id`'s substring match — e.g. "Andrew Su
    (PI)" contains agent_id "su") fabricated a Phase-3 thread activation
    misattributed to a bot that never posted anything. `_entry_allowed`'s own
    human-bypass clause (`src/agent/message_log.py`, cohort-system-v2 §5.1) is
-   untouched — it is a general-purpose cohort-gate primitive with its own
-   test suite (`test_cohort_isolation.py::TestGateHelper`) — but is no longer
-   reachable from any of the four GATED methods above, which now filter
-   `is_bot` before ever calling it.
+   untouched throughout — it is a general-purpose cohort-gate primitive with
+   its own test suite (`test_cohort_isolation.py::TestGateHelper`).
 4. **Phase-2 prompts.** §9's "kept on disk, documented inactive" treatment is
    superseded: the four `phase2-*.md` files, `build_phase2_scan_prompt`/
    `build_phase2_prune_prompt`/`build_scan_system_prompt`, `_phase2_scan_filter`/

@@ -526,8 +526,12 @@ async def reopen_proposal(
     token no longer changes what happens here) and the engine-side consumers
     that would have treated the posted text as authoritative
     (``has_pi_directive``/``pi_priority``/``pi_context`` are gone from
-    ``src/agent/state.py``, and ``MessageLog``'s GATED reads now filter out
-    every human-authored entry — see ``src/agent/message_log.py``). This route
+    ``src/agent/state.py``; the guidance can never set a bot's pending state or
+    reactive priority (``MessageLog.has_new_reply_from_other`` filters human
+    rows unconditionally), and it can never activate a new thread either
+    (``SimulationEngine._phase3_activate_threads`` filters human rows before
+    acting on them) — see ``src/agent/message_log.py`` /
+    ``src/agent/simulation.py``). This route
     never creates a NEW collab_private channel either: the engine-side
     private-channel collaboration/refinement flow
     (``src/services/private_channels.py``) was deleted in the same audit wave

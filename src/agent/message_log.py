@@ -93,16 +93,24 @@ class MessageLog:
         get_new_top_level_posts, get_replies_to_agent_posts, get_tags_for_agent,
         has_new_reply_from_other
 
-    Every GATED method also drops human-authored (``is_bot=False``) entries
-    unconditionally, independent of ``allowed_sender_ids`` — added 2026-08-12
-    (PI-interaction removal cycle) as the permanent trigger-loop guard: there
-    is no PI-bot interaction surface left, so a human row must never set
-    ``has_pending_reply``, grant reactive priority, or activate a new thread.
-    This is a separate filter each method applies before calling
-    ``_entry_allowed``; that helper's own human-bypass clause is untouched
-    (it is a general cohort-gate primitive with its own tests — see
-    ``test_cohort_isolation.py``'s ``TestGateHelper``) but is no longer
-    reachable from any of the calls above.
+    Decision 5 (2026-08-12 PI-interaction removal cycle) drew a line these four
+    methods do NOT all sit on the same side of: a human-authored (``is_bot=False``)
+    row stays visible through a general-purpose per-agent READ
+    (``get_new_top_level_posts``/``get_replies_to_agent_posts``/
+    ``get_tags_for_agent`` — history/observability is kept), but must never drive
+    BOT BEHAVIOR — pending state, reactive priority, or thread activation.
+    ``has_new_reply_from_other`` is the one method whose entire job IS driving bot
+    behavior (it feeds ``_owes_reply``'s reactive-priority tier and
+    ``_phase4_reply_threads``'s pending-reply trigger, and has no other caller), so
+    it alone filters out human rows unconditionally, independent of
+    ``allowed_sender_ids`` — including the ``allowed_sender_ids=None`` case, which
+    bypasses ``_entry_allowed`` entirely. The other three GATED methods' only real
+    caller today is ``SimulationEngine._phase3_activate_threads`` (thread
+    activation), so THAT function — not the shared read — is where the
+    activation-inert guard lives; see its own is_bot filtering and docstring.
+    ``_entry_allowed``'s own human-bypass clause is untouched throughout (it is a
+    general cohort-gate primitive with its own tests — see
+    ``test_cohort_isolation.py``'s ``TestGateHelper``).
 
     UNGATED by design — thread-internal, self-authored, or bookkeeping:
         get_entry, get_thread_history, get_thread_message_count,
@@ -195,16 +203,15 @@ class MessageLog:
         Return top-level posts (thread_ts is None) in the given channels,
         posted after `since`, excluding posts from `exclude_agent_id`.
 
-        When `allowed_sender_ids` is provided, only posts from those agents are
-        returned — the cohort gate (see specs/cohort-system.md). Human-authored
-        (`is_bot=False`) entries never come back from here, gate or no gate:
-        there is no PI-bot interaction surface left for a human top-level post
-        to activate (2026-08-12 removal cycle). This is a filter this method
-        applies on its own, ahead of `_entry_allowed` — that helper's own
-        human-bypass clause is untouched (it is still the tested, general-
-        purpose cohort-gate primitive; see test_cohort_isolation.py's
-        TestGateHelper) but is no longer reachable from here, since a human
-        entry is dropped before `_entry_allowed` ever sees it.
+        When `allowed_sender_ids` is provided, only posts from those agents (plus
+        human PI posts) are returned — the cohort gate (see specs/cohort-system.md).
+        This is a general-purpose per-agent read: a human row stays visible through
+        it for history/observability (decision 5, 2026-08-12 PI-interaction removal
+        cycle) exactly like `_entry_allowed`'s own human-bypass clause says. The
+        bot-behavior mandate that removal cycle actually enforces — a human row must
+        never activate a thread — is enforced at the point activation happens
+        (`SimulationEngine._phase3_activate_threads`), not here; see that method's
+        own is_bot filtering and docstring.
                 COHORT-GATE: GATED via allowed_sender_ids.
         """
         results = []
@@ -214,8 +221,6 @@ class MessageLog:
             if entry.thread_ts is not None:
                 continue
             if entry.channel not in channels:
-                continue
-            if not entry.is_bot:
                 continue
             if entry.sender_agent_id == exclude_agent_id:
                 continue
@@ -313,12 +318,13 @@ class MessageLog:
         where the reply is from a different agent.
 
         When `allowed_sender_ids` is provided, replies from non-cohort agents are
-        excluded (the cohort gate). Human-authored (`is_bot=False`) replies are
-        excluded unconditionally, gate or no gate — there is no PI-bot
-        interaction surface left for a human reply to activate a thread
-        (2026-08-12 removal cycle). See get_new_top_level_posts's docstring for
-        why this is a separate filter from `_entry_allowed`'s own (untouched)
-        human-bypass clause.
+        excluded (the cohort gate; human PI replies always pass — decision 5,
+        2026-08-12 PI-interaction removal cycle: this is a general-purpose
+        per-agent read, and a human row stays visible through it for
+        history/observability, same as `_entry_allowed`'s own human-bypass
+        clause). The bot-behavior mandate that removal cycle enforces — a human
+        reply must never activate a thread — is enforced at the point activation
+        happens (`SimulationEngine._phase3_activate_threads`), not here.
                 COHORT-GATE: GATED via allowed_sender_ids.
         """
         # First, find all top-level posts by this agent
@@ -333,8 +339,6 @@ class MessageLog:
             if entry.thread_ts not in agent_post_ts:
                 continue
             if entry.sender_agent_id == agent_id:
-                continue
-            if not entry.is_bot:
                 continue
             if not _entry_allowed(entry, allowed_sender_ids):
                 continue
@@ -352,22 +356,21 @@ class MessageLog:
         posted since the given cursor.
 
         When `allowed_sender_ids` is provided, tags authored by non-cohort agents
-        are excluded (the cohort gate). Human-authored (`is_bot=False`) tags are
-        excluded unconditionally, gate or no gate — there is no PI-bot
-        interaction surface left for a human @-mention to activate a thread
-        (2026-08-12 removal cycle; this closes the exact substring-match trap
-        a human sender name like "Andrew Su (PI)" could otherwise walk into
-        via `SimulationEngine._infer_agent_id`). See get_new_top_level_posts's
-        docstring for why this is a separate filter from `_entry_allowed`'s own
-        (untouched) human-bypass clause.
+        are excluded (the cohort gate; human PI tags always pass — decision 5,
+        2026-08-12 PI-interaction removal cycle: this is a general-purpose
+        per-agent read, and a human row stays visible through it for
+        history/observability, same as `_entry_allowed`'s own human-bypass
+        clause). The bot-behavior mandate that removal cycle enforces — a human
+        @-mention must never activate a thread, including via the substring-match
+        trap `SimulationEngine._infer_agent_id` could otherwise walk into (e.g.
+        "Andrew Su (PI)" contains agent_id "su") — is enforced at the point
+        activation happens (`_phase3_activate_threads`), not here.
                 COHORT-GATE: GATED via allowed_sender_ids.
         """
         tag = f"@{agent_bot_name}".lower()
         results = []
         for entry in self._entries:
             if entry.posted_at <= since:
-                continue
-            if not entry.is_bot:
                 continue
             if not _entry_allowed(entry, allowed_sender_ids):
                 continue

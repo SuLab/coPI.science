@@ -55,16 +55,18 @@ async def record_pi_message(
 
     The engine's inbound poller (``SimulationEngine._poll_inbound_from_db``)
     picks it up on its next tick and appends it to the live MessageLog for
-    history/observability only. Human-PI-to-bot interaction is retired
-    outright (2026-08-12 removal cycle) — there is no PI-handling path left to
-    route it into, and every GATED ``MessageLog`` read
-    (``src/agent/message_log.py``: ``get_new_top_level_posts``/
-    ``get_replies_to_agent_posts``/``get_tags_for_agent``/
-    ``has_new_reply_from_other``) filters ``is_bot=False`` entries
-    unconditionally, so the row this writes can never set a bot's
-    ``has_pending_reply``, grant reactive priority, or activate a new thread —
-    it is only ever readable, never actionable. Does not commit — the caller
-    owns the transaction.
+    history/observability (decision 5) — readable through the
+    general-purpose GATED reads (``get_new_top_level_posts``/
+    ``get_replies_to_agent_posts``/``get_tags_for_agent``,
+    ``src/agent/message_log.py``), but never actionable: it can never set a
+    bot's ``has_pending_reply`` or grant reactive priority
+    (``has_new_reply_from_other`` filters ``is_bot=False`` unconditionally),
+    and it can never activate a new thread either
+    (``SimulationEngine._phase3_activate_threads`` filters ``is_bot`` before
+    acting on any entry). Human-PI-to-bot interaction is retired outright
+    (2026-08-12 removal cycle) — there is no PI-handling path left to route
+    it into on top of that. Does not commit — the caller owns the
+    transaction.
     """
     channel_id, visibility = await _resolve_channel(db, run_id, channel_name)
     ts = mint_local_ts()
