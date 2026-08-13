@@ -43,12 +43,14 @@ COV_MIN="${COV_MIN:-60}"
 
 # Ceiling on ruff findings in src/, NOT a target. Measured 2026-08-04 with the same
 # command the ratchet below runs, so the numbers are comparable: origin/main 292, this
-# branch's pre-repair tip (8515f65) 308, HEAD 260.
+# branch's pre-repair tip (8515f65) 308, HEAD 260. Re-measured 2026-08-12 (final audit
+# wave, fix 8) with the same command: HEAD 249 — lowered from 260 to lock in the debt
+# already paid down by this wave.
 #
 # LOWER THIS AS DEBT IS PAID; NEVER RAISE IT. Raising it to make a push go through is
 # precisely how those 16 findings got into admin.py in the first place — a ceiling that
 # moves up to meet the code is not a gate, it is a logbook.
-SRC_LINT_MAX="${SRC_LINT_MAX:-260}"
+SRC_LINT_MAX="${SRC_LINT_MAX:-249}"
 
 # Throwaway-Postgres settings for the migration round trip (step 2). The port is
 # published on 127.0.0.1 only. MIGRATION_FLOOR is how far down the round trip goes;
