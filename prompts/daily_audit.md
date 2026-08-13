@@ -25,7 +25,7 @@ WHAT TO EXAMINE
    only Read narrow ranges.
 
 2. Container logs (last 24h) for context:
-     docker compose logs --since 24h app worker grantbot
+     docker compose logs --since 24h app worker
    Focus on stack traces, non-2xx HTTP, repeated warnings.
 
 3. Database sanity (optional, only if logs suggest data trouble):
