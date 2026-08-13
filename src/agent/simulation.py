@@ -1156,8 +1156,8 @@ class SimulationEngine:
             for e in history_entries
         ]
 
-        # Update message count (subtract offset for PI-reopened threads)
-        thread.message_count = len(history_entries) - thread.message_count_offset
+        # Update message count.
+        thread.message_count = len(history_entries)
 
         # Final participation check before composing a reply
         allowed = self.message_log.get_thread_allowed_agents(thread.thread_id)
@@ -1685,10 +1685,12 @@ class SimulationEngine:
         agent.state.last_phase5_action_time = time.time()
 
         # Daily post cap — pi_lab is capped to one pitch per day (design §9).
-        # scout_hub never reaches this line (hard-gated above); the ternary
-        # stays for any future role that is neither pi_lab nor scout_hub.
+        # scout_hub never reaches this line (hard-gated above), and it is the
+        # only other role, so `lab_daily_post_cap` is unconditional here — the
+        # generic `daily_post_cap` setting this once ternaried against was
+        # unreachable and was deleted (2026-08-12 release-gating fix pass, M1).
         today_posts = self._count_today_posts(agent)
-        cap = settings.lab_daily_post_cap if agent.role == "pi_lab" else settings.daily_post_cap
+        cap = settings.lab_daily_post_cap
         if today_posts >= cap:
             logger.debug("[%s] Phase 5: Skipped (daily cap %d/%d)", agent.agent_id, today_posts, cap)
             return

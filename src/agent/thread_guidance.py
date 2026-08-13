@@ -11,10 +11,15 @@ unit-testable in isolation.
 
 Both roles' strings are the canonical text reproduced in §4 of
 docs/specs/2026-08-07-pi-bot-prompts.md and
-docs/specs/2026-08-07-hub-bot-prompts.md (whitespace-normalized equality) and
-are pinned by tests/characterization/__snapshots__/test_agent_turn_gm.ambr.
-Reword only with sign-off (andrewsu), update the doc §4 blocks in the same
-change, and regenerate the golden masters as a reviewed diff.
+docs/specs/2026-08-07-hub-bot-prompts.md (whitespace-normalized equality via
+tests/unit/test_doc_prompt_sync.py::test_doc_section4_matches_thread_guidance,
+parametrized over both roles). Only `_PI_LAB`'s strings are additionally
+pinned by tests/characterization/__snapshots__/test_agent_turn_gm.ambr — that
+golden master only ever drives the pi_lab role (the default), so `_SCOUT_HUB`
+has no GM pin at all; its doc-sync coverage above is the only thing standing
+between it and drift. Reword only with sign-off (andrewsu), update the doc §4
+blocks in the same change, and regenerate the golden master as a reviewed
+diff whenever `_PI_LAB`'s strings change.
 """
 
 from __future__ import annotations

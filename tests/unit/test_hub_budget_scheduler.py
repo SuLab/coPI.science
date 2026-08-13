@@ -580,7 +580,6 @@ class TestPhase5CallAccounting:
             active_thread_threshold=12,
             llm_rate_window_seconds=600,
             llm_calls_per_load_per_window=8,
-            daily_post_cap=100,
             lab_daily_post_cap=100,
             phase5_skip_probability=0.0,
             llm_agent_model_opus="test-model",

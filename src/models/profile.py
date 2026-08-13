@@ -28,7 +28,7 @@ class ResearcherProfile(Base):
     grant_titles: Mapped[list[str] | None] = mapped_column(ARRAY(String), nullable=True)
     # [{label: str, content: str, submitted_at: str}]  — deprecated, use private_profile_md
     user_submitted_texts: Mapped[dict | None] = mapped_column(JSON, nullable=True)
-    # Live private profile markdown, editable by user via web UI or agent via PI DM
+    # retired 2026-08-12 removal cycle; columns kept, no writers
     private_profile_md: Mapped[str | None] = mapped_column(Text, nullable=True)
     # LLM-generated draft staged for user review during onboarding
     private_profile_seed: Mapped[str | None] = mapped_column(Text, nullable=True)

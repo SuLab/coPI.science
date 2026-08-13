@@ -2,8 +2,11 @@
 day (`lab_daily_post_cap`). `scout_hub` is hard-gated out of `_phase5_new_post`
 entirely (decision 9, reply-only-hub reconciliation) and never reaches the cap
 check at all — see `test_scout_hub_never_reaches_llm_regardless_of_daily_cap`
-below, which pins that the hard gate wins over what daily_post_cap headroom
-would otherwise have allowed.
+below, which pins that the hard gate wins regardless of any cap headroom.
+(The generic `daily_post_cap` setting the cap check once ternaried against for
+a role that was neither `pi_lab` nor `scout_hub` was itself deleted as
+unreachable — 2026-08-12 release-gating fix pass, M1 — since those are the
+only two roles that exist.)
 
 Formerly `test_phase2_guard.py`: that file's other test,
 `test_run_turn_has_no_phase2_call_or_gate`, pinned that `_run_turn` never
@@ -32,7 +35,6 @@ def _hub():
 
 def _settings(**over):
     base = dict(
-        daily_post_cap=5,
         lab_daily_post_cap=1,
         active_thread_threshold=12,
         phase5_skip_probability=0.0,
@@ -84,9 +86,9 @@ async def test_pi_lab_at_cap_never_reaches_llm(monkeypatch):
 
 
 async def test_scout_hub_never_reaches_llm_regardless_of_daily_cap(monkeypatch):
-    """scout_hub is not subject to lab_daily_post_cap, and daily_post_cap=5
-    still has headroom at 1 post — but neither matters anymore: the
-    reply-only-hub reconciliation (decision 9) hard-gates `scout_hub` out of
+    """scout_hub is not subject to lab_daily_post_cap, and there is headroom
+    at 1 post — but neither matters anymore: the reply-only-hub
+    reconciliation (decision 9) hard-gates `scout_hub` out of
     `_phase5_new_post` before ANY work, including the cap check this test
     used to pin as the reason the LLM WAS reached. This is the inversion the
     hard gate implies, not a cap regression — see

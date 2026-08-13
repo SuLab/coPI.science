@@ -40,7 +40,6 @@ def _lab(agent_id="gill"):
 
 def _settings(**over):
     base = dict(
-        daily_post_cap=5,
         lab_daily_post_cap=1,
         active_thread_threshold=12,
         phase5_skip_probability=0.0,

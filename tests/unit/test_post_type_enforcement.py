@@ -309,7 +309,7 @@ async def _drive(monkeypatch, response, *, capture=None):
     monkeypatch.setattr(
         "src.agent.simulation.get_settings",
         lambda: types.SimpleNamespace(
-            daily_post_cap=50, lab_daily_post_cap=50, active_thread_threshold=12,
+            lab_daily_post_cap=50, active_thread_threshold=12,
             phase5_skip_probability=0.0,
             llm_agent_model_opus="test-model",
         ),
@@ -387,7 +387,7 @@ async def test_repeated_rejections_accumulate_instead_of_pinning_at_one(monkeypa
     monkeypatch.setattr(
         "src.agent.simulation.get_settings",
         lambda: types.SimpleNamespace(
-            daily_post_cap=50, lab_daily_post_cap=50, active_thread_threshold=12,
+            lab_daily_post_cap=50, active_thread_threshold=12,
             phase5_skip_probability=0.0,
             llm_agent_model_opus="test-model",
         ),

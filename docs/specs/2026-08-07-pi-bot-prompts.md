@@ -435,7 +435,7 @@ reply with a brief `⏸️` acknowledgment, but no further replies after that.
 
 *Source: `src/agent/thread_guidance.py` — the `_PI_LAB` phase-guidance strings (Python, not a Markdown prompt file).*
 
-An interview runs in three phases, chosen by how many messages have been exchanged so far. Each phase supplies two blocks of text that fill the `{phase_guidance}` and `{instructions}` placeholders in the interview-reply prompt above.
+An interview runs in three phases, chosen by the ordinal of the reply being written. Each phase supplies two blocks of text that fill the `{phase_guidance}` and `{instructions}` placeholders in the interview-reply prompt above.
 
 | Message count | Phase |
 |---|---|
