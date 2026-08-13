@@ -50,7 +50,7 @@ COV_MIN="${COV_MIN:-60}"
 # LOWER THIS AS DEBT IS PAID; NEVER RAISE IT. Raising it to make a push go through is
 # precisely how those 16 findings got into admin.py in the first place — a ceiling that
 # moves up to meet the code is not a gate, it is a logbook.
-SRC_LINT_MAX="${SRC_LINT_MAX:-249}"
+SRC_LINT_MAX="${SRC_LINT_MAX:-231}"
 
 # Throwaway-Postgres settings for the migration round trip (step 2). The port is
 # published on 127.0.0.1 only. MIGRATION_FLOOR is how far down the round trip goes;

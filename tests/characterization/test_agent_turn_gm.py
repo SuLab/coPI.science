@@ -62,7 +62,6 @@ def test_extract_dois_normalizes_and_dedupes():
 def test_cites_own_paper_matches_profile_dois():
     a = _agent()
     a._public_profile = "Representative work: 10.1000/foo bar"
-    a._private_profile = "No private instructions yet."
     assert a.cites_own_paper("A post about 10.1000/FOO and things") is True
     assert a.cites_own_paper("Unrelated 10.9999/other") is False
     # Empty own-DOI set (default profile) never matches.
