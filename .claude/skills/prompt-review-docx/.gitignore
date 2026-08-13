@@ -1,0 +1,5 @@
+# fetched pandoc binary + optional preview node deps — regenerable, don't commit
+.cache/
+node_modules/
+package.json
+package-lock.json

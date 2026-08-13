@@ -86,3 +86,8 @@ mutants/
 # Production migration dumps (scripts/migrate/run_migration.sh). Never commit these:
 # they are full database copies containing message bodies and tokens.
 backups/
+
+# Generated Word review docs, rendered from the *-bot-prompts.md prompt-set docs
+# for non-technical (Blackbird) review. Regenerate from the .md sources — the .md
+# is the source of truth, these are throwaway artifacts.
+docs/specs/*.docx
