@@ -235,9 +235,10 @@ your work without being @-mentioned. Answer it the same way.
 
 ### Interview Conclusions
 
-**The hub closes the interview, not you.** It ends with its own read — sometimes that a
-:mag: Opportunity Assessment will follow, sometimes that the idea is too early. Acknowledge
-it briefly and stop.
+**The hub closes the interview, not you.** It ends with its own read, stated in that same
+reply — sometimes a verdict that becomes an internal :mag: Opportunity Assessment for
+Blackbird staff, sometimes that the idea is too early. Nothing further is posted after
+that. Acknowledge it briefly and stop.
 
 If the hub names something specific that would change its read — a replicate, a filing, a
 counter-screen, a selectivity margin — say it back explicitly in your closing reply so the

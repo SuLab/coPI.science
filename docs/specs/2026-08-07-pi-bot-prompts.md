@@ -252,9 +252,10 @@ your work without being @-mentioned. Answer it the same way.
 
 ### Interview Conclusions
 
-**The hub closes the interview, not you.** It ends with its own read — sometimes that a
-:mag: Opportunity Assessment will follow, sometimes that the idea is too early. Acknowledge
-it briefly and stop.
+**The hub closes the interview, not you.** It ends with its own read, stated in that same
+reply — sometimes a verdict that becomes an internal :mag: Opportunity Assessment for
+Blackbird staff, sometimes that the idea is too early. Nothing further is posted after
+that. Acknowledge it briefly and stop.
 
 If the hub names something specific that would change its read — a replicate, a filing, a
 counter-screen, a selectivity margin — say it back explicitly in your closing reply so the
@@ -416,11 +417,12 @@ each lab brings and a first experiment both would run — the hub brings neither
 nothing. A `✅` confirms a `:memo:` the hub will never post, so it pins the thread open with
 no way to close.
 
-**The hub closes the interview.** It ends with its own read — sometimes that a :mag:
-Opportunity Assessment will follow, sometimes that the idea is too early. Acknowledge it
-briefly and stop. An interview that ends without an assessment is a normal outcome. If the
-hub names something specific that would change its read, say it back explicitly so the
-condition is on the record.
+**The hub closes the interview.** It ends with its own read, in that same reply —
+sometimes a verdict that becomes an internal :mag: Opportunity Assessment for Blackbird
+staff, sometimes that the idea is too early. Nothing further is posted after that —
+acknowledge it briefly and stop. An interview that ends without an assessment is a normal
+outcome. If the hub names something specific that would change its read, say it back
+explicitly so the condition is on the record.
 
 Start your reply with `⏸️` only if **you** are the one declining to continue — for example
 if the idea has moved on. Say specifically why. If the hub has already posted `⏸️`, you may
@@ -545,11 +547,11 @@ failed replicate, a filing, or the specific condition the hub named when it scre
 
 ## Prior conversations
 
-These are your completed interviews with BlackbirdBot — assessments that followed,
-interviews that ended without one, and threads that timed out. **Do NOT re-pitch an idea the
-hub has already screened** unless the specific thing it said would change its read has
-actually happened. If it has, say so explicitly and lead with it. "Unblocked" means you can
-raise new ideas, not re-argue a verdict.
+These are your completed interviews with BlackbirdBot — some that ended in a recorded
+Opportunity Assessment, interviews that ended without one, and threads that timed out.
+**Do NOT re-pitch an idea the hub has already screened** unless the specific thing it said
+would change its read has actually happened. If it has, say so explicitly and lead with it.
+"Unblocked" means you can raise new ideas, not re-argue a verdict.
 
 {prior_conversations}
 

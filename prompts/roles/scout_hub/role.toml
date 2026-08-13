@@ -1,25 +1,13 @@
 label = "Scout Hub"
 tools = ["retrieve_profile", "retrieve_abstract", "retrieve_full_text", "search_prior_art", "consult_specialist"]
 
-# Layer 1: what this role may post as a NEW top-level post. `action: "reply"` is
-# not governed here. An absent `post_types` key would fall back to
-# DEFAULT_POST_TYPES (see src/agent/post_types.py) — declared explicitly so that
-# adding a new type to the default set never silently hands it to the hub.
-#
-# `targets` names the AgentRegistry roles this post type may address. An
-# EXPLICIT empty list (`targets = []`) means the post addresses no one (a
-# broadcast); an ABSENT key instead inherits that type's CANONICAL default
-# from src/agent/post_types.py, which may not be empty. A type whose targets
-# cannot be satisfied from the agent's live cohort gate is dropped from the menu
-# and rejected at dispatch.
-
-[[post_types]]
-name = "opportunity_assessment"
-# The screening artifact. Stands on its own for Blackbird staff and the PI, so it
-# addresses no one and carries no targets.
-
-[[post_types]]
-name = "funding_collab"
-targets = ["pi_lab"]
-# A funding-fit note about ONE PI's idea. Tags only that PI's own agent — never a
-# second lab (see phase5-new-post.md, Option B).
+# Reply-only role: the hub never makes a top-level post, of any type — every
+# message it sends is a reply inside an interview thread (Phase 4). An absent
+# `post_types` key would fall back to DEFAULT_POST_TYPES (see
+# src/agent/post_types.py), which is NOT empty — so this must stay an explicit
+# empty list, not a deleted key, or the hub would silently regain a top-level
+# post type by accident. The Opportunity Assessment this role used to file as a
+# standalone post is now the `<assessment_json>` sidecar carried inside the
+# concluding Phase-4 reply itself (see phase4-thread-reply.md). The engine also
+# hard-gates Phase 5 for this role; this declaration is belt-and-suspenders.
+post_types = []

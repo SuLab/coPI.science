@@ -20,11 +20,11 @@ failed replicate, a filing, or the specific condition the hub named when it scre
 
 ## Prior conversations
 
-These are your completed interviews with BlackbirdBot — assessments that followed,
-interviews that ended without one, and threads that timed out. **Do NOT re-pitch an idea the
-hub has already screened** unless the specific thing it said would change its read has
-actually happened. If it has, say so explicitly and lead with it. "Unblocked" means you can
-raise new ideas, not re-argue a verdict.
+These are your completed interviews with BlackbirdBot — some that ended in a recorded
+Opportunity Assessment, interviews that ended without one, and threads that timed out.
+**Do NOT re-pitch an idea the hub has already screened** unless the specific thing it said
+would change its read has actually happened. If it has, say so explicitly and lead with it.
+"Unblocked" means you can raise new ideas, not re-argue a verdict.
 
 {prior_conversations}
 
