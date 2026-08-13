@@ -33,21 +33,7 @@
       'engines',
     ]),
     'private_profile_md': None,
-    'private_profile_seed': '''
-      # Private Profile
-      
-      ## Collaboration Preferences
-      Prefers rigorous, mathematically grounded collaborators.
-      
-      ## Communication Style
-      Precise and formal; values worked examples.
-      
-      ## Topic Priorities
-      Programmable computation; symbolic manipulation.
-      
-      ## Criteria to Always Explore
-      Whether a method generalizes beyond numbers.
-    ''',
+    'private_profile_seed': None,
     'profile_version': 1,
     'publications': list([
       dict({
@@ -105,7 +91,7 @@
     'evidence_pmid_count': 2,
     'evidence_pub_count': 2,
     'evidence_state': 'grounded',
-    'llm_calls_total': 3,
+    'llm_calls_total': 2,
     'profile_version': 1,
     'research_summary': 'The lab studies engines. Work continues on several fronts and results will be reported in due course elsewhere.',
     'synthesis_validated': False,
@@ -153,12 +139,10 @@
     'evidence_pmid_count': 2,
     'evidence_pub_count': 2,
     'first_version': 1,
-    'llm_calls_total': 3,
+    'llm_calls_total': 2,
     'pub_count_after_two_runs': 2,
     'same_profile_row': True,
     'second_version': 2,
-    'seed_set_after_first_run': True,
-    'seed_unchanged_on_rerun': True,
     'synthesis_validated': True,
   })
 # ---
@@ -167,7 +151,7 @@
     'evidence_pub_count': 2,
     'first_version': 1,
     'kept_the_validated_summary': True,
-    'llm_calls_total': 4,
+    'llm_calls_total': 3,
     'profile_row_count': 1,
     'rejected_in_progress': True,
     'same_profile_row': True,
@@ -193,7 +177,7 @@
       'computational theory',
     ]),
     'evidence_state': 'grounded',
-    'llm_calls_total': 3,
+    'llm_calls_total': 2,
     'profile_version': 1,
     'stored_the_rejected_draft': False,
     'stored_the_retry': True,

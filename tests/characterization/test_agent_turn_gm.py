@@ -109,7 +109,12 @@ def test_phase4_prompt_phase_progression_gm(snapshot):
         {"sender": "SuBot", "content": "We run genome-wide CRISPR screens."},
     ]
     out = {}
-    for label, mc in (("explore", 2), ("decide", 8), ("must_conclude", 12)):
+    # `thread.message_count` is the PRIOR count; build_phase4_prompt feeds
+    # phase4_guidance the ordinal (message_count + 1, commit 55822a4). To keep
+    # these three examples landing on the same canonical EXPLORE/DECIDE/
+    # MUST_CONCLUDE ordinals (2/8/12) the fixture pins, the prior counts here
+    # are one less (1/7/11) than the ordinals they produce.
+    for label, mc in (("explore", 1), ("decide", 7), ("must_conclude", 11)):
         thread = ThreadState(
             thread_id="1700000000.000100",
             channel="collab-cellbio",
