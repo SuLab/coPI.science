@@ -6,10 +6,12 @@ docs/specs/2026-08-06-role-topology-post-type-gating-design.md §2, §3.
 import logging
 import re
 
+import src.agent.post_types as post_types_mod
 from src.agent.post_types import (
     CANONICAL,
     DEFAULT_POST_TYPES,
     LEGACY_POST_TYPE_ALIASES,
+    PostTypeSpec,
     available_for,
     eligible_targets,
     parse_post_types,
@@ -26,13 +28,38 @@ BOT_NAMES = {"gill": "GillBot", "blackbird": "BlackbirdBot", "pearce": "PearceBo
 # The mesh: several pi_lab peers, no hub.
 MESH_ROLES = {"gill": "pi_lab", "pearce": "pi_lab", "wu": "pi_lab"}
 
+# CANONICAL's one real broadcast-shaped example (opportunity_assessment) is
+# gone — the hub's assessment stopped being a post type at all when the hub
+# went reply-only (Option A relocation; see post_types.py's CANONICAL
+# comment). Several tests below only need SOME broadcast-shaped (no
+# `targets`) spec distinct from `pitch` to exercise `available_for`/
+# `render_menu`'s broadcast branch or `parse_post_types`'s multi-entry
+# handling — this synthetic spec stands in for that, decoupling them from
+# whatever CANONICAL happens to contain.
+_BROADCAST_TYPE = PostTypeSpec(
+    "broadcast_test_type", ":test_tube:", "Test-only broadcast type",
+    "A synthetic broadcast (no targets) post type used only in this test file.",
+)
+
 
 def _by_name(specs):
     return {s.name for s in specs}
 
 
+def _with_broadcast_type(monkeypatch):
+    """Make `_BROADCAST_TYPE` resolvable by name through `parse_post_types`,
+    which looks types up in the real `CANONICAL` — needed only by tests that
+    parse it from a raw role.toml-shaped dict; tests that build a
+    `PostTypeSpec` directly and hand it to `available_for`/`render_menu` need
+    no patching at all."""
+    monkeypatch.setattr(
+        post_types_mod, "CANONICAL",
+        {**post_types_mod.CANONICAL, _BROADCAST_TYPE.name: _BROADCAST_TYPE},
+    )
+
+
 def test_canonical_vocabulary_is_exactly_the_spec_table():
-    assert set(CANONICAL) == {"pitch", "opportunity_assessment"}
+    assert set(CANONICAL) == {"pitch"}
 
 
 def test_idea_is_not_a_type_anymore():
@@ -71,7 +98,7 @@ def test_default_post_types_is_the_pi_lab_set():
 
 
 def test_broadcast_types_carry_no_targets():
-    assert CANONICAL["opportunity_assessment"].targets == frozenset()
+    assert _BROADCAST_TYPE.targets == frozenset()
 
 
 def test_addressed_types_declare_their_counterparty_role():
@@ -128,7 +155,7 @@ def test_eligible_targets_with_gate_off_returns_every_matching_role():
 def test_star_keeps_pitch_for_a_spoke():
     got = available_for(
         DEFAULT_POST_TYPES, gate=STAR_GATE, roles_by_agent=STAR_ROLES,
-        self_id="gill", terminal_only=False,
+        self_id="gill",
     )
     assert _by_name(got) == {"pitch"}
 
@@ -136,57 +163,22 @@ def test_star_keeps_pitch_for_a_spoke():
 def test_mesh_drops_pitch_for_a_spoke_with_no_reachable_hub():
     got = available_for(
         DEFAULT_POST_TYPES, gate=None, roles_by_agent=MESH_ROLES,
-        self_id="gill", terminal_only=False,
+        self_id="gill",
     )
     assert _by_name(got) == set()
 
 
 def test_gate_off_keeps_a_broadcast_type_even_with_no_known_roles():
     got = available_for(
-        (CANONICAL["opportunity_assessment"],), gate=None, roles_by_agent={},
-        self_id="gill", terminal_only=False,
+        (_BROADCAST_TYPE,), gate=None, roles_by_agent={}, self_id="gill",
     )
-    assert _by_name(got) == {"opportunity_assessment"}
-
-
-def test_terminal_only_keeps_only_terminal_types():
-    """The subject is a lab (`gill`), with a reachable hub in the fixture, so
-    `pitch` is otherwise available — the assertions below must actually
-    discriminate on `terminal_only`, not just observe a set that was already
-    going to exclude `pitch` for an unrelated (topology) reason."""
-    declared = (CANONICAL["pitch"], CANONICAL["opportunity_assessment"])
-
-    kept = available_for(
-        declared, gate=STAR_GATE, roles_by_agent=STAR_ROLES,
-        self_id="gill", terminal_only=False,
-    )
-    assert _by_name(kept) == {"pitch", "opportunity_assessment"}
-
-    narrowed = available_for(
-        declared, gate=STAR_GATE, roles_by_agent=STAR_ROLES,
-        self_id="gill", terminal_only=True,
-    )
-    assert _by_name(narrowed) == {"opportunity_assessment"}
-
-
-def test_terminal_only_in_the_star_can_be_empty():
-    """Empty is the correct answer for a role with nothing terminal to
-    report, and the engine must NOT read it as "skip the turn" on its own —
-    that half is enforced in test_post_type_enforcement.py, not here; this
-    only pins that the set really is empty. See spec §5."""
-    got = available_for(
-        DEFAULT_POST_TYPES, gate=STAR_GATE, roles_by_agent=STAR_ROLES,
-        self_id="gill", terminal_only=True,
-    )
-    assert got == ()
+    assert _by_name(got) == {"broadcast_test_type"}
 
 
 def test_available_for_preserves_declaration_order():
-    declared = (CANONICAL["opportunity_assessment"], CANONICAL["pitch"])
+    declared = (_BROADCAST_TYPE, CANONICAL["pitch"])
     roles = dict(MESH_ROLES, blackbird="scout_hub")
-    got = available_for(
-        declared, gate=None, roles_by_agent=roles, self_id="gill", terminal_only=False,
-    )
+    got = available_for(declared, gate=None, roles_by_agent=roles, self_id="gill")
     declared_names = [s.name for s in declared if s.name in _by_name(got)]
     assert [s.name for s in got] == declared_names
 
@@ -204,13 +196,14 @@ def test_parse_none_yields_the_defaults(caplog):
     assert caplog.text == ""
 
 
-def test_parse_reads_name_and_targets():
+def test_parse_reads_name_and_targets(monkeypatch):
+    _with_broadcast_type(monkeypatch)
     got = parse_post_types(
-        [{"name": "opportunity_assessment"},
+        [{"name": "broadcast_test_type"},
          {"name": "pitch", "targets": ["scout_hub"]}],
         role="scout_hub",
     )
-    assert _by_name(got) == {"opportunity_assessment", "pitch"}
+    assert _by_name(got) == {"broadcast_test_type", "pitch"}
     assert dict((s.name, s.targets) for s in got)["pitch"] == frozenset({"scout_hub"})
 
 
@@ -222,11 +215,12 @@ def test_parse_drops_an_unknown_name_and_keeps_the_rest(caplog):
     assert "not_a_real_type" in caplog.text
 
 
-def test_parse_drops_a_malformed_entry_and_keeps_the_rest(caplog):
+def test_parse_drops_a_malformed_entry_and_keeps_the_rest(caplog, monkeypatch):
+    _with_broadcast_type(monkeypatch)
     got = parse_post_types(
-        ["not_a_table", {"name": "opportunity_assessment"}, {}], role="pi_lab"
+        ["not_a_table", {"name": "broadcast_test_type"}, {}], role="pi_lab"
     )
-    assert _by_name(got) == {"opportunity_assessment"}
+    assert _by_name(got) == {"broadcast_test_type"}
     assert caplog.text
 
 
@@ -240,21 +234,19 @@ def test_parse_warns_when_targets_names_a_role_that_cannot_exist(caplog):
     assert "scout_hubb" in caplog.text
 
 
-def test_a_typod_target_role_really_is_never_offered(caplog):
+def test_a_typod_target_role_really_is_never_offered(caplog, monkeypatch):
     """The other half of that §5 row. The WARNING is only useful if the
     behaviour it predicts is real: no agent can ever satisfy `scout_hubb`, so
     the type is filtered out of every menu on every topology."""
+    _with_broadcast_type(monkeypatch)
     caplog.set_level(logging.WARNING)
     declared = parse_post_types(
-        [{"name": "opportunity_assessment"}, {"name": "pitch", "targets": ["scout_hubb"]}],
+        [{"name": "broadcast_test_type"}, {"name": "pitch", "targets": ["scout_hubb"]}],
         role="pi_lab",
     )
     for gate, roles in ((STAR_GATE, STAR_ROLES), (None, MESH_ROLES)):
-        got = available_for(
-            declared, gate=gate, roles_by_agent=roles, self_id="gill",
-            terminal_only=False,
-        )
-        assert _by_name(got) == {"opportunity_assessment"}
+        got = available_for(declared, gate=gate, roles_by_agent=roles, self_id="gill")
+        assert _by_name(got) == {"broadcast_test_type"}
 
 
 def test_parse_of_a_non_list_yields_the_defaults(caplog):
@@ -297,18 +289,19 @@ def test_parse_dedupes_a_repeated_name_and_the_last_entry_wins(caplog):
     assert "pitch" in caplog.text
 
 
-def test_parse_dedupe_preserves_first_occurrence_position():
+def test_parse_dedupe_preserves_first_occurrence_position(monkeypatch):
     """Declaration order is the menu's rendering order and must stay stable
     between turns even when a later duplicate wins on content."""
+    _with_broadcast_type(monkeypatch)
     got = parse_post_types(
         [
-            {"name": "opportunity_assessment"},
+            {"name": "broadcast_test_type"},
             {"name": "pitch", "targets": ["scout_hub"]},
-            {"name": "opportunity_assessment"},  # duplicate, later — content wins, position doesn't move
+            {"name": "broadcast_test_type"},  # duplicate, later — content wins, position doesn't move
         ],
         role="pi_lab",
     )
-    assert [s.name for s in got] == ["opportunity_assessment", "pitch"]
+    assert [s.name for s in got] == ["broadcast_test_type", "pitch"]
 
 
 # --- render_menu ------------------------------------------------------------
@@ -316,7 +309,7 @@ def test_parse_dedupe_preserves_first_occurrence_position():
 def test_render_menu_names_every_available_type_with_its_emoji():
     specs = available_for(
         DEFAULT_POST_TYPES, gate=STAR_GATE, roles_by_agent=STAR_ROLES,
-        self_id="gill", terminal_only=False,
+        self_id="gill",
     )
     out = render_menu(
         specs, gate=STAR_GATE, roles_by_agent=STAR_ROLES, self_id="gill", bot_names=BOT_NAMES,
@@ -388,7 +381,7 @@ def test_render_menu_enumerated_branch_also_requires_the_body_mention():
 def test_render_menu_names_the_reachable_agent_for_an_addressed_type():
     specs = available_for(
         DEFAULT_POST_TYPES, gate=STAR_GATE, roles_by_agent=STAR_ROLES,
-        self_id="gill", terminal_only=False,
+        self_id="gill",
     )
     out = render_menu(
         specs, gate=STAR_GATE, roles_by_agent=STAR_ROLES, self_id="gill", bot_names=BOT_NAMES,
@@ -399,7 +392,7 @@ def test_render_menu_names_the_reachable_agent_for_an_addressed_type():
 
 def test_render_menu_marks_a_broadcast_type_as_addressing_no_one():
     out = render_menu(
-        [CANONICAL["opportunity_assessment"]], gate=STAR_GATE, roles_by_agent=STAR_ROLES,
+        [_BROADCAST_TYPE], gate=STAR_GATE, roles_by_agent=STAR_ROLES,
         self_id="gill", bot_names=BOT_NAMES,
     )
     assert "no one" in out.lower() or "broadcast" in out.lower()

@@ -110,14 +110,24 @@ def test_phase5_menu_defaults_to_the_unfiltered_pi_lab_set():
 
 def test_phase5_default_menu_is_the_agents_own_role_not_pi_lab():
     """A scout_hub agent must not be handed a menu offering `paper`,
-    `idea_crosslab` and `pitch` — its role.toml allows none of them."""
+    `idea_crosslab` and `pitch` — its role.toml allows none of them.
+
+    The hub went reply-only (Option A relocation): it declares no post
+    types at all anymore (`post_types = []` in role.toml — its former
+    `opportunity_assessment` is the sidecar carried inside its own Phase-4
+    CONCLUDE reply now, not a post type), so its default-rendered Phase-5
+    menu is the empty-menu message, not an enumeration of anything.
+    """
     from src.agent.agent import Agent
 
     hub = Agent("blackbird", "BlackbirdBot", "Blackbird", role="scout_hub")
     _, messages = hub.build_phase5_prompt()
     content = messages[0]["content"]
-    assert "**`opportunity_assessment`**" in content
-    for forbidden in ("**`paper`**", "**`idea_crosslab`**", "**`pitch`**"):
+    assert "No new top-level post type is available to you this turn" in content
+    for forbidden in (
+        "**`paper`**", "**`idea_crosslab`**", "**`pitch`**",
+        "**`opportunity_assessment`**",
+    ):
         assert forbidden not in content
 
 

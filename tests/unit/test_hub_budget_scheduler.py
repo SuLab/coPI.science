@@ -58,7 +58,6 @@ def _engine(agent_ids, budget_cap=0):
 _TICK_IO = (
     "_poll_slack_for_human_messages",
     "_poll_inbound_from_db",
-    "_sync_proposal_reviews_from_db",
     "_sync_private_channels_from_db",
     "_sync_roster_from_db",
     "_flush_persisted",

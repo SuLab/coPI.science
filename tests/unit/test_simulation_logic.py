@@ -936,6 +936,137 @@ class TestPhase4ReplySuppression:
 
 
 # ---------------------------------------------------------------
+# Option A relocation: the hub's :mag: Opportunity Assessment is extracted
+# from, and stripped out of, its own Phase-4 CONCLUDE reply — see
+# SimulationEngine._reply_to_thread / _capture_hub_assessment. The DB-backed
+# row-persistence assertions live in
+# tests/integration/test_opportunity_assessment_persistence.py; these are the
+# fast, no-database pins: the sidecar never reaches Slack, a role check gates
+# the whole mechanism to scout_hub, and a persistence failure never crashes
+# the reply that already posted.
+# ---------------------------------------------------------------
+
+class TestHubAssessmentRelocation:
+    def _engine_with_hub_thread(self):
+        from src.agent.agent import Agent
+        from src.agent.state import ThreadState
+        from tests.fakes import FakeSlackClient
+
+        hub = Agent("blackbird", "BlackbirdBot", "Blackbird", role="scout_hub")
+        thread = ThreadState(
+            thread_id="t1", channel="general", other_agent_id="wang",
+            message_count=11, has_pending_reply=True,
+        )
+        hub.state.active_threads["t1"] = thread
+        client = FakeSlackClient(agent_id="blackbird")
+        engine = SimulationEngine(agents=[hub], slack_clients={"blackbird": client})
+        return engine, hub, thread, client
+
+    @pytest.mark.asyncio
+    async def test_sidecar_never_reaches_slack_in_a_concluding_hub_reply(self, monkeypatch):
+        """Mission pin: the sidecar must NEVER appear in posted text."""
+        engine, hub, thread, client = self._engine_with_hub_thread()
+
+        raw_response = (
+            "<slack_message>\n"
+            ":mag: Closing note — thanks for the detail.\n"
+            "</slack_message>\n\n"
+            '<assessment_json>\n'
+            '{"subject_agent_id": "wang", "recommendation": "pass", '
+            '"scores": {"differentiation": 2}}\n'
+            '</assessment_json>'
+        )
+
+        async def _fake_generate_with_tools(**kwargs):
+            return raw_response
+
+        monkeypatch.setattr(hub, "build_phase4_prompt", lambda **kw: ("sys", []))
+        monkeypatch.setattr(
+            "src.agent.simulation.generate_with_tools", _fake_generate_with_tools
+        )
+
+        await engine._reply_to_thread(hub, thread)
+
+        assert len(client.posted) == 1
+        posted_text = client.posted[0]["text"]
+        assert posted_text == ":mag: Closing note — thanks for the detail."
+        for leaked in ("assessment_json", "subject_agent_id", "differentiation"):
+            assert leaked not in posted_text, f"sidecar leaked into Slack: {leaked!r}"
+
+    @pytest.mark.asyncio
+    async def test_a_persistence_failure_is_logged_and_never_crashes_the_reply(
+        self, monkeypatch, caplog,
+    ):
+        """Mission pin (d), the crash-safety half: whatever goes wrong
+        downstream of extraction must never propagate out of
+        `_reply_to_thread` — the reply already posted and must stay posted."""
+        engine, hub, thread, client = self._engine_with_hub_thread()
+
+        async def _boom(*args, **kwargs):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(engine, "_persist_assessment", _boom)
+
+        raw_response = (
+            "<slack_message>Closing note.</slack_message>\n\n"
+            '<assessment_json>{"subject_agent_id": "wang", "recommendation": "pass"}'
+            "</assessment_json>"
+        )
+
+        async def _fake_generate_with_tools(**kwargs):
+            return raw_response
+
+        monkeypatch.setattr(hub, "build_phase4_prompt", lambda **kw: ("sys", []))
+        monkeypatch.setattr(
+            "src.agent.simulation.generate_with_tools", _fake_generate_with_tools
+        )
+
+        with caplog.at_level("ERROR"):
+            await engine._reply_to_thread(hub, thread)
+
+        assert len(client.posted) == 1  # the reply still posted
+        assert hub.message_count == 1
+        assert "Failed to extract/persist the assessment sidecar" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_pi_lab_replies_never_attempt_assessment_capture(self, monkeypatch):
+        """A pi_lab reply must never even try to extract a sidecar — the
+        Option A call site is gated on `agent.role == "scout_hub"`."""
+        from src.agent.agent import Agent
+        from src.agent.state import ThreadState
+        from tests.fakes import FakeSlackClient
+
+        lab = Agent("gill", "GillBot", "Gill", role="pi_lab")
+        thread = ThreadState(
+            thread_id="t1", channel="general", other_agent_id="blackbird",
+            message_count=11, has_pending_reply=True,
+        )
+        lab.state.active_threads["t1"] = thread
+        client = FakeSlackClient(agent_id="gill")
+        engine = SimulationEngine(agents=[lab], slack_clients={"gill": client})
+
+        called = {"capture": False}
+
+        async def _spy(*args, **kwargs):
+            called["capture"] = True
+
+        monkeypatch.setattr(engine, "_capture_hub_assessment", _spy)
+        monkeypatch.setattr(lab, "build_phase4_prompt", lambda **kw: ("sys", []))
+
+        async def _fake_generate_with_tools(**kwargs):
+            return "<slack_message>A normal reply.</slack_message>"
+
+        monkeypatch.setattr(
+            "src.agent.simulation.generate_with_tools", _fake_generate_with_tools
+        )
+
+        await engine._reply_to_thread(lab, thread)
+
+        assert called["capture"] is False
+        assert len(client.posted) == 1
+
+
+# ---------------------------------------------------------------
 # _build_lab_directories — cohort gate must scope the "Other Labs'
 # Recent Publications" section (runbook finding A3), not just the
 # message log.

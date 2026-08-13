@@ -592,26 +592,34 @@ async def test_persist_assessment_drops_non_string_text_fields_instead_of_dying(
                 await cleanup.commit()
 
 
-# --- Phase 5 wiring: the real "New top-level post" branch, not the
-# _persist_assessment stub (Task 11 fix round 1, Finding 2) -----------------
+# --- Phase 4 wiring: the real Option A relocation, not the
+# _persist_assessment stub (Task 11 fix round 1, Finding 2; relocated by the
+# reply-only-hub reconciliation, Task 6) -------------------------------------
 #
-# Every test above drives _persist_assessment directly on an agent-less
-# SimulationEngine stub, which bypasses the `if verdict is not None:` gate in
-# SimulationEngine._phase5_new_post entirely — exactly why Finding 1 (a valid
-# `{}` sidecar misrouted to the "verdict lost" branch) had zero coverage. These
-# tests build a real SimulationEngine + Agent + FakeSlackClient and drive
-# _phase5_new_post end-to-end against a canned LLM response, so the assertions
-# exercise the actual wiring code, not a re-description of it.
+# The hub's :mag: Opportunity Assessment is no longer a Phase-5 "New
+# top-level post" at all — Option A extracts the `<assessment_json>` sidecar
+# from the hub's own Phase-4 CONCLUDE reply instead (see simulation.py's
+# `_reply_to_thread`/`_capture_hub_assessment`; `_phase5_new_post` hard-gates
+# `scout_hub` out before doing any work whatsoever, per decision 9). These
+# tests build a real SimulationEngine + Agent + ThreadState + FakeSlackClient
+# and drive `_reply_to_thread` end-to-end against a canned LLM response, so
+# the assertions exercise the actual wiring code, not a re-description of it.
 
-async def _drive_phase5_new_post(engine, monkeypatch, response_text):
-    """Build a real engine wired to the test DB and run _phase5_new_post
-    against ``response_text`` as if it were the LLM's raw output. Returns
-    (agent, client, factory, run_id) for the caller's own assertions/cleanup.
+async def _drive_reply_to_thread(
+    engine, monkeypatch, raw_response, *, other_agent_id="wang",
+):
+    """Build a real engine wired to the test DB and run `_reply_to_thread`
+    for a scout_hub agent against ``raw_response`` as if it were the LLM's
+    raw output (everything, including any `<assessment_json>` sidecar — not
+    just the `<slack_message>` body). Returns
+    (agent, thread, client, factory, run_id) for the caller's own
+    assertions/cleanup.
     """
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
     from src.agent.agent import Agent
     from src.agent.simulation import SimulationEngine
+    from src.agent.state import ThreadState
     from tests.fakes import FakeSlackClient
 
     factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -622,6 +630,11 @@ async def _drive_phase5_new_post(engine, monkeypatch, response_text):
         run_id = run.id
 
     agent = Agent("blackbird", "BlackbirdBot", "Blackbird", role="scout_hub")
+    thread = ThreadState(
+        thread_id="t1", channel="general", other_agent_id=other_agent_id,
+        message_count=11, has_pending_reply=True,
+    )
+    agent.state.active_threads["t1"] = thread
     client = FakeSlackClient(agent_id="blackbird")
     sim = SimulationEngine(
         agents=[agent], slack_clients={"blackbird": client},
@@ -629,15 +642,17 @@ async def _drive_phase5_new_post(engine, monkeypatch, response_text):
     )
     # Bypass real prompt construction (profile files on disk, etc.) — this
     # class tests what happens AFTER the LLM responds, not prompt building.
-    monkeypatch.setattr(agent, "build_phase5_prompt", lambda **kw: ("sys", []))
+    monkeypatch.setattr(agent, "build_phase4_prompt", lambda **kw: ("sys", []))
 
-    async def _fake_generate(**kwargs):
-        return response_text
+    async def _fake_generate_with_tools(**kwargs):
+        return raw_response
 
-    monkeypatch.setattr("src.agent.simulation.generate_agent_response", _fake_generate)
+    monkeypatch.setattr(
+        "src.agent.simulation.generate_with_tools", _fake_generate_with_tools
+    )
 
-    await sim._phase5_new_post(agent)
-    return agent, client, factory, run_id
+    await sim._reply_to_thread(agent, thread)
+    return agent, thread, client, factory, run_id
 
 
 async def _assessment_rows(factory, run_id):
@@ -659,50 +674,91 @@ async def _delete_run(factory, run_id):
             await cleanup.commit()
 
 
-_ACTION_JSON = (
-    '```json\n'
-    '{"action": "new_post", "channel": "general", "post_type": "opportunity_assessment", '
-    '"tagged_agent": null, "target_post_id": null}\n'
-    '```\n\n'
-)
+# The sidecar lives OUTSIDE <slack_message> by design (phase4-thread-reply.md's
+# "Concluding with an Opportunity Assessment" section) — this body carries no
+# hint of it at all, unlike the old Phase-5 fixture that concatenated a
+# separate action-JSON block ahead of it (Phase 4 has no action envelope).
 _SLACK_BODY = (
     "<slack_message>\n"
-    ":mag: *Opportunity Assessment — Wang Lab*\n"
+    ":mag: Closing note — thanks for walking me through this. "
     "Recommendation: proceed to diligence.\n"
     "</slack_message>"
 )
 
 
 @pytest.mark.asyncio
-async def test_phase5_valid_sidecar_persists_a_row(engine, monkeypatch):
+async def test_reply_valid_sidecar_persists_a_row_and_the_post_is_stripped(
+    engine, monkeypatch,
+):
+    """The mission pin: a hub concluding reply carrying a sidecar produces
+    an OpportunityAssessment row AND the posted Slack text never contains
+    the sidecar — Option A's whole premise in one test."""
     response = (
-        _ACTION_JSON + _SLACK_BODY + "\n\n"
+        _SLACK_BODY + "\n\n"
         '<assessment_json>\n'
         '{"subject_agent_id": "wang", "recommendation": "advance", '
         '"scores": {"differentiation": 5}}\n'
         '</assessment_json>'
     )
-    agent, client, factory, run_id = await _drive_phase5_new_post(engine, monkeypatch, response)
+    agent, thread, client, factory, run_id = await _drive_reply_to_thread(
+        engine, monkeypatch, response,
+    )
     try:
-        assert len(client.posted) == 1  # the post really went out
+        assert len(client.posted) == 1  # the reply really went out
         assert agent.message_count == 1
+        posted_text = client.posted[0]["text"]
+        assert posted_text == (
+            ":mag: Closing note — thanks for walking me through this. "
+            "Recommendation: proceed to diligence."
+        )
+        for leaked in ("assessment_json", "subject_agent_id", "differentiation"):
+            assert leaked not in posted_text, f"sidecar leaked into Slack: {leaked!r}"
         rows = await _assessment_rows(factory, run_id)
         assert len(rows) == 1
         assert rows[0].subject_agent_id == "wang"
         assert rows[0].recommendation == "advance"
+        assert rows[0].slack_ts == client.posted[0]["ts"]
     finally:
         await _delete_run(factory, run_id)
 
 
 @pytest.mark.asyncio
-async def test_phase5_empty_sidecar_object_still_persists_a_row(engine, monkeypatch):
-    """Finding 1: `{}` is a successfully parsed, if sparse, verdict — it must
-    not be treated as "no sidecar" and silently discarded."""
+async def test_reply_sidecar_missing_subject_id_falls_back_to_the_thread(
+    engine, monkeypatch,
+):
+    """Unlike Phase 5's old standalone post (no thread to infer a subject
+    from), a Phase-4 CONCLUDE reply always has a real interview thread
+    behind it — the PI being screened is exactly `thread.other_agent_id`.
+    A sidecar that leaves `subject_agent_id` blank must not lose the row
+    over a field the engine already knows the answer to."""
     response = (
-        _ACTION_JSON + _SLACK_BODY + "\n\n"
+        _SLACK_BODY + "\n\n"
+        '<assessment_json>\n'
+        '{"recommendation": "pass", "scores": {"differentiation": 2}}\n'
+        '</assessment_json>'
+    )
+    agent, thread, client, factory, run_id = await _drive_reply_to_thread(
+        engine, monkeypatch, response, other_agent_id="wang",
+    )
+    try:
+        rows = await _assessment_rows(factory, run_id)
+        assert len(rows) == 1
+        assert rows[0].subject_agent_id == "wang"
+    finally:
+        await _delete_run(factory, run_id)
+
+
+@pytest.mark.asyncio
+async def test_reply_empty_sidecar_object_still_persists_a_row(engine, monkeypatch):
+    """Finding 1 (ported): `{}` is a successfully parsed, if sparse, verdict
+    — it must not be treated as "no sidecar" and silently discarded."""
+    response = (
+        _SLACK_BODY + "\n\n"
         "<assessment_json>\n{}\n</assessment_json>"
     )
-    agent, client, factory, run_id = await _drive_phase5_new_post(engine, monkeypatch, response)
+    agent, thread, client, factory, run_id = await _drive_reply_to_thread(
+        engine, monkeypatch, response,
+    )
     try:
         assert len(client.posted) == 1
         rows = await _assessment_rows(factory, run_id)
@@ -719,7 +775,7 @@ async def test_phase5_empty_sidecar_object_still_persists_a_row(engine, monkeypa
 
 
 @pytest.mark.asyncio
-async def test_phase5_unscored_sidecar_logs_success_not_a_false_failure(
+async def test_reply_unscored_sidecar_logs_success_not_a_false_failure(
     engine, monkeypatch, caplog
 ):
     """A verdict with no `scores` key legitimately leaves `computed_score`/
@@ -730,14 +786,14 @@ async def test_phase5_unscored_sidecar_logs_success_not_a_false_failure(
     assessment" for a write that actually succeeded — a false failure that looks
     like data loss for every unscored verdict, which is most of them."""
     response = (
-        _ACTION_JSON + _SLACK_BODY + "\n\n"
+        _SLACK_BODY + "\n\n"
         '<assessment_json>\n'
         '{"subject_agent_id": "wang", "recommendation": "advance"}\n'
         '</assessment_json>'
     )
     with caplog.at_level("INFO"):
-        agent, client, factory, run_id = await _drive_phase5_new_post(
-            engine, monkeypatch, response
+        agent, thread, client, factory, run_id = await _drive_reply_to_thread(
+            engine, monkeypatch, response,
         )
     try:
         assert len(client.posted) == 1
@@ -752,29 +808,43 @@ async def test_phase5_unscored_sidecar_logs_success_not_a_false_failure(
 
 
 @pytest.mark.asyncio
-async def test_phase5_no_sidecar_persists_nothing_and_logs_its_absence(
+async def test_reply_no_sidecar_persists_nothing_and_is_silent_about_it(
     engine, monkeypatch, caplog
 ):
-    response = _ACTION_JSON + _SLACK_BODY  # no <assessment_json> at all
-    agent, client, factory, run_id = await _drive_phase5_new_post(engine, monkeypatch, response)
+    """Deliberate behaviour change from the ported Phase-5 test this
+    replaces (`test_phase5_no_sidecar_persists_nothing_and_logs_its_absence`):
+    Phase 5 only ever reached this code after the model explicitly declared
+    `post_type: "opportunity_assessment"`, so an absent sidecar there was a
+    genuine anomaly worth a WARNING every time. Every Phase-4 reply runs
+    through `_capture_hub_assessment` regardless of whether it is the
+    interview's concluding turn, and a sidecar is the exception (at most 1
+    of ~12 messages), not the rule — logging "no sidecar" on every ordinary
+    interview turn would be pure noise. See `_capture_hub_assessment`'s
+    docstring for the full rationale."""
+    response = _SLACK_BODY  # no <assessment_json> at all — the ordinary case
+    with caplog.at_level("WARNING"):
+        agent, thread, client, factory, run_id = await _drive_reply_to_thread(
+            engine, monkeypatch, response,
+        )
     try:
-        assert len(client.posted) == 1  # the post itself still went out
+        assert len(client.posted) == 1  # the reply itself still went out
         assert (await _assessment_rows(factory, run_id)) == []
-        assert "had no <assessment_json> sidecar present" in caplog.text
-        assert "unparseable" not in caplog.text  # must not claim the wrong failure
+        assert "assessment" not in caplog.text.lower()
     finally:
         await _delete_run(factory, run_id)
 
 
 @pytest.mark.asyncio
-async def test_phase5_unparseable_sidecar_persists_nothing_and_names_the_failure(
+async def test_reply_unparseable_sidecar_persists_nothing_and_names_the_failure(
     engine, monkeypatch, caplog
 ):
     response = (
-        _ACTION_JSON + _SLACK_BODY + "\n\n"
+        _SLACK_BODY + "\n\n"
         '<assessment_json>\n{this is not valid json}\n</assessment_json>'
     )
-    agent, client, factory, run_id = await _drive_phase5_new_post(engine, monkeypatch, response)
+    agent, thread, client, factory, run_id = await _drive_reply_to_thread(
+        engine, monkeypatch, response,
+    )
     try:
         assert len(client.posted) == 1
         assert (await _assessment_rows(factory, run_id)) == []
@@ -785,18 +855,20 @@ async def test_phase5_unparseable_sidecar_persists_nothing_and_names_the_failure
 
 
 @pytest.mark.asyncio
-async def test_phase5_non_object_sidecar_persists_nothing_and_names_the_right_failure(
+async def test_reply_non_object_sidecar_persists_nothing_and_names_the_right_failure(
     engine, monkeypatch, caplog
 ):
-    """Finding A3: a sidecar that parsed as valid JSON but wasn't an object
-    (e.g. a bare array) is a real parse — the wrong shape, not "unparseable".
-    Before the fix this was misreported under the same message as genuinely
-    invalid JSON, so the two failure modes were indistinguishable in logs."""
+    """Finding A3 (ported): a sidecar that parsed as valid JSON but wasn't an
+    object (e.g. a bare array) is a real parse — the wrong shape, not
+    "unparseable". Misreporting the two failure modes under the same message
+    makes them indistinguishable in logs."""
     response = (
-        _ACTION_JSON + _SLACK_BODY + "\n\n"
+        _SLACK_BODY + "\n\n"
         '<assessment_json>\n[1, 2, 3]\n</assessment_json>'
     )
-    agent, client, factory, run_id = await _drive_phase5_new_post(engine, monkeypatch, response)
+    agent, thread, client, factory, run_id = await _drive_reply_to_thread(
+        engine, monkeypatch, response,
+    )
     try:
         assert len(client.posted) == 1
         assert (await _assessment_rows(factory, run_id)) == []
@@ -808,27 +880,54 @@ async def test_phase5_non_object_sidecar_persists_nothing_and_names_the_right_fa
 
 
 @pytest.mark.asyncio
-async def test_phase5_suppressed_post_persists_nothing_and_does_not_count(
+async def test_reply_malformed_sidecar_still_posts_no_row_error_logged(
     engine, monkeypatch, caplog
 ):
-    """Cross-task Finding 3: _post_message now suppresses a post that strips
-    to nothing (e.g. the sidecar nested *inside* <slack_message>, leaving no
-    real body once stripped). Before this fix the caller still counted the
-    turn and — worse — still persisted an assessment row extracted from the
-    raw response, for a post that never reached Slack."""
+    """Mission pin (d): a malformed sidecar must not cost the reply that
+    already posted — the reply still reaches Slack, no row is written, and
+    the failure is logged (not silently swallowed, and not raised out of
+    `_reply_to_thread` to crash the turn)."""
     response = (
-        _ACTION_JSON +
+        _SLACK_BODY + "\n\n"
+        '<assessment_json>\nnot even close to json\n</assessment_json>'
+    )
+    with caplog.at_level("WARNING"):
+        agent, thread, client, factory, run_id = await _drive_reply_to_thread(
+            engine, monkeypatch, response,
+        )
+    try:
+        assert len(client.posted) == 1  # the reply still posted
+        assert agent.message_count == 1
+        assert (await _assessment_rows(factory, run_id)) == []  # no row
+        assert "sidecar was present but unparseable" in caplog.text  # logged
+    finally:
+        await _delete_run(factory, run_id)
+
+
+@pytest.mark.asyncio
+async def test_reply_suppressed_post_persists_nothing_and_does_not_count(
+    engine, monkeypatch, caplog
+):
+    """Cross-task Finding 3 (ported): `_post_message` suppresses a reply that
+    strips to nothing (e.g. the sidecar nested *inside* `<slack_message>`,
+    leaving no real body once stripped). The turn must not be counted and —
+    Option A's own guarantee — no assessment row may be persisted for a
+    reply that never reached Slack."""
+    caplog.set_level("INFO")
+    response = (
         "<slack_message>"
         '<assessment_json>{"subject_agent_id": "wang", "scores": {"differentiation": 5}}'
         "</assessment_json>"
         "</slack_message>"
     )
-    agent, client, factory, run_id = await _drive_phase5_new_post(engine, monkeypatch, response)
+    agent, thread, client, factory, run_id = await _drive_reply_to_thread(
+        engine, monkeypatch, response,
+    )
     try:
         assert client.posted == []  # nothing actually reached Slack
         assert agent.message_count == 0  # the turn was not counted
         assert (await _assessment_rows(factory, run_id)) == []  # no phantom row
-        assert "Suppressed a post" in caplog.text
+        assert "suppressed" in caplog.text.lower()
     finally:
         await _delete_run(factory, run_id)
 

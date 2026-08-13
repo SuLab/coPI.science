@@ -15,7 +15,6 @@ from src.agent.channels import SEEDED_CHANNELS
 from src.agent.ids import WRITER_ENGINE, TsMinter
 from src.agent.message_log import LogEntry, MessageLog
 from src.agent.post_types import (
-    TERMINAL_POST_TYPES,
     PostTypeSpec,
     available_for,
     eligible_targets,
@@ -70,15 +69,6 @@ def _visibility_permits(origin: str, current: str) -> bool:
 # stale sibling channel (e.g. an old refinement between the same pair) drags the
 # bot's global cursor months into the past. See _rewind_cursors_for_private_channels.
 _PRIVATE_CHANNEL_ACTIVE_WINDOW_S = 14 * 24 * 3600  # 14 days
-
-
-def _strip_reopen_prefix(comment: str) -> str:
-    """Strip the ``[Reopened]`` / ``[Reopened via email]`` marker the web/email
-    reopen routes prepend to the PI guidance stored in ProposalReview.comment."""
-    for prefix in ("[Reopened via email] ", "[Reopened] "):
-        if comment.startswith(prefix):
-            return comment[len(prefix):]
-    return comment
 
 
 def _restored_slack_ts(row: AgentMessage) -> str | None:
@@ -187,11 +177,6 @@ RUN_STATS_UPDATE_INTERVAL = 30.0
 # conversation's lifetime.
 REBUILD_WINDOW_S = 14 * 24 * 3600  # 14 days
 
-# Agents exempt from the unreviewed-proposal Phase-5 block — they keep making
-# new posts no matter how many of their proposals are awaiting review. Scoped to
-# SchultzBot (the reunion host) so he stays active without a human reviewer.
-UNBLOCK_EXEMPT_AGENTS = {"schultz"}
-
 
 class SimulationEngine:
     """
@@ -278,10 +263,6 @@ class SimulationEngine:
         # Prior thread decisions per agent pair — for Phase 5 dedup context.
         # Key: tuple(sorted([agent_a, agent_b])), Value: list of dicts
         self._prior_threads: dict[tuple[str, str], list[dict]] = {}
-
-        # Thread IDs already reopened via DB-synced PI guidance (rating=0 reviews)
-        # to avoid re-processing on every turn.
-        self._db_reopened_thread_ids: set[str] = set()
 
         # Names of collab_private channels whose refinement had converged on a
         # recorded revised proposal (outcome='proposal', origin_visibility=
@@ -613,9 +594,8 @@ class SimulationEngine:
             # regardless of Slack.
             await self._poll_inbound_from_db()
 
-            # Sync proposal reviews and any newly-created private channels from
-            # the web app. Both are DB-driven, so a single tick picks them up.
-            await self._sync_proposal_reviews_from_db()
+            # Sync any newly-created private channels from the web app.
+            # DB-driven, so a single tick picks it up.
             await self._sync_private_channels_from_db()
 
             # Pick up active/inactive flips (and newly-provisioned tokens) from
@@ -1343,7 +1323,7 @@ class SimulationEngine:
 
         agent.record_api_call()
         try:
-            response_text = await generate_with_tools(
+            raw_response = await generate_with_tools(
                 system_prompt=system_prompt,
                 messages=messages,
                 tools=tools_for_role(agent.role),
@@ -1358,8 +1338,15 @@ class SimulationEngine:
                 on_retry=agent.record_api_call,
             )
 
-            # Extract message from <slack_message> tags, fall back to preamble stripping
-            response_text = _extract_slack_message(response_text)
+            # Extract message from <slack_message> tags, fall back to preamble
+            # stripping. Kept as its own variable rather than reassigned in
+            # place: a concluding scout_hub reply's <assessment_json> sidecar
+            # is written OUTSIDE the <slack_message> block by design (see
+            # phase4-thread-reply.md's "Concluding with an Opportunity
+            # Assessment" section) — the extraction below (Option A
+            # relocation) needs the raw, unfiltered response, not just the
+            # text that gets posted.
+            response_text = _extract_slack_message(raw_response)
 
             if not response_text or not response_text.strip():
                 thread.empty_response_count += 1
@@ -1397,6 +1384,17 @@ class SimulationEngine:
             agent.message_count += 1
             thread.has_pending_reply = False
             thread.empty_response_count = 0
+
+            # Option A relocation: the hub's :mag: Opportunity Assessment is
+            # no longer a separate Phase-5 post — it is the machine-readable
+            # sidecar this same concluding reply carries. Extract and persist
+            # it here, gated on `posted` exactly like every other assessment
+            # write, so a suppressed reply (stripped to nothing, thread
+            # deleted) never produces a phantom row with no corresponding
+            # Slack message. A pi_lab reply never carries a sidecar, so this
+            # is a no-op for every non-hub agent.
+            if agent.role == "scout_hub":
+                await self._capture_hub_assessment(agent, thread, raw_response, posted)
 
             # Check for thread outcome
             await self._check_thread_outcome(agent, thread, response_text)
@@ -1754,7 +1752,24 @@ class SimulationEngine:
     # ------------------------------------------------------------------
 
     async def _phase5_new_post(self, agent: Agent, phase4_thread_ids: set[str] | None = None) -> None:
-        """Optionally start a new thread or reply to an interesting post."""
+        """Optionally start a new thread or reply to an interesting post.
+
+        Hard-gated for scout_hub (decision 9, reply-only-hub reconciliation):
+        the hub's former standalone :mag: Opportunity Assessment is now the
+        `<assessment_json>` sidecar carried inside its own Phase-4 CONCLUDE
+        reply instead (see `_reply_to_thread`) — it has no top-level post
+        type left, ever (role.toml declares `post_types = []`, belt-and-
+        suspenders). Returning here before ANY work — no settings lookup, no
+        prompt built, no LLM call — is what stops a permanently empty menu
+        from burning a full-price Opus call every single turn just to be
+        told "skip" (measured cost/noise trap: one production run took the
+        hub 30 turns and 0 useful phase-5 LLM calls). Gated on role, not on
+        an empty menu, so the invariant holds even if role.toml were ever
+        misconfigured back to declaring something.
+        """
+        if agent.role == "scout_hub":
+            return
+
         settings = get_settings()
         phase4_thread_ids = phase4_thread_ids or set()
 
@@ -1764,25 +1779,32 @@ class SimulationEngine:
         # every subsequent turn re-fires Phase 5, burning an LLM call per turn.
         agent.state.last_phase5_action_time = time.time()
 
-        # Daily post cap — pi_lab is capped to one pitch per day (design §9);
-        # other roles (e.g. scout_hub) keep the general cap.
+        # Daily post cap — pi_lab is capped to one pitch per day (design §9).
+        # scout_hub never reaches this line (hard-gated above); the ternary
+        # stays for any future role that is neither pi_lab nor scout_hub.
         today_posts = self._count_today_posts(agent)
         cap = settings.lab_daily_post_cap if agent.role == "pi_lab" else settings.daily_post_cap
         if today_posts >= cap:
             logger.debug("[%s] Phase 5: Skipped (daily cap %d/%d)", agent.agent_id, today_posts, cap)
             return
 
-        # Check preconditions
-        at_thread_threshold = self._active_thread_count(agent) >= settings.active_thread_threshold
-        unreviewed_count = sum(
-            1 for p in agent.state.pending_proposals
-            if not p.reviewed
-        )
-        has_unreviewed = (
-            agent.agent_id not in UNBLOCK_EXEMPT_AGENTS
-            and unreviewed_count >= settings.unreviewed_proposal_block_count
-        )
-        blocked_for_regular = at_thread_threshold or has_unreviewed
+        # Backpressure against STARTING more work than the agent can finish:
+        # too many threads open at once. This used to have a second clause
+        # (too many of the agent's proposals awaiting web review) and an
+        # exemption letting a blocked agent still file one *terminal*
+        # artifact past the block — the hub's assessment. Both are gone: the
+        # reconciliation deleted the only post type that was ever exempt (see
+        # post_types.py), and nothing on this branch creates a new proposal
+        # for a PI to review anymore, so there is nothing left to gate on
+        # either. A blocked agent (only ever pi_lab in practice — scout_hub
+        # is gated above) now has nothing left it could post regardless, so
+        # it skips outright here, no LLM call, exactly like the daily cap.
+        if self._active_thread_count(agent) >= settings.active_thread_threshold:
+            logger.debug(
+                "[%s] Phase 5: Skipped (at/over active_thread_threshold)",
+                agent.agent_id,
+            )
+            return
 
         if random.random() < settings.phase5_skip_probability:
             logger.debug("[%s] Phase 5: Skipped (random)", agent.agent_id)
@@ -1797,10 +1819,7 @@ class SimulationEngine:
             if post.post_id in agent.state.active_threads:
                 continue
 
-            # Used below for the flat-channel turn-taking rule. Private posts
-            # get no other special treatment here — the reconciliation
-            # retired the bypass that let them skip the unreviewed-proposal
-            # block along with the refinement flow it existed for.
+            # Used below for the flat-channel turn-taking rule.
             is_private = (
                 self._channel_visibility.get(post.channel) == VISIBILITY_COLLAB_PRIVATE
             )
@@ -1809,9 +1828,6 @@ class SimulationEngine:
             # recorded revised proposal (legacy rows only — see
             # _finalized_private_channels) is closed for further discussion.
             if post.channel in self._finalized_private_channels:
-                continue
-
-            if blocked_for_regular:
                 continue
 
             # Turn-taking in flat private channels: don't reply if we were
@@ -1836,19 +1852,6 @@ class SimulationEngine:
                 )
                 continue
             available_posts.append(post)
-
-        # A blocked agent with nothing to reply to normally has nothing to do,
-        # and bailing here saves an LLM call. But "nothing to reply to" is not
-        # the same as "nothing to post": a hub saturated with interviews still
-        # owes an assessment for each one it finished, and that is precisely
-        # the state this early return used to strand it in. Ask the post-type
-        # layer whether anything is actually postable before giving up.
-        nothing_postable = not self._available_post_types(
-            agent, restricted=blocked_for_regular
-        )
-        if not available_posts and blocked_for_regular and nothing_postable:
-            logger.debug("[%s] Phase 5: Skipped (blocked, nothing postable)", agent.agent_id)
-            return
 
         # Temporarily replace interesting_posts for prompt building
         original_posts = agent.state.interesting_posts
@@ -1885,16 +1888,16 @@ class SimulationEngine:
             agent.agent_id, current_visibility=current_visibility,
         )
 
-        available_types = self._available_post_types(
-            agent, restricted=blocked_for_regular,
-        )
-        if not available_types and not blocked_for_regular:
-            # Not restricted, yet nothing satisfies role ∩ topology — either a
-            # misconfigured role.toml or a cohort gate that leaves this agent
-            # with no reachable counterparty for anything it declares. Quiet
-            # for a blocked agent (restricted=True): an empty menu there is
-            # the expected, unremarkable shape for e.g. a pi_lab agent with no
-            # terminal type to report (design §6 C4).
+        available_types = self._available_post_types(agent)
+        if not available_types:
+            # Nothing satisfies role ∩ topology — either a misconfigured
+            # role.toml or a cohort gate that leaves this agent with no
+            # reachable counterparty for anything it declares. This point is
+            # only ever reached by an UNBLOCKED agent (a blocked one already
+            # returned above), so an empty menu here is always worth a
+            # WARNING — there is no longer a quiet/expected empty-menu case
+            # to distinguish it from (that was the hub's, and the hub never
+            # reaches this line).
             logger.warning(
                 "[%s] Phase 5: no post type satisfiable — check cohort/roster "
                 "for role %r", agent.agent_id, agent.role,
@@ -1924,15 +1927,20 @@ class SimulationEngine:
                 system_prompt=system_prompt,
                 messages=messages,
                 model=settings.llm_agent_model_opus,
-                # scout_hub's opportunity assessment is an 11-section body
-                # plus a ~15-line <assessment_json> sidecar emitted LAST, so
-                # truncation drops the machine-readable verdict first while
-                # still leaving the Slack post looking complete (F8). 1000
-                # was sized for a short reply/skip decision, not this
-                # artifact. NOTE: src/services/llm.py's retry-at-2x path logs
-                # loudly (logger.error) if the retry ALSO truncates, but it
-                # does not retry again — this ceiling still needs to be big
-                # enough that truncation stops being the common case.
+                # Historical sizing note: this used to also cover scout_hub's
+                # opportunity-assessment post here (an 11-section body plus a
+                # ~15-line <assessment_json> sidecar emitted LAST, where 1000
+                # — sized for a short reply/skip decision — truncated the
+                # verdict first while leaving the Slack post looking
+                # complete, F8). The hub is hard-gated out of this function
+                # now (see the docstring) and its assessment moved to the
+                # Phase-4 CONCLUDE reply's own budget instead, so this
+                # function's only caller today (pi_lab) never needs anywhere
+                # near 2500 tokens for a pitch or a skip — kept at this size
+                # anyway rather than re-tuned down, since a smaller ceiling
+                # buys nothing but risk here. NOTE: src/services/llm.py's
+                # retry-at-2x path logs loudly (logger.error) if the retry
+                # ALSO truncates, but it does not retry again.
                 max_tokens=2500,
                 log_meta={"agent_id": agent.agent_id, "phase": "new_post"},
                 on_retry=agent.record_api_call,
@@ -1985,20 +1993,6 @@ class SimulationEngine:
 
             channel = action_data.get("channel", "general").lstrip("#")
             post_type = action_data.get("post_type", "")
-
-            # If agent is blocked, only allow a terminal artifact reporting
-            # finished work — the start-new-work backpressure does not apply
-            # to it. See TERMINAL_POST_TYPES.
-            if blocked_for_regular:
-                is_terminal_post = (
-                    action == "new_post" and post_type in TERMINAL_POST_TYPES
-                )
-                if not is_terminal_post:
-                    logger.info(
-                        "[%s] Phase 5: Blocked action while proposals pending",
-                        agent.agent_id,
-                    )
-                    return
 
             # Retroactively add channel to the LLM log entry (unknown at call time)
             if self._llm_log_buffer:
@@ -2085,57 +2079,13 @@ class SimulationEngine:
             else:
                 agent.message_count += 1
 
-                # A :mag: Opportunity Assessment carries a machine-readable
-                # verdict sidecar (stripped from the Slack body). Persist it —
-                # the whole point of the artifact is that staff can triage it
-                # later. ``verdict`` can legitimately be ``{}`` (an empty but
-                # parsed sidecar) — that is falsy but not a failure, so the
-                # gate is `is not None`, never a truthiness check (Finding 1).
-                if post_type == "opportunity_assessment":
-                    verdict = _extract_assessment_json(response)
-                    if verdict is not None:
-                        # `posted` is the canonical id _post_message just
-                        # minted/returned for this post (F7) — thread it
-                        # through so the triage row can link back to the
-                        # Slack post it summarises.
-                        #
-                        # thread_id=None: this is the "new top-level post"
-                        # branch (not a reply to an existing thread), so
-                        # there is no phase-4 interview thread to point the
-                        # specialist floor at here. That makes the floor
-                        # fail open by the same rule as a post-restart map.
-                        await self._persist_assessment(
-                            agent.agent_id, channel, verdict, slack_ts=posted,
-                        )
-                    elif _ASSESSMENT_UNCLOSED_RE.search(response or ""):
-                        # An <assessment_json> opening tag is present.
-                        # _extract_assessment_json already logged the
-                        # per-block reason; this names the consequence
-                        # without re-claiming "no sidecar" (Finding 1) —
-                        # and without calling a block that parsed fine but
-                        # was the wrong shape (e.g. a JSON array)
-                        # "unparseable", which it was not (Finding A3).
-                        if _sidecar_has_valid_json_block(response or ""):
-                            logger.warning(
-                                "[%s] Phase 5: opportunity_assessment "
-                                "post's <assessment_json> sidecar parsed "
-                                "as valid JSON but was not an object — "
-                                "verdict lost",
-                                agent.agent_id,
-                            )
-                        else:
-                            logger.warning(
-                                "[%s] Phase 5: opportunity_assessment post's "
-                                "<assessment_json> sidecar was present but "
-                                "unparseable — verdict lost",
-                                agent.agent_id,
-                            )
-                    else:
-                        logger.warning(
-                            "[%s] Phase 5: opportunity_assessment post had no "
-                            "<assessment_json> sidecar present — verdict lost",
-                            agent.agent_id,
-                        )
+                # No post type reaching here ever carries an assessment
+                # sidecar anymore — the hub is hard-gated out of this
+                # function entirely (see the docstring), and CANONICAL has
+                # no entry for one (post_types.py). The extraction/persist
+                # step that used to live here for `opportunity_assessment`
+                # moved to `_reply_to_thread`'s Phase-4 CONCLUDE handling
+                # (Option A relocation).
 
                 # Check if it tags another agent
                 tagged_agent = action_data.get("tagged_agent")
@@ -2153,22 +2103,105 @@ class SimulationEngine:
         except Exception as exc:
             logger.error("[%s] Phase 5 failed: %s", agent.agent_id, exc)
 
+    async def _capture_hub_assessment(
+        self, agent: Agent, thread: ThreadState, raw_response: str, slack_ts: str | None,
+    ) -> None:
+        """Option A relocation: extract the hub's `<assessment_json>` verdict
+        sidecar from its own raw Phase-4 CONCLUDE reply and persist it.
+
+        ``raw_response`` is the full LLM response from BEFORE
+        ``_extract_slack_message`` discarded everything outside
+        ``<slack_message>`` — the sidecar is written outside that block by
+        design (see ``phase4-thread-reply.md``'s "Concluding with an
+        Opportunity Assessment" section), so it was never in the text Slack
+        actually received. (``_post_message`` also strips it unconditionally
+        as a backstop regardless — see ``_strip_assessment_sidecar`` — so the
+        sidecar cannot leak to Slack even if a model mistakenly wrote it
+        inside the block instead.)
+
+        Mirrors the two outcomes the old Phase-5 ``new_post`` handling of
+        this same artifact logged (persisted / present-but-unusable), with
+        one deliberate omission: Phase 5 only ever reached that code after
+        the model explicitly declared ``post_type: "opportunity_
+        assessment"``, so an absent sidecar there was a genuine anomaly
+        worth a WARNING every time. Every Phase-4 reply runs through here
+        regardless of whether it is the interview's concluding turn, and a
+        sidecar is expected on at most 1 of every 12 — logging "no sidecar"
+        on every ordinary interview turn would be pure noise, so that case is
+        silent here. Only a sidecar tag that IS present but broken is
+        anomalous.
+
+        Never raises: a failure to extract or persist a verdict must not cost
+        the reply that has already been posted to Slack by the time this
+        runs (``_persist_assessment`` already self-guards its own DB write;
+        this wraps the extraction step too, for the same reason).
+        """
+        try:
+            verdict = _extract_assessment_json(raw_response)
+            if verdict is not None:
+                # The model is asked for `subject_agent_id` in the sidecar,
+                # but unlike Phase 5's standalone post, a Phase-4 CONCLUDE
+                # reply always has a real interview thread behind it — the PI
+                # being screened is exactly `thread.other_agent_id`. Passed
+                # as a fallback (not written into `verdict` itself) so
+                # `raw_verdict` stays exactly what the model emitted — see
+                # _persist_assessment's docstring.
+                await self._persist_assessment(
+                    agent.agent_id, thread.channel, verdict, slack_ts=slack_ts,
+                    subject_agent_id_fallback=thread.other_agent_id,
+                )
+            elif _ASSESSMENT_UNCLOSED_RE.search(raw_response or ""):
+                # An <assessment_json> opening tag is present but
+                # _extract_assessment_json found no usable verdict in it —
+                # anomalous regardless of turn type, unlike plain absence.
+                if _sidecar_has_valid_json_block(raw_response or ""):
+                    logger.warning(
+                        "[%s] Phase 4: concluding reply's <assessment_json> "
+                        "sidecar parsed as valid JSON but was not an object "
+                        "— verdict lost",
+                        agent.agent_id,
+                    )
+                else:
+                    logger.warning(
+                        "[%s] Phase 4: concluding reply's <assessment_json> "
+                        "sidecar was present but unparseable — verdict lost",
+                        agent.agent_id,
+                    )
+        except Exception as exc:  # noqa: BLE001 — never lose a posted reply over this
+            logger.error(
+                "[%s] Failed to extract/persist the assessment sidecar for "
+                "thread %s: %s",
+                agent.agent_id, thread.thread_id, exc,
+            )
+
     async def _persist_assessment(
         self, agent_id: str, channel: str, verdict: dict, slack_ts: str | None = None,
+        *, subject_agent_id_fallback: str | None = None,
     ) -> None:
         """Store a scouting verdict. Best-effort: a failure here must never cost
         the Slack post that already went out.
 
         ``slack_ts`` is the canonical post id ``_post_message`` returned for
-        the assessment post itself (F7) — the row's link back to the Slack
-        message it summarises. Optional and defaulted to ``None`` so every
-        existing direct caller (tests driving this method on a stub) keeps
-        working unchanged.
+        the post/reply the verdict came from (F7) — the row's link back to
+        the Slack message it summarises. Optional and defaulted to ``None``
+        so every existing direct caller (tests driving this method on a
+        stub) keeps working unchanged.
 
-        ``thread_id`` is the phase-4 interview thread this verdict came out of,
-        used to enforce the specialist floor below. ``None`` when phase 5 has
-        no thread to point to (a top-level assessment post) — the floor treats
-        that exactly like a post-restart empty map and fails open.
+        ``subject_agent_id_fallback`` is used for the ``subject_agent_id``
+        column (and the specialist-floor check below) ONLY when the verdict
+        itself leaves that field blank — it is never written into
+        ``raw_verdict``, which always stays exactly what the model emitted
+        (see that field's own note below). Option A's caller
+        (``_capture_hub_assessment``) passes ``thread.other_agent_id`` here:
+        unlike Phase 5's old standalone post, a Phase-4 CONCLUDE reply always
+        has a real interview thread behind it, so the engine already knows
+        who the sidecar is about even when the model's own field is empty.
+
+        There is no ``thread_id`` parameter here, despite the verdict coming
+        from a specific Phase-4 interview thread today (Option A relocation)
+        — the specialist floor below (``_specialist_floor_gap``) is keyed on
+        the subject agent instead, not on a thread; see that method's
+        docstring for why an earlier thread-keyed version always failed open.
 
         The weighted score and band are computed here from the verdict's own
         dimension scores, never taken from the model's ``weighted_score`` field
@@ -2178,16 +2211,25 @@ class SimulationEngine:
         never produce) and the computed ``band`` are kept in separate columns
         and neither ever overwrites the other. The verdict exactly as emitted
         is kept verbatim in ``raw_verdict`` regardless of what could be parsed
-        out of it, so nothing is ever lost to a parsing decision made here.
+        out of it (and regardless of ``subject_agent_id_fallback``), so
+        nothing is ever lost to — or invented by — a decision made here.
         """
-        gap = self._specialist_floor_gap(verdict)
+        # A view with the fallback applied, used ONLY for the subject-derived
+        # column and the specialist-floor check — never for `raw_verdict`,
+        # which must stay byte-for-byte what the model actually sent.
+        subject_view = verdict
+        if subject_agent_id_fallback and not verdict.get("subject_agent_id"):
+            subject_view = {**verdict, "subject_agent_id": subject_agent_id_fallback}
+
+        gap = self._specialist_floor_gap(subject_view)
         if gap:
-            subject_hint = verdict.get("subject_agent_id")
+            subject_hint = subject_view.get("subject_agent_id")
             logger.warning(
                 "[%s] Assessment REFUSED for %s — recommendation %r requires the "
                 "%s specialist(s), which were never consulted during the "
-                "interview. Nothing persisted. Consult them in phase 4; the "
-                "assessment turn has no tools.",
+                "interview. Nothing persisted. The concluding reply that "
+                "carries the verdict is the last chance to consult them — "
+                "there is no later turn to add them in.",
                 agent_id, subject_hint or "?",
                 verdict.get("recommendation"), ", ".join(sorted(gap)),
             )
@@ -2226,7 +2268,7 @@ class SimulationEngine:
         # commit — which the outer except then drops the WHOLE row for. Clip
         # instead of dropping: a truncated recommendation is still useful for
         # triage, an absent one is not (Task 11 fix round 1, Finding 5).
-        subject_agent_id = _bounded_str(verdict.get("subject_agent_id"), 50)
+        subject_agent_id = _bounded_str(subject_view.get("subject_agent_id"), 50)
         funnel_stage = _bounded_str(verdict.get("funnel_stage"), 20)
         recommendation = _bounded_str(verdict.get("recommendation"), 30)
         confidence = _bounded_str(verdict.get("confidence"), 20)
@@ -2366,11 +2408,18 @@ class SimulationEngine:
     def _record_consult(self, pi_agent_id: str, domain: str) -> None:
         """Note a successful consult, keyed on the PI the interview is about.
 
-        Keyed on the PI rather than the interview thread because the reader
-        cannot see a thread: an assessment is a NEW TOP-LEVEL post, so
-        ``_persist_assessment`` is called with no thread to join on. The thread
-        knows the PI as ``other_agent_id`` and the verdict names the same PI as
-        ``subject_agent_id`` — that is the only identifier both ends share.
+        Keyed on the PI rather than the interview thread. The verdict names
+        the PI as ``subject_agent_id`` (not a thread id), and that is what
+        ``_specialist_floor_gap`` joins consults against when
+        ``_persist_assessment`` runs — keying on the PI directly avoids that
+        join needing a thread id at all. (Historically this was also the
+        ONLY identifier available: the hub's assessment used to be a
+        standalone Phase-5 post with no interview thread behind it at all.
+        Option A relocated the artifact into the Phase-4 CONCLUDE reply
+        itself, so a real thread now exists at persist time too — see
+        ``_specialist_floor_gap``'s docstring — but the PI-keyed record
+        stays, since it is simpler and the tool-call site here only ever
+        knows the PI, not which specific verdict will eventually cite it.)
         """
         if not pi_agent_id:
             return
@@ -2390,11 +2439,17 @@ class SimulationEngine:
         nothing, so requiring eight opinions to say no would burn calls on
         exactly the ideas that do not warrant them.
 
-        The record is keyed on the PI (``subject_agent_id``), not on a thread:
-        an assessment is a new top-level post, so there is no interview thread
-        to join on at this point. An earlier version keyed on ``thread_id``,
-        which was always None here — the floor read an empty set every time and
-        failed open on every verdict, enforcing nothing while looking enforced.
+        The record is keyed on the PI (``subject_agent_id``), not on a thread.
+        An earlier version keyed on ``thread_id`` instead, back when the
+        artifact was a standalone Phase-5 post with no interview thread of
+        its own — ``thread_id`` was always None there, so the floor read an
+        empty set every time and failed open on every verdict, enforcing
+        nothing while looking enforced. Option A now relocates the artifact
+        into the Phase-4 CONCLUDE reply itself, so a real thread does exist
+        at persist time — but the PI-keyed record is kept rather than
+        switched to thread-keyed, since ``_record_consult`` above only ever
+        learns the PI, and one PI's specialist consults are naturally
+        cumulative across however many interview threads that PI has open.
 
         FAILS OPEN in two cases, both of which mean "we have no record", never
         "the panel approved":
@@ -2437,26 +2492,27 @@ class SimulationEngine:
         consulted = self._consulted_domains(subject)
         return set(required_domains_for(verdict) - consulted)
 
-    def _available_post_types(
-        self, agent: "Agent", *, restricted: bool
-    ) -> tuple[PostTypeSpec, ...]:
+    def _available_post_types(self, agent: "Agent") -> tuple[PostTypeSpec, ...]:
         """Layer 1 ∩ layer 2: what this agent may post as a NEW top-level post.
 
         The SAME tuple is rendered into the prompt and used to judge the
         response, so the menu and the gate cannot disagree.
 
-        ``restricted`` is the caller's ``blocked_for_regular``. It used to be
-        distinguished from a narrower ``funding_only`` local (``blocked_for_regular
-        and not has_available_non_funding``) that drove a since-removed prompt-
-        template surgery in ``build_phase5_prompt`` — that local is gone (Task 5),
-        and this set has always used ``blocked_for_regular`` alone.
+        Used to also take a ``restricted`` flag (the caller's
+        ``blocked_for_regular``), forwarded to ``available_for`` as
+        ``terminal_only`` so a blocked agent could still be offered a
+        "reports finished work" type past the regular-work backpressure. That
+        mechanism is gone along with the one post type it ever exempted (the
+        hub's :mag: Opportunity Assessment — see post_types.py); a blocked
+        caller now skips Phase 5 outright instead of calling in here at all
+        (see ``_phase5_new_post``), so this always computes the unrestricted
+        set.
         """
         return available_for(
             self._post_types_for_role(agent.role),
             gate=agent.allowed_sender_ids,
             roles_by_agent=self._roles_by_agent(),
             self_id=agent.agent_id,
-            terminal_only=restricted,
         )
 
     def _normalize_tagged_agent(self, tagged_agent: object) -> object:
@@ -4452,171 +4508,6 @@ class SimulationEngine:
                 )
         except Exception as exc:
             logger.warning("[cohort] topology snapshot failed: %s", exc)
-
-    async def _sync_proposal_reviews_from_db(self) -> None:
-        """Check DB for web-app proposal reviews and mark in-memory proposals as reviewed.
-
-        For rating=0 reviews (reopened with PI guidance), also reopen the thread
-        so both agents resume discussion incorporating the PI's direction.
-        """
-        if not self.session_factory:
-            return
-        try:
-            async with self.session_factory() as db:
-                from sqlalchemy import select as sa_select
-                # Get all reviews with rating and guidance info, plus the
-                # ThreadDecision's refined_in_channel marker (set when a
-                # reopen migrated the refinement into a collab_private
-                # channel — in that case the legacy "reopen the public
-                # thread" path must NOT fire, or we'd drop the PI's
-                # guidance back into the public thread and leak it).
-                result = await db.execute(
-                    sa_select(
-                        ProposalReview.agent_id,
-                        ProposalReview.rating,
-                        ProposalReview.comment,
-                        ThreadDecision.thread_id,
-                        ThreadDecision.channel,
-                        ThreadDecision.refined_in_channel,
-                    )
-                    .join(ThreadDecision, ProposalReview.thread_decision_id == ThreadDecision.id)
-                )
-                rows = list(result)
-
-            reviewed_set = {(r.agent_id, r.thread_id) for r in rows}
-            # Thread IDs of proposals that have been migrated to a private
-            # channel. Any agent with a pending proposal on such a thread is
-            # unblocked: the proposal is under active refinement, not
-            # awaiting first review. Without this, only the PI who triggered
-            # the reopen (and whose ProposalReview row exists) would be
-            # unblocked — the other agent would stay blocked and silently
-            # skip Phase 5 in the private channel.
-            migrated_threads = {
-                r.thread_id for r in rows if r.refined_in_channel is not None
-            }
-            if not reviewed_set and not migrated_threads:
-                return
-
-            # Build lookup for rating=0 (reopened with guidance) reviews.
-            # Rows with refined_in_channel set are skipped entirely — those
-            # reopens were handled by the private-channel migration flow;
-            # resurrecting the legacy public-thread reopen would undo the
-            # privacy guarantee.
-            reopen_guidance: dict[tuple[str, str], tuple[str, str]] = {}
-            for r in rows:
-                if r.rating == 0 and r.comment and r.refined_in_channel is None:
-                    reopen_guidance[(r.agent_id, r.thread_id)] = (
-                        _strip_reopen_prefix(r.comment), r.channel,
-                    )
-
-            # Mark matching in-memory proposals as reviewed. A proposal is
-            # considered reviewed for unblocking purposes if EITHER this agent
-            # has a ProposalReview row OR the proposal has been migrated to a
-            # private channel (refinement supersedes review).
-            newly_reviewed: list[tuple[Agent, str]] = []
-            for agent in self.agents.values():
-                for proposal in agent.state.pending_proposals:
-                    if not proposal.reviewed:
-                        unblock = (
-                            (agent.agent_id, proposal.thread_id) in reviewed_set
-                            or proposal.thread_id in migrated_threads
-                        )
-                        if unblock:
-                            proposal.reviewed = True
-                            newly_reviewed.append((agent, proposal.other_agent_id))
-                            logger.info(
-                                "[%s] Proposal for thread %s marked reviewed via web app",
-                                agent.agent_id, proposal.thread_id,
-                            )
-
-            # Detect rating=0 reviews that need thread reopening, independent of
-            # the reviewed flag (which may already be True from a prior sync).
-            # Dedupe by thread_id within this pass so that if the PI reviewed
-            # both sides of the pair, we only reopen the thread once.
-            newly_reopened: list[tuple[Agent, str, str, str]] = []  # agent, other_id, thread_id, guidance
-            seen_reopens: set[str] = set()
-            for agent in self.agents.values():
-                for proposal in agent.state.pending_proposals:
-                    if proposal.thread_id in seen_reopens:
-                        continue
-                    if proposal.thread_id in self._db_reopened_thread_ids:
-                        continue
-                    key = (agent.agent_id, proposal.thread_id)
-                    if key in reopen_guidance:
-                        guidance, _channel = reopen_guidance[key]
-                        seen_reopens.add(proposal.thread_id)
-                        newly_reopened.append(
-                            (agent, proposal.other_agent_id, proposal.thread_id, guidance)
-                        )
-
-            # Update memory for agents whose proposals were just reviewed
-            for agent, other_id in newly_reviewed:
-                event = f"PI reviewed proposal with {other_id} — agent is now unblocked for new posts"
-                await self._update_agent_memory(agent, event)
-
-            # Reopen threads where PI provided guidance (rating=0)
-            for agent, other_id, thread_id, guidance in newly_reopened:
-                channel = None
-                for p in agent.state.pending_proposals:
-                    if p.thread_id == thread_id:
-                        channel = p.channel
-                        break
-                if not channel:
-                    continue
-
-                # Old closed threads may have been windowed out of the log at
-                # startup (B2); hydrate so the reply-budget offset below counts
-                # the real prior history rather than 0.
-                await self._hydrate_thread_from_db(thread_id)
-
-                # Create a synthetic log entry for the PI guidance so it appears
-                # in thread history and the agents can see it
-                minted = self.mint_ts()
-                pi_entry = LogEntry(
-                    ts=minted,
-                    channel=channel,
-                    sender_agent_id=None,
-                    sender_name="PI (via web)",
-                    content=guidance,
-                    thread_ts=thread_id,
-                    posted_at=float(minted),
-                    is_bot=False,
-                )
-                self.message_log.append(pi_entry)
-
-                # Reopen the thread for both agents
-                self._closed_thread_ids.discard(thread_id)
-                existing_count = len(self.message_log.get_thread_history(thread_id))
-
-                agent.state.active_threads[thread_id] = ThreadState(
-                    thread_id=thread_id,
-                    channel=channel,
-                    other_agent_id=other_id,
-                    message_count=0,
-                    has_pending_reply=True,
-                    pi_context=guidance,
-                    message_count_offset=existing_count,
-                )
-
-                other_agent = self.agents.get(other_id)
-                if other_agent:
-                    other_agent.state.active_threads[thread_id] = ThreadState(
-                        thread_id=thread_id,
-                        channel=channel,
-                        other_agent_id=agent.agent_id,
-                        message_count=0,
-                        has_pending_reply=True,
-                        message_count_offset=existing_count,
-                    )
-
-                self._db_reopened_thread_ids.add(thread_id)
-                logger.info(
-                    "[%s] PI guidance via web reopened thread %s with %s: %.60s",
-                    agent.agent_id, thread_id, other_id, guidance[:60],
-                )
-
-        except Exception as exc:
-            logger.debug("Proposal review sync failed: %s", exc)
 
     # ------------------------------------------------------------------
     # Post-simulation

@@ -27,13 +27,19 @@ class ThreadState:
     status: str = "active"  # active | proposed | closed
     abstracts_other: int = 0  # tool-use counters
     full_text: int = 0
-    # pi_context/message_count_offset: still written by
-    # SimulationEngine._sync_proposal_reviews_from_db's web-guidance reopen path
-    # (removal of the *live* PI-Slack/DM reopen paths landed in the removal
-    # cycle's engine task; the web-proposal-review reopen is a separate,
-    # still-live mechanism scheduled for its own removal pass). Not read by
-    # anything else — Agent._compose_system_prompt's phase-4 injection that used
-    # to read pi_context was removed alongside the live paths.
+    # pi_context/message_count_offset: had one writer,
+    # SimulationEngine._sync_proposal_reviews_from_db's web-guidance reopen
+    # path, which the reply-only-hub reconciliation task deleted (nothing on
+    # this branch creates or reviews proposals anymore, so there was nothing
+    # left to sync a web review of). Both fields are now permanently at their
+    # dataclass defaults (None / 0) — no code writes either one anymore.
+    # `message_count_offset` is kept because it is still read generically at
+    # simulation.py:_reply_to_thread's message-count computation (a no-op
+    # subtraction of 0 now, harmless). `pi_context` is read nowhere at all —
+    # Agent._compose_system_prompt's phase-4 injection that used to read it
+    # was removed alongside the live PI-Slack/DM paths — but the field is left
+    # in place rather than deleted to keep this a data-only, structural
+    # removal; dropping the field itself is a separate cleanup.
     pi_context: str | None = None  # PI posted in this thread — their message
     message_count_offset: int = 0  # subtract from message_count for PI-reopened threads
     empty_response_count: int = 0  # consecutive empty/unparseable Phase 4 replies

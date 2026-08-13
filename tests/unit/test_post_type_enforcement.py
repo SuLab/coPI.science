@@ -9,7 +9,21 @@ gate forbade. The mention was stripped and the post published anyway, leaving
 import types
 
 from src.agent.agent import Agent
+from src.agent.post_types import PostTypeSpec
 from src.agent.simulation import SimulationEngine
+
+# CANONICAL's one real broadcast-shaped (no `targets`) example
+# (opportunity_assessment) stopped being a post type at all once the hub
+# went reply-only (its assessment is now the sidecar carried inside its own
+# Phase-4 CONCLUDE reply — see simulation.py's `_reply_to_thread`). A few
+# tests below exercise `_post_type_rejection`'s broadcast-type branch
+# directly; `_post_type_rejection` takes `available` as a plain argument
+# with no coupling to CANONICAL/role.toml, so this synthetic stand-in
+# exercises the same code path regardless of what CANONICAL contains.
+_BROADCAST = PostTypeSpec(
+    "broadcast_test_type", ":test_tube:", "Test-only broadcast type",
+    "A synthetic broadcast (no targets) post type used only in this test file.",
+)
 
 
 def _engine(*agents):
@@ -37,34 +51,33 @@ def _star():
 
 def test_star_spoke_can_pitch_to_the_hub():
     eng, gill, _, _ = _star()
-    names = {s.name for s in eng._available_post_types(gill, restricted=False)}
+    names = {s.name for s in eng._available_post_types(gill)}
     assert "pitch" in names
 
 
 def test_mesh_spoke_loses_pitch_with_no_reachable_hub():
     gill, pearce = _spoke("gill"), _spoke("pearce")
     eng = _engine(gill, pearce)  # gates stay None, neither is a scout_hub
-    names = {s.name for s in eng._available_post_types(gill, restricted=False)}
+    names = {s.name for s in eng._available_post_types(gill)}
     assert names == set()
 
 
-def test_hub_may_only_post_its_assessment():
+def test_hub_menu_is_empty_it_has_no_top_level_post_type_left():
+    """The hub went reply-only (Option A relocation): its former sole post
+    type, :mag: Opportunity Assessment, is not a post type at all anymore —
+    it is the sidecar carried inside the hub's own Phase-4 CONCLUDE reply
+    (see simulation.py's `_reply_to_thread`). role.toml declares
+    `post_types = []` and CANONICAL has no entry for it either, so this menu
+    is empty for the hub on every topology, star included."""
     eng, _, hub, _ = _star()
-    names = {s.name for s in eng._available_post_types(hub, restricted=False)}
-    assert "opportunity_assessment" in names
-    assert "pitch" not in names
-
-
-def test_terminal_only_in_the_star_can_be_empty_but_that_is_not_a_skip():
-    eng, gill, _, _ = _star()
-    assert eng._available_post_types(gill, restricted=True) == ()
+    assert eng._available_post_types(hub) == ()
 
 
 # --- rejection -------------------------------------------------------------
 
 def test_layer1_rejects_a_type_the_role_never_declared():
     eng, gill, _, _ = _star()
-    avail = eng._available_post_types(gill, restricted=False)
+    avail = eng._available_post_types(gill)
     reason = eng._post_type_rejection(gill, "opportunity_assessment", None, avail)
     assert reason is not None
     assert "opportunity_assessment" in reason
@@ -77,7 +90,7 @@ def test_layer2_rejects_a_type_with_no_reachable_counterparty():
     gill = _spoke("gill")
     gill.allowed_sender_ids = {"gill"}
     eng = _engine(gill, _hub())
-    avail = eng._available_post_types(gill, restricted=False)
+    avail = eng._available_post_types(gill)
     assert "pitch" not in {s.name for s in avail}
     reason = eng._post_type_rejection(gill, "pitch", None, avail)
     assert reason is not None
@@ -85,7 +98,7 @@ def test_layer2_rejects_a_type_with_no_reachable_counterparty():
 
 def test_layer3_rejects_a_tag_toward_an_unreachable_agent_on_an_allowed_type():
     eng, gill, _, _ = _star()
-    avail = eng._available_post_types(gill, restricted=False)
+    avail = eng._available_post_types(gill)
     reason = eng._post_type_rejection(gill, "pitch", "pearce", avail)
     assert reason is not None
     assert "pearce" in reason
@@ -93,26 +106,33 @@ def test_layer3_rejects_a_tag_toward_an_unreachable_agent_on_an_allowed_type():
 
 def test_layer3_rejects_an_unreachable_tag_on_a_broadcast_type():
     """The dangling-ask bug does not stop being one because the type is a
-    broadcast: the mention gets stripped and the sentence around it survives."""
+    broadcast: the mention gets stripped and the sentence around it survives.
+
+    CANONICAL's one real broadcast-shaped example (opportunity_assessment)
+    stopped being a post type at all when the hub went reply-only, so this
+    passes a synthetic broadcast spec directly to `_post_type_rejection` —
+    it takes ``available`` as a plain argument and has no coupling to
+    CANONICAL/role.toml, so the broadcast-rejection branch under test is
+    exercised the same way regardless."""
     eng, _, hub, _ = _star()
-    avail = eng._available_post_types(hub, restricted=False)
-    reason = eng._post_type_rejection(hub, "opportunity_assessment", "nobody", avail)
+    reason = eng._post_type_rejection(hub, _BROADCAST.name, "nobody", (_BROADCAST,))
     assert reason is not None
     assert "nobody" in reason
 
 
-def test_the_hubs_assessment_is_accepted_tagged_or_not():
-    """Both shapes must publish. The prompt asks for tagged_agent=null, but a
-    model that names the PI anyway must not lose the assessment."""
+def test_a_broadcast_type_is_accepted_tagged_or_not():
+    """Both shapes must publish. A broadcast type addresses no one by
+    declaration, so a model naming a reachable agent anyway (redundant, not
+    wrong) must not lose the post over it."""
     eng, _, hub, _ = _star()
-    avail = eng._available_post_types(hub, restricted=False)
-    assert eng._post_type_rejection(hub, "opportunity_assessment", None, avail) is None
-    assert eng._post_type_rejection(hub, "opportunity_assessment", "gill", avail) is None
+    avail = (_BROADCAST,)
+    assert eng._post_type_rejection(hub, _BROADCAST.name, None, avail) is None
+    assert eng._post_type_rejection(hub, _BROADCAST.name, "gill", avail) is None
 
 
 def test_layer3_rejects_an_unknown_agent_id():
     eng, gill, _, _ = _star()
-    avail = eng._available_post_types(gill, restricted=False)
+    avail = eng._available_post_types(gill)
     assert eng._post_type_rejection(gill, "pitch", "nobody", avail) is not None
 
 
@@ -126,25 +146,25 @@ def test_layer3_rejects_an_unknown_agent_id():
 
 def test_a_leading_at_sign_on_the_tagged_agent_still_resolves():
     eng, gill, _, _ = _star()
-    avail = eng._available_post_types(gill, restricted=False)
+    avail = eng._available_post_types(gill)
     assert eng._post_type_rejection(gill, "pitch", "@blackbird", avail) is None
 
 
 def test_a_bot_name_instead_of_an_agent_id_still_resolves():
     eng, gill, _, _ = _star()
-    avail = eng._available_post_types(gill, restricted=False)
+    avail = eng._available_post_types(gill)
     assert eng._post_type_rejection(gill, "pitch", "BlackbirdBot", avail) is None
 
 
 def test_a_capitalized_agent_id_still_resolves():
     eng, gill, _, _ = _star()
-    avail = eng._available_post_types(gill, restricted=False)
+    avail = eng._available_post_types(gill)
     assert eng._post_type_rejection(gill, "pitch", "Blackbird", avail) is None
 
 
 def test_stray_whitespace_around_the_tagged_agent_still_resolves():
     eng, gill, _, _ = _star()
-    avail = eng._available_post_types(gill, restricted=False)
+    avail = eng._available_post_types(gill)
     assert eng._post_type_rejection(gill, "pitch", " blackbird", avail) is None
 
 
@@ -154,7 +174,7 @@ def test_normalisation_does_not_launder_a_genuinely_unreachable_agent():
     gate permits for `pitch` — every near-miss spelling of it must still be
     rejected, and the reason must still quote what the model actually sent."""
     eng, gill, _, _ = _star()
-    avail = eng._available_post_types(gill, restricted=False)
+    avail = eng._available_post_types(gill)
     for spelling in ("pearce", "@pearce", "PearceBot", " pearce"):
         reason = eng._post_type_rejection(gill, "pitch", spelling, avail)
         assert reason is not None, f"{spelling!r} must still be rejected"
@@ -165,7 +185,7 @@ def test_a_rejection_increments_the_per_agent_counter():
     """Mirrors _cohort_tags_stripped: a deployment where every pitch is
     rejected on a format slip must be visible without grepping logs."""
     eng, gill, _, _ = _star()
-    avail = eng._available_post_types(gill, restricted=False)
+    avail = eng._available_post_types(gill)
     assert eng._post_type_rejections.get(gill.agent_id, 0) == 0
     assert eng._post_type_rejection(gill, "pitch", "nobody", avail) is not None
     assert eng._post_type_rejections[gill.agent_id] == 1
@@ -178,20 +198,20 @@ def test_a_rejection_increments_the_per_agent_counter():
 
 def test_a_valid_pitch_at_the_hub_is_accepted():
     eng, gill, _, _ = _star()
-    avail = eng._available_post_types(gill, restricted=False)
+    avail = eng._available_post_types(gill)
     assert eng._post_type_rejection(gill, "pitch", "blackbird", avail) is None
 
 
 def test_a_valid_broadcast_with_no_tag_is_accepted():
     eng, _, hub, _ = _star()
-    avail = eng._available_post_types(hub, restricted=False)
-    assert eng._post_type_rejection(hub, "opportunity_assessment", None, avail) is None
+    avail = (_BROADCAST,)
+    assert eng._post_type_rejection(hub, _BROADCAST.name, None, avail) is None
 
 
 def test_an_empty_post_type_is_rejected_for_a_new_post():
     """post_type defaults to "" when the model omits it."""
     eng, gill, _, _ = _star()
-    avail = eng._available_post_types(gill, restricted=False)
+    avail = eng._available_post_types(gill)
     assert eng._post_type_rejection(gill, "", None, avail) is not None
 
 
@@ -206,7 +226,7 @@ def test_gate_off_accepts_everything_the_role_declared():
     gill = _spoke("gill")
     wu = Agent("wu", "WuBot", "Wu Lab", role="scout_hub")
     eng = _engine(gill, wu)
-    avail = eng._available_post_types(gill, restricted=False)
+    avail = eng._available_post_types(gill)
     assert "pitch" in {s.name for s in avail}
     assert eng._post_type_rejection(gill, "pitch", "wu", avail) is None
     assert eng._post_type_rejection(gill, "pitch", "ghost", avail) is None
@@ -218,14 +238,14 @@ def test_the_star_still_rejects_the_retired_idea_post_type():
     `idea` resolves to `idea_crosslab`, which no longer exists in the
     vocabulary at all — a star spoke still cannot use it."""
     eng, gill, _, _ = _star()
-    avail = eng._available_post_types(gill, restricted=False)
+    avail = eng._available_post_types(gill)
     assert eng._post_type_rejection(gill, "idea", "pearce", avail) is not None
 
 
 def test_gate_off_still_rejects_a_type_the_role_never_declared():
     gill = _spoke("gill")
     eng = _engine(gill)
-    avail = eng._available_post_types(gill, restricted=False)
+    avail = eng._available_post_types(gill)
     assert eng._post_type_rejection(gill, "opportunity_assessment", None, avail) is not None
 
 
@@ -466,19 +486,22 @@ async def test_the_menu_handed_to_the_prompt_is_the_set_that_is_enforced(monkeyp
 
     Spec §6 test 7: the rendered menu names exactly the post-layer-2 set.
     """
-    from src.agent.post_types import CANONICAL
-
     capture = {}
     eng, gill, _ = await _drive(monkeypatch, _ACCEPTED, capture=capture)
 
     menu = capture["post_type_menu"]
     available = {
-        s.name for s in eng._available_post_types(gill, restricted=False)
+        s.name for s in eng._available_post_types(gill)
     }
     assert available == {"pitch"}
     for name in available:
         assert f"**`{name}`**" in menu
-    for name in set(CANONICAL) - available:
-        assert f"**`{name}`**" not in menu
+    # A type gill's role never declared must not appear. CANONICAL is
+    # exactly {pitch} now (the hub's assessment stopped being a post type
+    # when it went reply-only), so there is no second real canonical name
+    # left to demonstrate exclusion with — the synthetic broadcast stand-in
+    # used elsewhere in this file exercises the same "excluded name is
+    # absent from the rendered menu" contract just as well.
+    assert f"**`{_BROADCAST.name}`**" not in menu
     # The hub is the one reachable counterparty, so the addressed type names it.
     assert "blackbird" in menu
