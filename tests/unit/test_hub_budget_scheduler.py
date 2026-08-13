@@ -56,7 +56,7 @@ def _engine(agent_ids, budget_cap=0):
 # All of them are I/O (Slack, DB, disk) and none of them affect selection, so a
 # loop-level test stubs the lot and keeps only the scheduling behaviour.
 _TICK_IO = (
-    "_poll_slack_for_human_messages",
+    "_poll_slack_for_bot_messages",
     "_poll_inbound_from_db",
     "_sync_private_channels_from_db",
     "_sync_roster_from_db",

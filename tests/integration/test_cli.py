@@ -587,8 +587,14 @@ def _write_profiles(tmp_path, files: dict[str, str]):
 
 @pytest.fixture
 def backfill_fixture(db, monkeypatch, tmp_path):
-    """Registered agent `alpha` with three profile files, plus two files that must be
-    skipped: one for an unregistered agent and one that is empty.
+    """Registered agent `alpha` with public/private/memory profile files, plus two
+    files that must be skipped: one for an unregistered agent and one that is empty.
+
+    The `private/` file is deliberately included and left unbackfilled by the
+    assertions below: the private-profile pipeline was retired in the 2026-08-12
+    PI-interaction removal cycle, and `backfill_profile_revisions` no longer walks
+    that subdirectory at all (`src/cli.py`) — a stale `profiles/private/` tree left
+    over on a host from before the removal must produce nothing, not an error.
 
     The command resolves `profiles/<type>` relative to the process CWD, so the test
     chdirs into a temp tree; otherwise it would read (and backfill from) /app/profiles.
@@ -626,21 +632,25 @@ def backfill_fixture(db, monkeypatch, tmp_path):
 def test_backfill_creates_one_revision_per_profile_file_and_skips_the_rest(
     db, runner, backfill_fixture
 ):
-    """T6.5 (first run): three revisions for the registered agent with non-empty files.
+    """T6.5 (first run): two revisions for the registered agent's non-empty,
+    still-processed files (public, memory) — `private/` is on disk (see the
+    fixture) but must produce nothing at all.
 
     Both absence assertions have their control in this same run — the ghost file and
-    the empty file produce nothing while alpha's three files produce three rows.
+    the empty file produce nothing while alpha's two processed files produce two rows.
     """
     fx = backfill_fixture
     result = _ok(runner.invoke(cli_app, ["backfill-profile-revisions"]))
 
-    assert "Created 3 profile revisions." in result.output
+    assert "Created 2 profile revisions." in result.output
     assert f"no agent '{AGENT_PREFIX}ghost'" in result.output
 
     revisions = db(lambda s: _revisions_for(s, fx["alpha_uuid"]))
-    assert len(revisions) == 3
+    assert len(revisions) == 2
     by_type = {r.profile_type: r for r in revisions}
-    assert set(by_type) == {"public", "private", "memory"}
+    assert set(by_type) == {"public", "memory"}, (
+        "private/ is on disk but retired — it must not produce a revision"
+    )
     for profile_type, revision in by_type.items():
         expected = (fx["tmp_path"] / "profiles" / profile_type / f"{fx['alpha_id']}.md").read_text()
         assert revision.content == expected
@@ -648,7 +658,7 @@ def test_backfill_creates_one_revision_per_profile_file_and_skips_the_rest(
         assert revision.change_summary == "Initial backfill from existing file"
         assert revision.changed_by_user_id is None
 
-    # Whitespace-only file: registered agent, still no revision (control = the 3 above).
+    # Whitespace-only file: registered agent, still no revision (control = the 2 above).
     assert db(lambda s: _revisions_for(s, fx["beta_uuid"])) == []
 
 
@@ -664,24 +674,24 @@ def test_backfill_run_twice_does_not_duplicate_any_revision(db, runner, backfill
     fx = backfill_fixture
 
     first = _ok(runner.invoke(cli_app, ["backfill-profile-revisions"]))
-    assert "Created 3 profile revisions." in first.output
+    assert "Created 2 profile revisions." in first.output
     # Control: the first run really did create rows, so "unchanged" would mean something.
-    assert len(db(lambda s: _revisions_for(s, fx["alpha_uuid"]))) == 3
+    assert len(db(lambda s: _revisions_for(s, fx["alpha_uuid"]))) == 2
 
     second = _ok(runner.invoke(cli_app, ["backfill-profile-revisions"]))
     assert "Created 0 profile revisions." in second.output
     assert f"Unchanged public profile for {fx['alpha_id']}" in second.output
     revisions = db(lambda s: _revisions_for(s, fx["alpha_uuid"]))
-    assert len(revisions) == 3, "a re-run must not duplicate anything"
+    assert len(revisions) == 2, "a re-run must not duplicate anything"
     # One revision per (type, content) pair — no identical siblings.
-    assert len({(r.profile_type, r.content) for r in revisions}) == 3
+    assert len({(r.profile_type, r.content) for r in revisions}) == 2
 
 
 def test_backfill_is_idempotent(db, runner, backfill_fixture):
     fx = backfill_fixture
     _ok(runner.invoke(cli_app, ["backfill-profile-revisions"]))
     after_first = len(db(lambda s: _revisions_for(s, fx["alpha_uuid"])))
-    assert after_first == 3
+    assert after_first == 2
     _ok(runner.invoke(cli_app, ["backfill-profile-revisions"]))
     assert len(db(lambda s: _revisions_for(s, fx["alpha_uuid"]))) == after_first
 
@@ -693,11 +703,11 @@ def test_a_changed_profile_body_still_creates_a_new_revision(db, runner, backfil
     (agent, profile_type) is byte-identical. A guard that also swallowed real edits
     would be a worse bug than the duplication it replaced — it would silently drop
     history — so this pins the positive case: edit one file, re-run, get one more
-    revision for that type and none for the two untouched ones.
+    revision for that type and none for the untouched one.
     """
     fx = backfill_fixture
     _ok(runner.invoke(cli_app, ["backfill-profile-revisions"]))
-    assert len(db(lambda s: _revisions_for(s, fx["alpha_uuid"]))) == 3
+    assert len(db(lambda s: _revisions_for(s, fx["alpha_uuid"]))) == 2
 
     edited = "# Alpha public\nPeptides, and now also proteases.\n"
     (fx["tmp_path"] / "profiles" / "public" / f"{fx['alpha_id']}.md").write_text(
@@ -708,7 +718,7 @@ def test_a_changed_profile_body_still_creates_a_new_revision(db, runner, backfil
     assert "Created 1 profile revisions." in second.output
 
     revisions = db(lambda s: _revisions_for(s, fx["alpha_uuid"]))
-    assert len(revisions) == 4, "the edited file must produce a second revision"
+    assert len(revisions) == 3, "the edited file must produce a second revision"
 
     by_type: dict[str, list] = {}
     for revision in revisions:
@@ -716,14 +726,15 @@ def test_a_changed_profile_body_still_creates_a_new_revision(db, runner, backfil
     assert len(by_type["public"]) == 2
     # Both the old and the new body are on record — this is history, not a replace.
     assert {r.content for r in by_type["public"]} == {"# Alpha public\nPeptides.\n", edited}
-    # Control: the two files nobody touched are still at one revision each.
-    assert len(by_type["private"]) == 1
+    # Control: the untouched file is still at one revision.
     assert len(by_type["memory"]) == 1
+    # private/ never produced anything in the first place — still true after a re-run.
+    assert "private" not in by_type
 
 
 def test_backfill_with_no_profile_directories_is_a_clean_no_op(db, runner, monkeypatch, tmp_path):
     """Absence control for the fixture above: with no files on disk the command still
-    succeeds and creates nothing, so 'created 3' upthread is attributable to the files.
+    succeeds and creates nothing, so 'created 2' upthread is attributable to the files.
     """
     empty = tmp_path / "empty"
     empty.mkdir()

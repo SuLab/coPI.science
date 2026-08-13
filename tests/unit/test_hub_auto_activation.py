@@ -146,3 +146,98 @@ def test_closed_thread_id_is_not_reactivated():
     eng._phase3_activate_threads(hub)
 
     assert hub.state.active_threads == {}
+
+
+# ---------------------------------------------------------------------------
+# Human-authored entries never activate a thread (2026-08-12 PI-interaction
+# removal cycle). The trigger loop this closes: `post_agent_message`/
+# `reopen_proposal` (via `src/services/pi_inbox.py::record_pi_message`) write
+# an `is_bot=False` row into `agent_messages`; the engine's DB-inbound poller
+# ingests it into the shared MessageLog; and — before this fix — Phase 3's
+# three `get_tags_for_agent`/`get_replies_to_agent_posts`/
+# `get_new_top_level_posts` loops (none of which checked `is_bot`) would
+# activate a thread against it, with `SimulationEngine._infer_agent_id`'s
+# substring match (`agent_id in name_lower or bot_name in name_lower`) able to
+# misattribute `other_agent_id` from a human sender name that happens to
+# contain a bot's agent_id (e.g. "Andrew Su (PI)" contains "su").
+# ---------------------------------------------------------------------------
+
+
+def _human_post(ts, channel, name, content, thread_ts=None):
+    return LogEntry(
+        ts=ts, channel=channel, sender_agent_id=None, sender_name=name,
+        content=content, thread_ts=thread_ts, posted_at=float(ts), is_bot=False,
+    )
+
+
+def test_human_tagged_post_does_not_activate_the_tag_loop():
+    hub, lab = _hub(), _lab()
+    eng = _engine(hub, lab)
+    eng.message_log.append(
+        _human_post("1", "general", "Andrew Su (PI)", "Hey @GillBot, please check this")
+    )
+
+    eng._phase3_activate_threads(lab)
+
+    assert lab.state.active_threads == {}
+
+
+def test_human_reply_to_the_agents_own_post_does_not_activate_the_reply_loop():
+    hub, lab = _hub(), _lab()
+    eng = _engine(hub, lab)
+    eng.message_log.append(
+        _post("1", "general", "gill", "GillBot", "Our new finding")
+    )
+    eng.message_log.append(
+        _human_post("2", "general", "Dr PI", "Nice work", thread_ts="1")
+    )
+
+    eng._phase3_activate_threads(lab)
+
+    assert lab.state.active_threads == {}
+
+
+def test_human_untagged_post_does_not_auto_activate_a_hub_thread():
+    """The hub loop's analogue of test_untagged_lab_post_activates_a_hub_thread:
+    a human top-level post must not open a hub interview thread."""
+    hub, lab = _hub(), _lab()
+    eng = _engine(hub, lab)
+    eng.message_log.append(
+        _human_post("1", "general", "Dr PI", "We just published something new.")
+    )
+
+    eng._phase3_activate_threads(hub)
+
+    assert hub.state.active_threads == {}
+
+
+def test_human_sender_name_substring_matching_a_bot_agent_id_does_not_activate():
+    """The exact substring-match trap `_infer_agent_id` could otherwise walk
+    into: "Andrew Su (PI)" contains "su" — a REAL agent_id in this roster
+    (SuBot), which never posted anything. Even if the human filter were
+    somehow bypassed, a thread fabricated and misattributed to "su" would be
+    the observable damage; this pins that it never happens at all."""
+    hub, lab = _hub(), _lab()
+    su = Agent("su", "SuBot", "Su", role="pi_lab")
+    eng = _engine(hub, lab, su)
+    eng.message_log.append(
+        _human_post("1", "general", "Andrew Su (PI)", "hey @GillBot take a look")
+    )
+
+    eng._phase3_activate_threads(lab)
+
+    assert lab.state.active_threads == {}
+
+
+def test_control_bot_tagged_post_still_activates_the_tag_loop():
+    """Positive control for the three human-inertness tests above: the same
+    shape of entry, bot-authored, still activates normally."""
+    hub, lab = _hub(), _lab()
+    eng = _engine(hub, lab)
+    eng.message_log.append(
+        _post("1", "general", "wu", "WuBot", "Hey @GillBot, please check this")
+    )
+
+    eng._phase3_activate_threads(lab)
+
+    assert "1" in lab.state.active_threads

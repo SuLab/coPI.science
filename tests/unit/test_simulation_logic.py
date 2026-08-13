@@ -936,6 +936,106 @@ class TestPhase4ReplySuppression:
 
 
 # ---------------------------------------------------------------
+# The pending/reactive-priority trigger loop closed 2026-08-12
+# (PI-interaction removal cycle). The surviving `is_bot=False` producer
+# (`reopen_proposal` -> `src/services/pi_inbox.py::record_pi_message`) writes
+# a human-authored row that the DB-inbound poller ingests into the shared
+# MessageLog; before this fix, `MessageLog.has_new_reply_from_other` (via
+# `_owes_reply` and `_phase4_reply_threads`'s ungated call) would have treated
+# that row as "a new reply from the other participant" — setting
+# `has_pending_reply`, granting reactive priority, and (via
+# `_reply_to_thread`'s message-count recompute) shifting the thread's ordinal.
+# ---------------------------------------------------------------
+
+class TestHumanRepliesAreInertToPhase4:
+    def _engine_with_thread(self):
+        from src.agent.agent import Agent
+        from src.agent.state import ThreadState
+        from tests.fakes import FakeSlackClient
+
+        agent = Agent("blackbird", "BlackbirdBot", "Blackbird")
+        thread = ThreadState(
+            thread_id="t1", channel="general", other_agent_id="wang",
+            message_count=3, has_pending_reply=False,
+        )
+        agent.state.active_threads["t1"] = thread
+        client = FakeSlackClient(agent_id="blackbird")
+        engine = SimulationEngine(agents=[agent], slack_clients={"blackbird": client})
+        return engine, agent, thread, client
+
+    @staticmethod
+    def _human_entry(ts="2", content="guidance"):
+        from src.agent.message_log import LogEntry
+        return LogEntry(
+            ts=ts, channel="general", sender_agent_id=None,
+            sender_name="Dr Wang (PI)", content=content, thread_ts="t1",
+            posted_at=float(ts), is_bot=False,
+        )
+
+    @staticmethod
+    def _bot_entry(ts="2", content="real reply"):
+        from src.agent.message_log import LogEntry
+        return LogEntry(
+            ts=ts, channel="general", sender_agent_id="wang", sender_name="WangBot",
+            content=content, thread_ts="t1", posted_at=float(ts), is_bot=True,
+        )
+
+    def test_human_reply_does_not_grant_reactive_priority(self):
+        engine, agent, _thread, _client = self._engine_with_thread()
+        engine.message_log.append(self._human_entry())
+
+        assert engine._owes_reply(agent) is False
+
+    def test_control_bot_reply_does_grant_reactive_priority(self):
+        """Positive control: the same shape of entry, bot-authored, DOES owe
+        a reply — so the test above is provably about is_bot."""
+        engine, agent, _thread, _client = self._engine_with_thread()
+        engine.message_log.append(self._bot_entry())
+
+        assert engine._owes_reply(agent) is True
+
+    @pytest.mark.asyncio
+    async def test_human_reply_does_not_trigger_phase4_or_shift_the_ordinal(self, monkeypatch):
+        engine, agent, thread, _client = self._engine_with_thread()
+        engine.message_log.append(self._human_entry())
+
+        called = {"reply": False}
+
+        async def _fake_reply_to_thread(a, t):
+            called["reply"] = True
+
+        monkeypatch.setattr(engine, "_reply_to_thread", _fake_reply_to_thread)
+
+        replied = await engine._phase4_reply_threads(agent)
+
+        assert replied == set(), "a human-only entry must not select the thread for reply"
+        assert called["reply"] is False
+        assert thread.has_pending_reply is False
+        assert thread.message_count == 3, (
+            "the ordinal must not shift merely from a human entry landing in the thread"
+        )
+
+    @pytest.mark.asyncio
+    async def test_control_bot_reply_does_trigger_phase4(self, monkeypatch):
+        """Positive control for the test above: the same shape of entry,
+        bot-authored, DOES select the thread for reply."""
+        engine, agent, thread, _client = self._engine_with_thread()
+        engine.message_log.append(self._bot_entry())
+
+        called = {"reply": False}
+
+        async def _fake_reply_to_thread(a, t):
+            called["reply"] = True
+
+        monkeypatch.setattr(engine, "_reply_to_thread", _fake_reply_to_thread)
+
+        replied = await engine._phase4_reply_threads(agent)
+
+        assert replied == {"t1"}
+        assert called["reply"] is True
+
+
+# ---------------------------------------------------------------
 # Option A relocation: the hub's :mag: Opportunity Assessment is extracted
 # from, and stripped out of, its own Phase-4 CONCLUDE reply — see
 # SimulationEngine._reply_to_thread / _capture_hub_assessment. The DB-backed

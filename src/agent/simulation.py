@@ -586,9 +586,10 @@ class SimulationEngine:
         turn_count = 0
         consecutive_idle = 0
         while self._running and self.is_within_time_limit:
-            # Poll Slack for human (non-bot) channel messages. No-ops when
-            # Slack is off (NullTransport / no connected clients).
-            await self._poll_slack_for_human_messages()
+            # Poll Slack for other bots' channel messages, mirroring them into
+            # the log. No-ops when Slack is off (NullTransport / no connected
+            # clients).
+            await self._poll_slack_for_bot_messages()
 
             # DB-native inbound path: messages written by other processes
             # (private-channel handover, and legacy human-authored rows). Runs
@@ -2620,15 +2621,21 @@ class SimulationEngine:
         self._poll_client_cursor += 1
         return client
 
-    async def _poll_slack_for_human_messages(self) -> None:
-        """
-        Poll all channels for new human (non-bot) messages.
-        Add them to the message log.
+    async def _poll_slack_for_bot_messages(self) -> None:
+        """Poll all channels for new bot-authored messages; mirror them into the log.
 
-        Human-authored channel messages are ingested for observability/history
-        only — there is no human-PI interaction surface left to route them
-        into (no reopen, no @-tag routing, no directive flag). See the removal
-        cycle's PI-interaction audit map.
+        Renamed from ``_poll_slack_for_human_messages`` (2026-08-12
+        PI-interaction removal cycle): a human-authored channel message is no
+        longer ingested via Slack at all — there is no PI-bot interaction
+        surface left for it to feed (no reopen, no @-tag routing, no directive
+        flag), so keeping a human branch here would only have grown the log
+        with entries nothing downstream may act on. The remaining job is
+        exactly what the name says: mirror another bot's Slack-native post (a
+        message this process did not itself write) into the shared
+        ``MessageLog``, recording the Slack-mirror mapping so a reply to it
+        can still be threaded. See the removal cycle's PI-interaction audit
+        map and ``MessageLog``'s GATED-method inventory (human rows are
+        filtered there too, independent of this poller).
         """
         if not self.slack_clients:
             return
@@ -2679,67 +2686,45 @@ class SimulationEngine:
                     if not is_bot and user_id:
                         is_bot = client.is_bot_user(user_id)
 
-                    # Add bot messages to the log (so agents can scan them)
-                    # but skip PI-specific handling for them
-                    if is_bot:
-                        bot_name = msg.get("username", "bot")
-                        # Resolve agent_id from bot name
-                        bot_agent_id = self.message_log._bot_name_to_id.get(
-                            bot_name.lower()
-                        )
-                        entry = LogEntry(
-                            ts=ts,
-                            channel=ch_name,
-                            sender_agent_id=bot_agent_id,
-                            sender_name=bot_name,
-                            content=msg.get("text", ""),
-                            thread_ts=msg.get("thread_ts"),
-                            posted_at=float(ts) if ts else 0.0,
-                            is_bot=True,
-                            visibility=ch_visibility,
-                            # This message came *from* Slack, so record the mirror
-                            # mapping exactly as the human branch below does. Without
-                            # it the entry looks DB-origin, and _slack_parent_ts then
-                            # reports "no Slack root" for any thread rooted here —
-                            # silently keeping every reply off Slack. The roots this
-                            # branch ingests are another workspace bot's posts.
-                            # Slack-origin ⇒ canonical id *is* the Slack ts, so the
-                            # thread parent needs no translation.
-                            slack_ts=ts or None,
-                            slack_channel_id=ch_id,
-                            slack_thread_ts=msg.get("thread_ts"),
-                        )
-                        if not self.message_log.get_entry(ts):
-                            self.message_log.append(entry)
+                    # Bot messages are mirrored into the log so agents can scan
+                    # them; a human message is dropped outright — advance the
+                    # cursor past it (so it is not re-fetched every tick) but
+                    # never append it. There is no PI-bot interaction surface
+                    # left for a human channel post to feed.
+                    if not is_bot:
                         if ts:
                             self._poll_cursors[ch_id] = ts
                         continue
 
-                    # Human message — ingested for history/observability only.
-                    sender_name = client.resolve_user_name(user_id)
+                    bot_name = msg.get("username", "bot")
+                    # Resolve agent_id from bot name
+                    bot_agent_id = self.message_log._bot_name_to_id.get(
+                        bot_name.lower()
+                    )
                     entry = LogEntry(
                         ts=ts,
                         channel=ch_name,
-                        sender_agent_id=None,
-                        sender_name=sender_name,
+                        sender_agent_id=bot_agent_id,
+                        sender_name=bot_name,
                         content=msg.get("text", ""),
                         thread_ts=msg.get("thread_ts"),
                         posted_at=float(ts) if ts else 0.0,
-                        is_bot=False,
+                        is_bot=True,
                         visibility=ch_visibility,
+                        # This message came *from* Slack, so record the mirror
+                        # mapping. Without it the entry looks DB-origin, and
+                        # _slack_parent_ts then reports "no Slack root" for any
+                        # thread rooted here — silently keeping every reply off
+                        # Slack. The roots this branch ingests are another
+                        # workspace bot's posts. Slack-origin ⇒ canonical id
+                        # *is* the Slack ts, so the thread parent needs no
+                        # translation.
                         slack_ts=ts or None,
                         slack_channel_id=ch_id,
-                        # Slack-origin: the canonical id is the Slack ts, so the
-                        # thread parent is already a Slack ts.
                         slack_thread_ts=msg.get("thread_ts"),
                     )
-                    self.message_log.append(entry)
-                    logger.info(
-                        "Human message in #%s from %s: %.60s (no action taken)",
-                        ch_name, sender_name, msg.get("text", "")[:60],
-                    )
-
-                    # Update cursor
+                    if not self.message_log.get_entry(ts):
+                        self.message_log.append(entry)
                     if ts:
                         self._poll_cursors[ch_id] = ts
 
@@ -2751,11 +2736,17 @@ class SimulationEngine:
 
         The DB is the primary store, so any message this process hasn't seen —
         bot-authored handover posts written by the web app, and (later) the
-        Slack mirror's inbound side, plus any legacy human-authored row — must
-        be pulled into the live MessageLog. Bot-authored rows are the live
-        path (design §8); a human-authored (``is_bot=False``) row is ingested
-        for history/observability only — there is no PI-interaction handling
-        left to route it into. Runs every tick regardless of Slack. See
+        Slack mirror's inbound side, plus any human-authored row (today, only
+        ``reopen_proposal``'s recorded guidance) — must be pulled into the
+        live MessageLog. Bot-authored rows are the live path (design §8); a
+        human-authored (``is_bot=False``) row is ingested too, but purely for
+        history/observability — every GATED ``MessageLog`` read
+        (``get_new_top_level_posts``/``get_replies_to_agent_posts``/
+        ``get_tags_for_agent``/``has_new_reply_from_other``) filters
+        ``is_bot=False`` entries out, so appending one here can never set a
+        bot's ``has_pending_reply``, grant reactive priority, or activate a
+        new thread. There is no PI-interaction handling left to route it into
+        on top of that. Runs every tick regardless of Slack. See
         specs/local-db-conversations.md.
         """
         if not self.session_factory or not self.simulation_run_id:

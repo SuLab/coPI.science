@@ -802,64 +802,21 @@ async def test_reviewing_on_the_web_retires_the_outstanding_email_notification(
 
 
 # ---------------------------------------------------------------------------
-# 5. Reopen -> posts guidance in place (fix 9, 2026-08-12 final audit wave)
+# 5. Reopen -> posts guidance in place (fix 9, 2026-08-12 final audit wave;
+#    Slack-post branch removed outright in the same date's PI-interaction
+#    removal cycle)
 #
 # reopen used to migrate a public-origin proposal thread into a NEW
 # collab_private channel by default before posting the PI's guidance there.
 # The engine-side private-channel collaboration/refinement flow was deleted
 # (docs/plans/2026-08-12-pr34-pitch-only-reconciliation-design.md §8 — no
 # agent converses inside a collab_private channel anymore), so a freshly
-# migrated channel would be a dead room nothing ever posts in again. reopen
-# no longer creates ANY private channel: it always posts the PI's guidance
-# directly into the proposal's origin thread (Slack, if the agent has a
-# token; the DB inbox otherwise). The fixtures below double the two
-# `slack_web` calls the route now makes (`list_channel_ids_async`,
-# `post_message_async`) instead of `private_channels`' migration internals.
+# migrated channel would be a dead room nothing ever posts in again. reopen no
+# longer creates ANY private channel, and — as of the same date's final
+# removal wave — no longer posts to Slack either: there is no PI-bot
+# interaction surface left for a bot token to re-engage through, so the DB
+# inbox is now the only path, unconditionally.
 # ---------------------------------------------------------------------------
-
-
-@pytest.fixture
-def slack_off(monkeypatch):
-    """Force reopen's post-to-Slack branch off, landing guidance in the DB inbox.
-
-    `slack_globally_enabled` auto-detects from bot tokens anywhere in the
-    deployment — including real roster ids' tokens in a live-tier `.env` on
-    this host, which `alpha`/`beta` (fictitious ids) do not protect against.
-    Pinning it makes the test's intent explicit and immune to a stray token
-    appearing in the environment.
-    """
-    async def _off(*args, **kwargs):
-        return False
-
-    monkeypatch.setattr("src.services.slack_tokens.slack_globally_enabled", _off)
-
-
-@pytest.fixture
-def slack_on(monkeypatch):
-    """Force reopen's post-to-Slack branch on, with fakes standing in for the
-    two `slack_web` calls it makes. Returns the list of posts recorded."""
-    posted: list[dict] = []
-
-    async def _on(*args, **kwargs):
-        return True
-
-    def _token_for_agent_row(agent):
-        return f"xoxb-fake-{agent.agent_id}"
-
-    async def _list_channel_ids(token, **kwargs):
-        return {"degrader-chem": "C_degrader-chem"}
-
-    async def _post_message(token, channel, text, *, thread_ts=None):
-        posted.append({"channel": channel, "text": text, "thread_ts": thread_ts})
-        return [{"ts": "1700000000.000900"}]
-
-    monkeypatch.setattr("src.services.slack_tokens.slack_globally_enabled", _on)
-    monkeypatch.setattr(
-        "src.services.slack_tokens.token_for_agent_row", _token_for_agent_row
-    )
-    monkeypatch.setattr("src.services.slack_web.list_channel_ids_async", _list_channel_ids)
-    monkeypatch.setattr("src.services.slack_web.post_message_async", _post_message)
-    return posted
 
 
 async def _reopen_inbox_count(db_session, proposal) -> int:
@@ -871,7 +828,7 @@ async def _reopen_inbox_count(db_session, proposal) -> int:
 
 
 async def test_reopen_posts_the_guidance_and_files_the_review_together(
-    client, db_session, lab, proposal, slack_off,
+    client, db_session, lab, proposal,
 ):
     """ONE request produces BOTH the PI-authored inbox message in the origin
     thread AND the rating=0 ProposalReview that marks the proposal acted-on.
@@ -929,7 +886,7 @@ async def test_reopen_posts_the_guidance_and_files_the_review_together(
 
 
 async def test_a_rating_never_writes_reopen_guidance(
-    client, db_session, lab, proposal, slack_off,
+    client, db_session, lab, proposal,
 ):
     """Rating and reopen are two separate PI actions behind two separate
     endpoints; only `/reopen` posts guidance into the origin thread.
@@ -970,7 +927,7 @@ async def test_a_rating_never_writes_reopen_guidance(
 
 
 async def test_a_rated_proposal_cannot_then_be_reopened_by_the_same_agent(
-    client, db_session, lab, proposal, slack_off,
+    client, db_session, lab, proposal,
 ):
     """The two edges out of "awaiting review" are mutually exclusive. Once alpha has
     rated, alpha's reopen is swallowed by the same guard that catches a replayed POST
@@ -1017,7 +974,7 @@ async def test_a_rated_proposal_cannot_then_be_reopened_by_the_same_agent(
 
 
 async def test_reopen_is_idempotent_under_a_replayed_post(
-    client, db_session, lab, proposal, slack_off,
+    client, db_session, lab, proposal,
 ):
     """A stale page or the Back button replays the reopen POST. The guard must make the
     second one a no-op rather than post a duplicate inbox message.
@@ -1042,100 +999,8 @@ async def test_reopen_is_idempotent_under_a_replayed_post(
     )) == 1, "the replayed reopen filed a second ProposalReview"
 
 
-async def test_reopen_drives_the_slack_client_when_slack_is_on(
-    client, db_session, lab, proposal, slack_on,
-):
-    """The Slack-on branch of the same wiring: reopen posts the PI's guidance into
-    the origin thread via `slack_web`, threaded on the proposal's root.
-    `no_outbound_side_effects` guarantees nothing reached slack_sdk for real.
-    """
-    guidance = "Push on the kinetics readout, not the chemistry."
-    r = await client.post(
-        f"/agent/alpha/proposals/{proposal.id}/reopen",
-        data={"guidance": guidance}, headers=_auth(lab.pi_a_id),
-    )
-    assert r.status_code == 302, r.text[:400]
-
-    assert len(slack_on) == 1, f"expected exactly one Slack post: {slack_on}"
-    posted = slack_on[0]
-    assert posted["channel"] == "C_degrader-chem"
-    assert guidance in posted["text"]
-    assert posted["thread_ts"] == proposal.thread_id, (
-        "the guidance must stay in the proposal thread, not the channel root"
-    )
-
-    db_session.expire_all()
-    assert (await db_session.scalar(select(func.count(AgentChannel.id)).where(
-        AgentChannel.visibility == VISIBILITY_COLLAB_PRIVATE
-    ))) == 0, "reopen must never create a collab_private channel"
-    review = (await db_session.execute(select(ProposalReview).where(
-        ProposalReview.thread_decision_id == proposal.id
-    ))).scalar_one()
-    assert review.rating == 0
-
-
-async def test_a_failed_slack_post_files_no_review(
-    client, db_session, lab, proposal, monkeypatch,
-):
-    """If Slack can't resolve the origin channel, the reopen must leave NOTHING
-    behind — no half-written review that would make the proposal look acted-on
-    and permanently block the retry (the idempotency guard keys off any review
-    by this agent).
-
-    Positive control: the same request, with the channel now resolvable, writes
-    the review.
-    """
-    resolvable = {"on": False}
-
-    async def _on(*args, **kwargs):
-        return True
-
-    def _token_for_agent_row(agent):
-        return f"xoxb-fake-{agent.agent_id}"
-
-    async def _list_channel_ids(token, **kwargs):
-        return {"degrader-chem": "C_degrader-chem"} if resolvable["on"] else {}
-
-    async def _post_message(token, channel, text, *, thread_ts=None):
-        return [{"ts": "1700000000.000900"}]
-
-    monkeypatch.setattr("src.services.slack_tokens.slack_globally_enabled", _on)
-    monkeypatch.setattr(
-        "src.services.slack_tokens.token_for_agent_row", _token_for_agent_row
-    )
-    monkeypatch.setattr("src.services.slack_web.list_channel_ids_async", _list_channel_ids)
-    monkeypatch.setattr("src.services.slack_web.post_message_async", _post_message)
-
-    bad = await client.post(
-        f"/agent/alpha/proposals/{proposal.id}/reopen",
-        data={"guidance": "This one will fail."}, headers=_auth(lab.pi_a_id),
-    )
-    assert bad.status_code == 500, bad.status_code
-    db_session.expire_all()
-    assert (await db_session.scalar(select(func.count(ProposalReview.id)).where(
-        ProposalReview.thread_decision_id == proposal.id
-    ))) == 0, (
-        "a failed post still filed a ProposalReview — the idempotency guard will "
-        "now treat every retry as a duplicate and the proposal is stuck"
-    )
-
-    resolvable["on"] = True
-    good = await client.post(
-        f"/agent/alpha/proposals/{proposal.id}/reopen",
-        data={"guidance": "Retry after the outage."}, headers=_auth(lab.pi_a_id),
-    )
-    assert good.status_code == 302, (
-        f"the retry control also failed ({good.status_code}); the assertions above "
-        "cannot distinguish 'clean abort' from 'reopen never works'"
-    )
-    db_session.expire_all()
-    assert (await db_session.scalar(select(func.count(ProposalReview.id)).where(
-        ProposalReview.thread_decision_id == proposal.id
-    ))) == 1
-
-
 async def test_reopen_is_blocked_for_an_inactive_agent_but_rating_is_not(
-    client, db_session, lab, proposal, slack_off,
+    client, db_session, lab, proposal,
 ):
     """The documented asymmetry in agent_page.py: an inactive agent's PI can still rate
     a proposal (passive, DB-only) but cannot reopen it (re-injects the bot into a live

@@ -342,6 +342,40 @@ the pitch-only reconciliation and are no longer current on these four points.
    setting that gated it — orphaned once neither the web reopen route nor
    `email_inbound.py` read it any longer. `collab_private` remains legacy-tolerance
    only: no new creation path, discovery/rebuild for existing channels unchanged.
+
+   **Final wave (same date, release-gating fix pass).** The web dashboard's
+   remaining PI-to-bot write surfaces are deleted outright: `post_agent_message`
+   (`POST /agent/{id}/message`, the DB-inbox posting form and its
+   `pi_may_post_to_channel` ACL — orphaned once this was its only caller) and
+   `connect_slack` (`POST /agent/{id}/slack`, the sole writer of
+   `AgentRegistry.slack_user_id` — column kept, no writers, same precedent as
+   `WRITER_GRANTBOT`). `reopen_proposal`'s Slack-post branch is deleted too —
+   the DB inbox (`record_pi_message`) is now the *only* path, unconditionally;
+   the route survives because it still files the rating=0 `ProposalReview` and
+   a record of the guidance, which the read-only `/conversations` page still
+   shows. `record_pi_dm` is deleted (zero production callers once
+   `pi_handler.py` was gone); `pi_dm_messages`/`PiDmMessage` are kept per
+   decision 5. `SimulationEngine._poll_slack_for_human_messages` is renamed to
+   `_poll_slack_for_bot_messages` and loses its human branch outright — a
+   human Slack message is no longer ingested at all, not even for
+   observability.
+
+   This wave also closes the trigger loop the earlier removals left open:
+   every GATED `MessageLog` read (`get_new_top_level_posts`/
+   `get_replies_to_agent_posts`/`get_tags_for_agent`/`has_new_reply_from_other`
+   — `src/agent/message_log.py`) now filters out human-authored
+   (`is_bot=False`) entries unconditionally, independent of the cohort gate.
+   Before this fix, the sole surviving `is_bot=False` producer
+   (`reopen_proposal` → `record_pi_message`) could still have set a bot's
+   `has_pending_reply`, granted reactive priority via `_owes_reply`, or (via
+   `SimulationEngine._infer_agent_id`'s substring match — e.g. "Andrew Su
+   (PI)" contains agent_id "su") fabricated a Phase-3 thread activation
+   misattributed to a bot that never posted anything. `_entry_allowed`'s own
+   human-bypass clause (`src/agent/message_log.py`, cohort-system-v2 §5.1) is
+   untouched — it is a general-purpose cohort-gate primitive with its own
+   test suite (`test_cohort_isolation.py::TestGateHelper`) — but is no longer
+   reachable from any of the four GATED methods above, which now filter
+   `is_bot` before ever calling it.
 4. **Phase-2 prompts.** §9's "kept on disk, documented inactive" treatment is
    superseded: the four `phase2-*.md` files, `build_phase2_scan_prompt`/
    `build_phase2_prune_prompt`/`build_scan_system_prompt`, `_phase2_scan_filter`/

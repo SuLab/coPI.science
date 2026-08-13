@@ -244,7 +244,6 @@ def backfill_profile_revisions():
             count = 0
             for profile_type, subdir in [
                 ("public", "profiles/public"),
-                ("private", "profiles/private"),
                 ("memory", "profiles/memory"),
             ]:
                 dirpath = Path(subdir)

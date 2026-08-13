@@ -1,4 +1,4 @@
-"""Live integration tests for the agent page — all 16 endpoints of routers/agent_page.py.
+"""Live integration tests for the agent page — all 14 endpoints of routers/agent_page.py.
 
 Real ASGI requests, real Postgres, real Jinja templates, real invitation/reopen
 flows. Task T8 of .notes/full-system-test-plan.md.
@@ -416,13 +416,16 @@ async def test_signup_twice_does_not_create_a_second_agent(client, db_session):
 # replies to anything, hub-and-spoke only), so a freshly migrated channel
 # would be a dead room nothing ever posts in again. reopen no longer creates
 # ANY private channel: it always posts the PI's guidance directly into the
-# proposal's origin thread (Slack, if the agent has a token; the DB inbox
-# otherwise), regardless of that thread's visibility. `enable_private_refinement`
-# and the migration service it gated (`src/services/private_channels.py`) were
-# both removed outright in the 2026-08-12 removal-cycle consolidation sweep,
-# once no caller — including the inbound-email reply path,
-# `src/services/email_inbound.py`, whose own human-PI-interaction surface is
-# separately retired — read the setting any longer.
+# proposal's origin thread's DB inbox, regardless of that thread's visibility.
+# `enable_private_refinement` and the migration service it gated
+# (`src/services/private_channels.py`) were both removed outright in the
+# 2026-08-12 removal-cycle consolidation sweep, once no caller — including the
+# inbound-email reply path, `src/services/email_inbound.py`, whose own
+# human-PI-interaction surface is separately retired — read the setting any
+# longer. The Slack-post branch itself (posting the guidance into Slack when
+# the agent had a bot token) was removed in the same removal cycle's final
+# wave: there is no PI-bot interaction surface left for a bot to re-engage
+# through, so the DB inbox is now the only path, unconditionally.
 # ===========================================================================
 
 
@@ -590,51 +593,6 @@ async def test_reopening_an_already_private_threads_posts_there_directly(
     assert inbox[0].channel_name == "priv-existing"
     assert slack.calls == []
 
-
-async def test_reopen_via_slack_finds_a_channel_past_the_first_page(
-    client, db_session, world, slack
-):
-    """reopen's post-to-Slack path resolves the channel id through the whole of
-    conversations.list, not just page one.
-
-    It used to call ``conversations_list(limit=200)`` once and scan that page, so
-    a workspace with more channels than fit in one page answered "Channel #x not
-    found" for a channel that exists — defect 11/12. The route now goes through
-    ``slack_web.list_channel_ids``, which follows every cursor, so the target on
-    page **two** below is the whole point of this test.
-    """
-    world.agent.slack_bot_token = "xoxb-fake-for-tests"   # flips Slack on
-    await db_session.flush()
-
-    pages = [
-        {"channels": [{"name": "decoy", "id": "C-DECOY"}],
-         "response_metadata": {"next_cursor": "page2"}},
-        {"channels": [{"name": world.td.channel, "id": "C-TARGET"}],
-         "response_metadata": {"next_cursor": ""}},
-    ]
-    seen: list[dict] = []
-
-    def _list(**kwargs):
-        seen.append(kwargs)
-        return pages[len(seen) - 1]
-
-    slack.stub("conversations_list", _list)
-    slack.stub("chat_postMessage", {"ok": True, "ts": "1700000000.000900"})
-
-    assert (await _reopen(client, world, world.td, world.pi)).status_code == 302
-
-    assert len(seen) == 2, "one page only — the pagination defect is back"
-    assert seen[1]["cursor"] == "page2"
-    posted = [kw for name, kw in slack.calls if name == "chat_postMessage"]
-    assert len(posted) == 1
-    assert posted[0]["channel"] == "C-TARGET", (
-        "the channel on page two was not resolved"
-    )
-    assert posted[0]["thread_ts"] == world.td.thread_id, (
-        "the guidance must stay in the proposal thread, not the channel root"
-    )
-    # reopen never mints a NEW private refinement channel.
-    assert await _private_channels(db_session) == []
 
 
 # ===========================================================================
@@ -944,100 +902,6 @@ async def test_the_dashboard_counts_only_this_agents_activity_and_titles_the_pro
     assert "A shared assay platform" in page2.text
 
 
-async def test_posting_a_message_writes_a_pi_row_into_the_named_channel(
-    client, db_session, world
-):
-    r = await client.post(
-        f"/agent/{OWNER_AGENT}/message",
-        data={"channel_name": "general", "content": "  Let's aim at the assay.  ",
-              "tag_bot": "1"},
-        headers=_auth(world.pi.id),
-    )
-    assert r.status_code == 302
-    assert r.headers["location"] == f"/agent/{OWNER_AGENT}/conversations?posted=1"
-
-    msg = (await db_session.execute(
-        select(AgentMessage).where(AgentMessage.channel_name == "general")
-    )).scalar_one()
-    assert msg.is_bot is False
-    assert msg.agent_id is None
-    assert msg.sender_name == "Pat Owner (PI)"
-    assert msg.content == "@OwnerBot Let's aim at the assay."  # tag_bot prepends
-    assert msg.visibility == "public"
-
-    # …and it is visible on the read view (control that the write is reachable).
-    page = await client.get(f"/agent/{OWNER_AGENT}/conversations",
-                            headers=_auth(world.pi.id))
-    assert page.status_code == 200
-    assert "Let&#39;s aim at the assay." in page.text or "aim at the assay" in page.text
-
-
-async def test_posting_an_empty_message_is_rejected(client, db_session, world):
-    r = await client.post(
-        f"/agent/{OWNER_AGENT}/message",
-        data={"channel_name": "general", "content": "   "},
-        headers=_auth(world.pi.id),
-    )
-    assert r.status_code == 400
-    assert (await db_session.execute(select(AgentMessage))).scalars().all() == []
-
-    # Control: non-empty content on the same route does write.
-    ok = await client.post(
-        f"/agent/{OWNER_AGENT}/message",
-        data={"channel_name": "general", "content": "real"},
-        headers=_auth(world.pi.id),
-    )
-    assert ok.status_code == 302
-    assert len((await db_session.execute(select(AgentMessage))).scalars().all()) == 1
-
-
-async def test_a_pi_cannot_post_into_another_pairs_private_channel(
-    client, db_session, world
-):
-    """A pre-existing (legacy) collab_private channel this PI has no membership
-    in. reopen no longer produces these (fix 9), so build one directly via
-    factories — exactly the "legacy viewing/discovery" surface that stays
-    supported for channels that already exist; only NEW private-channel
-    creation was removed."""
-    third_user, _ = await _agent_for(
-        db_session, name="Thea Third", email="thea@example.org",
-        agent_id=THIRD_AGENT, bot_name="ThirdBot",
-    )
-    private = await factories.make_agent_channel(
-        db_session, run=world.run, channel_name="priv-other-third",
-        channel_type="collaboration", visibility=VISIBILITY_COLLAB_PRIVATE,
-        created_by_agent=OTHER_AGENT,
-    )
-    await factories.make_private_channel_member(
-        db_session, channel=private, role="bot", agent_id=OTHER_AGENT,
-    )
-    await factories.make_private_channel_member(
-        db_session, channel=private, role="bot", agent_id=THIRD_AGENT,
-    )
-    await factories.make_private_channel_member(
-        db_session, channel=private, role="pi", agent_id=None, user_id=world.other_pi.id,
-    )
-    await db_session.flush()
-    assert private.visibility == VISIBILITY_COLLAB_PRIVATE
-
-    await client.post(
-        f"/agent/{OWNER_AGENT}/message",
-        data={"channel_name": private.channel_name, "content": "eavesdropping"},
-        headers=_auth(world.pi.id),
-    )
-    intruder = (await db_session.execute(
-        select(AgentMessage).where(
-            AgentMessage.channel_name == private.channel_name,
-            AgentMessage.is_bot.is_(False),
-        )
-    )).scalars().all()
-    assert intruder == [], (
-        "a PI with no membership in this collab_private channel wrote into it: "
-        f"{[m.content for m in intruder]}"
-    )
-    assert third_user is not None
-
-
 async def test_saving_the_public_profile_updates_the_pis_profile_not_the_editors(
     client, db_session, world, delegated
 ):
@@ -1070,58 +934,8 @@ async def test_saving_the_public_profile_updates_the_pis_profile_not_the_editors
     assert delegate_profile.research_summary == "Delegate's own"
 
 
-async def test_connect_slack_stores_the_pis_slack_user_id(client, db_session, world, slack):
-    world.agent.slack_bot_token = "xoxb-fake-for-tests"
-    await db_session.flush()
-    slack.stub("users_lookupByEmail", {"user": {"id": "U-PI"}})
-
-    r = await client.post(
-        f"/agent/{OWNER_AGENT}/slack",
-        data={"email": "pi@example.org"},
-        headers=_auth(world.pi.id),
-    )
-    assert r.status_code == 302 and "slack_error" not in r.headers["location"]
-    agent = (await db_session.execute(
-        select(AgentRegistry).where(AgentRegistry.agent_id == OWNER_AGENT)
-    )).scalar_one()
-    assert agent.slack_user_id == "U-PI"
-
-
-async def test_connect_slack_reports_a_lookup_failure_without_writing(
-    client, db_session, world, slack
-):
-    world.agent.slack_bot_token = "xoxb-fake-for-tests"
-    await db_session.flush()
-
-    def _not_found(**kwargs):
-        raise RuntimeError("users_not_found")
-
-    slack.stub("users_lookupByEmail", _not_found)
-    r = await client.post(
-        f"/agent/{OWNER_AGENT}/slack",
-        data={"email": "nobody@example.org"},
-        headers=_auth(world.pi.id),
-    )
-    assert r.status_code == 302 and "slack_error" in r.headers["location"]
-    agent = (await db_session.execute(
-        select(AgentRegistry).where(AgentRegistry.agent_id == OWNER_AGENT)
-    )).scalar_one()
-    assert agent.slack_user_id is None
-
-    # Control: the same route with a resolving lookup does write.
-    slack.stub("users_lookupByEmail", {"user": {"id": "U-PI"}})
-    assert (await client.post(
-        f"/agent/{OWNER_AGENT}/slack", data={"email": "pi@example.org"},
-        headers=_auth(world.pi.id),
-    )).status_code == 302
-    agent = (await db_session.execute(
-        select(AgentRegistry).where(AgentRegistry.agent_id == OWNER_AGENT)
-    )).scalar_one()
-    assert agent.slack_user_id == "U-PI"
-
-
 # ===========================================================================
-# 6. Authorization, all 16 endpoints
+# 6. Authorization, all 14 endpoints
 # ===========================================================================
 
 
@@ -1145,8 +959,6 @@ ENDPOINTS: list[Ep] = [
     Ep("GET", "/agent/{agent_id}/dashboard", "/agent/{agent}/dashboard"),
     Ep("GET", "/agent/{agent_id}/conversations", "/agent/{agent}/conversations"),
     Ep("GET", "/agent/{agent_id}/thread/{message_ts}", "/agent/{agent}/thread/{ts}"),
-    Ep("POST", "/agent/{agent_id}/message", "/agent/{agent}/message",
-       {"channel_name": "general", "content": "hello"}),
     Ep("GET", "/agent/{agent_id}/public-profile", "/agent/{agent}/public-profile"),
     Ep("GET", "/agent/{agent_id}/public-profile/edit", "/agent/{agent}/public-profile/edit"),
     Ep("POST", "/agent/{agent_id}/public-profile/save", "/agent/{agent}/public-profile/save",
@@ -1155,8 +967,6 @@ ENDPOINTS: list[Ep] = [
        "/agent/{agent}/proposals/{td}/review", {"rating": "3"}),
     Ep("POST", "/agent/{agent_id}/proposals/{thread_decision_id}/reopen",
        "/agent/{agent}/proposals/{td}/reopen", {"guidance": "refine the aims"}),
-    Ep("POST", "/agent/{agent_id}/slack", "/agent/{agent}/slack",
-       {"email": "pi@example.org"}, owner_only=True),
     Ep("POST", "/agent/{agent_id}/delegates/connect-slack",
        "/agent/{agent}/delegates/connect-slack"),
     Ep("POST", "/agent/{agent_id}/delegates/invite", "/agent/{agent}/delegates/invite",
@@ -1189,7 +999,7 @@ def test_the_endpoint_table_matches_the_registered_routes():
         f"missing from ENDPOINTS: {sorted(registered - listed)}; "
         f"stale entries: {sorted(listed - registered)}"
     )
-    assert len(ENDPOINTS) == 16
+    assert len(ENDPOINTS) == 14
 
 
 def _path(ep: Ep, world, delegated=None, ts: str = "0.0000") -> str:

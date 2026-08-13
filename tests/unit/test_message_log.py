@@ -211,6 +211,40 @@ class TestHasNewReplyFromOther:
         log.append(_post("2.0", "general", "wiseman", "WisemanBot", "Old reply", thread_ts="1"))
         assert log.has_new_reply_from_other("1", "su", since=3.0) is False
 
+    def test_ignores_a_human_reply(self, log):
+        """2026-08-12 removal cycle: a human-authored (is_bot=False) entry in
+        an active thread must never register as a new reply from the other
+        participant — there is no PI-bot interaction surface left for it to
+        feed. Checked both gated and ungated: the ungated path
+        (allowed_sender_ids=None) is what `_phase4_reply_threads` uses for an
+        already-open thread, and it bypasses the cohort gate entirely, so the
+        human filter has to be enforced independently of it."""
+        log.append(_post("1", "general", "su", "SuBot", "Root"))
+        human = LogEntry(
+            ts="2", channel="general", sender_agent_id=None,
+            sender_name="Andrew Su (PI)", content="guidance", thread_ts="1",
+            posted_at=2.0, is_bot=False,
+        )
+        log.append(human)
+        assert log.has_new_reply_from_other("1", "su", since=0) is False
+        assert log.has_new_reply_from_other("1", "su", since=0, allowed_sender_ids=None) is False
+        assert log.has_new_reply_from_other(
+            "1", "su", since=0, allowed_sender_ids={"wiseman"}
+        ) is False
+
+    def test_still_detects_a_bot_reply_alongside_a_human_one(self, log):
+        """Control for the human-exclusion test above: a genuine bot reply in
+        the same thread must still be detected, so the filter is provably
+        about is_bot and not a thread-wide suppression."""
+        log.append(_post("1", "general", "su", "SuBot", "Root"))
+        log.append(LogEntry(
+            ts="2", channel="general", sender_agent_id=None,
+            sender_name="Andrew Su (PI)", content="guidance", thread_ts="1",
+            posted_at=2.0, is_bot=False,
+        ))
+        log.append(_post("3", "general", "wiseman", "WisemanBot", "Real reply", thread_ts="1"))
+        assert log.has_new_reply_from_other("1", "su", since=0) is True
+
 
 # ---------------------------------------------------------------
 # get_last_bot_sender_in_channel (private-channel turn-taking)

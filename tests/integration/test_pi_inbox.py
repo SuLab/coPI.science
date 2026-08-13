@@ -1,24 +1,23 @@
 """Integration tests for the DB-native PI inbox (src/services/pi_inbox.py).
 
-These helpers are how a PI's web-authored messages and DMs enter the simulation
-when Slack is off — the engine ingests the rows they write. Exercised against the
-real migrated Postgres so the actual agent_messages / pi_dm_messages schema
-(including the 0019/0020 columns) is validated. See specs/local-db-conversations.md.
+``record_pi_message`` is how a PI's web-authored guidance (``reopen_proposal``)
+enters the simulation's DB inbox when Slack is off — the engine ingests the row
+for history/observability only (2026-08-12 PI-interaction removal cycle;
+``MessageLog``'s GATED reads filter it out of every trigger path). Exercised
+against the real migrated Postgres so the actual ``agent_messages`` schema
+(including the 0019 columns) is validated. See specs/local-db-conversations.md.
+``record_pi_dm``/``pi_dm_messages`` are out of scope here — that function was
+deleted (zero production callers once ``pi_handler.py`` was removed); the table
+itself is kept per decision 5.
 """
 
-import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import select
 
-from src.models import AgentMessage, PiDmMessage
-from src.services.pi_inbox import (
-    get_latest_run_id,
-    record_pi_dm,
-    record_pi_message,
-    web_pi_user_id,
-)
+from src.models import AgentMessage
+from src.services.pi_inbox import get_latest_run_id, record_pi_message
 from tests import factories
 
 pytestmark = pytest.mark.integration
@@ -72,27 +71,3 @@ async def test_record_pi_message_reply_and_local_channel_fallback(db_session):
     assert msg.visibility == "public"
     assert msg.thread_ts == "123.456"
     assert msg.phase == "thread_reply"   # has a thread_ts
-
-
-async def test_record_pi_dm_inbound_and_outbound(db_session):
-    run = await factories.make_simulation_run(db_session)
-    uid = uuid.uuid4()
-    inbound = await record_pi_dm(
-        db_session, run_id=run.id, agent_id="su", pi_user_id=web_pi_user_id(uid),
-        direction="inbound", content="always cc me on proposals", sender_name="PI",
-    )
-    await record_pi_dm(
-        db_session, run_id=run.id, agent_id="su", pi_user_id=web_pi_user_id(uid),
-        direction="outbound", content="noted — will do", sender_name="SuBot",
-    )
-    await db_session.flush()
-
-    assert inbound.pi_user_id == f"local:{uid}"
-    rows = (await db_session.execute(
-        select(PiDmMessage).where(PiDmMessage.simulation_run_id == run.id)
-        .order_by(PiDmMessage.posted_at.asc())
-    )).scalars().all()
-    assert [r.direction for r in rows] == ["inbound", "outbound"]
-    assert rows[0].content == "always cc me on proposals"
-    assert rows[1].agent_id == "su"
-    assert all(r.ts and r.posted_at > 0 for r in rows)

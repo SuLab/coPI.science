@@ -479,7 +479,7 @@ class AgentSlackClient:
         and page 1 came back as the OLDEST pair (newest-first within the page). So
         reversing the concatenated walk — which is exactly what a single page needed, and
         what this client did — assembled the pages newest-block-first as soon as
-        pagination was added. ``_poll_slack_for_human_messages`` advances
+        pagination was added. ``_poll_slack_for_bot_messages`` advances
         ``_poll_cursors[ch_id]`` to the last message it iterates, so the cursor landed on
         the second-oldest message of the window instead of the newest, and every later
         tick re-polled messages it had already handled: idempotent ``MessageLog.append``

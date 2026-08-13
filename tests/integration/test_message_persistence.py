@@ -471,7 +471,7 @@ async def test_polled_bot_message_keeps_its_slack_mapping(db_session):
     # start() registers this; the poller's append has to reach the DB buffer.
     engine.message_log.set_persist_callback(engine._enqueue_persist)
 
-    await engine._poll_slack_for_human_messages()
+    await engine._poll_slack_for_bot_messages()
 
     entry = engine.message_log.get_entry("1700000123.456789")
     assert entry is not None

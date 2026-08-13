@@ -93,6 +93,17 @@ class MessageLog:
         get_new_top_level_posts, get_replies_to_agent_posts, get_tags_for_agent,
         has_new_reply_from_other
 
+    Every GATED method also drops human-authored (``is_bot=False``) entries
+    unconditionally, independent of ``allowed_sender_ids`` — added 2026-08-12
+    (PI-interaction removal cycle) as the permanent trigger-loop guard: there
+    is no PI-bot interaction surface left, so a human row must never set
+    ``has_pending_reply``, grant reactive priority, or activate a new thread.
+    This is a separate filter each method applies before calling
+    ``_entry_allowed``; that helper's own human-bypass clause is untouched
+    (it is a general cohort-gate primitive with its own tests — see
+    ``test_cohort_isolation.py``'s ``TestGateHelper``) but is no longer
+    reachable from any of the calls above.
+
     UNGATED by design — thread-internal, self-authored, or bookkeeping:
         get_entry, get_thread_history, get_thread_message_count,
         get_agent_top_level_posts, get_last_bot_sender_in_channel,
@@ -184,8 +195,16 @@ class MessageLog:
         Return top-level posts (thread_ts is None) in the given channels,
         posted after `since`, excluding posts from `exclude_agent_id`.
 
-        When `allowed_sender_ids` is provided, only posts from those agents (plus
-        human PI posts) are returned — the cohort gate (see specs/cohort-system.md).
+        When `allowed_sender_ids` is provided, only posts from those agents are
+        returned — the cohort gate (see specs/cohort-system.md). Human-authored
+        (`is_bot=False`) entries never come back from here, gate or no gate:
+        there is no PI-bot interaction surface left for a human top-level post
+        to activate (2026-08-12 removal cycle). This is a filter this method
+        applies on its own, ahead of `_entry_allowed` — that helper's own
+        human-bypass clause is untouched (it is still the tested, general-
+        purpose cohort-gate primitive; see test_cohort_isolation.py's
+        TestGateHelper) but is no longer reachable from here, since a human
+        entry is dropped before `_entry_allowed` ever sees it.
                 COHORT-GATE: GATED via allowed_sender_ids.
         """
         results = []
@@ -195,6 +214,8 @@ class MessageLog:
             if entry.thread_ts is not None:
                 continue
             if entry.channel not in channels:
+                continue
+            if not entry.is_bot:
                 continue
             if entry.sender_agent_id == exclude_agent_id:
                 continue
@@ -292,7 +313,12 @@ class MessageLog:
         where the reply is from a different agent.
 
         When `allowed_sender_ids` is provided, replies from non-cohort agents are
-        excluded (the cohort gate; human PI replies always pass).
+        excluded (the cohort gate). Human-authored (`is_bot=False`) replies are
+        excluded unconditionally, gate or no gate — there is no PI-bot
+        interaction surface left for a human reply to activate a thread
+        (2026-08-12 removal cycle). See get_new_top_level_posts's docstring for
+        why this is a separate filter from `_entry_allowed`'s own (untouched)
+        human-bypass clause.
                 COHORT-GATE: GATED via allowed_sender_ids.
         """
         # First, find all top-level posts by this agent
@@ -307,6 +333,8 @@ class MessageLog:
             if entry.thread_ts not in agent_post_ts:
                 continue
             if entry.sender_agent_id == agent_id:
+                continue
+            if not entry.is_bot:
                 continue
             if not _entry_allowed(entry, allowed_sender_ids):
                 continue
@@ -324,13 +352,22 @@ class MessageLog:
         posted since the given cursor.
 
         When `allowed_sender_ids` is provided, tags authored by non-cohort agents
-        are excluded (the cohort gate; human PI tags always pass).
+        are excluded (the cohort gate). Human-authored (`is_bot=False`) tags are
+        excluded unconditionally, gate or no gate — there is no PI-bot
+        interaction surface left for a human @-mention to activate a thread
+        (2026-08-12 removal cycle; this closes the exact substring-match trap
+        a human sender name like "Andrew Su (PI)" could otherwise walk into
+        via `SimulationEngine._infer_agent_id`). See get_new_top_level_posts's
+        docstring for why this is a separate filter from `_entry_allowed`'s own
+        (untouched) human-bypass clause.
                 COHORT-GATE: GATED via allowed_sender_ids.
         """
         tag = f"@{agent_bot_name}".lower()
         results = []
         for entry in self._entries:
             if entry.posted_at <= since:
+                continue
+            if not entry.is_bot:
                 continue
             if not _entry_allowed(entry, allowed_sender_ids):
                 continue
@@ -401,6 +438,17 @@ class MessageLog:
         threads the gate had rejected. Callers pass ``allowed_sender_ids=None`` for
         a thread that is already open and not grandfathered — an open conversation
         is entitled to conclude (v2 §8) — and pass the agent's gate otherwise.
+
+        A human-authored (``is_bot=False``) entry is never treated as "a new
+        reply from the other participant", regardless of the gate — including
+        the ``allowed_sender_ids=None`` (fully open) case, which bypasses
+        ``_entry_allowed`` entirely and would otherwise let a human row through
+        unconditionally. There is no PI-bot interaction surface left for a
+        human reply to set ``has_pending_reply``, grant reactive priority, or
+        (via ``_reply_to_thread``'s message-count recompute) shift a thread's
+        ordinal (2026-08-12 removal cycle). This closes the loop
+        ``post_agent_message``/``reopen_proposal`` (via
+        ``src/services/pi_inbox.py::record_pi_message``) used to feed.
         """
         for entry in self._entries:
             if entry.thread_ts != thread_ts:
@@ -408,6 +456,8 @@ class MessageLog:
             if entry.posted_at <= since:
                 continue
             if entry.sender_agent_id == agent_id:
+                continue
+            if not entry.is_bot:
                 continue
             if not _entry_allowed(entry, allowed_sender_ids):
                 continue
