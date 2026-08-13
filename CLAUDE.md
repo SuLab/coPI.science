@@ -261,7 +261,3 @@ per-phase behaviour lives in `prompts/roles/scout_hub/` and `src/agent/thread_gu
   most specific terms when the full phrase misses — before that backoff existed, every
   production search ANDed in domain-generic words like "inhibitor" and returned zero hits,
   reported to PIs as clean novelty. An empty title search is never FTO.
-- **`retrieve_foa` is withheld** from this role by `prompts/roles/scout_hub/role.toml`'s
-  tool allow-list. `prompts/roles/scout_hub/agent-system.md` explicitly tells the agent it
-  does not have this tool (so it doesn't hallucinate calling it); the phase-4 template
-  (`phase4-thread-reply.md`) has no need to and does not mention it either way.
