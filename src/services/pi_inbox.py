@@ -111,10 +111,11 @@ async def record_pi_message(
 ) -> AgentMessage:
     """Insert a human/PI message (is_bot=False) into agent_messages.
 
-    The engine's inbound poller picks it up on its next tick, appends it to the
-    live MessageLog, and routes it through PI handling (proposal-review clear,
-    thread reopen, pi_context, @bot tags). Does not commit — the caller owns the
-    transaction.
+    The engine's inbound poller (``SimulationEngine._poll_inbound_from_db``)
+    picks it up on its next tick and appends it to the live MessageLog for
+    history/observability only — human-PI-to-bot interaction is retired
+    outright (2026-08-12 removal cycle), so there is no PI-handling path left
+    to route it into. Does not commit — the caller owns the transaction.
     """
     channel_id, visibility = await _resolve_channel(db, run_id, channel_name)
     ts = mint_local_ts()

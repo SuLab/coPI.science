@@ -16,20 +16,18 @@ class ThreadState:
     status: str = "active"  # active | proposed | closed
     abstracts_other: int = 0  # tool-use counters
     full_text: int = 0
-    # pi_context/message_count_offset: had one writer,
-    # SimulationEngine._sync_proposal_reviews_from_db's web-guidance reopen
-    # path, which the reply-only-hub reconciliation task deleted (nothing on
-    # this branch creates or reviews proposals anymore, so there was nothing
-    # left to sync a web review of). Both fields are now permanently at their
-    # dataclass defaults (None / 0) — no code writes either one anymore.
-    # `message_count_offset` is kept because it is still read generically at
-    # simulation.py:_reply_to_thread's message-count computation (a no-op
-    # subtraction of 0 now, harmless). `pi_context` is read nowhere at all —
+    # message_count_offset: had one writer, SimulationEngine
+    # ._sync_proposal_reviews_from_db's web-guidance reopen path, which the
+    # reply-only-hub reconciliation task deleted (nothing on this branch
+    # creates or reviews proposals anymore, so there was nothing left to sync
+    # a web review of). It is now permanently at its dataclass default (0) —
+    # no code writes it anymore — but is kept because it is still read
+    # generically at simulation.py:_reply_to_thread's message-count
+    # computation (a no-op subtraction of 0 now, harmless). Its sibling field
+    # `pi_context` had the same writer and was read nowhere at all once
     # Agent._compose_system_prompt's phase-4 injection that used to read it
-    # was removed alongside the live PI-Slack/DM paths — but the field is left
-    # in place rather than deleted to keep this a data-only, structural
-    # removal; dropping the field itself is a separate cleanup.
-    pi_context: str | None = None  # PI posted in this thread — their message
+    # was removed alongside the live PI-Slack/DM paths — it was dropped
+    # outright in the 2026-08-12 removal-cycle consolidation sweep.
     message_count_offset: int = 0  # subtract from message_count for PI-reopened threads
     empty_response_count: int = 0  # consecutive empty/unparseable Phase 4 replies
     # Cohort gate: True when `other_agent_id` is no longer a permitted sender for
