@@ -77,3 +77,76 @@ def test_llm_fallback_section_list_matches_new_contract():
         f"fallback string headers out of order relative to {NEW_SECTION_HEADERS}: "
         f"{fallback_src!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Final audit wave (2026-08-12): the same mesh-era residue turned up in three
+# more places outside the prompts-only phrase guard's blind spot -- the
+# welcome email (src/services/email.py), agent.py's emergency system-prompt
+# fallback (_default_system_prompt), and simulation.py's memory-synthesis
+# prompt (_update_agent_memory). Each was rewritten to the pitch-only model
+# (a PI's agent pitches ideas to BlackbirdBot, the scouting hub; there is no
+# lab-to-lab collaboration or refinement handshake) in three sibling commits.
+# This guard covers all three so the phrases can't reappear silently.
+# ---------------------------------------------------------------------------
+
+EMAIL_PY = ROOT / "src/services/email.py"
+AGENT_PY = ROOT / "src/agent/agent.py"
+SIMULATION_PY = ROOT / "src/agent/simulation.py"
+
+MESH_ERA_PHRASES = [
+    "collaboration opportunities",
+    "facilitate scientific collaboration",
+    "re-engage to refine",
+    "complementarity",
+]
+
+
+def _default_system_prompt_source() -> str:
+    """Isolate agent.py's `_default_system_prompt` fallback.
+
+    It is the last top-level function in the module (verified: nothing
+    follows it), so marker-to-EOF is exactly its region -- no need to hunt
+    for a closing boundary.
+    """
+    text = AGENT_PY.read_text(encoding="utf-8")
+    marker = "def _default_system_prompt"
+    assert marker in text, f"{AGENT_PY} no longer defines _default_system_prompt"
+    return text[text.index(marker):]
+
+
+def _update_agent_memory_prompt_source() -> str:
+    """Isolate simulation.py's `_update_agent_memory` method body.
+
+    Bounded by the next MODULE-level ``def`` (0 indentation), since this
+    method is the last one on its class and module-level helper functions
+    resume immediately afterward.
+    """
+    text = SIMULATION_PY.read_text(encoding="utf-8")
+    marker = "async def _update_agent_memory"
+    assert marker in text, f"{SIMULATION_PY} no longer defines _update_agent_memory"
+    body = text[text.index(marker):]
+    next_def = body.find("\ndef ", 1)
+    return body if next_def == -1 else body[:next_def]
+
+
+@pytest.mark.parametrize("phrase", MESH_ERA_PHRASES)
+def test_retired_phrase_absent_from_welcome_email(phrase):
+    text = EMAIL_PY.read_text(encoding="utf-8").lower()
+    assert phrase not in text, f"retired phrase {phrase!r} still present in {EMAIL_PY}"
+
+
+@pytest.mark.parametrize("phrase", MESH_ERA_PHRASES)
+def test_retired_phrase_absent_from_default_system_prompt(phrase):
+    text = _default_system_prompt_source().lower()
+    assert phrase not in text, (
+        f"retired phrase {phrase!r} still present in agent.py's _default_system_prompt"
+    )
+
+
+@pytest.mark.parametrize("phrase", MESH_ERA_PHRASES)
+def test_retired_phrase_absent_from_update_agent_memory_prompt(phrase):
+    text = _update_agent_memory_prompt_source().lower()
+    assert phrase not in text, (
+        f"retired phrase {phrase!r} still present in simulation.py's _update_agent_memory"
+    )
