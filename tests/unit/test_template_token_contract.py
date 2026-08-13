@@ -1,6 +1,6 @@
 """Bidirectional template <-> builder token-contract test (design invariant ii).
 
-For each phase-2/4/5 builder in `src.agent.agent.Agent`, every bare `{token}`
+For each phase-4/5 builder in `src.agent.agent.Agent`, every bare `{token}`
 in its covered template file(s) must have a matching `.replace("{token}", ...)`
 substitution somewhere in the builder's own source, AND every `.replace(
 "{token}", ...)` call in the builder's source must target a token that
@@ -35,10 +35,10 @@ REPLACE_RE = re.compile(r'\.replace\(\s*"(\{[a-z_]+\})"')
 IDENTITY_TOKENS = {"{bot_name}", "{pi_name}", "{agent_id}"}
 
 # Builder -> its covered templates (pi_lab default + scout_hub override, where
-# a scout_hub variant exists). {new_posts}/{interesting_posts} live in the
-# phase-2 builders, which are dormant in the running simulation (Task 8) but
-# retained on disk with matching "disabled in code" preambles in their
-# templates — still real contracts, so they're covered here, not excluded.
+# a scout_hub variant exists). The phase-2 scan/prune builders and their
+# `{new_posts}`/`{interesting_posts}` tokens were deleted outright by
+# removal-cycle task 7 (they were dormant in the running simulation since
+# Task 8, with zero callers) — nothing phase-2-shaped remains to cover here.
 BUILDER_TEMPLATES: dict[str, list[str]] = {
     "build_phase4_prompt": [
         "prompts/phase4-thread-reply.md",

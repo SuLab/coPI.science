@@ -116,10 +116,10 @@ async def test_scout_hub_never_reaches_the_llm_in_phase_5_even_when_saturated(mo
 
 
 def test_scout_hub_gate_is_the_first_check_in_phase5_new_post():
-    """Source-inspection pin (mirrors test_phase2_guard.py's pattern): the
-    hard gate must be visible in `_phase5_new_post`'s own source as the
-    check that runs before ``get_settings()`` — i.e. before any other work —
-    not merely somewhere in the function."""
+    """Source-inspection pin: the hard gate must be visible in
+    `_phase5_new_post`'s own source as the check that runs before
+    ``get_settings()`` — i.e. before any other work — not merely somewhere in
+    the function."""
     src = inspect.getsource(SimulationEngine._phase5_new_post)
     gate_pos = src.find('agent.role == "scout_hub"')
     settings_pos = src.find("get_settings()")

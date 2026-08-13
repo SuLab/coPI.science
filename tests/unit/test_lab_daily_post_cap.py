@@ -1,31 +1,25 @@
-"""Task 8 (branch2 engine reconciliation) deletes Phase 2 as a code path:
-`_run_turn` stops calling `_phase2_scan_filter` and stops gating Phase 5 on a
-`phase2_ran` flag. `_phase2_scan_filter`/`_phase2_prune` stay on disk per
-design §9 (prompts/phase2-*.md are retained for reference) but have no
-caller — this file pins the call site, not the (now dead) function bodies.
+"""Pins the per-role daily post cap: `pi_lab` agents get exactly one pitch per
+day (`lab_daily_post_cap`). `scout_hub` is hard-gated out of `_phase5_new_post`
+entirely (decision 9, reply-only-hub reconciliation) and never reaches the cap
+check at all — see `test_scout_hub_never_reaches_llm_regardless_of_daily_cap`
+below, which pins that the hard gate wins over what daily_post_cap headroom
+would otherwise have allowed.
 
-It also pins the per-role daily post cap: `pi_lab` agents get exactly one
-pitch per day (`lab_daily_post_cap`). `scout_hub` is hard-gated out of
-`_phase5_new_post` entirely now (decision 9, reply-only-hub reconciliation)
-and never reaches the cap check at all — see
-`test_scout_hub_never_reaches_llm_regardless_of_daily_cap` below, which pins
-that the hard gate wins over what daily_post_cap headroom would otherwise
-have allowed.
+Formerly `test_phase2_guard.py`: that file's other test,
+`test_run_turn_has_no_phase2_call_or_gate`, pinned that `_run_turn` never
+called `_phase2_scan_filter` — a source-inspection pin against a function that
+no longer exists at all (removal-cycle task 7 deleted `_phase2_scan_filter`/
+`_phase2_prune`/the phase-2 prompt builders and the `interesting_posts`
+cascade they fed). That pin is now permanently and trivially true, so it was
+deleted rather than kept as dead weight; this file's remaining content — the
+daily-cap tests below — was never about phase-2's existence, so it survives
+under a name that matches what it actually pins.
 """
-import inspect
 import types
 
 from src.agent.agent import Agent
 from src.agent.simulation import SimulationEngine
 from tests.fakes import FakeSlackClient
-
-
-def test_run_turn_has_no_phase2_call_or_gate():
-    """Source-inspection pin (INV-T §5 pattern 3): `_run_turn` must neither
-    call `_phase2_scan_filter` nor gate Phase 5 on a `phase2_ran` flag."""
-    src = inspect.getsource(SimulationEngine._run_turn)
-    assert "_phase2_scan_filter" not in src
-    assert "phase2_ran" not in src
 
 
 def _lab(agent_id="gill", bot_name="GillBot", pi_name="Gill"):

@@ -106,9 +106,6 @@ class ScenarioResult:
     # which is the successful outcome, misread as the failure.
     grandfathered: list = field(default_factory=list)
     grandfathered_at_end: list = field(default_factory=list)
-    # {agent_id: sorted senders whose posts this agent's GATED Phase 2 scan accepted}.
-    # Accumulated every turn, because interesting_posts is consumed as threads form.
-    interesting_senders: dict = field(default_factory=dict)
     strips: dict = field(default_factory=dict)
     messages: int = 0
     agent_messages: int = 0
@@ -130,7 +127,7 @@ class ScenarioResult:
     def diagnosis(self) -> str:
         return (
             f"turns={self.turns_taken} agent_msgs={self.agent_messages} "
-            f"by_agent={self.posts_by_agent} interesting={self.interesting_senders} "
+            f"by_agent={self.posts_by_agent} "
             f"gf_at_split={self.grandfathered} gf_at_end={self.grandfathered_at_end} "
             f"threads={self.threads} "
             f"loose={sorted(self.public_pairs)} strict={sorted(self.public_exchanges)} "
@@ -466,7 +463,6 @@ async def run_scenario(
     errors = []
     taken = 0
     grandfathered_at_split = []
-    interesting = {a: set() for a in roster}
     for t in range(turns):
         if mid_run and t == mid_run[0]:
             await _set_topology(factory, mid_run[1])
@@ -485,12 +481,6 @@ async def run_scenario(
             did = False
         agent.state.last_selected = time.time()
         eng._last_llm_caller = agent.agent_id if did else None
-        # Phase 2's output is consumed as threads form, so accumulate per turn.
-        for aid, a in eng.agents.items():
-            interesting[aid].update(
-                p.sender_agent_id for p in a.state.interesting_posts
-                if p.sender_agent_id
-            )
         await eng._flush_persisted()
 
     await eng._flush_persisted()
@@ -519,7 +509,6 @@ async def run_scenario(
         posts_by_agent=by_agent,
         grandfathered=grandfathered_at_split,
         grandfathered_at_end=_grandfathered_now(),
-        interesting_senders={a: sorted(v) for a, v in interesting.items()},
         seeded_threads=seeded_thread_ids,
         strips=dict(eng._cohort_tags_stripped),
         messages=total,
@@ -554,39 +543,26 @@ async def test_harness_produces_conversation_at_all(scenario_db):
     assert ("cravatt", "su") in res.public_pairs, res.diagnosis()
 
 
-async def test_open_policy_lets_an_uncohorted_agent_be_acted_on(scenario_db):
-    """§5.2 end to end, measured on the read path the gate actually filters.
-
-    Before the asymmetry fix, `su`'s gate was `{su, wiseman}` — it excluded the
-    uncohorted agent, so cravatt's posts never reached su's Phase 2 scan and su could
-    never engage. cravatt could react to anyone and be answered by nobody.
-
-    The assertion is that su's **gated** scan accepted a post authored by cravatt. That
-    is exactly what the bug prevented, and unlike waiting for a thread to spontaneously
-    form it happens on the first turn su takes.
-
-    Control: cravatt, whose gate is off entirely, must likewise find su's posts
-    interesting. If neither direction fired, the run produced nothing and the result is
-    inconclusive rather than a pass.
-    """
-    factory, run_id = scenario_db
-    res = await run_scenario(
-        factory, run_id, policy="open",
-        topology={"alpha": ["su", "wiseman"]}, roster=["su", "cravatt"],
-    )
-    assert not res.errors, res.errors
-    assert res.gates["cravatt"] is None, "the uncohorted agent must be unrestricted"
-    assert "cravatt" in res.gates["su"], (
-        f"the open-policy fix is not in effect. su gate={res.gates['su']}"
-    )
-    assert "su" in res.interesting_senders["cravatt"], (
-        f"INCONCLUSIVE: the unrestricted agent found nothing interesting, so the gated "
-        f"direction below proves nothing. {res.diagnosis()}"
-    )
-    assert "cravatt" in res.interesting_senders["su"], (
-        "REGRESSED: a cohorted agent's gated scan rejected the uncohorted agent's "
-        f"posts under policy=open. {res.diagnosis()}"
-    )
+# `test_open_policy_lets_an_uncohorted_agent_be_acted_on` used to live here. It
+# proved §5.2's open-policy asymmetry fix via Phase 2's gated scan: `su`'s
+# **gated** scan had to accept a post authored by the uncohorted `cravatt`, on
+# the first turn, without waiting for organic thread formation (which four
+# agents over eight turns cannot reliably produce — see this module's own
+# docstring, reason 2). Removal-cycle task 7 deleted Phase 2 outright
+# (`_phase2_scan_filter`/`build_phase2_scan_prompt`/`interesting_posts`), so
+# that evidentiary leg no longer exists, and no other surviving engine path
+# gives a first-turn, pre-conversation signal of "would this agent act on
+# that peer" — Phase 5 no longer scans/replies to a bank of interesting
+# posts at all (locked decision 4 deleted that action), so the only
+# remaining evidence of "the open policy lets this happen" is real thread/
+# message formation, which this same module already treats as unreliable at
+# this roster size and turn count for a single specific pair (hence the
+# deterministic gate-computation checks below, not a repeat here). The
+# claim's gate-computation half is already pinned without any LLM in
+# `tests/unit/test_cohort_isolation.py::TestComputeGates::
+# test_open_policy_uncohorted_agent_is_unrestricted` and
+# `test_open_policy_is_symmetric_with_uncohorted_agents` — deleted rather
+# than left half-working against a field that no longer exists.
 
 
 async def test_hub_converses_with_both_sides_but_spokes_do_not(scenario_db):

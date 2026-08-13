@@ -4,9 +4,10 @@ A bot must not engage with a paper its own PI/lab (co)authored as if the work
 were external. These tests cover DOI extraction, the ``cites_own_paper`` check,
 and that the phase-4 reply prompt builder surfaces the warning.
 
-Branch-2 Task 8 deletes the equivalent Phase 2 scan-prompt injection (Phase 2
-itself is no longer called — see tests/unit/test_phase2_guard.py), so there is
-no longer a scan-prompt-flagging test here; `cites_own_paper` is still used by
+Branch-2 Task 8 deleted the equivalent Phase 2 scan-prompt injection's call
+site, and removal-cycle task 7 deleted Phase 2 itself (the scan/prune prompt
+builders, `_phase2_scan_filter`/`_phase2_prune`) outright, so there is no
+longer a scan-prompt-flagging test here; `cites_own_paper` is still used by
 `build_phase4_prompt`, pinned below.
 """
 

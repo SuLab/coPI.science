@@ -25,7 +25,7 @@ from src.agent.prompt_safety import delimit
 from src.agent.roles import load_role
 from src.agent.slack_client import SlackListingIncomplete, ThreadNotFound
 from src.agent.specialists import required_domains_for
-from src.agent.state import PostRef, ProposalRef, ThreadState
+from src.agent.state import ProposalRef, ThreadState
 from src.agent.tools import execute_tool, tools_for_role
 from src.config import get_settings
 from src.models import (
@@ -902,7 +902,6 @@ class SimulationEngine:
 
         # State-change gate: skip Phase 5 (no LLM call) unless there's
         # new actionable state or the spontaneous post timer has expired.
-        has_interesting = len(agent.state.interesting_posts) > 0
         has_phase4_work = len(phase4_thread_ids) > 0
 
         # Spontaneous post timer — allow one Phase 5 call after enough
@@ -914,10 +913,10 @@ class SimulationEngine:
         since_last_action = time.time() - agent.state.last_phase5_action_time
         spontaneous_ready = since_last_action >= spontaneous_interval
 
-        has_new_work = has_interesting or has_phase4_work
+        has_new_work = has_phase4_work
 
         if has_new_work or spontaneous_ready:
-            await self._phase5_new_post(agent, phase4_thread_ids)
+            await self._phase5_new_post(agent)
         else:
             logger.debug(
                 "[%s] Phase 5: Skipped (no state change, spontaneous in %ds)",
@@ -953,119 +952,6 @@ class SimulationEngine:
                         client.join_channel(ch_id)
             agent.state.subscribed_channels.update(new_channels)
             logger.info("[%s] Phase 1: Joined channels: %s", agent.agent_id, new_channels)
-
-    # ------------------------------------------------------------------
-    # Phase 2: Scan & Filter
-    # ------------------------------------------------------------------
-
-    async def _phase2_scan_filter(self, agent: Agent) -> None:
-        """Scan new top-level posts and decide which to add to interesting_posts.
-
-        Disabled: no caller since the pitch-only reconciliation; prompts/phase2-*.md
-        carry the matching preamble.
-        """
-        settings = get_settings()
-
-        # Get new top-level posts since agent's last turn
-        new_posts = self.message_log.get_new_top_level_posts(
-            since=agent.state.last_seen_cursor,
-            channels=agent.state.subscribed_channels,
-            exclude_agent_id=agent.agent_id,
-            allowed_sender_ids=agent.allowed_sender_ids,
-        )
-
-        # Exclude posts already in interesting_posts or active_threads
-        known_ids = {p.post_id for p in agent.state.interesting_posts}
-        known_ids.update(agent.state.active_threads.keys())
-        new_posts = [p for p in new_posts if p.ts not in known_ids]
-
-        if not new_posts:
-            logger.debug("[%s] Phase 2: No new posts to evaluate", agent.agent_id)
-            return
-
-        # Build post data for LLM
-        post_dicts = [
-            {
-                "post_id": p.ts,
-                "channel": p.channel,
-                "sender": p.sender_name,
-                "content_snippet": p.content,
-            }
-            for p in new_posts
-        ]
-
-        system_prompt, messages = agent.build_phase2_scan_prompt(post_dicts)
-
-        agent.record_api_call()
-        try:
-            response = await generate_agent_response(
-                system_prompt=system_prompt,
-                messages=messages,
-                max_tokens=500,
-                log_meta={"agent_id": agent.agent_id, "phase": "scan"},
-                on_retry=agent.record_api_call,
-            )
-            if not response or not response.strip():
-                logger.warning("[%s] Phase 2: Empty response from LLM, skipping", agent.agent_id)
-                return
-            result = _extract_json(response)
-            selected_ids = set(result.get("selected_post_ids", []))
-
-            # Add selected posts to interesting_posts
-            for post in new_posts:
-                if post.ts in selected_ids:
-                    agent.state.interesting_posts.append(PostRef(
-                        post_id=post.ts,
-                        channel=post.channel,
-                        sender_agent_id=post.sender_agent_id or post.sender_name,
-                        content_snippet=post.content[:200],
-                        posted_at=post.posted_at,
-                    ))
-
-            logger.info(
-                "[%s] Phase 2: Evaluated %d posts, added %d to interesting",
-                agent.agent_id, len(new_posts), len(selected_ids),
-            )
-        except Exception as exc:
-            logger.error("[%s] Phase 2 scan failed: %s", agent.agent_id, exc)
-
-        # Prune if over cap
-        if len(agent.state.interesting_posts) > settings.interesting_posts_cap:
-            await self._phase2_prune(agent)
-
-    async def _phase2_prune(self, agent: Agent) -> None:
-        """Prune interesting_posts to ≤ cap.
-
-        Disabled: no caller since the pitch-only reconciliation; prompts/phase2-*.md
-        carry the matching preamble.
-        """
-        system_prompt, messages = agent.build_phase2_prune_prompt()
-
-        agent.record_api_call()
-        try:
-            response = await generate_agent_response(
-                system_prompt=system_prompt,
-                messages=messages,
-                max_tokens=500,
-                log_meta={"agent_id": agent.agent_id, "phase": "prune"},
-                on_retry=agent.record_api_call,
-            )
-            if not response or not response.strip():
-                logger.warning("[%s] Phase 2 prune: empty response", agent.agent_id)
-                return
-            result = _extract_json(response)
-            keep_ids = set(result.get("keep_post_ids", []))
-
-            before = len(agent.state.interesting_posts)
-            agent.state.interesting_posts = [
-                p for p in agent.state.interesting_posts if p.post_id in keep_ids
-            ]
-            logger.info(
-                "[%s] Phase 2 prune: %d → %d",
-                agent.agent_id, before, len(agent.state.interesting_posts),
-            )
-        except Exception as exc:
-            logger.error("[%s] Phase 2 prune failed: %s", agent.agent_id, exc)
 
     # ------------------------------------------------------------------
     # Phase 3: Activate Threads from Tags
@@ -1523,12 +1409,6 @@ class SimulationEngine:
             if thread_id in ag.state.active_threads:
                 ag.state.active_threads.pop(thread_id, None)
                 removed = True
-            before = len(ag.state.interesting_posts)
-            ag.state.interesting_posts = [
-                p for p in ag.state.interesting_posts if p.post_id != thread_id
-            ]
-            if len(ag.state.interesting_posts) != before:
-                removed = True
             before = len(ag.state.pending_proposals)
             ag.state.pending_proposals = [
                 p for p in ag.state.pending_proposals if p.thread_id != thread_id
@@ -1751,8 +1631,8 @@ class SimulationEngine:
     # Phase 5: New Post (conditional)
     # ------------------------------------------------------------------
 
-    async def _phase5_new_post(self, agent: Agent, phase4_thread_ids: set[str] | None = None) -> None:
-        """Optionally start a new thread or reply to an interesting post.
+    async def _phase5_new_post(self, agent: Agent) -> None:
+        """Optionally start a new top-level thread.
 
         Hard-gated for scout_hub (decision 9, reply-only-hub reconciliation):
         the hub's former standalone :mag: Opportunity Assessment is now the
@@ -1771,7 +1651,6 @@ class SimulationEngine:
             return
 
         settings = get_settings()
-        phase4_thread_ids = phase4_thread_ids or set()
 
         # Stamp the spontaneous-post timer up front: consulting Phase 5 consumes
         # the opportunity regardless of whether we end up posting, skipping, or
@@ -1810,53 +1689,6 @@ class SimulationEngine:
             logger.debug("[%s] Phase 5: Skipped (random)", agent.agent_id)
             return
 
-        # Filter out interesting posts that are already active threads (replied in Phase 4)
-        # or that already have a thread with another agent (2-party limit)
-        available_posts = []
-        for post in agent.state.interesting_posts:
-            if post.post_id in phase4_thread_ids:
-                continue
-            if post.post_id in agent.state.active_threads:
-                continue
-
-            # Used below for the flat-channel turn-taking rule.
-            is_private = (
-                self._channel_visibility.get(post.channel) == VISIBILITY_COLLAB_PRIVATE
-            )
-
-            # A private channel whose refinement already converged on a
-            # recorded revised proposal (legacy rows only — see
-            # _finalized_private_channels) is closed for further discussion.
-            if post.channel in self._finalized_private_channels:
-                continue
-
-            # Turn-taking in flat private channels: don't reply if we were
-            # the most recent bot to post there. Wait for the other bot.
-            if is_private and (
-                self.message_log.get_last_bot_sender_in_channel(post.channel)
-                == agent.agent_id
-            ):
-                logger.debug(
-                    "[%s] Phase 5: Skipping private-channel post %s — we were last to post in #%s",
-                    agent.agent_id, post.post_id, post.channel,
-                )
-                continue
-
-            # Check thread participation rules: if the post tags a specific agent,
-            # only that agent can reply; otherwise generic 2-party rule applies
-            allowed = self.message_log.get_thread_allowed_agents(post.post_id)
-            if allowed and len(allowed) >= 2 and agent.agent_id not in allowed:
-                logger.debug(
-                    "[%s] Phase 5: Skipping post %s — not in allowed set %s",
-                    agent.agent_id, post.post_id, allowed,
-                )
-                continue
-            available_posts.append(post)
-
-        # Temporarily replace interesting_posts for prompt building
-        original_posts = agent.state.interesting_posts
-        agent.state.interesting_posts = available_posts
-
         # Build prompt — include agent's recent posts for dedup
         recent_entries = self.message_log.get_agent_top_level_posts(agent.agent_id, limit=10)
         recent_posts = [
@@ -1864,29 +1696,11 @@ class SimulationEngine:
             for e in recent_entries
         ]
 
-        # Resolve the visibility context for the prompt. When the agent's only
-        # actionable posts are in a private channel, build the prompt in that
-        # channel's context so the right private-memory segment is injected
-        # (build_phase5_prompt -> build_system_prompt) and the prior-threads
-        # dedup context is filtered for that visibility (G3). Mixed/empty
-        # cases stay public (the default for new public posts).
-        private_available = [
-            p for p in available_posts
-            if self._channel_visibility.get(p.channel) == VISIBILITY_COLLAB_PRIVATE
-        ]
-        public_available = [
-            p for p in available_posts
-            if self._channel_visibility.get(p.channel) != VISIBILITY_COLLAB_PRIVATE
-        ]
-        private_channel_id = None
-        if private_available and not public_available:
-            current_visibility = VISIBILITY_COLLAB_PRIVATE
-            private_channel_id = self._channel_id_map.get(private_available[0].channel)
-        else:
-            current_visibility = VISIBILITY_PUBLIC
-        prior_threads = self._get_prior_threads_for_agent(
-            agent.agent_id, current_visibility=current_visibility,
-        )
+        # Phase 5 always operates in a public channel (see build_phase5_prompt's
+        # docstring) — there is no longer any per-turn state that could put it in
+        # a private-channel context, so prior-threads dedup uses the default
+        # (public) visibility.
+        prior_threads = self._get_prior_threads_for_agent(agent.agent_id)
 
         available_types = self._available_post_types(agent)
         if not available_types:
@@ -1913,13 +1727,8 @@ class SimulationEngine:
         system_prompt, messages = agent.build_phase5_prompt(
             recent_posts=recent_posts,
             prior_threads=prior_threads,
-            visibility=current_visibility,
-            channel_id=private_channel_id,
             post_type_menu=post_type_menu,
         )
-
-        # Restore
-        agent.state.interesting_posts = original_posts
 
         agent.record_api_call()
         try:
@@ -2966,9 +2775,9 @@ class SimulationEngine:
         # LogEntry with content="" and slack_ts=None — a DB row with no
         # corresponding Slack message, breaking the row-count-matches-Slack-
         # message-count invariant documented below, and the caller still
-        # counts the turn as published (message_count incremented,
-        # interesting_posts drained) even though nothing went out. Return
-        # before any of that — no Slack call, no minted ts, no log entry.
+        # counts the turn as published (message_count incremented) even
+        # though nothing went out. Return before any of that — no Slack
+        # call, no minted ts, no log entry.
         if not text:
             logger.warning(
                 "[%s] Suppressed a post to #%s: text was empty after "
@@ -4370,23 +4179,17 @@ class SimulationEngine:
     def _apply_cohort_gate_to_state(self) -> None:
         """Reconcile in-memory agent state with the freshly computed gate.
 
-        Two jobs, both required because the gate is a *read-time* filter and state
-        outlives a membership change:
-
-        1. **Grandfather** active threads whose partner is no longer permitted
-           (v2 §8). They still get Phase 4 replies — an open conversation is
-           entitled to conclude rather than waste the calls already spent — but
-           they are barred from the reactive-priority tier so they cannot outrank
-           gate-compliant work. This is also the path that marks a *resumed* run's
-           threads: the DB rebuild runs before the first recompute, so every
-           restart reconstructs its open partnerships gate-blind.
-        2. **Prune** banked ``interesting_posts`` whose author is no longer
-           permitted (v2 §6.1). Read-time filtering never removes posts that were
-           already accepted, so without this a membership change leaves stale posts
-           driving Phase 5 forever.
+        **Grandfather** active threads whose partner is no longer permitted
+        (v2 §8), because the gate is a *read-time* filter and state outlives a
+        membership change. They still get Phase 4 replies — an open
+        conversation is entitled to conclude rather than waste the calls
+        already spent — but they are barred from the reactive-priority tier
+        so they cannot outrank gate-compliant work. This is also the path
+        that marks a *resumed* run's threads: the DB rebuild runs before the
+        first recompute, so every restart reconstructs its open partnerships
+        gate-blind.
         """
         newly_grandfathered = 0
-        pruned_total = 0
         for agent in self.agents.values():
             allowed = agent.allowed_sender_ids
             if allowed is None:
@@ -4424,24 +4227,10 @@ class SimulationEngine:
                         agent.agent_id, thread.thread_id, other,
                     )
 
-            before = len(agent.state.interesting_posts)
-            if before:
-                agent.state.interesting_posts = [
-                    p for p in agent.state.interesting_posts
-                    if not p.sender_agent_id or p.sender_agent_id in allowed
-                ]
-                dropped = before - len(agent.state.interesting_posts)
-                if dropped:
-                    pruned_total += dropped
-                    logger.debug(
-                        "[cohort] %s: pruned %d banked interesting_posts from "
-                        "non-cohort senders", agent.agent_id, dropped,
-                    )
-
-        if newly_grandfathered or pruned_total:
+        if newly_grandfathered:
             logger.info(
-                "[cohort] state reconciled: %d threads grandfathered, %d stale posts pruned",
-                newly_grandfathered, pruned_total,
+                "[cohort] state reconciled: %d threads grandfathered",
+                newly_grandfathered,
             )
 
     def cohort_topology_snapshot(self) -> dict[str, Any]:

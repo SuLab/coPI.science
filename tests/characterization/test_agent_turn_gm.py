@@ -5,8 +5,8 @@ unit test — it is coupled to a DB session factory, live roster/proposal-review
 sync, Slack polling, wall-clock timers, and a rotating poll-client pool. What IS
 deterministic (and is the substance of a turn) is pinned here:
 
-  * Agent prompt assembly for every phase — scan, system, thread-reply (public
-    and collab_private), phase2 scan, phase4 (EXPLORE/DECIDE/MUST-CONCLUDE, PI
+  * Agent prompt assembly for every phase — system, thread-reply (public
+    and collab_private), phase4 (EXPLORE/DECIDE/MUST-CONCLUDE, PI
     context, funding), phase5. Templates come from the real prompts/*.md files;
     profiles/memory are absent so the on-disk fallbacks apply — deterministic
     given the repo.
@@ -26,7 +26,7 @@ import pytest
 from src.agent.agent import Agent, _extract_dois
 from src.agent.prompt_safety import delimit
 from src.agent.slack_client import markdown_to_mrkdwn
-from src.agent.state import PostRef, ThreadState
+from src.agent.state import ThreadState
 from src.models.agent_activity import VISIBILITY_COLLAB_PRIVATE
 from src.services import llm
 from tests.fakes import FakeAnthropic, FakeSlackClient
@@ -88,10 +88,6 @@ def test_markdown_to_mrkdwn_transforms():
 # System-prompt assembly (golden master)
 # ---------------------------------------------------------------------------
 
-def test_scan_system_prompt_gm(snapshot):
-    assert _agent().build_scan_system_prompt() == snapshot
-
-
 def test_thread_reply_system_prompt_gm(snapshot):
     a = _agent()
     assert {
@@ -130,15 +126,6 @@ def test_phase4_prompt_phase_progression_gm(snapshot):
 def test_phase5_prompt_gm(snapshot):
     a = _agent()
     a.state.subscribed_channels = {"cell-biology", "genomics", "funding"}
-    a.state.interesting_posts = [
-        PostRef(
-            post_id="p1",
-            channel="cell-biology",
-            sender_agent_id="wang",
-            content_snippet="Spatial transcriptomics of tumor sections.",
-            posted_at=1700000000.0,
-        )
-    ]
     prior = {
         "wang": [
             {"channel": "cell-biology", "outcome": "no_proposal", "summary": "No clear overlap."}

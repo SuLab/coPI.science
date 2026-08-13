@@ -437,8 +437,9 @@ def _make_engine(ctx, *, budget, bare=False):
         # `--reset-cursors` (a real production flag), and it is load-bearing here.
         # `_rebuild_agent_state` step 5 advances every agent's last_seen_cursor to
         # max(posted_at), so on a resumed run the harness's own seeded intros are
-        # already "seen": Phase 2 returns nothing, interesting_posts stays empty and
-        # Phase 5 has nothing to reply to. Measured without it — turn 1 concluded the
+        # already "seen": Phase 3's tag/reply discovery (and the hub's auto-
+        # activation) finds nothing new to activate, so there is no thread for
+        # Phase 4/5 to work with. Measured without it — turn 1 concluded the
         # seeded thread and turns 2-5 were all "Agent chose to skip", then the loop
         # went idle. Resetting the cursors is what lets three agents actually discover
         # each other, which is the precondition for a multi-turn run to exist at all.

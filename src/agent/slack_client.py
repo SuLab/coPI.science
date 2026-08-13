@@ -53,9 +53,9 @@ class ThreadNotFound(Exception):
     """Raised when a thread_ts points at a deleted/missing parent message.
 
     Callers must evict the thread_ts from any in-memory state (active_threads,
-    pending_proposals, interesting_posts) when this fires, otherwise they will
-    burn API calls re-polling a grave or — worse — post "replies" that Slack
-    silently converts to top-level posts because the parent is gone.
+    pending_proposals) when this fires, otherwise they will burn API calls
+    re-polling a grave or — worse — post "replies" that Slack silently
+    converts to top-level posts because the parent is gone.
     """
 
     def __init__(self, channel_id: str, thread_ts: str, slack_error: str | None = None):

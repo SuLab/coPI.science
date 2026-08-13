@@ -8,7 +8,6 @@ section so a failure names the rule it broke:
 - TestPreflight             §5.3  refusing to silence a roster
 - TestGatedReads            §6    MessageLog read filtering
 - TestReadPathInventory     §6    every public read method is classified
-- TestStatePruning          §6.1  stale interesting_posts
 - TestDbPrimaryPaths        §6.2  ingestion is never gated; is_bot keying
 - TestPrivateChannels       §7    PI pairings outrank the gate
 - TestGrandfathering        §8    resumed runs, conclude-but-deprioritise
@@ -29,7 +28,7 @@ import pytest
 from src.agent.agent import Agent
 from src.agent.message_log import LogEntry, MessageLog, _entry_allowed
 from src.agent.simulation import SimulationEngine
-from src.agent.state import PostRef, ThreadState
+from src.agent.state import ThreadState
 from src.services.cohorts import (
     POLICY_ISOLATED,
     POLICY_OPEN,
@@ -723,52 +722,6 @@ class TestReadPathInventory:
                 f"{name} must never take a gate: the log is shared by every agent "
                 "in the process, so filtering at write filters for all of them"
             )
-
-
-# ---------------------------------------------------------------------------
-# §6.1 — stale banked posts
-# ---------------------------------------------------------------------------
-
-
-class TestStatePruning:
-    async def test_interesting_posts_pruned_on_resync(self, monkeypatch):
-        _patch(monkeypatch, cohort_isolation_enabled=True,
-               cohort_default_policy=POLICY_ISOLATED)
-        c1 = uuid.uuid4()
-        eng = _engine(["su", "wiseman", "cravatt"],
-                      membership_rows=[(c1, "su"), (c1, "wiseman")])
-        su = eng.agents["su"]
-        su.state.interesting_posts = [
-            PostRef(post_id="1", channel="general", sender_agent_id="wiseman",
-                    content_snippet="mate", posted_at=1.0),
-            PostRef(post_id="2", channel="general", sender_agent_id="cravatt",
-                    content_snippet="non-mate", posted_at=2.0),
-        ]
-        await eng._recompute_allowed_sender_ids()
-        assert [p.post_id for p in su.state.interesting_posts] == ["1"]
-
-    async def test_pruning_keeps_human_authored_posts(self, monkeypatch):
-        _patch(monkeypatch, cohort_isolation_enabled=True,
-               cohort_default_policy=POLICY_ISOLATED)
-        c1 = uuid.uuid4()
-        eng = _engine(["su", "wiseman"], membership_rows=[(c1, "su"), (c1, "wiseman")])
-        su = eng.agents["su"]
-        su.state.interesting_posts = [
-            PostRef(post_id="h", channel="general", sender_agent_id="",
-                    content_snippet="from a PI", posted_at=1.0),
-        ]
-        await eng._recompute_allowed_sender_ids()
-        assert [p.post_id for p in su.state.interesting_posts] == ["h"]
-
-    async def test_no_pruning_when_gate_off(self, monkeypatch):
-        _patch(monkeypatch, cohort_isolation_enabled=False)
-        eng = _engine(["su"], membership_rows=[])
-        eng.agents["su"].state.interesting_posts = [
-            PostRef(post_id="1", channel="general", sender_agent_id="anyone",
-                    content_snippet="x", posted_at=1.0),
-        ]
-        await eng._recompute_allowed_sender_ids()
-        assert len(eng.agents["su"].state.interesting_posts) == 1
 
 
 # ---------------------------------------------------------------------------

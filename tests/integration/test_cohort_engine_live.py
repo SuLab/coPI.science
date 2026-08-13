@@ -573,79 +573,76 @@ async def test_gate_survives_a_membership_row_for_an_unknown_agent(live, monkeyp
 
 
 # ===========================================================================
-# A real turn, with a faked LLM: does the gate actually reach the prompt?
+# A real turn: does the gate actually reach downstream behavior?
+#
+# The two tests that used to open this section (`test_phase2_prompt_omits_non_
+# cohort_posts`, `test_phase2_makes_no_llm_call_when_everything_is_filtered`)
+# drove `_phase2_scan_filter` with a scripted LLM to prove a non-cohort post
+# never reached a rendered prompt. Phase 2 itself is gone (removal-cycle task
+# 7) — deleted with `build_phase2_scan_prompt`/`build_scan_system_prompt`, so
+# there is nothing left for those tests to drive. The claim they protected is
+# NOT left unpinned, on two levels:
+#   1. `tests/unit/test_cohort_isolation.py::TestGatedReads::
+#      test_top_level_posts_filtered` deterministically pins that
+#      `MessageLog.get_new_top_level_posts(allowed_sender_ids=...)` — the exact
+#      read both the old Phase 2 and the surviving hub auto-activation below
+#      call — excludes non-cohort posts from its returned set. Nothing
+#      downstream (prompt or otherwise) can render content it never received.
+#   2. The two tests just below re-pin that same read's gating at the one
+#      surviving production call site that feeds it into live turn behavior:
+#      the scout_hub auto-activation branch of `_phase3_activate_threads`
+#      (simulation.py, `if agent.role == "scout_hub":`).
 # ===========================================================================
 
 
-async def test_phase2_prompt_omits_non_cohort_posts(live, monkeypatch):
-    """The claim the whole feature rests on, verified at the LLM boundary.
-
-    Phase 2 is the one batched Sonnet call per turn, and its prompt is where the
-    token saving is either real or imaginary. Drive a real Phase 2 with a scripted
-    LLM and assert the excluded agent's content never reaches the prompt, while the
-    cohort-mate's and the human's do.
-    """
-    from tests.fakes import FakeAnthropic
-
+async def test_hub_auto_activation_does_not_activate_from_a_non_cohort_post(live, monkeypatch):
+    """The hub's auto-activation (opens an interview thread on any new lab
+    top-level post, no @-mention required) is the one surviving production
+    call site of the gated `get_new_top_level_posts` read the deleted Phase 2
+    tests used to exercise. A post from a lab outside the hub's cohort gate
+    must not open a thread."""
     factory, run_id = live
-    await _topology(factory, {"alpha": ["su", "wiseman"], "beta": ["cravatt"]})
+    await _topology(factory, {"alpha": ["su", "blackbird"]})
     _cfg(monkeypatch, enabled=True, policy="isolated")
-
-    fake = FakeAnthropic(['{"selected_post_ids": []}'])
-    monkeypatch.setattr("src.services.llm.get_anthropic_client", lambda: fake)
-
-    eng = _engine(factory, run_id)
+    eng = _engine(factory, run_id, agent_ids=("su", "cravatt", "blackbird"),
+                  roles={"blackbird": "scout_hub"})
     await eng._recompute_allowed_sender_ids()
 
-    await _write_message(factory, run_id, agent_id="wiseman", sender_name="WisemanBot",
-                         content="MATE-CONTENT spatial multiomics",
-                         message_ts="1000.0031", posted_at=1000.0031)
     await _write_message(factory, run_id, agent_id="cravatt", sender_name="CravattBot",
-                         content="EXCLUDED-CONTENT chemoproteomics",
-                         message_ts="1000.0032", posted_at=1000.0032)
-    await _write_message(factory, run_id, agent_id=None, sender_name="Dr PI",
-                         content="HUMAN-CONTENT please collaborate",
-                         message_ts="1000.0033", posted_at=1000.0033, is_bot=False)
+                         content="we have a screen hit worth talking about",
+                         message_ts="1000.0071", posted_at=1000.0071)
     await eng._poll_inbound_from_db()
 
-    su = eng.agents["su"]
-    su.state.subscribed_channels = {"general"}
-    su.state.last_seen_cursor = 0.0
-    await eng._phase2_scan_filter(su)
-
-    assert fake.calls, "Phase 2 should have made exactly one LLM call"
-    prompt = repr(fake.calls[0])
-    assert "MATE-CONTENT" in prompt, "a cohort-mate's post must reach the prompt"
-    assert "HUMAN-CONTENT" in prompt, "a human's post must always reach the prompt"
-    assert "EXCLUDED-CONTENT" not in prompt, (
-        "a non-cohort post reached the Phase 2 prompt — the gate is not saving "
-        "the tokens it claims to"
+    hub = eng.agents["blackbird"]
+    hub.state.subscribed_channels = {"general"}
+    hub.state.last_seen_cursor = 0.0
+    eng._phase3_activate_threads(hub)
+    assert hub.state.active_threads == {}, (
+        "the hub auto-activated an interview thread from a post outside its cohort gate"
     )
 
 
-async def test_phase2_makes_no_llm_call_when_everything_is_filtered(live, monkeypatch):
-    """When the only new posts are from excluded agents there is nothing to scan,
-    so the Sonnet call is skipped entirely — the actual saving."""
-    from tests.fakes import FakeAnthropic
-
+async def test_hub_auto_activation_does_activate_for_a_cohort_mate(live, monkeypatch):
+    """Control for the previous test — the same path must still work for a lab
+    inside the hub's cohort, proving the exclusion above is the gate and not a
+    broken auto-activation."""
     factory, run_id = live
-    await _topology(factory, {"alpha": ["su"], "beta": ["cravatt"]})
+    await _topology(factory, {"alpha": ["su", "blackbird"]})
     _cfg(monkeypatch, enabled=True, policy="isolated")
-    fake = FakeAnthropic(['{"selected_post_ids": []}'])
-    monkeypatch.setattr("src.services.llm.get_anthropic_client", lambda: fake)
-
-    eng = _engine(factory, run_id)
+    eng = _engine(factory, run_id, agent_ids=("su", "blackbird"),
+                  roles={"blackbird": "scout_hub"})
     await eng._recompute_allowed_sender_ids()
-    await _write_message(factory, run_id, agent_id="cravatt", sender_name="CravattBot",
-                         content="only excluded traffic", message_ts="1000.0041",
-                         posted_at=1000.0041)
+
+    await _write_message(factory, run_id, agent_id="su", sender_name="SuBot",
+                         content="we have a screen hit worth talking about",
+                         message_ts="1000.0072", posted_at=1000.0072)
     await eng._poll_inbound_from_db()
 
-    su = eng.agents["su"]
-    su.state.subscribed_channels = {"general"}
-    su.state.last_seen_cursor = 0.0
-    await eng._phase2_scan_filter(su)
-    assert fake.calls == [], "no scannable posts must mean no LLM call"
+    hub = eng.agents["blackbird"]
+    hub.state.subscribed_channels = {"general"}
+    hub.state.last_seen_cursor = 0.0
+    eng._phase3_activate_threads(hub)
+    assert hub.state.active_threads, "a cohort-mate's post must still auto-activate for the hub"
 
 
 async def test_phase3_does_not_activate_a_thread_from_a_non_cohort_tag(live, monkeypatch):

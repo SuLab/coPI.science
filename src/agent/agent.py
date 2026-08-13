@@ -6,7 +6,6 @@ import time
 from pathlib import Path
 
 from src.agent.post_types import render_menu
-from src.agent.prompt_safety import delimit
 from src.agent.roles import DEFAULT_ROLE, load_role, resolve_prompt_path
 from src.agent.state import AgentState, ThreadState
 from src.agent.thread_guidance import phase4_guidance
@@ -170,17 +169,6 @@ class Agent:
             channel_id=channel_id,
         )
 
-    def build_scan_system_prompt(self) -> str:
-        """Build a lightweight system prompt for scan/filter phases.
-
-        Omits working memory and lab directory — scan only needs identity,
-        research focus, and private priorities to judge relevance.
-        """
-        return self._compose_system_prompt(
-            include_memory=False,
-            include_lab_directory=False,
-        )
-
     def build_thread_reply_system_prompt(
         self,
         visibility: str = VISIBILITY_PUBLIC,
@@ -234,10 +222,10 @@ class Agent:
     ) -> str:
         """Assemble a system prompt from the shared sections.
 
-        This is the single composer behind build_system_prompt,
-        build_scan_system_prompt, and build_thread_reply_system_prompt — the
-        include_memory/include_lab_directory flags reproduce each builder's
-        original section set byte-for-byte (see the callers below).
+        This is the single composer behind build_system_prompt and
+        build_thread_reply_system_prompt — the include_memory/
+        include_lab_directory flags reproduce each builder's original section
+        set byte-for-byte (see the callers below).
         """
         base_prompt = self._load_prompt("agent-system.md", _default_system_prompt())
         identity = self._render_identity()
@@ -291,54 +279,6 @@ Use these to reference other labs' work in conversations. Include links when cit
         if not segments:
             return "*No working memory yet — this is your first simulation.*"
         return "\n\n".join(segments)
-
-    # ------------------------------------------------------------------
-    # Phase 2: Scan & Filter prompt
-    # ------------------------------------------------------------------
-
-    def build_phase2_scan_prompt(self, new_posts: list[dict[str, str]]) -> tuple[str, list[dict]]:
-        """
-        Build system + messages for Phase 2 scan/filter.
-
-        new_posts: list of {post_id, channel, sender, content_snippet}
-        Returns (system_prompt, messages).
-        """
-        system_prompt = self.build_scan_system_prompt()
-        phase2_template = self._load_prompt(
-            "phase2-scan-filter.md",
-            "Evaluate posts and return JSON with selected_post_ids.",
-        )
-
-        # Format posts for the prompt.
-        post_blocks: list[str] = []
-        for p in new_posts:
-            header = f"**Post ID: {p['post_id']}** in #{p['channel']} by {p['sender']}:"
-            # Post bodies come from other labs' agents — fence as untrusted
-            # peer content so an injected instruction can't hijack the scan
-            # decision (SEC-14).
-            post_blocks.append(f"{header}\n{delimit(p['content_snippet'], 'post_content')}")
-        posts_text = "\n\n".join(post_blocks)
-        prompt = phase2_template.replace("{new_posts}", posts_text)
-
-        messages = [{"role": "user", "content": prompt}]
-        return system_prompt, messages
-
-    def build_phase2_prune_prompt(self) -> tuple[str, list[dict]]:
-        """Build system + messages for Phase 2 prune."""
-        system_prompt = self.build_scan_system_prompt()
-        prune_template = self._load_prompt(
-            "phase2-prune.md",
-            "Prune interesting_posts to ≤20. Return JSON with keep_post_ids.",
-        )
-
-        posts_text = "\n\n".join(
-            f"**Post ID: {p.post_id}** in #{p.channel} by {p.sender_agent_id}:\n{p.content_snippet}"
-            for p in self.state.interesting_posts
-        )
-        prompt = prune_template.replace("{interesting_posts}", posts_text)
-
-        messages = [{"role": "user", "content": prompt}]
-        return system_prompt, messages
 
     # ------------------------------------------------------------------
     # Phase 4: Thread Reply prompt

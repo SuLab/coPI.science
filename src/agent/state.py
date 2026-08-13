@@ -5,17 +5,6 @@ from dataclasses import dataclass, field
 
 
 @dataclass
-class PostRef:
-    """Reference to a top-level post in the message log."""
-
-    post_id: str  # message timestamp (Slack ts)
-    channel: str
-    sender_agent_id: str
-    content_snippet: str  # first ~200 chars for LLM context
-    posted_at: float
-
-
-@dataclass
 class ThreadState:
     """Tracks an active thread between two agents."""
 
@@ -69,7 +58,6 @@ class ProposalRef:
 class AgentState:
     """Full mutable state for one agent during a simulation."""
 
-    interesting_posts: list[PostRef] = field(default_factory=list)
     active_threads: dict[str, ThreadState] = field(default_factory=dict)  # thread_id -> ThreadState
     subscribed_channels: set[str] = field(default_factory=set)
     pending_proposals: list[ProposalRef] = field(default_factory=list)
