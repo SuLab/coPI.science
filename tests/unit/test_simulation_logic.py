@@ -1067,20 +1067,19 @@ class TestHubAssessmentRelocation:
 
 
 # ---------------------------------------------------------------
-# _warn_if_hub_conclude_missing_assessment — absent-sidecar detection gap
-# (fix round item 2). thread_guidance.py's CONCLUDE branch is a hardcoded
-# message_count >= 12, independent of settings.max_thread_messages — and
-# _reply_to_thread's own "system-enforced close" check (a few lines above
-# where the reply is actually generated) returns *before generating any
-# reply at all* once thread.message_count >= settings.max_thread_messages.
-# With the default max_thread_messages=12 those two thresholds coincide, so
-# a reply actually generated under CONCLUDE guidance can never occur in that
-# configuration — the close-as-timeout branch always wins first. Every
-# fixture below raises max_thread_messages to 20, modelling an operator who
-# widened the cap without touching thread_guidance's own hardcoded literal
-# — the scenario that makes CONCLUDE-guided replies reachable at all through
-# _reply_to_thread, and lets these tests drive the real method instead of
-# calling it in isolation.
+# Ordinal regression pin (fix round T6, round 2). `_reply_to_thread` passed
+# thread.message_count — the count of messages ALREADY in the thread — straight
+# into `Agent.build_phase4_prompt`, but `phase4_guidance`'s own contract is the
+# ORDINAL of the reply about to be written ("This is message 12", not "message
+# 11"). Combined with the system-enforced-close check firing at that SAME
+# prior-count >= max_thread_messages (before any reply is generated at all),
+# CONCLUDE guidance could never reach an actual reply under the default
+# max_thread_messages=12: a reply only ever generates at prior-count <= 11
+# (DECIDE at most), and prior-count >= 12 closes the thread as a timeout with
+# no verdict, no sidecar, ever. These drive the REAL (non-mocked)
+# Agent.build_phase4_prompt through a real SimulationEngine._reply_to_thread
+# call — only PROFILES_DIR is faked, for hermeticity (same convention as
+# tests/characterization/test_agent_turn_gm.py's _hermetic_profiles fixture).
 # ---------------------------------------------------------------
 
 def _seed_thread_history(engine, thread_id: str, channel: str, count: int) -> None:
@@ -1102,6 +1101,98 @@ def _seed_thread_history(engine, thread_id: str, channel: str, count: int) -> No
             is_bot=True,
         ))
 
+
+class TestPhase4OrdinalGuidance:
+    def _engine_with_history(self, monkeypatch, tmp_path, count):
+        from src.agent.agent import Agent
+        from src.agent.state import ThreadState
+        from tests.fakes import FakeSlackClient
+
+        monkeypatch.setattr("src.agent.agent.PROFILES_DIR", tmp_path)
+        hub = Agent("blackbird", "BlackbirdBot", "Blackbird", role="scout_hub")
+        thread = ThreadState(
+            thread_id="t1", channel="general", other_agent_id="wang",
+            has_pending_reply=True,
+        )
+        hub.state.active_threads["t1"] = thread
+        client = FakeSlackClient(agent_id="blackbird")
+        engine = SimulationEngine(agents=[hub], slack_clients={"blackbird": client})
+        _seed_thread_history(engine, "t1", "general", count)
+        return engine, hub, thread, client
+
+    @pytest.mark.asyncio
+    async def test_prior_count_11_reply_gets_conclude_guidance_and_posts(
+        self, monkeypatch, tmp_path,
+    ):
+        """The mission pin: 11 EXISTING messages -> this reply is ordinal 12
+        -> MUST-CONCLUDE guidance, and the reply actually posts (the system-
+        enforced-close check at prior-count 11 does not fire — 11 < 12)."""
+        engine, hub, thread, client = self._engine_with_history(monkeypatch, tmp_path, 11)
+
+        captured = {}
+        real_build = hub.build_phase4_prompt
+
+        def _spy(**kwargs):
+            system, messages = real_build(**kwargs)
+            captured["messages"] = messages
+            return system, messages
+
+        monkeypatch.setattr(hub, "build_phase4_prompt", _spy)
+
+        async def _fake_generate_with_tools(**kwargs):
+            return (
+                "<slack_message>⏸️ Not a fit — no credible IP path here.</slack_message>"
+            )
+
+        monkeypatch.setattr(
+            "src.agent.simulation.generate_with_tools", _fake_generate_with_tools
+        )
+
+        await engine._reply_to_thread(hub, thread)
+
+        # Must actually post — NOT silently close as a timeout with no verdict.
+        assert len(client.posted) == 1
+        prompt_text = captured["messages"][0]["content"]
+        assert "This is message 12 — you MUST conclude the interview now" in prompt_text
+        assert "**Message count:** 12 of 12 max" in prompt_text
+
+    @pytest.mark.asyncio
+    async def test_prior_count_12_thread_closes_without_generating_a_reply(
+        self, monkeypatch, tmp_path,
+    ):
+        """The check just above the reply-generation code is unaffected by the
+        ordinal fix on purpose: 12 EXISTING messages means the thread is full,
+        so it closes as a timeout before the LLM is ever consulted."""
+        engine, hub, thread, client = self._engine_with_history(monkeypatch, tmp_path, 12)
+        monkeypatch.setattr(hub, "build_phase4_prompt", lambda **kw: ("sys", []))
+
+        async def _fail_if_called(**kwargs):
+            raise AssertionError("the LLM must not be reached once the thread is full")
+
+        monkeypatch.setattr("src.agent.simulation.generate_with_tools", _fail_if_called)
+
+        await engine._reply_to_thread(hub, thread)
+
+        assert client.posted == []
+        assert thread.status == "closed"
+
+
+# ---------------------------------------------------------------
+# _warn_if_hub_conclude_missing_assessment — absent-sidecar detection gap
+# (fix round item 2). thread_guidance.py's CONCLUDE branch is a hardcoded
+# message_count >= 12, independent of settings.max_thread_messages — and
+# _reply_to_thread's own "system-enforced close" check (a few lines above
+# where the reply is actually generated) returns *before generating any
+# reply at all* once thread.message_count >= settings.max_thread_messages.
+# With the default max_thread_messages=12 those two thresholds coincide, so
+# a reply actually generated under CONCLUDE guidance can never occur in that
+# configuration — the close-as-timeout branch always wins first. Every
+# fixture below raises max_thread_messages to 20, modelling an operator who
+# widened the cap without touching thread_guidance's own hardcoded literal
+# — the scenario that makes CONCLUDE-guided replies reachable at all through
+# _reply_to_thread, and lets these tests drive the real method instead of
+# calling it in isolation.
+# ---------------------------------------------------------------
 
 class TestHubConcludeMissingAssessmentWarning:
     _WARNING_SNIPPET = "no persistable <assessment_json> sidecar was found"

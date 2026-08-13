@@ -313,8 +313,22 @@ Use these to reference other labs' work in conversations. Include links when cit
         # Thread phase guidance + instructions, per role. scout_hub scouts ideas
         # against Blackbird's screening rubric; it has no lab and never proposes a
         # collaboration. See src/agent/thread_guidance.py.
+        #
+        # `thread.message_count` is the count of messages ALREADY in the thread
+        # (set by SimulationEngine._reply_to_thread from the message log BEFORE
+        # this reply exists). `phase4_guidance`'s contract is the ORDINAL of the
+        # message about to be written — its own CONCLUDE text says "This is
+        # message 12", not "message 11" — so the prior count must be bumped by
+        # one here. Without the +1, the reply that should receive MUST-CONCLUDE
+        # guidance was silently classified as DECIDE instead, and since
+        # `_reply_to_thread`'s system-enforced-close check fires at this exact
+        # same prior-count >= max_thread_messages (before any reply is even
+        # generated), a reply actually written under CONCLUDE guidance could
+        # never occur under the default configuration at all — see that check's
+        # own comment in simulation.py for the other half of this fix.
+        message_ordinal = thread.message_count + 1
         thread_phase, phase_guidance, instructions = phase4_guidance(
-            self.role, thread.message_count
+            self.role, message_ordinal
         )
 
         # Format thread history
@@ -335,7 +349,12 @@ Use these to reference other labs' work in conversations. Include links when cit
         prompt_text = phase4_template.replace("{channel_name}", thread.channel)
         prompt_text = prompt_text.replace("{other_agent_name}", other_agent_name)
         prompt_text = prompt_text.replace("{other_agent_lab}", other_agent_lab)
-        prompt_text = prompt_text.replace("{message_count}", str(thread.message_count))
+        # Shown to the model right alongside `{thread_phase}`/`{phase_guidance}`
+        # ("Message count: N of 12 max"), so it must be the same ordinal fed to
+        # phase4_guidance above — otherwise a CONCLUDE-guided reply would see
+        # "Message count: 11 of 12 max" one line above "This is message 12",
+        # which is exactly the kind of internal inconsistency this fix removes.
+        prompt_text = prompt_text.replace("{message_count}", str(message_ordinal))
         prompt_text = prompt_text.replace("{thread_phase}", thread_phase)
         prompt_text = prompt_text.replace("{thread_history}", history_text)
         prompt_text = prompt_text.replace("{phase_guidance}", phase_guidance)

@@ -1167,7 +1167,27 @@ class SimulationEngine:
             agent.state.active_threads.pop(thread.thread_id, None)
             return
 
-        # Check for system-enforced close
+        # Check for system-enforced close. Correct on its own terms: a thread
+        # with `max_thread_messages` messages already in it is genuinely full,
+        # and this must stay a check on the PRIOR count, not the ordinal —
+        # closing here is "there is no room left to reply", a different
+        # question from "what phase is the reply I'm about to write in".
+        #
+        # Latent coupling worth knowing about: thread_guidance.py's CONCLUDE
+        # boundary is a hardcoded literal (12), independent of
+        # `settings.max_thread_messages`. They agree today only because both
+        # happen to be 12. Below (build_phase4_prompt's ordinal fix), a reply
+        # generated at prior-count 11 gets ordinal 12 -> CONCLUDE, then THIS
+        # check closes the thread as full on the very next turn (prior-count
+        # 12). If `max_thread_messages` is ever configured to something other
+        # than 12, that "CONCLUDE, then close next turn" handoff drifts: e.g.
+        # max_thread_messages=20 lets ordinals 12-19 all render as CONCLUDE
+        # (thread_guidance doesn't know the cap moved), and max_thread_messages
+        # < 12 closes the thread as a timeout before CONCLUDE guidance is ever
+        # reachable at all — exactly the failure mode this fix round removed
+        # for the default value. `_warn_if_hub_conclude_missing_assessment`
+        # reads thread_guidance directly (not this setting) for exactly this
+        # reason.
         if thread.message_count >= settings.max_thread_messages:
             logger.info(
                 "[%s] Thread %s reached max messages, closing",
@@ -2025,7 +2045,11 @@ class SimulationEngine:
         all: the reply already posted (this runs after `_post_message`
         succeeded) and no DB row was ever going to exist for it either way.
         """
-        thread_phase, _, _ = phase4_guidance(agent.role, thread.message_count)
+        # +1: thread.message_count is the prior count; phase4_guidance's
+        # contract is the ordinal of the reply just generated — the same
+        # correction Agent.build_phase4_prompt applies for this same reply
+        # (see that call site's comment for the full rationale).
+        thread_phase, _, _ = phase4_guidance(agent.role, thread.message_count + 1)
         if thread_phase != CONCLUDE:
             return
         if _reply_opens_with_pause(response_text):
