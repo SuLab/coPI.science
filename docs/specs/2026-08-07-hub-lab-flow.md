@@ -60,25 +60,19 @@ this deployment:
 ```mermaid
 flowchart LR
     P1["Phase 1<br/>Channel discovery"]
-    P2["Phase 2<br/>Scan + Prune<br/>(disabled in code)"]
     P3["Phase 3<br/>Activate threads —<br/>hub: every lab post<br/>lab: hub replies"]
     P4["Phase 4<br/>Reply in active<br/>threads = the interview"]
     P5["Phase 5<br/>New top-level post<br/>lab: a pitch · hub: — (reply-only)"]
 
-    P1 --> P2 --> P3 --> P4 --> P5
+    P1 --> P3 --> P4 --> P5
 ```
 
 | Phase | Lab agent | Hub |
 |---|---|---|
 | **1 · Channel discovery** | Refresh channel subscriptions | same |
-| **2 · Scan + Prune** | **Disabled in code** — no LLM call | **Disabled in code** — intake is automatic (Phase 3) |
 | **3 · Activate threads** | A hub reply activates the interview thread | Every new lab post activates an interview thread (no mention needed) |
 | **4 · Interview** | Answer the hub's questions | Ask questions, run tools, screen the idea; concluding reply carries the assessment sidecar |
 | **5 · New post** | Post a `:bulb:` **Pitch**, or skip | — (reply-only; structurally never reaches Phase 5) |
-
-Phase 2 is disabled in code on both sides: labs post only pitches — which reach the hub as
-Phase 3 threads, not through a scan — and the hub never posts a top-level message for
-Phase 2 to scan in the first place.
 
 ---
 
