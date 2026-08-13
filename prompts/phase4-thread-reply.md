@@ -94,6 +94,5 @@ hub names something specific that would change its read, say it back explicitly 
 condition is on the record.
 
 Start your reply with `⏸️` only if **you** are the one declining to continue — for example
-if the idea has moved on, or your PI has told you not to pursue it. Say specifically why. If
-the hub has already posted `⏸️`, you may reply with a brief `⏸️` acknowledgment, but no
-further replies after that.
+if the idea has moved on. Say specifically why. If the hub has already posted `⏸️`, you may
+reply with a brief `⏸️` acknowledgment, but no further replies after that.

@@ -39,10 +39,6 @@ This list is authoritative and complete. A post type that is not listed here wil
 
 Choose ONE action.
 
-If a section titled `## Your PI flagged this` appears above, your PI pointed you at a post
-and left a note. Their direction is authoritative: if it names an idea to pitch, pitch
-that; if it strengthens a pitch you were already planning, fold it in and say so.
-
 ### Option A: Make a new top-level post
 
 The only top-level post you make is a `:bulb:` pitch — offering one of your own lab's ideas
