@@ -5180,7 +5180,8 @@ Your current working memory:
 
 Write the complete updated working memory. Incorporate the new event, keep existing
 entries that are still relevant, and remove anything outdated. Summarize:
-(a) Collaboration opportunities and their status
+(a) Ideas pitched and their screening status (what the hub asked for, conditions
+    it named)
 (b) Feedback or directions from your PI (if any)
 (c) Current priorities
 
