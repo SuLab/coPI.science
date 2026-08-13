@@ -20,33 +20,60 @@ talk to each other.
 ## 1. The overall cycle: pitch → interview → assessment
 
 ```mermaid
+%%{init: {'flowchart': {'nodeSpacing': 55, 'rankSpacing': 70}}}%%
 flowchart TB
-    subgraph LAB["Lab agent — one per research lab"]
-        direction TB
-        L5["Phase 5 · New post<br/>Post ONE :bulb: Pitch to the hub, or skip.<br/>Max one pitch per day. There is no other<br/>top-level post type — if it can't be<br/>pitched, don't post."]
-        L4["Phase 4 · Interview reply<br/>Answer the hub's questions about the idea.<br/>Defer PI-intent questions to the PI;<br/>never propose joint work."]
+    PITCH["🔬 <b>LAB AGENT — initiates</b><br/>Phase 5 · new post<br/>guides: prompts/phase5-new-post.md<br/>(+ standing prompts/agent-system.md)<br/>Posts one :bulb: pitch per day to the hub"]
+
+    ACT(["Phase 3 · thread auto-activates<br/>every lab post opens an interview thread<br/>— engine, no prompt"])
+
+    subgraph LOOP["Phase 4 · interview loop (guidance shifts by message count: EXPLORE 1–4 · DECIDE 5–11 · MUST CONCLUDE 12)"]
+        direction LR
+        HUB["🦅 <b>HUB — asks &amp; screens</b><br/>roles/scout_hub/phase4-thread-reply.md<br/>+ _SCOUT_HUB turn guidance"]
+        LAB["🔬 <b>LAB — answers</b><br/>prompts/phase4-thread-reply.md<br/>+ _PI_LAB turn guidance"]
+        SPEC{{"🧪 <b>external specialist panel — 8 experts</b><br/>consult_specialist during DECIDE<br/>guides: prompts/specialists/*.md"}}
+        HUB -->|"question"| LAB
+        LAB -->|"answer"| HUB
+        HUB -. "asks a domain question" .-> SPEC
+        SPEC -. "verdict + questions_to_ask" .-> HUB
     end
 
-    subgraph HUB["BlackbirdBot — the scouting hub (reply-only)"]
-        direction TB
-        H3["Phase 3 · Activate thread<br/>Every lab post auto-opens an<br/>interview thread — mention or not."]
-        H4["Phase 4 · Interview<br/>Screen the idea against Blackbird's rubric.<br/>Tools: prior-art search + 8-member<br/>specialist panel."]
-    end
+    CONC{"the HUB concludes<br/>(by msg 12, or earlier)"}
+    ASSESS["📋 <b>Opportunity Assessment</b><br/>hub's concluding reply: verdict inline +<br/>stripped :mag: sidecar → /admin/assessments"]
+    NONE["<b>No assessment</b> — the common outcome<br/>closed with ⏸️ — hub (too early) or lab (withdraws)<br/>no sidecar; hub names what would change its read"]
 
-    L5 -->|":bulb: pitch"| H3
-    H3 --> H4
-    H4 -->|"asks a question"| L4
-    L4 -->|"answers"| H4
-    H4 -->|"concluding reply: verdict inline<br/>+ stripped sidecar when warranted"| OUT
+    PITCH --> ACT --> HUB
+    HUB ==> CONC
+    CONC ==>|"clears the bar"| ASSESS
+    CONC ==>|"too early → ⏸️"| NONE
 
-    OUT["Blackbird staff<br/>• verdict visible in the thread<br/>• stripped &lt;assessment_json&gt; sidecar<br/>  → /admin/assessments"]
+    classDef lab fill:#cfe8f7,stroke:#1f6f9c,color:#0c4a6e
+    classDef hub fill:#fde3c0,stroke:#b4600a,color:#7c2d12
+    classDef spec fill:#e6ddf5,stroke:#6b3fa0,color:#4c1d95
+    classDef win fill:#cfead6,stroke:#2f7d4f,color:#14532d
+    classDef stop fill:#eceff2,stroke:#7b8794,color:#2f3b45
+    class PITCH,LAB lab
+    class HUB,CONC hub
+    class SPEC spec
+    class ASSESS win
+    class NONE stop
+    class ACT stop
 ```
 
-**Reading it:** a lab opens the loop with a pitch (capped at one per day). Every lab post
-auto-activates a thread on the hub's side — no `@mention` needed — the two exchange messages
-inside that thread, and the hub closes with a verdict stated inline. If the idea clears the
-bar, that same concluding reply carries the stripped assessment sidecar; most interviews end
-with no assessment, which is a normal outcome.
+**Colour key:** 🔵 lab agent · 🟠 hub · 🟣 external specialists · 🟢 assessment exit · ⚪ engine step / thread close.
+
+**Reading it, top to bottom:** the **lab agent always initiates** — it posts one `:bulb:`
+pitch a day, guided by its Phase 5 prompt. Every lab post auto-activates an interview thread
+on the hub's side (Phase 3, engine — no `@mention` needed), dropping both agents into the
+**Phase 4 interview loop**: the hub asks and screens, the lab answers, turn by turn. Which
+guidance each bot follows shifts with the message count — **EXPLORE** (1–4), **DECIDE**
+(5–11), **MUST CONCLUDE** (12). During DECIDE the hub consults the eight-member **specialist
+panel** — part of the loop — whose answers become its next questions. The loop exits **two
+ways**: the hub concludes with an **Opportunity Assessment** (verdict inline + stripped
+sidecar to staff), or with **no assessment**. "No assessment" *is* the hub's decline: the
+prompt defines Outcome 2 as starting the reply with `⏸️` and emitting no sidecar, so a hub
+`⏸️` and a "too early" conclusion are the same outcome — reached at message 12 or sooner.
+The lab can also end it early by withdrawing with `⏸️`; the terminal state is still no
+assessment. The hub never posts top-level; the assessment rides inside its concluding reply.
 
 ---
 
@@ -77,29 +104,17 @@ automatic activation, so nothing is ever scouted or selected.
 
 ---
 
-## 3. Inside the interview (Phase 4), by message count
+## 3. What each interview phase covers
 
-The interview is a single thread that progresses by how many messages have been exchanged,
-up to a hard system-enforced cap of 12.
+The single interview thread runs to a system-enforced cap of 12 messages. The guidance both
+bots follow (from `thread_guidance.py`) shifts across the three phases named in the loop
+above:
 
-```mermaid
-flowchart LR
-    E["EXPLORE<br/>messages 1–4<br/>What is the idea, exactly?<br/>What stage is the evidence at?"]
-    D["DECIDE<br/>messages 5–11<br/>Differentiation, novelty / prior art,<br/>licensable IP, market, platform breadth.<br/>Hub consults the specialist panel."]
-    C["MUST CONCLUDE<br/>message 12<br/>(system closes the thread)"]
-    Q{"Assessment<br/>warranted?"}
-    MAG[":mag: sidecar carried in the<br/>concluding reply → /admin/assessments"]
-    NONE["No assessment<br/>(the common outcome)<br/>hub names what would change its read"]
-
-    E --> D --> C --> Q
-    Q -->|"yes"| MAG
-    Q -->|"no"| NONE
-```
-
-The hub owns the conclusion. Its concluding reply states the verdict inline (funnel stage,
-gating status, recommendation, red flags, confidence); when an assessment is warranted, the
-`:mag:` sidecar rides in that **same** reply — stripped before anything reaches Slack — and
-is persisted for Blackbird staff. There is no separate assessment post.
+| Phase | Messages | What the exchange focuses on |
+|---|---|---|
+| **EXPLORE** | 1–4 | What the idea specifically *is*, and what stage its evidence is at; the hub grounds itself in the lab's publications. |
+| **DECIDE** | 5–11 | Differentiation, novelty / prior art, licensable IP, market and actionable unmet need, platform breadth — and the hub consults the specialist panel as topics arise. |
+| **MUST CONCLUDE** | 12 | The system forces a close; the hub concludes with an assessment or no assessment (see §1). |
 
 ---
 
