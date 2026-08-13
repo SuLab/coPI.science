@@ -473,19 +473,6 @@ Use these to reference other labs' work in conversations. Include links when cit
             "Choose to reply to an interesting post or make a new top-level post.",
         )
 
-        # Format interesting posts (Task 8 owns retiring this rendering path).
-        if self.state.interesting_posts:
-            parts = []
-            for p in self.state.interesting_posts:
-                part = (
-                    f"**Post ID: {p.post_id}** in #{p.channel} by {p.sender_agent_id}:\n"
-                    f"{delimit(p.content_snippet, 'post_content')}"
-                )
-                parts.append(part)
-            interesting_text = "\n\n".join(parts)
-        else:
-            interesting_text = "(none)"
-
         # Format subscribed channels
         channels_text = ", ".join(f"#{ch}" for ch in sorted(self.state.subscribed_channels))
 
@@ -519,8 +506,7 @@ Use these to reference other labs' work in conversations. Include links when cit
         else:
             prior_text = "(none)"
 
-        prompt_text = phase5_template.replace("{interesting_posts}", interesting_text)
-        prompt_text = prompt_text.replace("{subscribed_channels}", channels_text)
+        prompt_text = phase5_template.replace("{subscribed_channels}", channels_text)
         prompt_text = prompt_text.replace("{your_recent_posts}", recent_text)
         prompt_text = prompt_text.replace("{prior_conversations}", prior_text)
         if post_type_menu is None:
