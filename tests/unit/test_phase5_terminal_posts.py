@@ -89,10 +89,23 @@ async def test_scout_hub_never_reaches_the_llm_in_phase_5(monkeypatch):
 
 
 async def test_scout_hub_never_reaches_the_llm_in_phase_5_even_when_saturated(monkeypatch):
-    """The exact old production shape (65 open threads against a threshold of
-    12) — still never reaches the LLM. Before Option A this was the hub's one
-    exemption; now there is nothing to exempt, because there is nothing left
-    for the hub to post through this function at all."""
+    """The exact old production shape (65 open threads) — still never reaches
+    the LLM. Before Option A this was the hub's one exemption; now there is
+    nothing to exempt, because there is nothing left for the hub to post
+    through this function at all.
+
+    ``active_thread_threshold`` is set to 1000 here (NOT the production
+    value of 12) deliberately: with the threshold at 12, 65 open threads
+    would also trip the generic ``_active_thread_count(agent) >=
+    active_thread_threshold`` backpressure check a few lines below the role
+    gate — so the test would pass even with the role gate deleted entirely,
+    proving nothing about the gate this test is named for. Parking the
+    threshold at 1000, far above the fixture's 65 threads, removes that
+    confound: the generic check cannot fire, so the only thing left that can
+    explain zero prompt/LLM calls is the ``agent.role == "scout_hub"`` hard
+    gate itself: with the gate temporarily neutered (`if agent.role ==
+    "scout_hub": return` commented out), this test FAILS; restored, it
+    PASSES — see the fix-round report for both captured runs."""
     hub = _hub()
     hub.allowed_sender_ids = None
     for i in range(65):
@@ -105,7 +118,7 @@ async def test_scout_hub_never_reaches_the_llm_in_phase_5_even_when_saturated(mo
     eng = SimulationEngine(agents=[hub], slack_clients={"blackbird": client})
     monkeypatch.setattr(
         "src.agent.simulation.get_settings",
-        lambda: _settings(active_thread_threshold=12),
+        lambda: _settings(active_thread_threshold=1000),
     )
     called = _no_llm_reached(monkeypatch, hub)
 
