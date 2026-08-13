@@ -40,21 +40,12 @@ IDENTITY_TOKENS = {"{bot_name}", "{pi_name}", "{agent_id}"}
 # retained on disk with matching "disabled in code" preambles in their
 # templates — still real contracts, so they're covered here, not excluded.
 BUILDER_TEMPLATES: dict[str, list[str]] = {
-    "build_phase2_scan_prompt": [
-        "prompts/phase2-scan-filter.md",
-        "prompts/roles/scout_hub/phase2-scan-filter.md",
-    ],
-    "build_phase2_prune_prompt": [
-        "prompts/phase2-prune.md",
-        "prompts/roles/scout_hub/phase2-prune.md",
-    ],
     "build_phase4_prompt": [
         "prompts/phase4-thread-reply.md",
         "prompts/roles/scout_hub/phase4-thread-reply.md",
     ],
     "build_phase5_prompt": [
         "prompts/phase5-new-post.md",
-        "prompts/roles/scout_hub/phase5-new-post.md",
     ],
 }
 

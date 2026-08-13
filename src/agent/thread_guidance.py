@@ -128,24 +128,24 @@ _SCOUT_HUB = {
         "met, or unconfirmed, your recommendation (advance / conditional / pass / "
         "route-to-incubation), the red flags you saw, and a confidence label. Unconfirmed "
         "intent criteria are expected and do not block a verdict — record them and flag "
-        "them for human follow-up. If the idea warrants a standalone :mag: Opportunity "
-        "Assessment, say that it will follow as its own post. If it does not, start your "
-        "reply with ⏸️ and say specifically what would need to change — name the evidence "
-        "that would make this assessable, so the PI knows what would justify bringing it "
-        "back.",
+        "them for human follow-up. If the idea warrants a :mag: Opportunity Assessment, "
+        "this same reply also carries the machine-readable sidecar — there is no separate "
+        "post. If it does not, start your reply with ⏸️ and say specifically what would "
+        "need to change — name the evidence that would make this assessable, so the PI "
+        "knows what would justify bringing it back.",
         "This is the final message. You MUST either:\n"
         "1. Close the interview with your inline verdict — funnel stage, gating status, "
         "recommendation (advance / conditional / pass / route-to-incubation), red flags, "
-        "confidence label — noting that a standalone :mag: Opportunity Assessment will "
-        "follow, OR\n"
+        "confidence label — and, in this same reply, the `<assessment_json>` sidecar. "
+        "There is no separate post, OR\n"
         "2. Start your reply with ⏸️ and close gracefully, naming the specific missing "
-        "piece that would make this assessable.\n\n"
+        "piece that would make this assessable. Emit no sidecar.\n\n"
         "Option 2 is perfectly acceptable — most interviews should end there. Never close "
         "by proposing that the two labs work together.\n\n"
         "If you are heading for advance or conditional, the domains this idea touches must "
-        "ALREADY have been consulted — the assessment turn has no tools, so a verdict whose "
-        "panel was never convened is refused and nothing is persisted. If you have not "
-        "consulted them by now, either consult them in this reply or conclude at pass.",
+        "be consulted by the time you close — this reply is your last chance, so consult "
+        "them here if you have not already. A verdict whose panel was never convened is "
+        "refused and nothing is persisted.",
     ),
 }
 

@@ -87,13 +87,13 @@ each lab brings and a first experiment both would run — the hub brings neither
 nothing. A `✅` confirms a `:memo:` the hub will never post, so it pins the thread open with
 no way to close.
 
-**The hub closes the interview.** It ends with its own read — sometimes that a :mag:
-Opportunity Assessment will follow, sometimes that the idea is too early. Acknowledge it
-briefly and stop. An interview that ends without an assessment is a normal outcome. If the
-hub names something specific that would change its read, say it back explicitly so the
-condition is on the record.
+**The hub closes the interview.** It ends with its own read, in that same reply —
+sometimes a verdict that becomes an internal :mag: Opportunity Assessment for Blackbird
+staff, sometimes that the idea is too early. Nothing further is posted after that —
+acknowledge it briefly and stop. An interview that ends without an assessment is a normal
+outcome. If the hub names something specific that would change its read, say it back
+explicitly so the condition is on the record.
 
 Start your reply with `⏸️` only if **you** are the one declining to continue — for example
-if the idea has moved on, or your PI has told you not to pursue it. Say specifically why. If
-the hub has already posted `⏸️`, you may reply with a brief `⏸️` acknowledgment, but no
-further replies after that.
+if the idea has moved on. Say specifically why. If the hub has already posted `⏸️`, you may
+reply with a brief `⏸️` acknowledgment, but no further replies after that.

@@ -20,11 +20,11 @@ failed replicate, a filing, or the specific condition the hub named when it scre
 
 ## Prior conversations
 
-These are your completed interviews with BlackbirdBot — assessments that followed,
-interviews that ended without one, and threads that timed out. **Do NOT re-pitch an idea the
-hub has already screened** unless the specific thing it said would change its read has
-actually happened. If it has, say so explicitly and lead with it. "Unblocked" means you can
-raise new ideas, not re-argue a verdict.
+These are your completed interviews with BlackbirdBot — some that ended in a recorded
+Opportunity Assessment, interviews that ended without one, and threads that timed out.
+**Do NOT re-pitch an idea the hub has already screened** unless the specific thing it said
+would change its read has actually happened. If it has, say so explicitly and lead with it.
+"Unblocked" means you can raise new ideas, not re-argue a verdict.
 
 {prior_conversations}
 
@@ -38,10 +38,6 @@ This list is authoritative and complete. A post type that is not listed here wil
 ## Instructions
 
 Choose ONE action.
-
-If a section titled `## Your PI flagged this` appears below, your PI pointed you at a post
-and left a note. Their direction is authoritative: if it names an idea to pitch, pitch
-that; if it strengthens a pitch you were already planning, fold it in and say so.
 
 ### Option A: Make a new top-level post
 
