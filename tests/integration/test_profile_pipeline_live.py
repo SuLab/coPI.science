@@ -194,14 +194,17 @@ class PipelineProbe:
     is how the LLM-call count (which GM #1 and GM #4 pin) and the synthesis context
     (T4.3, T4.4) are observed from the outside.
 
-    ``private_calls`` is retained (always 0) rather than removed: the
+    ``private_calls`` is retained (permanently 0) rather than removed: the
     private-instructions removal cycle deleted step 9b
     (``synthesize_private_profile``) outright, so this probe can no longer
-    instrument it, but ``llm_calls`` and every call site below still add
-    ``public_calls + private_calls`` — deleting the field would be a wider,
-    out-of-scope rewrite of this file's many ``private_calls``/
-    ``private_profile_seed`` assertions (still pending a full pass; those
-    assertions are stale until then).
+    instrument it, but ``llm_calls`` still adds ``public_calls +
+    private_calls`` — deleting the field would be a wider rewrite of this
+    file's call-count arithmetic for no behavioural gain, since it is a
+    provable constant. Every ``private_calls``/``private_profile_seed``
+    assertion in this file was aligned to that constant during the
+    2026-08-12 release-gating fix pass (asserting 0 / None, with failure
+    text naming the removal, instead of the pre-removal non-zero/non-empty
+    expectations).
     """
 
     def __init__(self):
@@ -402,21 +405,27 @@ async def test_t41_one_real_orcid_becomes_a_stored_profile_grounded_in_its_works
     )
     assert profile.profile_generated_at is not None
 
-    # T4.1 asks for a non-empty `private_profile_md`. The pipeline NEVER sets that
-    # column — step 9b writes `private_profile_seed`, and `private_profile_md` is the
-    # live copy the PI edits later through the web UI. GM #1 pins the same thing
-    # ('private_profile_md': None in the snapshot). Both halves are asserted so the
-    # discrepancy is recorded rather than quietly reinterpreted.
-    assert profile.private_profile_seed and profile.private_profile_seed.strip(), (
-        "step 9b produced no private-profile seed. synthesize_private_profile raised "
-        "(logged as 'Private profile seed generation failed') — same three causes as "
-        "the public synthesis above"
+    # T4.1 asks for both private-profile columns to stay unset. Neither is written
+    # by the pipeline any more: `synthesize_private_profile` (former step 9b) was
+    # deleted outright in the 2026-08-12 PI-interaction removal cycle, so
+    # `private_profile_seed` is never populated, and `private_profile_md` — the
+    # live copy a PI used to edit through the web UI — was never written by the
+    # pipeline even before that (it is a fully separate write path, now itself
+    # deleted). GM #1 pins the same thing (both columns None in the snapshot).
+    # Both columns are KEPT on the model (decision 5) — this is "no writers left",
+    # not "the column was dropped".
+    assert profile.private_profile_seed is None, (
+        f"private_profile_seed is {profile.private_profile_seed!r}, not None. "
+        "synthesize_private_profile (former step 9b) was deleted outright — nothing "
+        "in the pipeline writes this column any more, so a non-None value here means "
+        "either a regression reintroduced a writer, or this test is running against "
+        "code older than the 2026-08-12 removal cycle"
     )
     assert profile.private_profile_md is None, (
-        "the pipeline set private_profile_md. It has never done that (step 9b writes "
-        "private_profile_seed, and GM #1 snapshots private_profile_md as None); if this "
-        "changed, the PI's hand-edited private profile is now being overwritten by a "
-        "monthly refresh"
+        "the pipeline set private_profile_md. It has never done that (GM #1 "
+        "snapshots private_profile_md as None); if this changed, some write path is "
+        "populating a column the web UI's private-profile editor no longer exists to "
+        "maintain (that editor was deleted in the same removal cycle)"
     )
 
     # --- _validate_profile accepted it, and the row says so ---------------------------
@@ -448,9 +457,17 @@ async def test_t41_one_real_orcid_becomes_a_stored_profile_grounded_in_its_works
     assert probe.public_calls == 1, (
         f"{probe.public_calls} public-synthesis calls. 2 means validation rejected the "
         "first reply and the stricter retry fired — the profile is still stored, but "
-        "the run cost double and GM #1's 'exactly two LLM calls' no longer holds"
+        "the run cost double and GM #1's 'exactly one LLM call on the happy path' no "
+        "longer holds"
     )
-    assert probe.private_calls == 1
+    assert probe.private_calls == 0, (
+        f"{probe.private_calls} private-synthesis calls, expected 0. "
+        "synthesize_private_profile (former step 9b) was deleted outright in the "
+        "2026-08-12 PI-interaction removal cycle — the probe's private_calls counter "
+        "is retained at a permanent 0 (see PipelineProbe's docstring) precisely "
+        "because nothing calls it any more; a non-zero value means that removal "
+        "regressed"
+    )
 
     # --- publications were persisted ---------------------------------------------------
     pubs = await publications(db_session, user.id)
@@ -672,11 +689,19 @@ async def test_t42_a_second_run_updates_the_same_row_and_adds_a_second_revision(
         "the second revision does not contain the second run's summary"
     )
 
-    # The seed is generated once and then left alone (GM #4 pins this). A pipeline that
-    # regenerated it every month would silently discard the PI's edits.
-    assert second.private_profile_seed == first_seed, (
-        "the re-run regenerated private_profile_seed. Step 9b is guarded on the seed "
-        "being absent; if that guard broke, every refresh overwrites the PI's staged text"
+    # private_profile_seed must stay None across both runs: step 9b
+    # (synthesize_private_profile) was deleted outright in the 2026-08-12
+    # PI-interaction removal cycle, so there is no writer left to regenerate
+    # it (or anything else) into that column. This replaces the pipeline's
+    # former "generate once, then leave it alone" guarantee — GM #4 no longer
+    # makes that claim at all (its snapshot carries no seed-related key), so
+    # there is no still-live GM claim to reconcile T4.5 against here; this is
+    # just a direct pin that the column really does stay untouched.
+    assert first_seed is None and second.private_profile_seed is None, (
+        f"private_profile_seed is {first_seed!r} after the first run and "
+        f"{second.private_profile_seed!r} after the second — expected None both times. "
+        "synthesize_private_profile was deleted outright; a non-None value means a "
+        "regression reintroduced a writer for this column"
     )
 
     _OBSERVED["rerun"] = {
@@ -684,8 +709,6 @@ async def test_t42_a_second_run_updates_the_same_row_and_adds_a_second_revision(
         "second_version": second.profile_version,
         "same_profile_row": second.id == first_id,
         "pub_count_after_two_runs": len(all_pubs),
-        "seed_set_after_first_run": first_seed is not None,
-        "seed_unchanged_on_rerun": second.private_profile_seed == first_seed,
         "llm_calls_total": probe.llm_calls,
         "llm_calls_first_run": calls_after_first,
         "revision_count": len(revs),
@@ -1049,10 +1072,12 @@ async def test_t45_the_four_mocked_golden_masters_still_describe_the_live_shape(
     it against live observations, and names the snapshot that is wrong when they differ.
 
       GM #1 test_profile_pipeline_golden_master
-            one run -> profile_version 1, private_profile_md None, seed set, the six
-            synthesized fields are list/str, publications carry
+            one run -> profile_version 1, private_profile_md None,
+            private_profile_seed None (never written — synthesize_private_profile
+            was deleted outright in the 2026-08-12 PI-interaction removal cycle),
+            the six synthesized fields are list/str, publications carry
             pmid/doi/title/journal/year/pmcid/abstract, raw_abstracts_hash is the sha256
-            of the joined abstracts, and exactly two LLM calls.
+            of the joined abstracts, and exactly one LLM call (public synthesis only).
       GM #2 test_profile_pipeline_llm_failure_leaves_fields_unset
             synthesis raises -> version stays 0, fields stay None, hash still set.
             Reproduced live below with an unauthenticated Anthropic client: a real 401
@@ -1061,7 +1086,10 @@ async def test_t45_the_four_mocked_golden_masters_still_describe_the_live_shape(
             the stored DOI is the one PubMed has on file for that PMID, never an
             unverified ORCID candidate. Checked against live esummary.
       GM #4 test_profile_pipeline_rerun_increments_version_and_updates_pubs
-            1 -> 2, same row, publication count stable, seed unchanged, 3 LLM calls.
+            1 -> 2, same row, publication count stable, 2 LLM calls total (one public
+            synthesis call per run; the GM no longer carries any seed-related claim
+            at all, so there is nothing left to reconcile T4.2's former seed pin
+            against — see that test's own assertion for the direct pin instead).
     """
     single = require_observation("single_run", "T4.1")
     rerun = require_observation("rerun", "T4.2")
@@ -1080,8 +1108,12 @@ async def test_t45_the_four_mocked_golden_masters_still_describe_the_live_shape(
         "GM #1 snapshots private_profile_md as None. Live disagrees, so GM #1 is wrong "
         "about which private column the pipeline writes"
     )
-    assert single["private_profile_seed"], (
-        "GM #1 snapshots a non-empty private_profile_seed; live produced none"
+    assert single["private_profile_seed"] is None and (
+        "'private_profile_seed': None," in snap["text"]
+    ), (
+        "GM #1 snapshots private_profile_seed as None (synthesize_private_profile / "
+        "step 9b was deleted outright in the 2026-08-12 PI-interaction removal cycle, "
+        f"so nothing writes it any more); live produced {single['private_profile_seed']!r}"
     )
     expected_types = {
         "research_summary": "str", "techniques": "list", "experimental_models": "list",
@@ -1120,21 +1152,26 @@ async def test_t45_the_four_mocked_golden_masters_still_describe_the_live_shape(
         f"gives {expected_hash[:12]}… but the pipeline stored "
         f"{single['raw_abstracts_hash'][:12]}… — the hashed set is not the synthesized set"
     )
-    assert single["llm_calls"] == 2, (
-        f"GM #1 asserts exactly two LLM calls on the happy path; the live run made "
-        f"{single['llm_calls']}. Three means _validate_profile rejected a real model's "
-        "output and the retry fired — the GM never sees that because its fixture is "
-        "hand-tuned to pass validation, so the GM understates the real cost per profile"
+    assert single["llm_calls"] == 1, (
+        f"GM #1 asserts exactly one LLM call on the happy path (public synthesis only "
+        "— the removal cycle deleted the private-seed follow-up call); the live run "
+        f"made {single['llm_calls']}. Two means _validate_profile rejected a real "
+        "model's output and the retry fired — the GM never sees that because its "
+        "fixture is hand-tuned to pass validation, so the GM understates the real "
+        "cost per profile"
     )
 
     # --- GM #4 -----------------------------------------------------------------------
+    # No seed-related key: GM #4's snapshot dropped seed_set_after_first_run /
+    # seed_unchanged_on_rerun entirely once synthesize_private_profile was deleted
+    # (2026-08-12 PI-interaction removal cycle) — there is no live GM claim about the
+    # seed left to reconcile here; T4.2 pins the seed-stays-None invariant directly
+    # instead (see its own assertion).
     gm4_expected = {
         "first_version": 1,
         "second_version": 2,
         "same_profile_row": True,
-        "seed_set_after_first_run": True,
-        "seed_unchanged_on_rerun": True,
-        "llm_calls_total": 3,
+        "llm_calls_total": 2,
     }
     gm4_live = {k: rerun[k] for k in gm4_expected}
     assert gm4_live == gm4_expected, (
@@ -1189,9 +1226,11 @@ async def test_t45_the_four_mocked_golden_masters_still_describe_the_live_shape(
     api_budget.wait("orcid")
     failed = await profile_pipeline.run_profile_pipeline(user.id, db_session)
 
-    assert probe.public_calls == 1 and probe.private_calls == 1, (
-        "the failure path did not attempt both synthesis calls, so GM #2's shape is not "
-        f"the one being reconciled: public={probe.public_calls} private={probe.private_calls}"
+    assert probe.public_calls == 1 and probe.private_calls == 0, (
+        "the failure path did not attempt exactly the one synthesis call the "
+        "post-removal pipeline makes (public only — step 9b/synthesize_private_profile "
+        "was deleted outright), so GM #2's shape is not the one being reconciled: "
+        f"public={probe.public_calls} private={probe.private_calls}"
     )
     gm2_expected = {
         "profile_version": 0,
