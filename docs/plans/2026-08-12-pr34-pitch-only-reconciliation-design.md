@@ -114,9 +114,12 @@ new lab top-level post, mentioned or not**. Consequences:
   `help_wanted`, `introduction`, `idea_crosslab`, `funding_collab` are deleted
   outright.
 - An empty rendered menu logs a WARNING naming the unsatisfiable target (e.g., hub
-  absent from a lab's cohort) and the turn skips; `_EMPTY_MENU`
-  (`post_types.py:296`) is rewritten to skip-only text with no option letters and no
-  `reply` action.
+  absent from a lab's cohort). The skip itself is LLM-mediated, not a code bypass:
+  `_EMPTY_MENU` (`post_types.py:296`) is rewritten to skip-only text with no option
+  letters and no `reply` action, phase 5 still calls the LLM with that menu, and the
+  model returns `{"action": "skip"}` in response to it — contrast with
+  `blocked_for_regular`'s narrowed-empty case below, which skips phase 5 without an
+  LLM call at all.
 - `blocked_for_regular` behavior (replaces `funding_only`): the menu narrows to
   `TERMINAL_POST_TYPES` — a backpressured hub can always still file assessments (no
   deadlock at its 12-thread ceiling); a backpressured lab, whose menu holds no
@@ -145,6 +148,15 @@ unreviewed proposals are purged at deploy (§12).
   collaboration/refinement flow (including seeds at `simulation.py:5539`).
 - The `Proposal` model, table, and admin views stay for historical data.
 - Legacy visibility values in old rows remain tolerated; only the flows are removed.
+- Infrastructure/discovery code for channels that already exist is retained by
+  design, not deleted: `_sync_private_channels_from_db` (`simulation.py:1593`),
+  the `/message` route's membership check (`pi_may_post_to_channel`), and the
+  admin views that list private channels all keep working for legacy rows. What
+  is removed is only the FLOW that creates new state — seeding a private
+  channel's initial content, finalizing a collab_private conclusion, and (fix 9,
+  2026-08-12 final audit wave) `reopen_proposal`'s migration into a brand-new
+  collab_private channel. A PI can still read and be blocked from an existing
+  private channel; nothing manufactures a new one.
 
 ## 9. Phase 2 guard and pitch pacing (branch 2)
 
@@ -195,7 +207,8 @@ unreviewed proposals are purged at deploy (§12).
     confidential. Never quote or paraphrase them in any channel or thread —
     everything you post is visible to the whole workspace. What you may share is
     the science you are pitching, at the level your lab has made public or chooses
-    to make public by pitching it."
+    to make public by pitching it." (drafted; final wording as landed in
+    prompts/agent-system.md, kept in sync by the doc-sync test)
   - The hub-may-open-a-thread sentence (lines 210-211) stays, aligned with
     auto-activation semantics.
 - `prompts/roles/scout_hub/agent-system.md`:
