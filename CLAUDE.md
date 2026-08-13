@@ -235,19 +235,26 @@ authoritative.)
 ## BlackbirdBot (the scout_hub role)
 
 BlackbirdBot screens PI ideas against `data/Blackbird_initial_priorities-criteria_v1.pdf`.
-The rubric lives in **`profiles/private/blackbird.md`** (loaded per-agent from
-`profiles/private/{agent_id}.md` and injected under the `## Your Private Instructions`
-header that `Agent._compose_system_prompt` builds into every phase's system prompt); the
-per-phase behaviour lives in `prompts/roles/scout_hub/` and `src/agent/thread_guidance.py`.
+The rubric criteria and the `<assessment_json>` skeleton live directly in
+`prompts/roles/scout_hub/phase4-thread-reply.md`; the per-phase behaviour otherwise lives
+in `prompts/roles/scout_hub/` and `src/agent/thread_guidance.py`. As of the 2026-08-12
+removal cycle (private instructions + reply-only hub), there is no runtime "private
+profile" mechanism — `Agent._compose_system_prompt` no longer injects a `## Your Private
+Instructions` header, and nothing reads `profiles/private/{agent_id}.md` per-agent.
+**`profiles/private/blackbird.md`** is untracked and unread at runtime; archive-and-diff it
+against the tracked rubric text before any deploy in case it holds content that was never
+migrated (see the deploy checklist).
 
 - **Interview guidance is per-role Python**, not a prompt: `src/agent/thread_guidance.py`.
   The `pi_lab` strings there are byte-identical to the pre-refactor literals and are pinned
   by `tests/characterization/__snapshots__/test_agent_turn_gm.ambr` — do not reword them,
   and never run `pytest --snapshot-update` to make a mismatch go away.
-- **Assessments are durable.** A `:mag:` Opportunity Assessment must carry an
-  `<assessment_json>` sidecar (bare JSON, *no* ``` fence — a fenced block would be parsed
-  as the phase-5 action and silently no-op the post). It is stripped from the Slack body
-  and written to `opportunity_assessments`, visible at `/admin/assessments`.
+- **The hub is reply-only — it never makes a top-level post.** An Opportunity Assessment is
+  not a post type: it is an `<assessment_json>` sidecar carried inside the hub's CONCLUDING
+  reply in the interview thread (bare JSON, *no* ``` fence). It is stripped from the Slack
+  body before anything is posted and written to `opportunity_assessments`, visible at
+  `/admin/assessments`. `:mag:` names the sidecar, not a post label — it never appears on
+  anything a PI or another lab sees.
 - **`weighted_score` is computed**, never taken from the model:
   `src/services/blackbird_rubric.py`. `recommendation` (which may be
   `route-to-incubation`) comes straight from the model's verdict and the computed `band`

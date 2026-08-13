@@ -286,3 +286,104 @@ unreviewed proposals are purged at deploy (§12).
 - Any org1 (`copi-python`) work; this design touches only the blackbird stack.
 - Proactive hub re-engagement of past interviews (possible future `question` post
   type — Approach B — deliberately not built now).
+
+## 15. Addendum — 2026-08-12 removal cycle (private instructions, reply-only hub, PI
+    interaction, phase-2 prompts)
+
+A second adversarial audit of this design's *implementation* (same date, after §1-14
+above had landed) found that several features this design deliberately kept —
+private instructions, the human-PI tag flow of §10, the hub's `:mag:` top-level post,
+and the phase-2 prompt files kept "for reference" per §9/§11 — were themselves the
+wrong target state. The `.superpowers/sdd/2026-08-12-removal-cycle/` plan removed all
+four outright, superseding the corresponding sections above. This addendum is the
+permanent record of what changed and why; §1-14 are left as the historical account of
+the pitch-only reconciliation and are no longer current on these four points.
+
+**The four removals:**
+
+1. **Private instructions.** `agent.py`'s `## Your Private Instructions` injection,
+   the `private_profile` property, and the private-channel working-memory
+   segmentation are deleted (superseding §11's "New confidentiality rule" text, which
+   assumed the mechanism it protected would stay). `llm.py::synthesize_private_profile`
+   and its worker/queue wiring, the onboarding private-profile step and its editor,
+   and the web dashboard's private-profile view/edit routes (`src/routers/agent_page.py`)
+   are all deleted outright — not reworded. `own_publication_dois` derives from the
+   *public* profile only. The prompts' Core Rule 4 (private-instructions
+   confidentiality) and the DM-rules Core Rule 6 are deleted (renumbered); the
+   interview-confidence rule ("cannot share private information" — a PI's confidences
+   go to the sidecar only) is unrelated and stays.
+2. **Reply-only hub (assessment relocation).** The hub's standalone `:mag:` Opportunity
+   Assessment top-level post (§6, §11's phase5-new-post.md skeleton work) is deleted.
+   `scout_hub` is now hard-gated out of Phase 5 entirely (`role.toml` declares
+   `post_types = []`; the engine gate is belt-and-suspenders). The `<assessment_json>`
+   sidecar — unchanged content: 3-state gating exemplar, 13 score keys, bare-JSON-no-
+   fence rule — is relocated into the hub's Phase-4 CONCLUDE-adjacent reply
+   (`prompts/roles/scout_hub/phase4-thread-reply.md`); it is extracted and stripped
+   from the Slack body before posting and persisted via the existing
+   `_persist_assessment` path (Option A). `TERMINAL_POST_TYPES`/`terminal_only` and the
+   unreviewed-proposal blocking machinery (§6's `blocked_for_regular`) are deleted —
+   nothing creates or reviews proposals on this branch, so there was nothing left to
+   gate; a lab at `active_thread_threshold` now simply skips Phase 5.
+3. **Human-PI interaction.** §10's repurposed tag flow ("Your PI flagged this" fed into
+   the next pitch) is deleted, not built out further: `pi_handler.py` and its
+   construction, pollers, and `has_pi_directive`/`pi_priority`/`pi_context` state are
+   removed; the phase-5 skip bypass reverts to plain probability. `delegate_slack_ids`
+   Slack-power fold-in is removed from the engine (web delegate account/dashboard
+   access is unaffected — decision 6 below). The web dashboard's PI-DM view/route
+   (`POST /agent/{id}/dm`) is deleted as a dead end once its only reader
+   (`pi_handler.py`) was gone; `pi_dm_messages` itself, and `email_inbound.py`'s
+   classification of an "instruction" reply, both stay as durable history/observability
+   only — `_handle_instruction` classifies and logs, with no thread post, no channel
+   migration, and no review row (superseding §10's "Flow is currently theoretical" —
+   it is now permanently a no-op, not theoretically live). The engine-side
+   private-channel collaboration/refinement flow (§8's kept "discovery/rebuild"
+   framing did not anticipate this) and its `src/services/private_channels.py`
+   creation flow are deleted outright, along with the `enable_private_refinement`
+   setting that gated it — orphaned once neither the web reopen route nor
+   `email_inbound.py` read it any longer. `collab_private` remains legacy-tolerance
+   only: no new creation path, discovery/rebuild for existing channels unchanged.
+4. **Phase-2 prompts.** §9's "kept on disk, documented inactive" treatment is
+   superseded: the four `phase2-*.md` files, `build_phase2_scan_prompt`/
+   `build_phase2_prune_prompt`/`build_scan_system_prompt`, `_phase2_scan_filter`/
+   `_phase2_prune`, the `interesting_posts_cap` setting, and the `interesting_posts`
+   field (plus every consumer: the Phase-5 available-posts loop, `_evict_dead_thread`,
+   `_apply_cohort_gate_to_state`) are deleted outright, not left dormant.
+
+**The ten locked decisions** (from `.superpowers/sdd/2026-08-12-removal-cycle/`,
+binding on every task in that cycle):
+
+1. Assessment relocation = Option A (above): `<assessment_json>` from the hub's
+   CONCLUDING reply, stripped before Slack, persisted via `_persist_assessment`.
+   Admin page unchanged.
+2. `own_publication_dois` derives from the PUBLIC profile only.
+3. Email: neuter ONLY `email_inbound.py::_handle_instruction` (classify →
+   log-and-ignore, no thread post); everything else email stays deferred scope.
+4. Top-level `specs/` UNTOUCHED (possibly org1-shared).
+5. Migrations 0020/0021 and `pi_dm_messages` KEPT; only blackbird-branch
+   writers/readers of PI DMs removed. No new migrations in this cycle.
+6. Delegates: web/account features stay; `delegate_slack_ids` engine consumption
+   (Slack-power fold-in) removed.
+7. Welcome email kept as a one-way notification; strip any PI→bot implication.
+8. `collab_private` remains legacy-tolerance only (no new creation paths; keep
+   discovery/rebuild for existing channels).
+9. Hub phase 5 = hard role gate (scout_hub never enters phase 5).
+   `TERMINAL_POST_TYPES`/`terminal_only`/blocked-narrowing machinery removed; a lab
+   at the active-thread threshold simply skips phase 5.
+10. "PI intent" attribution language in interviews KEPT ("that's a question for my
+    PI", "cannot commit your PI").
+
+**Audit-discovered correction, landed alongside the four removals (not itself one of
+them):** the EXPLORE/DECIDE/CONCLUDE phase-4 guidance boundary
+(`thread_guidance.phase4_guidance`) takes the ordinal of the reply about to be
+written, but both `Agent.build_phase4_prompt` and (until this fix)
+`_warn_if_hub_conclude_missing_assessment` were feeding it `thread.message_count`, the
+*prior* count — an off-by-one that silently misclassified the boundary reply at every
+threshold (a thread with 4 existing messages generating its 5th reply was classified
+EXPLORE instead of DECIDE; a thread with 11 existing messages generating its 12th was
+classified DECIDE instead of MUST-CONCLUDE). `Agent.build_phase4_prompt` now feeds it
+`thread.message_count + 1`; `_warn_if_hub_conclude_missing_assessment` does the same
+and logs that ordinal (not the prior count) in its warning. Fixed 2026-08-12
+(commit `55822a4`, "pass phase4_guidance the reply's ordinal, not the prior count");
+the shifted EXPLORE/DECIDE boundary at prior-count 4 (ordinal 5) is pinned by a
+real-path test (`test_agent_prompts.py::test_phase4_prompt_at_prior_count_4_receives_decide_not_explore`)
+as part of this cycle's consolidation sweep.
