@@ -26,6 +26,7 @@ from src.agent.roles import load_role
 from src.agent.slack_client import SlackListingIncomplete, ThreadNotFound
 from src.agent.specialists import required_domains_for
 from src.agent.state import ProposalRef, ThreadState
+from src.agent.thread_guidance import CONCLUDE, phase4_guidance
 from src.agent.tools import execute_tool, tools_for_role
 from src.config import get_settings
 from src.models import (
@@ -1281,6 +1282,9 @@ class SimulationEngine:
             # is a no-op for every non-hub agent.
             if agent.role == "scout_hub":
                 await self._capture_hub_assessment(agent, thread, raw_response, posted)
+                self._warn_if_hub_conclude_missing_assessment(
+                    agent, thread, response_text, raw_response,
+                )
 
             # Check for thread outcome
             await self._check_thread_outcome(agent, thread, response_text)
@@ -1982,6 +1986,60 @@ class SimulationEngine:
                 "thread %s: %s",
                 agent.agent_id, thread.thread_id, exc,
             )
+
+    def _warn_if_hub_conclude_missing_assessment(
+        self, agent: Agent, thread: ThreadState, response_text: str, raw_response: str,
+    ) -> None:
+        """Absent-sidecar detection gap: warn when a hub's structurally-
+        concluding reply is neither a decline nor a persistable verdict.
+
+        ``_capture_hub_assessment`` already warns when an ``<assessment_json>``
+        tag is PRESENT but broken (unparseable, or valid JSON that is not an
+        object) — it is deliberately silent when the tag is simply absent,
+        because that is the ordinary case on every one of the ~11 non-
+        concluding turns of an interview. That silence becomes a real gap at
+        the one turn where thread_guidance.py's own CONCLUDE branch tells the
+        hub it MUST either decline (⏸️) or close with an inline verdict that
+        carries the sidecar (see ``_SCOUT_HUB[CONCLUDE]``) — a reply that does
+        neither is a concluding, non-decline verdict that produced nothing
+        persistable, and nothing upstream of this ever says so.
+
+        Fires only when ALL THREE hold:
+          (a) the thread is at its structural CONCLUDE point. Deliberately
+              delegates to ``thread_guidance.phase4_guidance`` — the exact
+              function that decided THIS reply's guidance — rather than
+              re-deriving the cutoff from ``settings.max_thread_messages``:
+              thread_guidance's CONCLUDE branch is a literal 12, not settings-
+              derived, so the two can drift apart if ``max_thread_messages``
+              is ever configured to anything else. Reading from
+              thread_guidance itself keeps this check correct either way.
+          (b) the posted reply does NOT open with the ⏸️ decline convention
+              (see ``_reply_opens_with_pause``).
+          (c) no ``<assessment_json>`` tag — well-formed or truncated — is
+              present anywhere in the raw response. A present-but-broken tag
+              is already covered by ``_capture_hub_assessment``'s own
+              warnings above and must not double-warn here.
+
+        Never raises and never persists anything itself — purely an
+        observability signal for a case that otherwise leaves no trace at
+        all: the reply already posted (this runs after `_post_message`
+        succeeded) and no DB row was ever going to exist for it either way.
+        """
+        thread_phase, _, _ = phase4_guidance(agent.role, thread.message_count)
+        if thread_phase != CONCLUDE:
+            return
+        if _reply_opens_with_pause(response_text):
+            return
+        if _ASSESSMENT_RE.search(raw_response or "") or _ASSESSMENT_UNCLOSED_RE.search(
+            raw_response or ""
+        ):
+            return
+        logger.warning(
+            "[%s] Phase 4: thread %s concluded (message_count=%d) with a "
+            "non-decline verdict but no persistable <assessment_json> "
+            "sidecar was found",
+            agent.agent_id, thread.thread_id, thread.message_count,
+        )
 
     async def _persist_assessment(
         self, agent_id: str, channel: str, verdict: dict, slack_ts: str | None = None,
@@ -4422,6 +4480,24 @@ def _extract_slack_message(text: str) -> str:
             return text[last_open + len("<slack_message>"):last_close].strip()
     # Fallback: strip preamble heuristically
     return _strip_llm_preamble(text)
+
+
+def _reply_opens_with_pause(text: str) -> bool:
+    """True if ``text`` follows the ⏸️ no-viable-collaboration convention
+    thread_guidance.py's DECIDE/CONCLUDE instructions ask for verbatim
+    ("start your reply with ⏸️") — checked at the front of the (stripped)
+    string, not merely present anywhere in it.
+
+    Deliberately stricter than ``_check_thread_outcome``'s ``"⏸️" in
+    latest_reply`` check just below: that one exists to actually close the
+    thread and is intentionally permissive about where the marker appears,
+    while this one is asking "did the model follow the documented opening
+    convention" for ``_warn_if_hub_conclude_missing_assessment``'s absent-
+    sidecar detection — a marker buried mid-reply would not have been the
+    ⏸️-only decline thread_guidance describes.
+    """
+    stripped = (text or "").strip()
+    return stripped.startswith("⏸️") or stripped.startswith(":pause_button:")
 
 
 # Case-insensitive and tolerant of stray whitespace inside the delimiters

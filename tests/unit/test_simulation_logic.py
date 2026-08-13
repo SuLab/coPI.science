@@ -1067,6 +1067,153 @@ class TestHubAssessmentRelocation:
 
 
 # ---------------------------------------------------------------
+# _warn_if_hub_conclude_missing_assessment — absent-sidecar detection gap
+# (fix round item 2). thread_guidance.py's CONCLUDE branch is a hardcoded
+# message_count >= 12, independent of settings.max_thread_messages — and
+# _reply_to_thread's own "system-enforced close" check (a few lines above
+# where the reply is actually generated) returns *before generating any
+# reply at all* once thread.message_count >= settings.max_thread_messages.
+# With the default max_thread_messages=12 those two thresholds coincide, so
+# a reply actually generated under CONCLUDE guidance can never occur in that
+# configuration — the close-as-timeout branch always wins first. Every
+# fixture below raises max_thread_messages to 20, modelling an operator who
+# widened the cap without touching thread_guidance's own hardcoded literal
+# — the scenario that makes CONCLUDE-guided replies reachable at all through
+# _reply_to_thread, and lets these tests drive the real method instead of
+# calling it in isolation.
+# ---------------------------------------------------------------
+
+def _seed_thread_history(engine, thread_id: str, channel: str, count: int) -> None:
+    """Append ``count`` plain replies to ``thread_id`` so `_reply_to_thread`'s
+    own recompute (``len(get_thread_history(thread_id))``) lands on exactly
+    ``count`` — none of these entries' ``ts`` equals ``thread_id`` itself, so
+    there is no "root" entry inflating the count by one."""
+    from src.agent.message_log import LogEntry
+
+    for i in range(count):
+        engine.message_log.append(LogEntry(
+            ts=f"{thread_id}-msg{i}",
+            channel=channel,
+            sender_agent_id="wang" if i % 2 else "blackbird",
+            sender_name="WangBot" if i % 2 else "BlackbirdBot",
+            content=f"message {i}",
+            thread_ts=thread_id,
+            posted_at=float(i),
+            is_bot=True,
+        ))
+
+
+class TestHubConcludeMissingAssessmentWarning:
+    _WARNING_SNIPPET = "no persistable <assessment_json> sidecar was found"
+
+    def _engine_at(self, monkeypatch, *, message_count, max_thread_messages=20):
+        import types
+
+        from src.agent.agent import Agent
+        from src.agent.state import ThreadState
+        from tests.fakes import FakeSlackClient
+
+        hub = Agent("blackbird", "BlackbirdBot", "Blackbird", role="scout_hub")
+        thread = ThreadState(
+            thread_id="t1", channel="general", other_agent_id="wang",
+            has_pending_reply=True,
+        )
+        hub.state.active_threads["t1"] = thread
+        client = FakeSlackClient(agent_id="blackbird")
+        engine = SimulationEngine(agents=[hub], slack_clients={"blackbird": client})
+        _seed_thread_history(engine, "t1", "general", message_count)
+
+        settings = types.SimpleNamespace(
+            max_thread_messages=max_thread_messages,
+            llm_agent_model_opus="test-model",
+        )
+        monkeypatch.setattr("src.agent.simulation.get_settings", lambda: settings)
+        monkeypatch.setattr(hub, "build_phase4_prompt", lambda **kw: ("sys", []))
+        return engine, hub, thread, client
+
+    async def _drive(self, monkeypatch, engine, hub, thread, raw_response):
+        async def _fake_generate_with_tools(**kwargs):
+            return raw_response
+
+        monkeypatch.setattr(
+            "src.agent.simulation.generate_with_tools", _fake_generate_with_tools
+        )
+        await engine._reply_to_thread(hub, thread)
+
+    @pytest.mark.asyncio
+    async def test_fires_on_conclude_non_decline_reply_with_no_sidecar(
+        self, monkeypatch, caplog,
+    ):
+        """The mission pin: a hub reply generated at the structural CONCLUDE
+        point that neither declines nor carries a sidecar must warn."""
+        engine, hub, thread, client = self._engine_at(monkeypatch, message_count=12)
+        raw_response = (
+            "<slack_message>\n"
+            ":mag: Interesting, but I don't have enough to call it either way.\n"
+            "</slack_message>"
+        )
+        with caplog.at_level("WARNING"):
+            await self._drive(monkeypatch, engine, hub, thread, raw_response)
+
+        assert len(client.posted) == 1  # confirms the reply was actually generated
+        assert self._WARNING_SNIPPET in caplog.text
+        assert "t1" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_silent_on_pause_decline_at_conclude(self, monkeypatch, caplog):
+        """A ⏸️-opening decline at the CONCLUDE point is an expected,
+        documented outcome (thread_guidance's "Option 2 is perfectly
+        acceptable" branch) — must not warn."""
+        engine, hub, thread, client = self._engine_at(monkeypatch, message_count=12)
+        raw_response = (
+            "<slack_message>⏸️ Not a fit — no credible IP path here.</slack_message>"
+        )
+        with caplog.at_level("WARNING"):
+            await self._drive(monkeypatch, engine, hub, thread, raw_response)
+
+        assert len(client.posted) == 1
+        assert self._WARNING_SNIPPET not in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_silent_on_non_conclude_reply_with_no_sidecar(
+        self, monkeypatch, caplog,
+    ):
+        """Below the structural CONCLUDE point, an absent sidecar is the
+        ordinary case on ~11 of every 12 turns — must stay silent (this is
+        exactly what `_capture_hub_assessment`'s own docstring already
+        covers; this test pins that the NEW warning does not regress it)."""
+        engine, hub, thread, client = self._engine_at(
+            monkeypatch, message_count=8, max_thread_messages=12,
+        )
+        raw_response = (
+            "<slack_message>Can you say more about the assay's throughput?</slack_message>"
+        )
+        with caplog.at_level("WARNING"):
+            await self._drive(monkeypatch, engine, hub, thread, raw_response)
+
+        assert len(client.posted) == 1
+        assert self._WARNING_SNIPPET not in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_silent_when_sidecar_present_at_conclude(self, monkeypatch, caplog):
+        """A CONCLUDE reply that DOES carry a sidecar is the other
+        documented, successful outcome — must not warn even though nothing
+        is persisted (no database is configured in this engine)."""
+        engine, hub, thread, client = self._engine_at(monkeypatch, message_count=12)
+        raw_response = (
+            "<slack_message>:mag: Advancing — strong differentiation.</slack_message>\n\n"
+            '<assessment_json>\n'
+            '{"subject_agent_id": "wang", "recommendation": "advance"}\n'
+            '</assessment_json>'
+        )
+        with caplog.at_level("WARNING"):
+            await self._drive(monkeypatch, engine, hub, thread, raw_response)
+
+        assert len(client.posted) == 1
+        assert self._WARNING_SNIPPET not in caplog.text
+
+
+# ---------------------------------------------------------------
 # _build_lab_directories — cohort gate must scope the "Other Labs'
 # Recent Publications" section (runbook finding A3), not just the
 # message log.
