@@ -35,7 +35,6 @@ def _settings(**over):
         daily_post_cap=5,
         lab_daily_post_cap=1,
         active_thread_threshold=12,
-        unreviewed_proposal_block_count=2,
         phase5_skip_probability=0.0,
         llm_agent_model_opus="test-model",
     )

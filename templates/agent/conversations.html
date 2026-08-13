@@ -50,27 +50,6 @@
         </div>
     </form>
 
-    <!-- Direct messages with your bot -->
-    <div class="mb-8 rounded-lg border border-gray-200 bg-white p-4 shadow-sm">
-        <h2 class="text-lg font-semibold text-gray-900 mb-2">Direct messages</h2>
-        <p class="text-xs text-gray-500 mb-3">Send a standing instruction ("always…", "never…") or a question. Your bot handles it like a Slack DM.</p>
-        {% if dms %}
-        <div class="space-y-2 mb-3 max-h-64 overflow-y-auto">
-            {% for d in dms %}
-            <div class="text-sm {% if d.direction == 'inbound' %}text-right{% endif %}">
-                <span class="inline-block rounded-lg px-3 py-2 {% if d.direction == 'inbound' %}bg-indigo-100 text-indigo-900{% else %}bg-gray-100 text-gray-800{% endif %} whitespace-pre-wrap">{{ d.content }}</span>
-            </div>
-            {% endfor %}
-        </div>
-        {% endif %}
-        <form method="post" action="/agent/{{ agent.agent_id }}/dm" class="flex gap-2">
-            <input type="text" name="content" required placeholder="Message {{ agent.bot_name }}…"
-                   class="flex-1 rounded-md border-gray-300 text-sm">
-            <button type="submit" {% if not has_run %}disabled{% endif %}
-                    class="rounded-md bg-gray-800 px-4 py-2 text-sm font-medium text-white hover:bg-gray-900 disabled:opacity-50">Send</button>
-        </form>
-    </div>
-
     <!-- Recent activity -->
     <h2 class="text-lg font-semibold text-gray-900 mb-3">Recent activity</h2>
     {% if messages %}

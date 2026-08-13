@@ -5,7 +5,6 @@ import logging
 import re
 import uuid
 from datetime import UTC
-from pathlib import Path
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -34,7 +33,6 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 templates = Jinja2Templates(directory="templates")
 
-PROFILES_DIR = Path("profiles")
 SLACK_INVITE_URL = (
     "https://join.slack.com/t/labbot-workspace/shared_invite/"
     "zt-3sxfrrisw-t4hRz4aMfZZPxThxUaTGKA"
@@ -304,10 +302,6 @@ async def agent_dashboard(
             entry["discussion"] = deduped
             unreviewed.append(entry)
 
-    # Private profile path
-    private_profile_path = PROFILES_DIR / "private" / f"{aid}.md"
-    has_private_profile = private_profile_path.exists()
-
     # Resolve delegate display names (legacy Slack-only delegates)
     delegates = []
     if agent.delegate_slack_ids:
@@ -366,7 +360,6 @@ async def agent_dashboard(
             proposals_total=len(proposals),
             unreviewed=unreviewed,
             reviewed=reviewed,
-            has_private_profile=has_private_profile,
             slack_invite_url=SLACK_INVITE_URL,
             slack_error=slack_error,
             delegates=delegates,
@@ -529,15 +522,18 @@ async def reopen_proposal(
     Posts the PI's guidance directly into the proposal's origin thread — via
     Slack if the agent has a bot token, via the DB inbox otherwise — regardless
     of that thread's visibility. This route never creates a NEW collab_private
-    channel: it used to (when ``settings.enable_private_refinement`` was True
-    and the origin was public), but the engine-side private-channel
-    collaboration/refinement flow was deleted (2026-08-12 final audit wave,
-    fix 9 — "private-channel collaboration is out"; see
+    channel: it used to (gated on the now-deleted ``enable_private_refinement``
+    setting, when the origin was public), but the engine-side private-channel
+    collaboration/refinement flow (``src/services/private_channels.py``) was
+    deleted (2026-08-12 final audit wave, fix 9 — "private-channel
+    collaboration is out"; see
     docs/plans/2026-08-12-pr34-pitch-only-reconciliation-design.md §8), so a
     freshly migrated channel would be a dead room nothing ever posts in again.
-    ``enable_private_refinement`` is untouched and still gates the separate
-    inbound-email reply path (src/services/email_inbound.py), which this fix
-    does not touch. See specs/pi-interaction.md §"PI Reopens a Proposal" and
+    The setting and the migration service it once gated were both removed in
+    the 2026-08-12 removal-cycle consolidation sweep, once neither this route
+    nor the inbound-email reply path (src/services/email_inbound.py, whose own
+    human-PI-interaction surface is retired — see ``_handle_instruction``) read
+    it any longer. See specs/pi-interaction.md §"PI Reopens a Proposal" and
     specs/privacy-and-channel-visibility.md §Migration Rule for the
     now-web-route-inapplicable design intent those specs still describe.
     """
@@ -676,7 +672,7 @@ async def reopen_proposal(
 
 
 # --------------------------------------------------------------------------
-# Private profile view/edit
+# Conversations (DB-inbox messaging; Slack-independent)
 # --------------------------------------------------------------------------
 
 
@@ -704,27 +700,7 @@ async def agent_conversations(
     run_id = await get_latest_run_id(db)
     channels: list[str] = []
     messages: list[dict] = []
-    dms: list[dict] = []
     if run_id:
-        from src.models import PiDmMessage
-        dm_rows = await db.execute(
-            select(PiDmMessage)
-            .where(
-                PiDmMessage.simulation_run_id == run_id,
-                PiDmMessage.agent_id == aid,
-            )
-            # Total ordering. posted_at alone is not one: pi_dm_messages.posted_at
-            # carries server_default '0' (migration 0020), so any writer that omits
-            # it produces a tie group, and with LIMIT the tie makes row SELECTION
-            # plan-dependent, not just row order.
-            .order_by(PiDmMessage.posted_at.desc(), PiDmMessage.created_at.desc(),
-                      PiDmMessage.id.desc())
-            .limit(20)
-        )
-        dms = [
-            {"direction": d.direction, "sender": d.sender_name or "", "content": d.content}
-            for d in reversed(dm_rows.scalars().all())
-        ]
         channels = await _visible_channels(db, run_id, aid)
         # What this PI may read == what their bot may act on. Filtering happens in
         # SQL, before LIMIT: #general carries every other cohort's traffic, so
@@ -812,7 +788,7 @@ async def agent_conversations(
         "agent/conversations.html",
         _template_context(
             request, current_user, agent=agent, is_owner=is_owner,
-            channels=channels, messages=messages, dms=dms,
+            channels=channels, messages=messages,
             has_run=run_id is not None,
             posted=request.query_params.get("posted"),
         ),
@@ -984,135 +960,6 @@ async def post_agent_message(
             )
     logger.info("[%s] PI %s posted a web message to #%s", agent_id, current_user.name, channel_name)
     return RedirectResponse(url=f"/agent/{agent_id}/conversations?posted=1", status_code=302)
-
-
-@router.post("/{agent_id}/dm")
-async def send_agent_dm(
-    agent_id: str,
-    request: Request,
-    content: str = Form(...),
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    """Send a DM directive to the agent's bot (standing instruction / question).
-
-    Writes an inbound pi_dm_messages row. NOTE: as of the 2026-08-12 removal
-    cycle (private instructions + PI interaction), nothing in the running
-    simulation reads this row anymore — the engine-side poller/handler that
-    used to process it (SimulationEngine._poll_pi_dms_from_db,
-    src/agent/pi_handler.py) was removed. The row is durable history only.
-    See specs/local-db-conversations.md.
-    """
-    from src.services.pi_inbox import get_latest_run_id, record_pi_dm, web_pi_user_id
-
-    agent, is_owner = await get_agent_with_access(agent_id, db, current_user)
-    if agent.status != "active":
-        raise HTTPException(status_code=403, detail="Agent is not active")
-    text = content.strip()
-    if not text:
-        raise HTTPException(status_code=400, detail="Message cannot be empty")
-    run_id = await get_latest_run_id(db)
-    if not run_id:
-        raise HTTPException(status_code=409, detail="No simulation run yet")
-    await record_pi_dm(
-        db, run_id=run_id, agent_id=agent_id,
-        pi_user_id=web_pi_user_id(current_user.id), direction="inbound",
-        content=text, sender_name=f"{current_user.name} (PI)",
-    )
-    await db.commit()
-    logger.info("[%s] PI %s sent a web DM directive", agent_id, current_user.name)
-    return RedirectResponse(url=f"/agent/{agent_id}/conversations?posted=1", status_code=302)
-
-
-@router.get("/{agent_id}/profile", response_class=HTMLResponse)
-async def view_private_profile(
-    agent_id: str,
-    request: Request,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    """View agent's private profile."""
-    agent, is_owner = await get_agent_with_access(agent_id, db, current_user)
-    if agent.status != "active":
-        return RedirectResponse(url="/agent", status_code=302)
-
-    profile_path = PROFILES_DIR / "private" / f"{agent.agent_id}.md"
-    content = profile_path.read_text() if profile_path.exists() else ""
-
-    return templates.TemplateResponse(
-        request,
-        "agent/profile.html",
-        _template_context(
-            request, current_user, agent=agent, is_owner=is_owner,
-            profile_content=content, editing=False,
-        ),
-    )
-
-
-@router.get("/{agent_id}/profile/edit", response_class=HTMLResponse)
-async def edit_private_profile(
-    agent_id: str,
-    request: Request,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    """Edit agent's private profile."""
-    agent, is_owner = await get_agent_with_access(agent_id, db, current_user)
-    if agent.status != "active":
-        return RedirectResponse(url="/agent", status_code=302)
-
-    profile_path = PROFILES_DIR / "private" / f"{agent.agent_id}.md"
-    content = profile_path.read_text() if profile_path.exists() else ""
-
-    return templates.TemplateResponse(
-        request,
-        "agent/profile.html",
-        _template_context(
-            request, current_user, agent=agent, is_owner=is_owner,
-            profile_content=content, editing=True,
-        ),
-    )
-
-
-@router.post("/{agent_id}/profile/save")
-async def save_private_profile(
-    agent_id: str,
-    request: Request,
-    content: str = Form(...),
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    """Save private profile to disk and database."""
-    agent, is_owner = await get_agent_with_access(agent_id, db, current_user)
-    if agent.status != "active":
-        return RedirectResponse(url="/agent", status_code=302)
-
-    profile_path = PROFILES_DIR / "private" / f"{agent.agent_id}.md"
-    profile_path.parent.mkdir(parents=True, exist_ok=True)
-    profile_path.write_text(content)
-
-    # Persist to DB — use the PI's user_id, not the delegate's
-    profile_result = await db.execute(
-        select(ResearcherProfile).where(ResearcherProfile.user_id == agent.user_id)
-    )
-    profile = profile_result.scalar_one_or_none()
-    if profile:
-        profile.private_profile_md = content.strip() or None
-        await db.commit()
-
-    # Record revision
-    from src.services.profile_versioning import create_revision
-    await create_revision(
-        db,
-        agent_registry_id=agent.id,
-        profile_type="private",
-        content=content,
-        changed_by_user_id=current_user.id,
-        mechanism="web",
-    )
-    await db.commit()
-
-    return RedirectResponse(url=f"/agent/{agent_id}/profile", status_code=302)
 
 
 # --------------------------------------------------------------------------

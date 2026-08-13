@@ -1,4 +1,4 @@
-"""Live integration tests for the agent page — all 19 endpoints of routers/agent_page.py.
+"""Live integration tests for the agent page — all 16 endpoints of routers/agent_page.py.
 
 Real ASGI requests, real Postgres, real Jinja templates, real invitation/reopen
 flows. Task T8 of .notes/full-system-test-plan.md.
@@ -38,8 +38,6 @@ from src.models import (
     AgentMessage,
     AgentRegistry,
     DelegateInvitation,
-    PiDmMessage,
-    ProfileRevision,
     ProposalReview,
     ResearcherProfile,
 )
@@ -106,7 +104,7 @@ def slack(monkeypatch) -> _SlackRecorder:
     factory = lambda *a, **kw: _FakeWebClient(rec, **kw)  # noqa: E731
     monkeypatch.setattr("slack_sdk.WebClient", factory)
     # AgentSlackClient bound WebClient at import time, so patch that name too —
-    # it is the one the private-channel migration would use.
+    # it is the one `reopen_proposal`'s real-Slack branch uses to post guidance.
     monkeypatch.setattr("src.agent.slack_client.WebClient", factory)
     # services/slack_web.py is the web layer's Slack boundary and binds WebClient
     # at import time as well. Patching only `slack_sdk.WebClient` would leave the
@@ -117,9 +115,8 @@ def slack(monkeypatch) -> _SlackRecorder:
 
 @pytest.fixture(autouse=True)
 def _slack_enabled_auto_detect(monkeypatch):
-    """Hermetic default for the Slack on/off tri-state (src/services/slack_tokens.py
-    and src/services/private_channels.py's ``_slack_enabled_for_migration``): unset
-    (auto-detect from token presence) rather than whatever ``SLACK_ENABLED`` the
+    """Hermetic default for the Slack on/off tri-state (src/services/slack_tokens.py):
+    unset (auto-detect from token presence) rather than whatever ``SLACK_ENABLED`` the
     deployed .env on this host forces.
 
     Without this, a populated .env with SLACK_ENABLED=true forces the real-Slack
@@ -184,8 +181,7 @@ def no_network(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def profiles_dir(tmp_path, monkeypatch):
-    """Keep the profile-save routes off the repo's real profiles/ directory."""
-    monkeypatch.setattr("src.routers.agent_page.PROFILES_DIR", tmp_path / "profiles")
+    """Keep the public-profile export off the repo's real profiles/ directory."""
     monkeypatch.setattr(
         "src.services.profile_export.PROFILES_DIR", tmp_path / "profiles" / "public"
     )
@@ -421,9 +417,12 @@ async def test_signup_twice_does_not_create_a_second_agent(client, db_session):
 # would be a dead room nothing ever posts in again. reopen no longer creates
 # ANY private channel: it always posts the PI's guidance directly into the
 # proposal's origin thread (Slack, if the agent has a token; the DB inbox
-# otherwise), regardless of that thread's visibility. enable_private_refinement
-# itself is untouched — src/services/email_inbound.py still reads it for the
-# separate (currently out of scope) inbound-email reply path.
+# otherwise), regardless of that thread's visibility. `enable_private_refinement`
+# and the migration service it gated (`src/services/private_channels.py`) were
+# both removed outright in the 2026-08-12 removal-cycle consolidation sweep,
+# once no caller — including the inbound-email reply path,
+# `src/services/email_inbound.py`, whose own human-PI-interaction surface is
+# separately retired — read the setting any longer.
 # ===========================================================================
 
 
@@ -1039,43 +1038,6 @@ async def test_a_pi_cannot_post_into_another_pairs_private_channel(
     assert third_user is not None
 
 
-async def test_sending_a_dm_records_an_inbound_pi_dm(client, db_session, world):
-    r = await client.post(
-        f"/agent/{OWNER_AGENT}/dm",
-        data={"content": "Always cite the 2019 paper."},
-        headers=_auth(world.pi.id),
-    )
-    assert r.status_code == 302
-    dm = (await db_session.execute(select(PiDmMessage))).scalar_one()
-    assert dm.agent_id == OWNER_AGENT
-    assert dm.direction == "inbound"
-    assert dm.content == "Always cite the 2019 paper."
-    assert dm.pi_user_id == f"local:{world.pi.id}"
-
-
-async def test_saving_the_private_profile_persists_to_db_disk_and_a_revision(
-    client, db_session, world, profiles_dir
-):
-    r = await client.post(
-        f"/agent/{OWNER_AGENT}/profile/save",
-        data={"content": "# Private\nUnpublished compound series X."},
-        headers=_auth(world.pi.id),
-    )
-    assert r.status_code == 302
-
-    profile = (await db_session.execute(
-        select(ResearcherProfile).where(ResearcherProfile.user_id == world.pi.id)
-    )).scalar_one()
-    assert "compound series X" in profile.private_profile_md
-    assert (profiles_dir / "private" / f"{OWNER_AGENT}.md").exists()
-    revisions = (await db_session.execute(
-        select(ProfileRevision).where(ProfileRevision.agent_registry_id == world.agent.id)
-    )).scalars().all()
-    assert [x.profile_type for x in revisions] == ["private"]
-    assert revisions[0].changed_by_user_id == world.pi.id
-    assert revisions[0].mechanism == "web"
-
-
 async def test_saving_the_public_profile_updates_the_pis_profile_not_the_editors(
     client, db_session, world, delegated
 ):
@@ -1159,7 +1121,7 @@ async def test_connect_slack_reports_a_lookup_failure_without_writing(
 
 
 # ===========================================================================
-# 6. Authorization, all 19 endpoints
+# 6. Authorization, all 16 endpoints
 # ===========================================================================
 
 
@@ -1185,11 +1147,6 @@ ENDPOINTS: list[Ep] = [
     Ep("GET", "/agent/{agent_id}/thread/{message_ts}", "/agent/{agent}/thread/{ts}"),
     Ep("POST", "/agent/{agent_id}/message", "/agent/{agent}/message",
        {"channel_name": "general", "content": "hello"}),
-    Ep("POST", "/agent/{agent_id}/dm", "/agent/{agent}/dm", {"content": "directive"}),
-    Ep("GET", "/agent/{agent_id}/profile", "/agent/{agent}/profile"),
-    Ep("GET", "/agent/{agent_id}/profile/edit", "/agent/{agent}/profile/edit"),
-    Ep("POST", "/agent/{agent_id}/profile/save", "/agent/{agent}/profile/save",
-       {"content": "# Private"}),
     Ep("GET", "/agent/{agent_id}/public-profile", "/agent/{agent}/public-profile"),
     Ep("GET", "/agent/{agent_id}/public-profile/edit", "/agent/{agent}/public-profile/edit"),
     Ep("POST", "/agent/{agent_id}/public-profile/save", "/agent/{agent}/public-profile/save",
@@ -1232,7 +1189,7 @@ def test_the_endpoint_table_matches_the_registered_routes():
         f"missing from ENDPOINTS: {sorted(registered - listed)}; "
         f"stale entries: {sorted(listed - registered)}"
     )
-    assert len(ENDPOINTS) == 20
+    assert len(ENDPOINTS) == 16
 
 
 def _path(ep: Ep, world, delegated=None, ts: str = "0.0000") -> str:

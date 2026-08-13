@@ -842,11 +842,13 @@ async def test_the_public_export_never_carries_the_private_profile(
 
     The public export is what any agent (and anything downstream of the agent)
     reads. ``ResearcherProfile.private_profile_md`` is the PI's confidential
-    agent-dashboard content (written from ``src/routers/agent_page.py`` — the
-    onboarding-side writer, ``export_private_profile``, was retired along with
-    the rest of private instructions) and must never appear in the public
-    export. The control asserts the canary is real, non-empty content on the
-    row — not an empty field that would make "absent from the export" trivial.
+    content — both writers of it (the onboarding-side ``export_private_profile``
+    and the agent-dashboard editor in ``src/routers/agent_page.py``) were
+    retired along with the rest of private instructions (2026-08-12 removal
+    cycle); the column stays as legacy-tolerance for any pre-cycle rows, and
+    must never appear in the public export. The control asserts the canary is
+    real, non-empty content on the row — not an empty field that would make
+    "absent from the export" trivial.
     """
     user = await factories.make_user(
         db_session, name="Export Pi", institution="Scripps", department="Mol Bio"

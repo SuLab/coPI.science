@@ -582,7 +582,6 @@ class TestPhase5CallAccounting:
             llm_calls_per_load_per_window=8,
             daily_post_cap=100,
             lab_daily_post_cap=100,
-            unreviewed_proposal_block_count=2,
             phase5_skip_probability=0.0,
             llm_agent_model_opus="test-model",
         )
