@@ -72,7 +72,7 @@ EXIT_BLOCKED = 1
 EXIT_WARN = 2
 
 DEFAULT_TARGET = "0026"
-#: Revisions this migration path has been exercised from. 0025 means "already done"
+#: Revisions this migration path has been exercised from. 0026 means "already done"
 #: (that state is a no-op, handled by the current == target branch of revision_status(),
 #: not by membership in this tuple).
 #:
@@ -82,16 +82,17 @@ DEFAULT_TARGET = "0026"
 #: it ("migrate from 0018 or 0019") described where production was at the time, not where
 #: main is.
 #:
-#: 0023 and 0024 were each added here for the same reason: production's stamp at the time
-#: its target moved past them (0023 -> 0024, then 0024 -> 0025 — see git history on this
-#: constant). Each stays supported afterward; nothing here narrows.
+#: 0023, 0024 and 0025 were each added here for the same reason: production's stamp at
+#: the time its target moved past them (0023 -> 0024, then 0024 -> 0025, then 0025 -> 0026
+#: — see git history on this constant). Each stays supported afterward; nothing here
+#: narrows.
 #:
 #: Starting at 0020/0021 is strictly safer than starting at 0018: uq_agent_messages_run_ts
 #: already exists, so duplicates cannot be present and there is no 0019 index build to
 #: wait on. All that remains is 0022 (three empty tables), 0023 (three columns on the small
-#: researcher_profiles), 0024 (one column on agents) and 0025 (one new table,
-#: opportunity_assessments).
-SUPPORTED_START_REVISIONS = ("0018", "0019", "0020", "0021", "0023", "0024")
+#: researcher_profiles), 0024 (one column on agents), 0025 (one new table,
+#: opportunity_assessments) and 0026 (drop grantbot_posted_foas).
+SUPPORTED_START_REVISIONS = ("0018", "0019", "0020", "0021", "0023", "0024", "0025")
 
 #: Start revisions at which migration 0019 has already run, so the expensive
 #: ACCESS EXCLUSIVE index build on agent_messages is behind us.

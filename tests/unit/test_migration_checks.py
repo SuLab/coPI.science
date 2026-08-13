@@ -220,7 +220,7 @@ def test_revision_status_passes_at_a_supported_starting_point(rev):
     assert pf.revision_status(rev, "0023")[0] == pf.PASS
 
 
-@pytest.mark.parametrize("rev", ["0001", "0017", "0022", "0025", "abcdef"])
+@pytest.mark.parametrize("rev", ["0001", "0017", "0022", "abcdef"])
 def test_revision_status_blocks_anywhere_else(rev):
     status, reason = pf.revision_status(rev, "0023")
     assert status == pf.BLOCK
@@ -228,7 +228,9 @@ def test_revision_status_blocks_anywhere_else(rev):
 
 
 def test_supported_start_revisions_are_exactly_the_documented_set():
-    assert pf.SUPPORTED_START_REVISIONS == ("0018", "0019", "0020", "0021", "0023", "0024")
+    assert pf.SUPPORTED_START_REVISIONS == (
+        "0018", "0019", "0020", "0021", "0023", "0024", "0025",
+    )
     assert pf.DEFAULT_TARGET == "0026"
 
 
