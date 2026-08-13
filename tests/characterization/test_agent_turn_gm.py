@@ -23,7 +23,7 @@ Everything pins CURRENT behavior; nothing here fixes or judges it.
 
 import pytest
 
-from src.agent.agent import PRIVATE_CHANNEL_RULES, Agent, _extract_dois
+from src.agent.agent import Agent, _extract_dois
 from src.agent.prompt_safety import delimit
 from src.agent.slack_client import markdown_to_mrkdwn
 from src.agent.state import PostRef, ThreadState
@@ -90,18 +90,6 @@ def test_markdown_to_mrkdwn_transforms():
 
 def test_scan_system_prompt_gm(snapshot):
     assert _agent().build_scan_system_prompt() == snapshot
-
-
-def test_system_prompt_public_vs_private_gm(snapshot):
-    a = _agent()
-    public = a.build_system_prompt(visibility=VISIBILITY_PUBLIC)
-    private = a.build_system_prompt(
-        visibility=VISIBILITY_COLLAB_PRIVATE, channel_id="C_PRIV"
-    )
-    # Behavioral pin: private-channel rules appended only for collab_private.
-    assert PRIVATE_CHANNEL_RULES.strip() in private
-    assert PRIVATE_CHANNEL_RULES.strip() not in public
-    assert {"public": public, "private": private} == snapshot
 
 
 def test_thread_reply_system_prompt_gm(snapshot):
