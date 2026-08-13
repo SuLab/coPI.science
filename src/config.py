@@ -370,13 +370,22 @@ class Settings(BaseSettings):
     llm_rate_window_seconds: int = 600
     llm_calls_per_load_per_window: int = 8
 
-    # Privacy rollout — when True (default), POST /agent/{id}/proposals/{tid}/reopen
-    # migrates the thread into a new collab_private channel instead of posting
-    # the PI's guidance text into the origin public thread. Can be set to False
-    # to restore the legacy behavior during initial rollout or in an emergency.
+    # Privacy rollout flag for the inbound-EMAIL PI-reply path only
+    # (src/services/email_inbound.py): when True, a reply to a public-origin
+    # proposal migrates the thread into a new collab_private channel instead of
+    # posting the PI's guidance text into the origin public thread.
+    #
+    # Default flipped True -> False 2026-08-12 (final audit wave, fix 9,
+    # "private-channel collaboration is out"): the web reopen route
+    # (POST /agent/{id}/proposals/{tid}/reopen) no longer reads this setting at
+    # all — it never creates a private channel, full stop, because the
+    # engine-side private-channel refinement flow was deleted (design doc §8),
+    # so a freshly migrated channel would be a dead room nothing ever posts in
+    # again. This flag now only gates the separate (currently out-of-scope,
+    # infra-broken-in-prod) inbound-email flow, which was not part of that fix.
     # See specs/privacy-and-channel-visibility.md and specs/pi-interaction.md
-    # §"PI Reopens a Proposal".
-    enable_private_refinement: bool = True
+    # §"PI Reopens a Proposal" for the now-web-route-inapplicable design intent.
+    enable_private_refinement: bool = False
 
     def __repr_args__(self):
         """Redact credential-valued fields in repr()/str().

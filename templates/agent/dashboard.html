@@ -213,8 +213,8 @@
                         {% if agent.status == 'active' %}
                         <div id="reopen-{{ idx }}" class="tab-panel hidden">
                             <p class="text-sm text-gray-500 mb-3">
-                                Send guidance to both agents. Your feedback will be posted in the Slack thread
-                                and the agents will continue the conversation with a fresh set of replies.
+                                Post your guidance into the proposal's thread. This marks the proposal as
+                                reopened; it does not restart an automated conversation.
                             </p>
                             <form method="POST" action="/agent/{{ agent.agent_id }}/proposals/{{ p.id }}/reopen">
                                 <textarea name="guidance" rows="4" required

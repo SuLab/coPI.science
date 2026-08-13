@@ -526,19 +526,21 @@ async def reopen_proposal(
 ):
     """Reopen a proposal thread with PI guidance.
 
-    Default behavior (``enable_private_refinement=True``): when the origin
-    thread lives in a public channel, migrate it to a new ``collab_private``
-    channel, post the PI's guidance there, and close the origin thread with a
-    neutral ⏸️ marker — **the PI's text is never echoed into the public
-    thread.** See specs/pi-interaction.md §"PI Reopens a Proposal" and
-    specs/privacy-and-channel-visibility.md §Migration Rule.
-
-    Legacy behavior (``enable_private_refinement=False``): post the PI's
-    guidance verbatim into the origin thread. Retained as an emergency
-    rollback lever during early rollout.
+    Posts the PI's guidance directly into the proposal's origin thread — via
+    Slack if the agent has a bot token, via the DB inbox otherwise — regardless
+    of that thread's visibility. This route never creates a NEW collab_private
+    channel: it used to (when ``settings.enable_private_refinement`` was True
+    and the origin was public), but the engine-side private-channel
+    collaboration/refinement flow was deleted (2026-08-12 final audit wave,
+    fix 9 — "private-channel collaboration is out"; see
+    docs/plans/2026-08-12-pr34-pitch-only-reconciliation-design.md §8), so a
+    freshly migrated channel would be a dead room nothing ever posts in again.
+    ``enable_private_refinement`` is untouched and still gates the separate
+    inbound-email reply path (src/services/email_inbound.py), which this fix
+    does not touch. See specs/pi-interaction.md §"PI Reopens a Proposal" and
+    specs/privacy-and-channel-visibility.md §Migration Rule for the
+    now-web-route-inapplicable design intent those specs still describe.
     """
-    from src.config import get_settings
-
     guidance = guidance.strip()
     if not guidance:
         raise HTTPException(status_code=400, detail="Guidance text is required")
@@ -546,14 +548,10 @@ async def reopen_proposal(
     agent, is_owner = await get_agent_with_access(agent_id, db, current_user)
 
     # Reopening re-injects the agent into a live discussion (posts guidance to
-    # Slack / spins up a private refinement channel), so it is blocked while the
-    # agent is inactive — exactly the interaction that inactivating an agent is
-    # meant to stop. Reactivate the agent to reopen proposals for further
-    # discussion. (Unlike `review`, this requires status == 'active'.)
-    #
-    # Note: the reopen flow creates a collab_private channel, and the cohort gate
-    # deliberately exempts those — a PI explicitly pairing two agents outranks an
-    # admin-level cohort grouping. See .notes/cohort-system-v2.md §7.
+    # Slack, or to the DB inbox), so it is blocked while the agent is inactive —
+    # exactly the interaction that inactivating an agent is meant to stop.
+    # Reactivate the agent to reopen proposals for further discussion. (Unlike
+    # `review`, this requires status == 'active'.)
     if agent.status != "active":
         raise HTTPException(
             status_code=403,
@@ -573,12 +571,11 @@ async def reopen_proposal(
     # Idempotency guard. A proposal is reopened at most once per agent: the
     # dashboard hides the reopen form once a review/reopen exists, but a stale
     # page or the browser Back button can replay this POST. Without a guard the
-    # replay would migrate the thread a second time and mint a duplicate
-    # priv-…-N channel (or, in legacy mode, re-post the guidance to the public
-    # thread). A reopen writes a rating=0 ProposalReview in the same commit as
-    # refined_in_channel, so the presence of *any* review by this agent means
-    # the proposal was already acted on — treat the resubmission as a no-op and
-    # redirect without touching Slack.
+    # replay would re-post the guidance into the origin thread a second time. A
+    # reopen writes a rating=0 ProposalReview in the same commit as its post, so
+    # the presence of *any* review by this agent means the proposal was already
+    # acted on — treat the resubmission as a no-op and redirect without
+    # touching Slack.
     already_reviewed = (await db.execute(
         select(ProposalReview).where(
             ProposalReview.thread_decision_id == thread_decision_id,
@@ -593,101 +590,61 @@ async def reopen_proposal(
         )
         return RedirectResponse(url=f"/agent/{agent_id}/dashboard", status_code=302)
 
-    settings = get_settings()
+    # Post the guidance directly into the origin thread. This is the only path
+    # now (fix 9): no collab_private migration branch, regardless of
+    # td.origin_visibility -- see the docstring above for why.
+    from src.services.slack_tokens import slack_globally_enabled, token_for_agent_row
 
-    if settings.enable_private_refinement and td.origin_visibility == "public":
-        # New behavior: migrate to a collab_private channel before any PI
-        # text touches Slack.
-        from src.services.private_channels import migrate_public_thread_to_private
+    if not await slack_globally_enabled(db):
+        # Slack off → write the guidance to the DB inbox on the origin thread.
+        from src.services.pi_inbox import get_latest_run_id, record_pi_message
+        run_id = await get_latest_run_id(db)
+        if run_id:
+            await record_pi_message(
+                db, run_id=run_id, channel_name=td.channel,
+                content=f"PI guidance from {current_user.name}: {guidance}",
+                sender_name=f"{current_user.name} (PI)", thread_ts=td.thread_id,
+            )
+        logger.info("Reopen guidance for %s written to DB inbox (Slack off)", td.thread_id)
+    else:
         try:
-            result = await migrate_public_thread_to_private(
-                db,
-                thread_decision=td,
-                creator_agent_id=agent.agent_id,
-                creator_pi_user=current_user,
-                guidance_text=guidance,
+            # The channel lookup goes through the boundary. It used to read a
+            # single 200-item page of the paginated conversations.list, so a
+            # workspace with more channels than that reported "Channel not
+            # found" for a channel that exists; list_channel_ids follows every
+            # cursor and raises rather than returning a subset. Archived
+            # channels are counted deliberately — this asks "which id owns
+            # this name", not "can the bot join it".
+            #
+            # The post goes through it too, threaded: post_message takes
+            # thread_ts precisely so this caller does not need a raw client.
+            # It also splits at 4000 characters, which the raw call did not —
+            # long PI guidance was silently chunked by Slack.
+            from src.services.slack_web import list_channel_ids_async, post_message_async
+
+            bot_token = token_for_agent_row(agent)
+            if not bot_token:
+                raise HTTPException(status_code=500, detail="No bot token available")
+            channel_id = (await list_channel_ids_async(bot_token)).get(td.channel)
+            if not channel_id:
+                raise HTTPException(status_code=500, detail=f"Channel #{td.channel} not found")
+            await post_message_async(
+                bot_token,
+                channel_id,
+                f"*PI guidance from {current_user.name}:*\n\n{guidance}",
+                thread_ts=td.thread_id,
             )
             logger.info(
-                "PI %s reopened proposal %s: migrated #%s → private #%s",
-                current_user.name, td.thread_id, td.channel, result.channel_name,
+                "PI %s posted guidance in proposal thread %s via %s",
+                current_user.name, td.thread_id, agent.agent_id,
             )
         except HTTPException:
             raise
         except Exception as exc:
-            logger.error("Migration to private channel failed: %s", exc, exc_info=True)
+            logger.error("Failed to post PI guidance to Slack: %s", exc)
             raise HTTPException(
-                status_code=500,
-                detail=f"Failed to open private refinement channel: {str(exc)[:120]}",
+                status_code=500, detail=f"Failed to post to Slack: {str(exc)[:100]}",
             )
-    elif td.origin_visibility != "public":
-        # Origin already private — post guidance there. (Not exercised in v1
-        # since no rows have origin_visibility='collab_private' yet, but the
-        # branch is defined so future migrations don't require a rewrite.)
-        logger.info(
-            "Proposal %s origin is already private — posting guidance in-channel",
-            td.thread_id,
-        )
-        raise HTTPException(
-            status_code=501,
-            detail="Refinement on an already-private thread is not yet implemented",
-        )
-    else:
-        # Legacy fallback: flag is off → post guidance verbatim to the origin
-        # public thread. This reproduces the pre-refactor behavior and is the
-        # same code as before; kept gated so rollback is a config change.
-        from src.services.slack_tokens import slack_globally_enabled, token_for_agent_row
-
-        if not await slack_globally_enabled(db):
-            # Slack off → write the guidance to the DB inbox on the origin thread.
-            from src.services.pi_inbox import get_latest_run_id, record_pi_message
-            run_id = await get_latest_run_id(db)
-            if run_id:
-                await record_pi_message(
-                    db, run_id=run_id, channel_name=td.channel,
-                    content=f"PI guidance from {current_user.name}: {guidance}",
-                    sender_name=f"{current_user.name} (PI)", thread_ts=td.thread_id,
-                )
-            logger.info("Reopen guidance for %s written to DB inbox (Slack off)", td.thread_id)
-        else:
-            try:
-                # The channel lookup goes through the boundary. It used to read a
-                # single 200-item page of the paginated conversations.list, so a
-                # workspace with more channels than that reported "Channel not
-                # found" for a channel that exists; list_channel_ids follows every
-                # cursor and raises rather than returning a subset. Archived
-                # channels are counted deliberately — this asks "which id owns
-                # this name", not "can the bot join it".
-                #
-                # The post goes through it too, threaded: post_message takes
-                # thread_ts precisely so this caller does not need a raw client.
-                # It also splits at 4000 characters, which the raw call did not —
-                # long PI guidance was silently chunked by Slack.
-                from src.services.slack_web import list_channel_ids_async, post_message_async
-
-                bot_token = token_for_agent_row(agent)
-                if not bot_token:
-                    raise HTTPException(status_code=500, detail="No bot token available")
-                channel_id = (await list_channel_ids_async(bot_token)).get(td.channel)
-                if not channel_id:
-                    raise HTTPException(status_code=500, detail=f"Channel #{td.channel} not found")
-                await post_message_async(
-                    bot_token,
-                    channel_id,
-                    f"*PI guidance from {current_user.name}:*\n\n{guidance}",
-                    thread_ts=td.thread_id,
-                )
-                logger.warning(
-                    "LEGACY PATH: PI %s posted guidance in proposal thread %s via %s "
-                    "(enable_private_refinement=False)",
-                    current_user.name, td.thread_id, agent.agent_id,
-                )
-            except HTTPException:
-                raise
-            except Exception as exc:
-                logger.error("Failed to post PI guidance to Slack: %s", exc)
-                raise HTTPException(
-                    status_code=500, detail=f"Failed to post to Slack: {str(exc)[:100]}",
-                )
 
     existing = await db.execute(
         select(ProposalReview).where(

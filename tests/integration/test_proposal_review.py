@@ -4,8 +4,10 @@ the email seam.
 Scope, stated once so the gap stays visible:
 
 * **In scope.** The agent dashboard rendering a `ThreadDecision`; the `/review` and
-  `/reopen` endpoints and the `ProposalReview` rows they write; the private-channel
-  migration the reopen action triggers. The engine's thread-conclusion path
+  `/reopen` endpoints and the `ProposalReview` rows they write; reopen's post-guidance-
+  in-place behavior (fix 9, 2026-08-12 final audit wave — reopen no longer migrates
+  anything to a collab_private channel; see §5's module comment below). The engine's
+  thread-conclusion path
   (`_check_thread_outcome` -> `_close_thread`) writing a `ThreadDecision` with
   outcome='no_proposal' (the ⏸️ close) or 'timeout' is also in scope and driven for
   real; outcome='proposal' is NOT — see the note on `_conclude_thread` below.
@@ -75,13 +77,11 @@ from src.models import (
     AgentRegistry,
     EmailEngagementTracker,
     EmailNotification,
-    PrivateChannelMember,
     ProposalReview,
     ThreadDecision,
 )
 from src.visibility import VISIBILITY_COLLAB_PRIVATE
 from tests import factories
-from tests.fakes import FakeSlackClient
 
 pytestmark = pytest.mark.integration
 
@@ -802,63 +802,80 @@ async def test_reviewing_on_the_web_retires_the_outstanding_email_notification(
 
 
 # ---------------------------------------------------------------------------
-# 5. Reopen -> private channel
+# 5. Reopen -> posts guidance in place (fix 9, 2026-08-12 final audit wave)
+#
+# reopen used to migrate a public-origin proposal thread into a NEW
+# collab_private channel by default before posting the PI's guidance there.
+# The engine-side private-channel collaboration/refinement flow was deleted
+# (docs/plans/2026-08-12-pr34-pitch-only-reconciliation-design.md §8 — no
+# agent converses inside a collab_private channel anymore), so a freshly
+# migrated channel would be a dead room nothing ever posts in again. reopen
+# no longer creates ANY private channel: it always posts the PI's guidance
+# directly into the proposal's origin thread (Slack, if the agent has a
+# token; the DB inbox otherwise). The fixtures below double the two
+# `slack_web` calls the route now makes (`list_channel_ids_async`,
+# `post_message_async`) instead of `private_channels`' migration internals.
 # ---------------------------------------------------------------------------
 
 
 @pytest.fixture
 def slack_off(monkeypatch):
-    """Force the migration down its DB-only path.
+    """Force reopen's post-to-Slack branch off, landing guidance in the DB inbox.
 
-    `_slack_enabled_for_migration` auto-detects from bot tokens. Our agents have none,
-    so it would already choose the offline path — but pinning it makes the test's
-    intent explicit and immune to a stray token appearing in the environment.
+    `slack_globally_enabled` auto-detects from bot tokens anywhere in the
+    deployment — including real roster ids' tokens in a live-tier `.env` on
+    this host, which `alpha`/`beta` (fictitious ids) do not protect against.
+    Pinning it makes the test's intent explicit and immune to a stray token
+    appearing in the environment.
     """
     async def _off(*args, **kwargs):
         return False
 
-    monkeypatch.setattr(
-        "src.services.private_channels._slack_enabled_for_migration", _off,
-    )
+    monkeypatch.setattr("src.services.slack_tokens.slack_globally_enabled", _off)
 
 
 @pytest.fixture
 def slack_on(monkeypatch):
-    """Force the Slack migration path with a recording fake in place of the real
-    client. Returns the list of fakes that were constructed."""
-    made: list[FakeSlackClient] = []
+    """Force reopen's post-to-Slack branch on, with fakes standing in for the
+    two `slack_web` calls it makes. Returns the list of posts recorded."""
+    posted: list[dict] = []
 
     async def _on(*args, **kwargs):
         return True
 
-    async def _token(db, agent_id):
-        return f"xoxb-fake-{agent_id}"
+    def _token_for_agent_row(agent):
+        return f"xoxb-fake-{agent.agent_id}"
 
-    def _client(agent_id, bot_token):
-        c = FakeSlackClient(agent_id=agent_id, bot_token=bot_token)
-        made.append(c)
-        return c
+    async def _list_channel_ids(token, **kwargs):
+        return {"degrader-chem": "C_degrader-chem"}
 
+    async def _post_message(token, channel, text, *, thread_ts=None):
+        posted.append({"channel": channel, "text": text, "thread_ts": thread_ts})
+        return [{"ts": "1700000000.000900"}]
+
+    monkeypatch.setattr("src.services.slack_tokens.slack_globally_enabled", _on)
     monkeypatch.setattr(
-        "src.services.private_channels._slack_enabled_for_migration", _on)
-    monkeypatch.setattr(
-        "src.services.private_channels._get_or_fail_bot_token", _token)
-    monkeypatch.setattr("src.services.private_channels._make_client", _client)
-    return made
+        "src.services.slack_tokens.token_for_agent_row", _token_for_agent_row
+    )
+    monkeypatch.setattr("src.services.slack_web.list_channel_ids_async", _list_channel_ids)
+    monkeypatch.setattr("src.services.slack_web.post_message_async", _post_message)
+    return posted
 
 
-async def test_reopen_opens_the_private_channel_and_files_the_review_together(
+async def _reopen_inbox_count(db_session, proposal) -> int:
+    """PI-authored (agent_id IS NULL) messages reopen wrote into the origin thread."""
+    return await db_session.scalar(select(func.count(AgentMessage.id)).where(
+        AgentMessage.thread_ts == proposal.thread_id,
+        AgentMessage.agent_id.is_(None),
+    ))
+
+
+async def test_reopen_posts_the_guidance_and_files_the_review_together(
     client, db_session, lab, proposal, slack_off,
 ):
-    """The wiring assertion the task asks for: ONE request produces BOTH the
-    collab_private channel (with its members and handover) and the rating=0
-    ProposalReview that marks the proposal acted-on, and it points the decision at the
-    new channel.
-
-    They share a transaction on purpose — `migrate_public_thread_to_private` adds rows
-    to the caller's session and leaves the commit to the reopen endpoint (see the
-    comment in tests/integration/test_slack_private_live.py). If they ever stop
-    committing together, one of these two halves disappears.
+    """ONE request produces BOTH the PI-authored inbox message in the origin
+    thread AND the rating=0 ProposalReview that marks the proposal acted-on.
+    reopen never creates a collab_private channel any more.
     """
     guidance = "Nail down the ternary-complex geometry before any chemistry."
     r = await client.post(
@@ -868,27 +885,12 @@ async def test_reopen_opens_the_private_channel_and_files_the_review_together(
     assert r.status_code == 302, r.text[:400]
 
     db_session.expire_all()
-    channels = (await db_session.execute(
-        select(AgentChannel).where(
-            AgentChannel.visibility == VISIBILITY_COLLAB_PRIVATE
-        )
-    )).scalars().all()
-    assert len(channels) == 1, (
-        f"expected exactly one private refinement channel, got {len(channels)}"
-    )
-    ch = channels[0]
-    assert ch.created_by_agent == "alpha"
-    assert ch.migrated_from_channel_id == f"local:{proposal.channel}", (
-        f"the new channel does not record where it came from: "
-        f"{ch.migrated_from_channel_id}"
-    )
-    assert "alpha" in ch.channel_name and "beta" in ch.channel_name
+    assert (await db_session.scalar(select(func.count(AgentChannel.id)).where(
+        AgentChannel.visibility == VISIBILITY_COLLAB_PRIVATE
+    ))) == 0, "reopen must never create a collab_private channel"
 
     td = await _decision(db_session, proposal.thread_id)
-    assert td.refined_in_channel == ch.channel_id, (
-        "the proposal was migrated but the decision row still does not point at the "
-        f"refinement channel: {td.refined_in_channel!r} != {ch.channel_id!r}"
-    )
+    assert td.refined_in_channel is None
 
     review = (await db_session.execute(
         select(ProposalReview).where(ProposalReview.thread_decision_id == proposal.id)
@@ -900,31 +902,15 @@ async def test_reopen_opens_the_private_channel_and_files_the_review_together(
     assert guidance in review.comment
     assert review.user_id == lab.pi_a_id
 
-    members = (await db_session.execute(
-        select(PrivateChannelMember).where(
-            PrivateChannelMember.agent_channel_id == ch.id
+    inbox = (await db_session.execute(
+        select(AgentMessage).where(
+            AgentMessage.thread_ts == proposal.thread_id,
+            AgentMessage.agent_id.is_(None),
         )
     )).scalars().all()
-    assert {m.agent_id for m in members if m.agent_id} == {"alpha", "beta"}
-    assert [m.user_id for m in members if m.user_id] == [lab.pi_a_id], (
-        "the triggering PI is not a member of the channel that holds their guidance"
-    )
-
-    handover = (await db_session.execute(
-        select(AgentMessage).where(AgentMessage.channel_id == ch.channel_id)
-    )).scalars().all()
-    assert any(guidance in (m.content or "") for m in handover), (
-        "the PI's guidance never reached the private channel's message history"
-    )
-    assert all(m.visibility == VISIBILITY_COLLAB_PRIVATE for m in handover)
-
-    origin_rows = (await db_session.execute(
-        select(AgentMessage).where(AgentMessage.channel_name == proposal.channel)
-    )).scalars().all()
-    assert origin_rows, "the public origin thread was left with no closing marker"
-    assert not any(guidance in (m.content or "") for m in origin_rows), (
-        "the PI's private guidance was echoed into the PUBLIC origin thread"
-    )
+    assert len(inbox) == 1, "the guidance never landed in the origin thread's DB inbox"
+    assert guidance in inbox[0].content
+    assert inbox[0].channel_name == proposal.channel
 
     # Observed behaviour, pinned because it is surprising rather than because it is
     # right: the rating=0 sentinel puts the reopened proposal in the dashboard's
@@ -942,16 +928,15 @@ async def test_reopen_opens_the_private_channel_and_files_the_review_together(
     )
 
 
-async def test_a_rating_never_opens_a_private_channel(
+async def test_a_rating_never_writes_reopen_guidance(
     client, db_session, lab, proposal, slack_off,
 ):
-    """FINDING, pinned as a test. Approving a proposal does NOT trigger the
-    private-channel reopen — rating and reopen are two separate PI actions behind two
-    separate endpoints, and only `/reopen` migrates. See the module report.
+    """Rating and reopen are two separate PI actions behind two separate
+    endpoints; only `/reopen` posts guidance into the origin thread.
 
-    Control: the identical setup, driven through `/reopen` instead, DOES create the
-    channel — so "no channel" is a fact about the rating action, not about a migration
-    that cannot run in this fixture.
+    Control: the identical setup, driven through `/reopen` instead, DOES post
+    — so "no post" is a fact about the rating action, not about a route that
+    stopped working.
     """
     r = await client.post(
         f"/agent/alpha/proposals/{proposal.id}/review",
@@ -959,6 +944,9 @@ async def test_a_rating_never_opens_a_private_channel(
     )
     assert r.status_code == 302
     db_session.expire_all()
+    assert await _reopen_inbox_count(db_session, proposal) == 0, (
+        "a plain rating wrote a PI-authored message into the origin thread"
+    )
     assert (await db_session.scalar(select(func.count(AgentChannel.id)).where(
         AgentChannel.visibility == VISIBILITY_COLLAB_PRIVATE
     ))) == 0, "a plain rating opened a private refinement channel"
@@ -972,12 +960,13 @@ async def test_a_rating_never_opens_a_private_channel(
     )
     assert r2.status_code == 302, r2.text[:400]
     db_session.expire_all()
+    assert await _reopen_inbox_count(db_session, proposal) == 1, (
+        "the /reopen control did not post either, so the assertion above proves "
+        "nothing about the rating action"
+    )
     assert (await db_session.scalar(select(func.count(AgentChannel.id)).where(
         AgentChannel.visibility == VISIBILITY_COLLAB_PRIVATE
-    ))) == 1, (
-        "the /reopen control did not create a channel either, so the assertion above "
-        "proves nothing about the rating action"
-    )
+    ))) == 0, "reopen must never create a collab_private channel"
 
 
 async def test_a_rated_proposal_cannot_then_be_reopened_by_the_same_agent(
@@ -989,7 +978,7 @@ async def test_a_rated_proposal_cannot_then_be_reopened_by_the_same_agent(
     guidance was discarded (observed behaviour, reported).
 
     Control: beta, which has not acted, CAN still reopen the same proposal — so "no
-    channel" is a fact about alpha's spent transition, not about the migration being
+    post" is a fact about alpha's spent transition, not about the route being
     unavailable in this fixture.
     """
     rated = await client.post(
@@ -1005,9 +994,9 @@ async def test_a_rated_proposal_cannot_then_be_reopened_by_the_same_agent(
     )
     assert swallowed.status_code == 302
     db_session.expire_all()
-    assert (await db_session.scalar(select(func.count(AgentChannel.id)).where(
-        AgentChannel.visibility == VISIBILITY_COLLAB_PRIVATE
-    ))) == 0, "a proposal alpha had already rated was reopened by alpha anyway"
+    assert await _reopen_inbox_count(db_session, proposal) == 0, (
+        "a proposal alpha had already rated was reopened by alpha anyway"
+    )
     rows = (await db_session.execute(select(ProposalReview).where(
         ProposalReview.agent_id == "alpha"
     ))).scalars().all()
@@ -1022,10 +1011,8 @@ async def test_a_rated_proposal_cannot_then_be_reopened_by_the_same_agent(
     )
     assert control.status_code == 302
     db_session.expire_all()
-    assert (await db_session.scalar(select(func.count(AgentChannel.id)).where(
-        AgentChannel.visibility == VISIBILITY_COLLAB_PRIVATE
-    ))) == 1, (
-        "beta's reopen created nothing either, so the assertion above proves nothing"
+    assert await _reopen_inbox_count(db_session, proposal) == 1, (
+        "beta's reopen posted nothing either, so the assertion above proves nothing"
     )
 
 
@@ -1033,10 +1020,10 @@ async def test_reopen_is_idempotent_under_a_replayed_post(
     client, db_session, lab, proposal, slack_off,
 ):
     """A stale page or the Back button replays the reopen POST. The guard must make the
-    second one a no-op rather than mint a duplicate channel.
+    second one a no-op rather than post a duplicate inbox message.
 
-    Control: the first POST is asserted to have created exactly one channel, so "still
-    one channel" is not satisfied by a reopen that never worked.
+    Control: the first POST is asserted to have posted exactly once, so "still one
+    post" is not satisfied by a reopen that never worked.
     """
     for _ in range(2):
         r = await client.post(
@@ -1046,9 +1033,7 @@ async def test_reopen_is_idempotent_under_a_replayed_post(
         )
         assert r.status_code == 302
         db_session.expire_all()
-        assert (await db_session.scalar(select(func.count(AgentChannel.id)).where(
-            AgentChannel.visibility == VISIBILITY_COLLAB_PRIVATE
-        ))) == 1
+        assert await _reopen_inbox_count(db_session, proposal) == 1
 
     assert (await db_session.scalar(
         select(func.count(ProposalReview.id)).where(
@@ -1060,12 +1045,9 @@ async def test_reopen_is_idempotent_under_a_replayed_post(
 async def test_reopen_drives_the_slack_client_when_slack_is_on(
     client, db_session, lab, proposal, slack_on,
 ):
-    """The Slack-on branch of the same wiring, with a recording fake standing in for
-    AgentSlackClient (the live workspace belongs to another agent).
-
-    Asserts the migration really calls Slack — creates a private channel, invites the
-    other bot, posts the handover — and that the DB rows still land in the same
-    request. `no_outbound_side_effects` guarantees nothing reached slack_sdk.
+    """The Slack-on branch of the same wiring: reopen posts the PI's guidance into
+    the origin thread via `slack_web`, threaded on the proposal's root.
+    `no_outbound_side_effects` guarantees nothing reached slack_sdk for real.
     """
     guidance = "Push on the kinetics readout, not the chemistry."
     r = await client.post(
@@ -1074,71 +1056,55 @@ async def test_reopen_drives_the_slack_client_when_slack_is_on(
     )
     assert r.status_code == 302, r.text[:400]
 
-    assert [c.agent_id for c in slack_on] == ["alpha", "beta"], (
-        f"the migration did not build a client for each bot: {slack_on}"
-    )
-    creator = slack_on[0]
-    assert creator.created_channels and creator.created_channels[0]["is_private"], (
-        "no private channel was requested from Slack"
-    )
-    new_name = creator.created_channels[0]["name"]
-    assert any("U_beta" in inv["users"] for inv in creator.invites), (
-        f"the other bot was never invited to the new channel: {creator.invites}"
-    )
-    posted_here = [p for p in creator.posted if p["channel"] == f"G_{new_name}"]
-    assert any(guidance in p["text"] for p in posted_here), (
-        f"the guidance was never posted into the private channel: {posted_here}"
-    )
-    origin_posts = [p for p in creator.posted if p["channel"] == f"C_{proposal.channel}"]
-    assert origin_posts and all(guidance not in p["text"] for p in origin_posts), (
-        "the origin thread got no close marker, or it leaked the PI's guidance"
-    )
-    assert all(p["thread_ts"] == proposal.thread_id for p in origin_posts), (
-        "the close marker was posted top-level instead of in the origin thread"
+    assert len(slack_on) == 1, f"expected exactly one Slack post: {slack_on}"
+    posted = slack_on[0]
+    assert posted["channel"] == "C_degrader-chem"
+    assert guidance in posted["text"]
+    assert posted["thread_ts"] == proposal.thread_id, (
+        "the guidance must stay in the proposal thread, not the channel root"
     )
 
     db_session.expire_all()
-    ch = (await db_session.execute(select(AgentChannel).where(
+    assert (await db_session.scalar(select(func.count(AgentChannel.id)).where(
         AgentChannel.visibility == VISIBILITY_COLLAB_PRIVATE
-    ))).scalar_one()
-    assert ch.channel_id == f"G_{new_name}"
+    ))) == 0, "reopen must never create a collab_private channel"
     review = (await db_session.execute(select(ProposalReview).where(
         ProposalReview.thread_decision_id == proposal.id
     ))).scalar_one()
     assert review.rating == 0
 
 
-async def test_a_failed_migration_files_no_review(
+async def test_a_failed_slack_post_files_no_review(
     client, db_session, lab, proposal, monkeypatch,
 ):
-    """If Slack refuses the channel, the reopen must leave NOTHING behind — no
-    half-written review that would make the proposal look acted-on and permanently
-    block the retry (the idempotency guard keys off any review by this agent).
+    """If Slack can't resolve the origin channel, the reopen must leave NOTHING
+    behind — no half-written review that would make the proposal look acted-on
+    and permanently block the retry (the idempotency guard keys off any review
+    by this agent).
 
-    Positive control: the same request, with the fake repaired, writes both rows.
+    Positive control: the same request, with the channel now resolvable, writes
+    the review.
     """
-    refuse = {"on": True}
+    resolvable = {"on": False}
 
     async def _on(*args, **kwargs):
         return True
 
-    async def _token(db, agent_id):
-        return f"xoxb-fake-{agent_id}"
+    def _token_for_agent_row(agent):
+        return f"xoxb-fake-{agent.agent_id}"
 
-    class _Refusing(FakeSlackClient):
-        def create_private_channel(self, name):
-            if refuse["on"]:
-                return None
-            return super().create_private_channel(name)
+    async def _list_channel_ids(token, **kwargs):
+        return {"degrader-chem": "C_degrader-chem"} if resolvable["on"] else {}
 
+    async def _post_message(token, channel, text, *, thread_ts=None):
+        return [{"ts": "1700000000.000900"}]
+
+    monkeypatch.setattr("src.services.slack_tokens.slack_globally_enabled", _on)
     monkeypatch.setattr(
-        "src.services.private_channels._slack_enabled_for_migration", _on)
-    monkeypatch.setattr(
-        "src.services.private_channels._get_or_fail_bot_token", _token)
-    monkeypatch.setattr(
-        "src.services.private_channels._make_client",
-        lambda agent_id, bot_token: _Refusing(agent_id=agent_id, bot_token=bot_token),
+        "src.services.slack_tokens.token_for_agent_row", _token_for_agent_row
     )
+    monkeypatch.setattr("src.services.slack_web.list_channel_ids_async", _list_channel_ids)
+    monkeypatch.setattr("src.services.slack_web.post_message_async", _post_message)
 
     bad = await client.post(
         f"/agent/alpha/proposals/{proposal.id}/reopen",
@@ -1149,14 +1115,11 @@ async def test_a_failed_migration_files_no_review(
     assert (await db_session.scalar(select(func.count(ProposalReview.id)).where(
         ProposalReview.thread_decision_id == proposal.id
     ))) == 0, (
-        "a failed migration still filed a ProposalReview — the idempotency guard will "
+        "a failed post still filed a ProposalReview — the idempotency guard will "
         "now treat every retry as a duplicate and the proposal is stuck"
     )
-    assert (await db_session.scalar(select(func.count(AgentChannel.id)).where(
-        AgentChannel.visibility == VISIBILITY_COLLAB_PRIVATE
-    ))) == 0
 
-    refuse["on"] = False
+    resolvable["on"] = True
     good = await client.post(
         f"/agent/alpha/proposals/{proposal.id}/reopen",
         data={"guidance": "Retry after the outage."}, headers=_auth(lab.pi_a_id),
@@ -1168,9 +1131,6 @@ async def test_a_failed_migration_files_no_review(
     db_session.expire_all()
     assert (await db_session.scalar(select(func.count(ProposalReview.id)).where(
         ProposalReview.thread_decision_id == proposal.id
-    ))) == 1
-    assert (await db_session.scalar(select(func.count(AgentChannel.id)).where(
-        AgentChannel.visibility == VISIBILITY_COLLAB_PRIVATE
     ))) == 1
 
 
@@ -1195,9 +1155,7 @@ async def test_reopen_is_blocked_for_an_inactive_agent_but_rating_is_not(
         f"an inactive agent was reopened into a live discussion: {blocked.status_code}"
     )
     db_session.expire_all()
-    assert (await db_session.scalar(select(func.count(AgentChannel.id)).where(
-        AgentChannel.visibility == VISIBILITY_COLLAB_PRIVATE
-    ))) == 0
+    assert await _reopen_inbox_count(db_session, proposal) == 0
 
     allowed = await client.post(
         f"/agent/alpha/proposals/{proposal.id}/review",

@@ -39,7 +39,6 @@ from src.models import (
     AgentRegistry,
     DelegateInvitation,
     PiDmMessage,
-    PrivateChannelMember,
     ProfileRevision,
     ProposalReview,
     ResearcherProfile,
@@ -125,13 +124,32 @@ def _slack_enabled_auto_detect(monkeypatch):
 
     Without this, a populated .env with SLACK_ENABLED=true forces the real-Slack
     branch of `reopen_proposal` even for `world`'s fictitious agents (`tstowner`,
-    `tstother`), which have no token anywhere — `migrate_public_thread_to_private`
-    then 500s on "No valid Slack bot token". Auto-detect is this suite's actual
-    premise: a test that wants Slack ON gives its own agent a token (e.g.
+    `tstother`), which have no token anywhere — the route then 500s with "No bot
+    token available". Auto-detect is this suite's actual premise: a test that
+    wants Slack ON gives its own agent a token (e.g.
     ``world.agent.slack_bot_token = "xoxb-fake-for-tests"``), which is what
     auto-detect keys on either way.
+
+    ``get_slack_tokens`` is also stubbed to empty (fix 9, 2026-08-12 final audit
+    wave). ``slack_globally_enabled`` -- read by `reopen_proposal`'s now-only
+    code path -- is a WORKSPACE-wide auto-detect (`get_any_bot_token`): true if
+    *any* agent, real roster slug included, has a usable token, in the DB or in
+    ``.env``. The fictitious `tstowner`/`tstother` ids dodge the *per-agent*
+    lookups (`token_for_agent_row`, `env_token`) but not this one — a dev host
+    with a real live-tier ``.env`` (e.g. ``SLACK_BOT_TOKEN_WISEMAN`` set for the
+    live tier) makes `slack_globally_enabled` true regardless, sending these
+    tests down the real-Slack branch and 500ing on "No bot token available"
+    for an agent that was never meant to have one. Stubbing it to ``{}`` keeps
+    the Slack on/off answer keyed on what these tests actually control: DB rows
+    and each test's own `world.agent.slack_bot_token`.
     """
+    from src.config import Settings
+
     monkeypatch.setattr(get_settings(), "slack_enabled", None)
+    # A class-level patch, not an instance one: Settings is a pydantic model, and
+    # only declared fields can be set per-instance (an instance-level
+    # ``get_slack_tokens`` assignment raises "object has no field").
+    monkeypatch.setattr(Settings, "get_slack_tokens", lambda self: {})
 
 
 @pytest.fixture(autouse=True)
@@ -394,7 +412,21 @@ async def test_signup_twice_does_not_create_a_second_agent(client, db_session):
 
 
 # ===========================================================================
-# 2. The private-channel reopen route
+# 2. The reopen-proposal route
+#
+# Fix 9 (2026-08-12 final audit wave, "private-channel collaboration is out"):
+# reopen used to migrate a public-origin proposal thread into a NEW
+# collab_private channel by default (enable_private_refinement=True) before
+# posting the PI's guidance there. The engine-side private-channel
+# collaboration/refinement flow was deleted (design doc §8 — no agent
+# converses inside a collab_private channel anymore; only a scout_hub agent
+# replies to anything, hub-and-spoke only), so a freshly migrated channel
+# would be a dead room nothing ever posts in again. reopen no longer creates
+# ANY private channel: it always posts the PI's guidance directly into the
+# proposal's origin thread (Slack, if the agent has a token; the DB inbox
+# otherwise), regardless of that thread's visibility. enable_private_refinement
+# itself is untouched — src/services/email_inbound.py still reads it for the
+# separate (currently out of scope) inbound-email reply path.
 # ===========================================================================
 
 
@@ -406,47 +438,55 @@ async def _reopen(client, world, td, user, guidance="Push on the shared assay.")
     )
 
 
-async def test_reopening_the_same_proposal_twice_creates_one_channel(
+async def _inbox_messages(db, td) -> list[AgentMessage]:
+    """PI-authored (agent_id IS NULL) messages reopen wrote into the origin thread."""
+    return list((await db.execute(
+        select(AgentMessage).where(
+            AgentMessage.thread_ts == td.thread_id,
+            AgentMessage.agent_id.is_(None),
+        )
+    )).scalars().all())
+
+
+async def test_reopen_never_creates_a_collab_private_channel(
+    client, db_session, world, slack
+):
+    """Pin fix 9 directly: no collab_private channel, ever — guidance goes
+    straight into the origin thread's DB inbox instead (Slack is off for
+    `world`'s fictitious agents, so no Slack call either)."""
+    r = await _reopen(client, world, world.td, world.pi)
+    assert r.status_code == 302, r.text
+    assert await _private_channels(db_session) == [], (
+        "reopen must never create a collab_private channel"
+    )
+    inbox = await _inbox_messages(db_session, world.td)
+    assert len(inbox) == 1
+    assert "Push on the shared assay." in inbox[0].content
+    assert slack.calls == []
+
+
+async def test_reopening_the_same_proposal_twice_is_idempotent(
     client, db_session, world, slack
 ):
     """The idempotency guard in reopen_proposal (stale page / Back-button replay).
 
-    Control: a *different* proposal does create a second channel, so "still one"
-    cannot be satisfied by a reopen that silently stopped working.
+    Control: a *different* proposal is not deduped, so "still one review" cannot
+    be satisfied by a reopen that silently stopped working.
     """
     r1 = await _reopen(client, world, world.td, world.pi)
     assert r1.status_code == 302, r1.text
-    channels = await _private_channels(db_session)
-    assert len(channels) == 1
-    first_name = channels[0].channel_name
-    assert first_name.startswith("priv-")
-
-    await db_session.refresh(world.td)
-    assert world.td.refined_in_channel == channels[0].channel_id
-    # Both bots + the triggering PI, per specs/privacy-and-channel-visibility.md.
-    members = (await db_session.execute(
-        select(PrivateChannelMember).where(
-            PrivateChannelMember.agent_channel_id == channels[0].id
-        )
-    )).scalars().all()
-    assert sorted(m.agent_id for m in members if m.agent_id) == sorted(
-        [OWNER_AGENT, OTHER_AGENT]
-    )
-    assert [m.user_id for m in members if m.user_id] == [world.pi.id]
+    assert len(await _inbox_messages(db_session, world.td)) == 1
+    assert len(await _reviews(db_session, OWNER_AGENT)) == 1
 
     # --- the replay -------------------------------------------------------
     r2 = await _reopen(client, world, world.td, world.pi, guidance="Second submit.")
     assert r2.status_code == 302
-    after = await _private_channels(db_session)
-    assert len(after) == 1, (
-        "the reopen idempotency guard did not hold — the replay minted a second "
-        f"private channel: {[c.channel_name for c in after]}"
+    assert len(await _reviews(db_session, OWNER_AGENT)) == 1, (
+        "the reopen idempotency guard did not hold — the replay wrote a second review"
     )
-    assert after[0].channel_name == first_name
-    assert len(await _reviews(db_session, OWNER_AGENT)) == 1
-
-    await db_session.refresh(world.td)
-    assert world.td.refined_in_channel == after[0].channel_id
+    assert len(await _inbox_messages(db_session, world.td)) == 1, (
+        "the replay must not post a second time"
+    )
 
     # --- control: a different proposal is not deduped ---------------------
     td2 = await factories.make_thread_decision(
@@ -456,8 +496,10 @@ async def test_reopening_the_same_proposal_twice_creates_one_channel(
     await db_session.flush()
     r3 = await _reopen(client, world, td2, world.pi, guidance="Different proposal.")
     assert r3.status_code == 302
-    assert len(await _private_channels(db_session)) == 2
+    assert len(await _reviews(db_session, OWNER_AGENT)) == 2
+    assert len(await _inbox_messages(db_session, td2)) == 1
 
+    assert await _private_channels(db_session) == []
     assert slack.calls == [], f"the reopen route called Slack: {slack.methods}"
 
 
@@ -488,9 +530,10 @@ async def test_reopen_rejects_empty_guidance(client, db_session, world, slack):
     assert await _private_channels(db_session) == []
     assert slack.calls == []
 
-    # Control: real guidance on the same proposal does migrate.
+    # Control: real guidance on the same proposal succeeds and lands in the inbox.
     assert (await _reopen(client, world, world.td, world.pi)).status_code == 302
-    assert len(await _private_channels(db_session)) == 1
+    assert len(await _inbox_messages(db_session, world.td)) == 1
+    assert await _private_channels(db_session) == []
 
 
 async def test_reopen_is_blocked_while_the_agent_is_inactive(client, db_session, world):
@@ -505,7 +548,8 @@ async def test_reopen_is_blocked_while_the_agent_is_inactive(client, db_session,
     world.agent.status = "active"
     await db_session.flush()
     assert (await _reopen(client, world, world.td, world.pi)).status_code == 302
-    assert len(await _private_channels(db_session)) == 1
+    assert len(await _inbox_messages(db_session, world.td)) == 1
+    assert await _private_channels(db_session) == []
 
 
 async def test_reopen_refuses_a_proposal_the_agent_is_not_part_of(
@@ -522,14 +566,17 @@ async def test_reopen_refuses_a_proposal_the_agent_is_not_part_of(
 
     # Control: the same PI, same route, on a proposal that *is* theirs.
     assert (await _reopen(client, world, world.td, world.pi)).status_code == 302
-    assert len(await _private_channels(db_session)) == 1
+    assert len(await _inbox_messages(db_session, world.td)) == 1
+    assert await _private_channels(db_session) == []
 
 
-async def test_reopening_an_already_private_thread_reports_not_implemented(
+async def test_reopening_an_already_private_threads_posts_there_directly(
     client, db_session, world, slack
 ):
-    """The `origin_visibility != 'public'` branch: refuse loudly (501) rather than
-    fall through to the legacy "post the PI's text in-channel" path."""
+    """The `origin_visibility != 'public'` case is no longer special-cased: an
+    existing (legacy) private thread is reopened exactly like a public one —
+    guidance posted straight into it. There is no NEW private-channel creation
+    left to gate on visibility, so nothing is refused here anymore."""
     already_private = await factories.make_thread_decision(
         db_session, run=world.run, agent_a=OWNER_AGENT, agent_b=OTHER_AGENT,
         channel="priv-existing", outcome="proposal",
@@ -537,21 +584,22 @@ async def test_reopening_an_already_private_thread_reports_not_implemented(
     )
     await db_session.flush()
     r = await _reopen(client, world, already_private, world.pi)
-    assert r.status_code == 501
-    assert await _private_channels(db_session) == []
-    assert await _reviews(db_session, OWNER_AGENT) == []
+    assert r.status_code == 302
+    assert await _private_channels(db_session) == [], (
+        "reopen must never create a NEW collab_private channel"
+    )
+    assert len(await _reviews(db_session, OWNER_AGENT)) == 1
+    inbox = await _inbox_messages(db_session, already_private)
+    assert len(inbox) == 1
+    assert inbox[0].channel_name == "priv-existing"
     assert slack.calls == []
 
-    # Control: a public-origin proposal on the same route does migrate.
-    assert (await _reopen(client, world, world.td, world.pi)).status_code == 302
-    assert len(await _private_channels(db_session)) == 1
 
-
-async def test_the_legacy_reopen_finds_a_channel_past_the_first_page(
-    client, db_session, world, slack, monkeypatch
+async def test_reopen_via_slack_finds_a_channel_past_the_first_page(
+    client, db_session, world, slack
 ):
-    """The legacy (``enable_private_refinement=False``) path resolves the channel
-    id through the whole of conversations.list, not just page one.
+    """reopen's post-to-Slack path resolves the channel id through the whole of
+    conversations.list, not just page one.
 
     It used to call ``conversations_list(limit=200)`` once and scan that page, so
     a workspace with more channels than fit in one page answered "Channel #x not
@@ -559,7 +607,6 @@ async def test_the_legacy_reopen_finds_a_channel_past_the_first_page(
     ``slack_web.list_channel_ids``, which follows every cursor, so the target on
     page **two** below is the whole point of this test.
     """
-    monkeypatch.setattr(get_settings(), "enable_private_refinement", False)
     world.agent.slack_bot_token = "xoxb-fake-for-tests"   # flips Slack on
     await db_session.flush()
 
@@ -590,7 +637,7 @@ async def test_the_legacy_reopen_finds_a_channel_past_the_first_page(
     assert posted[0]["thread_ts"] == world.td.thread_id, (
         "the guidance must stay in the proposal thread, not the channel root"
     )
-    # Legacy path posts in place: no private refinement channel is minted.
+    # reopen never mints a NEW private refinement channel.
     assert await _private_channels(db_session) == []
 
 
@@ -951,23 +998,30 @@ async def test_posting_an_empty_message_is_rejected(client, db_session, world):
 async def test_a_pi_cannot_post_into_another_pairs_private_channel(
     client, db_session, world
 ):
+    """A pre-existing (legacy) collab_private channel this PI has no membership
+    in. reopen no longer produces these (fix 9), so build one directly via
+    factories — exactly the "legacy viewing/discovery" surface that stays
+    supported for channels that already exist; only NEW private-channel
+    creation was removed."""
     third_user, _ = await _agent_for(
         db_session, name="Thea Third", email="thea@example.org",
         agent_id=THIRD_AGENT, bot_name="ThirdBot",
     )
-    foreign_td = await factories.make_thread_decision(
-        db_session, run=world.run, agent_a=OTHER_AGENT, agent_b=THIRD_AGENT,
-        channel="metabolomics", outcome="proposal", summary_text="Summary — theirs",
+    private = await factories.make_agent_channel(
+        db_session, run=world.run, channel_name="priv-other-third",
+        channel_type="collaboration", visibility=VISIBILITY_COLLAB_PRIVATE,
+        created_by_agent=OTHER_AGENT,
+    )
+    await factories.make_private_channel_member(
+        db_session, channel=private, role="bot", agent_id=OTHER_AGENT,
+    )
+    await factories.make_private_channel_member(
+        db_session, channel=private, role="bot", agent_id=THIRD_AGENT,
+    )
+    await factories.make_private_channel_member(
+        db_session, channel=private, role="pi", agent_id=None, user_id=world.other_pi.id,
     )
     await db_session.flush()
-    # Produced by the real route, by a PI who is entitled to it.
-    r = await client.post(
-        f"/agent/{OTHER_AGENT}/proposals/{foreign_td.id}/reopen",
-        data={"guidance": "Ours alone."},
-        headers=_auth(world.other_pi.id),
-    )
-    assert r.status_code == 302
-    private = (await _private_channels(db_session))[0]
     assert private.visibility == VISIBILITY_COLLAB_PRIVATE
 
     await client.post(
