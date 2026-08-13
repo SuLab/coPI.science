@@ -27,7 +27,7 @@ from src.agent.agent import Agent, _extract_dois
 from src.agent.prompt_safety import delimit
 from src.agent.slack_client import markdown_to_mrkdwn
 from src.agent.state import PostRef, ThreadState
-from src.models.agent_activity import VISIBILITY_COLLAB_PRIVATE, VISIBILITY_PUBLIC
+from src.models.agent_activity import VISIBILITY_COLLAB_PRIVATE
 from src.services import llm
 from tests.fakes import FakeAnthropic, FakeSlackClient
 
