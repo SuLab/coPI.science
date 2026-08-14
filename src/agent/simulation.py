@@ -1155,11 +1155,20 @@ class SimulationEngine:
             agent.agent_id, len(threads_to_reply),
         )
 
-        # Run replies in parallel
-        tasks = [
-            self._reply_to_thread(agent, thread)
-            for thread in threads_to_reply
-        ]
+        # Run replies in parallel, bounded. These genuinely overlap now that the
+        # Anthropic call is awaited off the loop thread (services/llm._acreate);
+        # before that they could not, so the cap is new alongside it. The hub is
+        # why it exists: it sits on every spoke edge and has logged "Replying to
+        # 37 threads" in one turn, which unbounded is 37 concurrent Opus requests
+        # that the per-turn rate limiter never gets a chance to shape. The cap
+        # paces the fan-out; it never drops a thread.
+        sem = asyncio.Semaphore(max(1, settings.phase4_max_concurrent_replies))
+
+        async def _reply_bounded(thread: ThreadState) -> None:
+            async with sem:
+                await self._reply_to_thread(agent, thread)
+
+        tasks = [_reply_bounded(thread) for thread in threads_to_reply]
         await asyncio.gather(*tasks, return_exceptions=True)
 
         return {t.thread_id for t in threads_to_reply}
@@ -1246,6 +1255,11 @@ class SimulationEngine:
                 on_consult=lambda domain, _pi=thread.other_agent_id: self._record_consult(
                     _pi, domain
                 ),
+                # A specialist consult is a real Opus call. Without this it was
+                # invisible to the sliding-window limiter and to
+                # SimulationRun.total_api_calls, so a concluding reply that
+                # convened the panel booked 1 call while making up to 9.
+                on_api_call=agent.record_api_call,
                 own_dois=agent.own_publication_dois,
             )
 
@@ -1257,7 +1271,17 @@ class SimulationEngine:
                 tools=tools_for_role(agent.role),
                 tool_executor=tool_executor,
                 model=settings.llm_agent_model_opus,
-                max_tokens=1500,
+                # 2500, not 1500: a scout_hub CONCLUDE reply carries the
+                # `<assessment_json>` sidecar, emitted LAST. Truncation there
+                # drops the closing tag, so _extract_assessment_json returns
+                # None and the verdict is lost permanently — the reply has
+                # already been posted and no path re-attempts the artifact.
+                # _phase5_new_post carries the sizing history for this exact
+                # artifact (1000 truncated it "while leaving the Slack post
+                # looking complete") and sits at 2500; when Option A moved the
+                # sidecar here, this call was not raised to match. A ceiling is
+                # not a spend — a short pi_lab reply costs the same as before.
+                max_tokens=2500,
                 log_meta={
                     "agent_id": agent.agent_id,
                     "phase": "thread_reply",
@@ -1303,15 +1327,27 @@ class SimulationEngine:
                 # treated as sent — has_pending_reply stays True so the next
                 # Phase 4 pass tries again instead of silently dropping the
                 # thread (mirrors the phase-5 new-post suppression handling).
+                thread.suppressed_post_count += 1
                 logger.info(
                     "[%s] Phase 4: reply to thread %s suppressed — not "
-                    "counted, nothing persisted",
-                    agent.agent_id, thread.thread_id,
+                    "counted, nothing persisted (count=%d)",
+                    agent.agent_id, thread.thread_id, thread.suppressed_post_count,
                 )
+                if thread.suppressed_post_count >= 2:
+                    # Same backoff the empty-response branch above uses. Without
+                    # it this thread is retried every turn forever at full Opus
+                    # price: nothing it does advances message_count, so the
+                    # max_thread_messages close can never rescue it either.
+                    thread.has_pending_reply = False
+                    logger.info(
+                        "[%s] Phase 4: Backing off thread %s after %d suppressed posts",
+                        agent.agent_id, thread.thread_id, thread.suppressed_post_count,
+                    )
                 return
             agent.message_count += 1
             thread.has_pending_reply = False
             thread.empty_response_count = 0
+            thread.suppressed_post_count = 0
 
             # Option A relocation: the hub's :mag: Opportunity Assessment is
             # no longer a separate Phase-5 post — it is the machine-readable
@@ -2108,15 +2144,18 @@ class SimulationEngine:
         so every existing direct caller (tests driving this method on a
         stub) keeps working unchanged.
 
-        ``subject_agent_id_fallback`` is used for the ``subject_agent_id``
-        column (and the specialist-floor check below) ONLY when the verdict
-        itself leaves that field blank — it is never written into
+        ``subject_agent_id_fallback``, when given, is AUTHORITATIVE for the
+        ``subject_agent_id`` column and the specialist-floor check below — it
+        overrides whatever the verdict itself named, because the engine knows
+        the interview partner and the model has never been shown that id (see
+        the inline note at the override). It is never written into
         ``raw_verdict``, which always stays exactly what the model emitted
         (see that field's own note below). Option A's caller
         (``_capture_hub_assessment``) passes ``thread.other_agent_id`` here:
         unlike Phase 5's old standalone post, a Phase-4 CONCLUDE reply always
-        has a real interview thread behind it, so the engine already knows
-        who the sidecar is about even when the model's own field is empty.
+        has a real interview thread behind it, so the engine always knows who
+        the sidecar is about. The name is kept for its existing callers; it is
+        a fallback only in the sense that callers without a thread omit it.
 
         There is no ``thread_id`` parameter here, despite the verdict coming
         from a specific Phase-4 interview thread today (Option A relocation)
@@ -2135,11 +2174,22 @@ class SimulationEngine:
         out of it (and regardless of ``subject_agent_id_fallback``), so
         nothing is ever lost to — or invented by — a decision made here.
         """
-        # A view with the fallback applied, used ONLY for the subject-derived
-        # column and the specialist-floor check — never for `raw_verdict`,
-        # which must stay byte-for-byte what the model actually sent.
+        # A view with the engine-known subject applied, used ONLY for the
+        # subject-derived column and the specialist-floor check — never for
+        # `raw_verdict`, which must stay byte-for-byte what the model sent.
+        #
+        # This OVERRIDES the model's own field rather than only filling a blank
+        # one. The phase-4 prompt never shows the hub a PI's `agent_id`: it gets
+        # `{other_agent_name}` (bot_name, "WangBot") and `{other_agent_lab}`
+        # (pi_name), so it can only guess, and it guesses what it was shown.
+        # Consults are recorded under the real `agent_id`, so a guessed
+        # "WangBot" made _specialist_floor_gap join against a key that never
+        # exists, refuse the verdict, and discard it — after the concluding
+        # reply had already gone out, with no later turn to recover it. The
+        # caller's value is ground truth (`thread.other_agent_id`: an interview
+        # is 1:1 with the hub), so it wins.
         subject_view = verdict
-        if subject_agent_id_fallback and not verdict.get("subject_agent_id"):
+        if subject_agent_id_fallback:
             subject_view = {**verdict, "subject_agent_id": subject_agent_id_fallback}
 
         gap = self._specialist_floor_gap(subject_view)

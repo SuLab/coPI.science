@@ -1435,3 +1435,87 @@ class TestBuildLabDirectoriesCohortGate:
 
         assert "A's distinctive paper on topic A" in b._lab_directory
         assert "C's distinctive paper on topic C" in b._lab_directory
+
+
+class TestSuppressedPostBacksOff:
+    """A suppressed post must not be retried forever.
+
+    `_post_message` returning None leaves `has_pending_reply=True` so the thread
+    is retried rather than silently dropped — correct, but it had no counter, so
+    a thread whose reply always strips to empty burned one full-price Opus call
+    every hub turn, indefinitely. Nothing else ever stopped it: a suppressed post
+    writes no log row, so `thread.message_count` never advances and the
+    `>= max_thread_messages` close never fires either.
+
+    The empty-RESPONSE path next to it already backs off after 2. This gives the
+    suppressed-POST path the same treatment, on its own counter so
+    `empty_response_count`'s existing meaning (and the test that pins it) is
+    untouched.
+    """
+
+    def _engine_with_thread(self):
+        from src.agent.agent import Agent
+        from src.agent.simulation import SimulationEngine
+        from src.agent.state import ThreadState
+        from tests.fakes import FakeSlackClient
+
+        agent = Agent("blackbird", "BlackbirdBot", "Blackbird")
+        thread = ThreadState(
+            thread_id="t1", channel="general", other_agent_id="wang",
+            message_count=0, has_pending_reply=True,
+        )
+        agent.state.active_threads["t1"] = thread
+        client = FakeSlackClient(agent_id="blackbird")
+        engine = SimulationEngine(agents=[agent], slack_clients={"blackbird": client})
+        return engine, agent, thread
+
+    async def _attempt(self, monkeypatch, engine, agent, thread):
+        async def _fake_generate_with_tools(**kwargs):
+            return "<slack_message>text that will be suppressed</slack_message>"
+
+        async def _suppressed_post(*a, **kw):
+            return None
+
+        monkeypatch.setattr(agent, "build_phase4_prompt", lambda **kw: ("sys", []))
+        monkeypatch.setattr(
+            "src.agent.simulation.generate_with_tools", _fake_generate_with_tools
+        )
+        monkeypatch.setattr(engine, "_post_message", _suppressed_post)
+        await engine._reply_to_thread(agent, thread)
+
+    @pytest.mark.asyncio
+    async def test_first_suppression_still_retries(self, monkeypatch):
+        engine, agent, thread = self._engine_with_thread()
+        await self._attempt(monkeypatch, engine, agent, thread)
+        assert thread.has_pending_reply is True
+        assert thread.suppressed_post_count == 1
+        assert agent.message_count == 0
+
+    @pytest.mark.asyncio
+    async def test_second_suppression_backs_off(self, monkeypatch):
+        engine, agent, thread = self._engine_with_thread()
+        await self._attempt(monkeypatch, engine, agent, thread)
+        await self._attempt(monkeypatch, engine, agent, thread)
+        assert thread.suppressed_post_count == 2
+        assert thread.has_pending_reply is False, (
+            "a thread whose post is always suppressed must stop being retried"
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_successful_post_clears_the_counter(self, monkeypatch):
+        engine, agent, thread = self._engine_with_thread()
+        await self._attempt(monkeypatch, engine, agent, thread)
+        assert thread.suppressed_post_count == 1
+
+        async def _ok_generate(**kwargs):
+            return "<slack_message>A real reply.</slack_message>"
+
+        monkeypatch.setattr(agent, "build_phase4_prompt", lambda **kw: ("sys", []))
+        monkeypatch.setattr("src.agent.simulation.generate_with_tools", _ok_generate)
+        monkeypatch.undo()
+        monkeypatch.setattr(agent, "build_phase4_prompt", lambda **kw: ("sys", []))
+        monkeypatch.setattr("src.agent.simulation.generate_with_tools", _ok_generate)
+        await engine._reply_to_thread(agent, thread)
+
+        assert thread.suppressed_post_count == 0
+        assert thread.has_pending_reply is False

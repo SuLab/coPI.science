@@ -175,3 +175,59 @@ def test_fenced_sidecar_does_not_hijack_the_action_parse():
     assert verdict is not None
     assert verdict["subject_agent_id"] == "wang"
     assert verdict["funnel_stage"] == "incubation"
+
+
+# --- the sidecar has to fit in the call that emits it ------------------------
+
+import pytest  # noqa: E402
+
+
+@pytest.mark.asyncio
+async def test_phase4_reply_budget_fits_the_assessment_sidecar(monkeypatch):
+    """The CONCLUDE reply carries the `<assessment_json>` sidecar LAST, so a
+    truncated response loses the closing tag, `_extract_assessment_json` returns
+    None, and the verdict is gone — the reply is already posted and there is no
+    retry path for the artifact.
+
+    This codebase already sized this exact artifact once: `_phase5_new_post`
+    carries a note that 1000 tokens "truncated the verdict first while leaving
+    the Slack post looking complete" and sits at 2500 for it. When the sidecar
+    moved into the Phase-4 CONCLUDE reply (Option A), it landed in a call still
+    budgeted at 1500 — below the figure the same file documents as necessary.
+    Production logs for this phase show 11 `stop_reason=max_tokens` retries and
+    one response still truncated after the 2x retry.
+    """
+    from src.agent.agent import Agent
+    from src.agent.simulation import SimulationEngine
+    from src.agent.state import ThreadState
+    from tests.fakes import FakeSlackClient
+
+    PHASE5_BUDGET = 2500
+
+    hub = Agent("blackbird", "BlackbirdBot", "Blackbird", role="scout_hub")
+    thread = ThreadState(
+        thread_id="t1", channel="general", other_agent_id="wang",
+        message_count=11, has_pending_reply=True,
+    )
+    hub.state.active_threads["t1"] = thread
+    engine = SimulationEngine(
+        agents=[hub], slack_clients={"blackbird": FakeSlackClient(agent_id="blackbird")}
+    )
+
+    seen: dict = {}
+
+    async def _capture(**kwargs):
+        seen.update(kwargs)
+        return "<slack_message>A concluding reply.</slack_message>"
+
+    monkeypatch.setattr(hub, "build_phase4_prompt", lambda **kw: ("sys", []))
+    monkeypatch.setattr("src.agent.simulation.generate_with_tools", _capture)
+
+    await engine._reply_to_thread(hub, thread)
+
+    assert seen, "generate_with_tools was never called"
+    assert seen["max_tokens"] >= PHASE5_BUDGET, (
+        f"Phase 4 carries the assessment sidecar but is budgeted at "
+        f"{seen['max_tokens']} tokens, below the {PHASE5_BUDGET} this codebase "
+        f"documents as necessary for the same artifact"
+    )

@@ -1423,3 +1423,73 @@ async def test_admin_assessments_page_bounds_the_query_and_says_so(
     assert "Highest scoring" in html
     assert "Lower scoring" not in html
     assert "top 1 of 2" in html
+
+
+@pytest.mark.asyncio
+async def test_engine_known_subject_overrides_the_models_guess(engine):
+    """The engine's own knowledge of who the interview is with wins over the
+    model's `subject_agent_id` string.
+
+    The phase-4 prompt never shows the hub a PI's `agent_id` — it is handed
+    `{other_agent_name}` (the bot_name, "WangBot") and `{other_agent_lab}` (the
+    pi_name, "Wang"). So the model can only guess, and it guesses the identifier
+    it was actually shown. Consults, meanwhile, are recorded under the real
+    `agent_id` ("wang"). When the guess was trusted, `_specialist_floor_gap`
+    joined the consult record against "WangBot", found nothing, and refused the
+    whole verdict — with the concluding reply already posted to Slack and no
+    later turn to recover it. Failing this way is silent: one warning line and a
+    missing row.
+
+    Perversely, LEAVING the field blank always worked (the fallback applied, or
+    the floor failed open), so the model doing more was punished.
+    """
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from src.agent.simulation import SimulationEngine
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as setup:
+        run = SimulationRun()
+        setup.add(run)
+        await setup.commit()
+        run_id = run.id
+
+    stub = SimulationEngine(
+        agents=[], slack_clients={}, session_factory=factory, simulation_run_id=run_id,
+    )
+    # The panel really was convened — recorded, as always, under the agent_id.
+    for domain in ("scientific", "talent"):
+        stub._record_consult("wang", domain)
+
+    await SimulationEngine._persist_assessment(
+        stub, "blackbird", "general",
+        {
+            # The bot_name form: the only identifier the prompt ever showed it.
+            "subject_agent_id": "WangBot",
+            "company_or_project": "DBT / BCAA-autophagy axis",
+            "funnel_stage": "incubation",
+            "recommendation": "advance",
+            "confidence": "Speculative",
+            "scores": {"differentiation": 4, "platform": 2},
+            "gating": {"life_sciences_domain": "met", "credible_tech_source": "met",
+                       "fto_achievable": "unconfirmed"},
+        },
+        subject_agent_id_fallback="wang",
+    )
+
+    async with factory() as check:
+        rows = (await check.execute(
+            select(OpportunityAssessment).where(
+                OpportunityAssessment.simulation_run_id == run_id
+            )
+        )).scalars().all()
+
+    assert len(rows) == 1, (
+        "verdict was refused: the floor joined consults against the model's "
+        "'WangBot' instead of the engine's known 'wang'"
+    )
+    # Stored under the real agent_id, so /admin/assessments and every join
+    # against `agents` resolves.
+    assert rows[0].subject_agent_id == "wang"
+    # raw_verdict stays byte-for-byte what the model sent.
+    assert rows[0].raw_verdict["subject_agent_id"] == "WangBot"

@@ -58,11 +58,29 @@ you should already have what you need.
 
 `consult_specialist` reaches eight domain experts — scientific, chemistry, clinical,
 commercial, legal, technologic, talent, budget — described in the tool itself. Consult
-them here, during the interview, as each topic comes up. If you are heading toward an
-advance or conditional verdict, the domains this idea touches must be consulted by the
-time you close — your concluding reply is where the verdict and its sidecar are both
-emitted, so it is your last chance: a verdict whose relevant domains were never consulted
-is refused and nothing is persisted.
+them here, during the interview, as each topic comes up. Your concluding reply is where
+the verdict and its sidecar are both emitted, so it is your last chance: a verdict whose
+required domains were never consulted is refused and **nothing is persisted**.
+
+**Mandatory consults before any `advance` or `conditional` verdict.** These are checked
+mechanically against what you actually consulted during the interview — not against what
+you claim was necessary. Consult every one that applies, or downgrade the verdict:
+
+- `scientific` — **always**, without exception.
+- `talent` — **always**, without exception, before you conclude any interview.
+- `technologic` — whenever you will score `platform` at 4 or higher, or the idea
+  describes a platform, a pipeline, or multiple shots on goal.
+- `legal` — whenever you will mark `gating.fto_achievable` as `met`. Claiming
+  freedom-to-operate without a legal consult is refused.
+- `chemistry` — whenever the idea involves a small molecule, a compound series, a
+  medicinal-chemistry path, or a development-candidate milestone.
+- `clinical` — whenever the idea names a disease, an indication, a patient population,
+  or a therapeutic claim.
+
+Note the asymmetry, and do not let it push you toward a weaker verdict to avoid work: a
+strong idea requires *more* consults than a weak one, because scoring `platform` high and
+marking FTO `met` are each what pull in another required domain. `pass` and
+`route-to-incubation` verdicts require no panel at all.
 
 ## Instructions
 

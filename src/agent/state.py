@@ -17,6 +17,14 @@ class ThreadState:
     abstracts_other: int = 0  # tool-use counters
     full_text: int = 0
     empty_response_count: int = 0  # consecutive empty/unparseable Phase 4 replies
+    # Consecutive Phase 4 replies that were composed but never reached Slack
+    # (_post_message returned None — e.g. the text stripped to empty once its own
+    # sidecar/tag stripping ran). Distinct from empty_response_count: there the
+    # MODEL produced nothing, here it did and the POST was dropped. Without a
+    # counter this retried forever at one Opus call per turn, since a suppressed
+    # post writes no log row and so never advances message_count toward the
+    # max_thread_messages close either.
+    suppressed_post_count: int = 0
     # Cohort gate: True when `other_agent_id` is no longer a permitted sender for
     # the owning agent (membership changed, or — on every resumed run — the DB
     # state rebuild reconstructed the thread before the first gate recompute).

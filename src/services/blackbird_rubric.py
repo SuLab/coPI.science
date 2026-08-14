@@ -1,6 +1,11 @@
 """Blackbird's weighted screening rubric (Part C.3 of
-data/Blackbird_initial_priorities-criteria_v1.pdf, transcribed in
-profiles/private/blackbird.md).
+data/Blackbird_initial_priorities-criteria_v1.pdf; the hub-facing prose lives in
+prompts/roles/scout_hub/agent-system.md, the JSON contract in
+prompts/roles/scout_hub/phase4-thread-reply.md).
+
+The rubric used to be transcribed in the untracked profiles/private/blackbird.md
+and injected as private instructions. That mechanism was deleted in the
+2026-08-12 removal cycle — nothing reads that file at runtime any more.
 
 The score is computed here rather than taken from the model's own
 ``weighted_score`` field: thirteen weights times thirteen 1-5 scores is

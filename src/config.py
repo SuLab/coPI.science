@@ -314,6 +314,12 @@ class Settings(BaseSettings):
     turn_delay_seconds: float = 0.0         # pause between turns
     phase5_skip_probability: float = 0.0    # chance agent skips new post
     lab_daily_post_cap: int = 1  # pi_lab: one pitch per day (design §9)
+    # Max Phase-4 replies a single agent may have in flight at once. The LLM call
+    # is awaited off-thread (services/llm._acreate), so gather() genuinely
+    # overlaps now; unbounded, a hub turn that logged "Replying to 37 threads"
+    # would fire 37 simultaneous Opus requests. The sliding-window limiter cannot
+    # shape that burst — it is consulted once per turn at selection, not per call.
+    phase4_max_concurrent_replies: int = 4
     phase5_spontaneous_interval: float = 20.0  # minutes before allowing a spontaneous Phase 5
     phase5_spontaneous_interval_max_multiplier: int = 5  # cap for skip-backoff stretch
     max_abstracts_other_per_thread: int = 10

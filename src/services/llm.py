@@ -1,5 +1,6 @@
 """Anthropic Claude API wrapper."""
 
+import asyncio
 import json
 import logging
 import time
@@ -29,6 +30,23 @@ def get_anthropic_client() -> anthropic.Anthropic:
     return anthropic.Anthropic(api_key=settings.anthropic_api_key)
 
 
+async def _acreate(client: anthropic.Anthropic, **kwargs: Any):
+    """``client.messages.create`` awaited OFF the event-loop thread.
+
+    ``anthropic.Anthropic`` is the synchronous client, so calling it directly
+    from an ``async def`` pins the loop for the entire HTTP request. Every
+    caller in this module is async and several are gathered concurrently, so
+    that turned `asyncio.gather` into a sequential queue AND froze everything
+    else in the process for its duration — the Slack pollers, the DB persist
+    flush, the roster sync, and the asyncio SIGTERM handler (so `docker stop`
+    escalated to SIGKILL and lost the shutdown flush).
+
+    ``to_thread`` keeps the sync client (no SDK swap, no behaviour change per
+    call) while giving the loop back. See tests/unit/test_llm_event_loop.py.
+    """
+    return await asyncio.to_thread(client.messages.create, **kwargs)
+
+
 async def synthesize_profile(context_text: str, researcher_name: str) -> dict[str, Any]:
     """
     Call Claude Opus to synthesize a researcher profile from assembled context.
@@ -50,7 +68,8 @@ Return your response as valid JSON matching the specified schema."""
 
     client = get_anthropic_client()
     try:
-        message = client.messages.create(
+        message = await _acreate(
+            client,
             model=settings.llm_profile_model,
             max_tokens=4000,
             system=system_prompt,
@@ -144,7 +163,8 @@ async def generate_agent_response(
     client = get_anthropic_client()
     try:
         t0 = time.monotonic()
-        message = client.messages.create(
+        message = await _acreate(
+            client,
             model=model,
             max_tokens=max_tokens,
             system=system_prompt,
@@ -178,7 +198,8 @@ async def generate_agent_response(
                 message.usage.output_tokens, retry_max,
             )
             t0 = time.monotonic()
-            retry_msg = client.messages.create(
+            retry_msg = await _acreate(
+                client,
                 model=model,
                 max_tokens=retry_max,
                 system=system_prompt,
@@ -298,7 +319,8 @@ async def generate_with_tools(
 
     for round_num in range(max_tool_rounds + 1):
         t0 = time.monotonic()
-        message = client.messages.create(
+        message = await _acreate(
+            client,
             model=model,
             max_tokens=max_tokens,
             system=system_prompt,
@@ -326,7 +348,8 @@ async def generate_with_tools(
                     message.usage.output_tokens, retry_max,
                 )
                 t0 = time.monotonic()
-                retry_msg = client.messages.create(
+                retry_msg = await _acreate(
+                    client,
                     model=model,
                     max_tokens=retry_max,
                     system=system_prompt,
@@ -404,7 +427,8 @@ async def generate_with_tools(
     # Exhausted max rounds — force a final call without tools
     logger.warning("Max tool rounds (%d) reached, forcing final response", max_tool_rounds)
     t0 = time.monotonic()
-    message = client.messages.create(
+    message = await _acreate(
+        client,
         model=model,
         max_tokens=max_tokens,
         system=system_prompt,
@@ -424,7 +448,8 @@ async def generate_with_tools(
             message.usage.output_tokens, retry_max,
         )
         t0 = time.monotonic()
-        retry_msg = client.messages.create(
+        retry_msg = await _acreate(
+            client,
             model=model,
             max_tokens=retry_max,
             system=system_prompt,

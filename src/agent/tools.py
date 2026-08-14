@@ -1,6 +1,7 @@
 """Tool definitions and execution for Anthropic tool-use API (Phase 4 thread replies)."""
 
 import logging
+import re
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,12 @@ from src.services.pubmed import fetch_abstract, fetch_full_text
 logger = logging.getLogger(__name__)
 
 PROFILES_DIR = Path("profiles")
+
+# An agent_id as the registry mints them: lowercase last name, optionally with a
+# first-initial prefix on a collision (`wu` / `pwu`). No separators, no dots — so
+# nothing that could walk out of the directory it is joined onto. Used to validate
+# the model-supplied argument to retrieve_profile.
+_SAFE_AGENT_ID = re.compile(r"[A-Za-z0-9_-]+")
 
 # Anthropic tool-use schema definitions
 TOOL_DEFINITIONS: list[dict[str, Any]] = [
@@ -178,6 +185,7 @@ async def execute_tool(
     role: str = "pi_lab",
     *,
     on_consult: Callable[[str], None] | None = None,
+    on_api_call: Callable[[], None] | None = None,
     own_dois: set[str] | None = None,
 ) -> str:
     """
@@ -235,6 +243,7 @@ async def execute_tool(
                 tool_input["context"],
                 agent_id=agent_id,
                 on_consult=on_consult,
+                on_api_call=on_api_call,
             )
 
         else:
@@ -246,8 +255,33 @@ async def execute_tool(
 
 
 async def _execute_retrieve_profile(agent_id: str) -> str:
-    """Read a public profile from disk."""
-    profile_path = PROFILES_DIR / "public" / f"{agent_id}.md"
+    """Read a public profile from disk.
+
+    ``agent_id`` comes straight from the model, so it is validated before it
+    reaches the filesystem. Unvalidated, it escaped ``profiles/public/``
+    entirely: ``../private/blackbird`` returned the hub's private screening
+    rubric and ``../memory/<id>/public`` returned another lab's working memory
+    — a confidentiality hole one tool call wide, in a topology whose whole
+    point is that spokes cannot read each other. Real agent ids are lowercase
+    identifiers (``wu``, ``pwu``, ``hamacherbrady``), so anything with a
+    separator or a dot is not a lookup, it is an escape attempt.
+    """
+    if not isinstance(agent_id, str) or not _SAFE_AGENT_ID.fullmatch(agent_id):
+        logger.warning(
+            "[tools] retrieve_profile refused a malformed agent_id: %r", agent_id
+        )
+        return f"No public profile found for agent '{agent_id}'."
+
+    base = (PROFILES_DIR / "public").resolve()
+    profile_path = (base / f"{agent_id}.md").resolve()
+    # Belt and braces: the pattern above already excludes separators, but a
+    # containment check keeps this safe if that pattern is ever loosened.
+    if not profile_path.is_relative_to(base):
+        logger.warning(
+            "[tools] retrieve_profile refused an out-of-tree path for %r", agent_id
+        )
+        return f"No public profile found for agent '{agent_id}'."
+
     try:
         # Profiles are user-editable text — fence as untrusted data (SEC-14).
         return delimit(profile_path.read_text(encoding="utf-8"), "agent_profile")
@@ -395,6 +429,7 @@ async def _execute_consult_specialist(
     *,
     agent_id: str,
     on_consult: Callable[[str], None] | None = None,
+    on_api_call: Callable[[], None] | None = None,
 ) -> str:
     """Ask one specialist persona for an opinion.
 
@@ -402,6 +437,15 @@ async def _execute_consult_specialist(
     refused domain, a missing persona file, or a failed LLM call must not
     satisfy the enforcement floor — otherwise "the specialist was unreachable"
     would silently become "the specialist approved".
+
+    ``on_api_call`` is a DIFFERENT question — "was an Opus call billed?", not
+    "does this count as consulted?" — so it fires on a different schedule: once
+    per call actually issued, before it is issued, whatever the outcome. A
+    consult is a real Opus call; booking it is what keeps the hub visible to the
+    sliding-window limiter and to ``SimulationRun.total_api_calls`` (see
+    ``Agent.record_api_call``'s invariant). Callers pass
+    ``agent.record_api_call``. The two callbacks deliberately disagree on a
+    consult that was billed but did not parse.
     """
     spec = SPECIALIST_DOMAINS.get(domain)
     if spec is None:
@@ -419,6 +463,11 @@ async def _execute_consult_specialist(
         )
 
     persona = path.read_text(encoding="utf-8")
+    # Book the call before issuing it, the same way _reply_to_thread books its
+    # own: a call that is made and then fails is still billed, so charging only
+    # on success would let a flapping specialist run free.
+    if on_api_call is not None:
+        on_api_call()
     try:
         raw = await generate_agent_response(
             system_prompt=persona,
@@ -429,6 +478,9 @@ async def _execute_consult_specialist(
             }],
             max_tokens=900,
             log_meta={"agent_id": agent_id, "phase": f"consult_{domain}"},
+            # A truncation retry is a second billed call — book it too, same
+            # contract every other generate_agent_response caller uses.
+            on_retry=on_api_call,
         )
     except Exception as exc:  # noqa: BLE001 — a dead specialist must not kill the turn
         logger.error("[specialists] %s consult failed: %s", domain, exc)

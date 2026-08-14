@@ -5,6 +5,7 @@ Pure functions over plain data — no DB, no engine, no LLM. See
 docs/specs/2026-08-07-nine-evaluator-panel-design.md §2, §4.
 """
 import json
+from pathlib import Path
 
 from src.agent.specialists import (
     SPECIALIST_DOMAINS,
@@ -201,3 +202,59 @@ def test_no_persona_claims_to_decide():
     for domain in SPECIALIST_DOMAINS:
         body = persona_path(domain).read_text(encoding="utf-8").lower()
         assert "you do not decide" in body, f"{domain} persona omits the advisory boundary"
+
+
+# --- the floor's obligations must be stated where the hub can read them ------
+#
+# required_domains_for() refuses an advance/conditional verdict whose panel is
+# incomplete, and _persist_assessment drops that verdict entirely. So every rule
+# the function can enforce has to be stated in the prompt the hub actually reads;
+# otherwise the hub is held to a contract it was never given, and the verdict is
+# lost with the reply already posted. See tests/unit/test_specialist_floor.py.
+
+_SCOUT_HUB_PHASE4 = Path("prompts/roles/scout_hub/phase4-thread-reply.md")
+
+
+def _mandatory_block() -> str:
+    """The prompt's mandatory-consult section, lowercased."""
+    text = _SCOUT_HUB_PHASE4.read_text(encoding="utf-8").lower()
+    start = text.index("mandatory consults")
+    return text[start:start + 2000]
+
+
+def test_the_prompt_has_a_mandatory_consults_section():
+    assert "mandatory consults" in _SCOUT_HUB_PHASE4.read_text(encoding="utf-8").lower()
+
+
+def test_every_always_required_domain_is_named_as_always_required():
+    """_ALWAYS = {scientific, talent}. 'talent' in particular appeared only as one
+    name in a list of eight before this — nothing told the hub it was mandatory."""
+    block = _mandatory_block()
+    for domain in required_domains_for({"recommendation": "advance"}):
+        assert domain in block, f"{domain} is always required but unstated"
+
+
+def test_the_platform_condition_that_requires_technologic_is_stated():
+    """required_domains_for adds 'technologic' when scores.platform >= 4 — so a
+    STRONGER verdict needs strictly more consults than a weak one."""
+    verdict = {"recommendation": "advance", "scores": {"platform": 4}}
+    assert "technologic" in required_domains_for(verdict)
+    block = _mandatory_block()
+    assert "technologic" in block
+    assert "platform" in block
+
+
+def test_the_fto_condition_that_requires_legal_is_stated():
+    """required_domains_for adds 'legal' when gating.fto_achievable == 'met'."""
+    verdict = {"recommendation": "advance", "gating": {"fto_achievable": "met"}}
+    assert "legal" in required_domains_for(verdict)
+    block = _mandatory_block()
+    assert "legal" in block
+    assert "fto_achievable" in block
+
+
+def test_the_cue_driven_domains_are_stated():
+    """chemistry/clinical are added by free-text cue matching over the verdict."""
+    block = _mandatory_block()
+    assert "chemistry" in block
+    assert "clinical" in block
