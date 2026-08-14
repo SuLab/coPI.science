@@ -40,11 +40,6 @@ class LogEntry:
     slack_thread_ts: str | None = None
 
 
-def is_funding_post(content: str) -> bool:
-    """Return True if the message is a funding-related post (marked with :moneybag:)."""
-    return ":moneybag:" in content
-
-
 def _entry_allowed(entry: "LogEntry", allowed_sender_ids: set[str] | None) -> bool:
     """Cohort gate for one log entry. See .notes/cohort-system-v2.md §5.1.
 
@@ -98,10 +93,29 @@ class MessageLog:
         get_new_top_level_posts, get_replies_to_agent_posts, get_tags_for_agent,
         has_new_reply_from_other
 
+    Decision 5 (2026-08-12 PI-interaction removal cycle) drew a line these four
+    methods do NOT all sit on the same side of: a human-authored (``is_bot=False``)
+    row stays visible through a general-purpose per-agent READ
+    (``get_new_top_level_posts``/``get_replies_to_agent_posts``/
+    ``get_tags_for_agent`` — history/observability is kept), but must never drive
+    BOT BEHAVIOR — pending state, reactive priority, or thread activation.
+    ``has_new_reply_from_other`` is the one method whose entire job IS driving bot
+    behavior (it feeds ``_owes_reply``'s reactive-priority tier and
+    ``_phase4_reply_threads``'s pending-reply trigger, and has no other caller), so
+    it alone filters out human rows unconditionally, independent of
+    ``allowed_sender_ids`` — including the ``allowed_sender_ids=None`` case, which
+    bypasses ``_entry_allowed`` entirely. The other three GATED methods' only real
+    caller today is ``SimulationEngine._phase3_activate_threads`` (thread
+    activation), so THAT function — not the shared read — is where the
+    activation-inert guard lives; see its own is_bot filtering and docstring.
+    ``_entry_allowed``'s own human-bypass clause is untouched throughout (it is a
+    general cohort-gate primitive with its own tests — see
+    ``test_cohort_isolation.py``'s ``TestGateHelper``).
+
     UNGATED by design — thread-internal, self-authored, or bookkeeping:
         get_entry, get_thread_history, get_thread_message_count,
         get_agent_top_level_posts, get_last_bot_sender_in_channel,
-        get_thread_allowed_agents, is_funding_thread, latest_timestamp
+        get_thread_allowed_agents, latest_timestamp
 
     Writes (``append`` / ``load_entry`` / ``_record``) are NEVER gated: the log is
     shared by every agent in the process, so filtering at ingest would filter for
@@ -191,6 +205,13 @@ class MessageLog:
 
         When `allowed_sender_ids` is provided, only posts from those agents (plus
         human PI posts) are returned — the cohort gate (see specs/cohort-system.md).
+        This is a general-purpose per-agent read: a human row stays visible through
+        it for history/observability (decision 5, 2026-08-12 PI-interaction removal
+        cycle) exactly like `_entry_allowed`'s own human-bypass clause says. The
+        bot-behavior mandate that removal cycle actually enforces — a human row must
+        never activate a thread — is enforced at the point activation happens
+        (`SimulationEngine._phase3_activate_threads`), not here; see that method's
+        own is_bot filtering and docstring.
                 COHORT-GATE: GATED via allowed_sender_ids.
         """
         results = []
@@ -297,7 +318,13 @@ class MessageLog:
         where the reply is from a different agent.
 
         When `allowed_sender_ids` is provided, replies from non-cohort agents are
-        excluded (the cohort gate; human PI replies always pass).
+        excluded (the cohort gate; human PI replies always pass — decision 5,
+        2026-08-12 PI-interaction removal cycle: this is a general-purpose
+        per-agent read, and a human row stays visible through it for
+        history/observability, same as `_entry_allowed`'s own human-bypass
+        clause). The bot-behavior mandate that removal cycle enforces — a human
+        reply must never activate a thread — is enforced at the point activation
+        happens (`SimulationEngine._phase3_activate_threads`), not here.
                 COHORT-GATE: GATED via allowed_sender_ids.
         """
         # First, find all top-level posts by this agent
@@ -329,7 +356,15 @@ class MessageLog:
         posted since the given cursor.
 
         When `allowed_sender_ids` is provided, tags authored by non-cohort agents
-        are excluded (the cohort gate; human PI tags always pass).
+        are excluded (the cohort gate; human PI tags always pass — decision 5,
+        2026-08-12 PI-interaction removal cycle: this is a general-purpose
+        per-agent read, and a human row stays visible through it for
+        history/observability, same as `_entry_allowed`'s own human-bypass
+        clause). The bot-behavior mandate that removal cycle enforces — a human
+        @-mention must never activate a thread, including via the substring-match
+        trap `SimulationEngine._infer_agent_id` could otherwise walk into (e.g.
+        "Andrew Su (PI)" contains agent_id "su") — is enforced at the point
+        activation happens (`_phase3_activate_threads`), not here.
                 COHORT-GATE: GATED via allowed_sender_ids.
         """
         tag = f"@{agent_bot_name}".lower()
@@ -347,7 +382,6 @@ class MessageLog:
         """Return the set of agent_ids allowed to participate in this thread.
 
         Rules:
-        - Funding threads (:moneybag:) are open to all → returns None.
         - If the root post tags a specific agent, only the poster and tagged
           agent may participate → returns {poster, tagged}.
         - If no tag, falls back to generic 2-party rule: the first two distinct
@@ -357,10 +391,6 @@ class MessageLog:
         """
         root = self._by_ts.get(thread_ts)
         if not root:
-            return None
-
-        # Funding threads are open to all participants
-        if is_funding_post(root.content):
             return None
 
         poster_id = root.sender_agent_id
@@ -385,14 +415,6 @@ class MessageLog:
         if len(participants) < 2:
             return None  # Thread still open — anyone can join
         return set(participants)
-
-    def is_funding_thread(self, thread_ts: str) -> bool:
-        """Return True if the thread root is a funding post.
-
-        COHORT-GATE: UNGATED by design — a property of the thread root.
-        """
-        root = self._by_ts.get(thread_ts)
-        return bool(root and is_funding_post(root.content))
 
     def _extract_tagged_agent(self, content: str) -> str | None:
         """Extract a tagged agent_id from message content (e.g. @WisemanBot)."""
@@ -419,6 +441,17 @@ class MessageLog:
         threads the gate had rejected. Callers pass ``allowed_sender_ids=None`` for
         a thread that is already open and not grandfathered — an open conversation
         is entitled to conclude (v2 §8) — and pass the agent's gate otherwise.
+
+        A human-authored (``is_bot=False``) entry is never treated as "a new
+        reply from the other participant", regardless of the gate — including
+        the ``allowed_sender_ids=None`` (fully open) case, which bypasses
+        ``_entry_allowed`` entirely and would otherwise let a human row through
+        unconditionally. There is no PI-bot interaction surface left for a
+        human reply to set ``has_pending_reply``, grant reactive priority, or
+        (via ``_reply_to_thread``'s message-count recompute) shift a thread's
+        ordinal (2026-08-12 removal cycle). This closes the loop
+        ``post_agent_message``/``reopen_proposal`` (via
+        ``src/services/pi_inbox.py::record_pi_message``) used to feed.
         """
         for entry in self._entries:
             if entry.thread_ts != thread_ts:
@@ -426,6 +459,8 @@ class MessageLog:
             if entry.posted_at <= since:
                 continue
             if entry.sender_agent_id == agent_id:
+                continue
+            if not entry.is_bot:
                 continue
             if not _entry_allowed(entry, allowed_sender_ids):
                 continue

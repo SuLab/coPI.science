@@ -68,6 +68,7 @@ import src.agent.simulation as sim
 from src.agent.agent import Agent
 from src.agent.simulation import SimulationEngine
 from src.agent.slack_client import ThreadNotFound, markdown_to_mrkdwn
+from src.agent.transport import NullTransport
 from src.config import get_settings as real_settings
 from src.models import (
     COHORT_ACTION_TOPOLOGY_SNAPSHOT,
@@ -95,6 +96,13 @@ pytestmark = [
 
 AGENTS = ("su", "cravatt", "wiseman")
 
+# The scout_hub agent, added so the cohort fixture is star-shaped (§5 of
+# docs/plans/2026-08-12-pr34-pitch-only-reconciliation-design.md): `start()` now
+# fails fast (`_validate_star_topology`) unless every pi_lab agent's cohort gate is
+# exactly {lab, hub}. See the LIMITS note below the fixture — this edit satisfies
+# that one check; it does not rewrite the rest of this module's lab-to-lab scenario.
+HUB_AGENT_ID = "blackbird"
+
 # Complementary by construction (discipline 1). Every pair needs something only the
 # other two have, so no pair can fail to converse for reasons of relevance.
 LABS = {
@@ -115,6 +123,11 @@ LABS = {
         "quantitative single-cell imaging of substrate degradation kinetics and the "
         "proteostasis stress response; we need screen hits to watch and degrader "
         "chemistry to perturb them with",
+    ),
+    HUB_AGENT_ID: (
+        "BlackbirdBot",
+        "Blackbird Laboratories' scouting hub; screens pitches from PI labs against "
+        "incubation and investment criteria",
     ),
 }
 
@@ -205,10 +218,27 @@ class TurnRecord:
 
 @pytest.fixture
 async def full_run(engine, slack_clients, slack_probe_channel, tmp_path, monkeypatch):
-    """A live workspace collapsed to one `t-` channel, a 3-agent roster, one cohort.
+    """A live workspace collapsed to one `t-` channel, a 3-agent roster, star-shaped.
 
     Deliberately not the rolled-back ``db_session``: the engine opens its own sessions
     and commits, and that is the path under test.
+
+    LIMITS (2026-08-12 final audit wave, fix 7): the cohort layout below is reshaped
+    star-wise -- one cohort per lab, each pairing the lab with ``HUB_AGENT_ID`` -- purely
+    so ``start()``'s ``_validate_star_topology`` preflight (design doc §5) does not
+    immediately fail-fast if this module is ever run. The hub gets a ``NullTransport``,
+    not a real Slack client: there is no fourth probe bot token provisioned for it
+    (``_PROBE_BOTS`` in tests/conftest.py is still ``("su", "cravatt", "wiseman")``), and
+    provisioning one is out of scope here. This module's actual scenario -- three real
+    labs conversing directly and reaching a lab-to-lab ``:memo:``/✅ handshake -- still
+    assumes the retired mesh model the rest of this deployment removed (only a
+    ``scout_hub`` agent replies to top-level posts now, see ``agent.py``'s
+    ``role == "scout_hub"`` branch), and several downstream assertions (e.g.
+    ``expected_gate = set(AGENTS)``) still assume every lab shares a full-mesh gate.
+    Rewriting the scenario itself is a much larger change and cannot be verified here:
+    this suite is gated on ``ANTHROPIC_API_KEY`` plus live Slack tokens, so it does not
+    run in this environment. This edit only removes the immediate star-topology
+    fail-fast; it does not make the module's scenario pass live.
     """
     factory = async_sessionmaker(engine, expire_on_commit=False)
     run_id = uuid.uuid4()
@@ -241,8 +271,13 @@ async def full_run(engine, slack_clients, slack_probe_channel, tmp_path, monkeyp
     monkeypatch.setattr("src.agent.agent.PROFILES_DIR", tmp_path / "profiles")
     monkeypatch.setattr(sim, "PROFILES_DIR", tmp_path / "profiles")
 
+    # The hub has no real probe bot token (see the LIMITS note above) — NullTransport
+    # is enough for it to exist in the engine's roster, which is all star validation
+    # (`_validate_star_topology`) actually requires of it.
+    clients = dict(slack_clients)
+    clients[HUB_AGENT_ID] = NullTransport(HUB_AGENT_ID)
     ctx = RunCtx(factory=factory, run_id=run_id, channel=name, channel_id=cid,
-                 clients=dict(slack_clients))
+                 clients=clients)
 
     # Discipline 6: never write outside the probe channel. `list_channels` is
     # deliberately NOT patched — see discipline 5 in the module docstring.
@@ -256,11 +291,18 @@ async def full_run(engine, slack_clients, slack_probe_channel, tmp_path, monkeyp
         for aid in AGENTS:
             db.add(AgentRegistry(agent_id=aid, bot_name=LABS[aid][0],
                                  pi_name=f"PI {aid}", status="active"))
-        cohort = Cohort(name="t13-one-cohort")
-        db.add(cohort)
-        await db.flush()
+        db.add(AgentRegistry(agent_id=HUB_AGENT_ID, bot_name=LABS[HUB_AGENT_ID][0],
+                             pi_name="Blackbird Laboratories", status="active"))
+        # Star-shaped (design doc §5): one cohort per lab, each pairing that lab with
+        # the hub — never lab-to-lab. This replaces the single shared "t13-one-cohort"
+        # every lab used to sit in together, which is exactly the lab-to-lab shape
+        # `_validate_star_topology` now rejects.
         for aid in AGENTS:
-            db.add(CohortMembership(cohort_id=cohort.id, agent_id=aid))
+            lab_cohort = Cohort(name=f"t13-{aid}-hub")
+            db.add(lab_cohort)
+            await db.flush()
+            db.add(CohortMembership(cohort_id=lab_cohort.id, agent_id=aid))
+            db.add(CohortMembership(cohort_id=lab_cohort.id, agent_id=HUB_AGENT_ID))
         await db.commit()
 
     try:
@@ -283,7 +325,11 @@ async def full_run(engine, slack_clients, slack_probe_channel, tmp_path, monkeyp
                 delete(AgentChannel).where(AgentChannel.simulation_run_id == run_id)
             )
             # profile_revisions rows written by the memory update cascade from here.
-            await db.execute(delete(AgentRegistry).where(AgentRegistry.agent_id.in_(AGENTS)))
+            await db.execute(
+                delete(AgentRegistry).where(
+                    AgentRegistry.agent_id.in_((*AGENTS, HUB_AGENT_ID))
+                )
+            )
             await db.execute(delete(SimulationRun).where(SimulationRun.id == run_id))
             await db.commit()
 
@@ -363,8 +409,15 @@ def _make_agents():
         a = Agent(agent_id=aid, bot_name=bot, pi_name=f"PI {aid}")
         # The cached-profile seam: a real profile without touching disk or the DB.
         a._public_profile = f"# {aid.capitalize()} Lab\n\n{summary}\n"
-        a._private_profile = "No private instructions yet."
         agents.append(a)
+    # The hub: role=scout_hub so `_validate_star_topology` sees it. See the LIMITS
+    # note on the `full_run` fixture — it exists only for that check, not to actually
+    # play the hub's part in this module's (unrewritten) lab-to-lab scenario.
+    hub_bot, hub_summary = LABS[HUB_AGENT_ID]
+    hub = Agent(agent_id=HUB_AGENT_ID, bot_name=hub_bot, pi_name="Blackbird Laboratories",
+                role="scout_hub")
+    hub._public_profile = f"# Blackbird Laboratories\n\n{hub_summary}\n"
+    agents.append(hub)
     return agents
 
 
@@ -384,8 +437,9 @@ def _make_engine(ctx, *, budget, bare=False):
         # `--reset-cursors` (a real production flag), and it is load-bearing here.
         # `_rebuild_agent_state` step 5 advances every agent's last_seen_cursor to
         # max(posted_at), so on a resumed run the harness's own seeded intros are
-        # already "seen": Phase 2 returns nothing, interesting_posts stays empty and
-        # Phase 5 has nothing to reply to. Measured without it — turn 1 concluded the
+        # already "seen": Phase 3's tag/reply discovery (and the hub's auto-
+        # activation) finds nothing new to activate, so there is no thread for
+        # Phase 4/5 to work with. Measured without it — turn 1 concluded the
         # seeded thread and turns 2-5 were all "Agent chose to skip", then the loop
         # went idle. Resetting the cursors is what lets three agents actually discover
         # each other, which is the precondition for a multi-turn run to exist at all.
@@ -1047,10 +1101,11 @@ async def test_sigterm_and_restart_lose_nothing_and_duplicate_nothing(full_run):
     rec2 = TurnRecord()
     rebuilt: dict[str, set] = {}
 
-    # _backfill_foa_cache is the first setup step after all three rebuild passes
-    # (DB -> Slack reconcile -> agent state), so it is where "what did resume
-    # reconstruct" can be read before any new turn muddies it.
-    original_backfill = eng2._backfill_foa_cache
+    # _record_topology_snapshot is the last setup step after all three rebuild
+    # passes (DB -> Slack reconcile -> agent state) and the cohort gate
+    # recompute, so it is where "what did resume reconstruct" can be read
+    # before any new turn muddies it.
+    original_snapshot = eng2._record_topology_snapshot
 
     async def _snapshot_after_rebuild():
         rebuilt["log"] = {e.ts for e in eng2.message_log._entries}
@@ -1058,9 +1113,9 @@ async def test_sigterm_and_restart_lose_nothing_and_duplicate_nothing(full_run):
             aid: set(a.state.active_threads) for aid, a in eng2.agents.items()
         }
         rebuilt["calls"] = {aid: a.api_call_count for aid, a in eng2.agents.items()}
-        return await original_backfill()
+        return await original_snapshot()
 
-    eng2._backfill_foa_cache = _snapshot_after_rebuild
+    eng2._record_topology_snapshot = _snapshot_after_rebuild
     await _drive(eng2, rec2, turns=RESTART_TURNS_B)
     await eng2.stop()
 

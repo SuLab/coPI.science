@@ -11,14 +11,13 @@ from datetime import timedelta
 import pytest
 from sqlalchemy import func, select
 
-from src.agent.agent import Agent
 from src.agent.message_log import LogEntry
 from src.agent.simulation import (
     PI_INBOX_LOOKBACK_S,
     REBUILD_WINDOW_S,
     SimulationEngine,
 )
-from src.models import AgentMessage, PiDmMessage
+from src.models import AgentMessage
 from tests import factories
 
 pytestmark = pytest.mark.integration
@@ -52,16 +51,6 @@ def _engine_for(session, run_id, agents=None):
         session_factory=_FixtureSessionFactory(session),
         simulation_run_id=run_id,
     )
-
-
-class _RecordingPiHandler:
-    """Minimal PIHandler stand-in that records handle_dm calls."""
-
-    def __init__(self):
-        self.calls = []
-
-    async def handle_dm(self, agent_id, pi_user_id, content):
-        self.calls.append((agent_id, pi_user_id, content))
 
 
 async def test_flush_upsert_does_not_clobber_human_row_with_bot(db_session):
@@ -273,56 +262,6 @@ async def test_inbound_poller_delivers_a_row_from_a_skewed_writer_clock(db_sessi
     assert entry.content == "PI message from a skewed host"
 
 
-async def test_dm_poller_ingests_below_cursor_then_dedups(db_session):
-    run = await factories.make_simulation_run(db_session)
-    agent = Agent("su", "SuBot", "Andrew Su")
-    engine = _engine_for(db_session, run.id, agents=[agent])
-    handler = _RecordingPiHandler()
-    engine._pi_handler = handler
-
-    below_ts = "1700000150.000000"
-    dm = PiDmMessage(
-        simulation_run_id=run.id, agent_id="su", pi_user_id="local:x",
-        direction="inbound", content="standing instruction",
-        sender_name="PI", ts=below_ts, posted_at=float(below_ts),
-    )
-    db_session.add(dm)
-    await db_session.flush()
-    await db_session.refresh(dm)
-    engine._pi_dm_cursor = dm.created_at + timedelta(seconds=50)
-
-    # First poll ingests the below-cursor row (H2)...
-    await engine._poll_pi_dms_from_db()
-    assert handler.calls == [("su", "local:x", "standing instruction")]
-
-    # ...and the lookback re-scan on the next poll does NOT re-process it.
-    await engine._poll_pi_dms_from_db()
-    assert len(handler.calls) == 1
-
-
-async def test_seed_pi_dm_cursor_prevents_replay_on_restart(db_session):
-    # Seeding the seen-set (not just the cursor) means the first poll's lookback
-    # re-scan doesn't replay recent history through handle_dm after a restart.
-    run = await factories.make_simulation_run(db_session)
-    ts = "1700000150.000000"
-    db_session.add(PiDmMessage(
-        simulation_run_id=run.id, agent_id="su", pi_user_id="local:x",
-        direction="inbound", content="old directive",
-        sender_name="PI", ts=ts, posted_at=float(ts),
-    ))
-    await db_session.flush()
-
-    agent = Agent("su", "SuBot", "Andrew Su")
-    engine = _engine_for(db_session, run.id, agents=[agent])
-    handler = _RecordingPiHandler()
-    engine._pi_handler = handler
-
-    await engine._seed_pi_dm_cursor()
-    assert ts in engine._pi_dm_seen
-    await engine._poll_pi_dms_from_db()
-    assert handler.calls == []
-
-
 # ---------------------------------------------------------------
 # B1 — the cosmetic run-stats COUNT is throttled, not run every flush.
 # ---------------------------------------------------------------
@@ -489,232 +428,6 @@ async def test_rebuild_never_infers_a_slack_ts_from_the_channel_id(db_session):
 
 
 # ---------------------------------------------------------------
-# R1 (residual) — every canonical id must come from the shared minter, so it
-# carries its process's writer slot. The Slack-off private-channel handover was
-# the last site formatting ids straight off time.time().
-# ---------------------------------------------------------------
-
-
-async def test_offline_migration_mints_ids_in_its_own_writer_slot(db_session, monkeypatch):
-    import time as time_mod
-
-    from src.agent.ids import (
-        WRITER_ENGINE,
-        WRITER_SLOT_MODULUS,
-        WRITER_WEB,
-        TsMinter,
-        set_default_writer_id,
-    )
-    from src.services.private_channels import _migrate_offline
-
-    run = await factories.make_simulation_run(db_session)
-    pi_user = await factories.make_user(db_session)
-    td = await factories.make_thread_decision(
-        db_session, run=run, agent_a="su", agent_b="wiseman",
-        channel="general", summary_text="A joint proposal.",
-    )
-
-    # Freeze BOTH clocks the two id schemes read (time_ns for the minter,
-    # time for the old hand-rolled format), so the engine and the migration mint
-    # at the identical microsecond — the case that used to collide.
-    monkeypatch.setattr(time_mod, "time_ns", lambda: 1_800_000_000_000_000_000)
-    monkeypatch.setattr(time_mod, "time", lambda: 1_800_000_000.0)
-
-    engine = _engine_for(db_session, run.id)
-    engine._ts_minter = TsMinter(WRITER_ENGINE)
-    set_default_writer_id(WRITER_WEB)
-
-    bot_ts = engine.mint_ts()
-    engine._pending_persist = [LogEntry(
-        ts=bot_ts, channel="general", sender_agent_id="su",
-        sender_name="SuBot", content="BOT MESSAGE",
-        posted_at=float(bot_ts), is_bot=True,
-    )]
-    await engine._flush_persisted()
-
-    # The web process writes the handover at that same frozen instant. Under the
-    # old scheme its first id was f"{time.time():.6f}" == the engine's id, so the
-    # ORM insert below hit uq_agent_messages_run_ts.
-    await _migrate_offline(
-        db_session,
-        thread_decision=td,
-        creator_agent_id="su",
-        creator_pi_user=pi_user,
-        guidance_text="Narrow the aim to one assay.",
-        a="su", b="wiseman",
-        other_agent_id="wiseman",
-        origin_channel_name="general",
-    )
-    await db_session.flush()
-
-    rows = (await db_session.execute(select(AgentMessage).where(
-        AgentMessage.simulation_run_id == run.id,
-    ))).scalars().all()
-    assert "BOT MESSAGE" in {r.content for r in rows}
-
-    handover = [r for r in rows if r.message_ts != bot_ts]
-    # 2+ handover posts in the new private channel, plus the origin-thread marker.
-    assert len(handover) >= 3
-    assert any(r.thread_ts == td.thread_id for r in handover)
-
-    # Every handover id sits in the web writer's residue class, so it can never
-    # coincide with an engine- or GrantBot-minted id ...
-    for r in handover:
-        assert int(r.message_ts.partition(".")[2]) % WRITER_SLOT_MODULUS == WRITER_WEB
-    # ... and they stay distinct and float-ordered (posted_at == float(ts)).
-    minted = sorted(r.message_ts for r in handover)
-    assert len(set(minted)) == len(minted)
-    floats = [float(t) for t in minted]
-    assert all(b > a for a, b in zip(floats, floats[1:], strict=False))
-    assert all(r.posted_at == float(r.message_ts) for r in handover)
-
-
-# ---------------------------------------------------------------
-# The Slack-*on* migration used to post the handover to Slack without recording
-# it in agent_messages — the last place a message existed on Slack before it
-# existed in the primary store.
-# ---------------------------------------------------------------
-
-
-def _patch_slack_migration(monkeypatch, clients: dict):
-    """Route private_channels' Slack surface at FakeSlackClient instances."""
-    from src.services import private_channels as pc
-    from tests.fakes import FakeSlackClient
-
-    async def _enabled(*args, **kwargs):
-        return True
-
-    async def _token(db, agent_id):
-        return f"xoxb-fake-{agent_id}"
-
-    async def _other_pi(db, agent_id):
-        return None, None  # no claimed PI on the other side — skips the DM branch
-
-    def _client(agent_id, token):
-        return clients.setdefault(agent_id, FakeSlackClient(agent_id=agent_id))
-
-    monkeypatch.setattr(pc, "_slack_enabled_for_migration", _enabled)
-    monkeypatch.setattr(pc, "_get_or_fail_bot_token", _token)
-    monkeypatch.setattr(pc, "_resolve_other_pi", _other_pi)
-    monkeypatch.setattr(pc, "_make_client", _client)
-    return pc
-
-
-async def test_slack_migration_mirrors_the_handover_into_the_db(db_session, monkeypatch):
-    clients: dict = {}
-    pc = _patch_slack_migration(monkeypatch, clients)
-
-    run = await factories.make_simulation_run(db_session)
-    pi_user = await factories.make_user(db_session)
-    # A Slack-born origin root: stored against a real Slack channel, so its
-    # canonical id is also its Slack ts.
-    await factories.make_agent_message(
-        db_session, run=run, agent_id="su", is_bot=True,
-        channel_id="C0ORIGIN", channel_name="general",
-        message_ts="1700000000.000500", posted_at=1700000000.0005,
-        content="origin root", slack_ts="1700000000.000500",
-    )
-    td = await factories.make_thread_decision(
-        db_session, run=run, agent_a="su", agent_b="wiseman",
-        channel="general", thread_id="1700000000.000500",
-        summary_text="A joint proposal.",
-    )
-
-    result = await pc.migrate_public_thread_to_private(
-        db_session, thread_decision=td, creator_agent_id="su",
-        creator_pi_user=pi_user, guidance_text="Narrow the aim to one assay.",
-    )
-    await db_session.flush()
-
-    rows = (await db_session.execute(select(AgentMessage).where(
-        AgentMessage.simulation_run_id == run.id,
-        AgentMessage.content != "origin root",
-    ))).scalars().all()
-
-    # Sorted by canonical id, which is post order here (the fake ts increments).
-    private_rows = sorted(
-        (r for r in rows if r.channel_name == result.channel_name),
-        key=lambda r: r.message_ts,
-    )
-    close_rows = [r for r in rows if r.channel_name == "general"]
-    assert len(private_rows) >= 2      # the handover posts
-    assert len(close_rows) == 1        # the origin-thread close marker
-
-    # Slack-on parity (design rule 1): the canonical id IS the Slack ts, and the
-    # mirror mapping is recorded so a later reconcile dedups instead of duplicating.
-    posted_ts = {p["ts"] for p in clients["su"].posted}
-    for r in private_rows + close_rows:
-        assert r.slack_ts == r.message_ts
-        assert r.message_ts in posted_ts
-        assert r.posted_at == float(r.message_ts)
-        assert r.is_bot is True
-        assert r.sender_name == "suBot"
-    assert all(r.visibility == "collab_private" for r in private_rows)
-    # Stored content is the handover text itself (pre-mrkdwn), not a placeholder.
-    expected = pc._build_handover_messages(
-        creator_pi_name=pi_user.name,
-        proposal_summary="A joint proposal.",
-        guidance_text="Narrow the aim to one assay.",
-        origin_channel_name="general",
-    )
-    assert [r.content for r in private_rows] == expected
-    assert any("one assay" in r.content for r in private_rows)
-
-    # The close marker threads on the root's Slack ts, in the origin channel, and
-    # carries no PI guidance text.
-    marker = close_rows[0]
-    assert marker.visibility == "public"
-    assert marker.thread_ts == "1700000000.000500"
-    assert marker.slack_thread_ts == "1700000000.000500"
-    assert "one assay" not in marker.content
-    # ... and that is what Slack was actually asked to thread on.
-    threaded = [p for p in clients["su"].posted if p["thread_ts"]]
-    assert [p["thread_ts"] for p in threaded] == ["1700000000.000500"]
-
-
-async def test_slack_migration_keeps_the_close_marker_db_only_for_a_db_origin_root(
-    db_session, monkeypatch,
-):
-    """A thread started Slack-off has a minted root id Slack has never seen.
-
-    The marker must not be posted against it (that detaches or errors), but it
-    still has to land in the DB — the store the simulation actually reads.
-    """
-    clients: dict = {}
-    pc = _patch_slack_migration(monkeypatch, clients)
-
-    run = await factories.make_simulation_run(db_session)
-    pi_user = await factories.make_user(db_session)
-    await factories.make_agent_message(
-        db_session, run=run, agent_id="su", is_bot=True,
-        channel_id="local:general", channel_name="general",
-        message_ts="1800000000.000100", posted_at=1800000000.0001,
-        content="db-origin root", slack_ts=None,
-    )
-    td = await factories.make_thread_decision(
-        db_session, run=run, agent_a="su", agent_b="wiseman",
-        channel="general", thread_id="1800000000.000100",
-    )
-
-    await pc.migrate_public_thread_to_private(
-        db_session, thread_decision=td, creator_agent_id="su",
-        creator_pi_user=pi_user, guidance_text="Keep going.",
-    )
-    await db_session.flush()
-
-    # Nothing was posted into a thread on Slack ...
-    assert [p for p in clients["su"].posted if p["thread_ts"]] == []
-    # ... but the marker exists in the DB, unmirrored, on the canonical thread.
-    marker = (await db_session.execute(select(AgentMessage).where(
-        AgentMessage.simulation_run_id == run.id,
-        AgentMessage.thread_ts == "1800000000.000100",
-    ))).scalars().one()
-    assert marker.slack_ts is None
-    assert marker.slack_thread_ts is None
-    assert marker.channel_name == "general"
-
-
-# ---------------------------------------------------------------
 # The channel poller's bot branch dropped the Slack mirror mapping, so a thread
 # rooted at a polled bot post (GrantBot's funding posts) looked DB-origin and
 # every reply to it was kept off Slack.
@@ -746,26 +459,26 @@ async def test_polled_bot_message_keeps_its_slack_mapping(db_session):
     run = await factories.make_simulation_run(db_session)
     client = _HistoryClient([{
         "ts": "1700000123.456789",
-        "bot_id": "B0GRANT",
-        "username": "GrantBot",
-        "text": ":moneybag: *Funding Opportunity* R01 something",
+        "bot_id": "B0DIGEST",
+        "username": "DigestBot",
+        "text": "Workspace digest: 3 new posts this week",
     }])
 
     engine = _engine_for(db_session, run.id)
     engine.slack_clients = {"su": client}
-    engine._channel_id_map = {"funding-opportunities": "C0FUNDING"}
-    engine._channel_visibility = {"funding-opportunities": "public"}
+    engine._channel_id_map = {"general": "C0GENERAL"}
+    engine._channel_visibility = {"general": "public"}
     # start() registers this; the poller's append has to reach the DB buffer.
     engine.message_log.set_persist_callback(engine._enqueue_persist)
 
-    await engine._poll_slack_for_pi_messages()
+    await engine._poll_slack_for_bot_messages()
 
     entry = engine.message_log.get_entry("1700000123.456789")
     assert entry is not None
     # The mapping is what makes a reply mirrorable: without it _slack_parent_ts
     # reports "no Slack root" and _post_message keeps the reply DB-only.
     assert entry.slack_ts == "1700000123.456789"
-    assert entry.slack_channel_id == "C0FUNDING"
+    assert entry.slack_channel_id == "C0GENERAL"
     assert engine._slack_parent_ts("1700000123.456789") == "1700000123.456789"
 
     # And it survives the flush into the primary store.
@@ -775,5 +488,5 @@ async def test_polled_bot_message_keeps_its_slack_mapping(db_session):
         AgentMessage.message_ts == "1700000123.456789",
     ))).scalars().one()
     assert row.slack_ts == "1700000123.456789"
-    assert row.slack_channel_id == "C0FUNDING"
+    assert row.slack_channel_id == "C0GENERAL"
     assert row.is_bot is True

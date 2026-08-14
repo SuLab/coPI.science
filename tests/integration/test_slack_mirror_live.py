@@ -57,7 +57,7 @@ async def slack_engine(engine, slack_clients, slack_probe_channel, monkeypatch):
     run_id = uuid.uuid4()
     name, cid = slack_probe_channel
 
-    # _poll_slack_for_pi_messages only polls channels whose name is in SEEDED_CHANNELS
+    # _poll_slack_for_bot_messages only polls channels whose name is in SEEDED_CHANNELS
     # (or that are collab_private) — polling every public channel would sweep up
     # archived channels from prior sims. The probe channel is neither, so without this
     # the poller would silently skip it and every ingestion test would fail for a
@@ -226,8 +226,12 @@ async def test_a_polled_bot_message_records_its_mirror_mapping(slack_engine):
     """A message posted by ANOTHER process's bot arrives via the Slack poller. Its row
     must carry slack_ts/slack_channel_id, or a later reply to it cannot be threaded.
 
-    Control: a human-authored message in the same poll must also land, so a poller that
-    dropped every bot message would not pass.
+    `row.is_bot is True` below is the control that used to pair with a human-authored
+    message in the same poll: `_poll_slack_for_bot_messages` (renamed from
+    `_poll_slack_for_human_messages`, 2026-08-12 PI-interaction removal cycle) no
+    longer ingests human channel messages at all, so there is nothing left to post as
+    that control — a bot-only assertion is what proves this poller still mirrors bot
+    traffic rather than having quietly stopped ingesting anything.
     """
     eng, factory, run_id, name, cid = slack_engine
 
@@ -239,7 +243,7 @@ async def test_a_polled_bot_message_records_its_mirror_mapping(slack_engine):
     assert out and out.get("ts")
 
     eng._last_channel_poll = 0.0
-    await eng._poll_slack_for_pi_messages()
+    await eng._poll_slack_for_bot_messages()
     await eng._flush_persisted()
 
     rows = [r for r in await _rows(factory, run_id) if r.content == marker]
@@ -339,7 +343,7 @@ async def test_polling_does_not_re_ingest_our_own_mirrored_message(slack_engine)
 
     for _ in range(2):
         eng._last_channel_poll = 0.0
-        await eng._poll_slack_for_pi_messages()
+        await eng._poll_slack_for_bot_messages()
         await eng._flush_persisted()
 
     rows = await _rows(factory, run_id)
@@ -352,7 +356,7 @@ async def test_polling_does_not_re_ingest_our_own_mirrored_message(slack_engine)
     eng.slack_clients["cravatt"].post_message(cid, marker)
     time.sleep(POST_GAP)
     eng._last_channel_poll = 0.0
-    await eng._poll_slack_for_pi_messages()
+    await eng._poll_slack_for_bot_messages()
     await eng._flush_persisted()
     assert marker in [r.content for r in await _rows(factory, run_id)], (
         "control leg failed: the poller ingests nothing at all"

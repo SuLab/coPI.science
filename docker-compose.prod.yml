@@ -109,33 +109,6 @@ services:
         awslogs-create-group: "true"
         awslogs-region: ${AWS_REGION:-us-east-2}
 
-  grantbot:
-    build:
-      context: .
-    restart: unless-stopped
-    command: ["python", "-m", "src.agent.grantbot", "scheduler", "--run-hour", "8", "--max-per-channel", "1"]
-    env_file: .env
-    environment:
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-copi}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-copi}
-      # Fail fast at `docker compose up` if no secret is provided, and default
-      # the process to production so the insecure default SECRET_KEY is rejected.
-      SECRET_KEY: ${SECRET_KEY:?Set a strong random SECRET_KEY in .env}
-      ENVIRONMENT: ${ENVIRONMENT:-production}
-    volumes:
-      - ./profiles:/app/profiles
-      - ./prompts:/app/prompts
-      - ./data:/app/data
-    depends_on:
-      postgres:
-        condition: service_healthy
-    logging:
-      driver: awslogs
-      options:
-        awslogs-group: /copi/grantbot
-        tag: grantbot
-        awslogs-create-group: "true"
-        awslogs-region: ${AWS_REGION:-us-east-2}
-
   nginx:
     image: nginx:1.27-alpine
     restart: unless-stopped

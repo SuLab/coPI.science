@@ -1,4 +1,4 @@
-"""Live integration tests for the agent page — all 19 endpoints of routers/agent_page.py.
+"""Live integration tests for the agent page — all 14 endpoints of routers/agent_page.py.
 
 Real ASGI requests, real Postgres, real Jinja templates, real invitation/reopen
 flows. Task T8 of .notes/full-system-test-plan.md.
@@ -38,9 +38,6 @@ from src.models import (
     AgentMessage,
     AgentRegistry,
     DelegateInvitation,
-    PiDmMessage,
-    PrivateChannelMember,
-    ProfileRevision,
     ProposalReview,
     ResearcherProfile,
 )
@@ -107,7 +104,7 @@ def slack(monkeypatch) -> _SlackRecorder:
     factory = lambda *a, **kw: _FakeWebClient(rec, **kw)  # noqa: E731
     monkeypatch.setattr("slack_sdk.WebClient", factory)
     # AgentSlackClient bound WebClient at import time, so patch that name too —
-    # it is the one the private-channel migration would use.
+    # it is the one `reopen_proposal`'s real-Slack branch uses to post guidance.
     monkeypatch.setattr("src.agent.slack_client.WebClient", factory)
     # services/slack_web.py is the web layer's Slack boundary and binds WebClient
     # at import time as well. Patching only `slack_sdk.WebClient` would leave the
@@ -118,20 +115,38 @@ def slack(monkeypatch) -> _SlackRecorder:
 
 @pytest.fixture(autouse=True)
 def _slack_enabled_auto_detect(monkeypatch):
-    """Hermetic default for the Slack on/off tri-state (src/services/slack_tokens.py
-    and src/services/private_channels.py's ``_slack_enabled_for_migration``): unset
-    (auto-detect from token presence) rather than whatever ``SLACK_ENABLED`` the
+    """Hermetic default for the Slack on/off tri-state (src/services/slack_tokens.py):
+    unset (auto-detect from token presence) rather than whatever ``SLACK_ENABLED`` the
     deployed .env on this host forces.
 
     Without this, a populated .env with SLACK_ENABLED=true forces the real-Slack
     branch of `reopen_proposal` even for `world`'s fictitious agents (`tstowner`,
-    `tstother`), which have no token anywhere — `migrate_public_thread_to_private`
-    then 500s on "No valid Slack bot token". Auto-detect is this suite's actual
-    premise: a test that wants Slack ON gives its own agent a token (e.g.
+    `tstother`), which have no token anywhere — the route then 500s with "No bot
+    token available". Auto-detect is this suite's actual premise: a test that
+    wants Slack ON gives its own agent a token (e.g.
     ``world.agent.slack_bot_token = "xoxb-fake-for-tests"``), which is what
     auto-detect keys on either way.
+
+    ``get_slack_tokens`` is also stubbed to empty (fix 9, 2026-08-12 final audit
+    wave). ``slack_globally_enabled`` -- read by `reopen_proposal`'s now-only
+    code path -- is a WORKSPACE-wide auto-detect (`get_any_bot_token`): true if
+    *any* agent, real roster slug included, has a usable token, in the DB or in
+    ``.env``. The fictitious `tstowner`/`tstother` ids dodge the *per-agent*
+    lookups (`token_for_agent_row`, `env_token`) but not this one — a dev host
+    with a real live-tier ``.env`` (e.g. ``SLACK_BOT_TOKEN_WISEMAN`` set for the
+    live tier) makes `slack_globally_enabled` true regardless, sending these
+    tests down the real-Slack branch and 500ing on "No bot token available"
+    for an agent that was never meant to have one. Stubbing it to ``{}`` keeps
+    the Slack on/off answer keyed on what these tests actually control: DB rows
+    and each test's own `world.agent.slack_bot_token`.
     """
+    from src.config import Settings
+
     monkeypatch.setattr(get_settings(), "slack_enabled", None)
+    # A class-level patch, not an instance one: Settings is a pydantic model, and
+    # only declared fields can be set per-instance (an instance-level
+    # ``get_slack_tokens`` assignment raises "object has no field").
+    monkeypatch.setattr(Settings, "get_slack_tokens", lambda self: {})
 
 
 @pytest.fixture(autouse=True)
@@ -166,13 +181,9 @@ def no_network(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def profiles_dir(tmp_path, monkeypatch):
-    """Keep the profile-save routes off the repo's real profiles/ directory."""
-    monkeypatch.setattr("src.routers.agent_page.PROFILES_DIR", tmp_path / "profiles")
+    """Keep the public-profile export off the repo's real profiles/ directory."""
     monkeypatch.setattr(
         "src.services.profile_export.PROFILES_DIR", tmp_path / "profiles" / "public"
-    )
-    monkeypatch.setattr(
-        "src.services.profile_export.PRIVATE_PROFILES_DIR", tmp_path / "profiles" / "private"
     )
     return tmp_path / "profiles"
 
@@ -394,7 +405,27 @@ async def test_signup_twice_does_not_create_a_second_agent(client, db_session):
 
 
 # ===========================================================================
-# 2. The private-channel reopen route
+# 2. The reopen-proposal route
+#
+# Fix 9 (2026-08-12 final audit wave, "private-channel collaboration is out"):
+# reopen used to migrate a public-origin proposal thread into a NEW
+# collab_private channel by default (enable_private_refinement=True) before
+# posting the PI's guidance there. The engine-side private-channel
+# collaboration/refinement flow was deleted (design doc §8 — no agent
+# converses inside a collab_private channel anymore; only a scout_hub agent
+# replies to anything, hub-and-spoke only), so a freshly migrated channel
+# would be a dead room nothing ever posts in again. reopen no longer creates
+# ANY private channel: it always posts the PI's guidance directly into the
+# proposal's origin thread's DB inbox, regardless of that thread's visibility.
+# `enable_private_refinement` and the migration service it gated
+# (`src/services/private_channels.py`) were both removed outright in the
+# 2026-08-12 removal-cycle consolidation sweep, once no caller — including the
+# inbound-email reply path, `src/services/email_inbound.py`, whose own
+# human-PI-interaction surface is separately retired — read the setting any
+# longer. The Slack-post branch itself (posting the guidance into Slack when
+# the agent had a bot token) was removed in the same removal cycle's final
+# wave: there is no PI-bot interaction surface left for a bot to re-engage
+# through, so the DB inbox is now the only path, unconditionally.
 # ===========================================================================
 
 
@@ -406,47 +437,55 @@ async def _reopen(client, world, td, user, guidance="Push on the shared assay.")
     )
 
 
-async def test_reopening_the_same_proposal_twice_creates_one_channel(
+async def _inbox_messages(db, td) -> list[AgentMessage]:
+    """PI-authored (agent_id IS NULL) messages reopen wrote into the origin thread."""
+    return list((await db.execute(
+        select(AgentMessage).where(
+            AgentMessage.thread_ts == td.thread_id,
+            AgentMessage.agent_id.is_(None),
+        )
+    )).scalars().all())
+
+
+async def test_reopen_never_creates_a_collab_private_channel(
+    client, db_session, world, slack
+):
+    """Pin fix 9 directly: no collab_private channel, ever — guidance goes
+    straight into the origin thread's DB inbox instead (Slack is off for
+    `world`'s fictitious agents, so no Slack call either)."""
+    r = await _reopen(client, world, world.td, world.pi)
+    assert r.status_code == 302, r.text
+    assert await _private_channels(db_session) == [], (
+        "reopen must never create a collab_private channel"
+    )
+    inbox = await _inbox_messages(db_session, world.td)
+    assert len(inbox) == 1
+    assert "Push on the shared assay." in inbox[0].content
+    assert slack.calls == []
+
+
+async def test_reopening_the_same_proposal_twice_is_idempotent(
     client, db_session, world, slack
 ):
     """The idempotency guard in reopen_proposal (stale page / Back-button replay).
 
-    Control: a *different* proposal does create a second channel, so "still one"
-    cannot be satisfied by a reopen that silently stopped working.
+    Control: a *different* proposal is not deduped, so "still one review" cannot
+    be satisfied by a reopen that silently stopped working.
     """
     r1 = await _reopen(client, world, world.td, world.pi)
     assert r1.status_code == 302, r1.text
-    channels = await _private_channels(db_session)
-    assert len(channels) == 1
-    first_name = channels[0].channel_name
-    assert first_name.startswith("priv-")
-
-    await db_session.refresh(world.td)
-    assert world.td.refined_in_channel == channels[0].channel_id
-    # Both bots + the triggering PI, per specs/privacy-and-channel-visibility.md.
-    members = (await db_session.execute(
-        select(PrivateChannelMember).where(
-            PrivateChannelMember.agent_channel_id == channels[0].id
-        )
-    )).scalars().all()
-    assert sorted(m.agent_id for m in members if m.agent_id) == sorted(
-        [OWNER_AGENT, OTHER_AGENT]
-    )
-    assert [m.user_id for m in members if m.user_id] == [world.pi.id]
+    assert len(await _inbox_messages(db_session, world.td)) == 1
+    assert len(await _reviews(db_session, OWNER_AGENT)) == 1
 
     # --- the replay -------------------------------------------------------
     r2 = await _reopen(client, world, world.td, world.pi, guidance="Second submit.")
     assert r2.status_code == 302
-    after = await _private_channels(db_session)
-    assert len(after) == 1, (
-        "the reopen idempotency guard did not hold — the replay minted a second "
-        f"private channel: {[c.channel_name for c in after]}"
+    assert len(await _reviews(db_session, OWNER_AGENT)) == 1, (
+        "the reopen idempotency guard did not hold — the replay wrote a second review"
     )
-    assert after[0].channel_name == first_name
-    assert len(await _reviews(db_session, OWNER_AGENT)) == 1
-
-    await db_session.refresh(world.td)
-    assert world.td.refined_in_channel == after[0].channel_id
+    assert len(await _inbox_messages(db_session, world.td)) == 1, (
+        "the replay must not post a second time"
+    )
 
     # --- control: a different proposal is not deduped ---------------------
     td2 = await factories.make_thread_decision(
@@ -456,8 +495,10 @@ async def test_reopening_the_same_proposal_twice_creates_one_channel(
     await db_session.flush()
     r3 = await _reopen(client, world, td2, world.pi, guidance="Different proposal.")
     assert r3.status_code == 302
-    assert len(await _private_channels(db_session)) == 2
+    assert len(await _reviews(db_session, OWNER_AGENT)) == 2
+    assert len(await _inbox_messages(db_session, td2)) == 1
 
+    assert await _private_channels(db_session) == []
     assert slack.calls == [], f"the reopen route called Slack: {slack.methods}"
 
 
@@ -488,9 +529,10 @@ async def test_reopen_rejects_empty_guidance(client, db_session, world, slack):
     assert await _private_channels(db_session) == []
     assert slack.calls == []
 
-    # Control: real guidance on the same proposal does migrate.
+    # Control: real guidance on the same proposal succeeds and lands in the inbox.
     assert (await _reopen(client, world, world.td, world.pi)).status_code == 302
-    assert len(await _private_channels(db_session)) == 1
+    assert len(await _inbox_messages(db_session, world.td)) == 1
+    assert await _private_channels(db_session) == []
 
 
 async def test_reopen_is_blocked_while_the_agent_is_inactive(client, db_session, world):
@@ -505,7 +547,8 @@ async def test_reopen_is_blocked_while_the_agent_is_inactive(client, db_session,
     world.agent.status = "active"
     await db_session.flush()
     assert (await _reopen(client, world, world.td, world.pi)).status_code == 302
-    assert len(await _private_channels(db_session)) == 1
+    assert len(await _inbox_messages(db_session, world.td)) == 1
+    assert await _private_channels(db_session) == []
 
 
 async def test_reopen_refuses_a_proposal_the_agent_is_not_part_of(
@@ -522,14 +565,17 @@ async def test_reopen_refuses_a_proposal_the_agent_is_not_part_of(
 
     # Control: the same PI, same route, on a proposal that *is* theirs.
     assert (await _reopen(client, world, world.td, world.pi)).status_code == 302
-    assert len(await _private_channels(db_session)) == 1
+    assert len(await _inbox_messages(db_session, world.td)) == 1
+    assert await _private_channels(db_session) == []
 
 
-async def test_reopening_an_already_private_thread_reports_not_implemented(
+async def test_reopening_an_already_private_threads_posts_there_directly(
     client, db_session, world, slack
 ):
-    """The `origin_visibility != 'public'` branch: refuse loudly (501) rather than
-    fall through to the legacy "post the PI's text in-channel" path."""
+    """The `origin_visibility != 'public'` case is no longer special-cased: an
+    existing (legacy) private thread is reopened exactly like a public one —
+    guidance posted straight into it. There is no NEW private-channel creation
+    left to gate on visibility, so nothing is refused here anymore."""
     already_private = await factories.make_thread_decision(
         db_session, run=world.run, agent_a=OWNER_AGENT, agent_b=OTHER_AGENT,
         channel="priv-existing", outcome="proposal",
@@ -537,61 +583,16 @@ async def test_reopening_an_already_private_thread_reports_not_implemented(
     )
     await db_session.flush()
     r = await _reopen(client, world, already_private, world.pi)
-    assert r.status_code == 501
-    assert await _private_channels(db_session) == []
-    assert await _reviews(db_session, OWNER_AGENT) == []
+    assert r.status_code == 302
+    assert await _private_channels(db_session) == [], (
+        "reopen must never create a NEW collab_private channel"
+    )
+    assert len(await _reviews(db_session, OWNER_AGENT)) == 1
+    inbox = await _inbox_messages(db_session, already_private)
+    assert len(inbox) == 1
+    assert inbox[0].channel_name == "priv-existing"
     assert slack.calls == []
 
-    # Control: a public-origin proposal on the same route does migrate.
-    assert (await _reopen(client, world, world.td, world.pi)).status_code == 302
-    assert len(await _private_channels(db_session)) == 1
-
-
-async def test_the_legacy_reopen_finds_a_channel_past_the_first_page(
-    client, db_session, world, slack, monkeypatch
-):
-    """The legacy (``enable_private_refinement=False``) path resolves the channel
-    id through the whole of conversations.list, not just page one.
-
-    It used to call ``conversations_list(limit=200)`` once and scan that page, so
-    a workspace with more channels than fit in one page answered "Channel #x not
-    found" for a channel that exists — defect 11/12. The route now goes through
-    ``slack_web.list_channel_ids``, which follows every cursor, so the target on
-    page **two** below is the whole point of this test.
-    """
-    monkeypatch.setattr(get_settings(), "enable_private_refinement", False)
-    world.agent.slack_bot_token = "xoxb-fake-for-tests"   # flips Slack on
-    await db_session.flush()
-
-    pages = [
-        {"channels": [{"name": "decoy", "id": "C-DECOY"}],
-         "response_metadata": {"next_cursor": "page2"}},
-        {"channels": [{"name": world.td.channel, "id": "C-TARGET"}],
-         "response_metadata": {"next_cursor": ""}},
-    ]
-    seen: list[dict] = []
-
-    def _list(**kwargs):
-        seen.append(kwargs)
-        return pages[len(seen) - 1]
-
-    slack.stub("conversations_list", _list)
-    slack.stub("chat_postMessage", {"ok": True, "ts": "1700000000.000900"})
-
-    assert (await _reopen(client, world, world.td, world.pi)).status_code == 302
-
-    assert len(seen) == 2, "one page only — the pagination defect is back"
-    assert seen[1]["cursor"] == "page2"
-    posted = [kw for name, kw in slack.calls if name == "chat_postMessage"]
-    assert len(posted) == 1
-    assert posted[0]["channel"] == "C-TARGET", (
-        "the channel on page two was not resolved"
-    )
-    assert posted[0]["thread_ts"] == world.td.thread_id, (
-        "the guidance must stay in the proposal thread, not the channel root"
-    )
-    # Legacy path posts in place: no private refinement channel is minted.
-    assert await _private_channels(db_session) == []
 
 
 # ===========================================================================
@@ -901,130 +902,6 @@ async def test_the_dashboard_counts_only_this_agents_activity_and_titles_the_pro
     assert "A shared assay platform" in page2.text
 
 
-async def test_posting_a_message_writes_a_pi_row_into_the_named_channel(
-    client, db_session, world
-):
-    r = await client.post(
-        f"/agent/{OWNER_AGENT}/message",
-        data={"channel_name": "general", "content": "  Let's aim at the assay.  ",
-              "tag_bot": "1"},
-        headers=_auth(world.pi.id),
-    )
-    assert r.status_code == 302
-    assert r.headers["location"] == f"/agent/{OWNER_AGENT}/conversations?posted=1"
-
-    msg = (await db_session.execute(
-        select(AgentMessage).where(AgentMessage.channel_name == "general")
-    )).scalar_one()
-    assert msg.is_bot is False
-    assert msg.agent_id is None
-    assert msg.sender_name == "Pat Owner (PI)"
-    assert msg.content == "@OwnerBot Let's aim at the assay."  # tag_bot prepends
-    assert msg.visibility == "public"
-
-    # …and it is visible on the read view (control that the write is reachable).
-    page = await client.get(f"/agent/{OWNER_AGENT}/conversations",
-                            headers=_auth(world.pi.id))
-    assert page.status_code == 200
-    assert "Let&#39;s aim at the assay." in page.text or "aim at the assay" in page.text
-
-
-async def test_posting_an_empty_message_is_rejected(client, db_session, world):
-    r = await client.post(
-        f"/agent/{OWNER_AGENT}/message",
-        data={"channel_name": "general", "content": "   "},
-        headers=_auth(world.pi.id),
-    )
-    assert r.status_code == 400
-    assert (await db_session.execute(select(AgentMessage))).scalars().all() == []
-
-    # Control: non-empty content on the same route does write.
-    ok = await client.post(
-        f"/agent/{OWNER_AGENT}/message",
-        data={"channel_name": "general", "content": "real"},
-        headers=_auth(world.pi.id),
-    )
-    assert ok.status_code == 302
-    assert len((await db_session.execute(select(AgentMessage))).scalars().all()) == 1
-
-
-async def test_a_pi_cannot_post_into_another_pairs_private_channel(
-    client, db_session, world
-):
-    third_user, _ = await _agent_for(
-        db_session, name="Thea Third", email="thea@example.org",
-        agent_id=THIRD_AGENT, bot_name="ThirdBot",
-    )
-    foreign_td = await factories.make_thread_decision(
-        db_session, run=world.run, agent_a=OTHER_AGENT, agent_b=THIRD_AGENT,
-        channel="metabolomics", outcome="proposal", summary_text="Summary — theirs",
-    )
-    await db_session.flush()
-    # Produced by the real route, by a PI who is entitled to it.
-    r = await client.post(
-        f"/agent/{OTHER_AGENT}/proposals/{foreign_td.id}/reopen",
-        data={"guidance": "Ours alone."},
-        headers=_auth(world.other_pi.id),
-    )
-    assert r.status_code == 302
-    private = (await _private_channels(db_session))[0]
-    assert private.visibility == VISIBILITY_COLLAB_PRIVATE
-
-    await client.post(
-        f"/agent/{OWNER_AGENT}/message",
-        data={"channel_name": private.channel_name, "content": "eavesdropping"},
-        headers=_auth(world.pi.id),
-    )
-    intruder = (await db_session.execute(
-        select(AgentMessage).where(
-            AgentMessage.channel_name == private.channel_name,
-            AgentMessage.is_bot.is_(False),
-        )
-    )).scalars().all()
-    assert intruder == [], (
-        "a PI with no membership in this collab_private channel wrote into it: "
-        f"{[m.content for m in intruder]}"
-    )
-    assert third_user is not None
-
-
-async def test_sending_a_dm_records_an_inbound_pi_dm(client, db_session, world):
-    r = await client.post(
-        f"/agent/{OWNER_AGENT}/dm",
-        data={"content": "Always cite the 2019 paper."},
-        headers=_auth(world.pi.id),
-    )
-    assert r.status_code == 302
-    dm = (await db_session.execute(select(PiDmMessage))).scalar_one()
-    assert dm.agent_id == OWNER_AGENT
-    assert dm.direction == "inbound"
-    assert dm.content == "Always cite the 2019 paper."
-    assert dm.pi_user_id == f"local:{world.pi.id}"
-
-
-async def test_saving_the_private_profile_persists_to_db_disk_and_a_revision(
-    client, db_session, world, profiles_dir
-):
-    r = await client.post(
-        f"/agent/{OWNER_AGENT}/profile/save",
-        data={"content": "# Private\nUnpublished compound series X."},
-        headers=_auth(world.pi.id),
-    )
-    assert r.status_code == 302
-
-    profile = (await db_session.execute(
-        select(ResearcherProfile).where(ResearcherProfile.user_id == world.pi.id)
-    )).scalar_one()
-    assert "compound series X" in profile.private_profile_md
-    assert (profiles_dir / "private" / f"{OWNER_AGENT}.md").exists()
-    revisions = (await db_session.execute(
-        select(ProfileRevision).where(ProfileRevision.agent_registry_id == world.agent.id)
-    )).scalars().all()
-    assert [x.profile_type for x in revisions] == ["private"]
-    assert revisions[0].changed_by_user_id == world.pi.id
-    assert revisions[0].mechanism == "web"
-
-
 async def test_saving_the_public_profile_updates_the_pis_profile_not_the_editors(
     client, db_session, world, delegated
 ):
@@ -1057,58 +934,8 @@ async def test_saving_the_public_profile_updates_the_pis_profile_not_the_editors
     assert delegate_profile.research_summary == "Delegate's own"
 
 
-async def test_connect_slack_stores_the_pis_slack_user_id(client, db_session, world, slack):
-    world.agent.slack_bot_token = "xoxb-fake-for-tests"
-    await db_session.flush()
-    slack.stub("users_lookupByEmail", {"user": {"id": "U-PI"}})
-
-    r = await client.post(
-        f"/agent/{OWNER_AGENT}/slack",
-        data={"email": "pi@example.org"},
-        headers=_auth(world.pi.id),
-    )
-    assert r.status_code == 302 and "slack_error" not in r.headers["location"]
-    agent = (await db_session.execute(
-        select(AgentRegistry).where(AgentRegistry.agent_id == OWNER_AGENT)
-    )).scalar_one()
-    assert agent.slack_user_id == "U-PI"
-
-
-async def test_connect_slack_reports_a_lookup_failure_without_writing(
-    client, db_session, world, slack
-):
-    world.agent.slack_bot_token = "xoxb-fake-for-tests"
-    await db_session.flush()
-
-    def _not_found(**kwargs):
-        raise RuntimeError("users_not_found")
-
-    slack.stub("users_lookupByEmail", _not_found)
-    r = await client.post(
-        f"/agent/{OWNER_AGENT}/slack",
-        data={"email": "nobody@example.org"},
-        headers=_auth(world.pi.id),
-    )
-    assert r.status_code == 302 and "slack_error" in r.headers["location"]
-    agent = (await db_session.execute(
-        select(AgentRegistry).where(AgentRegistry.agent_id == OWNER_AGENT)
-    )).scalar_one()
-    assert agent.slack_user_id is None
-
-    # Control: the same route with a resolving lookup does write.
-    slack.stub("users_lookupByEmail", {"user": {"id": "U-PI"}})
-    assert (await client.post(
-        f"/agent/{OWNER_AGENT}/slack", data={"email": "pi@example.org"},
-        headers=_auth(world.pi.id),
-    )).status_code == 302
-    agent = (await db_session.execute(
-        select(AgentRegistry).where(AgentRegistry.agent_id == OWNER_AGENT)
-    )).scalar_one()
-    assert agent.slack_user_id == "U-PI"
-
-
 # ===========================================================================
-# 6. Authorization, all 19 endpoints
+# 6. Authorization, all 14 endpoints
 # ===========================================================================
 
 
@@ -1132,13 +959,6 @@ ENDPOINTS: list[Ep] = [
     Ep("GET", "/agent/{agent_id}/dashboard", "/agent/{agent}/dashboard"),
     Ep("GET", "/agent/{agent_id}/conversations", "/agent/{agent}/conversations"),
     Ep("GET", "/agent/{agent_id}/thread/{message_ts}", "/agent/{agent}/thread/{ts}"),
-    Ep("POST", "/agent/{agent_id}/message", "/agent/{agent}/message",
-       {"channel_name": "general", "content": "hello"}),
-    Ep("POST", "/agent/{agent_id}/dm", "/agent/{agent}/dm", {"content": "directive"}),
-    Ep("GET", "/agent/{agent_id}/profile", "/agent/{agent}/profile"),
-    Ep("GET", "/agent/{agent_id}/profile/edit", "/agent/{agent}/profile/edit"),
-    Ep("POST", "/agent/{agent_id}/profile/save", "/agent/{agent}/profile/save",
-       {"content": "# Private"}),
     Ep("GET", "/agent/{agent_id}/public-profile", "/agent/{agent}/public-profile"),
     Ep("GET", "/agent/{agent_id}/public-profile/edit", "/agent/{agent}/public-profile/edit"),
     Ep("POST", "/agent/{agent_id}/public-profile/save", "/agent/{agent}/public-profile/save",
@@ -1147,8 +967,6 @@ ENDPOINTS: list[Ep] = [
        "/agent/{agent}/proposals/{td}/review", {"rating": "3"}),
     Ep("POST", "/agent/{agent_id}/proposals/{thread_decision_id}/reopen",
        "/agent/{agent}/proposals/{td}/reopen", {"guidance": "refine the aims"}),
-    Ep("POST", "/agent/{agent_id}/slack", "/agent/{agent}/slack",
-       {"email": "pi@example.org"}, owner_only=True),
     Ep("POST", "/agent/{agent_id}/delegates/connect-slack",
        "/agent/{agent}/delegates/connect-slack"),
     Ep("POST", "/agent/{agent_id}/delegates/invite", "/agent/{agent}/delegates/invite",
@@ -1181,7 +999,7 @@ def test_the_endpoint_table_matches_the_registered_routes():
         f"missing from ENDPOINTS: {sorted(registered - listed)}; "
         f"stale entries: {sorted(listed - registered)}"
     )
-    assert len(ENDPOINTS) == 20
+    assert len(ENDPOINTS) == 14
 
 
 def _path(ep: Ep, world, delegated=None, ts: str = "0.0000") -> str:

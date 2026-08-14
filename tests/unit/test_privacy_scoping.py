@@ -199,11 +199,6 @@ class TestPromptScoping:
         assert "PRIVATE_MEMORY_MARKER" not in prompt
         assert "OTHER_PRIVATE_MARKER" not in prompt
 
-    def test_public_prompt_omits_private_channel_rules(self, agent_with_memory):
-        prompt = agent_with_memory.build_system_prompt(visibility=VISIBILITY_PUBLIC)
-        assert "Private channel rules" not in prompt
-        assert "still refining" not in prompt
-
     def test_private_prompt_includes_only_matching_channel_segment(self, agent_with_memory):
         prompt = agent_with_memory.build_system_prompt(
             visibility=VISIBILITY_COLLAB_PRIVATE, channel_id="CPRIV",
@@ -213,13 +208,6 @@ class TestPromptScoping:
         # Must NOT leak the other private channel's content.
         assert "OTHER_PRIVATE_MARKER" not in prompt
 
-    def test_private_prompt_includes_rules_suffix(self, agent_with_memory):
-        prompt = agent_with_memory.build_system_prompt(
-            visibility=VISIBILITY_COLLAB_PRIVATE, channel_id="CPRIV",
-        )
-        assert "Private channel rules" in prompt
-        assert "still refining" in prompt
-
     def test_thread_reply_prompt_respects_visibility(self, agent_with_memory):
         pub = agent_with_memory.build_thread_reply_system_prompt(visibility=VISIBILITY_PUBLIC)
         priv = agent_with_memory.build_thread_reply_system_prompt(
@@ -227,8 +215,6 @@ class TestPromptScoping:
         )
         assert "PRIVATE_MEMORY_MARKER" not in pub
         assert "PRIVATE_MEMORY_MARKER" in priv
-        assert "Private channel rules" not in pub
-        assert "Private channel rules" in priv
 
     def test_default_visibility_is_public(self, agent_with_memory):
         """Existing callers that don't pass visibility should still see public-only."""

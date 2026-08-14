@@ -295,7 +295,6 @@ class Settings(BaseSettings):
     slack_bot_token_chang: str = ""
     slack_bot_token_yliu: str = ""
     slack_bot_token_magliery: str = ""
-    slack_bot_token_grantbot: str = ""
 
     # Analytics
     posthog_api_key: str = ""
@@ -311,12 +310,10 @@ class Settings(BaseSettings):
 
     # Simulation parameters
     active_thread_threshold: int = 3        # per-agent max active threads
-    unreviewed_proposal_block_count: int = 2  # block Phase 5 new posts at N+ unreviewed non-funding proposals
     max_thread_messages: int = 12           # system-enforced thread close
-    interesting_posts_cap: int = 20         # triggers prune
     turn_delay_seconds: float = 0.0         # pause between turns
     phase5_skip_probability: float = 0.0    # chance agent skips new post
-    daily_post_cap: int = 5                 # max new top-level posts per agent per day
+    lab_daily_post_cap: int = 1  # pi_lab: one pitch per day (design §9)
     phase5_spontaneous_interval: float = 20.0  # minutes before allowing a spontaneous Phase 5
     phase5_spontaneous_interval_max_multiplier: int = 5  # cap for skip-backoff stretch
     max_abstracts_other_per_thread: int = 10
@@ -369,14 +366,6 @@ class Settings(BaseSettings):
     # See docs/specs/2026-08-06-hub-budget-scheduler-design.md §4.2 / §5.
     llm_rate_window_seconds: int = 600
     llm_calls_per_load_per_window: int = 8
-
-    # Privacy rollout — when True (default), POST /agent/{id}/proposals/{tid}/reopen
-    # migrates the thread into a new collab_private channel instead of posting
-    # the PI's guidance text into the origin public thread. Can be set to False
-    # to restore the legacy behavior during initial rollout or in an emergency.
-    # See specs/privacy-and-channel-visibility.md and specs/pi-interaction.md
-    # §"PI Reopens a Proposal".
-    enable_private_refinement: bool = True
 
     def __repr_args__(self):
         """Redact credential-valued fields in repr()/str().

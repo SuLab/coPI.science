@@ -12,10 +12,6 @@ from src.database import get_db
 from src.dependencies import get_current_user
 from src.models import AgentRegistry, Job, ResearcherProfile, User
 from src.routers.auth import pop_post_login_redirect
-from src.services.profile_export import (
-    PRIVATE_PROFILES_DIR,
-    export_private_profile,
-)
 from src.services.validators import is_valid_email
 
 logger = logging.getLogger(__name__)
@@ -187,118 +183,16 @@ async def save_profile(
         )
         await db.commit()
 
-    return RedirectResponse(url="/onboarding/private-profile", status_code=302)
-
-
-@router.get("/private-profile", response_class=HTMLResponse)
-async def private_profile(
-    request: Request,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    """Step 4: review and edit seeded private profile."""
-    if current_user.onboarding_complete:
-        return RedirectResponse(url="/profile", status_code=302)
-
-    profile_result = await db.execute(
-        select(ResearcherProfile).where(ResearcherProfile.user_id == current_user.id)
-    )
-    profile = profile_result.scalar_one_or_none()
-
-    # Show the best available content: DB live profile → DB seed → on-disk file → default template
-    content = ""
-    if profile:
-        content = profile.private_profile_md or profile.private_profile_seed or ""
-
-    # Fall back to existing on-disk private profile (e.g. pilot labs that were
-    # set up before the user claimed their account via ORCID login).
-    if not content:
-        agent_result = await db.execute(
-            select(AgentRegistry).where(AgentRegistry.user_id == current_user.id)
-        )
-        agent_reg = agent_result.scalar_one_or_none()
-        if agent_reg:
-            disk_path = PRIVATE_PROFILES_DIR / f"{agent_reg.agent_id}.md"
-            if disk_path.exists():
-                content = disk_path.read_text(encoding="utf-8").strip()
-
-    # For brand-new users with no existing profile anywhere, seed with the
-    # standard section template so they aren't staring at a blank page.
-    if not content:
-        lab_name = current_user.name or "My"
-        content = f"""# {lab_name} Lab — Private Profile
-
-## PI Behavioral Instructions
-
-### Collaboration Preferences
-- Add preferences here: what kinds of collaborations interest you, and what would you rather not pursue?
-
-### Communication Style
-- Add guidance for how your agent should communicate on your behalf (e.g. tone, what to emphasize or avoid).
-
-### Topic Priorities
-- No specific priority ordering yet. Add priorities here to guide which opportunities your agent pursues first.
-
-### Criteria to Always Explore
-- No specific criteria yet. Add questions or checks your agent should always ask when evaluating collaborations."""
-
-    return templates.TemplateResponse(
-        request,
-        "onboarding/private_profile.html",
-        _template_context(request, current_user, profile=profile, profile_content=content),
-    )
-
-
-@router.post("/private-profile")
-async def save_private_profile(
-    request: Request,
-    content: str = Form(""),
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    """Save the private profile from onboarding step 4."""
-    profile_result = await db.execute(
-        select(ResearcherProfile).where(ResearcherProfile.user_id == current_user.id)
-    )
-    profile = profile_result.scalar_one_or_none()
-    if not profile:
-        profile = ResearcherProfile(user_id=current_user.id)
-        db.add(profile)
-
-    profile.private_profile_md = content.strip() or None
-    profile.private_profile_seed = None  # Clear seed after user saves
-
-    # Mark onboarding complete
+    # This is now the terminal step of onboarding (the private-profile step
+    # that used to own completion — onboarding_complete flip, welcome email,
+    # pending-invite/post-login-redirect resume — was removed with private
+    # instructions; those side effects relocate here). Not gated on
+    # `was_complete` alone being new: the guard on `_maybe_send_welcome`
+    # itself still makes a replay of this POST a no-op for the welcome email.
     was_complete = current_user.onboarding_complete
     current_user.onboarding_complete = True
-
     await db.commit()
 
-    # Look up agent_id (gates file export and revision)
-    agent_result = await db.execute(
-        select(AgentRegistry).where(AgentRegistry.user_id == current_user.id)
-    )
-    agent_reg = agent_result.scalar_one_or_none()
-    agent_id_for_export = agent_reg.agent_id if agent_reg else None
-
-    # Export to disk
-    export_private_profile(current_user, profile, agent_id_for_export)
-
-    # Record revision
-    from src.services.profile_versioning import create_revision
-    if agent_reg and content.strip():
-        await create_revision(
-            db,
-            agent_registry_id=agent_reg.id,
-            profile_type="private",
-            content=content.strip(),
-            changed_by_user_id=current_user.id,
-            mechanism="web",
-            change_summary="Private profile saved during onboarding",
-        )
-        await db.commit()
-
-    # Welcome the user the first time onboarding completes
     _maybe_send_welcome(current_user, was_complete)
 
     # Check for pending invite token

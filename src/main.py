@@ -108,8 +108,8 @@ def create_app() -> FastAPI:
     settings = get_settings()
 
     # Claim the web process's canonical-id writer slot, so PI messages and DMs
-    # written here can never collide with ids minted by the engine or GrantBot
-    # processes (R1). See src/agent/ids.py.
+    # written here can never collide with ids minted by the engine or any other
+    # writer process (R1). See src/agent/ids.py.
     set_default_writer_id(WRITER_WEB)
 
     application = FastAPI(

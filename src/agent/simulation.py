@@ -12,18 +12,9 @@ from typing import Any
 
 from src.agent.agent import PROFILES_DIR, Agent
 from src.agent.channels import SEEDED_CHANNELS
-from src.agent.foa_cache import extract_foa_number, format_foa_for_prompt
-from src.agent.funding_rules import (
-    format_funding_thread_summary,
-    format_your_prior_messages,
-    is_acknowledgment_only_funding_reply,
-    is_announcement_only_funding_reply,
-    summarize_funding_thread,
-)
 from src.agent.ids import WRITER_ENGINE, TsMinter
-from src.agent.message_log import LogEntry, MessageLog, is_funding_post
+from src.agent.message_log import LogEntry, MessageLog
 from src.agent.post_types import (
-    TERMINAL_POST_TYPES,
     PostTypeSpec,
     available_for,
     eligible_targets,
@@ -34,7 +25,8 @@ from src.agent.prompt_safety import delimit
 from src.agent.roles import load_role
 from src.agent.slack_client import SlackListingIncomplete, ThreadNotFound
 from src.agent.specialists import required_domains_for
-from src.agent.state import PostRef, ProposalRef, ThreadState
+from src.agent.state import ProposalRef, ThreadState
+from src.agent.thread_guidance import CONCLUDE, phase4_guidance
 from src.agent.tools import execute_tool, tools_for_role
 from src.config import get_settings
 from src.models import (
@@ -73,27 +65,11 @@ def _visibility_permits(origin: str, current: str) -> bool:
     return current == VISIBILITY_COLLAB_PRIVATE
 
 
-# Don't kick-start refinement for a handover older than this. A reopen is
-# meant to be picked up by the next sim run; if a migrated thread's handover is
-# this stale it was either already refined or abandoned, and re-seeding it on a
-# fresh process would risk re-posting to a long-dead channel. See
-# _seed_private_refinements.
-_PRIVATE_REFINEMENT_SEED_MAX_AGE_S = 14 * 24 * 3600  # 14 days
-
 # A private channel whose newest message is older than this is treated as
 # settled: the cursor rewind won't reach back into it. Without this, a single
 # stale sibling channel (e.g. an old refinement between the same pair) drags the
 # bot's global cursor months into the past. See _rewind_cursors_for_private_channels.
 _PRIVATE_CHANNEL_ACTIVE_WINDOW_S = 14 * 24 * 3600  # 14 days
-
-
-def _strip_reopen_prefix(comment: str) -> str:
-    """Strip the ``[Reopened]`` / ``[Reopened via email]`` marker the web/email
-    reopen routes prepend to the PI guidance stored in ProposalReview.comment."""
-    for prefix in ("[Reopened via email] ", "[Reopened] "):
-        if comment.startswith(prefix):
-            return comment[len(prefix):]
-    return comment
 
 
 def _restored_slack_ts(row: AgentMessage) -> str | None:
@@ -145,12 +121,11 @@ _CHANNEL_KEYWORDS: dict[str, list[str]] = {
         "activity-based", "abpp", "chemical probe", "mass spectrom",
     ],
 }
-_UNIVERSAL_CHANNELS = {"general", "funding-opportunities"}
+_UNIVERSAL_CHANNELS = {"general"}
 
-# Slack poll throttles. PI messages come from humans, so sub-turn latency is
+# Slack poll throttles. Human channel messages are rare, so sub-turn latency is
 # unnecessary; polling every turn was saturating one bot token's rate limit.
 CHANNEL_POLL_INTERVAL = 15.0   # seconds between conversations.history sweeps
-PROPOSAL_POLL_INTERVAL = 30.0  # seconds between conversations.replies sweeps
 ROSTER_POLL_INTERVAL = 30.0    # seconds between AgentRegistry roster re-syncs
 
 # How often to log the reactive:proactive selection split. Starvation under the
@@ -202,11 +177,6 @@ RUN_STATS_UPDATE_INTERVAL = 30.0
 # one (see _hydrate_thread_from_db). Sized to comfortably cover any active
 # conversation's lifetime.
 REBUILD_WINDOW_S = 14 * 24 * 3600  # 14 days
-
-# Agents exempt from the unreviewed-proposal Phase-5 block — they keep making
-# new posts no matter how many of their proposals are awaiting review. Scoped to
-# SchultzBot (the reunion host) so he stays active without a human reviewer.
-UNBLOCK_EXEMPT_AGENTS = {"schultz"}
 
 
 class SimulationEngine:
@@ -262,9 +232,6 @@ class SimulationEngine:
         self._start_time: datetime | None = None
         self._running = False
         self.message_log = MessageLog()
-        self._pi_slack_id_to_agent_ids: dict[str, list[str]] = {}  # PI slack_user_id -> [agent_ids]
-        self._dm_poll_cursors: dict[str, str] = {}  # agent_id -> latest DM ts
-        self._pi_handler = None  # Initialized in start() after PI mappings loaded
 
         # Agent name lookups
         self._bot_name_to_id: dict[str, str] = {
@@ -298,28 +265,20 @@ class SimulationEngine:
         # Key: tuple(sorted([agent_a, agent_b])), Value: list of dicts
         self._prior_threads: dict[tuple[str, str], list[dict]] = {}
 
-        # Thread IDs already reopened via DB-synced PI guidance (rating=0 reviews)
-        # to avoid re-processing on every turn.
-        self._db_reopened_thread_ids: set[str] = set()
-
-        # Thread IDs whose private-channel refinement handover has already been
-        # seeded as a PI-priority interesting post, so we kick-start refinement
-        # exactly once per process. See _seed_private_refinements.
-        self._db_private_refined_thread_ids: set[str] = set()
-
-        # Names of collab_private channels whose refinement has converged on a
-        # recorded revised proposal. Bots stop posting there (Phase 5 skips
-        # them) and finalization is not re-run. Populated at startup from the DB
-        # and when a private refinement is finalized. See
-        # _finalize_private_proposal / _check_private_channel_outcome.
+        # Names of collab_private channels whose refinement had converged on a
+        # recorded revised proposal (outcome='proposal', origin_visibility=
+        # collab_private). The live handshake that finalized these was retired
+        # by the pitch-only reconciliation — this set is now populated only at
+        # startup/rebuild from legacy ThreadDecision rows, but is still read so
+        # a legacy-finalized channel stays closed for further discussion.
         self._finalized_private_channels: set[str] = set()
 
-        # Last-seen mtime of each agent's on-disk profile files (private +
-        # public), keyed by agent_id. The web editor runs in a separate process
-        # and writes profiles/{private,public}/{id}.md on a shared volume; this
-        # process caches profile content per Agent, so a per-turn mtime check
-        # tells us when an external edit happened and the cache must be
-        # invalidated. See _sync_profiles_from_disk.
+        # Last-seen mtime of each agent's on-disk public profile file, keyed by
+        # agent_id. The web editor runs in a separate process and writes
+        # profiles/public/{id}.md on a shared volume; this process caches
+        # profile content per Agent, so a per-turn mtime check tells us when an
+        # external edit happened and the cache must be invalidated. See
+        # _sync_profiles_from_disk.
         self._profile_mtimes: dict[str, float] = {}
 
         # Last agent to make an LLM call — prevents the same agent from making
@@ -360,7 +319,6 @@ class SimulationEngine:
         # Wall-clock throttles for Slack pollers + round-robin cursor over
         # connected clients, so one agent's token doesn't carry all poll load.
         self._last_channel_poll: float = 0.0
-        self._last_proposal_poll: float = 0.0
         self._poll_client_cursor: int = 0
         # Last wall-clock time the AgentRegistry roster was re-synced (live
         # add/remove of agents as their status flips). See _sync_roster_from_db.
@@ -386,13 +344,6 @@ class SimulationEngine:
         # if a DB-origin message was later mirrored to Slack). Lets the Slack
         # reconcile skip a message it already has. See _rebuild_state_from_slack.
         self._known_slack_ts: set[str] = set()
-        # High-water mark (created_at) for the DB DM inbox poller (Slack-off /
-        # web PI DMs). See _poll_pi_dms_from_db.
-        self._pi_dm_cursor: datetime = EPOCH_UTC
-        # Identity dedup for the DM poller's lookback re-scan (ts -> created_at),
-        # so a DM is processed exactly once even though the query re-scans a
-        # window behind the cursor (H2). Pruned to the lookback window each poll.
-        self._pi_dm_seen: dict[str, datetime] = {}
         # Wall-clock of the last cosmetic run-stats refresh (total_messages /
         # total_api_calls), throttled to RUN_STATS_UPDATE_INTERVAL. See
         # _flush_persisted (B1).
@@ -486,12 +437,9 @@ class SimulationEngine:
         agent.state.throttled = not ok
         return ok
 
-    def _non_funding_thread_count(self, agent: Agent) -> int:
-        """Count active threads that are NOT funding-related."""
-        return sum(
-            1 for t in agent.state.active_threads.values()
-            if not self.message_log.is_funding_thread(t.thread_id)
-        )
+    def _active_thread_count(self, agent: Agent) -> int:
+        """Count this agent's active threads."""
+        return len(agent.state.active_threads)
 
     def _count_today_posts(self, agent: Agent) -> int:
         """Count top-level posts by this agent in public channels, in the current Pacific time day.
@@ -532,7 +480,6 @@ class SimulationEngine:
         # them too — otherwise the handover message wouldn't land in the
         # message log until the first per-turn poll tick.
         await self._sync_private_channels_from_db()
-        await self._load_pi_mappings()
         # The DB is the primary conversation store. Register the persist hook,
         # hydrate the log from the DB, then (only when Slack is connected)
         # reconcile with Slack history, and finally reconstruct per-agent state
@@ -541,11 +488,10 @@ class SimulationEngine:
         await self._rebuild_state_from_db()
         await self._rebuild_state_from_slack()
         await self._rebuild_agent_state()
-        await self._seed_pi_dm_cursor()
         # Rebuild advanced last_seen_cursor to max(all_messages), which can
         # overshoot messages in private channels (typically older than the
-        # latest public chatter). Rewind member-bot cursors so Phase 2 can
-        # still scan the handover and any subsequent private-channel activity.
+        # latest public chatter). Rewind member-bot cursors so later phases can
+        # still see the handover and any subsequent private-channel activity.
         self._rewind_cursors_for_private_channels()
         set_call_log_callback(self._on_llm_call)
 
@@ -557,26 +503,23 @@ class SimulationEngine:
         # starts at 0.0), but doing it here means no turn can ever run with an
         # unset gate while isolation is on. See .notes/cohort-system-v2.md §8.
         await self._recompute_allowed_sender_ids()
+        # Fail fast: a cohort layout that isn't star-shaped ({lab, hub} per lab,
+        # no lab-to-lab cohort) makes the hub-and-spoke design unrunnable — a lab
+        # that can reach another lab directly, or can't reach the hub at all, has
+        # no way to land a pitch. Only the startup path raises; a mid-run
+        # recompute (roster sync) logs instead — see
+        # _recompute_allowed_sender_ids's call sites.
+        violations = self._validate_star_topology()
+        if violations:
+            raise RuntimeError(
+                "Star-topology validation failed: " + "; ".join(violations)
+            )
         # AFTER the gate, never before: the filter inside reads
         # agent.allowed_sender_ids, which is None until the line above runs.
         self.refresh_lab_directories()
         # Record which topology this run actually started with, so the run's output
         # stays attributable to its configuration (v2 §13.1).
         await self._record_topology_snapshot()
-
-        # Backfill FOA cache for any previously posted opportunities
-        await self._backfill_foa_cache()
-
-        # Initialize PI handler after mappings are loaded
-        from src.agent.pi_handler import PIHandler
-        self._pi_handler = PIHandler(
-            agents=self.agents,
-            slack_clients=self.slack_clients,
-            pi_slack_id_to_agent_ids=self._pi_slack_id_to_agent_ids,
-            message_log=self.message_log,
-            session_factory=self.session_factory,
-            simulation_run_id=self.simulation_run_id,
-        )
 
         await self._run_main_loop()
 
@@ -643,23 +586,18 @@ class SimulationEngine:
         turn_count = 0
         consecutive_idle = 0
         while self._running and self.is_within_time_limit:
-            # Poll Slack for PI messages (channels, DMs, and proposal threads).
-            # No-ops when Slack is off (NullTransport / no connected clients).
-            await self._poll_slack_for_pi_messages()
-            await self._poll_pi_dms()
-            await self._poll_proposal_threads_for_pi()
+            # Poll Slack for other bots' channel messages, mirroring them into
+            # the log. No-ops when Slack is off (NullTransport / no connected
+            # clients).
+            await self._poll_slack_for_bot_messages()
 
-            # DB-native inbound path: messages written by other processes (PI
-            # web interface, private-channel handover). Runs regardless of Slack,
-            # and is how PIs interact when Slack is off.
+            # DB-native inbound path: messages written by other processes
+            # (private-channel handover, and legacy human-authored rows). Runs
+            # regardless of Slack.
             await self._poll_inbound_from_db()
-            # DB-native PI DM processing (Slack DMs recorded by _poll_pi_dms and
-            # web DMs both converge here).
-            await self._poll_pi_dms_from_db()
 
-            # Sync proposal reviews and any newly-created private channels from
-            # the web app. Both are DB-driven, so a single tick picks them up.
-            await self._sync_proposal_reviews_from_db()
+            # Sync any newly-created private channels from the web app.
+            # DB-driven, so a single tick picks it up.
             await self._sync_private_channels_from_db()
 
             # Pick up active/inactive flips (and newly-provisioned tokens) from
@@ -812,11 +750,14 @@ class SimulationEngine:
           cohort still gets answered by Phase 4 so it can conclude, but it must not
           jump the queue ahead of gate-compliant work. Without this the gate and the
           scheduler contradict each other and the scheduler wins.
-        - **The remaining threads are read through the agent's gate.** Threads are
-          not always two-party — a funding thread is open to all
-          (``get_thread_allowed_agents`` returns None) — so a non-cohort third party
-          posting into an otherwise legal thread would otherwise manufacture
-          reactive priority for a sender the agent is not supposed to act on.
+        - **The remaining threads are read through the agent's gate.** An
+          untagged thread with fewer than 2 posters is still open
+          (``get_thread_allowed_agents`` returns None) — so a non-cohort third
+          party posting into an otherwise legal thread would otherwise
+          manufacture reactive priority for a sender the agent is not supposed
+          to act on. (Funding threads used to be unconditionally open-to-all
+          here too; that exception was removed — ex-funding thread roots now
+          follow this same normal rule. See message_log.get_thread_allowed_agents.)
         """
         cursor = agent.state.last_seen_cursor
         for thread in agent.state.active_threads.values():
@@ -950,9 +891,6 @@ class SimulationEngine:
         # Phase 1: Channel discovery
         self._phase1_channel_discovery(agent)
 
-        # Phase 2: Scan & filter new posts
-        await self._phase2_scan_filter(agent)
-
         # Phase 3: Activate threads from tags and replies
         self._phase3_activate_threads(agent)
 
@@ -966,10 +904,7 @@ class SimulationEngine:
 
         # State-change gate: skip Phase 5 (no LLM call) unless there's
         # new actionable state or the spontaneous post timer has expired.
-        phase2_ran = agent.api_call_count > api_calls_before
-        has_interesting = len(agent.state.interesting_posts) > 0
         has_phase4_work = len(phase4_thread_ids) > 0
-        has_pi = agent.state.has_pi_directive
 
         # Spontaneous post timer — allow one Phase 5 call after enough
         # idle time so agents can organically start new conversations.
@@ -980,19 +915,16 @@ class SimulationEngine:
         since_last_action = time.time() - agent.state.last_phase5_action_time
         spontaneous_ready = since_last_action >= spontaneous_interval
 
-        has_new_work = has_interesting or has_phase4_work or phase2_ran or has_pi
+        has_new_work = has_phase4_work
 
         if has_new_work or spontaneous_ready:
-            await self._phase5_new_post(agent, phase4_thread_ids)
+            await self._phase5_new_post(agent)
         else:
             logger.debug(
                 "[%s] Phase 5: Skipped (no state change, spontaneous in %ds)",
                 agent.agent_id,
                 int(spontaneous_interval - since_last_action),
             )
-
-        # Clear PI directive flag after the turn
-        agent.state.has_pi_directive = False
 
         # Update cursor
         agent.state.last_seen_cursor = time.time()
@@ -1024,117 +956,6 @@ class SimulationEngine:
             logger.info("[%s] Phase 1: Joined channels: %s", agent.agent_id, new_channels)
 
     # ------------------------------------------------------------------
-    # Phase 2: Scan & Filter
-    # ------------------------------------------------------------------
-
-    async def _phase2_scan_filter(self, agent: Agent) -> None:
-        """Scan new top-level posts and decide which to add to interesting_posts."""
-        settings = get_settings()
-
-        # Get new top-level posts since agent's last turn
-        new_posts = self.message_log.get_new_top_level_posts(
-            since=agent.state.last_seen_cursor,
-            channels=agent.state.subscribed_channels,
-            exclude_agent_id=agent.agent_id,
-            allowed_sender_ids=agent.allowed_sender_ids,
-        )
-
-        # Exclude posts already in interesting_posts or active_threads
-        known_ids = {p.post_id for p in agent.state.interesting_posts}
-        known_ids.update(agent.state.active_threads.keys())
-        new_posts = [p for p in new_posts if p.ts not in known_ids]
-
-        if not new_posts:
-            logger.debug("[%s] Phase 2: No new posts to evaluate", agent.agent_id)
-            return
-
-        # Build post data for LLM
-        post_dicts = [
-            {
-                "post_id": p.ts,
-                "channel": p.channel,
-                "sender": p.sender_name,
-                "content_snippet": p.content,
-            }
-            for p in new_posts
-        ]
-
-        system_prompt, messages = agent.build_phase2_scan_prompt(post_dicts)
-
-        agent.record_api_call()
-        try:
-            response = await generate_agent_response(
-                system_prompt=system_prompt,
-                messages=messages,
-                max_tokens=500,
-                log_meta={"agent_id": agent.agent_id, "phase": "scan"},
-                on_retry=agent.record_api_call,
-            )
-            if not response or not response.strip():
-                logger.warning("[%s] Phase 2: Empty response from LLM, skipping", agent.agent_id)
-                return
-            result = _extract_json(response)
-            selected_ids = set(result.get("selected_post_ids", []))
-
-            # Add selected posts to interesting_posts
-            for post in new_posts:
-                if post.ts in selected_ids:
-                    foa_num = None
-                    snippet_len = 200
-                    if is_funding_post(post.content):
-                        foa_num = extract_foa_number(post.content)
-                        snippet_len = 500  # funding posts need more context
-                    agent.state.interesting_posts.append(PostRef(
-                        post_id=post.ts,
-                        channel=post.channel,
-                        sender_agent_id=post.sender_agent_id or post.sender_name,
-                        content_snippet=post.content[:snippet_len],
-                        posted_at=post.posted_at,
-                        foa_number=foa_num,
-                    ))
-
-            logger.info(
-                "[%s] Phase 2: Evaluated %d posts, added %d to interesting",
-                agent.agent_id, len(new_posts), len(selected_ids),
-            )
-        except Exception as exc:
-            logger.error("[%s] Phase 2 scan failed: %s", agent.agent_id, exc)
-
-        # Prune if over cap
-        if len(agent.state.interesting_posts) > settings.interesting_posts_cap:
-            await self._phase2_prune(agent)
-
-    async def _phase2_prune(self, agent: Agent) -> None:
-        """Prune interesting_posts to ≤ cap."""
-        system_prompt, messages = agent.build_phase2_prune_prompt()
-
-        agent.record_api_call()
-        try:
-            response = await generate_agent_response(
-                system_prompt=system_prompt,
-                messages=messages,
-                max_tokens=500,
-                log_meta={"agent_id": agent.agent_id, "phase": "prune"},
-                on_retry=agent.record_api_call,
-            )
-            if not response or not response.strip():
-                logger.warning("[%s] Phase 2 prune: empty response", agent.agent_id)
-                return
-            result = _extract_json(response)
-            keep_ids = set(result.get("keep_post_ids", []))
-
-            before = len(agent.state.interesting_posts)
-            agent.state.interesting_posts = [
-                p for p in agent.state.interesting_posts if p.post_id in keep_ids
-            ]
-            logger.info(
-                "[%s] Phase 2 prune: %d → %d",
-                agent.agent_id, before, len(agent.state.interesting_posts),
-            )
-        except Exception as exc:
-            logger.error("[%s] Phase 2 prune failed: %s", agent.agent_id, exc)
-
-    # ------------------------------------------------------------------
     # Phase 3: Activate Threads from Tags
     # ------------------------------------------------------------------
 
@@ -1145,7 +966,21 @@ class SimulationEngine:
 
         Skipped entirely for entries in collab_private channels: those channels
         are flat discussions (no threading), so tags and replies there are
-        just content for Phase 2/5 to consider, not thread-activation signals.
+        just conversation content for later phases to read directly, not
+        thread-activation signals.
+
+        Human-authored (``is_bot=False``) entries are skipped in all three loops
+        below (tags, replies, hub auto-activation) — the bot-behavior half of
+        decision 5 (2026-08-12 PI-interaction removal cycle): there is no
+        PI-bot interaction surface left for a human post to activate a thread,
+        including the substring-match trap ``_infer_agent_id`` could otherwise
+        walk into (e.g. a human sender name like "Andrew Su (PI)" contains the
+        real agent_id "su"). The GATED ``MessageLog`` reads these loops consume
+        (``get_tags_for_agent``/``get_replies_to_agent_posts``/
+        ``get_new_top_level_posts``) deliberately still return human rows —
+        they are general-purpose per-agent reads whose history/observability
+        half of decision 5 is kept — so the filter belongs here, at the actual
+        point of activation, not in those shared methods.
         """
         cursor = agent.state.last_seen_cursor
 
@@ -1154,6 +989,8 @@ class SimulationEngine:
             agent.bot_name, cursor, allowed_sender_ids=agent.allowed_sender_ids
         )
         for entry in tagged_entries:
+            if not entry.is_bot:
+                continue
             # Private channels are flat — no thread activation.
             if self._channel_visibility.get(entry.channel) == VISIBILITY_COLLAB_PRIVATE:
                 continue
@@ -1162,7 +999,6 @@ class SimulationEngine:
                 continue
             if thread_id in self._closed_thread_ids:
                 continue
-            is_funding = self.message_log.is_funding_thread(thread_id)
             # Threshold gates Phase 5 (starting new threads), not Phase 3.
             # Ignoring an explicit @-mention is worse than running over the cap.
             # Check thread participation rules
@@ -1176,19 +1012,12 @@ class SimulationEngine:
             # Determine the other agent
             other_id = self._infer_agent_id(entry.sender_name) or entry.sender_agent_id
             if other_id and other_id != agent.agent_id:
-                # Extract FOA number from root post for funding threads
-                foa_num = None
-                if is_funding:
-                    root = self.message_log.get_entry(thread_id)
-                    if root:
-                        foa_num = extract_foa_number(root.content)
                 agent.state.active_threads[thread_id] = ThreadState(
                     thread_id=thread_id,
                     channel=entry.channel,
                     other_agent_id=other_id,
                     message_count=self.message_log.get_thread_message_count(thread_id),
                     has_pending_reply=True,
-                    foa_number=foa_num,
                 )
                 logger.info(
                     "[%s] Phase 3: Activated thread %s (tagged by %s)",
@@ -1200,6 +1029,8 @@ class SimulationEngine:
             agent.agent_id, cursor, allowed_sender_ids=agent.allowed_sender_ids
         )
         for entry in reply_entries:
+            if not entry.is_bot:
+                continue
             # Private channels are flat — no thread activation.
             if self._channel_visibility.get(entry.channel) == VISIBILITY_COLLAB_PRIVATE:
                 continue
@@ -1208,7 +1039,6 @@ class SimulationEngine:
                 continue
             if thread_id in self._closed_thread_ids:
                 continue
-            is_funding = self.message_log.is_funding_thread(thread_id)
             # Threshold gates Phase 5 (starting new threads), not Phase 3.
             # Ghosting a reply to our own post is worse than running over the cap.
             # Check thread participation rules
@@ -1217,24 +1047,58 @@ class SimulationEngine:
                 continue
             other_id = self._infer_agent_id(entry.sender_name) or entry.sender_agent_id
             if other_id and other_id != agent.agent_id:
-                # Extract FOA number from root post for funding threads
-                foa_num = None
-                if is_funding:
-                    root = self.message_log.get_entry(thread_id)
-                    if root:
-                        foa_num = extract_foa_number(root.content)
                 agent.state.active_threads[thread_id] = ThreadState(
                     thread_id=thread_id,
                     channel=entry.channel,
                     other_agent_id=other_id,
                     message_count=self.message_log.get_thread_message_count(thread_id),
                     has_pending_reply=True,
-                    foa_number=foa_num,
                 )
                 logger.info(
                     "[%s] Phase 3: Activated thread %s (reply from %s)",
                     agent.agent_id, thread_id, other_id,
                 )
+
+        # Hub auto-activation: the scout hub opens an interview thread on
+        # every new lab top-level post, no @-mention required. Gated on the
+        # plain `agent.role` attribute (NOT `self._roles_by_agent()` — see
+        # INV-E structural note 4, a separate, separately-recomputed
+        # consumer of role knowledge).
+        if agent.role == "scout_hub":
+            new_posts = self.message_log.get_new_top_level_posts(
+                since=cursor,
+                channels=agent.state.subscribed_channels,
+                exclude_agent_id=agent.agent_id,
+                allowed_sender_ids=agent.allowed_sender_ids,
+            )
+            for entry in new_posts:
+                if not entry.is_bot:
+                    continue
+                # Private channels are flat — no thread activation.
+                if self._channel_visibility.get(entry.channel) == VISIBILITY_COLLAB_PRIVATE:
+                    continue
+                thread_id = entry.thread_ts or entry.ts
+                if thread_id in agent.state.active_threads:
+                    continue
+                if thread_id in self._closed_thread_ids:
+                    continue
+                # Check thread participation rules
+                allowed = self.message_log.get_thread_allowed_agents(thread_id)
+                if allowed and agent.agent_id not in allowed:
+                    continue
+                other_id = self._infer_agent_id(entry.sender_name) or entry.sender_agent_id
+                if other_id and other_id != agent.agent_id:
+                    agent.state.active_threads[thread_id] = ThreadState(
+                        thread_id=thread_id,
+                        channel=entry.channel,
+                        other_agent_id=other_id,
+                        message_count=self.message_log.get_thread_message_count(thread_id),
+                        has_pending_reply=True,
+                    )
+                    logger.info(
+                        "[%s] Phase 3: Auto-activated interview thread %s (lab post by %s)",
+                        agent.agent_id, thread_id, other_id,
+                    )
 
     # ------------------------------------------------------------------
     # Phase 4: Reply to Active Threads (parallel)
@@ -1254,8 +1118,8 @@ class SimulationEngine:
                 continue
             # Safety net: Phase 4 does threaded replies, which are never the
             # right thing in a collab_private channel. Skip any active_thread
-            # that somehow ended up pointing at a private channel — Phase 2/5
-            # handle those flat.
+            # that somehow ended up pointing at a private channel — that
+            # channel's flat conversation is handled elsewhere.
             if self._channel_visibility.get(thread.channel) == VISIBILITY_COLLAB_PRIVATE:
                 continue
             # Check if there's a new reply from the other agent. Read UNGATED
@@ -1311,8 +1175,8 @@ class SimulationEngine:
             for e in history_entries
         ]
 
-        # Update message count (subtract offset for PI-reopened threads)
-        thread.message_count = len(history_entries) - thread.message_count_offset
+        # Update message count.
+        thread.message_count = len(history_entries)
 
         # Final participation check before composing a reply
         allowed = self.message_log.get_thread_allowed_agents(thread.thread_id)
@@ -1324,7 +1188,27 @@ class SimulationEngine:
             agent.state.active_threads.pop(thread.thread_id, None)
             return
 
-        # Check for system-enforced close
+        # Check for system-enforced close. Correct on its own terms: a thread
+        # with `max_thread_messages` messages already in it is genuinely full,
+        # and this must stay a check on the PRIOR count, not the ordinal —
+        # closing here is "there is no room left to reply", a different
+        # question from "what phase is the reply I'm about to write in".
+        #
+        # Latent coupling worth knowing about: thread_guidance.py's CONCLUDE
+        # boundary is a hardcoded literal (12), independent of
+        # `settings.max_thread_messages`. They agree today only because both
+        # happen to be 12. Below (build_phase4_prompt's ordinal fix), a reply
+        # generated at prior-count 11 gets ordinal 12 -> CONCLUDE, then THIS
+        # check closes the thread as full on the very next turn (prior-count
+        # 12). If `max_thread_messages` is ever configured to something other
+        # than 12, that "CONCLUDE, then close next turn" handoff drifts: e.g.
+        # max_thread_messages=20 lets ordinals 12-19 all render as CONCLUDE
+        # (thread_guidance doesn't know the cap moved), and max_thread_messages
+        # < 12 closes the thread as a timeout before CONCLUDE guidance is ever
+        # reachable at all — exactly the failure mode this fix round removed
+        # for the default value. `_warn_if_hub_conclude_missing_assessment`
+        # reads thread_guidance directly (not this setting) for exactly this
+        # reason.
         if thread.message_count >= settings.max_thread_messages:
             logger.info(
                 "[%s] Thread %s reached max messages, closing",
@@ -1337,20 +1221,6 @@ class SimulationEngine:
         other_agent = self.agents.get(thread.other_agent_id)
         other_name = other_agent.bot_name if other_agent else thread.other_agent_id
         other_lab = other_agent.pi_name if other_agent else "Unknown"
-
-        # Funding-thread context (self-dedup + late-joiner summary)
-        is_funding = self.message_log.is_funding_thread(thread.thread_id)
-        your_prior_text: str | None = None
-        thread_activity_text: str | None = None
-        if is_funding:
-            your_prior_entries = [
-                e for e in history_entries if e.sender_agent_id == agent.agent_id
-            ]
-            your_prior_text = format_your_prior_messages(your_prior_entries)
-            summary = summarize_funding_thread(
-                self.message_log, thread.thread_id, viewer_agent_id=agent.agent_id,
-            )
-            thread_activity_text = format_funding_thread_summary(summary)
 
         # Resolve the thread's channel visibility for G1 prompt scoping. In v1
         # all threads live in public channels, so this is effectively always
@@ -1365,9 +1235,6 @@ class SimulationEngine:
             thread_history=thread_history,
             other_agent_name=other_name,
             other_agent_lab=other_lab,
-            is_funding_thread=is_funding,
-            your_prior_messages=your_prior_text,
-            thread_activity_summary=thread_activity_text,
             visibility=thread_visibility,
             channel_id=thread_channel_id,
         )
@@ -1379,11 +1246,12 @@ class SimulationEngine:
                 on_consult=lambda domain, _pi=thread.other_agent_id: self._record_consult(
                     _pi, domain
                 ),
+                own_dois=agent.own_publication_dois,
             )
 
         agent.record_api_call()
         try:
-            response_text = await generate_with_tools(
+            raw_response = await generate_with_tools(
                 system_prompt=system_prompt,
                 messages=messages,
                 tools=tools_for_role(agent.role),
@@ -1398,8 +1266,15 @@ class SimulationEngine:
                 on_retry=agent.record_api_call,
             )
 
-            # Extract message from <slack_message> tags, fall back to preamble stripping
-            response_text = _extract_slack_message(response_text)
+            # Extract message from <slack_message> tags, fall back to preamble
+            # stripping. Kept as its own variable rather than reassigned in
+            # place: a concluding scout_hub reply's <assessment_json> sidecar
+            # is written OUTSIDE the <slack_message> block by design (see
+            # phase4-thread-reply.md's "Concluding with an Opportunity
+            # Assessment" section) — the extraction below (Option A
+            # relocation) needs the raw, unfiltered response, not just the
+            # text that gets posted.
+            response_text = _extract_slack_message(raw_response)
 
             if not response_text or not response_text.strip():
                 thread.empty_response_count += 1
@@ -1414,31 +1289,6 @@ class SimulationEngine:
                         agent.agent_id, thread.thread_id, thread.empty_response_count,
                     )
                 return
-
-            # Funding-thread draft validators: reject announcement-only and
-            # acknowledgment-only replies before they hit Slack.
-            if is_funding:
-                rejected_reason = None
-                if is_announcement_only_funding_reply(response_text):
-                    rejected_reason = "announcement-only"
-                elif is_acknowledgment_only_funding_reply(response_text):
-                    rejected_reason = "acknowledgment-only"
-                if rejected_reason:
-                    thread.funding_reject_count += 1
-                    logger.info(
-                        "[%s] Phase 4: Rejected %s draft in funding thread %s (count=%d)",
-                        agent.agent_id, rejected_reason, thread.thread_id,
-                        thread.funding_reject_count,
-                    )
-                    if thread.funding_reject_count >= 2:
-                        # Back off: drop the pending-reply flag so the agent
-                        # stops re-attempting this thread for a while.
-                        thread.has_pending_reply = False
-                        logger.info(
-                            "[%s] Phase 4: Backing off funding thread %s after %d rejections",
-                            agent.agent_id, thread.thread_id, thread.funding_reject_count,
-                        )
-                    return
 
             # Post the reply
             posted = await self._post_message(
@@ -1461,8 +1311,21 @@ class SimulationEngine:
                 return
             agent.message_count += 1
             thread.has_pending_reply = False
-            thread.funding_reject_count = 0
             thread.empty_response_count = 0
+
+            # Option A relocation: the hub's :mag: Opportunity Assessment is
+            # no longer a separate Phase-5 post — it is the machine-readable
+            # sidecar this same concluding reply carries. Extract and persist
+            # it here, gated on `posted` exactly like every other assessment
+            # write, so a suppressed reply (stripped to nothing, thread
+            # deleted) never produces a phantom row with no corresponding
+            # Slack message. A pi_lab reply never carries a sidecar, so this
+            # is a no-op for every non-hub agent.
+            if agent.role == "scout_hub":
+                await self._capture_hub_assessment(agent, thread, raw_response, posted)
+                self._warn_if_hub_conclude_missing_assessment(
+                    agent, thread, response_text, raw_response,
+                )
 
             # Check for thread outcome
             await self._check_thread_outcome(agent, thread, response_text)
@@ -1479,45 +1342,16 @@ class SimulationEngine:
         thread: ThreadState,
         latest_reply: str,
     ) -> None:
-        """Check if a thread should be closed based on the latest reply."""
-        # Check for ✅ confirmation of a :memo: Summary
-        if "✅" in latest_reply:
-            # Look back in thread history for the latest :memo: Summary from the other agent
-            history = self.message_log.get_thread_history(thread.thread_id)
-            for entry in reversed(history):
-                if entry.sender_agent_id == thread.other_agent_id and ":memo:" in entry.content:
-                    # Proposal confirmed!
-                    logger.info(
-                        "[%s] Thread %s: proposal confirmed with ✅",
-                        agent.agent_id, thread.thread_id,
-                    )
-                    # Extract text starting from :memo: marker
-                    memo_idx = entry.content.find(":memo:")
-                    summary_text = entry.content[memo_idx:].strip() if memo_idx >= 0 else entry.content
-                    agent.state.pending_proposals = [
-                        p for p in agent.state.pending_proposals
-                        if p.thread_id != thread.thread_id
-                    ]
-                    agent.state.pending_proposals.append(ProposalRef(
-                        thread_id=thread.thread_id,
-                        channel=thread.channel,
-                        other_agent_id=thread.other_agent_id,
-                        summary_text=summary_text,
-                        proposed_at=time.time(),
-                    ))
-                    await self._close_thread(agent, thread, "proposal", summary_text)
-                    return
+        """Check if a thread should be closed based on the latest reply.
 
-        # Check if this agent posted a :memo: Summary
-        if ":memo:" in latest_reply:
-            # The other agent needs to confirm — thread stays active
-            thread.status = "active"
-            logger.info(
-                "[%s] Thread %s: posted :memo: Summary, waiting for ✅",
-                agent.agent_id, thread.thread_id,
-            )
-            return
-
+        The ✅-confirms-:memo: proposal handshake that used to live here was
+        retired by the pitch-only reconciliation (there is no bilateral
+        collaboration left to propose or confirm) — this now only detects the
+        explicit ⏸️ no-viable-collaboration close. ``outcome="proposal"`` is
+        still a valid ThreadDecision.outcome value for legacy rows and is
+        still handled by _close_thread/admin routes/ProposalReview, but
+        nothing in this method can produce a new one.
+        """
         # Check for ⏸️ — explicit "no viable collaboration" signal
         if "⏸️" in latest_reply or ":pause_button:" in latest_reply:
             logger.info(
@@ -1591,15 +1425,6 @@ class SimulationEngine:
             agent.agent_id, thread.thread_id, outcome,
         )
 
-        # Notify PI via DM
-        if self._pi_handler:
-            try:
-                await self._pi_handler.notify_thread_conclusion(
-                    agent.agent_id, thread, outcome, summary_text,
-                )
-            except Exception as exc:
-                logger.debug("Failed to notify PI of thread conclusion: %s", exc)
-
         # Update working memory for both agents
         # summary_text is derived from a cross-agent conversation, so fence it
         # as untrusted before it lands in working memory (which is later fed
@@ -1613,134 +1438,6 @@ class SimulationEngine:
             if summary_text:
                 other_event += f". Summary: {delimit(summary_text[:200], 'proposal_summary')}"
             await self._update_agent_memory(other_agent, other_event)
-
-    async def _check_private_channel_outcome(
-        self, agent: Agent, channel: str, message_text: str,
-    ) -> None:
-        """Flat-channel analog of _check_thread_outcome for collab_private refinement.
-
-        Collab_private channels are flat (no ThreadState / threading), so the
-        threaded :memo:-Summary→✅ finalization never runs there. Here we detect
-        the same handshake on top-level posts: when this agent posts a ✅ that
-        confirms the *other* member's most recent :memo: Summary, we record the
-        refined proposal (see _finalize_private_proposal). A bare :memo: just
-        waits for the other bot's ✅.
-        """
-        if channel in self._finalized_private_channels:
-            return
-        if "✅" not in message_text and ":white_check_mark:" not in message_text:
-            return
-        cid = self._channel_id_map.get(channel)
-        if not cid:
-            return
-        other_id = next(
-            (m for m in self._private_channel_members.get(cid, set()) if m != agent.agent_id),
-            None,
-        )
-        if not other_id:
-            return
-        # Find the other member's most recent *revised* :memo: Summary in this
-        # channel. Skip the handover post: it embeds the ORIGINAL proposal
-        # summary (also marked :memo:), so without this a casual ✅ could
-        # finalize the un-revised proposal. The handover is identifiable by its
-        # header (see private_channels._build_handover_messages).
-        for entry in reversed(self.message_log._entries):
-            if entry.channel != channel:
-                continue
-            if entry.sender_agent_id != other_id or ":memo:" not in entry.content:
-                continue
-            if "Private refinement channel" in entry.content:
-                continue  # handover, not a revised summary
-            memo_idx = entry.content.find(":memo:")
-            summary_text = entry.content[memo_idx:].strip()
-            await self._finalize_private_proposal(
-                agent, other_id, channel, entry.ts, summary_text,
-            )
-            return
-
-    async def _finalize_private_proposal(
-        self,
-        agent: Agent,
-        other_id: str,
-        channel: str,
-        thread_id: str,
-        summary_text: str,
-    ) -> None:
-        """Record a refined proposal reached in a collab_private channel.
-
-        Writes a ThreadDecision with origin_visibility='collab_private' (kept out
-        of the public collaboration graph — see the visibility filter in
-        routers/public.py), blocks both bots pending review (a pending unreviewed
-        proposal), marks the channel finalized so refinement stops, and DMs the
-        PI. Idempotent: a private proposal already recorded for this channel is a
-        no-op. The PI reviews it through the normal dashboard/email flow (both
-        PIs are members of the channel).
-        """
-        if channel in self._finalized_private_channels:
-            return
-        if self.session_factory and self.simulation_run_id:
-            try:
-                from sqlalchemy import select as sa_select
-                async with self.session_factory() as db:
-                    existing = await db.execute(
-                        sa_select(ThreadDecision.id).where(
-                            ThreadDecision.channel == channel,
-                            ThreadDecision.origin_visibility == VISIBILITY_COLLAB_PRIVATE,
-                            ThreadDecision.outcome == "proposal",
-                        )
-                    )
-                    if existing.first() is None:
-                        db.add(ThreadDecision(
-                            simulation_run_id=self.simulation_run_id,
-                            thread_id=thread_id,
-                            channel=channel,
-                            agent_a=agent.agent_id,
-                            agent_b=other_id,
-                            outcome="proposal",
-                            summary_text=summary_text,
-                            origin_visibility=VISIBILITY_COLLAB_PRIVATE,
-                        ))
-                        await db.commit()
-            except Exception as exc:
-                logger.warning("Failed to record private refined proposal: %s", exc)
-                return
-
-        self._finalized_private_channels.add(channel)
-
-        # Block both bots pending review and reflect the proposal in their state.
-        for aid, other in ((agent.agent_id, other_id), (other_id, agent.agent_id)):
-            ag = self.agents.get(aid)
-            if not ag:
-                continue
-            ag.state.pending_proposals = [
-                p for p in ag.state.pending_proposals if p.thread_id != thread_id
-            ]
-            ag.state.pending_proposals.append(ProposalRef(
-                thread_id=thread_id,
-                channel=channel,
-                other_agent_id=other,
-                summary_text=summary_text,
-                proposed_at=time.time(),
-                reviewed=False,
-            ))
-
-        logger.info(
-            "[%s] Finalized revised proposal with %s in private #%s — recorded for PI review",
-            agent.agent_id, other_id, channel,
-        )
-
-        # DM the finalizing agent's PI (best-effort). The normal unreviewed-
-        # proposal email/dashboard flow surfaces it to both PIs for review.
-        if self._pi_handler:
-            try:
-                shim = ThreadState(
-                    thread_id=thread_id, channel=channel, other_agent_id=other_id,
-                )
-                await self._pi_handler.notify_thread_conclusion(
-                    agent.agent_id, shim, "proposal", summary_text,
-                )
-            except Exception as exc:
-                logger.debug("PI notify (private proposal) failed: %s", exc)
 
     def _evict_dead_thread(self, thread_id: str) -> None:
         """Remove a thread_id from every agent's in-memory state.
@@ -1756,12 +1453,6 @@ class SimulationEngine:
             removed = False
             if thread_id in ag.state.active_threads:
                 ag.state.active_threads.pop(thread_id, None)
-                removed = True
-            before = len(ag.state.interesting_posts)
-            ag.state.interesting_posts = [
-                p for p in ag.state.interesting_posts if p.post_id != thread_id
-            ]
-            if len(ag.state.interesting_posts) != before:
                 removed = True
             before = len(ag.state.pending_proposals)
             ag.state.pending_proposals = [
@@ -1787,8 +1478,8 @@ class SimulationEngine:
 
         - Adds to ``_channel_id_map`` and ``_channel_visibility``.
         - Adds the channel name to every member bot's ``subscribed_channels``
-          (resolved from ``private_channel_members``), so Phase 2 scans it and
-          Phase 4/5 can act in it.
+          (resolved from ``private_channel_members``), so Phase 4/5 can act
+          in it.
         - Seeds a poll cursor so the first poll picks up the handover message.
 
         Cheap to call every main-loop tick — a single query returning a handful
@@ -1885,7 +1576,7 @@ class SimulationEngine:
           older than ``_PRIVATE_CHANNEL_ACTIVE_WINDOW_S`` is considered done;
           rewinding into it would resurrect a long-dead conversation (this was
           the bug: a 2-month-old sibling channel pulled the global cursor back
-          ~2 months, burying a fresh handover under a huge Phase-2 backlog).
+          ~2 months, burying a fresh handover under a huge stale-message backlog).
         - **Caught-up bots are skipped.** If a bot has already posted after the
           newest message in a channel, it has nothing to scan there.
 
@@ -1985,10 +1676,26 @@ class SimulationEngine:
     # Phase 5: New Post (conditional)
     # ------------------------------------------------------------------
 
-    async def _phase5_new_post(self, agent: Agent, phase4_thread_ids: set[str] | None = None) -> None:
-        """Optionally start a new thread or reply to an interesting post."""
+    async def _phase5_new_post(self, agent: Agent) -> None:
+        """Optionally start a new top-level thread.
+
+        Hard-gated for scout_hub (decision 9, reply-only-hub reconciliation):
+        the hub's former standalone :mag: Opportunity Assessment is now the
+        `<assessment_json>` sidecar carried inside its own Phase-4 CONCLUDE
+        reply instead (see `_reply_to_thread`) — it has no top-level post
+        type left, ever (role.toml declares `post_types = []`, belt-and-
+        suspenders). Returning here before ANY work — no settings lookup, no
+        prompt built, no LLM call — is what stops a permanently empty menu
+        from burning a full-price Opus call every single turn just to be
+        told "skip" (measured cost/noise trap: one production run took the
+        hub 30 turns and 0 useful phase-5 LLM calls). Gated on role, not on
+        an empty menu, so the invariant holds even if role.toml were ever
+        misconfigured back to declaring something.
+        """
+        if agent.role == "scout_hub":
+            return
+
         settings = get_settings()
-        phase4_thread_ids = phase4_thread_ids or set()
 
         # Stamp the spontaneous-post timer up front: consulting Phase 5 consumes
         # the opportunity regardless of whether we end up posting, skipping, or
@@ -1996,115 +1703,38 @@ class SimulationEngine:
         # every subsequent turn re-fires Phase 5, burning an LLM call per turn.
         agent.state.last_phase5_action_time = time.time()
 
-        # Daily post cap
+        # Daily post cap — pi_lab is capped to one pitch per day (design §9).
+        # scout_hub never reaches this line (hard-gated above), and it is the
+        # only other role, so `lab_daily_post_cap` is unconditional here — the
+        # generic `daily_post_cap` setting this once ternaried against was
+        # unreachable and was deleted (2026-08-12 release-gating fix pass, M1).
         today_posts = self._count_today_posts(agent)
-        if today_posts >= settings.daily_post_cap:
-            logger.debug("[%s] Phase 5: Skipped (daily cap %d/%d)", agent.agent_id, today_posts, settings.daily_post_cap)
+        cap = settings.lab_daily_post_cap
+        if today_posts >= cap:
+            logger.debug("[%s] Phase 5: Skipped (daily cap %d/%d)", agent.agent_id, today_posts, cap)
             return
 
-        # Check preconditions
-        at_thread_threshold = self._non_funding_thread_count(agent) >= settings.active_thread_threshold
-        unreviewed_non_funding_count = sum(
-            1 for p in agent.state.pending_proposals
-            if not p.reviewed and not self.message_log.is_funding_thread(p.thread_id)
-        )
-        has_unreviewed_non_funding = (
-            agent.agent_id not in UNBLOCK_EXEMPT_AGENTS
-            and unreviewed_non_funding_count >= settings.unreviewed_proposal_block_count
-        )
-        blocked_for_regular = at_thread_threshold or has_unreviewed_non_funding
+        # Backpressure against STARTING more work than the agent can finish:
+        # too many threads open at once. This used to have a second clause
+        # (too many of the agent's proposals awaiting web review) and an
+        # exemption letting a blocked agent still file one *terminal*
+        # artifact past the block — the hub's assessment. Both are gone: the
+        # reconciliation deleted the only post type that was ever exempt (see
+        # post_types.py), and nothing on this branch creates a new proposal
+        # for a PI to review anymore, so there is nothing left to gate on
+        # either. A blocked agent (only ever pi_lab in practice — scout_hub
+        # is gated above) now has nothing left it could post regardless, so
+        # it skips outright here, no LLM call, exactly like the daily cap.
+        if self._active_thread_count(agent) >= settings.active_thread_threshold:
+            logger.debug(
+                "[%s] Phase 5: Skipped (at/over active_thread_threshold)",
+                agent.agent_id,
+            )
+            return
 
-        # Check for PI-priority posts — these bypass random skip and blocking
-        has_pi_priority = any(p.pi_priority for p in agent.state.interesting_posts)
-
-        if not has_pi_priority and random.random() < settings.phase5_skip_probability:
+        if random.random() < settings.phase5_skip_probability:
             logger.debug("[%s] Phase 5: Skipped (random)", agent.agent_id)
             return
-
-        # Filter out interesting posts that are already active threads (replied in Phase 4)
-        # or that already have a thread with another agent (2-party limit)
-        available_posts = []
-        for post in agent.state.interesting_posts:
-            if post.post_id in phase4_thread_ids:
-                continue
-            if post.post_id in agent.state.active_threads:
-                continue
-
-            is_funding = self.message_log.is_funding_thread(post.post_id)
-            # Posts in collab_private channels are by definition PI-engaged
-            # refinement; they must bypass the unreviewed-proposal block for
-            # the same reason pi_priority and funding posts do. Without this,
-            # an agent with any unrelated pending proposal would silently skip
-            # the handover message that migrated the conversation into the
-            # private channel in the first place.
-            is_private = (
-                self._channel_visibility.get(post.channel) == VISIBILITY_COLLAB_PRIVATE
-            )
-
-            # A private channel whose refinement already converged on a recorded
-            # revised proposal is closed for further discussion — the proposal
-            # is now awaiting PI review. Don't keep refining it.
-            if post.channel in self._finalized_private_channels:
-                continue
-
-            # PI-priority, funding, and private-channel posts bypass regular blocking
-            if blocked_for_regular and not is_funding and not post.pi_priority and not is_private:
-                continue
-
-            # Turn-taking in flat private channels: don't reply if we were
-            # the most recent bot to post there. Wait for the other bot.
-            if is_private and (
-                self.message_log.get_last_bot_sender_in_channel(post.channel)
-                == agent.agent_id
-            ):
-                logger.debug(
-                    "[%s] Phase 5: Skipping private-channel post %s — we were last to post in #%s",
-                    agent.agent_id, post.post_id, post.channel,
-                )
-                continue
-
-            # Check thread participation rules: if the post tags a specific agent,
-            # only that agent can reply; otherwise generic 2-party rule applies
-            allowed = self.message_log.get_thread_allowed_agents(post.post_id)
-            if allowed and len(allowed) >= 2 and agent.agent_id not in allowed:
-                logger.debug(
-                    "[%s] Phase 5: Skipping post %s — not in allowed set %s",
-                    agent.agent_id, post.post_id, allowed,
-                )
-                continue
-            available_posts.append(post)
-
-        # If blocked and no available posts to reply to, still allow Phase 5
-        # so the agent can create funding collaboration posts (Option B)
-        has_funding_interesting = any(
-            self.message_log.is_funding_thread(p.post_id)
-            for p in agent.state.interesting_posts
-        )
-        has_thread_foas = any(
-            ts.foa_number for ts in agent.state.active_threads.values()
-        )
-        # A blocked agent with nothing to reply to normally has nothing to do,
-        # and bailing here saves an LLM call. But "nothing to reply to" is not
-        # the same as "nothing to post": a hub saturated with interviews still
-        # owes an assessment for each one it finished, and that is precisely
-        # the state this early return used to strand it in. Ask the post-type
-        # layer whether anything is actually postable before giving up.
-        nothing_postable = not self._available_post_types(
-            agent, funding_restricted=blocked_for_regular
-        )
-        if (
-            not available_posts
-            and blocked_for_regular
-            and not has_funding_interesting
-            and not has_thread_foas
-            and nothing_postable
-        ):
-            logger.debug("[%s] Phase 5: Skipped (blocked, no funding/PI posts available)", agent.agent_id)
-            return
-
-        # Temporarily replace interesting_posts for prompt building
-        original_posts = agent.state.interesting_posts
-        agent.state.interesting_posts = available_posts
 
         # Build prompt — include agent's recent posts for dedup
         recent_entries = self.message_log.get_agent_top_level_posts(agent.agent_id, limit=10)
@@ -2113,72 +1743,26 @@ class SimulationEngine:
             for e in recent_entries
         ]
 
-        # Pre-load cached FOA text for funding posts so Phase 5 has full context
-        foa_contexts: dict[str, str] = {}
-        funding_thread_summaries: dict[str, str] = {}
-        for post in available_posts:
-            if post.foa_number:
-                foa_text = format_foa_for_prompt(post.foa_number)
-                if foa_text:
-                    foa_contexts[post.post_id] = foa_text
-            if self.message_log.is_funding_thread(post.post_id):
-                summary = summarize_funding_thread(
-                    self.message_log, post.post_id, viewer_agent_id=agent.agent_id,
-                )
-                if not summary.is_empty():
-                    funding_thread_summaries[post.post_id] = format_funding_thread_summary(summary)
+        # Phase 5 always operates in a public channel (see build_phase5_prompt's
+        # docstring) — there is no longer any per-turn state that could put it in
+        # a private-channel context, so prior-threads dedup uses the default
+        # (public) visibility.
+        prior_threads = self._get_prior_threads_for_agent(agent.agent_id)
 
-        # Also pre-load FOAs from active/closed threads for Option B
-        # (starting a new funding collab from a previously seen FOA)
-        thread_foa_contexts: dict[str, str] = {}
-        for ts in agent.state.active_threads.values():
-            if ts.foa_number and ts.foa_number not in thread_foa_contexts:
-                foa_text = format_foa_for_prompt(ts.foa_number)
-                if foa_text:
-                    thread_foa_contexts[ts.foa_number] = foa_text
-
-        # Resolve the visibility context for the prompt. Phase 5 now also drives
-        # collab_private refinement (flat follow-ups). When the agent's only
-        # actionable posts are in a private channel, build the prompt in that
-        # channel's context so the Private Channel Rules — including the
-        # converge-on-a-revised-:memo:-Summary instruction — are injected and the
-        # dedup context is filtered for that visibility. Mixed/empty cases stay
-        # public (the default for new public posts).
-        private_available = [
-            p for p in available_posts
-            if self._channel_visibility.get(p.channel) == VISIBILITY_COLLAB_PRIVATE
-        ]
-        public_available = [
-            p for p in available_posts
-            if self._channel_visibility.get(p.channel) != VISIBILITY_COLLAB_PRIVATE
-        ]
-        private_channel_id = None
-        if private_available and not public_available:
-            current_visibility = VISIBILITY_COLLAB_PRIVATE
-            private_channel_id = self._channel_id_map.get(private_available[0].channel)
-        else:
-            current_visibility = VISIBILITY_PUBLIC
-        prior_threads = self._get_prior_threads_for_agent(
-            agent.agent_id, current_visibility=current_visibility,
-        )
-
-        # funding_only strips the prompt to funding actions. Only apply when
-        # the agent is actually funding-restricted — if any available post is
-        # non-funding (e.g., a private-channel handover that also bypasses
-        # blocking), the LLM needs the regular reply path.
-        has_available_non_funding = any(
-            not self.message_log.is_funding_thread(p.post_id)
-            for p in available_posts
-        )
-        funding_only = blocked_for_regular and not has_available_non_funding
-
-        # blocked_for_regular, NOT funding_only — see _available_post_types'
-        # docstring. funding_only is the narrower "blocked AND nothing
-        # non-funding to reply to"; keying the menu on it would advertise
-        # `paper` to an agent the block below rejects for posting one.
-        available_types = self._available_post_types(
-            agent, funding_restricted=blocked_for_regular,
-        )
+        available_types = self._available_post_types(agent)
+        if not available_types:
+            # Nothing satisfies role ∩ topology — either a misconfigured
+            # role.toml or a cohort gate that leaves this agent with no
+            # reachable counterparty for anything it declares. This point is
+            # only ever reached by an UNBLOCKED agent (a blocked one already
+            # returned above), so an empty menu here is always worth a
+            # WARNING — there is no longer a quiet/expected empty-menu case
+            # to distinguish it from (that was the hub's, and the hub never
+            # reaches this line).
+            logger.warning(
+                "[%s] Phase 5: no post type satisfiable — check cohort/roster "
+                "for role %r", agent.agent_id, agent.role,
+            )
         post_type_menu = render_menu(
             available_types,
             gate=agent.allowed_sender_ids,
@@ -2189,18 +1773,9 @@ class SimulationEngine:
 
         system_prompt, messages = agent.build_phase5_prompt(
             recent_posts=recent_posts,
-            foa_contexts=foa_contexts,
-            thread_foa_contexts=thread_foa_contexts,
             prior_threads=prior_threads,
-            funding_only=funding_only,
-            funding_thread_summaries=funding_thread_summaries,
-            visibility=current_visibility,
-            channel_id=private_channel_id,
             post_type_menu=post_type_menu,
         )
-
-        # Restore
-        agent.state.interesting_posts = original_posts
 
         agent.record_api_call()
         try:
@@ -2208,15 +1783,20 @@ class SimulationEngine:
                 system_prompt=system_prompt,
                 messages=messages,
                 model=settings.llm_agent_model_opus,
-                # scout_hub's opportunity assessment is an 11-section body
-                # plus a ~15-line <assessment_json> sidecar emitted LAST, so
-                # truncation drops the machine-readable verdict first while
-                # still leaving the Slack post looking complete (F8). 1000
-                # was sized for a short reply/skip decision, not this
-                # artifact. NOTE: src/services/llm.py's retry-at-2x path logs
-                # loudly (logger.error) if the retry ALSO truncates, but it
-                # does not retry again — this ceiling still needs to be big
-                # enough that truncation stops being the common case.
+                # Historical sizing note: this used to also cover scout_hub's
+                # opportunity-assessment post here (an 11-section body plus a
+                # ~15-line <assessment_json> sidecar emitted LAST, where 1000
+                # — sized for a short reply/skip decision — truncated the
+                # verdict first while leaving the Slack post looking
+                # complete, F8). The hub is hard-gated out of this function
+                # now (see the docstring) and its assessment moved to the
+                # Phase-4 CONCLUDE reply's own budget instead, so this
+                # function's only caller today (pi_lab) never needs anywhere
+                # near 2500 tokens for a pitch or a skip — kept at this size
+                # anyway rather than re-tuned down, since a smaller ceiling
+                # buys nothing but risk here. NOTE: src/services/llm.py's
+                # retry-at-2x path logs loudly (logger.error) if the retry
+                # ALSO truncates, but it does not retry again.
                 max_tokens=2500,
                 log_meta={"agent_id": agent.agent_id, "phase": "new_post"},
                 on_retry=agent.record_api_call,
@@ -2258,70 +1838,17 @@ class SimulationEngine:
                 return
 
             # Real action — reset skip backoff. Capture the pre-reset value
-            # first: several rejection paths below (back-to-back private-
-            # channel post, funding announcement-only/acknowledgment-only
-            # replies, the post-type rejection further down) re-increment the
-            # streak AFTER this reset zeroes it, so a bare `+= 1` there always
-            # lands on 1 no matter how many times in a row this agent gets
-            # rejected — the damping at _select_next_agent (`skips >= 3`) never
-            # engages and a hopeless agent gets picked, and burns an
-            # LLM call, every bit as often as a productive one. Pre-existing
-            # bug at the back-to-back/funding-reply rejections below — not
-            # fixed here — but the post-type rejection uses `previous + 1`.
+            # first: several rejection paths below need the TRUE streak, not
+            # the just-reset 0, to feed _select_next_agent's damping
+            # (`skips >= 3`). Every remaining rejection path (unsupported
+            # action, post-type rejection, body-mention rejection) restores it
+            # correctly via `previous_skips + 1`.
             previous_skips = agent.state.consecutive_phase5_skips
             agent.state.consecutive_phase5_skips = 0
             agent.state.last_phase5_action_time = time.time()
 
             channel = action_data.get("channel", "general").lstrip("#")
-            target_post_id = action_data.get("target_post_id")
             post_type = action_data.get("post_type", "")
-
-            # Turn-taking enforcement for private channels: reject any action
-            # that would post back-to-back with our previous private-channel
-            # message. Belt-and-braces — the available_posts pre-filter also
-            # catches this for the "reply" path, but this gate covers new
-            # top-level posts the LLM might propose.
-            if (
-                self._channel_visibility.get(channel) == VISIBILITY_COLLAB_PRIVATE
-                and self.message_log.get_last_bot_sender_in_channel(channel)
-                == agent.agent_id
-            ):
-                logger.info(
-                    "[%s] Phase 5: Rejecting back-to-back post in private #%s",
-                    agent.agent_id, channel,
-                )
-                agent.state.consecutive_phase5_skips += 1
-                return
-
-            # If agent is blocked, only allow bypass-eligible actions: funding
-            # replies, funding posts, or replies to a post in a collab_private
-            # channel (the PI has explicitly engaged that refinement).
-            if blocked_for_regular:
-                is_funding_reply = (
-                    action == "reply" and target_post_id
-                    and self.message_log.is_funding_thread(target_post_id)
-                )
-                is_funding_post = action == "new_post" and post_type == "funding_collab"
-                # A terminal artifact reports finished work, so the
-                # start-new-work backpressure does not apply to it. Same shape
-                # as the funding bypass above; see TERMINAL_POST_TYPES.
-                is_terminal_post = (
-                    action == "new_post" and post_type in TERMINAL_POST_TYPES
-                )
-                is_private_reply = False
-                if action == "reply" and target_post_id:
-                    target_entry = self.message_log.get_entry(target_post_id)
-                    if target_entry and (
-                        self._channel_visibility.get(target_entry.channel)
-                        == VISIBILITY_COLLAB_PRIVATE
-                    ):
-                        is_private_reply = True
-                if not (is_funding_reply or is_funding_post or is_private_reply or is_terminal_post):
-                    logger.info(
-                        "[%s] Phase 5: Blocked non-funding action while proposals pending",
-                        agent.agent_id,
-                    )
-                    return
 
             # Retroactively add channel to the LLM log entry (unknown at call time)
             if self._llm_log_buffer:
@@ -2330,7 +1857,7 @@ class SimulationEngine:
             # Cross-cohort mention stripping now happens in _post_message, which
             # covers every outbound path instead of only this one. Phase 5 still
             # needs the *cleaned* text locally, though: the tagged_agent decision
-            # and _check_private_channel_outcome below both read message_text.
+            # below reads message_text.
             #
             # The JSON `post_type`/`tagged_agent` pair is not the only place a
             # disallowed mention can hide — a spoke can also name an
@@ -2346,258 +1873,256 @@ class SimulationEngine:
                 self._cohort_tags_stripped.get(agent.agent_id, 0) > tags_stripped_before
             )
 
-            if action == "reply" and target_post_id:
-                # Enforce thread participation rules
-                allowed = self.message_log.get_thread_allowed_agents(target_post_id)
-                if allowed and agent.agent_id not in allowed:
-                    logger.info(
-                        "[%s] Phase 5: Blocked reply to %s — not in allowed set %s",
-                        agent.agent_id, target_post_id, allowed,
-                    )
-                    return
-
-                # Funding-thread draft validators (atomic spin-off + no-ack rules)
-                if self.message_log.is_funding_thread(target_post_id):
-                    if is_announcement_only_funding_reply(message_text):
-                        logger.info(
-                            "[%s] Phase 5: Rejected announcement-only funding reply to %s",
-                            agent.agent_id, target_post_id,
-                        )
-                        agent.state.consecutive_phase5_skips += 1
-                        return
-                    if is_acknowledgment_only_funding_reply(message_text):
-                        logger.info(
-                            "[%s] Phase 5: Rejected acknowledgment-only funding reply to %s",
-                            agent.agent_id, target_post_id,
-                        )
-                        agent.state.consecutive_phase5_skips += 1
-                        return
-
-                # In a collab_private channel, the whole channel IS the
-                # discussion — post flat (no thread_ts) and don't create an
-                # active_thread. The other agent will see this as a new
-                # top-level post on its next Phase 2 scan and continue the
-                # flat conversation. See specs/privacy-and-channel-visibility.md.
-                is_private_channel = (
-                    self._channel_visibility.get(channel) == VISIBILITY_COLLAB_PRIVATE
+            if action != "new_post":
+                logger.info(
+                    "[%s] Phase 5: unsupported action %r — skipping",
+                    agent.agent_id, action,
                 )
+                agent.state.consecutive_phase5_skips = previous_skips + 1
+                return
 
-                if is_private_channel:
-                    posted = await self._post_message(agent.agent_id, channel, message_text)
-                    if not posted:
-                        # _post_message already logged why (e.g. the text
-                        # stripped to empty). Nothing reached Slack, so this
-                        # turn must not count and the post must not be
-                        # consumed from interesting_posts (Task 11 fix round
-                        # 1, Finding 3, applied here too).
-                        logger.info(
-                            "[%s] Phase 5: flat follow-up to %s in private "
-                            "#%s suppressed — not counted, nothing persisted",
-                            agent.agent_id, target_post_id, channel,
-                        )
-                    else:
-                        agent.message_count += 1
-                        # Consume the interesting post (we acted on it) but do not
-                        # create an active_thread — private channels don't thread.
-                        agent.state.interesting_posts = [
-                            p for p in agent.state.interesting_posts
-                            if p.post_id != target_post_id
-                        ]
-                        logger.info(
-                            "[%s] Phase 5: Posted flat follow-up to %s in private #%s",
-                            agent.agent_id, target_post_id, channel,
-                        )
-                else:
-                    # Reply to an interesting post → creates a new thread
-                    posted = await self._post_message(
-                        agent.agent_id, channel, message_text,
-                        thread_ts=target_post_id,
-                    )
-                    if not posted:
-                        logger.info(
-                            "[%s] Phase 5: reply to post %s in #%s suppressed "
-                            "— not counted, nothing persisted",
-                            agent.agent_id, target_post_id, channel,
-                        )
-                    else:
-                        agent.message_count += 1
-
-                        # Move from interesting_posts to active_threads
-                        agent.state.interesting_posts = [
-                            p for p in agent.state.interesting_posts
-                            if p.post_id != target_post_id
-                        ]
-                        # Determine the other agent from the original post
-                        original_entry = self.message_log.get_entry(target_post_id)
-                        other_id = original_entry.sender_agent_id if original_entry else None
-                        if other_id:
-                            # Carry FOA number from the PostRef if this is a funding post
-                            post_foa = None
-                            for p in original_posts:
-                                if p.post_id == target_post_id:
-                                    post_foa = p.foa_number
-                                    break
-                            agent.state.active_threads[target_post_id] = ThreadState(
-                                thread_id=target_post_id,
-                                channel=channel,
-                                other_agent_id=other_id,
-                                message_count=2,  # original + this reply
-                                foa_number=post_foa,
-                            )
-
-                        logger.info(
-                            "[%s] Phase 5: Replied to post %s in #%s",
-                            agent.agent_id, target_post_id, channel,
-                        )
-
+            # New top-level post. Layers 1-3, against the SAME set that was
+            # rendered into the prompt above. Reject rather than strip-and-
+            # publish: a mention stripped out of an addressed post leaves a
+            # dangling ask no one can answer (259 such posts, 0.8% reply
+            # rate). WARNING, not DEBUG — the cohort strip was logged at
+            # DEBUG and 200 of them produced no operator-visible signal.
+            rejection = self._post_type_rejection(
+                agent,
+                post_type,
+                action_data.get("tagged_agent"),
+                available_types,
+            )
+            if rejection is not None:
+                logger.warning(
+                    "[%s] Phase 5: rejected new post in #%s — %s",
+                    agent.agent_id, channel, rejection,
+                )
+                agent.state.consecutive_phase5_skips = previous_skips + 1
+                return
+            # Layer 1-3 judge the JSON declaration, but the mutilation this
+            # whole gate exists to prevent is driven by the message BODY.
+            # A broadcast type with tagged_agent=null sails through the
+            # check above even when the body itself @-mentions an
+            # unreachable lab in prose — and the strip above would then
+            # publish the post with that mention silently deleted,
+            # producing exactly the dangling-ask artifact (measured in
+            # production: 42 of 259 posts named a lab in prose with no
+            # tag). Reject instead of publishing a mutilated body.
+            if body_mention_was_stripped:
+                logger.warning(
+                    "[%s] Phase 5: rejected new post in #%s — the message "
+                    "body @-mentions an agent this cohort gate cannot "
+                    "reach; publishing it would silently delete that "
+                    "mention rather than deliver it (post_type=%r)",
+                    agent.agent_id, channel, post_type,
+                )
+                agent.state.consecutive_phase5_skips = previous_skips + 1
+                return
+            # New top-level post
+            posted = await self._post_message(agent.agent_id, channel, message_text)
+            if not posted:
+                # _post_message already logged why (e.g. the text stripped to
+                # empty). Nothing reached Slack, so neither the turn counter
+                # nor an assessment row may be written for it — either would
+                # be a phantom record with no corresponding Slack message
+                # (Task 11 fix round 1, Finding 3).
+                logger.info(
+                    "[%s] Phase 5: New post in #%s suppressed — not counted, "
+                    "nothing persisted",
+                    agent.agent_id, channel,
+                )
             else:
-                # New top-level post. Layers 1-3, against the SAME set that was
-                # rendered into the prompt above. Reject rather than strip-and-
-                # publish: a mention stripped out of an addressed post leaves a
-                # dangling ask no one can answer (259 such posts, 0.8% reply
-                # rate). WARNING, not DEBUG — the cohort strip was logged at
-                # DEBUG and 200 of them produced no operator-visible signal.
-                rejection = self._post_type_rejection(
-                    agent,
-                    post_type,
-                    action_data.get("tagged_agent"),
-                    available_types,
-                )
-                if rejection is not None:
-                    logger.warning(
-                        "[%s] Phase 5: rejected new post in #%s — %s",
-                        agent.agent_id, channel, rejection,
-                    )
-                    agent.state.consecutive_phase5_skips = previous_skips + 1
-                    return
-                # Layer 1-3 judge the JSON declaration, but the mutilation this
-                # whole gate exists to prevent is driven by the message BODY.
-                # A broadcast type with tagged_agent=null sails through the
-                # check above even when the body itself @-mentions an
-                # unreachable lab in prose — and the strip above would then
-                # publish the post with that mention silently deleted,
-                # producing exactly the dangling-ask artifact (measured in
-                # production: 42 of 259 posts named a lab in prose with no
-                # tag). Reject instead of publishing a mutilated body.
-                if body_mention_was_stripped:
-                    logger.warning(
-                        "[%s] Phase 5: rejected new post in #%s — the message "
-                        "body @-mentions an agent this cohort gate cannot "
-                        "reach; publishing it would silently delete that "
-                        "mention rather than deliver it (post_type=%r)",
-                        agent.agent_id, channel, post_type,
-                    )
-                    agent.state.consecutive_phase5_skips = previous_skips + 1
-                    return
-                # New top-level post
-                posted = await self._post_message(agent.agent_id, channel, message_text)
-                if not posted:
-                    # _post_message already logged why (e.g. the text stripped to
-                    # empty). Nothing reached Slack, so neither the turn counter
-                    # nor an assessment row may be written for it — either would
-                    # be a phantom record with no corresponding Slack message
-                    # (Task 11 fix round 1, Finding 3).
+                agent.message_count += 1
+
+                # No post type reaching here ever carries an assessment
+                # sidecar anymore — the hub is hard-gated out of this
+                # function entirely (see the docstring), and CANONICAL has
+                # no entry for one (post_types.py). The extraction/persist
+                # step that used to live here for `opportunity_assessment`
+                # moved to `_reply_to_thread`'s Phase-4 CONCLUDE handling
+                # (Option A relocation).
+
+                # Check if it tags another agent
+                tagged_agent = action_data.get("tagged_agent")
+                if tagged_agent:
                     logger.info(
-                        "[%s] Phase 5: New post in #%s suppressed — not counted, "
-                        "nothing persisted",
+                        "[%s] Phase 5: New post in #%s tagging @%s",
+                        agent.agent_id, channel, tagged_agent,
+                    )
+                else:
+                    logger.info(
+                        "[%s] Phase 5: New post in #%s",
                         agent.agent_id, channel,
                     )
-                else:
-                    agent.message_count += 1
-
-                    # A :mag: Opportunity Assessment carries a machine-readable
-                    # verdict sidecar (stripped from the Slack body). Persist it —
-                    # the whole point of the artifact is that staff can triage it
-                    # later. ``verdict`` can legitimately be ``{}`` (an empty but
-                    # parsed sidecar) — that is falsy but not a failure, so the
-                    # gate is `is not None`, never a truthiness check (Finding 1).
-                    if post_type == "opportunity_assessment":
-                        verdict = _extract_assessment_json(response)
-                        if verdict is not None:
-                            # `posted` is the canonical id _post_message just
-                            # minted/returned for this post (F7) — thread it
-                            # through so the triage row can link back to the
-                            # Slack post it summarises.
-                            #
-                            # thread_id=None: this is the "new top-level post"
-                            # branch (not a reply to an existing thread), so
-                            # there is no phase-4 interview thread to point the
-                            # specialist floor at here. That makes the floor
-                            # fail open by the same rule as a post-restart map.
-                            await self._persist_assessment(
-                                agent.agent_id, channel, verdict, slack_ts=posted,
-                            )
-                        elif _ASSESSMENT_UNCLOSED_RE.search(response or ""):
-                            # An <assessment_json> opening tag is present.
-                            # _extract_assessment_json already logged the
-                            # per-block reason; this names the consequence
-                            # without re-claiming "no sidecar" (Finding 1) —
-                            # and without calling a block that parsed fine but
-                            # was the wrong shape (e.g. a JSON array)
-                            # "unparseable", which it was not (Finding A3).
-                            if _sidecar_has_valid_json_block(response or ""):
-                                logger.warning(
-                                    "[%s] Phase 5: opportunity_assessment "
-                                    "post's <assessment_json> sidecar parsed "
-                                    "as valid JSON but was not an object — "
-                                    "verdict lost",
-                                    agent.agent_id,
-                                )
-                            else:
-                                logger.warning(
-                                    "[%s] Phase 5: opportunity_assessment post's "
-                                    "<assessment_json> sidecar was present but "
-                                    "unparseable — verdict lost",
-                                    agent.agent_id,
-                                )
-                        else:
-                            logger.warning(
-                                "[%s] Phase 5: opportunity_assessment post had no "
-                                "<assessment_json> sidecar present — verdict lost",
-                                agent.agent_id,
-                            )
-
-                    # Check if it tags another agent
-                    tagged_agent = action_data.get("tagged_agent")
-                    if tagged_agent:
-                        logger.info(
-                            "[%s] Phase 5: New post in #%s tagging @%s",
-                            agent.agent_id, channel, tagged_agent,
-                        )
-                    else:
-                        logger.info(
-                            "[%s] Phase 5: New post in #%s",
-                            agent.agent_id, channel,
-                        )
-
-            # In a collab_private channel, a :memo: Summary + ✅ handshake
-            # finalizes the refined proposal (the flat path has no
-            # _check_thread_outcome). Runs for either action since both post flat.
-            if (
-                message_text
-                and self._channel_visibility.get(channel) == VISIBILITY_COLLAB_PRIVATE
-            ):
-                await self._check_private_channel_outcome(agent, channel, message_text)
 
         except Exception as exc:
             logger.error("[%s] Phase 5 failed: %s", agent.agent_id, exc)
 
+    async def _capture_hub_assessment(
+        self, agent: Agent, thread: ThreadState, raw_response: str, slack_ts: str | None,
+    ) -> None:
+        """Option A relocation: extract the hub's `<assessment_json>` verdict
+        sidecar from its own raw Phase-4 CONCLUDE reply and persist it.
+
+        ``raw_response`` is the full LLM response from BEFORE
+        ``_extract_slack_message`` discarded everything outside
+        ``<slack_message>`` — the sidecar is written outside that block by
+        design (see ``phase4-thread-reply.md``'s "Concluding with an
+        Opportunity Assessment" section), so it was never in the text Slack
+        actually received. (``_post_message`` also strips it unconditionally
+        as a backstop regardless — see ``_strip_assessment_sidecar`` — so the
+        sidecar cannot leak to Slack even if a model mistakenly wrote it
+        inside the block instead.)
+
+        Mirrors the two outcomes the old Phase-5 ``new_post`` handling of
+        this same artifact logged (persisted / present-but-unusable), with
+        one deliberate omission: Phase 5 only ever reached that code after
+        the model explicitly declared ``post_type: "opportunity_
+        assessment"``, so an absent sidecar there was a genuine anomaly
+        worth a WARNING every time. Every Phase-4 reply runs through here
+        regardless of whether it is the interview's concluding turn, and a
+        sidecar is expected on at most 1 of every 12 — logging "no sidecar"
+        on every ordinary interview turn would be pure noise, so that case is
+        silent here. Only a sidecar tag that IS present but broken is
+        anomalous.
+
+        Never raises: a failure to extract or persist a verdict must not cost
+        the reply that has already been posted to Slack by the time this
+        runs (``_persist_assessment`` already self-guards its own DB write;
+        this wraps the extraction step too, for the same reason).
+        """
+        try:
+            verdict = _extract_assessment_json(raw_response)
+            if verdict is not None:
+                # The model is asked for `subject_agent_id` in the sidecar,
+                # but unlike Phase 5's standalone post, a Phase-4 CONCLUDE
+                # reply always has a real interview thread behind it — the PI
+                # being screened is exactly `thread.other_agent_id`. Passed
+                # as a fallback (not written into `verdict` itself) so
+                # `raw_verdict` stays exactly what the model emitted — see
+                # _persist_assessment's docstring.
+                await self._persist_assessment(
+                    agent.agent_id, thread.channel, verdict, slack_ts=slack_ts,
+                    subject_agent_id_fallback=thread.other_agent_id,
+                )
+            elif _ASSESSMENT_UNCLOSED_RE.search(raw_response or ""):
+                # An <assessment_json> opening tag is present but
+                # _extract_assessment_json found no usable verdict in it —
+                # anomalous regardless of turn type, unlike plain absence.
+                if _sidecar_has_valid_json_block(raw_response or ""):
+                    logger.warning(
+                        "[%s] Phase 4: concluding reply's <assessment_json> "
+                        "sidecar parsed as valid JSON but was not an object "
+                        "— verdict lost",
+                        agent.agent_id,
+                    )
+                else:
+                    logger.warning(
+                        "[%s] Phase 4: concluding reply's <assessment_json> "
+                        "sidecar was present but unparseable — verdict lost",
+                        agent.agent_id,
+                    )
+        except Exception as exc:  # noqa: BLE001 — never lose a posted reply over this
+            logger.error(
+                "[%s] Failed to extract/persist the assessment sidecar for "
+                "thread %s: %s",
+                agent.agent_id, thread.thread_id, exc,
+            )
+
+    def _warn_if_hub_conclude_missing_assessment(
+        self, agent: Agent, thread: ThreadState, response_text: str, raw_response: str,
+    ) -> None:
+        """Absent-sidecar detection gap: warn when a hub's structurally-
+        concluding reply is neither a decline nor a persistable verdict.
+
+        ``_capture_hub_assessment`` already warns when an ``<assessment_json>``
+        tag is PRESENT but broken (unparseable, or valid JSON that is not an
+        object) — it is deliberately silent when the tag is simply absent,
+        because that is the ordinary case on every one of the ~11 non-
+        concluding turns of an interview. That silence becomes a real gap at
+        the one turn where thread_guidance.py's own CONCLUDE branch tells the
+        hub it MUST either decline (⏸️) or close with an inline verdict that
+        carries the sidecar (see ``_SCOUT_HUB[CONCLUDE]``) — a reply that does
+        neither is a concluding, non-decline verdict that produced nothing
+        persistable, and nothing upstream of this ever says so.
+
+        Fires only when ALL THREE hold:
+          (a) the thread is at its structural CONCLUDE point. Deliberately
+              delegates to ``thread_guidance.phase4_guidance`` — the exact
+              function that decided THIS reply's guidance — rather than
+              re-deriving the cutoff from ``settings.max_thread_messages``:
+              thread_guidance's CONCLUDE branch is a literal 12, not settings-
+              derived, so the two can drift apart if ``max_thread_messages``
+              is ever configured to anything else. Reading from
+              thread_guidance itself keeps this check correct either way.
+              Under the default settings this fires for a genuinely real
+              reply: a thread with 11 existing messages passes the earlier
+              system-enforced-close check (11 < 12), generates a reply at
+              ordinal 12 -> CONCLUDE, and is inspected here — see
+              ``Agent.build_phase4_prompt``'s ordinal-fix comment for why
+              this was NOT true before that fix.
+          (b) the posted reply does NOT open with the ⏸️ decline convention
+              (see ``_reply_opens_with_pause``).
+          (c) no ``<assessment_json>`` tag — well-formed or truncated — is
+              present anywhere in the raw response. A present-but-broken tag
+              is already covered by ``_capture_hub_assessment``'s own
+              warnings above and must not double-warn here.
+
+        Never raises and never persists anything itself — purely an
+        observability signal for a case that otherwise leaves no trace at
+        all: the reply already posted (this runs after `_post_message`
+        succeeded) and no DB row was ever going to exist for it either way.
+        """
+        # +1: thread.message_count is the prior count; phase4_guidance's
+        # contract is the ordinal of the reply just generated — the same
+        # correction Agent.build_phase4_prompt applies for this same reply
+        # (see that call site's comment for the full rationale).
+        message_ordinal = thread.message_count + 1
+        thread_phase, _, _ = phase4_guidance(agent.role, message_ordinal)
+        if thread_phase != CONCLUDE:
+            return
+        if _reply_opens_with_pause(response_text):
+            return
+        if _ASSESSMENT_RE.search(raw_response or "") or _ASSESSMENT_UNCLOSED_RE.search(
+            raw_response or ""
+        ):
+            return
+        logger.warning(
+            "[%s] Phase 4: thread %s concluded (message_ordinal=%d) with a "
+            "non-decline verdict but no persistable <assessment_json> "
+            "sidecar was found",
+            agent.agent_id, thread.thread_id, message_ordinal,
+        )
+
     async def _persist_assessment(
         self, agent_id: str, channel: str, verdict: dict, slack_ts: str | None = None,
+        *, subject_agent_id_fallback: str | None = None,
     ) -> None:
         """Store a scouting verdict. Best-effort: a failure here must never cost
         the Slack post that already went out.
 
         ``slack_ts`` is the canonical post id ``_post_message`` returned for
-        the assessment post itself (F7) — the row's link back to the Slack
-        message it summarises. Optional and defaulted to ``None`` so every
-        existing direct caller (tests driving this method on a stub) keeps
-        working unchanged.
+        the post/reply the verdict came from (F7) — the row's link back to
+        the Slack message it summarises. Optional and defaulted to ``None``
+        so every existing direct caller (tests driving this method on a
+        stub) keeps working unchanged.
 
-        ``thread_id`` is the phase-4 interview thread this verdict came out of,
-        used to enforce the specialist floor below. ``None`` when phase 5 has
-        no thread to point to (a top-level assessment post) — the floor treats
-        that exactly like a post-restart empty map and fails open.
+        ``subject_agent_id_fallback`` is used for the ``subject_agent_id``
+        column (and the specialist-floor check below) ONLY when the verdict
+        itself leaves that field blank — it is never written into
+        ``raw_verdict``, which always stays exactly what the model emitted
+        (see that field's own note below). Option A's caller
+        (``_capture_hub_assessment``) passes ``thread.other_agent_id`` here:
+        unlike Phase 5's old standalone post, a Phase-4 CONCLUDE reply always
+        has a real interview thread behind it, so the engine already knows
+        who the sidecar is about even when the model's own field is empty.
+
+        There is no ``thread_id`` parameter here, despite the verdict coming
+        from a specific Phase-4 interview thread today (Option A relocation)
+        — the specialist floor below (``_specialist_floor_gap``) is keyed on
+        the subject agent instead, not on a thread; see that method's
+        docstring for why an earlier thread-keyed version always failed open.
 
         The weighted score and band are computed here from the verdict's own
         dimension scores, never taken from the model's ``weighted_score`` field
@@ -2607,16 +2132,25 @@ class SimulationEngine:
         never produce) and the computed ``band`` are kept in separate columns
         and neither ever overwrites the other. The verdict exactly as emitted
         is kept verbatim in ``raw_verdict`` regardless of what could be parsed
-        out of it, so nothing is ever lost to a parsing decision made here.
+        out of it (and regardless of ``subject_agent_id_fallback``), so
+        nothing is ever lost to — or invented by — a decision made here.
         """
-        gap = self._specialist_floor_gap(verdict)
+        # A view with the fallback applied, used ONLY for the subject-derived
+        # column and the specialist-floor check — never for `raw_verdict`,
+        # which must stay byte-for-byte what the model actually sent.
+        subject_view = verdict
+        if subject_agent_id_fallback and not verdict.get("subject_agent_id"):
+            subject_view = {**verdict, "subject_agent_id": subject_agent_id_fallback}
+
+        gap = self._specialist_floor_gap(subject_view)
         if gap:
-            subject_hint = verdict.get("subject_agent_id")
+            subject_hint = subject_view.get("subject_agent_id")
             logger.warning(
                 "[%s] Assessment REFUSED for %s — recommendation %r requires the "
                 "%s specialist(s), which were never consulted during the "
-                "interview. Nothing persisted. Consult them in phase 4; the "
-                "assessment turn has no tools.",
+                "interview. Nothing persisted. The concluding reply that "
+                "carries the verdict is the last chance to consult them — "
+                "there is no later turn to add them in.",
                 agent_id, subject_hint or "?",
                 verdict.get("recommendation"), ", ".join(sorted(gap)),
             )
@@ -2655,7 +2189,7 @@ class SimulationEngine:
         # commit — which the outer except then drops the WHOLE row for. Clip
         # instead of dropping: a truncated recommendation is still useful for
         # triage, an absent one is not (Task 11 fix round 1, Finding 5).
-        subject_agent_id = _bounded_str(verdict.get("subject_agent_id"), 50)
+        subject_agent_id = _bounded_str(subject_view.get("subject_agent_id"), 50)
         funnel_stage = _bounded_str(verdict.get("funnel_stage"), 20)
         recommendation = _bounded_str(verdict.get("recommendation"), 30)
         confidence = _bounded_str(verdict.get("confidence"), 20)
@@ -2795,11 +2329,18 @@ class SimulationEngine:
     def _record_consult(self, pi_agent_id: str, domain: str) -> None:
         """Note a successful consult, keyed on the PI the interview is about.
 
-        Keyed on the PI rather than the interview thread because the reader
-        cannot see a thread: an assessment is a NEW TOP-LEVEL post, so
-        ``_persist_assessment`` is called with no thread to join on. The thread
-        knows the PI as ``other_agent_id`` and the verdict names the same PI as
-        ``subject_agent_id`` — that is the only identifier both ends share.
+        Keyed on the PI rather than the interview thread. The verdict names
+        the PI as ``subject_agent_id`` (not a thread id), and that is what
+        ``_specialist_floor_gap`` joins consults against when
+        ``_persist_assessment`` runs — keying on the PI directly avoids that
+        join needing a thread id at all. (Historically this was also the
+        ONLY identifier available: the hub's assessment used to be a
+        standalone Phase-5 post with no interview thread behind it at all.
+        Option A relocated the artifact into the Phase-4 CONCLUDE reply
+        itself, so a real thread now exists at persist time too — see
+        ``_specialist_floor_gap``'s docstring — but the PI-keyed record
+        stays, since it is simpler and the tool-call site here only ever
+        knows the PI, not which specific verdict will eventually cite it.)
         """
         if not pi_agent_id:
             return
@@ -2819,11 +2360,17 @@ class SimulationEngine:
         nothing, so requiring eight opinions to say no would burn calls on
         exactly the ideas that do not warrant them.
 
-        The record is keyed on the PI (``subject_agent_id``), not on a thread:
-        an assessment is a new top-level post, so there is no interview thread
-        to join on at this point. An earlier version keyed on ``thread_id``,
-        which was always None here — the floor read an empty set every time and
-        failed open on every verdict, enforcing nothing while looking enforced.
+        The record is keyed on the PI (``subject_agent_id``), not on a thread.
+        An earlier version keyed on ``thread_id`` instead, back when the
+        artifact was a standalone Phase-5 post with no interview thread of
+        its own — ``thread_id`` was always None there, so the floor read an
+        empty set every time and failed open on every verdict, enforcing
+        nothing while looking enforced. Option A now relocates the artifact
+        into the Phase-4 CONCLUDE reply itself, so a real thread does exist
+        at persist time — but the PI-keyed record is kept rather than
+        switched to thread-keyed, since ``_record_consult`` above only ever
+        learns the PI, and one PI's specialist consults are naturally
+        cumulative across however many interview threads that PI has open.
 
         FAILS OPEN in two cases, both of which mean "we have no record", never
         "the panel approved":
@@ -2866,29 +2413,27 @@ class SimulationEngine:
         consulted = self._consulted_domains(subject)
         return set(required_domains_for(verdict) - consulted)
 
-    def _available_post_types(
-        self, agent: "Agent", *, funding_restricted: bool
-    ) -> tuple[PostTypeSpec, ...]:
+    def _available_post_types(self, agent: "Agent") -> tuple[PostTypeSpec, ...]:
         """Layer 1 ∩ layer 2: what this agent may post as a NEW top-level post.
 
         The SAME tuple is rendered into the prompt and used to judge the
         response, so the menu and the gate cannot disagree.
 
-        ``funding_restricted`` is the caller's ``blocked_for_regular``, NOT its
-        ``funding_only``. The two differ: ``funding_only = blocked_for_regular
-        and not has_available_non_funding``, so a blocked agent that has a
-        non-funding post available has ``funding_only=False`` — and keying on
-        that would advertise ``paper`` to an agent whose next non-funding post
-        the block at the top of this handler rejects anyway. ``funding_only``
-        still drives the prompt-template surgery; only this set uses
-        ``blocked_for_regular``.
+        Used to also take a ``restricted`` flag (the caller's
+        ``blocked_for_regular``), forwarded to ``available_for`` as
+        ``terminal_only`` so a blocked agent could still be offered a
+        "reports finished work" type past the regular-work backpressure. That
+        mechanism is gone along with the one post type it ever exempted (the
+        hub's :mag: Opportunity Assessment — see post_types.py); a blocked
+        caller now skips Phase 5 outright instead of calling in here at all
+        (see ``_phase5_new_post``), so this always computes the unrestricted
+        set.
         """
         return available_for(
             self._post_types_for_role(agent.role),
             gate=agent.allowed_sender_ids,
             roles_by_agent=self._roles_by_agent(),
             self_id=agent.agent_id,
-            funding_only=funding_restricted,
         )
 
     def _normalize_tagged_agent(self, tagged_agent: object) -> object:
@@ -3097,10 +2642,21 @@ class SimulationEngine:
         self._poll_client_cursor += 1
         return client
 
-    async def _poll_slack_for_pi_messages(self) -> None:
-        """
-        Poll all channels for new human (non-bot) messages.
-        Add them to the message log.
+    async def _poll_slack_for_bot_messages(self) -> None:
+        """Poll all channels for new bot-authored messages; mirror them into the log.
+
+        Renamed from ``_poll_slack_for_human_messages`` (2026-08-12
+        PI-interaction removal cycle): a human-authored channel message is no
+        longer ingested via Slack at all — there is no PI-bot interaction
+        surface left for it to feed (no reopen, no @-tag routing, no directive
+        flag), so keeping a human branch here would only have grown the log
+        with entries nothing downstream may act on. The remaining job is
+        exactly what the name says: mirror another bot's Slack-native post (a
+        message this process did not itself write) into the shared
+        ``MessageLog``, recording the Slack-mirror mapping so a reply to it
+        can still be threaded. See the removal cycle's PI-interaction audit
+        map and ``MessageLog``'s GATED-method inventory (human rows are
+        filtered there too, independent of this poller).
         """
         if not self.slack_clients:
             return
@@ -3140,7 +2696,8 @@ class SimulationEngine:
                 # (slack_client.normalize_inbound_message). Copying it verbatim, as
                 # this loop used to, ingested a root as a reply to itself — and
                 # get_new_top_level_posts skips anything with a non-null thread_ts, so
-                # the post vanished from Phase 2 and _rebuild_state_from_db made it
+                # the post vanished from every reader of that method (e.g. the hub's
+                # Phase 3 auto-activation scan) and _rebuild_state_from_db made it
                 # permanent. The rule now lives in exactly one place.
                 for msg in messages:
                     ts = msg.get("ts", "")
@@ -3150,99 +2707,45 @@ class SimulationEngine:
                     if not is_bot and user_id:
                         is_bot = client.is_bot_user(user_id)
 
-                    # Add bot messages to the log (so agents can scan them)
-                    # but skip PI-specific handling for them
-                    if is_bot:
-                        bot_name = msg.get("username", "bot")
-                        # Resolve agent_id from bot name
-                        bot_agent_id = self.message_log._bot_name_to_id.get(
-                            bot_name.lower()
-                        )
-                        entry = LogEntry(
-                            ts=ts,
-                            channel=ch_name,
-                            sender_agent_id=bot_agent_id,
-                            sender_name=bot_name,
-                            content=msg.get("text", ""),
-                            thread_ts=msg.get("thread_ts"),
-                            posted_at=float(ts) if ts else 0.0,
-                            is_bot=True,
-                            visibility=ch_visibility,
-                            # This message came *from* Slack, so record the mirror
-                            # mapping exactly as the human branch below does. Without
-                            # it the entry looks DB-origin, and _slack_parent_ts then
-                            # reports "no Slack root" for any thread rooted here —
-                            # silently keeping every reply off Slack. The roots this
-                            # branch ingests are another workspace bot's posts, i.e.
-                            # GrantBot's funding posts, whose threads are open to all
-                            # agents. Slack-origin ⇒ canonical id *is* the Slack ts,
-                            # so the thread parent needs no translation.
-                            slack_ts=ts or None,
-                            slack_channel_id=ch_id,
-                            slack_thread_ts=msg.get("thread_ts"),
-                        )
-                        if not self.message_log.get_entry(ts):
-                            self.message_log.append(entry)
+                    # Bot messages are mirrored into the log so agents can scan
+                    # them; a human message is dropped outright — advance the
+                    # cursor past it (so it is not re-fetched every tick) but
+                    # never append it. There is no PI-bot interaction surface
+                    # left for a human channel post to feed.
+                    if not is_bot:
                         if ts:
                             self._poll_cursors[ch_id] = ts
                         continue
 
-                    # Human message — resolve PI identity
-                    sender_name = client.resolve_user_name(user_id)
-                    pi_agent_ids = self._pi_slack_id_to_agent_ids.get(user_id, [])
+                    bot_name = msg.get("username", "bot")
+                    # Resolve agent_id from bot name
+                    bot_agent_id = self.message_log._bot_name_to_id.get(
+                        bot_name.lower()
+                    )
                     entry = LogEntry(
                         ts=ts,
                         channel=ch_name,
-                        sender_agent_id=None,
-                        sender_name=sender_name,
+                        sender_agent_id=bot_agent_id,
+                        sender_name=bot_name,
                         content=msg.get("text", ""),
                         thread_ts=msg.get("thread_ts"),
                         posted_at=float(ts) if ts else 0.0,
-                        is_bot=False,
+                        is_bot=True,
                         visibility=ch_visibility,
+                        # This message came *from* Slack, so record the mirror
+                        # mapping. Without it the entry looks DB-origin, and
+                        # _slack_parent_ts then reports "no Slack root" for any
+                        # thread rooted here — silently keeping every reply off
+                        # Slack. The roots this branch ingests are another
+                        # workspace bot's posts. Slack-origin ⇒ canonical id
+                        # *is* the Slack ts, so the thread parent needs no
+                        # translation.
                         slack_ts=ts or None,
                         slack_channel_id=ch_id,
-                        # Slack-origin: the canonical id is the Slack ts, so the
-                        # thread parent is already a Slack ts.
                         slack_thread_ts=msg.get("thread_ts"),
                     )
-                    self.message_log.append(entry)
-                    logger.info(
-                        "PI message in #%s from %s: %.60s",
-                        ch_name, sender_name, msg.get("text", "")[:60],
-                    )
-
-                    # Check if PI message references a proposal (clears pending block)
-                    self._check_pi_proposal_review(entry)
-
-                    # PI-specific handling — apply to all agents this PI controls
-                    for pi_agent_id in pi_agent_ids:
-                      agent_obj = self.agents.get(pi_agent_id)
-                      if agent_obj:
-                          agent_obj.state.has_pi_directive = True
-                      if not self._pi_handler:
-                          continue
-                      thread_ts = msg.get("thread_ts")
-
-                      # PI posted in a closed thread → reopen it
-                      if thread_ts and thread_ts in self._closed_thread_ids:
-                          await self._reopen_thread(pi_agent_id, thread_ts, entry)
-
-                      # PI posted in an active thread → set pi_context
-                      elif thread_ts:
-                          agent = self.agents.get(pi_agent_id)
-                          if agent and thread_ts in agent.state.active_threads:
-                              thread = agent.state.active_threads[thread_ts]
-                              thread.pi_context = entry.content
-                              thread.has_pending_reply = True
-                              logger.info("[%s] PI posted in active thread %s", pi_agent_id, thread_ts)
-
-                      # PI tagged their bot in a top-level post or reply
-                      bot_name = self.agents[pi_agent_id].bot_name if pi_agent_id in self.agents else None
-                      if bot_name and f"@{bot_name.lower()}" in msg.get("text", "").lower():
-                          await self._pi_handler.handle_channel_tag(pi_agent_id, entry)
-
-                    # Update cursor
+                    if not self.message_log.get_entry(ts):
+                        self.message_log.append(entry)
                     if ts:
                         self._poll_cursors[ch_id] = ts
 
@@ -3253,11 +2756,22 @@ class SimulationEngine:
         """Ingest messages written to the DB by other processes.
 
         The DB is the primary store, so any message this process hasn't seen —
-        PI messages and bot-authored handover posts written by the web app, and
-        (later) the Slack mirror's inbound side — must be pulled into the live
-        MessageLog. Human/PI messages are additionally routed through PI handling
-        (proposal-review clearing, thread reopen, pi_context, @bot tags). Runs
-        every tick regardless of Slack. See specs/local-db-conversations.md.
+        bot-authored handover posts written by the web app, and (later) the
+        Slack mirror's inbound side, plus any human-authored row (today, only
+        ``reopen_proposal``'s recorded guidance) — must be pulled into the
+        live MessageLog. Bot-authored rows are the live path (design §8); a
+        human-authored (``is_bot=False``) row is ingested too, but purely for
+        history/observability (decision 5) — it can still be *read back* by
+        the general-purpose GATED reads (``get_new_top_level_posts``/
+        ``get_replies_to_agent_posts``/``get_tags_for_agent``), but
+        ``has_new_reply_from_other`` filters ``is_bot=False`` unconditionally
+        (so appending one here can never set a bot's ``has_pending_reply`` or
+        grant reactive priority), and ``_phase3_activate_threads`` filters
+        ``is_bot`` before acting on any entry it reads (so it can never
+        activate a new thread either). There is no PI-interaction handling
+        left to route it into
+        on top of that. Runs every tick regardless of Slack. See
+        specs/local-db-conversations.md.
         """
         if not self.session_factory or not self.simulation_run_id:
             return
@@ -3305,369 +2819,10 @@ class SimulationEngine:
             if r.is_bot:
                 logger.info("External bot message in #%s: %.60s", entry.channel, entry.content[:60])
             else:
-                logger.info("PI (web) message in #%s: %.60s", entry.channel, entry.content[:60])
-                await self._handle_pi_inbound_entry(entry)
-
-    async def _handle_pi_inbound_entry(self, entry: LogEntry) -> None:
-        """Apply PI-message side effects, derived from the thread (no Slack map).
-
-        Clears pending-proposal blocks, reopens closed threads, sets pi_context
-        on active threads, and honors @bot tags — using the thread's own
-        participants rather than a Slack user→agent mapping, so it works with
-        Slack off.
-        """
-        # Clears any pending proposal on this thread (keyed purely by thread id).
-        self._check_pi_proposal_review(entry)
-
-        thread_ts = entry.thread_ts
-        if thread_ts:
-            # Reopen a closed thread for its participants.
-            if thread_ts in self._closed_thread_ids:
-                # Old closed threads may have been windowed out of the log at
-                # startup (B2) — pull the history back so participants resolve.
-                await self._hydrate_thread_from_db(thread_ts)
-                history = self.message_log.get_thread_history(thread_ts)
-                participants = [
-                    h.sender_agent_id for h in history
-                    if h.sender_agent_id and h.sender_agent_id in self.agents
-                ]
-                if participants:
-                    await self._reopen_thread(participants[0], thread_ts, entry)
-            else:
-                # Active thread → treat the PI message as authoritative context.
-                for agent in self.agents.values():
-                    thread = agent.state.active_threads.get(thread_ts)
-                    if thread:
-                        thread.pi_context = entry.content
-                        thread.has_pending_reply = True
-                        agent.state.has_pi_directive = True
-
-        # @bot tag → route to the tagged agent (same as the Slack path).
-        tagged_id = self.message_log._extract_tagged_agent(entry.content)
-        if tagged_id and tagged_id in self.agents and self._pi_handler:
-            self.agents[tagged_id].state.has_pi_directive = True
-            await self._pi_handler.handle_channel_tag(tagged_id, entry)
-
-    def _check_pi_proposal_review(self, entry: LogEntry) -> None:
-        """Check if a PI message clears a pending proposal for any agent."""
-        thread_ts = entry.thread_ts
-        if not thread_ts:
-            return
-
-        for agent in self.agents.values():
-            for proposal in agent.state.pending_proposals:
-                if proposal.thread_id == thread_ts and not proposal.reviewed:
-                    proposal.reviewed = True
-                    logger.info(
-                        "[%s] Proposal in thread %s reviewed by PI",
-                        agent.agent_id, thread_ts,
-                    )
-
-    async def _reopen_thread(self, agent_id: str, thread_ts: str, pi_entry: LogEntry) -> None:
-        """Reopen a closed thread when a PI posts in it."""
-        self._closed_thread_ids.discard(thread_ts)
-        agent = self.agents.get(agent_id)
-        if not agent:
-            return
-
-        # An old closed thread may have been windowed out of the log at startup
-        # (B2); pull its history so the other-agent lookup and reply budget below
-        # see the real conversation.
-        await self._hydrate_thread_from_db(thread_ts)
-        # Find the other agent from thread history
-        history = self.message_log.get_thread_history(thread_ts)
-        other_id = None
-        for entry in history:
-            if entry.sender_agent_id and entry.sender_agent_id != agent_id:
-                other_id = entry.sender_agent_id
-                break
-
-        if not other_id:
-            logger.warning("[%s] Cannot reopen thread %s — no other agent found", agent_id, thread_ts)
-            return
-
-        # Create fresh ThreadState for both agents
-        # Set message_count_offset so the bots get a fresh budget of replies
-        existing_count = len(self.message_log.get_thread_history(thread_ts))
-        agent.state.active_threads[thread_ts] = ThreadState(
-            thread_id=thread_ts,
-            channel=pi_entry.channel,
-            other_agent_id=other_id,
-            message_count=0,
-            has_pending_reply=True,
-            pi_context=pi_entry.content,
-            message_count_offset=existing_count,
-        )
-
-        other_agent = self.agents.get(other_id)
-        if other_agent:
-            other_agent.state.active_threads[thread_ts] = ThreadState(
-                thread_id=thread_ts,
-                channel=pi_entry.channel,
-                other_agent_id=agent_id,
-                message_count=0,
-                has_pending_reply=True,
-                message_count_offset=existing_count,
-            )
-
-        logger.info("[%s] PI reopened closed thread %s with %s", agent_id, thread_ts, other_id)
-
-    async def _poll_pi_dms(self) -> None:
-        """Poll Slack for PI DMs and record them as inbound rows.
-
-        Processing is unified through the DB: this method only persists inbound
-        Slack DMs to pi_dm_messages; _poll_pi_dms_from_db is the single place
-        that runs them through PIHandler (so Slack and web DMs are handled
-        identically and never double-processed). See specs/local-db-conversations.md.
-        """
-        if not self._pi_slack_id_to_agent_ids or not self.session_factory or not self.simulation_run_id:
-            return
-
-        # Default cursor to simulation start time — only process DMs sent after we started
-        default_cursor = str(self._start_time.timestamp()) if self._start_time else "0"
-
-        from src.services.pi_inbox import record_pi_dm
-
-        for pi_slack_id, agent_ids in self._pi_slack_id_to_agent_ids.items():
-            for agent_id in agent_ids:
-                client = self.slack_clients.get(agent_id)
-                if not client or not client.is_connected:
-                    continue
-
-                oldest = self._dm_poll_cursors.get(agent_id, default_cursor)
-                messages = client.poll_dm_messages(pi_slack_id, oldest=oldest)
-
-                for msg in messages:
-                    ts = msg.get("ts", "")
-                    text = msg.get("text", "").strip()
-                    if not text:
-                        continue
-                    logger.info("[%s] PI DM from %s: %s", agent_id, pi_slack_id, text[:80])
-                    try:
-                        async with self.session_factory() as db:
-                            await record_pi_dm(
-                                db, run_id=self.simulation_run_id, agent_id=agent_id,
-                                pi_user_id=pi_slack_id, direction="inbound", content=text,
-                                sender_name="PI", slack_ts=ts or None,
-                            )
-                            await db.commit()
-                    except Exception as exc:
-                        logger.error("[%s] Failed to record PI DM: %s", agent_id, exc)
-                    if ts > oldest:
-                        self._dm_poll_cursors[agent_id] = ts
-
-    async def _seed_pi_dm_cursor(self) -> None:
-        """Start the DM poller past existing inbound DMs (don't replay history).
-
-        Seeds both the cursor (max created_at — the DB server's clock, see R3)
-        and the seen-set (ts of inbound DMs within the lookback window), so the
-        first poll's lookback re-scan doesn't re-process history through
-        handle_dm on restart.
-        """
-        if not self.session_factory or not self.simulation_run_id:
-            return
-        from sqlalchemy import func as sa_func
-        from sqlalchemy import select as sa_select
-
-        from src.models import PiDmMessage
-        try:
-            async with self.session_factory() as db:
-                mx = (await db.execute(
-                    sa_select(sa_func.max(PiDmMessage.created_at)).where(
-                        PiDmMessage.simulation_run_id == self.simulation_run_id,
-                        PiDmMessage.direction == "inbound",
-                    )
-                )).scalar_one_or_none()
-                if mx:
-                    self._pi_dm_cursor = max(self._pi_dm_cursor, mx)
-                    seen = (await db.execute(
-                        sa_select(PiDmMessage.ts, PiDmMessage.created_at).where(
-                            PiDmMessage.simulation_run_id == self.simulation_run_id,
-                            PiDmMessage.direction == "inbound",
-                            PiDmMessage.created_at > self._pi_dm_cursor - PI_INBOX_LOOKBACK,
-                        )
-                    )).all()
-                    for ts, created_at in seen:
-                        if ts:
-                            self._pi_dm_seen[ts] = created_at or EPOCH_UTC
-        except Exception as exc:
-            logger.warning("PI DM cursor seed failed: %s", exc)
-
-    async def _poll_pi_dms_from_db(self) -> None:
-        """Process inbound PI DMs recorded in the DB (Slack or web-originated).
-
-        The single processor for PI DMs: reads new inbound pi_dm_messages rows
-        and runs each through PIHandler.handle_dm (classify → standing
-        instruction / feedback / question), then flips has_pi_directive so
-        Phase 5 runs. Works with Slack off. See specs/local-db-conversations.md.
-        """
-        if not self._pi_handler or not self.session_factory or not self.simulation_run_id:
-            return
-        from sqlalchemy import select as sa_select
-
-        from src.models import PiDmMessage
-        floor = self._pi_dm_cursor - PI_INBOX_LOOKBACK
-        try:
-            async with self.session_factory() as db:
-                rows = (await db.execute(
-                    sa_select(PiDmMessage)
-                    .where(
-                        PiDmMessage.simulation_run_id == self.simulation_run_id,
-                        PiDmMessage.direction == "inbound",
-                        # Lookback + seen-set dedup below, mirroring the channel
-                        # poller, so a late-committing DM row isn't skipped (H2).
-                        # created_at, not posted_at, so the window doesn't depend
-                        # on the writing process's clock (R3).
-                        PiDmMessage.created_at > floor,
-                    )
-                    .order_by(PiDmMessage.created_at.asc())
-                )).scalars().all()
-        except Exception as exc:
-            logger.warning("PI DM inbox poll failed: %s", exc)
-            return
-
-        for r in rows:
-            if r.created_at and r.created_at > self._pi_dm_cursor:
-                self._pi_dm_cursor = r.created_at
-            if r.ts and r.ts in self._pi_dm_seen:
-                continue  # already processed (lookback re-scan)
-            if r.agent_id not in self.agents:
-                continue
-            if r.ts:
-                self._pi_dm_seen[r.ts] = r.created_at or EPOCH_UTC
-            try:
-                await self._pi_handler.handle_dm(r.agent_id, r.pi_user_id, r.content)
-                self.agents[r.agent_id].state.has_pi_directive = True
-            except Exception as exc:
-                logger.error("[%s] Failed to handle PI DM (DB): %s", r.agent_id, exc)
-
-        # Prune the seen-set to the lookback window — anything at or below the new
-        # floor won't be re-queried, so it no longer needs tracking.
-        prune_floor = self._pi_dm_cursor - PI_INBOX_LOOKBACK
-        if self._pi_dm_seen:
-            self._pi_dm_seen = {
-                ts: ca for ts, ca in self._pi_dm_seen.items() if ca > prune_floor
-            }
-
-    async def _poll_proposal_threads_for_pi(self) -> None:
-        """Poll unreviewed proposal threads for PI replies.
-
-        Thread replies don't appear in channel history, so this checks
-        conversations.replies on each unreviewed proposal thread to detect
-        PI messages that would trigger a thread reopen.
-        """
-        if not self._pi_slack_id_to_agent_ids:
-            return
-
-        now = time.time()
-        if now - self._last_proposal_poll < PROPOSAL_POLL_INTERVAL:
-            return
-        self._last_proposal_poll = now
-
-        # Collect PI user IDs for quick lookup
-        pi_user_ids = set(self._pi_slack_id_to_agent_ids.keys())
-        if not pi_user_ids:
-            return
-
-        # Find unreviewed proposals from in-memory state
-        threads_to_poll: list[tuple[str, str, str]] = []  # (thread_id, channel_name, agent_id)
-        seen = set()
-        for agent in self.agents.values():
-            for proposal in agent.state.pending_proposals:
-                if not proposal.reviewed and proposal.thread_id not in seen:
-                    seen.add(proposal.thread_id)
-                    threads_to_poll.append(
-                        (proposal.thread_id, proposal.channel, agent.agent_id)
-                    )
-
-        if not threads_to_poll:
-            return
-
-        default_client = self._next_poll_client()
-        if not default_client:
-            return
-
-        default_cursor = str(self._start_time.timestamp()) if self._start_time else "0"
-
-        for thread_id, channel_name, agent_id in threads_to_poll:
-            ch_id = self._channel_id_map.get(channel_name)
-            if not ch_id:
-                continue
-
-            # Route per-channel: collab_private channels need a bot that was
-            # invited. A round-robin client will hit channel_not_found on any
-            # private channel it isn't a member of.
-            client = self._client_for_channel(ch_id, default_client)
-            if client is None:
-                logger.debug(
-                    "Skipping proposal-thread poll for private channel #%s — no connected member bot",
-                    channel_name,
-                )
-                continue
-
-            cursor_key = f"proposal_thread:{thread_id}"
-            oldest = self._poll_cursors.get(cursor_key, default_cursor)
-
-            try:
-                replies = client.get_thread_replies(ch_id, thread_id, oldest=oldest)
-            except ThreadNotFound:
-                self._evict_dead_thread(thread_id)
-                continue
-            except Exception as exc:
-                logger.debug("Failed to poll proposal thread %s: %s", thread_id, exc)
-                continue
-
-            for msg in replies:
-                ts = msg.get("ts", "")
-                user_id = msg.get("user", "")
-
-                # Skip bot messages and the root message
-                if msg.get("bot_id") or ts == thread_id:
-                    continue
-
-                # Only process PI messages
-                if user_id not in pi_user_ids:
-                    continue
-
-                sender_name = client.resolve_user_name(user_id)
-                entry = LogEntry(
-                    ts=ts,
-                    channel=channel_name,
-                    sender_agent_id=None,
-                    sender_name=sender_name,
-                    content=msg.get("text", ""),
-                    thread_ts=thread_id,
-                    posted_at=float(ts) if ts else 0.0,
-                    is_bot=False,
-                    slack_ts=ts or None,
-                    slack_channel_id=ch_id,
-                    # Slack-origin (polled from a Slack proposal thread), so the
-                    # canonical thread id is already the Slack parent ts.
-                    slack_thread_ts=thread_id,
-                )
-
-                # Avoid re-processing messages already in the log
-                if self.message_log.get_entry(ts):
-                    continue
-
-                self.message_log.append(entry)
                 logger.info(
-                    "PI message in proposal thread %s (#%s) from %s: %.60s",
-                    thread_id, channel_name, sender_name, msg.get("text", "")[:60],
+                    "Human-origin DB message in #%s: %.60s (no action taken)",
+                    entry.channel, entry.content[:60],
                 )
-
-                # Mark proposal as reviewed
-                self._check_pi_proposal_review(entry)
-
-                # Reopen the thread for all PI's agents
-                pi_agent_ids = self._pi_slack_id_to_agent_ids.get(user_id, [])
-                for pi_agent_id in pi_agent_ids:
-                    if thread_id in self._closed_thread_ids:
-                        await self._reopen_thread(pi_agent_id, thread_id, entry)
-
-                # Update cursor
-                if ts > oldest:
-                    self._poll_cursors[cursor_key] = ts
 
     # ------------------------------------------------------------------
     # Message posting
@@ -3726,9 +2881,9 @@ class SimulationEngine:
         # LogEntry with content="" and slack_ts=None — a DB row with no
         # corresponding Slack message, breaking the row-count-matches-Slack-
         # message-count invariant documented below, and the caller still
-        # counts the turn as published (message_count incremented,
-        # interesting_posts drained) even though nothing went out. Return
-        # before any of that — no Slack call, no minted ts, no log entry.
+        # counts the turn as published (message_count incremented) even
+        # though nothing went out. Return before any of that — no Slack
+        # call, no minted ts, no log entry.
         if not text:
             logger.warning(
                 "[%s] Suppressed a post to #%s: text was empty after "
@@ -3824,7 +2979,8 @@ class SimulationEngine:
                 posted_at = time.time()
             # Chunk 0 keeps the caller's canonical thread id. A continuation chunk of
             # a *root* post hangs off chunk 0 — one logical post stays one top-level
-            # post, so nobody's Phase 2 scan sees N roots where the author wrote one.
+            # post, so the hub's Phase 3 auto-activation scan doesn't see N roots
+            # where the author wrote one.
             canonical_parent = thread_ts if (thread_ts or index == 0) else root_ts
             entry = LogEntry(
                 ts=ts,
@@ -3894,40 +3050,6 @@ class SimulationEngine:
     # ------------------------------------------------------------------
     # Setup helpers
     # ------------------------------------------------------------------
-
-    async def _load_pi_mappings(self) -> None:
-        """Load PI and delegate Slack user ID -> agent ID mappings from AgentRegistry."""
-        if not self.session_factory:
-            logger.info("No DB session — skipping PI mapping load")
-            return
-        try:
-            from sqlalchemy import select
-
-            from src.models import AgentRegistry
-            async with self.session_factory() as db:
-                result = await db.execute(
-                    select(
-                        AgentRegistry.agent_id,
-                        AgentRegistry.slack_user_id,
-                        AgentRegistry.delegate_slack_ids,
-                    )
-                    .where(AgentRegistry.slack_user_id.isnot(None))
-                    .where(AgentRegistry.status == "active")
-                )
-                for row in result:
-                    # Primary PI
-                    self._pi_slack_id_to_agent_ids.setdefault(row.slack_user_id, []).append(row.agent_id)
-                    # Delegates
-                    for delegate_id in (row.delegate_slack_ids or []):
-                        self._pi_slack_id_to_agent_ids.setdefault(delegate_id, []).append(row.agent_id)
-            if self._pi_slack_id_to_agent_ids:
-                logger.info("Loaded PI mappings: %s", {
-                    k[:8] + "...": v for k, v in self._pi_slack_id_to_agent_ids.items()
-                })
-            else:
-                logger.info("No PI Slack accounts linked yet")
-        except Exception as exc:
-            logger.warning("Failed to load PI mappings: %s", exc)
 
     def _ensure_seeded_channels(self) -> None:
         """Create any missing seeded channels and join relevant bots."""
@@ -4065,26 +3187,6 @@ class SimulationEngine:
     def refresh_lab_directories(self) -> None:
         """Rebuild every agent's lab directory against its CURRENT gate."""
         self._build_lab_directories()
-
-    async def _backfill_foa_cache(self) -> None:
-        """Ensure locally cached FOA details exist for all previously posted opportunities."""
-        from sqlalchemy import select as sa_select
-
-        from src.agent.foa_cache import backfill_cache
-        from src.models import GrantbotPostedFoa
-
-        if not self.session_factory:
-            return
-        try:
-            async with self.session_factory() as db:
-                result = await db.execute(sa_select(GrantbotPostedFoa.foa_number))
-                posted_numbers = [n for n in result.scalars().all() if n]
-            if posted_numbers:
-                count = await backfill_cache(posted_numbers)
-                if count:
-                    logger.info("Backfilled FOA cache for %d opportunities", count)
-        except Exception as exc:
-            logger.warning("FOA cache backfill failed: %s", exc)
 
     async def _rebuild_state_from_db(self) -> None:
         """Hydrate the MessageLog from agent_messages — the primary store.
@@ -4820,22 +3922,20 @@ class SimulationEngine:
             logger.warning("Failed to flush LLM call logs: %s", exc)
 
     def _sync_profiles_from_disk(self) -> None:
-        """Reload any agent whose profile files changed on disk since last turn.
+        """Reload any agent whose public profile file changed on disk since last turn.
 
-        Private and public profiles can be edited from the web app, which runs
-        in a separate process and writes profiles/{private,public}/{id}.md on a
-        shared mounted volume. Each Agent caches its profile content in memory
-        and otherwise only invalidates that cache for in-process edits (the
-        Slack-DM path via Agent.update_private_profile). Without this check, a
-        web edit would not reach the running simulation until a restart.
+        The public profile can be edited from the web app, which runs in a
+        separate process and writes profiles/public/{id}.md on a shared
+        mounted volume. Each Agent caches its profile content in memory.
+        Without this check, a web edit would not reach the running simulation
+        until a restart.
 
-        Detection is by file mtime: cheap (two stat() calls per agent, no DB
-        round-trip) and tied to exactly what the agent reads. Re-reading the
-        same content after an in-process Slack-DM edit is harmless.
+        Detection is by file mtime: cheap (one stat() call per agent, no DB
+        round-trip) and tied to exactly what the agent reads.
         """
         for agent in self.agents.values():
             mtime = 0.0
-            for sub in ("private", "public"):
+            for sub in ("public",):
                 path = PROFILES_DIR / sub / f"{agent.agent_id}.md"
                 try:
                     mtime = max(mtime, path.stat().st_mtime)
@@ -4863,8 +3963,8 @@ class SimulationEngine:
         process restart. Tokens are read from the DB row (falling back to .env),
         so a freshly provisioned token is picked up on the next tick too.
 
-        Mutates self.agents / self.slack_clients IN PLACE: PIHandler holds those
-        dicts by reference, so they must never be reassigned.
+        Mutates self.agents / self.slack_clients IN PLACE — never reassigned —
+        in case anything else in the engine has taken a reference to either dict.
         """
         if not self.session_factory:
             return
@@ -4955,7 +4055,6 @@ class SimulationEngine:
             for aid in to_remove:
                 self.agents.pop(aid, None)
                 self.slack_clients.pop(aid, None)  # Web API only — no socket to close
-                self._dm_poll_cursors.pop(aid, None)
                 bot_name = next(
                     (n for n, a in self._bot_name_to_id.items() if a == aid), None
                 )
@@ -4984,7 +4083,6 @@ class SimulationEngine:
                     from src.agent.transport import NullTransport
                     client = NullTransport(agent_id=aid)
                 agent = Agent(agent_id=aid, bot_name=r.bot_name, pi_name=r.pi_name, role=r.role)
-                # In-place inserts (PIHandler shares these dicts by reference).
                 self.agents[aid] = agent
                 self.slack_clients[aid] = client
                 self._bot_name_to_id[agent.bot_name.lower()] = aid
@@ -4992,11 +4090,6 @@ class SimulationEngine:
 
             # Rebuild cross-agent derived structures after any membership change.
             self.message_log.set_bot_name_map(self._bot_name_to_id)
-            # Rebuild PI mappings from scratch (clear in place — PIHandler shares
-            # this dict by reference; _load_pi_mappings appends, so it must start
-            # empty to avoid accumulating duplicates).
-            self._pi_slack_id_to_agent_ids.clear()
-            await self._load_pi_mappings()
 
             # Recompute cohort interaction sets after roster changes so newly
             # active agents get their gate populated this tick.
@@ -5009,6 +4102,59 @@ class SimulationEngine:
         """Set every agent's gate to None (no filtering). See v2 §5.4."""
         for agent in self.agents.values():
             agent.allowed_sender_ids = None
+
+    def _validate_star_topology(self) -> list[str]:
+        """Check the live cohort gates against the hub-and-spoke ("star") design.
+
+        The design (docs/plans/2026-08-12-pr34-pitch-only-reconciliation-design.md
+        §5) is strictly hub-and-spoke: every ``pi_lab`` agent's cohort is
+        ``{lab, hub}`` — it may reach the ``scout_hub`` agent and nothing else. Two
+        ways a gate can violate that, checked for every ``pi_lab`` agent whose gate
+        is not None (``gate is None`` means isolation is off for that agent, which
+        is vacuously fine — an ungated agent can always reach the hub):
+
+        (a) the gate contains another ``pi_lab`` agent — labs can reach each other
+            directly, which the hub-only design forbids.
+        (b) the gate contains no ``scout_hub`` agent — the hub is unreachable, so
+            the agent has nowhere to land a pitch.
+
+        Returns one human-readable violation string per broken rule (a lab-to-lab
+        pair is reported once, not once per side); empty when the topology is
+        star-shaped, including when every gate is None.
+        """
+        violations: list[str] = []
+        reported_pairs: set[frozenset[str]] = set()
+        for agent_id, agent in self.agents.items():
+            if agent.role != "pi_lab":
+                continue
+            gate = agent.allowed_sender_ids
+            if gate is None:
+                continue
+
+            has_hub = False
+            for other_id in gate:
+                other = self.agents.get(other_id)
+                if other is None or other_id == agent_id:
+                    continue
+                if other.role == "scout_hub":
+                    has_hub = True
+                elif other.role == "pi_lab":
+                    pair = frozenset((agent_id, other_id))
+                    if pair not in reported_pairs:
+                        reported_pairs.add(pair)
+                        violations.append(
+                            f"{agent_id} and {other_id} are both pi_lab agents but "
+                            "can reach each other directly — labs may only be "
+                            "cohorted with the hub"
+                        )
+
+            if not has_hub:
+                violations.append(
+                    f"{agent_id} has no scout_hub agent in its cohort gate — the "
+                    "hub is unreachable, so pitch targets are unsatisfiable"
+                )
+
+        return violations
 
     async def _recompute_allowed_sender_ids(self) -> None:
         """Recompute each live agent's cohort-mate set for the interaction gate.
@@ -5130,26 +4276,27 @@ class SimulationEngine:
             # attributable to every configuration it actually ran under (v2 §13.1).
             await self._record_topology_snapshot()
 
+        # Star-topology check: log only. The startup call site (start(), right
+        # after the FIRST invocation of this method) raises instead — a live run
+        # must not crash on an admin's transient cohort edit, but the edit still
+        # needs to show up somewhere an operator will see it.
+        for violation in self._validate_star_topology():
+            logger.error("[cohort] star-topology violation: %s", violation)
+
     def _apply_cohort_gate_to_state(self) -> None:
         """Reconcile in-memory agent state with the freshly computed gate.
 
-        Two jobs, both required because the gate is a *read-time* filter and state
-        outlives a membership change:
-
-        1. **Grandfather** active threads whose partner is no longer permitted
-           (v2 §8). They still get Phase 4 replies — an open conversation is
-           entitled to conclude rather than waste the calls already spent — but
-           they are barred from the reactive-priority tier so they cannot outrank
-           gate-compliant work. This is also the path that marks a *resumed* run's
-           threads: the DB rebuild runs before the first recompute, so every
-           restart reconstructs its open partnerships gate-blind.
-        2. **Prune** banked ``interesting_posts`` whose author is no longer
-           permitted (v2 §6.1). Read-time filtering never removes posts that were
-           already accepted, so without this a membership change leaves stale posts
-           driving Phase 5 forever.
+        **Grandfather** active threads whose partner is no longer permitted
+        (v2 §8), because the gate is a *read-time* filter and state outlives a
+        membership change. They still get Phase 4 replies — an open
+        conversation is entitled to conclude rather than waste the calls
+        already spent — but they are barred from the reactive-priority tier
+        so they cannot outrank gate-compliant work. This is also the path
+        that marks a *resumed* run's threads: the DB rebuild runs before the
+        first recompute, so every restart reconstructs its open partnerships
+        gate-blind.
         """
         newly_grandfathered = 0
-        pruned_total = 0
         for agent in self.agents.values():
             allowed = agent.allowed_sender_ids
             if allowed is None:
@@ -5187,24 +4334,10 @@ class SimulationEngine:
                         agent.agent_id, thread.thread_id, other,
                     )
 
-            before = len(agent.state.interesting_posts)
-            if before:
-                agent.state.interesting_posts = [
-                    p for p in agent.state.interesting_posts
-                    if not p.sender_agent_id or p.sender_agent_id in allowed
-                ]
-                dropped = before - len(agent.state.interesting_posts)
-                if dropped:
-                    pruned_total += dropped
-                    logger.debug(
-                        "[cohort] %s: pruned %d banked interesting_posts from "
-                        "non-cohort senders", agent.agent_id, dropped,
-                    )
-
-        if newly_grandfathered or pruned_total:
+        if newly_grandfathered:
             logger.info(
-                "[cohort] state reconciled: %d threads grandfathered, %d stale posts pruned",
-                newly_grandfathered, pruned_total,
+                "[cohort] state reconciled: %d threads grandfathered",
+                newly_grandfathered,
             )
 
     def cohort_topology_snapshot(self) -> dict[str, Any]:
@@ -5272,288 +4405,6 @@ class SimulationEngine:
         except Exception as exc:
             logger.warning("[cohort] topology snapshot failed: %s", exc)
 
-    async def _sync_proposal_reviews_from_db(self) -> None:
-        """Check DB for web-app proposal reviews and mark in-memory proposals as reviewed.
-
-        For rating=0 reviews (reopened with PI guidance), also reopen the thread
-        so both agents resume discussion incorporating the PI's direction.
-        """
-        if not self.session_factory:
-            return
-        try:
-            async with self.session_factory() as db:
-                from sqlalchemy import select as sa_select
-                # Get all reviews with rating and guidance info, plus the
-                # ThreadDecision's refined_in_channel marker (set when a
-                # reopen migrated the refinement into a collab_private
-                # channel — in that case the legacy "reopen the public
-                # thread" path must NOT fire, or we'd drop the PI's
-                # guidance back into the public thread and leak it).
-                result = await db.execute(
-                    sa_select(
-                        ProposalReview.agent_id,
-                        ProposalReview.rating,
-                        ProposalReview.comment,
-                        ThreadDecision.thread_id,
-                        ThreadDecision.channel,
-                        ThreadDecision.refined_in_channel,
-                    )
-                    .join(ThreadDecision, ProposalReview.thread_decision_id == ThreadDecision.id)
-                )
-                rows = list(result)
-
-            reviewed_set = {(r.agent_id, r.thread_id) for r in rows}
-            # Thread IDs of proposals that have been migrated to a private
-            # channel. Any agent with a pending proposal on such a thread is
-            # unblocked: the proposal is under active refinement, not
-            # awaiting first review. Without this, only the PI who triggered
-            # the reopen (and whose ProposalReview row exists) would be
-            # unblocked — the other agent would stay blocked and silently
-            # skip Phase 5 in the private channel.
-            migrated_threads = {
-                r.thread_id for r in rows if r.refined_in_channel is not None
-            }
-            if not reviewed_set and not migrated_threads:
-                return
-
-            # Build lookup for rating=0 (reopened with guidance) reviews.
-            # Rows with refined_in_channel set are skipped entirely — those
-            # reopens were handled by the private-channel migration flow;
-            # resurrecting the legacy public-thread reopen would undo the
-            # privacy guarantee.
-            reopen_guidance: dict[tuple[str, str], tuple[str, str]] = {}
-            for r in rows:
-                if r.rating == 0 and r.comment and r.refined_in_channel is None:
-                    reopen_guidance[(r.agent_id, r.thread_id)] = (
-                        _strip_reopen_prefix(r.comment), r.channel,
-                    )
-
-            # Migrated reopens (refined_in_channel set) handle their guidance in
-            # the private channel, not the public thread. Collect the channel id
-            # + PI guidance per migrated thread so we can seed the handover as a
-            # PI-priority interesting post and actually kick off refinement.
-            migrated_info: dict[str, tuple[str, str]] = {}  # thread_id -> (refined_channel_id, guidance)
-            for r in rows:
-                if r.refined_in_channel is None:
-                    continue
-                guidance = _strip_reopen_prefix(r.comment) if (r.rating == 0 and r.comment) else ""
-                # Prefer a row that carries guidance if multiple reviews exist.
-                if r.thread_id not in migrated_info or guidance:
-                    migrated_info[r.thread_id] = (r.refined_in_channel, guidance)
-
-            # Mark matching in-memory proposals as reviewed. A proposal is
-            # considered reviewed for unblocking purposes if EITHER this agent
-            # has a ProposalReview row OR the proposal has been migrated to a
-            # private channel (refinement supersedes review).
-            newly_reviewed: list[tuple[Agent, str]] = []
-            for agent in self.agents.values():
-                for proposal in agent.state.pending_proposals:
-                    if not proposal.reviewed:
-                        unblock = (
-                            (agent.agent_id, proposal.thread_id) in reviewed_set
-                            or proposal.thread_id in migrated_threads
-                        )
-                        if unblock:
-                            proposal.reviewed = True
-                            newly_reviewed.append((agent, proposal.other_agent_id))
-                            logger.info(
-                                "[%s] Proposal for thread %s marked reviewed via web app",
-                                agent.agent_id, proposal.thread_id,
-                            )
-
-            # Detect rating=0 reviews that need thread reopening, independent of
-            # the reviewed flag (which may already be True from a prior sync).
-            # Dedupe by thread_id within this pass so that if the PI reviewed
-            # both sides of the pair, we only reopen the thread once.
-            newly_reopened: list[tuple[Agent, str, str, str]] = []  # agent, other_id, thread_id, guidance
-            seen_reopens: set[str] = set()
-            for agent in self.agents.values():
-                for proposal in agent.state.pending_proposals:
-                    if proposal.thread_id in seen_reopens:
-                        continue
-                    if proposal.thread_id in self._db_reopened_thread_ids:
-                        continue
-                    key = (agent.agent_id, proposal.thread_id)
-                    if key in reopen_guidance:
-                        guidance, _channel = reopen_guidance[key]
-                        seen_reopens.add(proposal.thread_id)
-                        newly_reopened.append(
-                            (agent, proposal.other_agent_id, proposal.thread_id, guidance)
-                        )
-
-            # Update memory for agents whose proposals were just reviewed
-            for agent, other_id in newly_reviewed:
-                event = f"PI reviewed proposal with {other_id} — agent is now unblocked for new posts"
-                await self._update_agent_memory(agent, event)
-
-            # Reopen threads where PI provided guidance (rating=0)
-            for agent, other_id, thread_id, guidance in newly_reopened:
-                channel = None
-                for p in agent.state.pending_proposals:
-                    if p.thread_id == thread_id:
-                        channel = p.channel
-                        break
-                if not channel:
-                    continue
-
-                # Old closed threads may have been windowed out of the log at
-                # startup (B2); hydrate so the reply-budget offset below counts
-                # the real prior history rather than 0.
-                await self._hydrate_thread_from_db(thread_id)
-
-                # Create a synthetic log entry for the PI guidance so it appears
-                # in thread history and the agents can see it
-                minted = self.mint_ts()
-                pi_entry = LogEntry(
-                    ts=minted,
-                    channel=channel,
-                    sender_agent_id=None,
-                    sender_name="PI (via web)",
-                    content=guidance,
-                    thread_ts=thread_id,
-                    posted_at=float(minted),
-                    is_bot=False,
-                )
-                self.message_log.append(pi_entry)
-
-                # Reopen the thread for both agents
-                self._closed_thread_ids.discard(thread_id)
-                existing_count = len(self.message_log.get_thread_history(thread_id))
-
-                agent.state.active_threads[thread_id] = ThreadState(
-                    thread_id=thread_id,
-                    channel=channel,
-                    other_agent_id=other_id,
-                    message_count=0,
-                    has_pending_reply=True,
-                    pi_context=guidance,
-                    message_count_offset=existing_count,
-                )
-
-                other_agent = self.agents.get(other_id)
-                if other_agent:
-                    other_agent.state.active_threads[thread_id] = ThreadState(
-                        thread_id=thread_id,
-                        channel=channel,
-                        other_agent_id=agent.agent_id,
-                        message_count=0,
-                        has_pending_reply=True,
-                        message_count_offset=existing_count,
-                    )
-
-                self._db_reopened_thread_ids.add(thread_id)
-                logger.info(
-                    "[%s] PI guidance via web reopened thread %s with %s: %.60s",
-                    agent.agent_id, thread_id, other_id, guidance[:60],
-                )
-
-            # Kick-start refinement for proposals migrated to a private channel.
-            self._seed_private_refinements(migrated_info)
-        except Exception as exc:
-            logger.debug("Proposal review sync failed: %s", exc)
-
-    def _seed_private_refinements(self, migrated_info: dict[str, tuple[str, str]]) -> None:
-        """Seed the private-channel handover as a PI-priority interesting post.
-
-        When a PI reopens a proposal it migrates to a collab_private channel and
-        the web flow posts the handover (proposal summary + PI guidance + a
-        "bots, please proceed" prompt). Unblocking the agents is not enough to
-        make them act: in the flat private-channel model refinement flows
-        through Phase 2 scan -> interesting_posts -> Phase 5, but the handover
-        is older than the agents' resumed cursor (and the cursor rewind can
-        overshoot to a stale sibling channel), so Phase 2 never surfaces it and
-        both bots skip Phase 5 forever.
-
-        We therefore inject the handover directly into the *responding* bot's
-        interesting_posts as a PI-priority post carrying the guidance as
-        pi_context — mirroring how the legacy public reopen force-seeds an
-        active_thread. pi_priority bypasses the random Phase 5 skip and the
-        unreviewed-proposal block; the existing private-channel turn-taking
-        (don't reply if we posted last) decides which bot goes first.
-
-        Fires once per thread per process (tracked in
-        _db_private_refined_thread_ids). No-ops until the channel is tracked and
-        its handover has been polled into the message log — so it self-heals on
-        a later tick if discovery/poll hasn't caught up yet.
-        """
-        if not migrated_info:
-            return
-        name_by_id = {cid: name for name, cid in self._channel_id_map.items()}
-        for thread_id, (refined_cid, guidance) in migrated_info.items():
-            if thread_id in self._db_private_refined_thread_ids:
-                continue
-            channel_name = name_by_id.get(refined_cid)
-            if not channel_name:
-                continue  # channel not tracked yet — retry next tick
-            if channel_name in self._finalized_private_channels:
-                self._db_private_refined_thread_ids.add(thread_id)
-                continue  # refinement already converged on a recorded proposal
-            # Anchor on the most recent top-level bot post in the channel (the
-            # handover). If none is in the log yet, the poll hasn't reached it.
-            anchor = next(
-                (
-                    e for e in reversed(self.message_log._entries)
-                    if e.channel == channel_name
-                    and e.thread_ts is None
-                    and e.is_bot
-                    and e.sender_agent_id
-                ),
-                None,
-            )
-            if anchor is None:
-                continue  # handover not polled in yet — retry next tick
-
-            # Recency guard: only kick-start refinements that are fresh. A stale
-            # handover was already refined or abandoned; re-seeding it on a
-            # fresh process would risk reviving a long-dead channel (the
-            # in-process dedup set is empty after a restart).
-            if time.time() - anchor.posted_at > _PRIVATE_REFINEMENT_SEED_MAX_AGE_S:
-                logger.debug(
-                    "Skipping stale private refinement #%s (thread %s, handover %.0fd old)",
-                    channel_name, thread_id,
-                    (time.time() - anchor.posted_at) / 86400,
-                )
-                self._db_private_refined_thread_ids.add(thread_id)
-                continue
-
-            last_poster = self.message_log.get_last_bot_sender_in_channel(channel_name)
-            members = self._private_channel_members.get(refined_cid, set())
-            for aid in members:
-                agent = self.agents.get(aid)
-                if not agent:
-                    continue
-                # Seed the bot whose turn it is to respond — the member who is
-                # NOT the most recent poster. This both kick-starts a fresh
-                # refinement (responder hasn't posted) and RE-engages an active
-                # one on resume (the bot owing a reply), since Phase 2 won't
-                # reliably re-surface the counterpart's last post on its own.
-                # Stale channels are excluded by the recency guard above and
-                # finalized ones by the check at the top, so re-seeding here only
-                # ever revives live, in-flight refinements.
-                if aid == last_poster:
-                    continue
-                if anchor.ts in agent.state.active_threads:
-                    continue
-                if any(p.post_id == anchor.ts for p in agent.state.interesting_posts):
-                    continue
-                agent.state.interesting_posts.append(PostRef(
-                    post_id=anchor.ts,
-                    channel=channel_name,
-                    sender_agent_id=anchor.sender_agent_id,
-                    content_snippet=(guidance or anchor.content)[:200],
-                    posted_at=anchor.posted_at,
-                    pi_priority=True,
-                    pi_context=guidance or None,
-                ))
-                logger.info(
-                    "[%s] Seeded private refinement in #%s (thread %s) as PI-priority post",
-                    aid, channel_name, thread_id,
-                )
-            # We had a real chance to seed (channel + handover present): don't
-            # retry this thread again, even if the only members were the last
-            # poster (the counterpart will be seeded once they're loaded).
-            self._db_private_refined_thread_ids.add(thread_id)
-
     # ------------------------------------------------------------------
     # Post-simulation
     # ------------------------------------------------------------------
@@ -5607,7 +4458,8 @@ Your current working memory:
 
 Write the complete updated working memory. Incorporate the new event, keep existing
 entries that are still relevant, and remove anything outdated. Summarize:
-(a) Collaboration opportunities and their status
+(a) Ideas pitched and their screening status (what the hub asked for, conditions
+    it named)
 (b) Feedback or directions from your PI (if any)
 (c) Current priorities
 
@@ -5677,6 +4529,24 @@ def _extract_slack_message(text: str) -> str:
             return text[last_open + len("<slack_message>"):last_close].strip()
     # Fallback: strip preamble heuristically
     return _strip_llm_preamble(text)
+
+
+def _reply_opens_with_pause(text: str) -> bool:
+    """True if ``text`` follows the ⏸️ no-viable-collaboration convention
+    thread_guidance.py's DECIDE/CONCLUDE instructions ask for verbatim
+    ("start your reply with ⏸️") — checked at the front of the (stripped)
+    string, not merely present anywhere in it.
+
+    Deliberately stricter than ``_check_thread_outcome``'s ``"⏸️" in
+    latest_reply`` check just below: that one exists to actually close the
+    thread and is intentionally permissive about where the marker appears,
+    while this one is asking "did the model follow the documented opening
+    convention" for ``_warn_if_hub_conclude_missing_assessment``'s absent-
+    sidecar detection — a marker buried mid-reply would not have been the
+    ⏸️-only decline thread_guidance describes.
+    """
+    stripped = (text or "").strip()
+    return stripped.startswith("⏸️") or stripped.startswith(":pause_button:")
 
 
 # Case-insensitive and tolerant of stray whitespace inside the delimiters
@@ -5815,11 +4685,13 @@ def _sidecar_has_valid_json_block(text: str) -> bool:
     return False
 
 
-# The prompt's tri-state gating contract (see prompts/roles/scout_hub/phase5-new-post.md):
-# every gating.* value must be exactly one of these three strings, never a bare
-# boolean — "the PI declined" (not_met) and "we never asked" (unconfirmed) are
-# different facts, and a boolean can express only the first two of these three
-# outcomes.
+# The prompt's tri-state gating contract (see the <assessment_json> skeleton in
+# prompts/roles/scout_hub/phase4-thread-reply.md — relocated there from the
+# deleted phase5-new-post.md by the 2026-08-12 removal cycle's reply-only-hub
+# reconciliation): every gating.* value must be exactly one of these three
+# strings, never a bare boolean — "the PI declined" (not_met) and "we never
+# asked" (unconfirmed) are different facts, and a boolean can express only the
+# first two of these three outcomes.
 _VALID_GATING_STATES = frozenset({"met", "not_met", "unconfirmed"})
 
 

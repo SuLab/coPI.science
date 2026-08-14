@@ -8,7 +8,6 @@ section so a failure names the rule it broke:
 - TestPreflight             §5.3  refusing to silence a roster
 - TestGatedReads            §6    MessageLog read filtering
 - TestReadPathInventory     §6    every public read method is classified
-- TestStatePruning          §6.1  stale interesting_posts
 - TestDbPrimaryPaths        §6.2  ingestion is never gated; is_bot keying
 - TestPrivateChannels       §7    PI pairings outrank the gate
 - TestGrandfathering        §8    resumed runs, conclude-but-deprioritise
@@ -29,7 +28,7 @@ import pytest
 from src.agent.agent import Agent
 from src.agent.message_log import LogEntry, MessageLog, _entry_allowed
 from src.agent.simulation import SimulationEngine
-from src.agent.state import PostRef, ThreadState
+from src.agent.state import ThreadState
 from src.services.cohorts import (
     POLICY_ISOLATED,
     POLICY_OPEN,
@@ -628,6 +627,11 @@ class TestGatedReads:
         return ml
 
     def test_top_level_posts_filtered(self, log):
+        """A human post passes this read regardless of the cohort gate (decision
+        5: this is a general-purpose per-agent read, human rows stay visible for
+        history/observability). The activation-inert half of decision 5 is
+        enforced at SimulationEngine._phase3_activate_threads, not here — see
+        tests/unit/test_hub_auto_activation.py for that guarantee."""
         log.append(_post("1", "general", "wiseman", "WisemanBot", "hi"))
         log.append(_post("2", "general", "cravatt", "CravattBot", "hi"))
         log.append(_post("3", "general", None, "Dr PI", "hi", is_bot=False))
@@ -646,6 +650,8 @@ class TestGatedReads:
         assert {p.ts for p in got} == {"1", "2"}
 
     def test_tags_filtered(self, log):
+        """A human tag passes this read regardless of the cohort gate (decision
+        5, same reasoning as test_top_level_posts_filtered above)."""
         log.append(_post("1", "general", "wiseman", "WisemanBot", "hey @SuBot"))
         log.append(_post("2", "general", "cravatt", "CravattBot", "hey @SuBot"))
         log.append(_post("3", "general", None, "Dr PI", "hey @SuBot", is_bot=False))
@@ -667,6 +673,23 @@ class TestGatedReads:
             "1", "su", 0.0, allowed_sender_ids={"wiseman"}
         ) is False
 
+    def test_has_new_reply_from_other_ignores_a_human_reply_even_ungated(self, log):
+        """The pending/reactive-priority trigger loop (2026-08-12 removal
+        cycle): a human reply into an active thread must never register as "a
+        new reply from the other participant", including the
+        allowed_sender_ids=None path _phase4_reply_threads uses for an
+        already-open thread — that path bypasses `_entry_allowed` entirely,
+        so this has to be enforced independently of the cohort gate."""
+        log.append(_post("1", "general", "su", "SuBot", "root"))
+        log.append(_post("2", "general", None, "Dr PI (PI)", "r", thread_ts="1", is_bot=False))
+        assert log.has_new_reply_from_other("1", "su", 0.0, allowed_sender_ids=None) is False
+        assert log.has_new_reply_from_other(
+            "1", "su", 0.0, allowed_sender_ids={"wiseman"}
+        ) is False
+        # Control: a genuine bot reply in the same thread is still detected.
+        log.append(_post("3", "general", "wiseman", "WisemanBot", "real reply", thread_ts="1"))
+        assert log.has_new_reply_from_other("1", "su", 0.0, allowed_sender_ids=None) is True
+
     def test_has_new_reply_ignores_own_messages(self, log):
         """Regression: the original returned True for the agent's own reply when the
         sender check was ordered after the early return."""
@@ -679,7 +702,7 @@ class TestGatedReads:
         for name in (
             "get_thread_history", "get_thread_message_count",
             "get_agent_top_level_posts", "get_last_bot_sender_in_channel",
-            "get_thread_allowed_agents", "is_funding_thread", "get_entry",
+            "get_thread_allowed_agents", "get_entry",
         ):
             sig = inspect.signature(getattr(MessageLog, name))
             assert "allowed_sender_ids" not in sig.parameters, name
@@ -723,52 +746,6 @@ class TestReadPathInventory:
                 f"{name} must never take a gate: the log is shared by every agent "
                 "in the process, so filtering at write filters for all of them"
             )
-
-
-# ---------------------------------------------------------------------------
-# §6.1 — stale banked posts
-# ---------------------------------------------------------------------------
-
-
-class TestStatePruning:
-    async def test_interesting_posts_pruned_on_resync(self, monkeypatch):
-        _patch(monkeypatch, cohort_isolation_enabled=True,
-               cohort_default_policy=POLICY_ISOLATED)
-        c1 = uuid.uuid4()
-        eng = _engine(["su", "wiseman", "cravatt"],
-                      membership_rows=[(c1, "su"), (c1, "wiseman")])
-        su = eng.agents["su"]
-        su.state.interesting_posts = [
-            PostRef(post_id="1", channel="general", sender_agent_id="wiseman",
-                    content_snippet="mate", posted_at=1.0),
-            PostRef(post_id="2", channel="general", sender_agent_id="cravatt",
-                    content_snippet="non-mate", posted_at=2.0),
-        ]
-        await eng._recompute_allowed_sender_ids()
-        assert [p.post_id for p in su.state.interesting_posts] == ["1"]
-
-    async def test_pruning_keeps_human_authored_posts(self, monkeypatch):
-        _patch(monkeypatch, cohort_isolation_enabled=True,
-               cohort_default_policy=POLICY_ISOLATED)
-        c1 = uuid.uuid4()
-        eng = _engine(["su", "wiseman"], membership_rows=[(c1, "su"), (c1, "wiseman")])
-        su = eng.agents["su"]
-        su.state.interesting_posts = [
-            PostRef(post_id="h", channel="general", sender_agent_id="",
-                    content_snippet="from a PI", posted_at=1.0),
-        ]
-        await eng._recompute_allowed_sender_ids()
-        assert [p.post_id for p in su.state.interesting_posts] == ["h"]
-
-    async def test_no_pruning_when_gate_off(self, monkeypatch):
-        _patch(monkeypatch, cohort_isolation_enabled=False)
-        eng = _engine(["su"], membership_rows=[])
-        eng.agents["su"].state.interesting_posts = [
-            PostRef(post_id="1", channel="general", sender_agent_id="anyone",
-                    content_snippet="x", posted_at=1.0),
-        ]
-        await eng._recompute_allowed_sender_ids()
-        assert len(eng.agents["su"].state.interesting_posts) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -939,8 +916,16 @@ class TestGrandfathering:
         assert eng._owes_reply(eng.agents["su"]) is True
 
     async def test_non_cohort_third_party_cannot_manufacture_priority(self, monkeypatch):
-        """A funding thread is open to all, so a non-cohort agent can post into an
-        otherwise legal thread. That must not create reactive priority."""
+        """Locked decision (#29 branch-2 engine reconciliation): ex-funding thread
+        roots follow the NORMAL participation rule — no open-to-all exception.
+
+        A `:moneybag:` root no longer makes ``get_thread_allowed_agents`` return
+        unrestricted access. Once two distinct agents (su, wiseman) have posted,
+        a third party (cravatt — outside both the cohort and the thread) is
+        excluded exactly like on any other thread. This inverts the old vehicle
+        (a funding thread's open-to-all rule was the one case a non-cohort agent
+        could legally land a message in an otherwise-restricted thread) into a
+        direct pin that no such vehicle survives."""
         _patch(monkeypatch, cohort_isolation_enabled=True,
                cohort_default_policy=POLICY_ISOLATED)
         c1 = uuid.uuid4()
@@ -949,11 +934,16 @@ class TestGrandfathering:
         _thread(eng.agents["su"], "1", "wiseman")
         eng.message_log.append(_post("1", "general", "su", "SuBot", ":moneybag: FOA"))
         eng.message_log.append(
-            _post("2", "general", "cravatt", "CravattBot", "me too", thread_ts="1")
+            _post("2", "general", "wiseman", "WisemanBot", "on it", thread_ts="1")
+        )
+        eng.message_log.append(
+            _post("3", "general", "cravatt", "CravattBot", "me too", thread_ts="1")
         )
         eng.agents["su"].state.last_seen_cursor = 0.0
         await eng._recompute_allowed_sender_ids()
-        assert eng._owes_reply(eng.agents["su"]) is False
+        allowed = eng.message_log.get_thread_allowed_agents("1")
+        assert allowed == {"su", "wiseman"}
+        assert "cravatt" not in allowed
 
     def test_phase4_reads_ungated_so_threads_can_conclude(self):
         """Phase 4 must see a grandfathered partner's reply — the thread is open and

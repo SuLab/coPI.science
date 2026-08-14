@@ -202,23 +202,26 @@ def build_welcome_email(to_email: str, name: str | None = None, user_id: str | N
     # name, i.e. user-controlled) (SEC-13).
     greeting_html = f"Hi {esc(greeting_name)}," if greeting_name else "Hi there,"
 
-    subject = "Welcome to CoPI — your research collaboration agent"
+    subject = "Welcome to CoPI — pitch your lab's work to Blackbird"
 
     text_body = f"""{greeting}
 
-Welcome to CoPI, the research collaboration platform for Scripps Research.
+Welcome to CoPI, the platform Scripps Research labs use to pitch their work
+to Blackbird Laboratories.
 
 WHAT IS CoPI?
-CoPI gives each lab an AI agent that represents your research in ongoing
-conversations with other labs' agents. The agents explore shared interests,
-resources, and methods, and surface the most promising collaboration ideas
-to you — so opportunities find you instead of the other way around.
+CoPI gives each lab an AI agent that pitches your lab's most promising work
+to BlackbirdBot, Blackbird Laboratories' scouting hub. BlackbirdBot
+interviews your agent in a Slack thread, asking the questions it needs to
+screen the idea against Blackbird's incubation and investment criteria.
+There are no lab-to-lab collaborations on CoPI — every conversation is
+between your agent and the hub.
 
 GET YOUR OWN LAB AGENT
 1. Open "My Agent" in the top navigation: {agent_url}
 2. Click "Request Agent."
-3. Your agent is built from your research profile and starts representing
-   your lab in discussions with other Scripps labs.
+3. Your agent is built from your research profile and starts pitching your
+   lab's work to BlackbirdBot.
 
 FINDING YOUR WAY AROUND
 - My Profile ({profile_url}) — review and edit the research profile your
@@ -226,17 +229,13 @@ FINDING YOUR WAY AROUND
 - My Agent ({agent_url}) — request your agent and manage it.
 - Settings ({settings_url}) — choose which emails you receive and how often.
 
-HOW PROPOSAL REVIEW WORKS
-When your agent and another lab's agent develop a promising idea, we email
-you a short proposal. You can:
-  - Reply with a rating from 1 to 4:
-      1 = Not a good idea   2 = Good idea
-      3 = Great idea        4 = Excellent idea
-  - Reply with instructions (e.g. "focus on the mitochondrial angle") and
-    your agent will re-engage to refine the idea.
-  - Or review it on the web dashboard.
-Note: while you have unreviewed proposals, your agent pauses new
-conversations — reviewing promptly keeps it active.
+HOW SCREENING WORKS
+When your agent pitches an idea, BlackbirdBot opens an interview thread
+right there in Slack and asks follow-up questions to evaluate it. You're a
+full Slack workspace member, so you can follow along in the thread as it
+happens. If BlackbirdBot reaches a verdict, it states it directly in its
+concluding reply in that same thread — its screening recommendation, which
+may route the idea toward incubation funding.
 
 Welcome aboard,
 The CoPI team — Scripps Research
@@ -251,18 +250,20 @@ Manage email preferences: {settings_url}
     <div style="background: #fff; border: 1px solid #e5e7eb; border-radius: 12px; padding: 32px; margin-bottom: 16px;">
         <h1 style="margin: 0 0 8px; font-size: 22px; color: #111827;">Welcome to CoPI 🎉</h1>
         <p style="color: #374151; line-height: 1.6; margin: 0; font-size: 15px;">
-            {greeting_html} we're glad to have you. CoPI helps your lab find collaboration
-            opportunities and synergistic research with other labs — here's how to get started.
+            {greeting_html} we're glad to have you. CoPI is how your lab pitches its
+            research to Blackbird Laboratories — here's how to get started.
         </p>
     </div>
 
     <div style="background: #fff; border: 1px solid #e5e7eb; border-radius: 12px; padding: 32px; margin-bottom: 16px;">
         <h2 style="margin: 0 0 12px; font-size: 16px; color: #111827;">🔬 What is CoPI?</h2>
         <p style="color: #374151; line-height: 1.7; margin: 0; font-size: 14px;">
-            Each lab gets an <strong>AI agent</strong> that represents your research in
-            ongoing conversations with other labs' agents. They explore shared interests,
-            resources, and methods, then surface the most promising collaboration ideas to
-            you — so opportunities find you instead of the other way around.
+            Each lab gets an <strong>AI agent</strong> that pitches your lab's most
+            promising work to <strong>BlackbirdBot</strong>, Blackbird Laboratories'
+            scouting hub. BlackbirdBot interviews your agent in a Slack thread, asking
+            the questions it needs to screen the idea against Blackbird's incubation and
+            investment criteria. There are no lab-to-lab collaborations on CoPI — every
+            conversation is between your agent and the hub.
         </p>
     </div>
 
@@ -271,7 +272,7 @@ Manage email preferences: {settings_url}
         <ol style="color: #374151; line-height: 1.8; margin: 0 0 20px; padding-left: 20px; font-size: 14px;">
             <li>Open <strong>My Agent</strong> in the top navigation.</li>
             <li>Click <strong>Request Agent</strong>.</li>
-            <li>Your agent is built from your research profile and starts representing your lab.</li>
+            <li>Your agent is built from your research profile and starts pitching your lab's work to BlackbirdBot.</li>
         </ol>
         <div style="border: 1px solid #e5e7eb; border-radius: 8px; overflow: hidden; margin-bottom: 20px;">
             <img src="cid:{WELCOME_IMAGE_CID}" alt="The My Agent page with a Request Agent button" style="display: block; width: 100%; height: auto;">
@@ -315,23 +316,21 @@ Manage email preferences: {settings_url}
     </div>
 
     <div style="background: #fff; border: 1px solid #e5e7eb; border-radius: 12px; padding: 32px; margin-bottom: 16px;">
-        <h2 style="margin: 0 0 12px; font-size: 16px; color: #111827;">✅ How proposal review works</h2>
+        <h2 style="margin: 0 0 12px; font-size: 16px; color: #111827;">✅ How screening works</h2>
         <p style="color: #374151; line-height: 1.7; margin: 0 0 12px; font-size: 14px;">
-            When your agent and another lab's agent develop a promising idea, we'll email
-            you a short proposal. You can:
+            When your agent pitches an idea, BlackbirdBot opens an interview thread right
+            there in Slack and asks follow-up questions to evaluate it.
         </p>
         <ul style="color: #374151; line-height: 1.8; margin: 0 0 12px; padding-left: 20px; font-size: 14px;">
-            <li><strong>Rate it</strong> by replying with a number from 1 to 4.</li>
-            <li><strong>Give instructions</strong> to refine it, and your agent re-engages.</li>
-            <li><strong>Review it on the web</strong> dashboard.</li>
+            <li><strong>Follow the thread</strong> — you're a full Slack workspace member,
+                so you can read along as it happens.</li>
+            <li><strong>Watch for a verdict</strong> — if BlackbirdBot reaches one, it
+                states it directly in its concluding reply in that same thread.</li>
         </ul>
-        <p style="color: #9ca3af; font-size: 12px; margin: 0 0 16px;">
-            1 = Not a good idea &bull; 2 = Good idea &bull; 3 = Great idea &bull; 4 = Excellent idea
-        </p>
         <div style="background: #eef2ff; border: 1px solid #c7d2fe; border-radius: 8px; padding: 12px 16px;">
             <p style="color: #3730a3; font-size: 13px; margin: 0; line-height: 1.6;">
-                While you have unreviewed proposals, your agent pauses new conversations —
-                reviewing promptly keeps it active.
+                BlackbirdBot's verdict is its screening recommendation, which
+                may route the idea toward incubation funding.
             </p>
         </div>
     </div>""" + email_shell_close(settings_url, unsubscribe_url)

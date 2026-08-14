@@ -6,8 +6,10 @@ external dependency faked deterministically:
     imported there by name; reconcile_pub_doi is left REAL so DOI reconciliation
     is exercised for real).
   - The Anthropic client is replaced via the src.services.llm.get_anthropic_client
-    seam, scripted to return a valid public-profile JSON then a private-profile
-    markdown seed.
+    seam, scripted to return a valid public-profile JSON (retries on a failed
+    validation consume additional scripted responses in order; the removal
+    cycle deleted the follow-up private-profile-seed LLM call, so a happy-path
+    run makes exactly one).
 
 A future change to how the pipeline assembles/stores a profile (field mapping,
 version bump, DOI handling, abstract hashing) breaks this snapshot loudly.
@@ -70,19 +72,6 @@ _INVALID_PROFILE = {
     "key_targets": ["Bernoulli numbers"],
     "keywords": ["computing"],
 }
-
-_PRIVATE_SEED = (
-    "# Private Profile\n\n"
-    "## Collaboration Preferences\n"
-    "Prefers rigorous, mathematically grounded collaborators.\n\n"
-    "## Communication Style\n"
-    "Precise and formal; values worked examples.\n\n"
-    "## Topic Priorities\n"
-    "Programmable computation; symbolic manipulation.\n\n"
-    "## Criteria to Always Explore\n"
-    "Whether a method generalizes beyond numbers."
-)
-
 
 def _install_fakes(monkeypatch):
     """Patch every external boundary the pipeline reaches through, deterministically."""
@@ -148,10 +137,11 @@ def _install_fakes(monkeypatch):
     monkeypatch.setattr(profile_pipeline, "convert_pmids_to_pmcids", fake_convert_pmids_to_pmcids)
     monkeypatch.setattr(profile_pipeline, "fetch_pmc_methods", fake_fetch_pmc_methods)
 
-    # LLM: synthesize_profile / synthesize_private_profile both call
-    # src.services.llm.get_anthropic_client() at call time. First scripted
-    # response is the public JSON, second is the private markdown seed.
-    fake_llm = FakeAnthropic([json.dumps(_VALID_PROFILE), _PRIVATE_SEED])
+    # LLM: synthesize_profile calls src.services.llm.get_anthropic_client() at
+    # call time. The removal cycle deleted the second, private-profile-seed
+    # call this pipeline used to make (synthesize_private_profile no longer
+    # exists), so a happy-path run consumes exactly one scripted response.
+    fake_llm = FakeAnthropic([json.dumps(_VALID_PROFILE)])
     monkeypatch.setattr("src.services.llm.get_anthropic_client", lambda: fake_llm)
     return fake_llm
 
@@ -211,8 +201,11 @@ async def test_profile_pipeline_golden_master(db_session, monkeypatch, snapshot)
     }
 
     assert result == snapshot
-    # Exactly two LLM calls on the happy path: public synthesis + private seed.
-    assert len(fake_llm.calls) == 2
+    # Exactly one LLM call on the happy path: public synthesis only. The
+    # removal cycle deleted the follow-up private-profile-seed call, so
+    # private_profile_md/private_profile_seed above are always None now —
+    # the columns are kept (decision 5) but nothing in the pipeline writes them.
+    assert len(fake_llm.calls) == 1
 
 
 async def test_profile_pipeline_llm_failure_leaves_fields_unset(db_session, monkeypatch, snapshot):
@@ -309,7 +302,7 @@ async def test_profile_pipeline_doi_correction_stores_authoritative(
     monkeypatch.setattr(profile_pipeline, "fetch_pubmed_records", fake_fetch_pubmed_records)
     monkeypatch.setattr(profile_pipeline, "convert_pmids_to_pmcids", fake_convert_pmids_to_pmcids)
     monkeypatch.setattr(profile_pipeline, "fetch_pmc_methods", fake_fetch_pmc_methods)
-    fake_llm = FakeAnthropic([json.dumps(_VALID_PROFILE), _PRIVATE_SEED])
+    fake_llm = FakeAnthropic([json.dumps(_VALID_PROFILE)])
     monkeypatch.setattr("src.services.llm.get_anthropic_client", lambda: fake_llm)
 
     user = await factories.make_user(
@@ -338,15 +331,14 @@ async def test_profile_pipeline_rerun_increments_version_and_updates_pubs(
     db_session, monkeypatch, snapshot
 ):
     """Re-run / idempotency. A second run for the same user increments
-    profile_version (1 -> 2), UPDATES the existing publications instead of
-    duplicating them (count stays 2), and does NOT regenerate the private seed
-    (that only happens when no seed exists yet). Three LLM calls total: public
-    synthesis on each run + one private-seed generation on the first run only."""
+    profile_version (1 -> 2) and UPDATES the existing publications instead of
+    duplicating them (count stays 2). Two LLM calls total: one public synthesis
+    per run (the removal cycle deleted the private-seed follow-up call this
+    test used to also pin)."""
     _install_fakes(monkeypatch)
-    # Script the LLM for two runs: run 1 = public JSON + private seed; run 2 =
-    # public JSON only (the seed step is skipped once a seed already exists).
+    # Script the LLM for two runs: one public-synthesis call each.
     fake_llm = FakeAnthropic(
-        [json.dumps(_VALID_PROFILE), _PRIVATE_SEED, json.dumps(_VALID_PROFILE)]
+        [json.dumps(_VALID_PROFILE), json.dumps(_VALID_PROFILE)]
     )
     monkeypatch.setattr("src.services.llm.get_anthropic_client", lambda: fake_llm)
 
@@ -356,7 +348,6 @@ async def test_profile_pipeline_rerun_increments_version_and_updates_pubs(
 
     first = await profile_pipeline.run_profile_pipeline(user.id, db_session)
     first_version = first.profile_version  # capture the int before the second run mutates it
-    first_seed = first.private_profile_seed
 
     second = await profile_pipeline.run_profile_pipeline(user.id, db_session)
 
@@ -369,8 +360,6 @@ async def test_profile_pipeline_rerun_increments_version_and_updates_pubs(
         "second_version": second.profile_version,
         "same_profile_row": first.id == second.id,
         "pub_count_after_two_runs": len(pubs),
-        "seed_set_after_first_run": first_seed is not None,
-        "seed_unchanged_on_rerun": second.private_profile_seed == first_seed,
         "llm_calls_total": len(fake_llm.calls),
         # The provenance columns are rewritten each run, not accumulated: a second
         # valid, grounded run over the same two publications leaves the same 2/2.
@@ -427,16 +416,16 @@ async def test_profile_pipeline_stores_the_retry_not_the_rejected_first_synthesi
     This is the first of the three tests that die if `_validate_profile` is
     hardwired to `return True`: with a validator that never says no, the retry
     below never fires, the 18-word draft is stored instead of the good one, and
-    the LLM is called twice rather than three times.
+    the LLM is called once rather than twice.
     """
     _install_fakes(monkeypatch)
     assert profile_pipeline._validate_profile(_INVALID_PROFILE) is False, (
         "_INVALID_PROFILE now passes validation, so this test no longer exercises "
         "the retry path it claims to"
     )
-    # public #1 (rejected) -> public #2 (accepted) -> private seed
+    # public #1 (rejected) -> public #2 (accepted, retry)
     fake_llm = FakeAnthropic(
-        [json.dumps(_INVALID_PROFILE), json.dumps(_VALID_PROFILE), _PRIVATE_SEED]
+        [json.dumps(_INVALID_PROFILE), json.dumps(_VALID_PROFILE)]
     )
     monkeypatch.setattr("src.services.llm.get_anthropic_client", lambda: fake_llm)
 
@@ -462,10 +451,10 @@ async def test_profile_pipeline_stores_the_retry_not_the_rejected_first_synthesi
     # regression back to storing the rejected draft.
     assert profile.research_summary == _VALID_PROFILE["research_summary"]
     assert profile.synthesis_validated is True
-    assert len(fake_llm.calls) == 3, (
-        f"{len(fake_llm.calls)} LLM calls; expected 3 (rejected public synthesis, "
-        "retry, private seed). 2 means the retry never fired, i.e. validation "
-        "accepted the invalid draft"
+    assert len(fake_llm.calls) == 2, (
+        f"{len(fake_llm.calls)} LLM calls; expected 2 (rejected public synthesis, "
+        "retry). 1 means the retry never fired, i.e. validation accepted the "
+        "invalid draft"
     )
 
 
@@ -484,13 +473,13 @@ async def test_profile_pipeline_marks_a_profile_that_fails_validation_twice(
 
     Second of the three mutation-killing tests: with `_validate_profile` hardwired
     to `return True`, synthesis_validated comes out True, the progress entry is
-    absent, and only two LLM calls are made.
+    absent, and only one LLM call is made.
     """
     _install_fakes(monkeypatch)
     assert profile_pipeline._validate_profile(_INVALID_PROFILE) is False
-    # Both public attempts return the same invalid draft, then the private seed.
+    # Both public attempts return the same invalid draft.
     fake_llm = FakeAnthropic(
-        [json.dumps(_INVALID_PROFILE), json.dumps(_INVALID_PROFILE), _PRIVATE_SEED]
+        [json.dumps(_INVALID_PROFILE), json.dumps(_INVALID_PROFILE)]
     )
     monkeypatch.setattr("src.services.llm.get_anthropic_client", lambda: fake_llm)
 
@@ -526,7 +515,7 @@ async def test_profile_pipeline_marks_a_profile_that_fails_validation_twice(
         "below-standard profile is again indistinguishable from a good one"
     )
     assert "unvalidated" in _progress_steps(job)
-    assert len(fake_llm.calls) == 3
+    assert len(fake_llm.calls) == 2
 
 
 async def test_profile_pipeline_rerun_that_fails_validation_keeps_the_stored_profile(
@@ -544,10 +533,10 @@ async def test_profile_pipeline_rerun_that_fails_validation_keeps_the_stored_pro
     """
     _install_fakes(monkeypatch)
     assert profile_pipeline._validate_profile(_INVALID_PROFILE) is False
-    # Run 1: valid public synthesis + private seed. Run 2: invalid twice (the seed
-    # step is skipped because run 1 left a seed).
+    # Run 1: valid public synthesis (single call). Run 2: invalid twice (the
+    # retry also fails validation).
     fake_llm = FakeAnthropic([
-        json.dumps(_VALID_PROFILE), _PRIVATE_SEED,
+        json.dumps(_VALID_PROFILE),
         json.dumps(_INVALID_PROFILE), json.dumps(_INVALID_PROFILE),
     ])
     monkeypatch.setattr("src.services.llm.get_anthropic_client", lambda: fake_llm)
@@ -617,7 +606,7 @@ async def test_profile_pipeline_pubmed_outage_stores_a_profile_marked_evidence_l
         raise ConnectionError("simulated PubMed outage")
 
     monkeypatch.setattr(profile_pipeline, "fetch_pubmed_records", pubmed_is_down)
-    fake_llm = FakeAnthropic([json.dumps(_VALID_PROFILE), _PRIVATE_SEED])
+    fake_llm = FakeAnthropic([json.dumps(_VALID_PROFILE)])
     monkeypatch.setattr("src.services.llm.get_anthropic_client", lambda: fake_llm)
 
     # Observe the prompt without replacing it: the claim "no publication reached
@@ -695,7 +684,7 @@ async def test_profile_pipeline_researcher_with_no_works_is_not_reported_as_evid
         return []
 
     monkeypatch.setattr(profile_pipeline, "fetch_orcid_works", no_works)
-    fake_llm = FakeAnthropic([json.dumps(_VALID_PROFILE), _PRIVATE_SEED])
+    fake_llm = FakeAnthropic([json.dumps(_VALID_PROFILE)])
     monkeypatch.setattr("src.services.llm.get_anthropic_client", lambda: fake_llm)
 
     user = await factories.make_user(
@@ -738,7 +727,7 @@ async def test_profile_pipeline_orcid_works_failure_is_not_reported_as_no_works(
         raise ConnectionError("simulated ORCID outage")
 
     monkeypatch.setattr(profile_pipeline, "fetch_orcid_works", orcid_works_down)
-    fake_llm = FakeAnthropic([json.dumps(_VALID_PROFILE), _PRIVATE_SEED])
+    fake_llm = FakeAnthropic([json.dumps(_VALID_PROFILE)])
     monkeypatch.setattr("src.services.llm.get_anthropic_client", lambda: fake_llm)
 
     user = await factories.make_user(
@@ -766,7 +755,7 @@ async def test_profile_pipeline_pubmed_outage_on_rerun_keeps_the_grounded_profil
     persisted rather than merely logged."""
     _install_fakes(monkeypatch)
     fake_llm = FakeAnthropic(
-        [json.dumps(_VALID_PROFILE), _PRIVATE_SEED, json.dumps(_VALID_PROFILE)]
+        [json.dumps(_VALID_PROFILE), json.dumps(_VALID_PROFILE)]
     )
     monkeypatch.setattr("src.services.llm.get_anthropic_client", lambda: fake_llm)
 

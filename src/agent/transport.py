@@ -81,7 +81,8 @@ class Transport(Protocol):
     # ``thread_ts`` equals its own ``ts`` (which is how Slack marks a parent that has
     # replies) carries ``thread_ts=None``. Without it the engine ingests a root as a
     # reply to itself and ``MessageLog.get_new_top_level_posts`` drops it, so the post
-    # never reaches Phase 2. ``AgentSlackClient`` applies this in
+    # never surfaces to any reader of that method (e.g. the hub's Phase 3
+    # auto-activation scan). ``AgentSlackClient`` applies this in
     # ``normalize_inbound_message`` — one place, for all four inbound methods.
     def poll_channel_messages(self, channel_id: str, oldest: str = "0", limit: int = 100) -> list[dict[str, Any]]: ...
     def get_thread_replies(self, channel_id: str, thread_ts: str, oldest: str = "0") -> list[dict[str, Any]]: ...

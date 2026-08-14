@@ -6,7 +6,6 @@ import time
 from pathlib import Path
 
 from src.agent.post_types import render_menu
-from src.agent.prompt_safety import delimit
 from src.agent.roles import DEFAULT_ROLE, load_role, resolve_prompt_path
 from src.agent.state import AgentState, ThreadState
 from src.agent.thread_guidance import phase4_guidance
@@ -30,36 +29,6 @@ def _extract_dois(text: str | None) -> set[str]:
     return out
 
 
-# Private Channel Rules block — appended to the system prompt when the agent is
-# acting in a collab_private channel. See specs/privacy-and-channel-visibility.md §G4.
-PRIVATE_CHANNEL_RULES = """
-## Private channel rules
-You are in a private channel with a small membership (two bots plus up to two
-PIs). Anything said here must not be referenced by name or specific detail in
-any public channel, any other private channel, or any proposal visible outside
-this channel's membership. If someone outside this channel asks about progress,
-say "we're still refining; I'll post when we have a shareable summary."
-
-## Converging on a revised proposal (IMPORTANT — this channel must conclude)
-This channel exists to refine ONE proposal using the PI's guidance, then finish.
-Do not let it become an open-ended discussion. After a couple of substantive
-exchanges that address the PI's guidance, STOP adding new angles and CONVERGE:
-- If the other bot has just posted a revised `:memo: Summary`, reply with ✅ to
-  confirm it (or propose a specific edit, but move toward ✅ quickly).
-- Otherwise, once the guidance is addressed and the proposal is materially
-  stronger, YOU post the revised `:memo: Summary` — the same structure as a
-  normal proposal (what each lab brings, the specific scientific question, a
-  concrete first experiment, why the collaboration wins, and a confidence
-  label). The other bot then replies ✅.
-
-The `:memo: Summary` + ✅ handshake locks in the revised proposal for the PIs to
-review and ends the refinement. Bias toward producing the summary sooner rather
-than continuing to elaborate — a good revised proposal now beats endless
-discussion. The summary must stand on its own and must not quote the PI's
-private guidance verbatim.
-"""
-
-
 class Agent:
     """
     Represents a single lab agent (Slack bot).
@@ -73,7 +42,6 @@ class Agent:
         self.pi_name = pi_name  # e.g., "Andrew Su"
         self.role = role  # e.g., "pi_lab" — selects prompt/role overrides
         self._public_profile: str | None = None
-        self._private_profile: str | None = None
         self._public_working_memory: str | None = None  # cached public memory segment
         self._own_publication_dois: set[str] | None = None  # cached DOIs from own profiles
         self._lab_directory: str | None = None
@@ -109,15 +77,6 @@ class Agent:
                 f"# {self.pi_name} Lab\n\nProfile not yet available.",
             )
         return self._public_profile
-
-    @property
-    def private_profile(self) -> str:
-        if self._private_profile is None:
-            self._private_profile = self._load_file(
-                PROFILES_DIR / "private" / f"{self.agent_id}.md",
-                "No private instructions yet.",
-            )
-        return self._private_profile
 
     @property
     def public_working_memory(self) -> str:
@@ -158,20 +117,21 @@ class Agent:
 
     @property
     def own_publication_dois(self) -> set[str]:
-        """DOIs of the lab's own papers, parsed from its profiles.
+        """DOIs of the lab's own papers, parsed from its public profile.
 
         Used to detect when a post or thread is about a paper this lab
-        (co)authored. Profiles list each PI's representative publications with
-        DOIs, so a DOI appearing here means the paper is the lab's own work.
-        Note this only catches papers whose DOI is present in the profile — a
-        prose-only profile yields an empty set, which is why the scan/reply
-        prompts also instruct the model to recognize its own published methods
-        semantically. See GitHub issue #7.
+        (co)authored. The public profile lists each PI's representative
+        publications with DOIs, so a DOI appearing here means the paper is the
+        lab's own work. Note this only catches papers whose DOI is present in
+        the profile — a prose-only profile yields an empty set, which is why
+        the scan/reply prompts also instruct the model to recognize its own
+        published methods semantically. See GitHub issue #7.
+
+        Derives from the public profile only — there is no private-profile
+        segment to union anymore (private instructions were removed).
         """
         if self._own_publication_dois is None:
-            self._own_publication_dois = _extract_dois(self.public_profile) | _extract_dois(
-                self.private_profile
-            )
+            self._own_publication_dois = _extract_dois(self.public_profile)
         return self._own_publication_dois
 
     def cites_own_paper(self, content: str | None) -> bool:
@@ -184,7 +144,6 @@ class Agent:
     def reload_profiles(self):
         """Reload profiles from disk."""
         self._public_profile = None
-        self._private_profile = None
         self._public_working_memory = None
         self._own_publication_dois = None
 
@@ -201,25 +160,13 @@ class Agent:
 
         visibility: the visibility class of the channel the agent is about to
         act in. When 'collab_private', the private-channel memory segment for
-        ``channel_id`` is also injected and a Private Channel Rules block is
-        appended. See specs/privacy-and-channel-visibility.md §G1, §G4.
+        ``channel_id`` is also injected. See specs/privacy-and-channel-visibility.md §G1.
         """
         return self._compose_system_prompt(
             include_memory=True,
             include_lab_directory=True,
             visibility=visibility,
             channel_id=channel_id,
-        )
-
-    def build_scan_system_prompt(self) -> str:
-        """Build a lightweight system prompt for scan/filter phases.
-
-        Omits working memory and lab directory — scan only needs identity,
-        research focus, and private priorities to judge relevance.
-        """
-        return self._compose_system_prompt(
-            include_memory=False,
-            include_lab_directory=False,
         )
 
     def build_thread_reply_system_prompt(
@@ -234,8 +181,7 @@ class Agent:
         Includes working memory since it may contain thread-relevant context.
 
         visibility/channel_id: same semantics as build_system_prompt — determines
-        which memory segment is injected and whether the Private Channel Rules
-        block is appended.
+        which memory segment is injected.
         """
         return self._compose_system_prompt(
             include_memory=True,
@@ -276,24 +222,20 @@ class Agent:
     ) -> str:
         """Assemble a system prompt from the shared sections.
 
-        This is the single composer behind build_system_prompt,
-        build_scan_system_prompt, and build_thread_reply_system_prompt — the
-        include_memory/include_lab_directory flags reproduce each builder's
-        original section set byte-for-byte (see the callers below).
+        This is the single composer behind build_system_prompt and
+        build_thread_reply_system_prompt — the include_memory/
+        include_lab_directory flags reproduce each builder's original section
+        set byte-for-byte (see the callers below).
         """
         base_prompt = self._load_prompt("agent-system.md", _default_system_prompt())
         identity = self._render_identity()
-        private_rules = PRIVATE_CHANNEL_RULES if visibility == VISIBILITY_COLLAB_PRIVATE else ""
 
         header = f"""{base_prompt}
 
 {identity}
 
 ## Your Lab Profile (Public)
-{self.public_profile}
-
-## Your Private Instructions
-{self.private_profile}"""
+{self.public_profile}"""
 
         if not include_memory:
             return header
@@ -309,9 +251,9 @@ class Agent:
 Use these to reference other labs' work in conversations. Include links when citing.
 {self._lab_directory}
 """
-            return f"{header}{memory_block}\n{lab_directory_section}{private_rules}"
+            return f"{header}{memory_block}\n{lab_directory_section}"
 
-        return f"{header}{memory_block}{private_rules}"
+        return f"{header}{memory_block}"
 
     def _compose_working_memory(
         self,
@@ -339,62 +281,6 @@ Use these to reference other labs' work in conversations. Include links when cit
         return "\n\n".join(segments)
 
     # ------------------------------------------------------------------
-    # Phase 2: Scan & Filter prompt
-    # ------------------------------------------------------------------
-
-    def build_phase2_scan_prompt(self, new_posts: list[dict[str, str]]) -> tuple[str, list[dict]]:
-        """
-        Build system + messages for Phase 2 scan/filter.
-
-        new_posts: list of {post_id, channel, sender, content_snippet}
-        Returns (system_prompt, messages).
-        """
-        system_prompt = self.build_scan_system_prompt()
-        phase2_template = self._load_prompt(
-            "phase2-scan-filter.md",
-            "Evaluate posts and return JSON with selected_post_ids.",
-        )
-
-        # Format posts for the prompt. Flag any post that cites a paper this
-        # lab authored so the model applies the "Papers your own lab authored"
-        # rule (see issue #7).
-        post_blocks: list[str] = []
-        for p in new_posts:
-            header = f"**Post ID: {p['post_id']}** in #{p['channel']} by {p['sender']}:"
-            if self.cites_own_paper(p.get("content_snippet")):
-                header += (
-                    "\n⚠️ SELF-AUTHORED: this post cites a paper your own lab authored. "
-                    "Per the \"Papers your own lab authored\" rule, do NOT add it unless "
-                    "you can take it in a genuinely new direction."
-                )
-            # Post bodies come from other labs' agents — fence as untrusted
-            # peer content so an injected instruction can't hijack the scan
-            # decision (SEC-14).
-            post_blocks.append(f"{header}\n{delimit(p['content_snippet'], 'post_content')}")
-        posts_text = "\n\n".join(post_blocks)
-        prompt = phase2_template.replace("{new_posts}", posts_text)
-
-        messages = [{"role": "user", "content": prompt}]
-        return system_prompt, messages
-
-    def build_phase2_prune_prompt(self) -> tuple[str, list[dict]]:
-        """Build system + messages for Phase 2 prune."""
-        system_prompt = self.build_scan_system_prompt()
-        prune_template = self._load_prompt(
-            "phase2-prune.md",
-            "Prune interesting_posts to ≤20. Return JSON with keep_post_ids.",
-        )
-
-        posts_text = "\n\n".join(
-            f"**Post ID: {p.post_id}** in #{p.channel} by {p.sender_agent_id}:\n{p.content_snippet}"
-            for p in self.state.interesting_posts
-        )
-        prompt = prune_template.replace("{interesting_posts}", posts_text)
-
-        messages = [{"role": "user", "content": prompt}]
-        return system_prompt, messages
-
-    # ------------------------------------------------------------------
     # Phase 4: Thread Reply prompt
     # ------------------------------------------------------------------
 
@@ -404,9 +290,6 @@ Use these to reference other labs' work in conversations. Include links when cit
         thread_history: list[dict[str, str]],
         other_agent_name: str,
         other_agent_lab: str,
-        is_funding_thread: bool = False,
-        your_prior_messages: str | None = None,
-        thread_activity_summary: str | None = None,
         visibility: str = VISIBILITY_PUBLIC,
         channel_id: str | None = None,
     ) -> tuple[str, list[dict]]:
@@ -430,8 +313,22 @@ Use these to reference other labs' work in conversations. Include links when cit
         # Thread phase guidance + instructions, per role. scout_hub scouts ideas
         # against Blackbird's screening rubric; it has no lab and never proposes a
         # collaboration. See src/agent/thread_guidance.py.
+        #
+        # `thread.message_count` is the count of messages ALREADY in the thread
+        # (set by SimulationEngine._reply_to_thread from the message log BEFORE
+        # this reply exists). `phase4_guidance`'s contract is the ORDINAL of the
+        # message about to be written — its own CONCLUDE text says "This is
+        # message 12", not "message 11" — so the prior count must be bumped by
+        # one here. Without the +1, the reply that should receive MUST-CONCLUDE
+        # guidance was silently classified as DECIDE instead, and since
+        # `_reply_to_thread`'s system-enforced-close check fires at this exact
+        # same prior-count >= max_thread_messages (before any reply is even
+        # generated), a reply actually written under CONCLUDE guidance could
+        # never occur under the default configuration at all — see that check's
+        # own comment in simulation.py for the other half of this fix.
+        message_ordinal = thread.message_count + 1
         thread_phase, phase_guidance, instructions = phase4_guidance(
-            self.role, thread.message_count
+            self.role, message_ordinal
         )
 
         # Format thread history
@@ -444,63 +341,24 @@ Use these to reference other labs' work in conversations. Include links when cit
         root_content = thread_history[0]["content"] if thread_history else ""
         if self.cites_own_paper(root_content):
             phase_guidance += (
-                "\n\n**⚠️ This thread's paper was authored by your own lab.** Do NOT pitch "
-                "your lab's capabilities back as if they were external — the methods in this "
-                "paper are already yours. Acknowledge the authorship plainly. Only continue "
-                "toward a collaboration if you are extending the work in a genuinely new "
-                "direction beyond the paper's scope; otherwise close gracefully with ⏸️."
+                "\n\n**⚠️ This thread's root post cites a paper your own lab authored.** "
+                "Speak as its author — do not describe it as external work — and focus on "
+                "what remains unexploited beyond the published scope."
             )
-
-        # Inject PI context if the PI posted in this thread
-        if thread.pi_context:
-            phase_guidance += (
-                f"\n\n**Your PI has posted in this thread.** Their message is authoritative — "
-                f"incorporate their direction into your reply. If they corrected something you "
-                f"said, acknowledge the correction to the other agent. PI's message: "
-                f"\"{thread.pi_context}\""
-            )
-
-        # Funding-thread context block: rendered only when this is a :moneybag: thread.
-        if is_funding_thread:
-            funding_ctx_lines = [
-                "## Funding thread — additional rules",
-                "",
-                "This is a :moneybag: funding thread. In addition to the normal reply rules:",
-                "",
-                "- **No announcement-only replies.** Do not post replies that merely announce "
-                "a future spin-off ('I'll start a new thread', 'watch for my post', "
-                "'posting it now', 'thread wrapped'). Either create the spin-off post this "
-                "turn via a new top-level :moneybag: post, or reply only with substantive "
-                "content (a new aim, a specific contribution, a scoping question).",
-                "- **No acknowledgment-only replies.** 'Sounds good', 'thanks', 'see you "
-                "there', 'agreed' are not allowed. Every reply must add substantive content.",
-                "- **Self-dedup.** If you have already replied in this thread, your next "
-                "reply must build on the discussion — do not repost the same alignment "
-                "pitch. See your prior messages below.",
-                "",
-                "### Your prior messages in this thread",
-                "",
-                your_prior_messages or "(none — this would be your first reply)",
-                "",
-                "### Prior activity in this thread",
-                "",
-                thread_activity_summary or "(no prior activity)",
-                "",
-            ]
-            funding_context = "\n".join(funding_ctx_lines)
-        else:
-            funding_context = ""
 
         prompt_text = phase4_template.replace("{channel_name}", thread.channel)
         prompt_text = prompt_text.replace("{other_agent_name}", other_agent_name)
         prompt_text = prompt_text.replace("{other_agent_lab}", other_agent_lab)
-        prompt_text = prompt_text.replace("{message_count}", str(thread.message_count))
+        # Shown to the model right alongside `{thread_phase}`/`{phase_guidance}`
+        # ("Message count: N of 12 max"), so it must be the same ordinal fed to
+        # phase4_guidance above — otherwise a CONCLUDE-guided reply would see
+        # "Message count: 11 of 12 max" one line above "This is message 12",
+        # which is exactly the kind of internal inconsistency this fix removes.
+        prompt_text = prompt_text.replace("{message_count}", str(message_ordinal))
         prompt_text = prompt_text.replace("{thread_phase}", thread_phase)
         prompt_text = prompt_text.replace("{thread_history}", history_text)
         prompt_text = prompt_text.replace("{phase_guidance}", phase_guidance)
         prompt_text = prompt_text.replace("{instructions}", instructions)
-        prompt_text = prompt_text.replace("{foa_number}", thread.foa_number or "none")
-        prompt_text = prompt_text.replace("{funding_thread_context}", funding_context)
 
         messages = [{"role": "user", "content": prompt_text}]
         return system_prompt, messages
@@ -512,11 +370,7 @@ Use these to reference other labs' work in conversations. Include links when cit
     def build_phase5_prompt(
         self,
         recent_posts: list[dict[str, str]] | None = None,
-        foa_contexts: dict[str, str] | None = None,
-        thread_foa_contexts: dict[str, str] | None = None,
         prior_threads: dict[str, list[dict]] | None = None,
-        funding_only: bool = False,
-        funding_thread_summaries: dict[str, str] | None = None,
         visibility: str = VISIBILITY_PUBLIC,
         channel_id: str | None = None,
         post_type_menu: str | None = None,
@@ -524,13 +378,8 @@ Use these to reference other labs' work in conversations. Include links when cit
         """
         Build system + messages for Phase 5 new post.
         recent_posts: [{channel, content_snippet}] — agent's own recent top-level posts.
-        foa_contexts: {post_id: formatted_foa_text} — pre-loaded FOA details for funding posts.
-        thread_foa_contexts: {foa_number: formatted_foa_text} — FOAs from active threads
-            available for Option B (starting a funding collaboration).
         prior_threads: {other_agent_id: [{channel, outcome, summary}]} — all closed threads
             grouped by other agent, for dedup context.
-        funding_only: if True, strip prompt to funding actions only (agent is blocked for
-            regular posts but has funding posts available).
         Returns (system_prompt, messages).
 
         visibility/channel_id: Phase 5 is the "new post" phase, which in v1
@@ -549,27 +398,6 @@ Use these to reference other labs' work in conversations. Include links when cit
             "phase5-new-post.md",
             "Choose to reply to an interesting post or make a new top-level post.",
         )
-
-        # Format interesting posts, injecting FOA details for funding posts
-        if self.state.interesting_posts:
-            parts = []
-            for p in self.state.interesting_posts:
-                part = (
-                    f"**Post ID: {p.post_id}** in #{p.channel} by {p.sender_agent_id}:\n"
-                    f"{delimit(p.content_snippet, 'post_content')}"
-                )
-                if foa_contexts and p.post_id in foa_contexts:
-                    part += f"\n\n<foa_details foa_number=\"{p.foa_number}\">\n{foa_contexts[p.post_id]}\n</foa_details>"
-                if funding_thread_summaries and p.post_id in funding_thread_summaries:
-                    part += (
-                        f"\n\n<thread_activity post_id=\"{p.post_id}\">\n"
-                        f"{funding_thread_summaries[p.post_id]}\n"
-                        f"</thread_activity>"
-                    )
-                parts.append(part)
-            interesting_text = "\n\n".join(parts)
-        else:
-            interesting_text = "(none)"
 
         # Format subscribed channels
         channels_text = ", ".join(f"#{ch}" for ch in sorted(self.state.subscribed_channels))
@@ -604,45 +432,7 @@ Use these to reference other labs' work in conversations. Include links when cit
         else:
             prior_text = "(none)"
 
-        if funding_only:
-            # Strip prompt to funding-only actions: reply to funding posts,
-            # start a funding collab, or skip. Remove sections that would
-            # tempt the LLM into proposing regular posts that will be rejected.
-            import re
-            phase5_template = re.sub(
-                r"## Your subscribed channels\n.*?\n\{subscribed_channels\}\n",
-                "",
-                phase5_template,
-                flags=re.DOTALL,
-            )
-            phase5_template = re.sub(
-                r"## Your recent posts\n.*?\{your_recent_posts\}\n",
-                "",
-                phase5_template,
-                flags=re.DOTALL,
-            )
-            phase5_template = re.sub(
-                r"## Prior conversations with other labs\n.*?\{prior_conversations\}\n",
-                "",
-                phase5_template,
-                flags=re.DOTALL,
-            )
-            phase5_template = re.sub(
-                r"### Option C: Make a new top-level post\n.*?(?=### Option D:)",
-                "",
-                phase5_template,
-                flags=re.DOTALL,
-            )
-            # Replace intro text to clarify the constraint
-            phase5_template = phase5_template.replace(
-                "You have the opportunity to either reply to an interesting post or make a new top-level\n"
-                "post in one of your subscribed channels.",
-                "You have unreviewed proposals, so you can only take funding-related actions this turn.\n"
-                "Reply to a funding post, start a funding collaboration, or skip.",
-            )
-
-        prompt_text = phase5_template.replace("{interesting_posts}", interesting_text)
-        prompt_text = prompt_text.replace("{subscribed_channels}", channels_text)
+        prompt_text = phase5_template.replace("{subscribed_channels}", channels_text)
         prompt_text = prompt_text.replace("{your_recent_posts}", recent_text)
         prompt_text = prompt_text.replace("{prior_conversations}", prior_text)
         if post_type_menu is None:
@@ -662,15 +452,6 @@ Use these to reference other labs' work in conversations. Include links when cit
                 self_id=self.agent_id, bot_names={},
             )
         prompt_text = prompt_text.replace("{post_type_menu}", post_type_menu)
-
-        # Inject pre-loaded FOA details for Option B (funding collaborations)
-        if thread_foa_contexts:
-            foa_section = "\n\n## Available FOA details for funding collaborations\n\n"
-            foa_section += "\n\n".join(
-                f"<foa_details foa_number=\"{foa_num}\">\n{foa_text}\n</foa_details>"
-                for foa_num, foa_text in thread_foa_contexts.items()
-            )
-            prompt_text += foa_section
 
         messages = [{"role": "user", "content": prompt_text}]
         return system_prompt, messages
@@ -721,43 +502,6 @@ Use these to reference other labs' work in conversations. Include links when cit
         except Exception as exc:
             logger.error("[%s] Failed to update working memory: %s", self.agent_id, exc)
 
-    def update_private_profile(self, new_profile: str) -> None:
-        """Write private profile to profiles/private/{agent_id}.md (disk only).
-
-        For DB persistence, call persist_private_profile_to_db() afterward.
-        """
-        profile_path = PROFILES_DIR / "private" / f"{self.agent_id}.md"
-        try:
-            profile_path.parent.mkdir(parents=True, exist_ok=True)
-            profile_path.write_text(new_profile + "\n", encoding="utf-8")
-            self._private_profile = None  # Invalidate cache
-        except Exception as exc:
-            logger.error("[%s] Failed to update private profile: %s", self.agent_id, exc)
-
-    async def persist_private_profile_to_db(self, db: "AsyncSession") -> None:
-        """Sync the on-disk private profile to the database."""
-        from sqlalchemy import select
-        from src.models import AgentRegistry, ResearcherProfile
-
-        try:
-            agent_result = await db.execute(
-                select(AgentRegistry).where(AgentRegistry.agent_id == self.agent_id)
-            )
-            agent_reg = agent_result.scalar_one_or_none()
-            if not agent_reg:
-                return
-            profile_result = await db.execute(
-                select(ResearcherProfile).where(
-                    ResearcherProfile.user_id == agent_reg.user_id
-                )
-            )
-            profile = profile_result.scalar_one_or_none()
-            if profile:
-                profile.private_profile_md = self.private_profile
-                await db.commit()
-        except Exception as exc:
-            logger.error("[%s] Failed to persist private profile to DB: %s", self.agent_id, exc)
-
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
@@ -781,33 +525,19 @@ Your agent ID is "{agent_id}". When communicating, represent your lab profession
 
 
 def _default_system_prompt() -> str:
-    return """You are an AI agent representing a research lab in a Slack workspace
-called "labbot". Your role is to facilitate scientific collaboration by engaging with other lab agents.
+    """Emergency fallback used only if prompts/agent-system.md (or a role override)
+    cannot be loaded from disk. Not the real prompt -- keep this short and generic;
+    see prompts/agent-system.md for the actual behavior contract."""
+    return """You are an AI agent representing a research lab in a Slack workspace run by
+Blackbird Laboratories. Your job is to pitch your own lab's best research to
+BlackbirdBot, Blackbird's scouting hub, and to answer its screening questions honestly.
 
-## Core Principles
-
-1. **Specificity over generality.** Every collaboration idea must name specific techniques, models,
-   reagents, datasets, or expertise. Generic contributions ("computational analysis", "structural studies")
-   without specific scientific context are not acceptable.
-
-2. **True complementarity.** Each lab must bring something the other doesn't have.
-
-3. **Concrete first experiment required.** Any collaboration beyond initial interest must include
-   a proposed first experiment scoped to days-to-weeks, naming specific assays, methods, or reagents.
-
-4. **Silence is better than noise.** If you can't articulate what makes this collaboration better
-   than either lab doing it alone, don't propose it.
-
-5. **Non-generic benefits.** Both labs must benefit in ways specific to the collaboration.
-
-## Communication Style
-- Professional but not stiff — like a knowledgeable postdoc representing the lab
-- Specific and concrete, not vague
-- Willing to say "I don't know, let me check with my PI"
-- Doesn't oversell or overcommit
-- Expresses genuine enthusiasm when there's real synergy
-
-## Rules
-- Cannot commit effort or resources on behalf of your PI
-- Cannot share private profile information
-- Cannot DM other labs' PIs (only DM your own PI)"""
+## Core Rules
+1. **Represent your lab honestly.** Only claim capabilities, techniques, results, and
+   stages of evidence that are real. Never inflate what you have.
+2. **You never propose collaborations.** There is no lab-to-lab conversation in this
+   workspace — every conversation is between your agent and the hub.
+3. **Defer PI-intent questions.** For funding preference, appetite for equity, or any
+   other decision only your PI can make, say you'd need to check with your PI rather
+   than answering on their behalf.
+4. **Cannot commit effort, resources, or funding decisions on behalf of your PI.**"""

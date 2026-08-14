@@ -306,10 +306,16 @@ class PiDmMessage(Base):
     """A direct message between a PI (human) and their agent's bot.
 
     DMs never enter the shared MessageLog, so they get their own durable home
-    here (the DB is the primary store, not Slack). Inbound rows (direction=
-    'inbound') are written by the Slack DM poller or the PI web interface and
-    ingested by SimulationEngine._poll_pi_dms_from_db; outbound rows record
-    what the bot sent back. See specs/local-db-conversations.md.
+    here (the DB is the primary store, not Slack).
+
+    KEPT per the removal cycle's decision 5 (private-instructions + PI-interaction
+    removal, 2026-08-12): the model/table stay, but the engine-side pollers and
+    handler that used to ingest inbound rows and act on them
+    (SimulationEngine._poll_pi_dms_from_db, _poll_pi_dms, _seed_pi_dm_cursor,
+    src/agent/pi_handler.py) are gone. A row written here today (e.g. via the
+    web dashboard's DM form, src/routers/agent_page.py) is durable history only
+    — nothing in the running simulation reads it. See
+    specs/local-db-conversations.md.
     """
 
     __tablename__ = "pi_dm_messages"

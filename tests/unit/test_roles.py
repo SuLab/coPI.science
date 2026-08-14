@@ -99,7 +99,6 @@ def test_scout_hub_ships_with_the_hub_tool_set():
     spec = _load_role_real("scout_hub")
     assert spec.label == "Scout Hub"
     assert "search_prior_art" in spec.tools
-    assert "retrieve_foa" not in spec.tools  # GrantBot fetches FOAs, not the hub
 
 
 def test_scout_hub_phase4_override_renders_and_drops_the_tool_it_lacks():
@@ -111,8 +110,7 @@ def test_scout_hub_phase4_override_renders_and_drops_the_tool_it_lacks():
     tokens = (
         "{channel_name}", "{other_agent_name}", "{other_agent_lab}",
         "{message_count}", "{thread_phase}", "{thread_history}",
-        "{phase_guidance}", "{instructions}", "{foa_number}",
-        "{funding_thread_context}",
+        "{phase_guidance}", "{instructions}",
     )
 
     # Pin the raw template on disk: every token must actually be present in the
@@ -153,79 +151,19 @@ def test_scout_hub_phase4_override_renders_and_drops_the_tool_it_lacks():
     # Every substitution token was consumed.
     for token in tokens:
         assert token not in content, f"leftover token {token!r}"
-    # The Task 5 DECIDE guidance landed in the rendered prompt.
-    assert "Baltimore commitment" in content
 
 
-def test_scout_hub_phase5_override_renders_in_both_modes():
-    """build_phase5_prompt loads phase5-new-post.md through the role-aware
-    _load_prompt() (see src/agent/agent.py), so a scout_hub agent must pick up
-    prompts/roles/scout_hub/phase5-new-post.md, not the global pi_lab template.
-
-    This guards the byte-for-byte scaffolding that build_phase5_prompt's
-    .replace()/regex substitution depends on:
-      - the four substitution tokens are each replaced exactly once
-      - the funding_only regexes (keyed to '## Your subscribed channels',
-        '## Your recent posts', '## Prior conversations with other labs',
-        and the 'Option C ... Option D' block) still find their targets
-        in the scout_hub override, in both normal and funding_only mode.
-    """
-    from src.agent.agent import Agent
-
-    agent = Agent("blackbird", "BlackbirdBot", "Blackbird Labs", role="scout_hub")
-
-    leftover_tokens = [
-        "{interesting_posts}",
-        "{subscribed_channels}",
-        "{your_recent_posts}",
-        "{prior_conversations}",
-        "{post_type_menu}",
-    ]
-
-    for funding_only in (False, True):
-        system_prompt, messages = agent.build_phase5_prompt(
-            recent_posts=[{"channel": "general", "content_snippet": "an old post"}],
-            foa_contexts={},
-            thread_foa_contexts={"RFA-AI-27-019": "Example FOA text"},
-            prior_threads={
-                "wiseman": [
-                    {"channel": "general", "outcome": "no_proposal", "summary": "n/a"}
-                ]
-            },
-            funding_only=funding_only,
-            funding_thread_summaries={},
-        )
-        assert isinstance(system_prompt, str)
-        content = messages[0]["content"]
-
-        # All four tokens were substituted — none survive as raw placeholders.
-        for token in leftover_tokens:
-            assert token not in content, (
-                f"leftover token {token!r} in scout_hub phase5 prompt "
-                f"(funding_only={funding_only})"
-            )
-
-        # Confirms the scout_hub override actually rendered (not a silent
-        # fallback to the global pi_lab template).
-        assert "As the Blackbird scouting hub" in content
-
-    # funding_only=True must strip Option C (the regular new-post artifact)
-    # while keeping Option D (skip) — this is the hardcoded regex in
-    # agent.py keyed to these exact headings.
-    _, funding_only_messages = agent.build_phase5_prompt(funding_only=True)
-    funding_only_content = funding_only_messages[0]["content"]
-    assert "### Option C: Make a new top-level post" not in funding_only_content
-    assert "### Option D: Skip this turn" in funding_only_content
-    assert "## Your subscribed channels" not in funding_only_content
-    assert "## Your recent posts" not in funding_only_content
-    assert "## Prior conversations with other labs" not in funding_only_content
-
-    # Non-funding_only mode keeps the full option set, including the
-    # opportunity-assessment artifact instructions.
-    _, normal_messages = agent.build_phase5_prompt()
-    normal_content = normal_messages[0]["content"]
-    assert "### Option C: Make a new top-level post" in normal_content
-    assert ":mag: **Opportunity Assessment**" in normal_content
+# scout_hub used to have its own prompts/roles/scout_hub/phase5-new-post.md
+# override (the assessment's "Option A: post it / Option B: skip" scaffolding
+# this test used to pin byte-for-byte). The reply-only-hub reconciliation
+# deleted that file outright — the hub is hard-gated out of Phase 5 at the
+# engine level (SimulationEngine._phase5_new_post) and has no role-specific
+# Phase-5 content left to render at all; it falls back to the same GLOBAL
+# prompts/phase5-new-post.md template every other role with no override uses,
+# with an empty menu (role.toml declares post_types = []). That fallback
+# shape is already pinned by
+# test_agent_prompts.py::test_phase5_default_menu_is_the_agents_own_role_not_pi_lab
+# — nothing role-specific remains here to test.
 
 
 def test_role_rate_override_is_read_when_positive(tmp_path, monkeypatch):
@@ -282,6 +220,14 @@ def test_scout_hub_prompts_state_the_title_only_limitation():
     empty-result "not novelty, not FTO" framing, the 2-4-term query guidance with
     its concrete contrast, or -- the regression that motivated this -- a citation
     instruction that carries only the US-only half of the caveat.
+
+    File list updated for the reply-only-hub reconciliation: the standalone
+    `phase5-new-post.md` override this test originally also checked was
+    deleted (the hub has no top-level post left to make); its own copy of the
+    tool caveat is gone with it. `phase4-thread-reply.md` is the file the
+    caveat now also appears in (the tool description in its "Available
+    tools" section) alongside `agent-system.md`, which carries the full
+    caveat/vocabulary this test pins.
     """
     from pathlib import Path
 
@@ -290,16 +236,14 @@ def test_scout_hub_prompts_state_the_title_only_limitation():
         # assertions aren't brittle to reflowing or bold/italic-only edits.
         return " ".join(text.replace("*", "").split())
 
-    for name in ("agent-system.md", "phase5-new-post.md"):
+    for name in ("agent-system.md", "phase4-thread-reply.md"):
         path = Path("prompts/roles/scout_hub") / name
         body = path.read_text(encoding="utf-8")
         assert "PatentsView" not in body, f"{name} still names the dead endpoint"
         assert "title" in body.lower(), f"{name} omits the title-only limitation"
 
     system = (Path("prompts/roles/scout_hub") / "agent-system.md").read_text(encoding="utf-8")
-    phase5 = (Path("prompts/roles/scout_hub") / "phase5-new-post.md").read_text(encoding="utf-8")
     norm_system = _normalize(system)
-    norm_phase5 = _normalize(phase5)
 
     assert "freedom-to-operate" in system.lower()
     assert "2-4" in system
@@ -309,19 +253,14 @@ def test_scout_hub_prompts_state_the_title_only_limitation():
     assert "not abstracts, not claims" in norm_system, (
         "agent-system.md no longer excludes abstracts/claims from the title-only limitation"
     )
-    assert "differently-titled patent" in norm_phase5, (
-        "phase5-new-post.md no longer distinguishes a title match from a claims/differently-"
-        "titled match"
-    )
 
     # An empty/no-hit result must be described as neither novelty nor freedom-to-operate.
     assert "is never novelty and never freedom-to-operate" in norm_system, (
         "agent-system.md no longer states that an empty title search is neither novelty nor FTO"
     )
 
-    # The broadened-search case must be addressed in both files.
+    # The broadened-search case must be addressed.
     assert "reports it broadened your query" in norm_system
-    assert "if the tool broadened your query, say so" in norm_phase5.lower()
 
     # The 2-4-specific-terms guidance must come with a concrete good/bad contrast,
     # not just the bare "2-4" token.
@@ -340,9 +279,14 @@ def test_scout_hub_prompts_state_the_title_only_limitation():
 
 
 def test_scout_hub_assessment_follows_the_blackbird_rubric():
+    """The `<assessment_json>` skeleton lived in the now-deleted
+    `phase5-new-post.md` override; Option A relocated it, unchanged in
+    content, into `phase4-thread-reply.md`'s CONCLUDE-adjacent section (see
+    `simulation.py`'s `_reply_to_thread`/`_capture_hub_assessment` for the
+    engine side of that relocation)."""
     from pathlib import Path
 
-    body = (Path("prompts/roles/scout_hub") / "phase5-new-post.md").read_text(
+    body = (Path("prompts/roles/scout_hub") / "phase4-thread-reply.md").read_text(
         encoding="utf-8"
     )
     # C.1 gating, C.2 funnel, C.3 scores, C.5 red flags, C.6 verdict.
@@ -352,37 +296,19 @@ def test_scout_hub_assessment_follows_the_blackbird_rubric():
         "suggested_derisking_milestones",
     ):
         assert required in body, f"assessment template omits {required!r}"
-    # The Baltimore gate is asked, never inferred from the institution.
-    assert "JHU address is not" in body
     # Maryland non-dilutive leverage, not a generic NIH-mechanism frame.
     assert "TEDCO" in body and "BIITC" in body
-    # The sidecar must NOT be fenced — _parse_phase5_response takes the last
-    # ```json``` block as the ACTION, so a fenced sidecar would hijack it.
-    # rsplit: the tag name also appears in the prose above the real block, and
-    # only the real block's contents are the thing under test.
+    # The sidecar must NOT be fenced. rsplit: the tag name also appears in
+    # the prose above the real block, and only the real block's contents are
+    # the thing under test.
     sidecar = body.rsplit("<assessment_json>", 1)[1].split("</assessment_json>")[0]
     assert "```" not in sidecar
     assert '"funnel_stage"' in sidecar
-    # Scaffolding the existing renderer depends on must survive the rewrite.
-    for anchor in (
-        "### Option C: Make a new top-level post", "### Option D: Skip this turn",
-        "## Your subscribed channels", "## Your recent posts",
-        "## Prior conversations with other labs", ":mag: **Opportunity Assessment**",
-        "As the Blackbird scouting hub", "{interesting_posts}",
-        "{subscribed_channels}", "{your_recent_posts}", "{prior_conversations}",
-        "{post_type_menu}",
-    ):
-        assert anchor in body, f"rewrite broke the renderer anchor {anchor!r}"
-
-
-def test_baltimore_is_a_question_not_an_inference():
-    from pathlib import Path
-
-    body = (Path("prompts/roles/scout_hub") / "agent-system.md").read_text(
-        encoding="utf-8"
-    )
-    assert "Baltimore" in body
-    assert "is not a Baltimore commitment" in body
+    # The real Phase-4 renderer's scaffolding (build_phase4_prompt's
+    # substitution tokens) is pinned separately by
+    # test_scout_hub_phase4_override_renders_and_drops_the_tool_it_lacks —
+    # the old Phase-5-specific anchors ("Option A/B", "{post_type_menu}",
+    # etc.) have no equivalent here and are not re-pinned.
 
 
 def test_visible_body_hides_the_verdict_the_sidecar_still_carries():
@@ -396,20 +322,22 @@ def test_visible_body_hides_the_verdict_the_sidecar_still_carries():
     """
     from pathlib import Path
 
-    body = (Path("prompts/roles/scout_hub") / "phase5-new-post.md").read_text(
+    # Lived in the now-deleted phase5-new-post.md override; Option A
+    # relocated the same content, unchanged, into phase4-thread-reply.md's
+    # CONCLUDE-adjacent "Concluding with an Opportunity Assessment" section.
+    body = (Path("prompts/roles/scout_hub") / "phase4-thread-reply.md").read_text(
         encoding="utf-8"
     )
 
     # Anchors bounding the visible-body instructions and the sidecar
-    # instructions within Option C. If any of these move, the slice below
-    # would silently cover the wrong text, so pin their relative order.
-    visible_start = body.index("Label it :mag: **Opportunity Assessment**")
-    sidecar_start = body.index("**Also emit the machine-readable verdict.**")
-    option_d_start = body.index("### Option D: Skip this turn")
-    assert visible_start < sidecar_start < option_d_start
+    # instructions. If any of these move, the slice below would silently
+    # cover the wrong text, so pin their relative order.
+    visible_start = body.index("### Concluding with an Opportunity Assessment: the sidecar")
+    sidecar_start = body.index("**Emit the sidecar as bare JSON")
+    assert visible_start < sidecar_start
 
     visible_instructions = body[visible_start:sidecar_start]
-    sidecar_instructions = body[sidecar_start:option_d_start]
+    sidecar_instructions = body[sidecar_start:]
 
     # The PI-facing instructions must not ask for (or even name) the internal
     # verdict machinery.
@@ -451,7 +379,9 @@ def test_gating_values_in_assessment_skeleton_are_tristate_strings():
     import json
     from pathlib import Path
 
-    body = (Path("prompts/roles/scout_hub") / "phase5-new-post.md").read_text(
+    # Lived in the now-deleted phase5-new-post.md override; Option A
+    # relocated the same skeleton, unchanged, into phase4-thread-reply.md.
+    body = (Path("prompts/roles/scout_hub") / "phase4-thread-reply.md").read_text(
         encoding="utf-8"
     )
     # Same rsplit as the rubric test above: the tag name also appears in the prose
@@ -484,15 +414,37 @@ def test_missing_manifest_yields_default_post_types():
     assert spec.post_types == DEFAULT_POST_TYPES
 
 
+def _with_synthetic_canonical_type(monkeypatch):
+    """Add a second, always-available (no `targets`) canonical post type,
+    distinct from `pitch`, for tests below that need to parse TWO real
+    names. CANONICAL's one real example of this shape
+    (`opportunity_assessment`) stopped being a post type at all when the hub
+    went reply-only (Option A relocation — see post_types.py's CANONICAL
+    comment), so these tests no longer have a second real name to reach for
+    and use this synthetic stand-in instead."""
+    import src.agent.post_types as post_types_mod
+
+    synthetic = post_types_mod.PostTypeSpec(
+        "widget_broadcast", ":gear:", "Test-only broadcast type",
+        "A synthetic broadcast post type used only in this test file.",
+    )
+    monkeypatch.setattr(
+        post_types_mod, "CANONICAL",
+        {**post_types_mod.CANONICAL, synthetic.name: synthetic},
+    )
+    return synthetic.name
+
+
 def test_manifest_post_types_are_parsed(tmp_path, monkeypatch):
+    synthetic_name = _with_synthetic_canonical_type(monkeypatch)
     _write_role(
         tmp_path, monkeypatch, "widget",
         'label = "Widget"\n'
-        '[[post_types]]\nname = "paper"\n'
+        f'[[post_types]]\nname = "{synthetic_name}"\n'
         '[[post_types]]\nname = "pitch"\ntargets = ["scout_hub"]\n',
     )
     spec = load_role("widget")
-    assert [s.name for s in spec.post_types] == ["paper", "pitch"]
+    assert [s.name for s in spec.post_types] == [synthetic_name, "pitch"]
     assert dict((s.name, s.targets) for s in spec.post_types)["pitch"] == frozenset(
         {"scout_hub"}
     )
@@ -500,14 +452,15 @@ def test_manifest_post_types_are_parsed(tmp_path, monkeypatch):
 
 def test_manifest_unknown_post_type_is_dropped(tmp_path, monkeypatch, caplog):
     caplog.set_level(logging.WARNING)
+    synthetic_name = _with_synthetic_canonical_type(monkeypatch)
     _write_role(
         tmp_path, monkeypatch, "widget",
         'label = "Widget"\n'
-        '[[post_types]]\nname = "paper"\n'
+        f'[[post_types]]\nname = "{synthetic_name}"\n'
         '[[post_types]]\nname = "nonsense"\n',
     )
     spec = load_role("widget")
-    assert [s.name for s in spec.post_types] == ["paper"]
+    assert [s.name for s in spec.post_types] == [synthetic_name]
     assert "nonsense" in caplog.text
 
 
@@ -518,17 +471,17 @@ def test_malformed_toml_still_yields_default_post_types(tmp_path, monkeypatch):
     assert load_role("broken").post_types == DEFAULT_POST_TYPES
 
 
-def test_scout_hub_declares_its_two_post_types():
+def test_scout_hub_declares_no_post_types():
+    """The hub went reply-only (Option A relocation): its role.toml
+    declares `post_types = []` explicitly — its former sole type, :mag:
+    Opportunity Assessment, is not a post type anymore; it is the
+    `<assessment_json>` sidecar carried inside its own Phase-4 CONCLUDE
+    reply instead (see simulation.py's `_reply_to_thread`). An explicit
+    empty list, not an absent key, matters here: an absent `post_types` key
+    would silently hand the role `DEFAULT_POST_TYPES` (`pitch`) instead —
+    see post_types.py's `parse_post_types` docstring."""
     spec = load_role("scout_hub")
-    assert {s.name for s in spec.post_types} == {
-        "opportunity_assessment", "funding_collab",
-    }
-    assert dict((s.name, s.targets) for s in spec.post_types)[
-        "funding_collab"
-    ] == frozenset({"pi_lab"})
-    assert dict((s.name, s.targets) for s in spec.post_types)[
-        "opportunity_assessment"
-    ] == frozenset()
+    assert spec.post_types == ()
 
 
 def test_scout_hub_cannot_post_a_cross_lab_idea():
@@ -539,42 +492,30 @@ def test_scout_hub_cannot_post_a_cross_lab_idea():
 
 
 def test_pi_lab_phase5_template_renders_in_both_modes():
-    """The global template's tokens and funding_only surgeries were pinned
-    nowhere — only the scout_hub override was. This rewrite is exactly the kind
-    of change that needs the pin."""
+    """The global template's substitution tokens were pinned nowhere — only the
+    scout_hub override was. This rewrite is exactly the kind of change that
+    needs the pin. ("both modes" now just means "with and without a supplied
+    post_type_menu" — the funding_only mode this test used to also exercise
+    was removed with the template surgery it depended on."""
     from src.agent.agent import Agent
 
     agent = Agent("gill", "GillBot", "Gill PI")  # role defaults to pi_lab
 
-    for funding_only in (False, True):
-        _, messages = agent.build_phase5_prompt(
-            recent_posts=[{"channel": "general", "content_snippet": "an old post"}],
-            foa_contexts={},
-            thread_foa_contexts={"RFA-AI-27-019": "Example FOA text"},
-            prior_threads={
-                "pearce": [
-                    {"channel": "general", "outcome": "no_proposal", "summary": "n/a"}
-                ]
-            },
-            funding_only=funding_only,
-            funding_thread_summaries={},
-        )
-        content = messages[0]["content"]
-        for token in (
-            "{interesting_posts}", "{subscribed_channels}", "{your_recent_posts}",
-            "{prior_conversations}", "{post_type_menu}",
-        ):
-            assert token not in content, (
-                f"leftover token {token!r} (funding_only={funding_only})"
-            )
-
-    _, fo = agent.build_phase5_prompt(funding_only=True)
-    fo_content = fo[0]["content"]
-    assert "### Option C: Make a new top-level post" not in fo_content
-    assert "### Option D: Skip this turn" in fo_content
-    assert "## Your subscribed channels" not in fo_content
-    assert "## Your recent posts" not in fo_content
-    assert "## Prior conversations with other labs" not in fo_content
+    _, messages = agent.build_phase5_prompt(
+        recent_posts=[{"channel": "general", "content_snippet": "an old post"}],
+        prior_threads={
+            "pearce": [
+                {"channel": "general", "outcome": "no_proposal", "summary": "n/a"}
+            ]
+        },
+    )
+    content = messages[0]["content"]
+    for token in (
+        "{interesting_posts}", "{subscribed_channels}", "{your_recent_posts}",
+        "{prior_conversations}", "{post_type_menu}",
+    ):
+        assert token not in content, f"leftover token {token!r}"
 
     _, normal = agent.build_phase5_prompt()
-    assert "### Option C: Make a new top-level post" in normal[0]["content"]
+    assert "### Option A: Make a new top-level post" in normal[0]["content"]
+    assert "### Option B: Skip this turn" in normal[0]["content"]

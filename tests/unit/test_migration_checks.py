@@ -220,7 +220,7 @@ def test_revision_status_passes_at_a_supported_starting_point(rev):
     assert pf.revision_status(rev, "0023")[0] == pf.PASS
 
 
-@pytest.mark.parametrize("rev", ["0001", "0017", "0022", "0025", "abcdef"])
+@pytest.mark.parametrize("rev", ["0001", "0017", "0022", "abcdef"])
 def test_revision_status_blocks_anywhere_else(rev):
     status, reason = pf.revision_status(rev, "0023")
     assert status == pf.BLOCK
@@ -228,8 +228,10 @@ def test_revision_status_blocks_anywhere_else(rev):
 
 
 def test_supported_start_revisions_are_exactly_the_documented_set():
-    assert pf.SUPPORTED_START_REVISIONS == ("0018", "0019", "0020", "0021", "0023", "0024")
-    assert pf.DEFAULT_TARGET == "0025"
+    assert pf.SUPPORTED_START_REVISIONS == (
+        "0018", "0019", "0020", "0021", "0023", "0024", "0025",
+    )
+    assert pf.DEFAULT_TARGET == "0026"
 
 
 def test_0021_is_supported_because_that_is_origin_mains_own_alembic_head():
@@ -1143,7 +1145,7 @@ def test_postflight_status_aliases_are_the_same_tokens_preflight_uses():
 def test_preflight_parser_defaults():
     args = pf.build_parser().parse_args([])
     assert args.database_url is None
-    assert args.target == "0025"
+    assert args.target == "0026"
     assert args.json is False
     assert args.snapshot is None
     assert args.backup_path is None
@@ -1184,7 +1186,7 @@ def test_preflight_parser_accepts_the_documented_interface():
 def test_postflight_parser_defaults_and_shape():
     args = po.build_parser().parse_args([])
     assert args.database_url is None
-    assert args.target == "0025"
+    assert args.target == "0026"
     assert args.json is False
     assert args.snapshot is None
     assert args.allow_row_growth is False

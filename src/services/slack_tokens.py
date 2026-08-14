@@ -70,7 +70,7 @@ async def slack_globally_enabled(db: AsyncSession) -> bool:
 
     Explicit SLACK_ENABLED wins; otherwise auto-detect (on iff at least one
     usable bot token exists anywhere). Used to gate secondary Slack posters
-    (GrantBot, the email→Slack relay, web-triggered posts) so they no-op in
+    (the email→Slack relay, web-triggered posts) so they no-op in
     DB-only mode. See specs/local-db-conversations.md.
     """
     setting = get_settings().slack_enabled

@@ -606,7 +606,7 @@ def test_polling_a_channel_pages_and_still_returns_oldest_first():
     conversations.history anchors at `oldest` and pages FORWARD in time, so page 1 is the
     OLDEST block (newest-first *within* the page). Reversing the concatenated walk — what
     a single page needed — therefore assembles the blocks backwards, and
-    `_poll_slack_for_pi_messages` advances `_poll_cursors` to the last message it
+    `_poll_slack_for_bot_messages` advances `_poll_cursors` to the last message it
     iterates, so the cursor lands mid-window and the same messages are re-polled and
     re-handled on every later tick.
     """
@@ -913,24 +913,6 @@ def test_the_recorded_thread_parent_is_the_one_slack_reports():
     assert out["posted_messages"] == [
         {"ts": "9.9", "channel": "C_OTHER", "text": "reply", "thread_ts": "0.5"},
     ]
-
-
-def test_handover_post_budget_stays_under_the_slack_split_threshold():
-    """_add_handover_message writes one DB row per call, not one per Slack message.
-
-    That is only correct while every post it makes fits in a single Slack
-    message. 8515f65 recorded that raising _MAX_POST_CHARS silently reinstates
-    defect 2 — the DB and Slack disagreeing about how many messages exist — and
-    nothing pinned the coupling. This is that pin. If you need a bigger budget,
-    make _add_handover_message honour posted_messages first, then delete this.
-    """
-    from src.services.private_channels import _MAX_POST_CHARS
-
-    assert _MAX_POST_CHARS < SLACK_MAX_TEXT_CHARS, (
-        f"_MAX_POST_CHARS={_MAX_POST_CHARS} would let a handover post split into "
-        f"multiple Slack messages (limit {SLACK_MAX_TEXT_CHARS}), while "
-        "_add_handover_message still writes exactly one DB row per call"
-    )
 
 
 # ===========================================================================

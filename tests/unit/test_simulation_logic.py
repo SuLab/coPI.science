@@ -293,10 +293,9 @@ class TestSyncProfilesFromDisk:
         import src.agent.simulation as sim
         from src.agent.agent import Agent
 
-        (tmp_path / "private").mkdir()
         (tmp_path / "public").mkdir()
-        priv = tmp_path / "private" / "su.md"
-        priv.write_text("Focus on aging.")
+        pub = tmp_path / "public" / "su.md"
+        pub.write_text("Focus on aging.")
 
         # Point the sync method at the temp profiles tree.
         monkeypatch.setattr(sim, "PROFILES_DIR", tmp_path)
@@ -311,30 +310,30 @@ class TestSyncProfilesFromDisk:
         agent.reload_profiles = counting_reload
 
         engine = SimulationEngine(agents=[agent], slack_clients={})
-        return engine, agent, priv, calls
+        return engine, agent, pub, calls
 
     def test_first_observation_records_baseline_without_reload(self, setup):
-        engine, agent, _priv, calls = setup
+        engine, agent, _pub, calls = setup
         engine._sync_profiles_from_disk()
         assert calls == []                                  # no reload on first pass
         assert "su" in engine._profile_mtimes              # baseline recorded
 
     def test_unchanged_files_do_not_reload(self, setup):
-        engine, agent, _priv, calls = setup
+        engine, agent, _pub, calls = setup
         engine._sync_profiles_from_disk()  # baseline
         engine._sync_profiles_from_disk()  # nothing changed
         assert calls == []
 
     def test_external_edit_triggers_reload(self, setup):
         import os
-        engine, agent, priv, calls = setup
+        engine, agent, pub, calls = setup
         engine._sync_profiles_from_disk()  # baseline
 
         # Simulate the web app rewriting the file. Bump mtime explicitly so the
         # test is robust to sub-second filesystem timestamp resolution.
-        priv.write_text("Switch focus to immunology.")
+        pub.write_text("Switch focus to immunology.")
         future = engine._profile_mtimes["su"] + 10
-        os.utime(priv, (future, future))
+        os.utime(pub, (future, future))
 
         engine._sync_profiles_from_disk()
         assert calls == [1]                                 # reloaded exactly once
@@ -345,150 +344,11 @@ class TestSyncProfilesFromDisk:
         assert calls == [1]
 
     def test_missing_profile_files_are_tolerated(self, setup, tmp_path):
-        engine, agent, priv, calls = setup
-        priv.unlink()  # no profile files on disk at all
+        engine, agent, pub, calls = setup
+        pub.unlink()  # no profile files on disk at all
         engine._sync_profiles_from_disk()  # must not raise
         engine._sync_profiles_from_disk()
         assert calls == []
-
-
-# ---------------------------------------------------------------
-# _seed_private_refinements — kick-start refinement after a reopen
-# migrates a proposal into a collab_private channel.
-# ---------------------------------------------------------------
-
-class TestSeedPrivateRefinements:
-    THREAD_ID = "1781124831.657319"
-    CHANNEL_ID = "C0BB48ETLQL"
-    CHANNEL_NAME = "priv-lairson-su-drug-repurposing-20260616-180113"
-    GUIDANCE = "This needs more research. Check for knowledge graphs to augment predictions."
-
-    def _engine_with_handover(self, *, with_handover=True, age_s=60.0):
-        import time
-
-        from src.agent.agent import Agent
-        from src.agent.message_log import LogEntry
-
-        su = Agent("su", "SuBot", "Andrew Su")
-        lairson = Agent("lairson", "LairsonBot", "Brian Lairson")
-        engine = SimulationEngine(agents=[su, lairson], slack_clients={})
-        engine._channel_id_map[self.CHANNEL_NAME] = self.CHANNEL_ID
-        engine._private_channel_members[self.CHANNEL_ID] = {"su", "lairson"}
-        # Handover timestamps relative to now so the recency guard is stable
-        # regardless of when the suite runs. base is `age_s` seconds ago.
-        base = time.time() - age_s
-        self._anchor_ts = f"{base + 2:.6f}"  # the latest of the three posts
-        if with_handover:
-            # Three top-level handover posts authored by the creator bot (su),
-            # exactly as the web reopen flow posts them.
-            for i, text in enumerate([
-                "*Private refinement channel* ... *Proposal summary:* ...",
-                f"*Guidance from Andrew Su:*\n{self.GUIDANCE}",
-                "Continuing the conversation here — bots, please proceed with refinement.",
-            ]):
-                engine.message_log.append(LogEntry(
-                    ts=f"{base + i:.6f}",
-                    channel=self.CHANNEL_NAME,
-                    sender_agent_id="su",
-                    sender_name="subot",
-                    content=text,
-                    thread_ts=None,
-                    posted_at=base + i,
-                    is_bot=True,
-                ))
-        return engine, su, lairson
-
-    def _migrated_info(self):
-        return {self.THREAD_ID: (self.CHANNEL_ID, self.GUIDANCE)}
-
-    def test_seeds_responder_not_last_poster(self):
-        engine, su, lairson = self._engine_with_handover()
-        engine._seed_private_refinements(self._migrated_info())
-
-        # su posted the handover (last poster) → it waits, gets nothing.
-        assert su.state.interesting_posts == []
-        # lairson is the responder → seeded with one PI-priority post.
-        assert len(lairson.state.interesting_posts) == 1
-        post = lairson.state.interesting_posts[0]
-        assert post.channel == self.CHANNEL_NAME
-        assert post.post_id == self._anchor_ts  # the latest handover post
-        assert post.pi_priority is True
-        assert post.pi_context == self.GUIDANCE
-        assert self.THREAD_ID in engine._db_private_refined_thread_ids
-
-    def test_idempotent_does_not_double_seed(self):
-        engine, su, lairson = self._engine_with_handover()
-        engine._seed_private_refinements(self._migrated_info())
-        engine._seed_private_refinements(self._migrated_info())
-        assert len(lairson.state.interesting_posts) == 1
-
-    def test_noop_when_channel_not_tracked(self):
-        engine, su, lairson = self._engine_with_handover()
-        engine._channel_id_map.clear()  # channel id can't resolve to a name
-        engine._seed_private_refinements(self._migrated_info())
-        assert lairson.state.interesting_posts == []
-        # Not marked handled — must retry once the channel is tracked.
-        assert self.THREAD_ID not in engine._db_private_refined_thread_ids
-
-    def test_noop_when_handover_not_yet_in_log(self):
-        engine, su, lairson = self._engine_with_handover(with_handover=False)
-        engine._seed_private_refinements(self._migrated_info())
-        assert lairson.state.interesting_posts == []
-        # Not marked handled — self-heals on a later tick after the poll lands.
-        assert self.THREAD_ID not in engine._db_private_refined_thread_ids
-
-    def test_skips_stale_handover(self):
-        # A handover older than the recency window must not be revived, but is
-        # marked handled so it isn't re-evaluated every tick.
-        engine, su, lairson = self._engine_with_handover(age_s=30 * 24 * 3600)
-        engine._seed_private_refinements(self._migrated_info())
-        assert lairson.state.interesting_posts == []
-        assert self.THREAD_ID in engine._db_private_refined_thread_ids
-
-    def test_reengages_responder_on_resume(self):
-        # On resume, an active (non-finalized, recent) refinement must re-engage
-        # the bot that owes a reply — even though it already participated —
-        # because Phase 2 won't reliably re-surface the counterpart's last post.
-        # Only the most-recent poster is held back (turn-taking).
-        from src.agent.message_log import LogEntry
-
-        engine, su, lairson = self._engine_with_handover()
-        base = engine.message_log._entries[-1].posted_at
-        # lairson replied, then su replied — su is the last poster; lairson owes
-        # the next turn.
-        for i, (aid, name) in enumerate([("lairson", "lairsonbot"), ("su", "subot")]):
-            engine.message_log.append(LogEntry(
-                ts=f"9999999999.00000{i}",
-                channel=self.CHANNEL_NAME,
-                sender_agent_id=aid,
-                sender_name=name,
-                content=f"Refinement reply {i} from {aid}.",
-                thread_ts=None,
-                posted_at=base + 1 + i,
-                is_bot=True,
-            ))
-        assert engine.message_log.get_last_bot_sender_in_channel(self.CHANNEL_NAME) == "su"
-        engine._seed_private_refinements(self._migrated_info())
-        # lairson (owes the reply) is re-seeded off su's latest post; su isn't.
-        assert len(lairson.state.interesting_posts) == 1
-        assert lairson.state.interesting_posts[0].post_id == "9999999999.000001"
-        assert su.state.interesting_posts == []
-
-    def test_skips_finalized_channel(self):
-        # A channel whose refinement already converged on a recorded proposal
-        # must not be re-seeded.
-        engine, su, lairson = self._engine_with_handover()
-        engine._finalized_private_channels.add(self.CHANNEL_NAME)
-        engine._seed_private_refinements(self._migrated_info())
-        assert su.state.interesting_posts == []
-        assert lairson.state.interesting_posts == []
-        assert self.THREAD_ID in engine._db_private_refined_thread_ids
-
-    def test_empty_migrated_info_is_noop(self):
-        engine, su, lairson = self._engine_with_handover()
-        engine._seed_private_refinements({})
-        assert su.state.interesting_posts == []
-        assert lairson.state.interesting_posts == []
 
 
 # ---------------------------------------------------------------
@@ -581,94 +441,6 @@ class TestRewindCursorsForPrivateChannels:
         engine._rewind_cursors_for_private_channels()
         assert su.state.last_seen_cursor == now
         assert lairson.state.last_seen_cursor == now
-
-
-# ---------------------------------------------------------------
-# _check_private_channel_outcome / _finalize_private_proposal —
-# converge a flat collab_private refinement into a revised proposal.
-# ---------------------------------------------------------------
-
-class TestPrivateChannelFinalization:
-    CID = "C0BB48ETLQL"
-    NAME = "priv-lairson-su-drug-repurposing-20260616-180113"
-    MEMO = ":memo: Summary\n*Scientific question:* refined STING question\n*Confidence: [Moderate]*"
-
-    def _engine(self):
-        from src.agent.agent import Agent
-        su = Agent("su", "SuBot", "Andrew Su")
-        lairson = Agent("lairson", "LairsonBot", "Brian Lairson")
-        engine = SimulationEngine(agents=[su, lairson], slack_clients={})
-        engine._channel_id_map[self.NAME] = self.CID
-        engine._channel_visibility[self.NAME] = "collab_private"
-        engine._private_channel_members[self.CID] = {"su", "lairson"}
-        return engine, su, lairson
-
-    def _add(self, engine, sender, content, ts):
-        from src.agent.message_log import LogEntry
-        engine.message_log.append(LogEntry(
-            ts=ts, channel=self.NAME, sender_agent_id=sender, sender_name=sender,
-            content=content, thread_ts=None, posted_at=float(ts), is_bot=True,
-        ))
-
-    async def test_memo_plus_check_finalizes(self):
-        engine, su, lairson = self._engine()
-        self._add(engine, "lairson", self.MEMO, "100.000001")
-        await engine._check_private_channel_outcome(su, self.NAME, "✅ Great — let's lock this in.")
-
-        assert self.NAME in engine._finalized_private_channels
-        for ag, other in ((su, "lairson"), (lairson, "su")):
-            props = [p for p in ag.state.pending_proposals if p.thread_id == "100.000001"]
-            assert len(props) == 1
-            assert props[0].reviewed is False
-            assert props[0].other_agent_id == other
-            assert props[0].summary_text.startswith(":memo:")
-
-    async def test_bare_memo_does_not_finalize(self):
-        engine, su, lairson = self._engine()
-        self._add(engine, "lairson", self.MEMO, "100.000001")
-        # A :memo: with no ✅ must not finalize — it awaits the other bot's ✅.
-        await engine._check_private_channel_outcome(lairson, self.NAME, self.MEMO)
-        assert self.NAME not in engine._finalized_private_channels
-        assert su.state.pending_proposals == []
-
-    async def test_check_without_prior_memo_is_noop(self):
-        engine, su, lairson = self._engine()
-        self._add(engine, "lairson", "Some discussion, no summary yet.", "100.000001")
-        await engine._check_private_channel_outcome(su, self.NAME, "✅ sounds good")
-        assert self.NAME not in engine._finalized_private_channels
-
-    async def test_check_ignores_own_memo(self):
-        engine, su, lairson = self._engine()
-        # su's ✅ must confirm the *other* member's memo, not su's own.
-        self._add(engine, "su", self.MEMO, "100.000001")
-        await engine._check_private_channel_outcome(su, self.NAME, "✅")
-        assert self.NAME not in engine._finalized_private_channels
-
-    async def test_finalization_is_idempotent(self):
-        engine, su, lairson = self._engine()
-        self._add(engine, "lairson", self.MEMO, "100.000001")
-        await engine._check_private_channel_outcome(su, self.NAME, "✅")
-        await engine._check_private_channel_outcome(su, self.NAME, "✅ again")
-        # Still exactly one pending proposal per agent (no duplicate).
-        assert len([p for p in su.state.pending_proposals if p.thread_id == "100.000001"]) == 1
-        assert len([p for p in lairson.state.pending_proposals if p.thread_id == "100.000001"]) == 1
-
-    async def test_handover_memo_is_not_treated_as_revised_proposal(self):
-        # The handover embeds the ORIGINAL proposal summary (also :memo:). A ✅
-        # before any revised summary exists must NOT finalize off the handover.
-        engine, su, lairson = self._engine()
-        self._add(engine, "su",
-                  "*Private refinement channel*\n\n*Proposal summary:*\n" + self.MEMO,
-                  "100.000001")
-        await engine._check_private_channel_outcome(lairson, self.NAME, "✅ good start")
-        assert self.NAME not in engine._finalized_private_channels
-
-        # Once su posts a genuine revised summary, ✅ finalizes off that one.
-        self._add(engine, "su", self.MEMO, "200.000002")
-        await engine._check_private_channel_outcome(lairson, self.NAME, "✅ locking it in")
-        assert self.NAME in engine._finalized_private_channels
-        props = [p for p in lairson.state.pending_proposals if p.thread_id == "200.000002"]
-        assert len(props) == 1
 
 
 # ---------------------------------------------------------------
@@ -1163,116 +935,468 @@ class TestPhase4ReplySuppression:
         assert thread.has_pending_reply is False
 
 
-class TestPhase5ReplyActionSuppression:
-    """Covers both reply-action branches in _phase5_new_post: the private-
-    channel flat follow-up, and the normal thread-creating reply."""
+# ---------------------------------------------------------------
+# The pending/reactive-priority trigger loop closed 2026-08-12
+# (PI-interaction removal cycle). The surviving `is_bot=False` producer
+# (`reopen_proposal` -> `src/services/pi_inbox.py::record_pi_message`) writes
+# a human-authored row that the DB-inbound poller ingests into the shared
+# MessageLog; before this fix, `MessageLog.has_new_reply_from_other` (via
+# `_owes_reply` and `_phase4_reply_threads`'s ungated call) would have treated
+# that row as "a new reply from the other participant" — setting
+# `has_pending_reply`, granting reactive priority, and (via
+# `_reply_to_thread`'s message-count recompute) shifting the thread's ordinal.
+# ---------------------------------------------------------------
 
-    def _engine_with_agent(self, *, private_channel: bool):
+class TestHumanRepliesAreInertToPhase4:
+    def _engine_with_thread(self):
         from src.agent.agent import Agent
-        from src.agent.message_log import LogEntry
-        from src.agent.state import PostRef
-        from src.visibility import VISIBILITY_COLLAB_PRIVATE
+        from src.agent.state import ThreadState
         from tests.fakes import FakeSlackClient
 
         agent = Agent("blackbird", "BlackbirdBot", "Blackbird")
-        agent.state.interesting_posts.append(PostRef(
-            post_id="t1", channel="general", sender_agent_id="wang",
-            content_snippet="an interesting post", posted_at=0.0,
-        ))
+        thread = ThreadState(
+            thread_id="t1", channel="general", other_agent_id="wang",
+            message_count=3, has_pending_reply=False,
+        )
+        agent.state.active_threads["t1"] = thread
         client = FakeSlackClient(agent_id="blackbird")
         engine = SimulationEngine(agents=[agent], slack_clients={"blackbird": client})
-        # The threaded-reply branch looks up the original post's sender via
-        # the message log (to populate the new ThreadState) — give it an
-        # entry to find, so the non-suppressed case exercises that too.
-        engine.message_log.load_entry(LogEntry(
-            ts="t1", channel="general", sender_agent_id="wang",
-            sender_name="WangBot", content="an interesting post", posted_at=0.0,
-            # Slack-origin, so _slack_parent_ts resolves a root and the
-            # non-suppressed threaded reply actually mirrors to Slack.
-            slack_ts="t1",
+        return engine, agent, thread, client
+
+    @staticmethod
+    def _human_entry(ts="2", content="guidance"):
+        from src.agent.message_log import LogEntry
+        return LogEntry(
+            ts=ts, channel="general", sender_agent_id=None,
+            sender_name="Dr Wang (PI)", content=content, thread_ts="t1",
+            posted_at=float(ts), is_bot=False,
+        )
+
+    @staticmethod
+    def _bot_entry(ts="2", content="real reply"):
+        from src.agent.message_log import LogEntry
+        return LogEntry(
+            ts=ts, channel="general", sender_agent_id="wang", sender_name="WangBot",
+            content=content, thread_ts="t1", posted_at=float(ts), is_bot=True,
+        )
+
+    def test_human_reply_does_not_grant_reactive_priority(self):
+        engine, agent, _thread, _client = self._engine_with_thread()
+        engine.message_log.append(self._human_entry())
+
+        assert engine._owes_reply(agent) is False
+
+    def test_control_bot_reply_does_grant_reactive_priority(self):
+        """Positive control: the same shape of entry, bot-authored, DOES owe
+        a reply — so the test above is provably about is_bot."""
+        engine, agent, _thread, _client = self._engine_with_thread()
+        engine.message_log.append(self._bot_entry())
+
+        assert engine._owes_reply(agent) is True
+
+    @pytest.mark.asyncio
+    async def test_human_reply_does_not_trigger_phase4_or_shift_the_ordinal(self, monkeypatch):
+        engine, agent, thread, _client = self._engine_with_thread()
+        engine.message_log.append(self._human_entry())
+
+        called = {"reply": False}
+
+        async def _fake_reply_to_thread(a, t):
+            called["reply"] = True
+
+        monkeypatch.setattr(engine, "_reply_to_thread", _fake_reply_to_thread)
+
+        replied = await engine._phase4_reply_threads(agent)
+
+        assert replied == set(), "a human-only entry must not select the thread for reply"
+        assert called["reply"] is False
+        assert thread.has_pending_reply is False
+        assert thread.message_count == 3, (
+            "the ordinal must not shift merely from a human entry landing in the thread"
+        )
+
+    @pytest.mark.asyncio
+    async def test_control_bot_reply_does_trigger_phase4(self, monkeypatch):
+        """Positive control for the test above: the same shape of entry,
+        bot-authored, DOES select the thread for reply."""
+        engine, agent, thread, _client = self._engine_with_thread()
+        engine.message_log.append(self._bot_entry())
+
+        called = {"reply": False}
+
+        async def _fake_reply_to_thread(a, t):
+            called["reply"] = True
+
+        monkeypatch.setattr(engine, "_reply_to_thread", _fake_reply_to_thread)
+
+        replied = await engine._phase4_reply_threads(agent)
+
+        assert replied == {"t1"}
+        assert called["reply"] is True
+
+
+# ---------------------------------------------------------------
+# Option A relocation: the hub's :mag: Opportunity Assessment is extracted
+# from, and stripped out of, its own Phase-4 CONCLUDE reply — see
+# SimulationEngine._reply_to_thread / _capture_hub_assessment. The DB-backed
+# row-persistence assertions live in
+# tests/integration/test_opportunity_assessment_persistence.py; these are the
+# fast, no-database pins: the sidecar never reaches Slack, a role check gates
+# the whole mechanism to scout_hub, and a persistence failure never crashes
+# the reply that already posted.
+# ---------------------------------------------------------------
+
+class TestHubAssessmentRelocation:
+    def _engine_with_hub_thread(self):
+        from src.agent.agent import Agent
+        from src.agent.state import ThreadState
+        from tests.fakes import FakeSlackClient
+
+        hub = Agent("blackbird", "BlackbirdBot", "Blackbird", role="scout_hub")
+        thread = ThreadState(
+            thread_id="t1", channel="general", other_agent_id="wang",
+            message_count=11, has_pending_reply=True,
+        )
+        hub.state.active_threads["t1"] = thread
+        client = FakeSlackClient(agent_id="blackbird")
+        engine = SimulationEngine(agents=[hub], slack_clients={"blackbird": client})
+        return engine, hub, thread, client
+
+    @pytest.mark.asyncio
+    async def test_sidecar_never_reaches_slack_in_a_concluding_hub_reply(self, monkeypatch):
+        """Mission pin: the sidecar must NEVER appear in posted text."""
+        engine, hub, thread, client = self._engine_with_hub_thread()
+
+        raw_response = (
+            "<slack_message>\n"
+            ":mag: Closing note — thanks for the detail.\n"
+            "</slack_message>\n\n"
+            '<assessment_json>\n'
+            '{"subject_agent_id": "wang", "recommendation": "pass", '
+            '"scores": {"differentiation": 2}}\n'
+            '</assessment_json>'
+        )
+
+        async def _fake_generate_with_tools(**kwargs):
+            return raw_response
+
+        monkeypatch.setattr(hub, "build_phase4_prompt", lambda **kw: ("sys", []))
+        monkeypatch.setattr(
+            "src.agent.simulation.generate_with_tools", _fake_generate_with_tools
+        )
+
+        await engine._reply_to_thread(hub, thread)
+
+        assert len(client.posted) == 1
+        posted_text = client.posted[0]["text"]
+        assert posted_text == ":mag: Closing note — thanks for the detail."
+        for leaked in ("assessment_json", "subject_agent_id", "differentiation"):
+            assert leaked not in posted_text, f"sidecar leaked into Slack: {leaked!r}"
+
+    @pytest.mark.asyncio
+    async def test_a_persistence_failure_is_logged_and_never_crashes_the_reply(
+        self, monkeypatch, caplog,
+    ):
+        """Mission pin (d), the crash-safety half: whatever goes wrong
+        downstream of extraction must never propagate out of
+        `_reply_to_thread` — the reply already posted and must stay posted."""
+        engine, hub, thread, client = self._engine_with_hub_thread()
+
+        async def _boom(*args, **kwargs):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(engine, "_persist_assessment", _boom)
+
+        raw_response = (
+            "<slack_message>Closing note.</slack_message>\n\n"
+            '<assessment_json>{"subject_agent_id": "wang", "recommendation": "pass"}'
+            "</assessment_json>"
+        )
+
+        async def _fake_generate_with_tools(**kwargs):
+            return raw_response
+
+        monkeypatch.setattr(hub, "build_phase4_prompt", lambda **kw: ("sys", []))
+        monkeypatch.setattr(
+            "src.agent.simulation.generate_with_tools", _fake_generate_with_tools
+        )
+
+        with caplog.at_level("ERROR"):
+            await engine._reply_to_thread(hub, thread)
+
+        assert len(client.posted) == 1  # the reply still posted
+        assert hub.message_count == 1
+        assert "Failed to extract/persist the assessment sidecar" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_pi_lab_replies_never_attempt_assessment_capture(self, monkeypatch):
+        """A pi_lab reply must never even try to extract a sidecar — the
+        Option A call site is gated on `agent.role == "scout_hub"`."""
+        from src.agent.agent import Agent
+        from src.agent.state import ThreadState
+        from tests.fakes import FakeSlackClient
+
+        lab = Agent("gill", "GillBot", "Gill", role="pi_lab")
+        thread = ThreadState(
+            thread_id="t1", channel="general", other_agent_id="blackbird",
+            message_count=11, has_pending_reply=True,
+        )
+        lab.state.active_threads["t1"] = thread
+        client = FakeSlackClient(agent_id="gill")
+        engine = SimulationEngine(agents=[lab], slack_clients={"gill": client})
+
+        called = {"capture": False}
+
+        async def _spy(*args, **kwargs):
+            called["capture"] = True
+
+        monkeypatch.setattr(engine, "_capture_hub_assessment", _spy)
+        monkeypatch.setattr(lab, "build_phase4_prompt", lambda **kw: ("sys", []))
+
+        async def _fake_generate_with_tools(**kwargs):
+            return "<slack_message>A normal reply.</slack_message>"
+
+        monkeypatch.setattr(
+            "src.agent.simulation.generate_with_tools", _fake_generate_with_tools
+        )
+
+        await engine._reply_to_thread(lab, thread)
+
+        assert called["capture"] is False
+        assert len(client.posted) == 1
+
+
+# ---------------------------------------------------------------
+# Ordinal regression pin (fix round T6, round 2). `_reply_to_thread` passed
+# thread.message_count — the count of messages ALREADY in the thread — straight
+# into `Agent.build_phase4_prompt`, but `phase4_guidance`'s own contract is the
+# ORDINAL of the reply about to be written ("This is message 12", not "message
+# 11"). Combined with the system-enforced-close check firing at that SAME
+# prior-count >= max_thread_messages (before any reply is generated at all),
+# CONCLUDE guidance could never reach an actual reply under the default
+# max_thread_messages=12: a reply only ever generates at prior-count <= 11
+# (DECIDE at most), and prior-count >= 12 closes the thread as a timeout with
+# no verdict, no sidecar, ever. These drive the REAL (non-mocked)
+# Agent.build_phase4_prompt through a real SimulationEngine._reply_to_thread
+# call — only PROFILES_DIR is faked, for hermeticity (same convention as
+# tests/characterization/test_agent_turn_gm.py's _hermetic_profiles fixture).
+# ---------------------------------------------------------------
+
+def _seed_thread_history(engine, thread_id: str, channel: str, count: int) -> None:
+    """Append ``count`` plain replies to ``thread_id`` so `_reply_to_thread`'s
+    own recompute (``len(get_thread_history(thread_id))``) lands on exactly
+    ``count`` — none of these entries' ``ts`` equals ``thread_id`` itself, so
+    there is no "root" entry inflating the count by one."""
+    from src.agent.message_log import LogEntry
+
+    for i in range(count):
+        engine.message_log.append(LogEntry(
+            ts=f"{thread_id}-msg{i}",
+            channel=channel,
+            sender_agent_id="wang" if i % 2 else "blackbird",
+            sender_name="WangBot" if i % 2 else "BlackbirdBot",
+            content=f"message {i}",
+            thread_ts=thread_id,
+            posted_at=float(i),
+            is_bot=True,
         ))
-        if private_channel:
-            engine._channel_visibility["general"] = VISIBILITY_COLLAB_PRIVATE
-        return engine, agent, client
 
-    _ACTION_JSON = (
-        '```json\n'
-        '{"action": "reply", "target_post_id": "t1", "channel": "general", '
-        '"post_type": "", "tagged_agent": null}\n'
-        '```\n\n'
-    )
 
-    async def _drive(self, engine, agent, monkeypatch, slack_message_body):
-        async def _fake_generate(**kwargs):
-            return self._ACTION_JSON + slack_message_body
+class TestPhase4OrdinalGuidance:
+    def _engine_with_history(self, monkeypatch, tmp_path, count):
+        from src.agent.agent import Agent
+        from src.agent.state import ThreadState
+        from tests.fakes import FakeSlackClient
 
-        monkeypatch.setattr(agent, "build_phase5_prompt", lambda **kw: ("sys", []))
-        monkeypatch.setattr("src.agent.simulation.generate_agent_response", _fake_generate)
-        await engine._phase5_new_post(agent)
-
-    @pytest.mark.asyncio
-    async def test_suppressed_private_channel_reply_is_not_counted_or_drained(
-        self, monkeypatch, caplog
-    ):
-        caplog.set_level("INFO")
-        engine, agent, client = self._engine_with_agent(private_channel=True)
-
-        await self._drive(engine, agent, monkeypatch, _SUPPRESSING_SLACK_MESSAGE)
-
-        assert client.posted == []
-        assert agent.message_count == 0
-        # The post never went out, so the interesting post must not be
-        # consumed — draining it would silently drop the opportunity to reply.
-        assert [p.post_id for p in agent.state.interesting_posts] == ["t1"]
-        assert "suppressed" in caplog.text
-        assert "not counted" in caplog.text
+        monkeypatch.setattr("src.agent.agent.PROFILES_DIR", tmp_path)
+        hub = Agent("blackbird", "BlackbirdBot", "Blackbird", role="scout_hub")
+        thread = ThreadState(
+            thread_id="t1", channel="general", other_agent_id="wang",
+            has_pending_reply=True,
+        )
+        hub.state.active_threads["t1"] = thread
+        client = FakeSlackClient(agent_id="blackbird")
+        engine = SimulationEngine(agents=[hub], slack_clients={"blackbird": client})
+        _seed_thread_history(engine, "t1", "general", count)
+        return engine, hub, thread, client
 
     @pytest.mark.asyncio
-    async def test_non_suppressed_private_channel_reply_still_counts_and_drains(
-        self, monkeypatch
+    async def test_prior_count_11_reply_gets_conclude_guidance_and_posts(
+        self, monkeypatch, tmp_path,
     ):
-        engine, agent, client = self._engine_with_agent(private_channel=True)
+        """The mission pin: 11 EXISTING messages -> this reply is ordinal 12
+        -> MUST-CONCLUDE guidance, and the reply actually posts (the system-
+        enforced-close check at prior-count 11 does not fire — 11 < 12)."""
+        engine, hub, thread, client = self._engine_with_history(monkeypatch, tmp_path, 11)
 
-        await self._drive(
-            engine, agent, monkeypatch,
-            "<slack_message>A normal flat follow-up.</slack_message>",
+        captured = {}
+        real_build = hub.build_phase4_prompt
+
+        def _spy(**kwargs):
+            system, messages = real_build(**kwargs)
+            captured["messages"] = messages
+            return system, messages
+
+        monkeypatch.setattr(hub, "build_phase4_prompt", _spy)
+
+        async def _fake_generate_with_tools(**kwargs):
+            return (
+                "<slack_message>⏸️ Not a fit — no credible IP path here.</slack_message>"
+            )
+
+        monkeypatch.setattr(
+            "src.agent.simulation.generate_with_tools", _fake_generate_with_tools
         )
 
+        await engine._reply_to_thread(hub, thread)
+
+        # Must actually post — NOT silently close as a timeout with no verdict.
         assert len(client.posted) == 1
-        assert agent.message_count == 1
-        assert agent.state.interesting_posts == []
+        prompt_text = captured["messages"][0]["content"]
+        assert "This is message 12 — you MUST conclude the interview now" in prompt_text
+        assert "**Message count:** 12 of 12 max" in prompt_text
 
     @pytest.mark.asyncio
-    async def test_suppressed_threaded_reply_is_not_counted_or_drained(
-        self, monkeypatch, caplog
+    async def test_prior_count_12_thread_closes_without_generating_a_reply(
+        self, monkeypatch, tmp_path,
     ):
-        caplog.set_level("INFO")
-        engine, agent, client = self._engine_with_agent(private_channel=False)
+        """The check just above the reply-generation code is unaffected by the
+        ordinal fix on purpose: 12 EXISTING messages means the thread is full,
+        so it closes as a timeout before the LLM is ever consulted."""
+        engine, hub, thread, client = self._engine_with_history(monkeypatch, tmp_path, 12)
+        monkeypatch.setattr(hub, "build_phase4_prompt", lambda **kw: ("sys", []))
 
-        await self._drive(engine, agent, monkeypatch, _SUPPRESSING_SLACK_MESSAGE)
+        async def _fail_if_called(**kwargs):
+            raise AssertionError("the LLM must not be reached once the thread is full")
+
+        monkeypatch.setattr("src.agent.simulation.generate_with_tools", _fail_if_called)
+
+        await engine._reply_to_thread(hub, thread)
 
         assert client.posted == []
-        assert agent.message_count == 0
-        assert [p.post_id for p in agent.state.interesting_posts] == ["t1"]
-        assert agent.state.active_threads == {}
-        assert "suppressed" in caplog.text
-        assert "not counted" in caplog.text
+        assert thread.status == "closed"
+
+
+# ---------------------------------------------------------------
+# _warn_if_hub_conclude_missing_assessment — absent-sidecar detection gap
+# (fix round item 2). thread_guidance.py's CONCLUDE branch is a hardcoded
+# ordinal >= 12. Now that the message_count/ordinal off-by-one is fixed
+# (`Agent.build_phase4_prompt` and this warning's own `phase4_guidance` call
+# both feed it `thread.message_count + 1`), a reply generated when the
+# thread already has 11 messages is ordinal 12 -> CONCLUDE, and — because
+# the system-enforced-close check just above is a check on the unmodified
+# PRIOR count (11 < 12) — that reply genuinely gets generated and posted
+# under DEFAULT settings (max_thread_messages=12). No threshold inflation
+# needed any more: every fixture below uses the real default.
+# ---------------------------------------------------------------
+
+class TestHubConcludeMissingAssessmentWarning:
+    _WARNING_SNIPPET = "no persistable <assessment_json> sidecar was found"
+
+    def _engine_at(self, monkeypatch, *, message_count):
+        from src.agent.agent import Agent
+        from src.agent.state import ThreadState
+        from tests.fakes import FakeSlackClient
+
+        hub = Agent("blackbird", "BlackbirdBot", "Blackbird", role="scout_hub")
+        thread = ThreadState(
+            thread_id="t1", channel="general", other_agent_id="wang",
+            has_pending_reply=True,
+        )
+        hub.state.active_threads["t1"] = thread
+        client = FakeSlackClient(agent_id="blackbird")
+        engine = SimulationEngine(agents=[hub], slack_clients={"blackbird": client})
+        _seed_thread_history(engine, "t1", "general", message_count)
+        monkeypatch.setattr(hub, "build_phase4_prompt", lambda **kw: ("sys", []))
+        return engine, hub, thread, client
+
+    async def _drive(self, monkeypatch, engine, hub, thread, raw_response):
+        async def _fake_generate_with_tools(**kwargs):
+            return raw_response
+
+        monkeypatch.setattr(
+            "src.agent.simulation.generate_with_tools", _fake_generate_with_tools
+        )
+        await engine._reply_to_thread(hub, thread)
 
     @pytest.mark.asyncio
-    async def test_non_suppressed_threaded_reply_still_counts_and_drains(
-        self, monkeypatch
+    async def test_fires_on_conclude_non_decline_reply_with_no_sidecar(
+        self, monkeypatch, caplog,
     ):
-        engine, agent, client = self._engine_with_agent(private_channel=False)
-
-        await self._drive(
-            engine, agent, monkeypatch,
-            "<slack_message>A normal threaded reply.</slack_message>",
+        """The mission pin: a hub reply generated at the structural CONCLUDE
+        point (11 EXISTING messages -> ordinal 12, under DEFAULT settings —
+        no max_thread_messages override) that neither declines nor carries a
+        sidecar must warn."""
+        engine, hub, thread, client = self._engine_at(monkeypatch, message_count=11)
+        raw_response = (
+            "<slack_message>\n"
+            ":mag: Interesting, but I don't have enough to call it either way.\n"
+            "</slack_message>"
         )
+        with caplog.at_level("WARNING"):
+            await self._drive(monkeypatch, engine, hub, thread, raw_response)
+
+        assert len(client.posted) == 1  # confirms the reply was actually generated
+        assert self._WARNING_SNIPPET in caplog.text
+        assert "t1" in caplog.text
+        # The warning logs the ordinal of the reply just generated (12), not
+        # thread.message_count, the prior count (11) — the same off-by-one
+        # that build_phase4_prompt corrects for the same reply. Logging the
+        # prior count would silently mislabel every one of these warnings.
+        assert "message_ordinal=12" in caplog.text
+        assert "message_count=11" not in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_silent_on_pause_decline_at_conclude(self, monkeypatch, caplog):
+        """A ⏸️-opening decline at the CONCLUDE point is an expected,
+        documented outcome (thread_guidance's "Option 2 is perfectly
+        acceptable" branch) — must not warn."""
+        engine, hub, thread, client = self._engine_at(monkeypatch, message_count=11)
+        raw_response = (
+            "<slack_message>⏸️ Not a fit — no credible IP path here.</slack_message>"
+        )
+        with caplog.at_level("WARNING"):
+            await self._drive(monkeypatch, engine, hub, thread, raw_response)
 
         assert len(client.posted) == 1
-        assert agent.message_count == 1
-        assert agent.state.interesting_posts == []
-        assert "t1" in agent.state.active_threads
+        assert self._WARNING_SNIPPET not in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_silent_on_non_conclude_reply_with_no_sidecar(
+        self, monkeypatch, caplog,
+    ):
+        """Below the structural CONCLUDE point, an absent sidecar is the
+        ordinary case on ~11 of every 12 turns — must stay silent (this is
+        exactly what `_capture_hub_assessment`'s own docstring already
+        covers; this test pins that the NEW warning does not regress it).
+        8 EXISTING messages -> ordinal 9 -> still DECIDE."""
+        engine, hub, thread, client = self._engine_at(monkeypatch, message_count=8)
+        raw_response = (
+            "<slack_message>Can you say more about the assay's throughput?</slack_message>"
+        )
+        with caplog.at_level("WARNING"):
+            await self._drive(monkeypatch, engine, hub, thread, raw_response)
+
+        assert len(client.posted) == 1
+        assert self._WARNING_SNIPPET not in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_silent_when_sidecar_present_at_conclude(self, monkeypatch, caplog):
+        """A CONCLUDE reply that DOES carry a sidecar is the other
+        documented, successful outcome — must not warn even though nothing
+        is persisted (no database is configured in this engine)."""
+        engine, hub, thread, client = self._engine_at(monkeypatch, message_count=11)
+        raw_response = (
+            "<slack_message>:mag: Advancing — strong differentiation.</slack_message>\n\n"
+            '<assessment_json>\n'
+            '{"subject_agent_id": "wang", "recommendation": "advance"}\n'
+            '</assessment_json>'
+        )
+        with caplog.at_level("WARNING"):
+            await self._drive(monkeypatch, engine, hub, thread, raw_response)
+
+        assert len(client.posted) == 1
+        assert self._WARNING_SNIPPET not in caplog.text
 
 
 # ---------------------------------------------------------------

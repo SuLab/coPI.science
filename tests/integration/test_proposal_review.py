@@ -3,10 +3,14 @@ the email seam.
 
 Scope, stated once so the gap stays visible:
 
-* **In scope.** The engine's thread-conclusion path (`_check_thread_outcome` ->
-  `_close_thread`) writing a `ThreadDecision`; the agent dashboard rendering it; the
-  `/review` and `/reopen` endpoints and the `ProposalReview` rows they write; the
-  private-channel migration the reopen action triggers.
+* **In scope.** The agent dashboard rendering a `ThreadDecision`; the `/review` and
+  `/reopen` endpoints and the `ProposalReview` rows they write; reopen's post-guidance-
+  in-place behavior (fix 9, 2026-08-12 final audit wave — reopen no longer migrates
+  anything to a collab_private channel; see §5's module comment below). The engine's
+  thread-conclusion path
+  (`_check_thread_outcome` -> `_close_thread`) writing a `ThreadDecision` with
+  outcome='no_proposal' (the ⏸️ close) or 'timeout' is also in scope and driven for
+  real; outcome='proposal' is NOT — see the note on `_conclude_thread` below.
 * **Out of scope by instruction.** Everything inside `src/services/email.py` and
   `src/services/email_notifications.py` below `send_proposal_notification`: MIME
   assembly, the Reply-To / unsubscribe token wiring, and the SES call itself. The one
@@ -14,6 +18,19 @@ Scope, stated once so the gap stays visible:
   recording double and says so in every assertion message, so a reader cannot mistake a
   green run here for "proposal email is covered". It is not covered. See
   `.notes/full-system-test-plan.md` § Global Constraints.
+
+**outcome='proposal' is legacy-only as of the pitch-only reconciliation (Task 7,
+docs/plans/2026-08-12-pr34-branch2-engine-reconciliation.md).** The live ✅-confirms-
+:memo: handshake that used to write these rows was retired: `_check_thread_outcome` has
+no arm left that produces outcome='proposal', and `_check_private_channel_outcome` /
+`_finalize_private_proposal` (the collab_private analog) no longer exist at all. The
+review/reopen/dashboard machinery below still has to keep serving proposals that
+already exist in the DB, so every fixture in this module that needs one (`proposal`,
+via `_conclude_thread(outcome="proposal", ...)`) fabricates the row directly instead of
+driving the (now nonexistent) live path — see that helper's docstring. This is a
+deliberate scope narrowing, not test debt: `test_a_concluded_thread_records_a_proposal_
+decision` is the control that pins what the live handshake actually does now (produces
+no ThreadDecision at all), alongside the ⏸️ path it still does drive for real.
 
 Dependencies: the database is REAL (the rolled-back `db_session` from
 tests/conftest.py). The LLM, Slack and SES are all doubled — and the autouse
@@ -24,7 +41,7 @@ than a silent network call.
 anywhere; "reviewed" is the *existence* of a `ProposalReview` row for
 (thread_decision_id, agent_id), and the rating column doubles as the discriminator:
 
-    thread concluded (ThreadDecision.outcome='proposal')   -- no review row
+    thread concluded (ThreadDecision.outcome='proposal', legacy rows only)  -- no review row
         -- POST /review   rating 1..4  -->  decided, terminal for this agent
         -- POST /reopen   rating 0     -->  reopened, ALSO terminal for this agent
                                             (+ collab_private channel,
@@ -60,13 +77,11 @@ from src.models import (
     AgentRegistry,
     EmailEngagementTracker,
     EmailNotification,
-    PrivateChannelMember,
     ProposalReview,
     ThreadDecision,
 )
 from src.visibility import VISIBILITY_COLLAB_PRIVATE
 from tests import factories
-from tests.fakes import FakeSlackClient
 
 pytestmark = pytest.mark.integration
 
@@ -202,13 +217,42 @@ def _marker() -> str:
 async def _conclude_thread(
     db_session, lab, llm_calls, *, channel: str, outcome: str, body: str,
 ) -> str:
-    """Drive the REAL conclusion path and return the thread_id.
+    """Produce a concluded thread's ThreadDecision row and return its thread_id.
 
-    Not a factory call: the point of this task's first bullet is that a concluded
-    thread produces the decision row, so the row has to come out of
-    `_check_thread_outcome`. ``outcome='proposal'`` replays the :memo:-Summary -> ✅
-    handshake; ``outcome='no_proposal'`` replays the ⏸️ close.
+    ``outcome='no_proposal'`` drives the REAL conclusion path — replays the ⏸️
+    close through the live `_check_thread_outcome` -> `_close_thread` — because
+    that arm survived the pitch-only reconciliation (see
+    docs/plans/2026-08-12-pr34-branch2-engine-reconciliation.md Task 7).
+
+    ``outcome='proposal'`` does NOT drive the engine. The ✅-confirms-:memo:
+    handshake that used to produce these rows was retired by that same task —
+    `_check_thread_outcome` has no arm left that can write outcome='proposal'
+    (see `_check_private_channel_outcome` too: also gone). A row with this
+    outcome is legacy data only, so this branch fabricates exactly the row
+    shape a legacy run would have left behind, directly via the DB, so the
+    review/reopen/dashboard machinery below — which still has to serve
+    existing proposals regardless of how they were created — has one to
+    serve. It is NOT simulating reachable behavior: see
+    `test_a_concluded_thread_records_a_proposal_decision`'s control pair for
+    what the live handshake actually does now (nothing).
     """
+    root_ts = f"{1_700_000_000 + len(channel) * 7 + abs(hash(channel)) % 9000}.000100"
+
+    if outcome == "proposal":
+        summary = f":memo: **Summary — Joint programme**\n\n{body}"
+        db_session.add(ThreadDecision(
+            simulation_run_id=lab.run_id,
+            thread_id=root_ts,
+            channel=channel,
+            agent_a="alpha",
+            agent_b="beta",
+            outcome="proposal",
+            summary_text=summary,
+        ))
+        await db_session.flush()
+        db_session.expire_all()
+        return root_ts
+
     agents = [
         Agent(agent_id="alpha", bot_name="AlphaBot", pi_name="Ada Alpha"),
         Agent(agent_id="beta", bot_name="BetaBot", pi_name="Bo Beta"),
@@ -219,7 +263,6 @@ async def _conclude_thread(
         session_factory=_FixtureSessionFactory(db_session),
         simulation_run_id=lab.run_id,
     )
-    root_ts = f"{1_700_000_000 + len(channel) * 7 + abs(hash(channel)) % 9000}.000100"
     engine.message_log.append(LogEntry(
         ts=root_ts, channel=channel, sender_agent_id="beta", sender_name="BetaBot",
         content="Opening the discussion.", posted_at=float(root_ts),
@@ -227,23 +270,14 @@ async def _conclude_thread(
     thread = ThreadState(thread_id=root_ts, channel=channel, other_agent_id="beta")
     agents[0].state.active_threads[root_ts] = thread
 
-    if outcome == "proposal":
-        summary = f":memo: **Summary — Joint programme**\n\n{body}"
-        engine.message_log.append(LogEntry(
-            ts=f"{float(root_ts) + 1:.6f}", channel=channel, sender_agent_id="beta",
-            sender_name="BetaBot", content=summary, thread_ts=root_ts,
-            posted_at=float(root_ts) + 1,
-        ))
-        await engine._check_thread_outcome(agents[0], thread, "✅ Agreed, let's do it.")
-    else:
-        engine.message_log.append(LogEntry(
-            ts=f"{float(root_ts) + 1:.6f}", channel=channel, sender_agent_id="beta",
-            sender_name="BetaBot", content=body, thread_ts=root_ts,
-            posted_at=float(root_ts) + 1,
-        ))
-        await engine._check_thread_outcome(
-            agents[0], thread, f"⏸️ No viable overlap. {body}",
-        )
+    engine.message_log.append(LogEntry(
+        ts=f"{float(root_ts) + 1:.6f}", channel=channel, sender_agent_id="beta",
+        sender_name="BetaBot", content=body, thread_ts=root_ts,
+        posted_at=float(root_ts) + 1,
+    ))
+    await engine._check_thread_outcome(
+        agents[0], thread, f"⏸️ No viable overlap. {body}",
+    )
 
     assert llm_calls, (
         "the working-memory synthesis never ran, so the conclusion path was not "
@@ -262,7 +296,11 @@ async def _decision(db_session, thread_id: str) -> ThreadDecision:
 
 @pytest.fixture
 async def proposal(db_session, lab, llm):
-    """One concluded PROPOSAL thread, produced by the engine, ready to review."""
+    """One concluded PROPOSAL thread, fabricated as a legacy row, ready to review.
+
+    ``llm`` is accepted (and unused) only to keep this fixture's shape stable for
+    the tests that request it alongside other fixtures needing the double.
+    """
     body = _marker()
     thread_id = await _conclude_thread(
         db_session, lab, llm, channel="degrader-chem", outcome="proposal", body=body,
@@ -277,51 +315,83 @@ async def proposal(db_session, lab, llm):
 # ---------------------------------------------------------------------------
 
 
-async def test_a_concluded_thread_records_a_proposal_decision(db_session, lab, llm):
-    """The ✅-confirms-:memo: handshake writes a ThreadDecision with outcome='proposal'
-    and the summary text starting at the :memo: marker.
-
-    Control: the SAME engine, same session, driven with ⏸️ instead, writes
-    outcome='no_proposal'. Without it, `outcome == 'proposal'` would also be satisfied
-    by a `_close_thread` that hard-coded the value.
+async def test_the_no_proposal_close_still_produces_a_thread_decision(db_session, lab, llm):
+    """Control half 1/2. The ⏸️ close survived the pitch-only reconciliation — pin
+    that `_check_thread_outcome` -> `_close_thread` still writes a ThreadDecision
+    for the arm that remains, with no ProposalReview yet (concluding a thread
+    leaves the proposal UNREVIEWED and waiting; the review row is created only
+    by a PI action).
     """
-    yes_body, no_body = _marker(), _marker()
-    yes_ts = await _conclude_thread(
-        db_session, lab, llm, channel="degrader-chem", outcome="proposal", body=yes_body,
+    body = _marker()
+    thread_id = await _conclude_thread(
+        db_session, lab, llm, channel="cold-lead", outcome="no_proposal", body=body,
     )
-    no_ts = await _conclude_thread(
-        db_session, lab, llm, channel="cold-lead", outcome="no_proposal", body=no_body,
-    )
+    decision = await _decision(db_session, thread_id)
 
-    yes = await _decision(db_session, yes_ts)
-    no = await _decision(db_session, no_ts)
-
-    assert yes.outcome == "proposal", (
-        f"the ✅/:memo: handshake did not close the thread as a proposal: {yes.outcome}"
+    assert decision.outcome == "no_proposal", (
+        f"the ⏸️ close did not record outcome='no_proposal': {decision.outcome}"
     )
-    assert no.outcome == "no_proposal", (
-        "the ⏸️ control also came back as 'proposal', so outcome is not being derived "
-        f"from the conversation at all: {no.outcome}"
-    )
-    assert yes.summary_text.startswith(":memo:"), (
-        f"the summary was not extracted from the :memo: marker: {yes.summary_text!r}"
-    )
-    assert yes_body in yes.summary_text
-    assert {yes.agent_a, yes.agent_b} == {"alpha", "beta"}
-    assert yes.origin_visibility == "public"
-    assert yes.refined_in_channel is None, (
-        "a freshly concluded thread must not already point at a refinement channel"
-    )
-
-    # No ProposalReview exists yet. This is the state machine's real entry point: the
-    # review row is created by the PI's action, never by the thread concluding.
+    assert {decision.agent_a, decision.agent_b} == {"alpha", "beta"}
     assert (await db_session.scalar(
         select(func.count(ProposalReview.id)).where(
-            ProposalReview.thread_decision_id.in_([yes.id, no.id])
+            ProposalReview.thread_decision_id == decision.id
         )
     )) == 0, (
         "a ProposalReview row appeared without any PI action — concluding a thread is "
         "supposed to leave the proposal UNREVIEWED and waiting"
+    )
+
+
+async def test_a_memo_and_check_mark_reply_no_longer_produces_a_thread_decision(
+    db_session, lab,
+):
+    """Control half 2/2 — and the actual regression pin for Task 7.
+
+    Before the pitch-only reconciliation this was
+    `test_a_concluded_thread_records_a_proposal_decision`'s "yes" half: replaying
+    a `:memo: Summary` + ✅ reply through the REAL, live `_check_thread_outcome`
+    used to write a ThreadDecision with outcome='proposal'. That handshake is
+    retired now (see the module docstring) — this asserts it does NOTHING: no
+    ThreadDecision is written and the thread is not closed. No `llm` double is
+    installed because nothing here should reach `_close_thread`, which is the
+    only path that would call it.
+    """
+    channel = "degrader-chem"
+    agents = [
+        Agent(agent_id="alpha", bot_name="AlphaBot", pi_name="Ada Alpha"),
+        Agent(agent_id="beta", bot_name="BetaBot", pi_name="Bo Beta"),
+    ]
+    engine = SimulationEngine(
+        agents=agents,
+        slack_clients={},
+        session_factory=_FixtureSessionFactory(db_session),
+        simulation_run_id=lab.run_id,
+    )
+    root_ts = "1700000000.000100"
+    engine.message_log.append(LogEntry(
+        ts=root_ts, channel=channel, sender_agent_id="beta", sender_name="BetaBot",
+        content="Opening the discussion.", posted_at=float(root_ts),
+    ))
+    thread = ThreadState(thread_id=root_ts, channel=channel, other_agent_id="beta")
+    agents[0].state.active_threads[root_ts] = thread
+
+    summary = f":memo: **Summary — Joint programme**\n\n{_marker()}"
+    engine.message_log.append(LogEntry(
+        ts=f"{float(root_ts) + 1:.6f}", channel=channel, sender_agent_id="beta",
+        sender_name="BetaBot", content=summary, thread_ts=root_ts,
+        posted_at=float(root_ts) + 1,
+    ))
+    await engine._check_thread_outcome(agents[0], thread, "✅ Agreed, let's do it.")
+
+    assert (await db_session.scalar(
+        select(func.count(ThreadDecision.id)).where(ThreadDecision.thread_id == root_ts)
+    )) == 0, (
+        "a ✅ reply to a :memo: Summary wrote a ThreadDecision — the retired "
+        "handshake is still live somewhere in _check_thread_outcome"
+    )
+    assert thread.status != "closed", "the thread was closed by the retired handshake"
+    assert root_ts in agents[0].state.active_threads, (
+        "the thread was evicted from active_threads by the retired handshake"
     )
 
 
@@ -732,63 +802,37 @@ async def test_reviewing_on_the_web_retires_the_outstanding_email_notification(
 
 
 # ---------------------------------------------------------------------------
-# 5. Reopen -> private channel
+# 5. Reopen -> posts guidance in place (fix 9, 2026-08-12 final audit wave;
+#    Slack-post branch removed outright in the same date's PI-interaction
+#    removal cycle)
+#
+# reopen used to migrate a public-origin proposal thread into a NEW
+# collab_private channel by default before posting the PI's guidance there.
+# The engine-side private-channel collaboration/refinement flow was deleted
+# (docs/plans/2026-08-12-pr34-pitch-only-reconciliation-design.md §8 — no
+# agent converses inside a collab_private channel anymore), so a freshly
+# migrated channel would be a dead room nothing ever posts in again. reopen no
+# longer creates ANY private channel, and — as of the same date's final
+# removal wave — no longer posts to Slack either: there is no PI-bot
+# interaction surface left for a bot token to re-engage through, so the DB
+# inbox is now the only path, unconditionally.
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture
-def slack_off(monkeypatch):
-    """Force the migration down its DB-only path.
-
-    `_slack_enabled_for_migration` auto-detects from bot tokens. Our agents have none,
-    so it would already choose the offline path — but pinning it makes the test's
-    intent explicit and immune to a stray token appearing in the environment.
-    """
-    async def _off(*args, **kwargs):
-        return False
-
-    monkeypatch.setattr(
-        "src.services.private_channels._slack_enabled_for_migration", _off,
-    )
+async def _reopen_inbox_count(db_session, proposal) -> int:
+    """PI-authored (agent_id IS NULL) messages reopen wrote into the origin thread."""
+    return await db_session.scalar(select(func.count(AgentMessage.id)).where(
+        AgentMessage.thread_ts == proposal.thread_id,
+        AgentMessage.agent_id.is_(None),
+    ))
 
 
-@pytest.fixture
-def slack_on(monkeypatch):
-    """Force the Slack migration path with a recording fake in place of the real
-    client. Returns the list of fakes that were constructed."""
-    made: list[FakeSlackClient] = []
-
-    async def _on(*args, **kwargs):
-        return True
-
-    async def _token(db, agent_id):
-        return f"xoxb-fake-{agent_id}"
-
-    def _client(agent_id, bot_token):
-        c = FakeSlackClient(agent_id=agent_id, bot_token=bot_token)
-        made.append(c)
-        return c
-
-    monkeypatch.setattr(
-        "src.services.private_channels._slack_enabled_for_migration", _on)
-    monkeypatch.setattr(
-        "src.services.private_channels._get_or_fail_bot_token", _token)
-    monkeypatch.setattr("src.services.private_channels._make_client", _client)
-    return made
-
-
-async def test_reopen_opens_the_private_channel_and_files_the_review_together(
-    client, db_session, lab, proposal, slack_off,
+async def test_reopen_posts_the_guidance_and_files_the_review_together(
+    client, db_session, lab, proposal,
 ):
-    """The wiring assertion the task asks for: ONE request produces BOTH the
-    collab_private channel (with its members and handover) and the rating=0
-    ProposalReview that marks the proposal acted-on, and it points the decision at the
-    new channel.
-
-    They share a transaction on purpose — `migrate_public_thread_to_private` adds rows
-    to the caller's session and leaves the commit to the reopen endpoint (see the
-    comment in tests/integration/test_slack_private_live.py). If they ever stop
-    committing together, one of these two halves disappears.
+    """ONE request produces BOTH the PI-authored inbox message in the origin
+    thread AND the rating=0 ProposalReview that marks the proposal acted-on.
+    reopen never creates a collab_private channel any more.
     """
     guidance = "Nail down the ternary-complex geometry before any chemistry."
     r = await client.post(
@@ -798,27 +842,12 @@ async def test_reopen_opens_the_private_channel_and_files_the_review_together(
     assert r.status_code == 302, r.text[:400]
 
     db_session.expire_all()
-    channels = (await db_session.execute(
-        select(AgentChannel).where(
-            AgentChannel.visibility == VISIBILITY_COLLAB_PRIVATE
-        )
-    )).scalars().all()
-    assert len(channels) == 1, (
-        f"expected exactly one private refinement channel, got {len(channels)}"
-    )
-    ch = channels[0]
-    assert ch.created_by_agent == "alpha"
-    assert ch.migrated_from_channel_id == f"local:{proposal.channel}", (
-        f"the new channel does not record where it came from: "
-        f"{ch.migrated_from_channel_id}"
-    )
-    assert "alpha" in ch.channel_name and "beta" in ch.channel_name
+    assert (await db_session.scalar(select(func.count(AgentChannel.id)).where(
+        AgentChannel.visibility == VISIBILITY_COLLAB_PRIVATE
+    ))) == 0, "reopen must never create a collab_private channel"
 
     td = await _decision(db_session, proposal.thread_id)
-    assert td.refined_in_channel == ch.channel_id, (
-        "the proposal was migrated but the decision row still does not point at the "
-        f"refinement channel: {td.refined_in_channel!r} != {ch.channel_id!r}"
-    )
+    assert td.refined_in_channel is None
 
     review = (await db_session.execute(
         select(ProposalReview).where(ProposalReview.thread_decision_id == proposal.id)
@@ -830,31 +859,15 @@ async def test_reopen_opens_the_private_channel_and_files_the_review_together(
     assert guidance in review.comment
     assert review.user_id == lab.pi_a_id
 
-    members = (await db_session.execute(
-        select(PrivateChannelMember).where(
-            PrivateChannelMember.agent_channel_id == ch.id
+    inbox = (await db_session.execute(
+        select(AgentMessage).where(
+            AgentMessage.thread_ts == proposal.thread_id,
+            AgentMessage.agent_id.is_(None),
         )
     )).scalars().all()
-    assert {m.agent_id for m in members if m.agent_id} == {"alpha", "beta"}
-    assert [m.user_id for m in members if m.user_id] == [lab.pi_a_id], (
-        "the triggering PI is not a member of the channel that holds their guidance"
-    )
-
-    handover = (await db_session.execute(
-        select(AgentMessage).where(AgentMessage.channel_id == ch.channel_id)
-    )).scalars().all()
-    assert any(guidance in (m.content or "") for m in handover), (
-        "the PI's guidance never reached the private channel's message history"
-    )
-    assert all(m.visibility == VISIBILITY_COLLAB_PRIVATE for m in handover)
-
-    origin_rows = (await db_session.execute(
-        select(AgentMessage).where(AgentMessage.channel_name == proposal.channel)
-    )).scalars().all()
-    assert origin_rows, "the public origin thread was left with no closing marker"
-    assert not any(guidance in (m.content or "") for m in origin_rows), (
-        "the PI's private guidance was echoed into the PUBLIC origin thread"
-    )
+    assert len(inbox) == 1, "the guidance never landed in the origin thread's DB inbox"
+    assert guidance in inbox[0].content
+    assert inbox[0].channel_name == proposal.channel
 
     # Observed behaviour, pinned because it is surprising rather than because it is
     # right: the rating=0 sentinel puts the reopened proposal in the dashboard's
@@ -872,16 +885,15 @@ async def test_reopen_opens_the_private_channel_and_files_the_review_together(
     )
 
 
-async def test_a_rating_never_opens_a_private_channel(
-    client, db_session, lab, proposal, slack_off,
+async def test_a_rating_never_writes_reopen_guidance(
+    client, db_session, lab, proposal,
 ):
-    """FINDING, pinned as a test. Approving a proposal does NOT trigger the
-    private-channel reopen — rating and reopen are two separate PI actions behind two
-    separate endpoints, and only `/reopen` migrates. See the module report.
+    """Rating and reopen are two separate PI actions behind two separate
+    endpoints; only `/reopen` posts guidance into the origin thread.
 
-    Control: the identical setup, driven through `/reopen` instead, DOES create the
-    channel — so "no channel" is a fact about the rating action, not about a migration
-    that cannot run in this fixture.
+    Control: the identical setup, driven through `/reopen` instead, DOES post
+    — so "no post" is a fact about the rating action, not about a route that
+    stopped working.
     """
     r = await client.post(
         f"/agent/alpha/proposals/{proposal.id}/review",
@@ -889,6 +901,9 @@ async def test_a_rating_never_opens_a_private_channel(
     )
     assert r.status_code == 302
     db_session.expire_all()
+    assert await _reopen_inbox_count(db_session, proposal) == 0, (
+        "a plain rating wrote a PI-authored message into the origin thread"
+    )
     assert (await db_session.scalar(select(func.count(AgentChannel.id)).where(
         AgentChannel.visibility == VISIBILITY_COLLAB_PRIVATE
     ))) == 0, "a plain rating opened a private refinement channel"
@@ -902,16 +917,17 @@ async def test_a_rating_never_opens_a_private_channel(
     )
     assert r2.status_code == 302, r2.text[:400]
     db_session.expire_all()
+    assert await _reopen_inbox_count(db_session, proposal) == 1, (
+        "the /reopen control did not post either, so the assertion above proves "
+        "nothing about the rating action"
+    )
     assert (await db_session.scalar(select(func.count(AgentChannel.id)).where(
         AgentChannel.visibility == VISIBILITY_COLLAB_PRIVATE
-    ))) == 1, (
-        "the /reopen control did not create a channel either, so the assertion above "
-        "proves nothing about the rating action"
-    )
+    ))) == 0, "reopen must never create a collab_private channel"
 
 
 async def test_a_rated_proposal_cannot_then_be_reopened_by_the_same_agent(
-    client, db_session, lab, proposal, slack_off,
+    client, db_session, lab, proposal,
 ):
     """The two edges out of "awaiting review" are mutually exclusive. Once alpha has
     rated, alpha's reopen is swallowed by the same guard that catches a replayed POST
@@ -919,7 +935,7 @@ async def test_a_rated_proposal_cannot_then_be_reopened_by_the_same_agent(
     guidance was discarded (observed behaviour, reported).
 
     Control: beta, which has not acted, CAN still reopen the same proposal — so "no
-    channel" is a fact about alpha's spent transition, not about the migration being
+    post" is a fact about alpha's spent transition, not about the route being
     unavailable in this fixture.
     """
     rated = await client.post(
@@ -935,9 +951,9 @@ async def test_a_rated_proposal_cannot_then_be_reopened_by_the_same_agent(
     )
     assert swallowed.status_code == 302
     db_session.expire_all()
-    assert (await db_session.scalar(select(func.count(AgentChannel.id)).where(
-        AgentChannel.visibility == VISIBILITY_COLLAB_PRIVATE
-    ))) == 0, "a proposal alpha had already rated was reopened by alpha anyway"
+    assert await _reopen_inbox_count(db_session, proposal) == 0, (
+        "a proposal alpha had already rated was reopened by alpha anyway"
+    )
     rows = (await db_session.execute(select(ProposalReview).where(
         ProposalReview.agent_id == "alpha"
     ))).scalars().all()
@@ -952,21 +968,19 @@ async def test_a_rated_proposal_cannot_then_be_reopened_by_the_same_agent(
     )
     assert control.status_code == 302
     db_session.expire_all()
-    assert (await db_session.scalar(select(func.count(AgentChannel.id)).where(
-        AgentChannel.visibility == VISIBILITY_COLLAB_PRIVATE
-    ))) == 1, (
-        "beta's reopen created nothing either, so the assertion above proves nothing"
+    assert await _reopen_inbox_count(db_session, proposal) == 1, (
+        "beta's reopen posted nothing either, so the assertion above proves nothing"
     )
 
 
 async def test_reopen_is_idempotent_under_a_replayed_post(
-    client, db_session, lab, proposal, slack_off,
+    client, db_session, lab, proposal,
 ):
     """A stale page or the Back button replays the reopen POST. The guard must make the
-    second one a no-op rather than mint a duplicate channel.
+    second one a no-op rather than post a duplicate inbox message.
 
-    Control: the first POST is asserted to have created exactly one channel, so "still
-    one channel" is not satisfied by a reopen that never worked.
+    Control: the first POST is asserted to have posted exactly once, so "still one
+    post" is not satisfied by a reopen that never worked.
     """
     for _ in range(2):
         r = await client.post(
@@ -976,9 +990,7 @@ async def test_reopen_is_idempotent_under_a_replayed_post(
         )
         assert r.status_code == 302
         db_session.expire_all()
-        assert (await db_session.scalar(select(func.count(AgentChannel.id)).where(
-            AgentChannel.visibility == VISIBILITY_COLLAB_PRIVATE
-        ))) == 1
+        assert await _reopen_inbox_count(db_session, proposal) == 1
 
     assert (await db_session.scalar(
         select(func.count(ProposalReview.id)).where(
@@ -987,125 +999,8 @@ async def test_reopen_is_idempotent_under_a_replayed_post(
     )) == 1, "the replayed reopen filed a second ProposalReview"
 
 
-async def test_reopen_drives_the_slack_client_when_slack_is_on(
-    client, db_session, lab, proposal, slack_on,
-):
-    """The Slack-on branch of the same wiring, with a recording fake standing in for
-    AgentSlackClient (the live workspace belongs to another agent).
-
-    Asserts the migration really calls Slack — creates a private channel, invites the
-    other bot, posts the handover — and that the DB rows still land in the same
-    request. `no_outbound_side_effects` guarantees nothing reached slack_sdk.
-    """
-    guidance = "Push on the kinetics readout, not the chemistry."
-    r = await client.post(
-        f"/agent/alpha/proposals/{proposal.id}/reopen",
-        data={"guidance": guidance}, headers=_auth(lab.pi_a_id),
-    )
-    assert r.status_code == 302, r.text[:400]
-
-    assert [c.agent_id for c in slack_on] == ["alpha", "beta"], (
-        f"the migration did not build a client for each bot: {slack_on}"
-    )
-    creator = slack_on[0]
-    assert creator.created_channels and creator.created_channels[0]["is_private"], (
-        "no private channel was requested from Slack"
-    )
-    new_name = creator.created_channels[0]["name"]
-    assert any("U_beta" in inv["users"] for inv in creator.invites), (
-        f"the other bot was never invited to the new channel: {creator.invites}"
-    )
-    posted_here = [p for p in creator.posted if p["channel"] == f"G_{new_name}"]
-    assert any(guidance in p["text"] for p in posted_here), (
-        f"the guidance was never posted into the private channel: {posted_here}"
-    )
-    origin_posts = [p for p in creator.posted if p["channel"] == f"C_{proposal.channel}"]
-    assert origin_posts and all(guidance not in p["text"] for p in origin_posts), (
-        "the origin thread got no close marker, or it leaked the PI's guidance"
-    )
-    assert all(p["thread_ts"] == proposal.thread_id for p in origin_posts), (
-        "the close marker was posted top-level instead of in the origin thread"
-    )
-
-    db_session.expire_all()
-    ch = (await db_session.execute(select(AgentChannel).where(
-        AgentChannel.visibility == VISIBILITY_COLLAB_PRIVATE
-    ))).scalar_one()
-    assert ch.channel_id == f"G_{new_name}"
-    review = (await db_session.execute(select(ProposalReview).where(
-        ProposalReview.thread_decision_id == proposal.id
-    ))).scalar_one()
-    assert review.rating == 0
-
-
-async def test_a_failed_migration_files_no_review(
-    client, db_session, lab, proposal, monkeypatch,
-):
-    """If Slack refuses the channel, the reopen must leave NOTHING behind — no
-    half-written review that would make the proposal look acted-on and permanently
-    block the retry (the idempotency guard keys off any review by this agent).
-
-    Positive control: the same request, with the fake repaired, writes both rows.
-    """
-    refuse = {"on": True}
-
-    async def _on(*args, **kwargs):
-        return True
-
-    async def _token(db, agent_id):
-        return f"xoxb-fake-{agent_id}"
-
-    class _Refusing(FakeSlackClient):
-        def create_private_channel(self, name):
-            if refuse["on"]:
-                return None
-            return super().create_private_channel(name)
-
-    monkeypatch.setattr(
-        "src.services.private_channels._slack_enabled_for_migration", _on)
-    monkeypatch.setattr(
-        "src.services.private_channels._get_or_fail_bot_token", _token)
-    monkeypatch.setattr(
-        "src.services.private_channels._make_client",
-        lambda agent_id, bot_token: _Refusing(agent_id=agent_id, bot_token=bot_token),
-    )
-
-    bad = await client.post(
-        f"/agent/alpha/proposals/{proposal.id}/reopen",
-        data={"guidance": "This one will fail."}, headers=_auth(lab.pi_a_id),
-    )
-    assert bad.status_code == 500, bad.status_code
-    db_session.expire_all()
-    assert (await db_session.scalar(select(func.count(ProposalReview.id)).where(
-        ProposalReview.thread_decision_id == proposal.id
-    ))) == 0, (
-        "a failed migration still filed a ProposalReview — the idempotency guard will "
-        "now treat every retry as a duplicate and the proposal is stuck"
-    )
-    assert (await db_session.scalar(select(func.count(AgentChannel.id)).where(
-        AgentChannel.visibility == VISIBILITY_COLLAB_PRIVATE
-    ))) == 0
-
-    refuse["on"] = False
-    good = await client.post(
-        f"/agent/alpha/proposals/{proposal.id}/reopen",
-        data={"guidance": "Retry after the outage."}, headers=_auth(lab.pi_a_id),
-    )
-    assert good.status_code == 302, (
-        f"the retry control also failed ({good.status_code}); the assertions above "
-        "cannot distinguish 'clean abort' from 'reopen never works'"
-    )
-    db_session.expire_all()
-    assert (await db_session.scalar(select(func.count(ProposalReview.id)).where(
-        ProposalReview.thread_decision_id == proposal.id
-    ))) == 1
-    assert (await db_session.scalar(select(func.count(AgentChannel.id)).where(
-        AgentChannel.visibility == VISIBILITY_COLLAB_PRIVATE
-    ))) == 1
-
-
 async def test_reopen_is_blocked_for_an_inactive_agent_but_rating_is_not(
-    client, db_session, lab, proposal, slack_off,
+    client, db_session, lab, proposal,
 ):
     """The documented asymmetry in agent_page.py: an inactive agent's PI can still rate
     a proposal (passive, DB-only) but cannot reopen it (re-injects the bot into a live
@@ -1125,9 +1020,7 @@ async def test_reopen_is_blocked_for_an_inactive_agent_but_rating_is_not(
         f"an inactive agent was reopened into a live discussion: {blocked.status_code}"
     )
     db_session.expire_all()
-    assert (await db_session.scalar(select(func.count(AgentChannel.id)).where(
-        AgentChannel.visibility == VISIBILITY_COLLAB_PRIVATE
-    ))) == 0
+    assert await _reopen_inbox_count(db_session, proposal) == 0
 
     allowed = await client.post(
         f"/agent/alpha/proposals/{proposal.id}/review",

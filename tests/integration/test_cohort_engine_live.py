@@ -75,10 +75,16 @@ async def live(engine, monkeypatch):
         await db.commit()
 
 
-def _engine(factory, run_id, agent_ids=AGENT_IDS):
-    """A real SimulationEngine with Slack off."""
+def _engine(factory, run_id, agent_ids=AGENT_IDS, roles=None):
+    """A real SimulationEngine with Slack off.
+
+    ``roles`` (agent_id -> role) defaults every agent to ``pi_lab`` — pass it to
+    build a ``scout_hub`` agent for a star-shaped topology (task 10).
+    """
+    roles = roles or {}
     agents = [
-        Agent(agent_id=a, bot_name=f"{a.capitalize()}Bot", pi_name=f"PI {a}")
+        Agent(agent_id=a, bot_name=f"{a.capitalize()}Bot", pi_name=f"PI {a}",
+              role=roles.get(a, "pi_lab"))
         for a in agent_ids
     ]
     eng = SimulationEngine(
@@ -567,79 +573,76 @@ async def test_gate_survives_a_membership_row_for_an_unknown_agent(live, monkeyp
 
 
 # ===========================================================================
-# A real turn, with a faked LLM: does the gate actually reach the prompt?
+# A real turn: does the gate actually reach downstream behavior?
+#
+# The two tests that used to open this section (`test_phase2_prompt_omits_non_
+# cohort_posts`, `test_phase2_makes_no_llm_call_when_everything_is_filtered`)
+# drove `_phase2_scan_filter` with a scripted LLM to prove a non-cohort post
+# never reached a rendered prompt. Phase 2 itself is gone (removal-cycle task
+# 7) — deleted with `build_phase2_scan_prompt`/`build_scan_system_prompt`, so
+# there is nothing left for those tests to drive. The claim they protected is
+# NOT left unpinned, on two levels:
+#   1. `tests/unit/test_cohort_isolation.py::TestGatedReads::
+#      test_top_level_posts_filtered` deterministically pins that
+#      `MessageLog.get_new_top_level_posts(allowed_sender_ids=...)` — the exact
+#      read both the old Phase 2 and the surviving hub auto-activation below
+#      call — excludes non-cohort posts from its returned set. Nothing
+#      downstream (prompt or otherwise) can render content it never received.
+#   2. The two tests just below re-pin that same read's gating at the one
+#      surviving production call site that feeds it into live turn behavior:
+#      the scout_hub auto-activation branch of `_phase3_activate_threads`
+#      (simulation.py, `if agent.role == "scout_hub":`).
 # ===========================================================================
 
 
-async def test_phase2_prompt_omits_non_cohort_posts(live, monkeypatch):
-    """The claim the whole feature rests on, verified at the LLM boundary.
-
-    Phase 2 is the one batched Sonnet call per turn, and its prompt is where the
-    token saving is either real or imaginary. Drive a real Phase 2 with a scripted
-    LLM and assert the excluded agent's content never reaches the prompt, while the
-    cohort-mate's and the human's do.
-    """
-    from tests.fakes import FakeAnthropic
-
+async def test_hub_auto_activation_does_not_activate_from_a_non_cohort_post(live, monkeypatch):
+    """The hub's auto-activation (opens an interview thread on any new lab
+    top-level post, no @-mention required) is the one surviving production
+    call site of the gated `get_new_top_level_posts` read the deleted Phase 2
+    tests used to exercise. A post from a lab outside the hub's cohort gate
+    must not open a thread."""
     factory, run_id = live
-    await _topology(factory, {"alpha": ["su", "wiseman"], "beta": ["cravatt"]})
+    await _topology(factory, {"alpha": ["su", "blackbird"]})
     _cfg(monkeypatch, enabled=True, policy="isolated")
-
-    fake = FakeAnthropic(['{"selected_post_ids": []}'])
-    monkeypatch.setattr("src.services.llm.get_anthropic_client", lambda: fake)
-
-    eng = _engine(factory, run_id)
+    eng = _engine(factory, run_id, agent_ids=("su", "cravatt", "blackbird"),
+                  roles={"blackbird": "scout_hub"})
     await eng._recompute_allowed_sender_ids()
 
-    await _write_message(factory, run_id, agent_id="wiseman", sender_name="WisemanBot",
-                         content="MATE-CONTENT spatial multiomics",
-                         message_ts="1000.0031", posted_at=1000.0031)
     await _write_message(factory, run_id, agent_id="cravatt", sender_name="CravattBot",
-                         content="EXCLUDED-CONTENT chemoproteomics",
-                         message_ts="1000.0032", posted_at=1000.0032)
-    await _write_message(factory, run_id, agent_id=None, sender_name="Dr PI",
-                         content="HUMAN-CONTENT please collaborate",
-                         message_ts="1000.0033", posted_at=1000.0033, is_bot=False)
+                         content="we have a screen hit worth talking about",
+                         message_ts="1000.0071", posted_at=1000.0071)
     await eng._poll_inbound_from_db()
 
-    su = eng.agents["su"]
-    su.state.subscribed_channels = {"general"}
-    su.state.last_seen_cursor = 0.0
-    await eng._phase2_scan_filter(su)
-
-    assert fake.calls, "Phase 2 should have made exactly one LLM call"
-    prompt = repr(fake.calls[0])
-    assert "MATE-CONTENT" in prompt, "a cohort-mate's post must reach the prompt"
-    assert "HUMAN-CONTENT" in prompt, "a human's post must always reach the prompt"
-    assert "EXCLUDED-CONTENT" not in prompt, (
-        "a non-cohort post reached the Phase 2 prompt — the gate is not saving "
-        "the tokens it claims to"
+    hub = eng.agents["blackbird"]
+    hub.state.subscribed_channels = {"general"}
+    hub.state.last_seen_cursor = 0.0
+    eng._phase3_activate_threads(hub)
+    assert hub.state.active_threads == {}, (
+        "the hub auto-activated an interview thread from a post outside its cohort gate"
     )
 
 
-async def test_phase2_makes_no_llm_call_when_everything_is_filtered(live, monkeypatch):
-    """When the only new posts are from excluded agents there is nothing to scan,
-    so the Sonnet call is skipped entirely — the actual saving."""
-    from tests.fakes import FakeAnthropic
-
+async def test_hub_auto_activation_does_activate_for_a_cohort_mate(live, monkeypatch):
+    """Control for the previous test — the same path must still work for a lab
+    inside the hub's cohort, proving the exclusion above is the gate and not a
+    broken auto-activation."""
     factory, run_id = live
-    await _topology(factory, {"alpha": ["su"], "beta": ["cravatt"]})
+    await _topology(factory, {"alpha": ["su", "blackbird"]})
     _cfg(monkeypatch, enabled=True, policy="isolated")
-    fake = FakeAnthropic(['{"selected_post_ids": []}'])
-    monkeypatch.setattr("src.services.llm.get_anthropic_client", lambda: fake)
-
-    eng = _engine(factory, run_id)
+    eng = _engine(factory, run_id, agent_ids=("su", "blackbird"),
+                  roles={"blackbird": "scout_hub"})
     await eng._recompute_allowed_sender_ids()
-    await _write_message(factory, run_id, agent_id="cravatt", sender_name="CravattBot",
-                         content="only excluded traffic", message_ts="1000.0041",
-                         posted_at=1000.0041)
+
+    await _write_message(factory, run_id, agent_id="su", sender_name="SuBot",
+                         content="we have a screen hit worth talking about",
+                         message_ts="1000.0072", posted_at=1000.0072)
     await eng._poll_inbound_from_db()
 
-    su = eng.agents["su"]
-    su.state.subscribed_channels = {"general"}
-    su.state.last_seen_cursor = 0.0
-    await eng._phase2_scan_filter(su)
-    assert fake.calls == [], "no scannable posts must mean no LLM call"
+    hub = eng.agents["blackbird"]
+    hub.state.subscribed_channels = {"general"}
+    hub.state.last_seen_cursor = 0.0
+    eng._phase3_activate_threads(hub)
+    assert hub.state.active_threads, "a cohort-mate's post must still auto-activate for the hub"
 
 
 async def test_phase3_does_not_activate_a_thread_from_a_non_cohort_tag(live, monkeypatch):
@@ -761,42 +764,6 @@ async def test_grandfathered_thread_still_gets_a_phase4_reply(live, monkeypatch)
         "a grandfathered thread must still be answered so it can conclude"
     )
     assert fake.calls, "Phase 4 should have called the LLM for the grandfathered thread"
-
-
-async def test_pi_dm_path_is_unaffected_by_any_topology(live, monkeypatch):
-    """PI DMs bypass MessageLog entirely (_poll_pi_dms_from_db -> PIHandler), so no
-    cohort configuration may suppress them."""
-    from src.models import PiDmMessage
-
-    factory, run_id = live
-    await _topology(factory, {"alpha": ["su"], "beta": ["cravatt"]})
-    _cfg(monkeypatch, enabled=True, policy="isolated")
-    eng = _engine(factory, run_id)
-    await eng._recompute_allowed_sender_ids()
-    # su is maximally gated: only itself.
-    assert eng.agents["su"].allowed_sender_ids == {"su"}
-
-    handled = []
-
-    class _Handler:
-        async def handle_dm(self, agent_id, pi_user_id, content):
-            handled.append((agent_id, content))
-
-    eng._pi_handler = _Handler()
-
-    async with factory() as db:
-        db.add(PiDmMessage(
-            simulation_run_id=run_id, agent_id="su", pi_user_id="Uweb",
-            direction="inbound", content="please prioritise the immunology angle",
-            ts="1000.0081",
-        ))
-        await db.commit()
-
-    await eng._poll_pi_dms_from_db()
-    assert handled == [("su", "please prioritise the immunology angle")], (
-        "a PI DM must reach the agent under every cohort configuration"
-    )
-    assert eng.agents["su"].state.has_pi_directive is True
 
 
 # ===========================================================================
@@ -1301,30 +1268,38 @@ async def test_start_computes_the_gate_and_records_a_snapshot(live, monkeypatch)
     first turn — has never actually been exercised. `request_stop()` is triggered from
     a setup step that runs after both, which is the least invasive way to let setup
     complete and skip the loop.
+
+    Star-shaped (task 10): `start()` now fails fast on a non-star cohort layout, so
+    the topology here is `{lab, hub}` per lab rather than the lab-to-lab cohort this
+    test used before that validation existed — see
+    `test_start_raises_when_cohorts_are_not_star_shaped` for that shape as the
+    negative case.
     """
     factory, run_id = live
-    await _topology(factory, {"alpha": ["su", "wiseman"]})
+    await _topology(factory, {"alpha": ["su", "blackbird"], "beta": ["wiseman", "blackbird"]})
     _cfg(monkeypatch, enabled=True, policy="isolated")
-    eng = _engine(factory, run_id)
+    eng = _engine(factory, run_id, agent_ids=("su", "wiseman", "blackbird"),
+                  roles={"blackbird": "scout_hub"})
 
-    original = eng._backfill_foa_cache
+    original = eng._record_topology_snapshot
     order = []
 
     async def _stop_after_setup():
-        # By the time this runs, start() has computed the gate and written the
-        # snapshot. Record what the gate looked like at that instant.
+        # By the time this runs, start() has already computed the gate — this
+        # IS the call that writes the snapshot, so record the gate first, then
+        # delegate to the real snapshot write.
         order.append({a: x.allowed_sender_ids for a, x in eng.agents.items()})
         eng.request_stop()
         return await original()
 
-    monkeypatch.setattr(eng, "_backfill_foa_cache", _stop_after_setup)
+    monkeypatch.setattr(eng, "_record_topology_snapshot", _stop_after_setup)
     await eng.start()
 
-    assert order, "setup never reached _backfill_foa_cache — start() aborted early"
-    assert order[0]["su"] == {"su", "wiseman"}, (
+    assert order, "setup never reached _record_topology_snapshot — start() aborted early"
+    assert order[0]["su"] == {"su", "blackbird"}, (
         f"the gate was not in force before the loop: {order[0]}"
     )
-    assert order[0]["cravatt"] == set()
+    assert order[0]["wiseman"] == {"wiseman", "blackbird"}
 
     async with factory() as db:
         snaps = (await db.execute(
@@ -1337,9 +1312,24 @@ async def test_start_computes_the_gate_and_records_a_snapshot(live, monkeypatch)
         f"start() must record exactly one startup snapshot, got {len(snaps)}"
     )
     topo = snaps[0].topology
-    assert topo["agents"]["su"] == ["su", "wiseman"]
+    assert topo["agents"]["su"] == ["blackbird", "su"]
     assert topo["cohort_default_policy"] == "isolated"
     assert topo["cohort_isolation_enabled"] is True
+
+
+async def test_start_raises_when_cohorts_are_not_star_shaped(live, monkeypatch):
+    """Task 10's actual deliverable, end to end: a lab-to-lab cohort — the shape
+    every other test in this module still uses via `_recompute_allowed_sender_ids()`
+    directly — must fail `start()` fast rather than let a hub-unreachable, lab-to-lab
+    roster run.
+    """
+    factory, run_id = live
+    await _topology(factory, {"alpha": ["su", "wiseman"]})
+    _cfg(monkeypatch, enabled=True, policy="isolated")
+    eng = _engine(factory, run_id)
+
+    with pytest.raises(RuntimeError, match="Star-topology validation failed"):
+        await eng.start()
 
 
 async def test_start_records_a_snapshot_even_when_the_gate_is_off(live, monkeypatch):
@@ -1353,13 +1343,13 @@ async def test_start_records_a_snapshot_even_when_the_gate_is_off(live, monkeypa
     _cfg(monkeypatch, enabled=False)
     eng = _engine(factory, run_id)
 
-    original = eng._backfill_foa_cache
+    original = eng._record_topology_snapshot
 
     async def _stop_after_setup():
         eng.request_stop()
         return await original()
 
-    monkeypatch.setattr(eng, "_backfill_foa_cache", _stop_after_setup)
+    monkeypatch.setattr(eng, "_record_topology_snapshot", _stop_after_setup)
     await eng.start()
 
     async with factory() as db:

@@ -6,11 +6,12 @@ docs/specs/2026-08-06-role-topology-post-type-gating-design.md §2, §3.
 import logging
 import re
 
+import src.agent.post_types as post_types_mod
 from src.agent.post_types import (
     CANONICAL,
     DEFAULT_POST_TYPES,
-    FUNDING_POST_TYPES,
     LEGACY_POST_TYPE_ALIASES,
+    PostTypeSpec,
     available_for,
     eligible_targets,
     parse_post_types,
@@ -27,33 +28,56 @@ BOT_NAMES = {"gill": "GillBot", "blackbird": "BlackbirdBot", "pearce": "PearceBo
 # The mesh: several pi_lab peers, no hub.
 MESH_ROLES = {"gill": "pi_lab", "pearce": "pi_lab", "wu": "pi_lab"}
 
+# CANONICAL's one real broadcast-shaped example (opportunity_assessment) is
+# gone — the hub's assessment stopped being a post type at all when the hub
+# went reply-only (Option A relocation; see post_types.py's CANONICAL
+# comment). Several tests below only need SOME broadcast-shaped (no
+# `targets`) spec distinct from `pitch` to exercise `available_for`/
+# `render_menu`'s broadcast branch or `parse_post_types`'s multi-entry
+# handling — this synthetic spec stands in for that, decoupling them from
+# whatever CANONICAL happens to contain.
+_BROADCAST_TYPE = PostTypeSpec(
+    "broadcast_test_type", ":test_tube:", "Test-only broadcast type",
+    "A synthetic broadcast (no targets) post type used only in this test file.",
+)
+
 
 def _by_name(specs):
     return {s.name for s in specs}
 
 
+def _with_broadcast_type(monkeypatch):
+    """Make `_BROADCAST_TYPE` resolvable by name through `parse_post_types`,
+    which looks types up in the real `CANONICAL` — needed only by tests that
+    parse it from a raw role.toml-shaped dict; tests that build a
+    `PostTypeSpec` directly and hand it to `available_for`/`render_menu` need
+    no patching at all."""
+    monkeypatch.setattr(
+        post_types_mod, "CANONICAL",
+        {**post_types_mod.CANONICAL, _BROADCAST_TYPE.name: _BROADCAST_TYPE},
+    )
+
+
 def test_canonical_vocabulary_is_exactly_the_spec_table():
-    assert set(CANONICAL) == {
-        "paper", "help_wanted", "introduction",
-        "idea_crosslab", "pitch", "funding_collab", "opportunity_assessment",
-    }
+    assert set(CANONICAL) == {"pitch"}
 
 
 def test_idea_is_not_a_type_anymore():
     """`idea` and `idea_crosslab` were both in the old enum with no documented
-    difference and no code distinguishing them. Collapsed to one."""
+    difference and no code distinguishing them. Both are retired now."""
     assert "idea" not in CANONICAL
+    assert "idea_crosslab" not in CANONICAL
     assert "idea" not in _by_name(DEFAULT_POST_TYPES)
 
 
 def test_the_retired_idea_name_still_resolves():
-    """Retired in the vocabulary, still accepted on input. A mesh deployment
-    whose prompts lag the code must not have its posts silently deleted."""
+    """Retired in the vocabulary, still accepted on input — the alias table
+    itself does not care whether its destination is still canonical."""
     assert resolve_post_type_name("idea") == "idea_crosslab"
 
 
 def test_resolve_passes_current_and_unknown_names_through():
-    assert resolve_post_type_name("paper") == "paper"
+    assert resolve_post_type_name("pitch") == "pitch"
     assert resolve_post_type_name("nonsense") == "nonsense"
 
 
@@ -69,30 +93,26 @@ def test_an_alias_is_never_offered_as_a_type():
 
 
 def test_default_post_types_is_the_pi_lab_set():
-    assert _by_name(DEFAULT_POST_TYPES) == {
-        "paper", "help_wanted", "introduction",
-        "idea_crosslab", "pitch", "funding_collab",
-    }
+    assert _by_name(DEFAULT_POST_TYPES) == {"pitch"}
     assert "opportunity_assessment" not in _by_name(DEFAULT_POST_TYPES)
 
 
 def test_broadcast_types_carry_no_targets():
-    for name in ("paper", "help_wanted", "introduction"):
-        assert CANONICAL[name].targets == frozenset()
+    assert _BROADCAST_TYPE.targets == frozenset()
 
 
 def test_addressed_types_declare_their_counterparty_role():
-    assert CANONICAL["idea_crosslab"].targets == frozenset({"pi_lab"})
     assert CANONICAL["pitch"].targets == frozenset({"scout_hub"})
-    assert CANONICAL["funding_collab"].targets == frozenset({"pi_lab"})
 
 
 # --- eligible_targets -------------------------------------------------------
 
 def test_eligible_targets_excludes_self():
     """An agent's own role is in its own gate; it must never be its own target."""
-    spec = CANONICAL["idea_crosslab"]
-    got = eligible_targets(spec, gate={"gill"}, roles_by_agent={"gill": "pi_lab"}, self_id="gill")
+    spec = CANONICAL["pitch"]
+    got = eligible_targets(
+        spec, gate={"gill"}, roles_by_agent={"gill": "scout_hub"}, self_id="gill"
+    )
     assert got == frozenset()
 
 
@@ -107,84 +127,60 @@ def test_eligible_targets_ignores_agents_with_no_known_role():
     """grantbot is in the gate but has no AgentRegistry row and is a separate
     process, never an entry in self.agents — so it never appears in
     roles_by_agent and matches no `targets`. It is a funding announcer, not a
-    pitch recipient. Asserted for BOTH addressed types so the exclusion is not
-    an accident of `pitch` happening to find the hub first."""
-    for name in ("pitch", "idea_crosslab", "funding_collab"):
-        got = eligible_targets(
-            CANONICAL[name], gate=STAR_GATE, roles_by_agent=STAR_ROLES, self_id="gill"
-        )
-        assert "grantbot" not in got
-
-
-def test_eligible_targets_is_empty_for_a_lab_peer_in_the_star():
+    pitch recipient."""
     got = eligible_targets(
-        CANONICAL["idea_crosslab"], gate=STAR_GATE, roles_by_agent=STAR_ROLES, self_id="gill"
+        CANONICAL["pitch"], gate=STAR_GATE, roles_by_agent=STAR_ROLES, self_id="gill"
+    )
+    assert "grantbot" not in got
+
+
+def test_eligible_targets_is_empty_with_no_reachable_hub():
+    got = eligible_targets(
+        CANONICAL["pitch"], gate={"gill", "pearce"},
+        roles_by_agent={"gill": "pi_lab", "pearce": "pi_lab"}, self_id="gill",
     )
     assert got == frozenset()
 
 
 def test_eligible_targets_with_gate_off_returns_every_matching_role():
+    roles = {"gill": "pi_lab", "blackbird": "scout_hub", "wu": "scout_hub"}
     got = eligible_targets(
-        CANONICAL["idea_crosslab"], gate=None, roles_by_agent=MESH_ROLES, self_id="gill"
+        CANONICAL["pitch"], gate=None, roles_by_agent=roles, self_id="gill"
     )
-    assert got == frozenset({"pearce", "wu"})
+    assert got == frozenset({"blackbird", "wu"})
 
 
 # --- available_for ----------------------------------------------------------
 
-def test_star_drops_lab_peer_types_and_keeps_pitch():
+def test_star_keeps_pitch_for_a_spoke():
     got = available_for(
         DEFAULT_POST_TYPES, gate=STAR_GATE, roles_by_agent=STAR_ROLES,
-        self_id="gill", funding_only=False,
+        self_id="gill",
     )
-    assert _by_name(got) == {"paper", "help_wanted", "introduction", "pitch"}
+    assert _by_name(got) == {"pitch"}
 
 
-def test_mesh_keeps_lab_peer_types_and_drops_pitch():
+def test_mesh_drops_pitch_for_a_spoke_with_no_reachable_hub():
     got = available_for(
         DEFAULT_POST_TYPES, gate=None, roles_by_agent=MESH_ROLES,
-        self_id="gill", funding_only=False,
+        self_id="gill",
     )
-    assert _by_name(got) == {
-        "paper", "help_wanted", "introduction", "idea_crosslab", "funding_collab",
-    }
+    assert _by_name(got) == set()
 
 
-def test_gate_off_keeps_every_broadcast_type():
+def test_gate_off_keeps_a_broadcast_type_even_with_no_known_roles():
     got = available_for(
-        DEFAULT_POST_TYPES, gate=None, roles_by_agent={}, self_id="gill", funding_only=False,
+        (_BROADCAST_TYPE,), gate=None, roles_by_agent={}, self_id="gill",
     )
-    assert {"paper", "help_wanted", "introduction"} <= _by_name(got)
-
-
-def test_funding_only_restricts_to_funding_types():
-    got = available_for(
-        DEFAULT_POST_TYPES, gate=None, roles_by_agent=MESH_ROLES,
-        self_id="gill", funding_only=True,
-    )
-    assert _by_name(got) == {"funding_collab"}
-    assert _by_name(got) <= FUNDING_POST_TYPES
-
-
-def test_funding_only_in_the_star_is_empty():
-    """Empty is the correct answer here, and the engine must NOT read it as
-    "skip the turn" — Option A (a funding reply) is still legitimate. That half
-    is enforced in test_post_type_enforcement.py, not here; this only pins that
-    the set really is empty. See spec §5."""
-    got = available_for(
-        DEFAULT_POST_TYPES, gate=STAR_GATE, roles_by_agent=STAR_ROLES,
-        self_id="gill", funding_only=True,
-    )
-    assert got == ()
+    assert _by_name(got) == {"broadcast_test_type"}
 
 
 def test_available_for_preserves_declaration_order():
-    got = available_for(
-        DEFAULT_POST_TYPES, gate=None, roles_by_agent=MESH_ROLES,
-        self_id="gill", funding_only=False,
-    )
-    declared = [s.name for s in DEFAULT_POST_TYPES if s.name in _by_name(got)]
-    assert [s.name for s in got] == declared
+    declared = (_BROADCAST_TYPE, CANONICAL["pitch"])
+    roles = dict(MESH_ROLES, blackbird="scout_hub")
+    got = available_for(declared, gate=None, roles_by_agent=roles, self_id="gill")
+    declared_names = [s.name for s in declared if s.name in _by_name(got)]
+    assert [s.name for s in got] == declared_names
 
 
 # --- parse_post_types -------------------------------------------------------
@@ -200,27 +196,31 @@ def test_parse_none_yields_the_defaults(caplog):
     assert caplog.text == ""
 
 
-def test_parse_reads_name_and_targets():
+def test_parse_reads_name_and_targets(monkeypatch):
+    _with_broadcast_type(monkeypatch)
     got = parse_post_types(
-        [{"name": "opportunity_assessment"},
-         {"name": "funding_collab", "targets": ["pi_lab"]}],
+        [{"name": "broadcast_test_type"},
+         {"name": "pitch", "targets": ["scout_hub"]}],
         role="scout_hub",
     )
-    assert _by_name(got) == {"opportunity_assessment", "funding_collab"}
-    assert dict((s.name, s.targets) for s in got)["funding_collab"] == frozenset({"pi_lab"})
+    assert _by_name(got) == {"broadcast_test_type", "pitch"}
+    assert dict((s.name, s.targets) for s in got)["pitch"] == frozenset({"scout_hub"})
 
 
 def test_parse_drops_an_unknown_name_and_keeps_the_rest(caplog):
     got = parse_post_types(
-        [{"name": "paper"}, {"name": "not_a_real_type"}], role="pi_lab"
+        [{"name": "pitch"}, {"name": "not_a_real_type"}], role="pi_lab"
     )
-    assert _by_name(got) == {"paper"}
+    assert _by_name(got) == {"pitch"}
     assert "not_a_real_type" in caplog.text
 
 
-def test_parse_drops_a_malformed_entry_and_keeps_the_rest(caplog):
-    got = parse_post_types(["paper", {"name": "help_wanted"}, {}], role="pi_lab")
-    assert _by_name(got) == {"help_wanted"}
+def test_parse_drops_a_malformed_entry_and_keeps_the_rest(caplog, monkeypatch):
+    _with_broadcast_type(monkeypatch)
+    got = parse_post_types(
+        ["not_a_table", {"name": "broadcast_test_type"}, {}], role="pi_lab"
+    )
+    assert _by_name(got) == {"broadcast_test_type"}
     assert caplog.text
 
 
@@ -234,21 +234,19 @@ def test_parse_warns_when_targets_names_a_role_that_cannot_exist(caplog):
     assert "scout_hubb" in caplog.text
 
 
-def test_a_typod_target_role_really_is_never_offered(caplog):
+def test_a_typod_target_role_really_is_never_offered(caplog, monkeypatch):
     """The other half of that §5 row. The WARNING is only useful if the
     behaviour it predicts is real: no agent can ever satisfy `scout_hubb`, so
     the type is filtered out of every menu on every topology."""
+    _with_broadcast_type(monkeypatch)
     caplog.set_level(logging.WARNING)
     declared = parse_post_types(
-        [{"name": "paper"}, {"name": "pitch", "targets": ["scout_hubb"]}],
+        [{"name": "broadcast_test_type"}, {"name": "pitch", "targets": ["scout_hubb"]}],
         role="pi_lab",
     )
     for gate, roles in ((STAR_GATE, STAR_ROLES), (None, MESH_ROLES)):
-        got = available_for(
-            declared, gate=gate, roles_by_agent=roles, self_id="gill",
-            funding_only=False,
-        )
-        assert _by_name(got) == {"paper"}
+        got = available_for(declared, gate=gate, roles_by_agent=roles, self_id="gill")
+        assert _by_name(got) == {"broadcast_test_type"}
 
 
 def test_parse_of_a_non_list_yields_the_defaults(caplog):
@@ -291,18 +289,19 @@ def test_parse_dedupes_a_repeated_name_and_the_last_entry_wins(caplog):
     assert "pitch" in caplog.text
 
 
-def test_parse_dedupe_preserves_first_occurrence_position():
+def test_parse_dedupe_preserves_first_occurrence_position(monkeypatch):
     """Declaration order is the menu's rendering order and must stay stable
     between turns even when a later duplicate wins on content."""
+    _with_broadcast_type(monkeypatch)
     got = parse_post_types(
         [
-            {"name": "paper"},
+            {"name": "broadcast_test_type"},
             {"name": "pitch", "targets": ["scout_hub"]},
-            {"name": "paper"},  # duplicate, later — content wins, position doesn't move
+            {"name": "broadcast_test_type"},  # duplicate, later — content wins, position doesn't move
         ],
         role="pi_lab",
     )
-    assert [s.name for s in got] == ["paper", "pitch"]
+    assert [s.name for s in got] == ["broadcast_test_type", "pitch"]
 
 
 # --- render_menu ------------------------------------------------------------
@@ -310,17 +309,16 @@ def test_parse_dedupe_preserves_first_occurrence_position():
 def test_render_menu_names_every_available_type_with_its_emoji():
     specs = available_for(
         DEFAULT_POST_TYPES, gate=STAR_GATE, roles_by_agent=STAR_ROLES,
-        self_id="gill", funding_only=False,
+        self_id="gill",
     )
     out = render_menu(
         specs, gate=STAR_GATE, roles_by_agent=STAR_ROLES, self_id="gill", bot_names=BOT_NAMES,
     )
-    for name in ("paper", "help_wanted", "introduction", "pitch"):
-        assert CANONICAL[name].emoji in out
-        # The stronger form: `name in out` alone would also pass for a menu
-        # that merely echoes the name in prose somewhere, without actually
-        # naming it as a selectable `post_type` value.
-        assert f"**`{name}`**" in out
+    assert CANONICAL["pitch"].emoji in out
+    # The stronger form: `name in out` alone would also pass for a menu
+    # that merely echoes the name in prose somewhere, without actually
+    # naming it as a selectable `post_type` value.
+    assert "**`pitch`**" in out
     assert "idea_crosslab" not in out
 
 
@@ -350,11 +348,11 @@ def test_render_menu_does_not_enumerate_when_the_gate_is_off():
     would recreate the 46 KB lab directory this design is shrinking, so gate
     None renders guidance instead of a list."""
     out = render_menu(
-        [CANONICAL["idea_crosslab"]], gate=None, roles_by_agent=MESH_ROLES,
+        [CANONICAL["pitch"]], gate=None, roles_by_agent=MESH_ROLES,
         self_id="gill", bot_names=BOT_NAMES,
     )
     assert "pearce" not in out and "wu" not in out
-    assert "pi_lab" in out
+    assert "scout_hub" in out
     assert "agent_id" in out
 
 
@@ -383,7 +381,7 @@ def test_render_menu_enumerated_branch_also_requires_the_body_mention():
 def test_render_menu_names_the_reachable_agent_for_an_addressed_type():
     specs = available_for(
         DEFAULT_POST_TYPES, gate=STAR_GATE, roles_by_agent=STAR_ROLES,
-        self_id="gill", funding_only=False,
+        self_id="gill",
     )
     out = render_menu(
         specs, gate=STAR_GATE, roles_by_agent=STAR_ROLES, self_id="gill", bot_names=BOT_NAMES,
@@ -394,20 +392,21 @@ def test_render_menu_names_the_reachable_agent_for_an_addressed_type():
 
 def test_render_menu_marks_a_broadcast_type_as_addressing_no_one():
     out = render_menu(
-        [CANONICAL["paper"]], gate=STAR_GATE, roles_by_agent=STAR_ROLES,
+        [_BROADCAST_TYPE], gate=STAR_GATE, roles_by_agent=STAR_ROLES,
         self_id="gill", bot_names=BOT_NAMES,
     )
     assert "no one" in out.lower() or "broadcast" in out.lower()
 
 
-def test_render_menu_of_an_empty_set_says_so_and_points_at_reply_or_skip():
+def test_render_menu_of_an_empty_set_says_so_and_points_at_skip():
     out = render_menu(
         [], gate=STAR_GATE, roles_by_agent=STAR_ROLES, self_id="gill", bot_names=BOT_NAMES,
     )
     assert out.strip()
     low = out.lower()
     assert "no new top-level post type" in low
-    assert "reply" in low and "skip" in low
+    assert "skip" in low
+    assert "new_post" in low
 
 
 def test_render_menu_never_returns_an_empty_string():

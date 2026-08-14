@@ -16,7 +16,7 @@ from slack_sdk.errors import SlackApiError
 from src.agent.agent import Agent
 from src.agent.simulation import SimulationEngine
 from src.agent.slack_client import AgentSlackClient, ThreadNotFound
-from src.agent.state import PostRef, ProposalRef, ThreadState
+from src.agent.state import ProposalRef, ThreadState
 
 
 def _slack_error(error_code: str) -> SlackApiError:
@@ -117,10 +117,6 @@ class TestEvictDeadThread:
             ag.state.active_threads[dead_ts] = ThreadState(
                 thread_id=dead_ts, channel="single-cell-omics", other_agent_id="other",
             )
-            ag.state.interesting_posts.append(PostRef(
-                post_id=dead_ts, channel="single-cell-omics",
-                sender_agent_id="grantbot", content_snippet="dead", posted_at=0.0,
-            ))
             ag.state.pending_proposals.append(ProposalRef(
                 thread_id=dead_ts, channel="single-cell-omics",
                 other_agent_id="other", summary_text="x", proposed_at=0.0,
@@ -137,7 +133,6 @@ class TestEvictDeadThread:
 
         for ag in (a, b):
             assert dead_ts not in ag.state.active_threads
-            assert not any(p.post_id == dead_ts for p in ag.state.interesting_posts)
             assert not any(p.thread_id == dead_ts for p in ag.state.pending_proposals)
 
         assert f"proposal_thread:{dead_ts}" not in engine._poll_cursors
@@ -149,5 +144,4 @@ class TestEvictDeadThread:
         engine._evict_dead_thread("9999999999.999999")
         for ag in (a, b):
             assert len(ag.state.active_threads) == 1
-            assert len(ag.state.interesting_posts) == 1
             assert len(ag.state.pending_proposals) == 1

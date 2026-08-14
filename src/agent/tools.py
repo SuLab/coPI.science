@@ -5,6 +5,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from src.agent.agent import _extract_dois
 from src.agent.prompt_safety import delimit
 from src.agent.roles import load_role
 from src.agent.specialists import (
@@ -73,26 +74,6 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                 }
             },
             "required": ["pmid_or_doi"],
-        },
-    },
-    {
-        "name": "retrieve_foa",
-        "description": (
-            "Fetch the full details of a federal funding opportunity from Grants.gov. "
-            "Accepts an FOA number (e.g., 'RFA-AI-27-019', 'PAR-24-293'). "
-            "Returns the title, agency, description, synopsis, eligibility, dates, "
-            "and award amounts. Use this to read the full FOA before engaging in "
-            "any funding-related discussion."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "foa_number": {
-                    "type": "string",
-                    "description": "The FOA number (e.g., 'RFA-AI-27-019')",
-                }
-            },
-            "required": ["foa_number"],
         },
     },
     {
@@ -197,6 +178,7 @@ async def execute_tool(
     role: str = "pi_lab",
     *,
     on_consult: Callable[[str], None] | None = None,
+    own_dois: set[str] | None = None,
 ) -> str:
     """
     Execute a tool call and return the result as a string.
@@ -207,6 +189,14 @@ async def execute_tool(
 
     ``on_consult`` is forwarded to ``consult_specialist`` and fires only on a
     fully successful consult — see ``_execute_consult_specialist``.
+
+    ``own_dois``: the calling agent's own-lab publication DOIs (see
+    ``Agent.own_publication_dois``, GitHub issue #7). A ``retrieve_abstract``
+    lookup whose ``pmid_or_doi`` contains one of these DOIs is exempt from
+    BOTH the per-thread cap check and its increment — citing your own paper
+    isn't "using up" the budget meant to limit how much of another lab's work
+    you pull in. Only recognizes DOI form: a bare PMID has no DOI substring to
+    match, so it always counts against the cap (documented limit, design §10).
     """
     if tool_name not in load_role(role).tools:
         logger.warning("[tools] %s: role %r may not call %s", agent_id, role, tool_name)
@@ -216,9 +206,9 @@ async def execute_tool(
             return await _execute_retrieve_profile(tool_input["agent_id"])
 
         elif tool_name == "retrieve_abstract":
-            if thread_state:
-                # Check if this is the agent's own paper (no limit) vs other lab
-                # We don't enforce limits on own-lab lookups, but we track other-lab ones
+            ref = str(tool_input.get("pmid_or_doi", ""))
+            is_own = bool(own_dois) and bool(_extract_dois(ref) & own_dois)
+            if thread_state and not is_own:
                 from src.config import get_settings
                 settings = get_settings()
                 if thread_state.abstracts_other >= settings.max_abstracts_other_per_thread:
@@ -234,9 +224,6 @@ async def execute_tool(
                     return "Rate limit: you have used all your full-text retrievals in this thread."
                 thread_state.full_text += 1
             return await _execute_retrieve_full_text(tool_input["pmid_or_doi"])
-
-        elif tool_name == "retrieve_foa":
-            return await _execute_retrieve_foa(tool_input["foa_number"])
 
         elif tool_name == "search_prior_art":
             return await _execute_search_prior_art(tool_input["query"])
@@ -256,48 +243,6 @@ async def execute_tool(
     except Exception as exc:
         logger.error("Tool execution failed: %s(%s) — %s", tool_name, tool_input, exc)
         return f"Error executing {tool_name}: {exc}"
-
-
-async def _execute_retrieve_foa(foa_number: str) -> str:
-    """Fetch full details of a funding opportunity — checks local cache first."""
-    from src.agent.foa_cache import format_foa_for_prompt
-
-    cached = format_foa_for_prompt(foa_number)
-    if cached:
-        return cached
-
-    # Fall back to Grants.gov API
-    from src.services.grants import fetch_opportunity_by_number
-
-    result = await fetch_opportunity_by_number(foa_number)
-    if not result:
-        return f"No funding opportunity found for '{foa_number}'."
-
-    # Cache for future use
-    from src.agent.foa_cache import cache_foa
-    cache_foa(foa_number, result)
-
-    parts = [
-        f"Title: {result.get('title', 'Unknown')}",
-        f"Number: {result.get('number', foa_number)}",
-        f"Agency: {result.get('agency', 'Unknown')}",
-        f"Open Date: {result.get('open_date', 'Not specified')}",
-        f"Close Date: {result.get('close_date', 'Not specified')}",
-    ]
-    if result.get("award_ceiling") or result.get("award_floor"):
-        parts.append(f"Award Range: ${result.get('award_floor', '?')} – ${result.get('award_ceiling', '?')}")
-    if result.get("eligibility"):
-        parts.append(f"Eligibility: {result['eligibility']}")
-    if result.get("category"):
-        parts.append(f"Category: {result['category']}")
-    parts.append("")
-    if result.get("description"):
-        parts.append(f"Description:\n{result['description']}")
-    if result.get("synopsis"):
-        parts.append(f"\nSynopsis:\n{result['synopsis']}")
-    if result.get("additional_info_url"):
-        parts.append(f"\nMore info: {result['additional_info_url']}")
-    return "\n".join(parts)
 
 
 async def _execute_retrieve_profile(agent_id: str) -> str:

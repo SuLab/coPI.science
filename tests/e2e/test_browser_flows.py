@@ -124,7 +124,7 @@ FLOWS: dict[str, dict] = {
         "as": "onboarding",
         "human_needed": False,
         "stops_at": (
-            "Step 3 of 4, 'Building Your Profile'. /onboarding auto-enqueues a "
+            "Step 3 of 3, 'Building Your Profile'. /onboarding auto-enqueues a "
             "generate_profile job and the template shows that spinner for "
             "job_status in (none, pending, processing). Completing the step "
             "needs the worker to run run_profile_pipeline, which fetches the "
@@ -134,16 +134,15 @@ FLOWS: dict[str, dict] = {
             "subject, not this one."
         ),
         "steps": [
-            ("open", "/onboarding", "Step 3 of 4 spinner, job enqueued"),
+            ("open", "/onboarding", "Step 3 of 3 spinner, job enqueued"),
             ("substitute", "ResearcherProfile + jobs.status='completed'",
              "stands in for the ORCID-fed pipeline"),
             ("open", "/onboarding", "now renders the editable review form"),
-            ("click", "Save & Continue", "POST /onboarding/save-profile"),
-            # The button lives in private_profile.html and always posted here;
-            # this note said POST /onboarding/complete, which was wrong even
-            # before that duplicate route was deleted for setting
-            # onboarding_complete with no validation.
-            ("click", "Save & Complete Onboarding", "POST /onboarding/private-profile"),
+            # This is now the terminal step: the private-profile step (and its
+            # own terminal POST) was removed with private instructions; the
+            # onboarding_complete flip/welcome-email/redirect-resume side
+            # effects relocated onto this same POST (removal cycle, Task 5).
+            ("click", "Save & Finish", "POST /onboarding/save-profile"),
         ],
         "expect": [
             "onboarding_complete=1",

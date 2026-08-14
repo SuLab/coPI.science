@@ -156,7 +156,6 @@ async def seed(session) -> dict[str, str]:
                 research_summary="Studies chemical probes of protein function.",
                 techniques=["mass spectrometry", "chemoproteomics"],
                 keywords=["covalent probes", "target ID"],
-                private_profile_md="# Private\nE2E fixture.",
                 profile_version=1,
             )
         )

@@ -50,7 +50,6 @@ async def make_profile(session, *, user=None, **overrides) -> ResearcherProfile:
         research_summary="Studies the thing.",
         techniques=["technique-a"],
         keywords=["keyword-a"],
-        private_profile_md="# Private\nStuff.",
         profile_version=1,
     )
     if user is not None:

@@ -12,20 +12,22 @@ def test_phase_boundaries_are_unchanged(count, expected):
 
 
 def test_pi_lab_strings_are_byte_identical_to_the_pinned_snapshot():
-    # These exact strings are pinned in
-    # tests/characterization/__snapshots__/test_agent_turn_gm.ambr. Any drift here
-    # changes every PI bot's behaviour, which this refactor must not do.
-    _, guidance, instructions = phase4_guidance("pi_lab", 5)
-    assert guidance == (
-        "You are in the DECIDE phase. Narrow the scope: is there genuine complementarity? "
-        "Can you name a specific first experiment? If yes, build toward a :memo: Summary proposal. "
-        "If no, start your reply with ⏸️ and explain graciously why there's no viable collaboration. "
-        "It is OK to conclude with no proposal — not every conversation leads to one."
+    # Spot-anchors of the current §4 text (docs/specs/2026-08-07-pi-bot-prompts.md),
+    # pinned in tests/characterization/__snapshots__/test_agent_turn_gm.ambr. Any
+    # drift here changes every PI bot's behaviour.
+    _, decide_guidance, decide_instructions = phase4_guidance("pi_lab", 5)
+    assert "that's a question for my PI" in decide_guidance
+    assert "differentiation" in decide_guidance
+    assert decide_instructions == (
+        "Write a reply that closes the biggest gap in what the hub still does not know about "
+        "your idea, or answers its last question directly. Do not oversell and do not ask to "
+        "be introduced to another lab."
     )
-    assert instructions == (
-        "Write a reply that moves toward a conclusion. Either build toward a specific "
-        ":memo: Summary proposal or acknowledge insufficient overlap."
-    )
+
+    _, conclude_guidance, conclude_instructions = phase4_guidance("pi_lab", 12)
+    assert "Do NOT post a :memo: Summary" in conclude_guidance
+    assert "Do NOT reply with a bare ✅" in conclude_guidance
+    assert "Never close by proposing that the two of you work together" in conclude_instructions
 
 
 def test_unknown_role_falls_back_to_pi_lab():
@@ -43,13 +45,14 @@ def test_scout_hub_never_asks_for_a_collaboration_proposal():
 
 
 def test_scout_hub_decide_phase_works_the_gating_criteria():
+    # 3-criteria gating contract (Baltimore location gating was dropped, dcc5212):
+    # credible technology source, freedom-to-operate, differentiation.
     _, guidance, instructions = phase4_guidance("scout_hub", 5)
     blob = (guidance + instructions).lower()
-    assert "baltimore" in blob
+    assert "credible" in blob
     assert "freedom-to-operate" in blob or "fto" in blob
     assert "differentiation" in blob
-    # The measured failure: inferring the Baltimore gate from a JHU address.
-    assert "jhu address" in blob or "institution is not" in blob
+    assert "baltimore" not in blob
     # Part C.4 of the rubric — the target-level scientific checklist.
     assert "proof of mechanism" in blob
 
