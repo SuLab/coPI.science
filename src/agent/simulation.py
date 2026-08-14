@@ -32,6 +32,7 @@ from src.config import get_settings
 from src.models import (
     AgentChannel,
     AgentMessage,
+    AssessmentDrop,
     LlmCallLog,
     OpportunityAssessment,
     ProposalReview,
@@ -1359,9 +1360,20 @@ class SimulationEngine:
             # is a no-op for every non-hub agent.
             if agent.role == "scout_hub":
                 await self._capture_hub_assessment(agent, thread, raw_response, posted)
-                self._warn_if_hub_conclude_missing_assessment(
+                missing = self._warn_if_hub_conclude_missing_assessment(
                     agent, thread, response_text, raw_response,
                 )
+                if missing:
+                    await self._record_assessment_drop(
+                        agent.agent_id,
+                        missing,
+                        subject_agent_id=thread.other_agent_id,
+                        thread_id=thread.thread_id,
+                        detail=(
+                            "concluding reply carried no <assessment_json> sidecar "
+                            "and was not a decline"
+                        ),
+                    )
 
             # Check for thread outcome
             await self._check_thread_outcome(agent, thread, response_text)
@@ -2053,12 +2065,24 @@ class SimulationEngine:
                         "— verdict lost",
                         agent.agent_id,
                     )
+                    drop_detail = "sidecar parsed as valid JSON but was not an object"
                 else:
                     logger.warning(
                         "[%s] Phase 4: concluding reply's <assessment_json> "
                         "sidecar was present but unparseable — verdict lost",
                         agent.agent_id,
                     )
+                    drop_detail = (
+                        "sidecar present but unparseable (commonly a max_tokens "
+                        "truncation that ate the closing tag)"
+                    )
+                await self._record_assessment_drop(
+                    agent.agent_id,
+                    "unparseable_sidecar",
+                    subject_agent_id=thread.other_agent_id,
+                    thread_id=thread.thread_id,
+                    detail=drop_detail,
+                )
         except Exception as exc:  # noqa: BLE001 — never lose a posted reply over this
             logger.error(
                 "[%s] Failed to extract/persist the assessment sidecar for "
@@ -2068,9 +2092,13 @@ class SimulationEngine:
 
     def _warn_if_hub_conclude_missing_assessment(
         self, agent: Agent, thread: ThreadState, response_text: str, raw_response: str,
-    ) -> None:
+    ) -> str | None:
         """Absent-sidecar detection gap: warn when a hub's structurally-
         concluding reply is neither a decline nor a persistable verdict.
+
+        Returns the ``AssessmentDrop`` reason (``"missing_sidecar"``) when it
+        warned, else ``None``. Kept synchronous — its callers include tests that
+        invoke it directly — so the async call site does the recording.
 
         ``_capture_hub_assessment`` already warns when an ``<assessment_json>``
         tag is PRESENT but broken (unparseable, or valid JSON that is not an
@@ -2117,19 +2145,20 @@ class SimulationEngine:
         message_ordinal = thread.message_count + 1
         thread_phase, _, _ = phase4_guidance(agent.role, message_ordinal)
         if thread_phase != CONCLUDE:
-            return
+            return None
         if _reply_opens_with_pause(response_text):
-            return
+            return None
         if _ASSESSMENT_RE.search(raw_response or "") or _ASSESSMENT_UNCLOSED_RE.search(
             raw_response or ""
         ):
-            return
+            return None
         logger.warning(
             "[%s] Phase 4: thread %s concluded (message_ordinal=%d) with a "
             "non-decline verdict but no persistable <assessment_json> "
             "sidecar was found",
             agent.agent_id, thread.thread_id, message_ordinal,
         )
+        return "missing_sidecar"
 
     async def _persist_assessment(
         self, agent_id: str, channel: str, verdict: dict, slack_ts: str | None = None,
@@ -2204,6 +2233,15 @@ class SimulationEngine:
                 agent_id, subject_hint or "?",
                 verdict.get("recommendation"), ", ".join(sorted(gap)),
             )
+            await self._record_assessment_drop(
+                agent_id,
+                "specialist_floor",
+                subject_agent_id=subject_hint if isinstance(subject_hint, str) else None,
+                detail=(
+                    f"recommendation {verdict.get('recommendation')!r} required the "
+                    f"{', '.join(sorted(gap))} specialist(s), never consulted"
+                ),
+            )
             return
 
         # The engine can run without a database (see __init__) — in that mode
@@ -2274,6 +2312,45 @@ class SimulationEngine:
             )
         except Exception as exc:  # noqa: BLE001 — never lose a posted assessment
             logger.error("[%s] Failed to persist assessment: %s", agent_id, exc)
+
+    async def _record_assessment_drop(
+        self,
+        agent_id: str,
+        reason: str,
+        *,
+        subject_agent_id: str | None = None,
+        thread_id: str | None = None,
+        detail: str | None = None,
+    ) -> None:
+        """Record that a verdict was generated and then lost.
+
+        Best-effort in exactly the same sense as ``_persist_assessment``: the
+        concluding reply is already in Slack by the time any of these fire, so
+        nothing here may raise, and a DB-less engine is a silent no-op.
+
+        This exists because every loss path is otherwise invisible — one WARNING
+        in a container log — which leaves an empty ``/admin/assessments`` page
+        meaning either "nothing screened yet" or "everything screened and every
+        verdict thrown away", with no way to tell them apart. See
+        ``AssessmentDrop`` for the ``reason`` vocabulary.
+        """
+        if not self.session_factory or not self.simulation_run_id:
+            return
+        try:
+            async with self.session_factory() as db:
+                db.add(AssessmentDrop(
+                    simulation_run_id=self.simulation_run_id,
+                    agent_id=agent_id,
+                    subject_agent_id=(subject_agent_id or None),
+                    thread_id=(thread_id or None),
+                    reason=reason,
+                    detail=detail,
+                ))
+                await db.commit()
+        except Exception as exc:  # noqa: BLE001 — visibility must never cost a reply
+            logger.error(
+                "[%s] Failed to record assessment drop (%s): %s", agent_id, reason, exc
+            )
 
     def _strip_disallowed_tags(self, message_text: str | None, agent: Agent) -> str | None:
         """Remove @BotName mentions of non-cohort agents from an outbound message.

@@ -11,6 +11,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import delete as sa_delete
 from sqlalchemy import func, select
+from sqlalchemy import true as sa_true
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -19,6 +20,7 @@ from src.config import get_settings
 from src.database import get_db
 from src.dependencies import get_admin_user, get_current_user
 from src.models import (
+    AssessmentDrop,
     COHORT_ACTION_AGENT_ADDED,
     COHORT_ACTION_AGENT_REMOVED,
     COHORT_ACTION_CREATED,
@@ -914,6 +916,25 @@ async def admin_assessments(
     result = await db.execute(query)
     assessments = result.scalars().all()
 
+    # Verdicts that were generated and then lost, scoped exactly like the rows
+    # above. Without this an empty page is ambiguous: "nothing screened yet" and
+    # "everything screened and every verdict discarded" look identical, and the
+    # latter is only visible as a WARNING in a container log. Grouped by reason
+    # so the banner can say WHICH failure is happening — they have different
+    # fixes (panel never convened / sidecar truncated / no sidecar emitted).
+    drops_result = await db.execute(
+        select(AssessmentDrop.reason, func.count())
+        .where(
+            AssessmentDrop.simulation_run_id == selected_run_id
+            if not show_all_runs and selected_run_id
+            else sa_true()
+        )
+        .group_by(AssessmentDrop.reason)
+        .order_by(func.count().desc())
+    )
+    drop_counts = list(drops_result.all())
+    drops_total = sum(n for _, n in drop_counts)
+
     return templates.TemplateResponse(
         request,
         "admin/assessments.html",
@@ -934,6 +955,8 @@ async def admin_assessments(
             show_all_runs=show_all_runs,
             total_count=total_count,
             assessments_limit=_ASSESSMENTS_LIMIT,
+            drop_counts=drop_counts,
+            drops_total=drops_total,
         ),
     )
 

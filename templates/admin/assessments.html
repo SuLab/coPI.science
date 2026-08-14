@@ -47,6 +47,47 @@
     (the rubric question was never answered — distinct from a gate that failed).
 </p>
 
+{# Lost verdicts. Without this an empty page is ambiguous: "nothing screened
+   yet" and "everything screened and every verdict discarded" look identical.
+   Each reason has a different fix, so they are broken out rather than summed
+   into one number. #}
+{% if drops_total %}
+<div class="rounded-xl border border-amber-300 bg-amber-50 p-4 mb-6">
+    <div class="flex items-start gap-3">
+        <span class="text-amber-600 text-xl leading-none">&#9888;</span>
+        <div class="text-sm text-amber-900">
+            <div class="font-semibold mb-1">
+                {{ drops_total }} verdict{{ '' if drops_total == 1 else 's' }}
+                generated but not stored{% if not show_all_runs %} in this run{% endif %}.
+            </div>
+            <ul class="list-disc list-inside space-y-0.5">
+                {% for reason, n in drop_counts %}
+                <li>
+                    <span class="font-mono text-xs">{{ reason }}</span> &times; {{ n }}
+                    {% if reason == 'specialist_floor' %}
+                        &mdash; an advance/conditional verdict whose required specialist
+                        panel was never convened, so it was refused.
+                    {% elif reason == 'unparseable_sidecar' %}
+                        &mdash; the <code>&lt;assessment_json&gt;</code> sidecar was present
+                        but could not be read (commonly a max-tokens truncation that ate
+                        the closing tag).
+                    {% elif reason == 'missing_sidecar' %}
+                        &mdash; the interview concluded without declining, but carried no
+                        sidecar at all.
+                    {% endif %}
+                </li>
+                {% endfor %}
+            </ul>
+            <div class="mt-2 text-xs text-amber-700">
+                The Slack reply for each of these was posted normally &mdash; only the
+                machine-readable verdict was lost, and it cannot be recovered from a
+                later turn.
+            </div>
+        </div>
+    </div>
+</div>
+{% endif %}
+
 {# These four cards summarize the rows actually rendered below (bounded by
    assessments_limit), not total_count (the true count of the current
    filter, which may exceed what's shown) — so "Total" here always equals

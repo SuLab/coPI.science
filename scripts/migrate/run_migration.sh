@@ -53,7 +53,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT"
 
 APPLY=0
-TARGET="0026"
+TARGET="0027"
 DSN="${DATABASE_URL:-}"
 BACKUP_DIR="${MIGRATE_BACKUP_DIR:-backups}"
 SVC="${MIGRATE_SERVICE:-app}"

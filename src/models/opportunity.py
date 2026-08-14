@@ -66,3 +66,49 @@ class OpportunityAssessment(Base):
             f"<OpportunityAssessment subject={self.subject_agent_id} "
             f"rec={self.recommendation} score={self.weighted_score}>"
         )
+
+
+class AssessmentDrop(Base):
+    """One verdict that was generated but never became an OpportunityAssessment.
+
+    The counterpart to the table above, and the reason it exists: every way an
+    assessment can be lost is silent. The concluding reply has already been
+    posted to Slack, the thread closes normally, and the only trace is one
+    WARNING line in a container log nobody is tailing — so an empty
+    /admin/assessments page is indistinguishable from "no ideas screened yet".
+
+    Recording a drop is strictly best-effort and must never cost the reply that
+    already went out, exactly like the assessment write itself.
+
+    ``reason`` is one of:
+      * ``specialist_floor``     — an advance/conditional verdict whose required
+        panel was never convened (``_specialist_floor_gap``). Nothing persisted.
+      * ``unparseable_sidecar``  — an ``<assessment_json>`` tag was present but
+        yielded no usable verdict (commonly a max_tokens truncation that ate the
+        closing tag).
+      * ``missing_sidecar``      — the reply concluded, did not decline, and
+        carried no sidecar at all.
+    """
+
+    __tablename__ = "assessment_drops"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    simulation_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("simulation_runs.id", ondelete="CASCADE"),
+        nullable=True, index=True,
+    )
+    agent_id: Mapped[str] = mapped_column(String(50), nullable=False)
+    subject_agent_id: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    thread_id: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    reason: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
+    detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<AssessmentDrop subject={self.subject_agent_id} reason={self.reason}>"
+        )

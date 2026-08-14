@@ -34,7 +34,7 @@ from src.models.email_notification import (
     EmailNotificationPreference,
 )
 from src.models.job import Job
-from src.models.opportunity import OpportunityAssessment
+from src.models.opportunity import AssessmentDrop, OpportunityAssessment
 from src.models.profile_revision import ProfileRevision
 from src.models.profile import ResearcherProfile
 from src.models.proposal_vote import VOTE_DOWN, VOTE_UP, ProposalVote
@@ -47,6 +47,7 @@ __all__ = [
     "ResearcherProfile",
     "Publication",
     "Job",
+    "AssessmentDrop",
     "OpportunityAssessment",
     "SimulationRun",
     "AgentMessage",

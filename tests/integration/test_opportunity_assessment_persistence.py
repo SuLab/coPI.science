@@ -1493,3 +1493,166 @@ async def test_engine_known_subject_overrides_the_models_guess(engine):
     assert rows[0].subject_agent_id == "wang"
     # raw_verdict stays byte-for-byte what the model sent.
     assert rows[0].raw_verdict["subject_agent_id"] == "WangBot"
+
+
+@pytest.mark.asyncio
+async def test_a_refused_verdict_is_recorded_as_a_drop(engine):
+    """A refused verdict must leave a durable trace, not just a log line.
+
+    Every way an assessment is lost is silent: the concluding reply is already
+    in Slack, the thread closes normally, and the only evidence is a WARNING in
+    a container log. That makes an empty /admin/assessments page
+    indistinguishable from "nothing screened yet" — the exact state this
+    deployment sat in, with zero rows across four runs.
+    """
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from src.agent.simulation import SimulationEngine
+    from src.models import AssessmentDrop
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as setup:
+        run = SimulationRun()
+        setup.add(run)
+        await setup.commit()
+        run_id = run.id
+
+    stub = SimulationEngine(
+        agents=[], slack_clients={}, session_factory=factory, simulation_run_id=run_id,
+    )
+    # A consult exists for someone else, so the floor does not fail open, and
+    # none exists for THIS subject — the "hub never convened the panel" case.
+    stub._record_consult("someone-else", "scientific")
+
+    await SimulationEngine._persist_assessment(
+        stub, "blackbird", "general",
+        {
+            "subject_agent_id": "wang",
+            "company_or_project": "Refused thing",
+            "recommendation": "advance",
+            "scores": {"differentiation": 4},
+        },
+        subject_agent_id_fallback="wang",
+    )
+
+    async with factory() as check:
+        assessments = (await check.execute(
+            select(OpportunityAssessment).where(
+                OpportunityAssessment.simulation_run_id == run_id
+            )
+        )).scalars().all()
+        drops = (await check.execute(
+            select(AssessmentDrop).where(AssessmentDrop.simulation_run_id == run_id)
+        )).scalars().all()
+
+    # The refusal itself is unchanged — this is about visibility, not policy.
+    assert assessments == []
+    assert len(drops) == 1
+    assert drops[0].reason == "specialist_floor"
+    assert drops[0].subject_agent_id == "wang"
+    assert drops[0].agent_id == "blackbird"
+    # The detail must name what was missing, so the banner can be acted on.
+    assert "scientific" in (drops[0].detail or "")
+
+
+@pytest.mark.asyncio
+async def test_a_persisted_verdict_records_no_drop(engine):
+    """The happy path must not pollute the drop count — otherwise the banner
+    cries wolf on a perfectly healthy run."""
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from src.agent.simulation import SimulationEngine
+    from src.models import AssessmentDrop
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as setup:
+        run = SimulationRun()
+        setup.add(run)
+        await setup.commit()
+        run_id = run.id
+
+    stub = SimulationEngine(
+        agents=[], slack_clients={}, session_factory=factory, simulation_run_id=run_id,
+    )
+    for domain in ("scientific", "talent"):
+        stub._record_consult("wang", domain)
+
+    await SimulationEngine._persist_assessment(
+        stub, "blackbird", "general",
+        {
+            "subject_agent_id": "wang",
+            "company_or_project": "Good thing",
+            "recommendation": "advance",
+            "scores": {"differentiation": 4, "platform": 2},
+            "gating": {"fto_achievable": "unconfirmed"},
+        },
+        subject_agent_id_fallback="wang",
+    )
+
+    async with factory() as check:
+        assessments = (await check.execute(
+            select(OpportunityAssessment).where(
+                OpportunityAssessment.simulation_run_id == run_id
+            )
+        )).scalars().all()
+        drops = (await check.execute(
+            select(AssessmentDrop).where(AssessmentDrop.simulation_run_id == run_id)
+        )).scalars().all()
+
+    assert len(assessments) == 1
+    assert drops == []
+
+
+@pytest.mark.asyncio
+async def test_admin_page_warns_about_dropped_verdicts(client, db_session, admin):
+    """An empty page must not be able to mean two different things.
+
+    "Nothing has been screened yet" and "everything was screened and every
+    verdict was thrown away" rendered identically before this — the only trace
+    of a loss was a WARNING in a container log.
+    """
+    from src.models import AssessmentDrop
+
+    run = SimulationRun()
+    db_session.add(run)
+    await db_session.flush()
+    db_session.add(AssessmentDrop(
+        simulation_run_id=run.id, agent_id="blackbird", subject_agent_id="wang",
+        thread_id="t1", reason="specialist_floor",
+        detail="recommendation 'advance' required the talent specialist(s)",
+    ))
+    db_session.add(AssessmentDrop(
+        simulation_run_id=run.id, agent_id="blackbird", subject_agent_id="gill",
+        thread_id="t2", reason="unparseable_sidecar", detail="truncated",
+    ))
+    await db_session.flush()
+
+    resp = await client.get("/admin/assessments", headers=_auth(admin.id))
+    assert resp.status_code == 200
+    # Collapse whitespace: the banner's sentence is wrapped across source lines,
+    # and this test is about what it SAYS, not how the markup is folded.
+    flat = " ".join(resp.text.split())
+    assert "2 verdicts generated but not stored" in flat
+    # Each reason is broken out, because each has a different fix.
+    assert "specialist_floor" in flat
+    assert "unparseable_sidecar" in flat
+    # And the operator is told the Slack side already went out.
+    assert "was posted normally" in flat
+
+
+@pytest.mark.asyncio
+async def test_admin_page_has_no_drop_banner_on_a_clean_run(client, db_session, admin):
+    """No drops, no banner — it must not cry wolf on a healthy run."""
+    run = SimulationRun()
+    db_session.add(run)
+    await db_session.flush()
+    db_session.add(OpportunityAssessment(
+        simulation_run_id=run.id, agent_id="blackbird", subject_agent_id="wang",
+        channel_name="general", company_or_project="A clean verdict",
+        recommendation="advance", weighted_score=4.2, band="advance",
+    ))
+    await db_session.flush()
+
+    resp = await client.get("/admin/assessments", headers=_auth(admin.id))
+    assert resp.status_code == 200
+    assert "generated but not stored" not in resp.text

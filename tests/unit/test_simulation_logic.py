@@ -1519,3 +1519,83 @@ class TestSuppressedPostBacksOff:
 
         assert thread.suppressed_post_count == 0
         assert thread.has_pending_reply is False
+
+
+class TestMissingSidecarIsRecordedAsADrop:
+    """The absent-sidecar warning must also leave a durable trace.
+
+    `_warn_if_hub_conclude_missing_assessment` only logged. A concluding reply
+    that carries no sidecar is the quietest loss of all — the reply posts, the
+    thread closes, and /admin/assessments simply never gains a row. The method
+    stays synchronous (its existing tests call it directly); it now reports
+    whether it warned, and the async call site records the drop.
+    """
+
+    def _hub_thread(self, message_count):
+        """Seed the message LOG, not just the ThreadState field.
+
+        _reply_to_thread recomputes thread.message_count from
+        message_log.get_thread_history() on entry, so setting the dataclass
+        field alone is silently overwritten with 0 and the reply never reaches
+        the CONCLUDE ordinal. Same helper the sibling warning tests use.
+        """
+        from src.agent.agent import Agent
+        from src.agent.simulation import SimulationEngine
+        from src.agent.state import ThreadState
+        from tests.fakes import FakeSlackClient
+
+        hub = Agent("blackbird", "BlackbirdBot", "Blackbird", role="scout_hub")
+        thread = ThreadState(
+            thread_id="t1", channel="general", other_agent_id="wang",
+            message_count=message_count, has_pending_reply=True,
+        )
+        hub.state.active_threads["t1"] = thread
+        engine = SimulationEngine(
+            agents=[hub],
+            slack_clients={"blackbird": FakeSlackClient(agent_id="blackbird")},
+        )
+        _seed_thread_history(engine, "t1", "general", message_count)
+        return engine, hub, thread
+
+    def test_it_reports_the_reason_when_the_sidecar_is_missing(self):
+        # 11 prior messages -> this reply is ordinal 12 -> CONCLUDE.
+        engine, hub, thread = self._hub_thread(11)
+        reason = engine._warn_if_hub_conclude_missing_assessment(
+            hub, thread, "A concluding reply with no sidecar.", "no sidecar here",
+        )
+        assert reason == "missing_sidecar"
+
+    def test_it_reports_nothing_when_a_sidecar_is_present(self):
+        engine, hub, thread = self._hub_thread(11)
+        raw = '<assessment_json>{"subject_agent_id": "wang"}</assessment_json>'
+        reason = engine._warn_if_hub_conclude_missing_assessment(
+            hub, thread, "Concluding.", raw,
+        )
+        assert reason is None
+
+    def test_it_reports_nothing_before_the_conclude_ordinal(self):
+        engine, hub, thread = self._hub_thread(2)
+        reason = engine._warn_if_hub_conclude_missing_assessment(
+            hub, thread, "Mid-interview question.", "no sidecar",
+        )
+        assert reason is None
+
+    @pytest.mark.asyncio
+    async def test_the_call_site_records_the_drop(self, monkeypatch):
+        """Wiring: a concluding reply with no sidecar reaches the recorder."""
+        engine, hub, thread = self._hub_thread(11)
+        recorded = []
+
+        async def _fake_record(agent_id, reason, **kw):
+            recorded.append((agent_id, reason, kw.get("subject_agent_id")))
+
+        async def _fake_generate(**kwargs):
+            return "<slack_message>Concluding, with no sidecar at all.</slack_message>"
+
+        monkeypatch.setattr(engine, "_record_assessment_drop", _fake_record)
+        monkeypatch.setattr(hub, "build_phase4_prompt", lambda **kw: ("sys", []))
+        monkeypatch.setattr("src.agent.simulation.generate_with_tools", _fake_generate)
+
+        await engine._reply_to_thread(hub, thread)
+
+        assert ("blackbird", "missing_sidecar", "wang") in recorded
