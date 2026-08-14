@@ -5,6 +5,7 @@ Exercised against the real migrated Postgres so the actual ON CONFLICT upsert
 See specs/local-db-conversations.md.
 """
 
+import asyncio
 import time
 from datetime import timedelta
 
@@ -450,6 +451,9 @@ class _HistoryClient:
 
     def poll_channel_messages(self, channel_id, oldest="0", limit=100):
         return list(self._messages)
+
+    async def apoll_channel_messages(self, *args, **kwargs):
+        return await asyncio.to_thread(self.poll_channel_messages, *args, **kwargs)
 
     def resolve_user_name(self, user_id):
         return user_id

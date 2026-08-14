@@ -17,6 +17,7 @@ in this module, and ``tests/unit/test_slack_client_contract.py`` asserts that at
 the source level.
 """
 
+import asyncio
 import logging
 import re
 import secrets
@@ -1097,3 +1098,28 @@ class AgentSlackClient:
     def cache_channel_ids(self, mapping: dict[str, str]) -> None:
         """Seed the name→id cache (engine shares discovered channel ids here)."""
         self._channel_name_to_id.update(mapping)
+
+    # ------------------------------------------------------------------
+    # Async wrappers — network calls awaited OFF the event-loop thread
+    # ------------------------------------------------------------------
+
+    async def apost_message(self, *args, **kwargs):
+        """``post_message`` awaited OFF the loop thread.
+
+        The slack_sdk client is synchronous and its 429 handler calls
+        time.sleep (see _api's retry path), so calling it from a coroutine
+        pins the loop for the entire request. Mirrors services/llm._acreate.
+
+        MessageLog.append must NOT be called from inside this thread — it is
+        loop-safe, not thread-safe. Post here; append on the loop.
+        """
+        return await asyncio.to_thread(self.post_message, *args, **kwargs)
+
+    async def apoll_channel_messages(self, *args, **kwargs):
+        return await asyncio.to_thread(self.poll_channel_messages, *args, **kwargs)
+
+    async def aget_full_channel_history(self, *args, **kwargs):
+        return await asyncio.to_thread(self.get_full_channel_history, *args, **kwargs)
+
+    async def aget_all_thread_replies(self, *args, **kwargs):
+        return await asyncio.to_thread(self.get_all_thread_replies, *args, **kwargs)

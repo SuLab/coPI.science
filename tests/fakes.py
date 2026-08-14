@@ -12,6 +12,7 @@ hands back deterministic ts/channel ids, so agent-turn golden-master tests never
 touch the network.
 """
 
+import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -161,6 +162,15 @@ class FakeSlackClient:
 
     def get_thread_replies(self, channel_id: str, thread_ts: str, oldest: str = "0") -> list:
         return []
+
+    # Async twins — the engine now awaits these, off the loop thread, exactly
+    # like the real AgentSlackClient (src/agent/slack_client.py). Kept here so
+    # this fake still satisfies the surface the simulation calls.
+    async def apost_message(self, *args, **kwargs) -> dict:
+        return await asyncio.to_thread(self.post_message, *args, **kwargs)
+
+    async def apoll_channel_messages(self, *args, **kwargs) -> list:
+        return await asyncio.to_thread(self.poll_channel_messages, *args, **kwargs)
 
     def create_channel(self, name: str) -> dict:
         ch = {"id": f"C_{name}", "name": name}

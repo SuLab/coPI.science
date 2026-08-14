@@ -154,6 +154,15 @@ class MessageLog:
         keeps the DB persist hook from double-writing during Slack reconciliation.
         Safe because ids are unique (Slack ts or a minted ts; see mint_ts).
         Returns True when a new entry was added.
+
+        Loop-only, NOT thread-safe: the dedupe above is a check-then-act (the
+        ``entry.ts in self._by_ts`` test and the ``_record`` that follows are two
+        separate steps) and ``_record`` mutates two structures (``_entries`` and
+        ``_by_ts``) without a lock. Safe to call from coroutines sharing one
+        event-loop thread; calling it from a worker thread (e.g. from inside an
+        ``asyncio.to_thread`` transport call) can race two appends past the dedupe
+        check or interleave the two mutations. Always call this on the loop —
+        fetch/post off it, then append back on it.
         """
         if entry.ts in self._by_ts:
             return False

@@ -2817,7 +2817,7 @@ class SimulationEngine:
                 continue
             oldest = self._poll_cursors.get(ch_id, "0")
             try:
-                messages = client.poll_channel_messages(ch_id, oldest=oldest)
+                messages = await client.apoll_channel_messages(ch_id, oldest=oldest)
                 # `msg["thread_ts"]` arrives normalised: Slack sets thread_ts == ts on
                 # a parent once it has replies, and the transport nulls that at ingest
                 # (slack_client.normalize_inbound_message). Copying it verbatim, as
@@ -3047,7 +3047,7 @@ class SimulationEngine:
             )
         elif client and client.is_connected:
             try:
-                result = client.post_message(channel, text, thread_ts=slack_parent)
+                result = await client.apost_message(channel, text, thread_ts=slack_parent)
             except ThreadNotFound:
                 # Parent was deleted. post_message already cleaned up the
                 # orphan top-level post on Slack. Purge the dead thread_ts
@@ -3628,7 +3628,7 @@ class SimulationEngine:
                     ch_name,
                 )
                 continue
-            messages = client.get_full_channel_history(ch_id)
+            messages = await client.aget_full_channel_history(ch_id)
             for msg in messages:
                 ts = msg.get("ts", "")
                 user_id = msg.get("user", "")
@@ -3682,7 +3682,7 @@ class SimulationEngine:
                 reply_count = msg.get("reply_count", 0)
                 if reply_count > 0:
                     try:
-                        replies = client.get_all_thread_replies(ch_id, ts)
+                        replies = await client.aget_all_thread_replies(ch_id, ts)
                     except ThreadNotFound:
                         continue
                     total_threads += 1

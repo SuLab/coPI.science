@@ -8,6 +8,8 @@ recorded one row for a post the backend turned into five looked identical here (
 and only showed up as messages in Slack with no row.
 """
 
+import asyncio
+
 from src.agent.simulation import SimulationEngine
 from src.agent.transport import NullTransport, Transport
 
@@ -134,6 +136,9 @@ class _SplittingTransport:
                 "text": f"{text}#{index}", "thread_ts": parent,
             })
         return {**posted[0], "posted_messages": posted}
+
+    async def apost_message(self, *args, **kwargs):
+        return await asyncio.to_thread(self.post_message, *args, **kwargs)
 
     def _resolve_channel_id(self, channel):
         return channel if channel.startswith(("C", "G")) else f"C_{channel}"
