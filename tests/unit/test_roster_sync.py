@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from src.agent.authorship_rules import LabPublicationRecord
 from src.agent.simulation import SimulationEngine
 from src.services import slack_tokens
 
@@ -69,9 +70,18 @@ class _FakeResult:
 class _FakeDB:
     def __init__(self, rows):
         self._rows = rows
+        self._call_count = 0
 
     async def execute(self, _stmt):
-        return _FakeResult(self._rows)
+        # _sync_roster_from_db now issues a second query inside the same
+        # session block (_load_publication_records' AgentRegistry/Publication
+        # join). Serve the roster rows on the first call and treat every
+        # later call as "no publication rows" — these tests aren't seeding
+        # any, and _agent_publications isn't part of what they assert.
+        self._call_count += 1
+        if self._call_count == 1:
+            return _FakeResult(self._rows)
+        return _FakeResult([])
 
     async def __aenter__(self):
         return self
@@ -207,6 +217,29 @@ class TestSyncRosterFromDb:
         )
         await engine._sync_roster_from_db()  # must not raise
         assert set(engine.agents) == {"su"}
+
+    async def test_publication_load_failure_does_not_abort_roster_sync(self, monkeypatch):
+        """A publications-join failure must be isolated to its own try/except.
+
+        Before the fix, _load_publication_records shared the roster query's
+        try/except, so any exception from it (AgentRegistry/Publication join
+        failing) was caught by the OUTER handler and silently no-op'd the whole
+        tick — new agents never got added, removals never propagated. See
+        issue #29 review.
+        """
+        _patch_client(monkeypatch)
+        engine = _make_engine([_row("su"), _row("wiseman")], existing_agents=["su"])
+        stale = {"su": LabPublicationRecord(dois={"10.1/stale"}, has_records=True)}
+        engine._agent_publications = stale
+        engine._load_publication_records = AsyncMock(side_effect=RuntimeError("join failed"))
+
+        await engine._sync_roster_from_db()
+
+        # Roster sync still completed its add/remove work despite the failure.
+        assert set(engine.agents) == {"su", "wiseman"}
+        assert "wiseman" in engine.slack_clients
+        # Stale grounding data is preserved rather than cleared or replaced.
+        assert engine._agent_publications == stale
 
 
 # ---------------------------------------------------------------

@@ -11,6 +11,13 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from src.agent.agent import PROFILES_DIR, Agent
+from src.agent.authorship_rules import (
+    LabPublicationRecord,
+    lab_self_names,
+    normalize_claim_text,
+    strip_ungrounded_authorship_lines,
+    validate_authorship_claims,
+)
 from src.agent.channels import SEEDED_CHANNELS
 from src.agent.foa_cache import extract_foa_number, format_foa_for_prompt
 from src.agent.funding_rules import (
@@ -211,6 +218,17 @@ REBUILD_WINDOW_S = 14 * 24 * 3600  # 14 days
 # SchultzBot (the reunion host) so he stays active without a human reviewer.
 UNBLOCK_EXEMPT_AGENTS = {"schultz"}
 
+# Prose-named lab mentions ("the Good lab", "Su Lab's") for the authorship
+# guard (audit finding I4): a fabricated co-author named in prose instead of
+# @-tagged must still be resolved against the roster. Possessive/article
+# words that precede "lab(s)" without naming one are excluded.
+_PROSE_LAB_RE = re.compile(r"\b([A-Z][\w-]+)(?:['’]s)?\s+[Ll]abs?\b")
+_PROSE_LAB_STOPWORDS = frozenset({
+    "our", "my", "their", "your", "his", "her", "its", "the", "a", "an",
+    "this", "that", "these", "those", "each", "every", "both", "all", "any",
+    "other", "another", "wet", "dry", "which", "whose", "one", "two",
+})
+
 
 class SimulationEngine:
     """
@@ -262,6 +280,12 @@ class SimulationEngine:
             a.bot_name.lower(): a.agent_id for a in agents
         }
         self.message_log.set_bot_name_map(self._bot_name_to_id)
+
+        # agent_id → LabPublicationRecord (publications-table ground truth for
+        # the authorship emit guard). Populated by _load_publication_records at
+        # roster sync; an agent absent from this dict has NO records and every
+        # first-person authorship claim from it fails closed. See issue #29.
+        self._agent_publications: dict[str, LabPublicationRecord] = {}
 
         # LLM call log buffer
         self._llm_log_buffer: list[dict] = []
@@ -1420,6 +1444,26 @@ class SimulationEngine:
                         )
                     return
 
+            # Authorship guard (issue #29): reject drafts claiming authorship
+            # the publication records cannot verify — mirrors the funding
+            # validators' reject-and-back-off pattern, but applies to EVERY
+            # thread, funding or not.
+            authorship_reason = self._reject_ungrounded_authorship(agent, response_text)
+            if authorship_reason:
+                thread.authorship_reject_count += 1
+                logger.warning(
+                    "[%s] Phase 4: Rejected reply to thread %s — %s (count=%d)",
+                    agent.agent_id, thread.thread_id, authorship_reason,
+                    thread.authorship_reject_count,
+                )
+                if thread.authorship_reject_count >= 2:
+                    thread.has_pending_reply = False
+                    logger.info(
+                        "[%s] Phase 4: Backing off thread %s after %d authorship rejections",
+                        agent.agent_id, thread.thread_id, thread.authorship_reject_count,
+                    )
+                return
+
             # Post the reply
             posted = await self._post_message(
                 agent.agent_id, thread.channel, response_text,
@@ -1434,6 +1478,7 @@ class SimulationEngine:
                 agent.message_count += 1
                 thread.has_pending_reply = False
                 thread.funding_reject_count = 0
+                thread.authorship_reject_count = 0
                 thread.empty_response_count = 0
 
                 # Check for thread outcome
@@ -2239,6 +2284,20 @@ class SimulationEngine:
             if self._llm_log_buffer:
                 self._llm_log_buffer[-1]["channel"] = channel
 
+            # Authorship guard (issue #29) — one gate for both the reply and
+            # new-post branches below. Runs on the ORIGINAL draft, BEFORE the
+            # cohort-tag strip: stripping a disallowed co-author's @tag first
+            # would blind the tagged-co-author check to exactly the
+            # fabrication it exists to catch (audit finding I1). The gate is
+            # read-only, so the swap is safe.
+            authorship_reason = self._reject_ungrounded_authorship(agent, message_text)
+            if authorship_reason:
+                logger.warning(
+                    "[%s] Phase 5: Rejected draft — %s", agent.agent_id, authorship_reason,
+                )
+                agent.state.consecutive_phase5_skips += 1
+                return
+
             # Cross-cohort mention stripping now happens in _post_message, which
             # covers every outbound path instead of only this one. Phase 5 still
             # needs the *cleaned* text locally, though: the tagged_agent decision
@@ -2449,6 +2508,78 @@ class SimulationEngine:
         cleaned = re.sub(r"(?<=\S)[ \t]{2,}", " ", cleaned)
         cleaned = re.sub(r"(?m)[ \t]+$", "", cleaned)
         return cleaned.lstrip(" \t") if cleaned[:1] in (" ", "\t") else cleaned
+
+    def _reject_ungrounded_authorship(self, agent: Agent, text: str | None) -> str | None:
+        """Return a rejection reason if ``text`` makes an authorship claim the
+        publication records cannot back; None when the draft is clean.
+
+        Ground truth is the publications table (loaded per roster sync into
+        ``_agent_publications``) unioned with the agent's profile-parsed DOIs.
+        Tagged bots are resolved through ``_bot_name_to_id`` and their labs'
+        records are enforced on co-authorship claims — the issue-#29 origin
+        message fails HERE, not on the own-DOI check. Fails closed on every
+        unverifiable claim.
+        """
+        if not text:
+            return None
+        own_db = self._agent_publications.get(agent.agent_id)
+        profile_dois = agent.own_publication_dois
+        own = LabPublicationRecord(
+            dois=(own_db.dois if own_db else set()) | profile_dois,
+            has_records=bool(own_db) or bool(profile_dois),
+        )
+        tagged: dict[str, LabPublicationRecord] = {}
+        for m in re.finditer(r"@(\w+[Bb]ot)\b", text):
+            bot_name = m.group(1)
+            target_id = self._bot_name_to_id.get(bot_name.lower())
+            if target_id is None or target_id == agent.agent_id:
+                continue
+            tagged[bot_name] = self._lab_record_for(target_id)
+
+        # Prose-named labs (audit finding I4): "co-authored ... with the Good
+        # lab" dodges the @-tag scan above. Resolve capitalized "<Name> lab"
+        # mentions through the roster (PI last name or agent_id) and enforce
+        # their records exactly like a tagged bot's. Deliberately
+        # conservative: an unresolved name is left alone — the roster is the
+        # only ground truth available, and gating arbitrary capitalized words
+        # would block legit mentions of outside labs. Same-surname collisions
+        # (wu vs pwu) get the benefit of the doubt: the union record stands
+        # if ANY namesake lab can back the claim.
+        name_to_ids: dict[str, set[str]] = {}
+        for aid, roster_agent in self.agents.items():
+            name_to_ids.setdefault(aid.lower(), set()).add(aid)
+            pi_name = (roster_agent.pi_name or "").strip()
+            if pi_name:
+                name_to_ids.setdefault(pi_name.split()[-1].lower(), set()).add(aid)
+        for m in _PROSE_LAB_RE.finditer(normalize_claim_text(text)):
+            name = m.group(1)
+            if name.lower() in _PROSE_LAB_STOPWORDS:
+                continue
+            candidate_ids = name_to_ids.get(name.lower(), set()) - {agent.agent_id}
+            if not candidate_ids:
+                continue
+            merged = LabPublicationRecord()
+            bot_names: list[str] = []
+            for cid in sorted(candidate_ids):
+                rec = self._lab_record_for(cid)
+                merged.dois |= rec.dois
+                merged.has_records = merged.has_records or rec.has_records
+                roster_agent = self.agents.get(cid)
+                bot_names.append(roster_agent.bot_name if roster_agent else cid)
+            tagged.setdefault("/".join(bot_names), merged)
+
+        verdict = validate_authorship_claims(text, own, tagged)
+        return None if verdict.ok else verdict.reason
+
+    def _lab_record_for(self, agent_id: str) -> LabPublicationRecord:
+        """A lab's ground truth: publications-table rows ∪ profile DOIs."""
+        rec = self._agent_publications.get(agent_id)
+        roster_agent = self.agents.get(agent_id)
+        profile_dois = roster_agent.own_publication_dois if roster_agent else set()
+        return LabPublicationRecord(
+            dois=(rec.dois if rec else set()) | profile_dois,
+            has_records=bool(rec) or bool(profile_dois),
+        )
 
     def _parse_phase5_response(self, response: str) -> tuple[dict | None, str | None]:
         """Parse Phase 5 response into (json_data, message_text).
@@ -3151,6 +3282,20 @@ class SimulationEngine:
 
         client = self.slack_clients.get(agent_id)
         agent = self.agents.get(agent_id)
+
+        # Authorship guard, chokepoint pass (issue #29). The phase gates have
+        # already run for phase-4/phase-5 drafts (they own the backoff
+        # counters); this pass exists so no future call site can bypass the
+        # guard. Idempotent — a clean draft validates twice at negligible
+        # cost. Skipped for senders without an Agent (system posts).
+        if agent is not None:
+            authorship_reason = self._reject_ungrounded_authorship(agent, text)
+            if authorship_reason:
+                logger.warning(
+                    "[%s] Suppressed post to #%s at _post_message: %s",
+                    agent_id, channel, authorship_reason,
+                )
+                return False
 
         # Cohort gate, outbound side. Placed here rather than in a phase so it
         # covers every caller — Phase 4 replies, Phase 5 posts, private-channel
@@ -4308,6 +4453,22 @@ class SimulationEngine:
                     ).where(AgentRegistry.status == "active")
                 )).all()
 
+                # Isolated from the roster query above: a publications-join
+                # failure must never abort the roster sync (add/remove/role-
+                # diff below never runs otherwise, since both queries were
+                # sharing the outer try/except). Stale grounding data is
+                # preferable to a silently no-op'd roster tick — leave
+                # _agent_publications (and each Agent's db_publication_dois)
+                # exactly as they were on failure; absent agents still fail
+                # closed regardless. See issue #29 review.
+                try:
+                    await self._load_publication_records(db)
+                except Exception as exc:
+                    logger.warning(
+                        "[roster] publication-record load failed (grounding data "
+                        "may be stale): %s", exc,
+                    )
+
             desired = {r.agent_id: r for r in rows}
 
             # Role-diff for surviving agents (agents present in both current and
@@ -4421,6 +4582,39 @@ class SimulationEngine:
         except Exception as exc:
             # A transient DB hiccup must never crash the main loop.
             logger.warning("[roster] roster sync failed: %s", exc)
+
+    async def _load_publication_records(self, db) -> None:
+        """Refresh per-agent publication ground truth from the publications table.
+
+        DOIs are normalized to the same form _extract_dois produces
+        (lowercase, trailing punctuation stripped) so emit-guard set
+        membership works. A lab with registry rows but zero publications is
+        deliberately ABSENT from the map — the guard treats that as
+        "cannot verify → fail closed" (issue #29 acceptance criterion).
+        """
+        from sqlalchemy import select as sa_select
+
+        from src.models import AgentRegistry, Publication
+
+        rows = (await db.execute(
+            sa_select(AgentRegistry.agent_id, Publication.doi)
+            .join(Publication, Publication.user_id == AgentRegistry.user_id)
+        )).all()
+
+        records: dict[str, LabPublicationRecord] = {}
+        for agent_id, doi in rows:
+            record = records.setdefault(
+                agent_id, LabPublicationRecord(dois=set(), has_records=True)
+            )
+            if doi:
+                record.dois.add(doi.strip().rstrip(".,;").lower())
+        self._agent_publications = records
+
+        # Push DB DOIs onto live Agent objects so the intake guard
+        # (cites_own_paper) sees them too.
+        for agent_id, agent in self.agents.items():
+            record = records.get(agent_id)
+            agent.db_publication_dois = record.dois if record else set()
 
     def _disable_all_gates(self) -> None:
         """Set every agent's gate to None (no filtering). See v2 §5.4."""
@@ -5025,7 +5219,11 @@ entries that are still relevant, and remove anything outdated. Summarize:
 (b) Feedback or directions from your PI (if any)
 (c) Current priorities
 
-Keep it concise — under 300 words.""",
+Keep it concise — under 300 words.
+
+Authorship notes: when recording that a paper was (co)authored, name the authoring lab(s) explicitly
+(e.g. "Wu Lab co-authored the Desiderata paper"), never a subject-less "Co-authored X". Never record
+your own lab as an author of a paper unless it appears in your own publication list.""",
                 }
             ]
 
@@ -5045,6 +5243,29 @@ Keep it concise — under 300 words.""",
             if not response or not response.strip():
                 logger.warning("[%s] Memory update: empty response", agent.agent_id)
                 return
+
+            # Authorship hygiene (issue #29): a false authorship note written
+            # here is re-injected into every future prompt. Strip lines the
+            # publication records can't back before persisting.
+            own_db = self._agent_publications.get(agent.agent_id)
+            profile_dois = agent.own_publication_dois
+            own_record = LabPublicationRecord(
+                dois=(own_db.dois if own_db else set()) | profile_dois,
+                has_records=bool(own_db) or bool(profile_dois),
+            )
+            response, stripped_lines = strip_ungrounded_authorship_lines(
+                response,
+                own_record,
+                self_names=lab_self_names(
+                    agent.agent_id, agent.bot_name, agent.pi_name
+                ),
+            )
+            for line in stripped_lines:
+                logger.warning(
+                    "[%s] Memory update: stripped ungrounded authorship line: %s",
+                    agent.agent_id, line[:160],
+                )
+
             agent.update_working_memory_file(
                 response, visibility=visibility, channel_id=channel_id,
             )

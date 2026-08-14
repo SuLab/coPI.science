@@ -17,9 +17,10 @@ logger = logging.getLogger(__name__)
 PROFILES_DIR = Path("profiles")
 
 # Matches a bare DOI. The character class deliberately excludes the delimiters
-# that wrap DOIs in Slack posts (whitespace, quotes, angle brackets from
-# <https://doi.org/...> links, and the ) ] that close markdown/parentheticals).
-_DOI_RE = re.compile(r"10\.\d{4,9}/[^\s\"'<>)\]]+", re.IGNORECASE)
+# that wrap DOIs in Slack posts (whitespace, quotes, angle brackets and the
+# label pipe from <https://doi.org/...|label> links, and the ) ] that close
+# markdown/parentheticals).
+_DOI_RE = re.compile(r"10\.\d{4,9}/[^\s\"'<>)\]|]+", re.IGNORECASE)
 
 
 def _extract_dois(text: str | None) -> set[str]:
@@ -76,6 +77,11 @@ class Agent:
         self._private_profile: str | None = None
         self._public_working_memory: str | None = None  # cached public memory segment
         self._own_publication_dois: set[str] | None = None  # cached DOIs from own profiles
+        # DB-backed ground truth (publications table), pushed in by the
+        # simulation engine at roster sync. Unioned into own_publication_dois
+        # so the intake guard benefits from the same grounding as the emit
+        # guard. See issue #29.
+        self.db_publication_dois: set[str] = set()
         self._lab_directory: str | None = None
         self.api_call_count: int = 0
         self.message_count: int = 0
@@ -172,7 +178,7 @@ class Agent:
             self._own_publication_dois = _extract_dois(self.public_profile) | _extract_dois(
                 self.private_profile
             )
-        return self._own_publication_dois
+        return self._own_publication_dois | self.db_publication_dois
 
     def cites_own_paper(self, content: str | None) -> bool:
         """True if ``content`` cites a DOI belonging to this lab's own papers."""
