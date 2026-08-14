@@ -183,6 +183,21 @@ EPOCH_UTC = datetime.fromtimestamp(0, tz=UTC)
 # themselves are still upserted every flush.
 RUN_STATS_UPDATE_INTERVAL = 30.0
 
+# Max rows per agent_messages upsert statement. Postgres binds at most 32767
+# parameters per statement and each row here binds one per column, so a single
+# VALUES list covering the whole buffer breaks once the buffer is a few thousand
+# entries. That is not hypothetical: a resumed run reconciles its Slack backlog
+# into the buffer before turn 1, so the very first flush of a busy workspace
+# carries thousands of rows. Because a failed flush is re-queued in full rather
+# than dropped (see _flush_persisted), an oversized batch is a poison pill — it
+# fails identically on every retry and the buffer never drains, leaving every
+# message in volatile memory while the DB is supposed to be the durable store.
+# Observed in production 2026-08-14: 6,988 buffered rows x 16 columns = ~112k
+# parameters, failing every turn. The effective chunk is also floored against the
+# real column count at call time, so adding columns cannot reintroduce the limit.
+PERSIST_MAX_ROWS_PER_STMT = 500
+_PG_MAX_BIND_PARAMS = 32767
+
 # Startup rebuild window (B2): the MessageLog is hydrated with messages from the
 # last REBUILD_WINDOW_S plus the full history of any still-undecided thread, so
 # RAM/startup cost grows with recent + live volume rather than all-time history.
@@ -3689,38 +3704,44 @@ class SimulationEngine:
         from sqlalchemy import or_
         from sqlalchemy import select as sa_select
         from sqlalchemy.dialects.postgresql import insert as pg_insert
+        # Stay under Postgres' per-statement bind-parameter ceiling. See
+        # PERSIST_MAX_ROWS_PER_STMT: one oversized VALUES list is a poison pill,
+        # because the except below re-queues the whole batch on failure.
+        per_row_params = max(1, len(rows[0]))
+        chunk_size = max(1, min(PERSIST_MAX_ROWS_PER_STMT, _PG_MAX_BIND_PARAMS // per_row_params))
         try:
             async with self.session_factory() as db:
-                stmt = pg_insert(AgentMessage.__table__).values(rows)
-                stmt = stmt.on_conflict_do_update(
-                    constraint="uq_agent_messages_run_ts",
-                    set_={
-                        "content": stmt.excluded.content,
-                        "sender_name": stmt.excluded.sender_name,
-                        "is_bot": stmt.excluded.is_bot,
-                        "posted_at": stmt.excluded.posted_at,
-                        "message_length": stmt.excluded.message_length,
-                        "visibility": stmt.excluded.visibility,
-                        "thread_ts": stmt.excluded.thread_ts,
-                        "channel_id": stmt.excluded.channel_id,
-                        "channel_name": stmt.excluded.channel_name,
-                        "agent_id": stmt.excluded.agent_id,
-                        "slack_ts": stmt.excluded.slack_ts,
-                        "slack_channel_id": stmt.excluded.slack_channel_id,
-                        "slack_thread_ts": stmt.excluded.slack_thread_ts,
-                    },
-                    # M1a guard: never let a bot message clobber an existing human
-                    # (PI) row on a cross-process canonical-id collision. Allow the
-                    # update only when the existing row is itself a bot row, or the
-                    # incoming row is human (re-flush of an ingested PI message /
-                    # slack mirror). A blocked conflict is left untouched, like
-                    # DO NOTHING for that row. See PR #19 review M1.
-                    where=or_(
-                        AgentMessage.__table__.c.is_bot.is_(True),
-                        stmt.excluded.is_bot.is_(False),
-                    ),
-                )
-                await db.execute(stmt)
+                for start in range(0, len(rows), chunk_size):
+                    stmt = pg_insert(AgentMessage.__table__).values(rows[start:start + chunk_size])
+                    stmt = stmt.on_conflict_do_update(
+                        constraint="uq_agent_messages_run_ts",
+                        set_={
+                            "content": stmt.excluded.content,
+                            "sender_name": stmt.excluded.sender_name,
+                            "is_bot": stmt.excluded.is_bot,
+                            "posted_at": stmt.excluded.posted_at,
+                            "message_length": stmt.excluded.message_length,
+                            "visibility": stmt.excluded.visibility,
+                            "thread_ts": stmt.excluded.thread_ts,
+                            "channel_id": stmt.excluded.channel_id,
+                            "channel_name": stmt.excluded.channel_name,
+                            "agent_id": stmt.excluded.agent_id,
+                            "slack_ts": stmt.excluded.slack_ts,
+                            "slack_channel_id": stmt.excluded.slack_channel_id,
+                            "slack_thread_ts": stmt.excluded.slack_thread_ts,
+                        },
+                        # M1a guard: never let a bot message clobber an existing human
+                        # (PI) row on a cross-process canonical-id collision. Allow the
+                        # update only when the existing row is itself a bot row, or the
+                        # incoming row is human (re-flush of an ingested PI message /
+                        # slack mirror). A blocked conflict is left untouched, like
+                        # DO NOTHING for that row. See PR #19 review M1.
+                        where=or_(
+                            AgentMessage.__table__.c.is_bot.is_(True),
+                            stmt.excluded.is_bot.is_(False),
+                        ),
+                    )
+                    await db.execute(stmt)
                 # Refresh the run's cosmetic counters at most every
                 # RUN_STATS_UPDATE_INTERVAL (a full COUNT every flush is wasteful
                 # at scale — B1). The bulk upsert can't cheaply tell inserts from

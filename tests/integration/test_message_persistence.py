@@ -777,3 +777,38 @@ async def test_polled_bot_message_keeps_its_slack_mapping(db_session):
     assert row.slack_ts == "1700000123.456789"
     assert row.slack_channel_id == "C0FUNDING"
     assert row.is_bot is True
+
+
+async def test_flush_chunks_a_batch_that_exceeds_the_bind_parameter_ceiling(db_session):
+    # A resumed run reconciles its entire Slack backlog into the persist buffer
+    # before turn 1, so the first flush of a busy workspace carries thousands of
+    # rows. Postgres binds at most 32767 parameters per statement and each row
+    # here binds one per column, so a single VALUES list over ~2k rows raises
+    # asyncpg InterfaceError. That is not a transient failure: _flush_persisted
+    # deliberately re-queues a failed batch in full rather than dropping it, so an
+    # oversized batch fails identically on every retry and the buffer never
+    # drains — every message stays in volatile memory while the DB is supposed to
+    # be the durable store. Observed in production on 2026-08-14 with 6,988
+    # buffered rows (~112k parameters), failing once per turn.
+    run = await factories.make_simulation_run(db_session)
+    engine = _engine_for(db_session, run.id)
+
+    n = 2500  # x16 columns = ~40k bind params in one statement, over the ceiling
+    engine._pending_persist = [
+        LogEntry(
+            ts=f"17000001{i:05d}.000001",
+            channel="general",
+            sender_agent_id="subot",
+            sender_name="SuBot",
+            content=f"backlog message {i}",
+            posted_at=1700000100.0 + i,
+            is_bot=True,
+        )
+        for i in range(n)
+    ]
+
+    await engine._flush_persisted()
+
+    # Every row landed, and the buffer drained instead of being re-queued.
+    assert await _count_messages(db_session, run.id) == n
+    assert engine._pending_persist == []
