@@ -455,6 +455,11 @@ Respond with only the JSON object, no other text."""
         message = client.messages.create(
             model=settings.llm_agent_model_sonnet,
             max_tokens=500,
+            # Sonnet 5 thinks by default and max_tokens caps thinking + text
+            # together, so without this pin content[0] is a thinking block and
+            # the .text read below raises — every inbound reply would classify
+            # as a failure. 500 tokens leaves no room to share with reasoning.
+            thinking={"type": "disabled"},
             system=system_prompt,
             messages=[{"role": "user", "content": user_message}],
         )
