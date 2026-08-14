@@ -10,12 +10,12 @@ Usage:
 import asyncio
 import logging
 import signal
-import sys
 from datetime import datetime, timezone
 
 import typer
 
 from src.agent.agent import Agent
+from src.agent.ids import WRITER_ENGINE_AUX, set_default_writer_id
 from src.agent.simulation import SimulationEngine
 from src.config import get_settings
 
@@ -31,7 +31,16 @@ app = typer.Typer()
 @app.command()
 def main(
     max_runtime: int = typer.Option(0, "--max-runtime", help="Max runtime in minutes (0 = run until stopped)"),
-    budget: int = typer.Option(50, "--budget", help="Max LLM calls per agent"),
+    budget: int = typer.Option(
+        0, "--budget",
+        help=(
+            "DEPRECATED legacy cumulative cap: max LLM calls per agent for the "
+            "WHOLE run. 0 (default) disables it. Superseded by the sliding-window "
+            "rate limiter (llm_calls_per_load_per_window). Passing a nonzero value "
+            "can permanently bench a hub agent — see "
+            "docs/specs/2026-08-06-hub-budget-scheduler-design.md §6."
+        ),
+    ),
     mock: bool = typer.Option(False, "--mock", help="Run in mock mode without real Slack tokens"),
     no_db: bool = typer.Option(False, "--no-db", help="Skip database logging"),
     fresh: bool = typer.Option(False, "--fresh", help="Wipe simulation data and start fresh"),
@@ -39,6 +48,10 @@ def main(
     all_agents: bool = typer.Option(False, "--all-agents", help="Run every AgentRegistry row regardless of status (default is status='active' only)"),
 ):
     """Run the turn-based agent simulation."""
+    # Claim this process's canonical-id writer slot before anything mints. The
+    # engine's own minter owns WRITER_ENGINE; the module default is used here
+    # only for PI DM rows, so it takes the aux slot (R1).
+    set_default_writer_id(WRITER_ENGINE_AUX)
     asyncio.run(_run_simulation(max_runtime, budget, mock, no_db, fresh, reset_cursors, all_agents))
 
 
@@ -68,7 +81,7 @@ async def _run_simulation(
         _sf = _asm(_engine, expire_on_commit=False)
         async with _sf() as _db:
             _stmt = _select(
-                _AR.agent_id, _AR.bot_name, _AR.pi_name, _AR.slack_bot_token
+                _AR.agent_id, _AR.bot_name, _AR.pi_name, _AR.slack_bot_token, _AR.role
             )
             if not all_agents:
                 _stmt = _stmt.where(_AR.status == "active")
@@ -76,7 +89,10 @@ async def _run_simulation(
     finally:
         await _engine.dispose()
 
-    agents = [Agent(agent_id=r.agent_id, bot_name=r.bot_name, pi_name=r.pi_name) for r in _rows]
+    agents = [
+        Agent(agent_id=r.agent_id, bot_name=r.bot_name, pi_name=r.pi_name, role=r.role)
+        for r in _rows
+    ]
     roster_tokens = {r.agent_id: r.slack_bot_token for r in _rows}
 
     if not agents:
@@ -91,16 +107,31 @@ async def _run_simulation(
         len(agents), "all statuses" if all_agents else "status='active'",
     )
 
-    # Set up Slack clients (Web API only, no Socket Mode). Tokens come from the
-    # AgentRegistry row, falling back to the legacy .env/config mapping.
+    # Resolve whether Slack is enabled. --mock forces it off; an explicit
+    # SLACK_ENABLED env setting wins next; otherwise auto-detect from whether
+    # any agent has a usable bot token. When off, the DB is the sole store and
+    # no Slack API calls are made. See specs/local-db-conversations.md.
+    from src.services.slack_tokens import env_token, is_valid_token
+
+    def _token_for(agent_id: str) -> str | None:
+        tok = roster_tokens.get(agent_id)
+        return tok if is_valid_token(tok) else env_token(agent_id)
+
+    if mock:
+        slack_enabled = False
+    elif settings.slack_enabled is not None:
+        slack_enabled = settings.slack_enabled
+    else:
+        slack_enabled = any(is_valid_token(_token_for(a.agent_id)) for a in agents)
+
+    # Set up transports. When Slack is on, each agent gets a Web-API client
+    # (Web API only, no Socket Mode); when off, a NullTransport that no-ops all
+    # Slack calls so the engine runs identically against the DB.
     slack_clients = {}
-    if not mock:
+    if slack_enabled:
         from src.agent.slack_client import AgentSlackClient
-        from src.services.slack_tokens import env_token, is_valid_token
         for agent in agents:
-            bot_token = roster_tokens.get(agent.agent_id)
-            if not is_valid_token(bot_token):
-                bot_token = env_token(agent.agent_id)
+            bot_token = _token_for(agent.agent_id)
             if is_valid_token(bot_token):
                 client = AgentSlackClient(
                     agent_id=agent.agent_id,
@@ -112,6 +143,11 @@ async def _run_simulation(
                     logger.warning("[%s] Slack connection failed — skipping", agent.agent_id)
             else:
                 logger.warning("[%s] No valid Slack token — skipping", agent.agent_id)
+    else:
+        from src.agent.transport import NullTransport
+        for agent in agents:
+            slack_clients[agent.agent_id] = NullTransport(agent_id=agent.agent_id)
+        logger.info("Slack disabled — running DB-only (NullTransport for %d agents)", len(agents))
 
     # Set up database session factory
     session_factory = None
@@ -120,7 +156,7 @@ async def _run_simulation(
     if not no_db:
         from sqlalchemy import select
         from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-        from src.models import AgentChannel, AgentMessage, SimulationRun
+        from src.models import AgentChannel, AgentMessage, PiDmMessage, SimulationRun
         engine = create_async_engine(settings.database_url)
         session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
@@ -131,6 +167,7 @@ async def _run_simulation(
             async with session_factory() as db:
                 await db.execute(AgentMessage.__table__.delete())
                 await db.execute(AgentChannel.__table__.delete())
+                await db.execute(PiDmMessage.__table__.delete())
                 await db.commit()
             logger.info("Simulation data wiped.")
 
@@ -195,19 +232,34 @@ async def _run_simulation(
         session_factory=session_factory,
         simulation_run_id=simulation_run_id,
         reset_cursors=reset_cursors,
+        slack_enabled=slack_enabled,
     )
 
     # Handle shutdown signals
     loop = asyncio.get_event_loop()
 
     def shutdown():
+        # Only flip the stop flag here. The flush must not run in a
+        # fire-and-forget task: the main loop can return first, and asyncio.run
+        # then cancels the still-pending task mid-await, losing the in-flight
+        # turn's messages. It is awaited in the finally-block below instead (R2).
         logger.info("Received shutdown signal")
-        asyncio.ensure_future(sim_engine.stop())
+        sim_engine.request_stop()
 
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, shutdown)
 
     try:
+        if budget > 0:
+            logger.warning(
+                "--budget %d is the DEPRECATED cumulative cap. It counts LLM calls "
+                "for the ENTIRE run, is rebuilt from llm_call_logs on restart, and "
+                "therefore benches an agent PERMANENTLY once crossed — this is what "
+                "took the blackbird hub off the air for 161 consecutive turns. The "
+                "sliding-window rate limiter supersedes it. Pass --budget 0 unless "
+                "you specifically want the legacy behaviour.",
+                budget,
+            )
         logger.info(
             "Starting simulation: %d agents, %s max runtime, %d budget/agent%s",
             len(agents), runtime_label, budget,
@@ -217,6 +269,15 @@ async def _run_simulation(
     except Exception:
         logger.exception("Simulation engine raised an exception")
     finally:
+        # Durably flush buffered messages/LLM logs before anything else. The DB
+        # is the primary conversation store, so anything still in the in-memory
+        # buffer at exit is otherwise unrecoverable. Runs on every exit path
+        # (signal, time limit, budget exhaustion, crash).
+        try:
+            await sim_engine.stop()
+        except Exception:
+            logger.exception("Final flush on shutdown failed")
+
         # Update simulation run status
         if session_factory and simulation_run_id:
             async with session_factory() as db:

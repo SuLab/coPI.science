@@ -1,0 +1,730 @@
+"""Load-proportional budget and scheduling for star topologies.
+
+Implements the test plan in docs/specs/2026-08-06-hub-budget-scheduler-design.md
+§8. Organised by design section so a failure names the rule it broke:
+
+- TestAgentLoad            §4.1  the shared load signal
+- TestRoleRateOverride     §4.4  optional per-role allowance
+- TestCallLedger           §4.2  record_api_call maintains both counters
+- TestRateLimiter          §4.2  sliding-window eligibility, and that it self-heals
+- TestRestartRebuild       §4.2  step 4b repopulates call_times from llm_call_logs
+- TestScheduler            §4.3  load-proportional weight, reactive tiebreak
+- TestStallIsTransient     F1    a throttled roster must NOT end the run
+- TestPIHandlerAccounting  F2    PI-DM LLM calls go through record_api_call
+- TestRateSettingGuards    F4    non-positive rate settings are clamped, loudly
+- TestProductionRegression §8    the exact run-4f1e8395 state
+"""
+
+import inspect
+import logging
+import random
+import time
+import types
+
+from src.agent.agent import Agent
+from src.agent.message_log import MessageLog
+from src.agent.simulation import SimulationEngine
+from src.agent.state import ThreadState
+
+
+def _settings(**kw):
+    base = dict(
+        cohort_isolation_enabled=False,
+        cohort_default_policy="open",
+        max_consecutive_reactive_turns=3,
+        turn_delay_seconds=0.0,
+        active_thread_threshold=12,
+        llm_rate_window_seconds=600,
+        llm_calls_per_load_per_window=8,
+    )
+    base.update(kw)
+    return types.SimpleNamespace(**base)
+
+
+def _patch(monkeypatch, **kw):
+    monkeypatch.setattr("src.agent.simulation.get_settings", lambda: _settings(**kw))
+
+
+def _engine(agent_ids, budget_cap=0):
+    agents = [
+        Agent(agent_id=a, bot_name=f"{a.capitalize()}Bot", pi_name=f"PI {a}")
+        for a in agent_ids
+    ]
+    return SimulationEngine(agents=agents, slack_clients={}, budget_cap=budget_cap)
+
+
+# Every awaitable the main loop calls once per tick before it selects an agent.
+# All of them are I/O (Slack, DB, disk) and none of them affect selection, so a
+# loop-level test stubs the lot and keeps only the scheduling behaviour.
+_TICK_IO = (
+    "_poll_slack_for_pi_messages",
+    "_poll_pi_dms",
+    "_poll_proposal_threads_for_pi",
+    "_poll_inbound_from_db",
+    "_poll_pi_dms_from_db",
+    "_sync_proposal_reviews_from_db",
+    "_sync_private_channels_from_db",
+    "_sync_roster_from_db",
+    "_flush_persisted",
+    "_flush_llm_logs",
+)
+
+
+def _drive_loop(eng, monkeypatch, *, stop_after=4):
+    """Run the REAL ``_run_main_loop`` with every per-tick I/O call stubbed out.
+
+    Returns ``(sleeps, turns)``, both filled in as the loop runs. The engine is
+    stopped once ``stop_after`` events have been recorded, so a regression that
+    reinstates the old spin-or-break behaviour fails an assertion instead of
+    hanging the suite.
+    """
+    async def _noop(*a, **kw):
+        return None
+
+    for name in _TICK_IO:
+        monkeypatch.setattr(eng, name, _noop)
+    monkeypatch.setattr(eng, "_sync_profiles_from_disk", lambda *a, **kw: None)
+
+    sleeps: list[int] = []
+    turns: list[str] = []
+
+    def _budget():
+        if len(sleeps) + len(turns) >= stop_after:
+            eng._running = False
+
+    async def _sleep(delay):
+        sleeps.append(delay)
+        _budget()
+
+    async def _run_turn(agent):
+        turns.append(agent.agent_id)
+        _budget()
+        return False
+
+    monkeypatch.setattr(eng, "_sleep", _sleep)
+    monkeypatch.setattr(eng, "_run_turn", _run_turn)
+    eng._running = True
+    return sleeps, turns
+
+
+def _add_threads(agent, n, *, status="active", pending=False, prefix="t"):
+    for i in range(n):
+        tid = f"{prefix}{i}"
+        agent.state.active_threads[tid] = ThreadState(
+            thread_id=tid,
+            channel="general",
+            other_agent_id=f"pi{i}",
+            status=status,
+            has_pending_reply=pending,
+        )
+
+
+class TestAgentLoad:
+    def test_idle_agent_has_load_one(self, monkeypatch):
+        _patch(monkeypatch)
+        eng = _engine(["hub"])
+        assert eng._agent_load(eng.agents["hub"]) == 1
+
+    def test_load_counts_active_threads(self, monkeypatch):
+        _patch(monkeypatch)
+        eng = _engine(["hub"])
+        _add_threads(eng.agents["hub"], 5)
+        assert eng._agent_load(eng.agents["hub"]) == 5
+
+    def test_non_active_threads_are_excluded(self, monkeypatch):
+        _patch(monkeypatch)
+        eng = _engine(["hub"])
+        _add_threads(eng.agents["hub"], 3, status="active", prefix="a")
+        _add_threads(eng.agents["hub"], 4, status="closed", prefix="c")
+        _add_threads(eng.agents["hub"], 2, status="proposed", prefix="p")
+        assert eng._agent_load(eng.agents["hub"]) == 3
+
+    def test_load_is_clamped_at_active_thread_threshold(self, monkeypatch):
+        _patch(monkeypatch, active_thread_threshold=12)
+        eng = _engine(["hub"])
+        _add_threads(eng.agents["hub"], 56)
+        assert eng._agent_load(eng.agents["hub"]) == 12
+
+
+class TestCallLedger:
+    def test_record_api_call_increments_both_counters(self):
+        a = Agent(agent_id="hub", bot_name="HubBot", pi_name="PI hub")
+        a.record_api_call(now=100.0)
+        a.record_api_call(now=101.0)
+        assert a.api_call_count == 2
+        assert list(a.state.call_times) == [100.0, 101.0]
+
+    def test_record_api_call_defaults_to_wall_clock(self):
+        a = Agent(agent_id="hub", bot_name="HubBot", pi_name="PI hub")
+        before = time.time()
+        a.record_api_call()
+        after = time.time()
+        assert a.api_call_count == 1
+        assert before <= a.state.call_times[0] <= after
+
+    def test_call_times_starts_empty(self):
+        a = Agent(agent_id="hub", bot_name="HubBot", pi_name="PI hub")
+        assert len(a.state.call_times) == 0
+        assert a.api_call_count == 0
+
+
+class TestRateLimiter:
+    def test_under_allowance_is_eligible(self, monkeypatch):
+        _patch(monkeypatch, llm_calls_per_load_per_window=8)
+        eng = _engine(["spoke"])
+        a = eng.agents["spoke"]
+        for i in range(7):
+            a.record_api_call(now=1000.0 + i)
+        assert eng._within_rate_limit(a, 1010.0) is True
+
+    def test_at_allowance_is_throttled(self, monkeypatch):
+        _patch(monkeypatch, llm_calls_per_load_per_window=8)
+        eng = _engine(["spoke"])
+        a = eng.agents["spoke"]
+        for i in range(8):
+            a.record_api_call(now=1000.0 + i)
+        assert eng._within_rate_limit(a, 1010.0) is False
+
+    def test_throttle_self_heals_as_the_window_slides(self, monkeypatch):
+        """The regression test for the permanent bench. A throttled agent MUST
+        become eligible again once its calls age out — this is the single
+        property the cumulative cap did not have."""
+        _patch(monkeypatch, llm_calls_per_load_per_window=8,
+               llm_rate_window_seconds=600)
+        eng = _engine(["spoke"])
+        a = eng.agents["spoke"]
+        for i in range(8):
+            a.record_api_call(now=1000.0 + i)
+        assert eng._within_rate_limit(a, 1010.0) is False
+        # 700s later every recorded call is outside the 600s window.
+        assert eng._within_rate_limit(a, 1710.0) is True
+        assert len(a.state.call_times) == 0
+
+    def test_allowance_scales_with_load(self, monkeypatch):
+        _patch(monkeypatch, llm_calls_per_load_per_window=8,
+               active_thread_threshold=12)
+        eng = _engine(["hub"])
+        hub = eng.agents["hub"]
+        _add_threads(hub, 12)
+        for i in range(50):
+            hub.record_api_call(now=1000.0 + i)
+        # load 12 -> allowance 96, so 50 calls is fine for a hub...
+        assert eng._within_rate_limit(hub, 1060.0) is True
+        # ...but the identical ledger throttles a load-1 spoke.
+        spoke = Agent(agent_id="spoke", bot_name="SpokeBot", pi_name="PI spoke")
+        for i in range(50):
+            spoke.record_api_call(now=1000.0 + i)
+        assert eng._within_rate_limit(spoke, 1060.0) is False
+
+    def test_role_override_beats_the_global_setting(self, monkeypatch):
+        _patch(monkeypatch, llm_calls_per_load_per_window=8)
+        monkeypatch.setattr(
+            "src.agent.simulation.load_role",
+            lambda name: types.SimpleNamespace(calls_per_load_per_window=2),
+        )
+        eng = _engine(["spoke"])
+        a = eng.agents["spoke"]
+        for i in range(3):
+            a.record_api_call(now=1000.0 + i)
+        assert eng._calls_per_load(a) == 2
+        assert eng._within_rate_limit(a, 1010.0) is False
+
+    def test_turn_eligible_requires_both_checks(self, monkeypatch):
+        """Legacy cumulative cap and the rate limiter compose with AND."""
+        _patch(monkeypatch, llm_calls_per_load_per_window=8)
+        eng = _engine(["spoke"], budget_cap=5)
+        a = eng.agents["spoke"]
+        # Rate limit fine (1 call), legacy cap blown (api_call_count 6 >= 5).
+        a.api_call_count = 6
+        a.record_api_call(now=1000.0)
+        assert eng._turn_eligible(a, 1010.0) is False
+
+    def test_turn_eligible_passes_when_both_pass(self, monkeypatch):
+        _patch(monkeypatch, llm_calls_per_load_per_window=8)
+        eng = _engine(["spoke"], budget_cap=0)
+        a = eng.agents["spoke"]
+        a.record_api_call(now=1000.0)
+        assert eng._turn_eligible(a, 1010.0) is True
+
+    def test_throttle_flag_stays_fresh_while_the_legacy_cap_binds(self, monkeypatch):
+        """F5. The cap-first ordering in _turn_eligible is deliberate, but it used
+        to freeze `state.throttled`: with --budget armed the flag was whatever it
+        was when the cap first bit, so the agent's next real throttle transition
+        logged nothing. The window check now runs for its side effect while the
+        cap still decides eligibility.
+        """
+        _patch(monkeypatch, llm_calls_per_load_per_window=2)
+        eng = _engine(["spoke"], budget_cap=5)
+        a = eng.agents["spoke"]
+        a.record_api_call(now=1000.0)
+        a.record_api_call(now=1001.0)  # at the window allowance
+        a.api_call_count = 6           # ...and over the legacy cap
+
+        assert eng._turn_eligible(a, 1010.0) is False
+        assert a.state.throttled is True
+        # 700s later the window has slid: the flag must clear even though the
+        # cap still benches the agent. Eligibility is unchanged either way.
+        assert eng._turn_eligible(a, 1710.0) is False
+        assert a.state.throttled is False
+
+    def test_legacy_cap_still_decides_eligibility(self, monkeypatch):
+        """The F5 side-effect call must not have reordered the gates: an agent
+        well inside its rate window is STILL ineligible once the cap is blown."""
+        _patch(monkeypatch, llm_calls_per_load_per_window=8)
+        eng = _engine(["spoke"], budget_cap=5)
+        a = eng.agents["spoke"]
+        a.api_call_count = 5
+        assert a.state.throttled is False       # rate limit nowhere near
+        assert eng._turn_eligible(a, 1010.0) is False
+
+    def test_throttle_transition_warns_once(self, monkeypatch, caplog):
+        _patch(monkeypatch, llm_calls_per_load_per_window=2)
+        eng = _engine(["spoke"])
+        a = eng.agents["spoke"]
+        a.record_api_call(now=1000.0)
+        a.record_api_call(now=1001.0)
+        with caplog.at_level(logging.WARNING):
+            eng._within_rate_limit(a, 1010.0)
+            eng._within_rate_limit(a, 1011.0)
+            eng._within_rate_limit(a, 1012.0)
+        assert caplog.text.count("throttled") == 1
+
+
+class TestRestartRebuild:
+    def test_window_filter_selects_only_recent_calls(self, monkeypatch):
+        """Step 4b's cutoff arithmetic, isolated from the DB.
+
+        The full DB round trip is covered by the integration suite; what matters
+        here is that the cutoff is `now - window` and that boundary rows are
+        included, since an off-by-one there silently re-creates the permanent
+        bench for anything on the edge.
+        """
+        _patch(monkeypatch, llm_rate_window_seconds=600)
+        eng = _engine(["hub"])
+        a = eng.agents["hub"]
+        now = 10_000.0
+        # Simulate what step 4b loads: only rows at or after the cutoff.
+        cutoff = now - 600
+        rows = [now - 1200, now - 700, now - 600, now - 100, now - 1]
+        a.state.call_times.extend(t for t in rows if t >= cutoff)
+        assert list(a.state.call_times) == [now - 600, now - 100, now - 1]
+        assert eng._within_rate_limit(a, now) is True
+
+    def test_agent_whose_calls_all_predate_the_window_starts_unthrottled(
+        self, monkeypatch
+    ):
+        """The exact post-restart state that benched the hub: a large lifetime
+        count, but nothing inside the window."""
+        _patch(monkeypatch, llm_calls_per_load_per_window=8)
+        eng = _engine(["hub"])
+        a = eng.agents["hub"]
+        a.api_call_count = 42  # rebuilt by step 4, lifetime
+        # step 4b found no rows inside the window
+        assert eng._within_rate_limit(a, 10_000.0) is True
+        assert eng._turn_eligible(a, 10_000.0) is True
+
+
+class TestScheduler:
+    def test_proactive_weight_scales_with_load(self, monkeypatch):
+        """A load-12 hub against 12 load-1 spokes, all equally stale, should take
+        ~12/(12+12) = 50% of proactive draws. Under the old agent-fair weighting
+        it took 1/13 = 7.7%."""
+        _patch(monkeypatch, active_thread_threshold=12)
+        random.seed(20260806)
+        ids = ["hub"] + [f"pi{i}" for i in range(12)]
+        eng = _engine(ids)
+        _add_threads(eng.agents["hub"], 12)
+        now = time.time()
+        for a in eng.agents.values():
+            a.state.last_selected = now - 100.0
+
+        picks = [eng._select_agent().agent_id for _ in range(2000)]
+        share = picks.count("hub") / 2000
+        assert 0.42 < share < 0.58, f"hub share {share:.3f} not load-proportional"
+
+    def test_reactive_tiebreak_no_longer_penalises_the_busy_agent(
+        self, monkeypatch
+    ):
+        """The hub is selected often, so its last_selected is always recent. Under
+        min(last_selected) it lost every tiebreak to a long-idle spoke — it was
+        penalised precisely for being busy. Weighted by load, it wins."""
+        _patch(monkeypatch, active_thread_threshold=12)
+        eng = _engine(["hub", "spoke"])
+        now = time.time()
+        _add_threads(eng.agents["hub"], 12, pending=True)
+        _add_threads(eng.agents["spoke"], 1, pending=True, prefix="s")
+        eng.agents["hub"].state.last_selected = now - 10.0    # 10 * 12 = 120
+        eng.agents["spoke"].state.last_selected = now - 60.0  # 60 *  1 =  60
+
+        assert eng._select_agent().agent_id == "hub"
+
+    def test_reactive_tier_still_prefers_a_genuinely_starved_spoke(
+        self, monkeypatch
+    ):
+        """The load weighting must not become a blank cheque: a spoke that has
+        waited long enough still outranks the hub."""
+        _patch(monkeypatch, active_thread_threshold=12)
+        eng = _engine(["hub", "spoke"])
+        now = time.time()
+        _add_threads(eng.agents["hub"], 2, pending=True)
+        _add_threads(eng.agents["spoke"], 1, pending=True, prefix="s")
+        eng.agents["hub"].state.last_selected = now - 10.0     # 10 * 2 =  20
+        eng.agents["spoke"].state.last_selected = now - 600.0  # 600 * 1 = 600
+
+        assert eng._select_agent().agent_id == "spoke"
+
+    def test_throttled_hub_is_not_selected(self, monkeypatch):
+        _patch(monkeypatch, llm_calls_per_load_per_window=1,
+               active_thread_threshold=12)
+        eng = _engine(["hub", "spoke"])
+        now = time.time()
+        hub = eng.agents["hub"]
+        _add_threads(hub, 1)
+        hub.record_api_call(now=now)
+        for _ in range(50):
+            assert eng._select_agent().agent_id == "spoke"
+
+
+class TestBudgetDeprecation:
+    def test_default_budget_is_off(self):
+        """The default must be 0 (off). A nonzero default is what silently armed
+        the legacy cap on every run."""
+        from src.agent.main import main
+
+        default = inspect.signature(main).parameters["budget"].default
+        assert default.default == 0
+
+    def test_help_text_marks_the_flag_deprecated(self):
+        from src.agent.main import main
+
+        help_text = inspect.signature(main).parameters["budget"].default.help
+        assert "DEPRECATED" in help_text
+
+    def test_engine_constructor_default_matches_the_cli_default(self):
+        """F3. The constructor default was 50 while the CLI default was 0, so
+        every caller that omitted the kwarg — tests, backfill scripts — silently
+        armed the deprecated permanent cap."""
+        default = inspect.signature(SimulationEngine.__init__).parameters[
+            "budget_cap"
+        ].default
+        assert default == 0
+
+    def test_engine_without_a_budget_kwarg_caps_nobody(self, monkeypatch):
+        _patch(monkeypatch)
+        agent = Agent(agent_id="hub", bot_name="HubBot", pi_name="PI hub")
+        agent.api_call_count = 10_000
+        eng = SimulationEngine(agents=[agent], slack_clients={})
+        assert eng._agent_within_budget(agent) is True
+        assert eng._turn_eligible(agent, time.time()) is True
+
+
+class TestStallIsTransient:
+    """F1. `_select_agent()` returning None used to break the main loop.
+
+    Rate limiting and the per-agent `turn_delay_seconds` cooldown both lapse with
+    time, so breaking on them converts "one agent is benched for a while" into
+    "the run exits and stays exited" — strictly worse than the bug the branch
+    fixes, and reachable on any roster whose aggregate demand meets its aggregate
+    allowance (7 token-holding agents at 8 calls/600s does it in minutes).
+    """
+
+    def test_predicate_is_not_terminal_when_the_cap_is_off(self, monkeypatch):
+        _patch(monkeypatch)
+        eng = _engine(["a", "b"], budget_cap=0)
+        for a in eng.agents.values():
+            a.api_call_count = 10_000
+        assert eng._terminal_stall_reason() is None
+
+    def test_predicate_is_not_terminal_while_one_agent_is_under_the_cap(
+        self, monkeypatch
+    ):
+        _patch(monkeypatch)
+        eng = _engine(["a", "b"], budget_cap=5)
+        eng.agents["a"].api_call_count = 99
+        eng.agents["b"].api_call_count = 1
+        assert eng._terminal_stall_reason() is None
+
+    def test_predicate_is_terminal_when_every_agent_is_over_the_cap(
+        self, monkeypatch
+    ):
+        _patch(monkeypatch)
+        eng = _engine(["a", "b"], budget_cap=5)
+        for a in eng.agents.values():
+            a.api_call_count = 5
+        assert "legacy --budget cap (5)" in eng._terminal_stall_reason()
+
+    def test_predicate_is_terminal_on_an_empty_roster(self, monkeypatch):
+        _patch(monkeypatch)
+        eng = _engine([], budget_cap=0)
+        assert eng._terminal_stall_reason() == "the roster is empty"
+
+    async def test_fully_throttled_roster_backs_off_instead_of_stopping(
+        self, monkeypatch, caplog
+    ):
+        """THE regression test for F1: every agent throttled, legacy cap off.
+
+        The loop must keep ticking with a growing backoff, never break, and never
+        spin (each empty tick costs a `_sleep`).
+        """
+        _patch(monkeypatch, llm_calls_per_load_per_window=1)
+        eng = _engine(["a", "b"], budget_cap=0)
+        now = time.time()
+        for a in eng.agents.values():
+            a.record_api_call(now=now)  # allowance is 1 * load 1
+        assert eng._select_agent() is None
+
+        sleeps, turns = _drive_loop(eng, monkeypatch, stop_after=4)
+        with caplog.at_level(logging.INFO):
+            await eng._run_main_loop()
+
+        assert turns == []
+        assert sleeps == [5, 5, 5, 15], "idle backoff must apply and grow"
+        assert "Stopping" not in caplog.text
+        assert "retrying" in caplog.text
+
+    async def test_mixed_stall_with_the_cap_armed_is_still_transient(
+        self, monkeypatch, caplog
+    ):
+        """Cap armed, one agent over it, the other merely throttled. Nothing is
+        selectable right now, but the second agent recovers as the window slides,
+        so the run must not end."""
+        _patch(monkeypatch, llm_calls_per_load_per_window=1)
+        eng = _engine(["over", "throttled"], budget_cap=5)
+        eng.agents["over"].api_call_count = 99
+        eng.agents["throttled"].record_api_call(now=time.time())
+        assert eng._select_agent() is None
+
+        sleeps, turns = _drive_loop(eng, monkeypatch, stop_after=2)
+        with caplog.at_level(logging.INFO):
+            await eng._run_main_loop()
+
+        assert turns == []
+        assert sleeps == [5, 5]
+        assert "Stopping" not in caplog.text
+
+    async def test_every_agent_over_the_legacy_cap_stops_the_loop(
+        self, monkeypatch, caplog
+    ):
+        """The one genuinely permanent case: `api_call_count` only grows within a
+        process and `_rebuild_state_from_db` restores it, so nothing recovers."""
+        _patch(monkeypatch)
+        eng = _engine(["a", "b"], budget_cap=5)
+        for a in eng.agents.values():
+            a.api_call_count = 5
+
+        sleeps, turns = _drive_loop(eng, monkeypatch, stop_after=4)
+        with caplog.at_level(logging.INFO):
+            await eng._run_main_loop()
+
+        assert (sleeps, turns) == ([], []), "terminal stall must break at once"
+        assert "over the legacy --budget cap (5). Stopping." in caplog.text
+
+    async def test_a_recovered_agent_gets_its_turn(self, monkeypatch):
+        """The backoff is not a dead end: once the ledger clears, the very next
+        tick selects the agent it was waiting for."""
+        _patch(monkeypatch, llm_calls_per_load_per_window=1)
+        eng = _engine(["a"], budget_cap=0)
+        eng.agents["a"].record_api_call(now=time.time())
+
+        sleeps, turns = _drive_loop(eng, monkeypatch, stop_after=3)
+        # The first stall clears the ledger the way an expiring window would.
+        real_sleep = eng._sleep
+
+        async def _sleep(delay):
+            eng.agents["a"].state.call_times.clear()
+            await real_sleep(delay)
+
+        monkeypatch.setattr(eng, "_sleep", _sleep)
+        await eng._run_main_loop()
+
+        assert turns and turns[0] == "a"
+
+    async def test_stop_signal_still_ends_a_stalled_loop(self, monkeypatch):
+        """max_runtime / SIGTERM must still end the run: `_sleep` returns early
+        once `_stop_event` is set, and the loop condition then fails."""
+        _patch(monkeypatch, llm_calls_per_load_per_window=1)
+        eng = _engine(["a"], budget_cap=0)
+        eng.agents["a"].record_api_call(now=time.time())
+
+        sleeps, turns = _drive_loop(eng, monkeypatch, stop_after=50)
+        real_sleep = eng._sleep
+
+        async def _sleep(delay):
+            eng.request_stop()
+            await real_sleep(delay)
+
+        monkeypatch.setattr(eng, "_sleep", _sleep)
+        await eng._run_main_loop()
+
+        assert turns == []
+        assert len(sleeps) == 1
+
+
+class TestPIHandlerAccounting:
+    """F2. `pi_handler` logged llm_call_logs rows under a real agent_id without
+    touching either counter, so those calls were invisible to the live limiter
+    but restored into `call_times` by step 4b — throttling an agent on turn 0 of
+    a resumed run for calls it never appeared to make.
+    """
+
+    def _handler(self, monkeypatch, response="answer", raises=False):
+        from src.agent import pi_handler as ph
+
+        agent = Agent(agent_id="su", bot_name="SuBot", pi_name="Andrew Su")
+        handler = ph.PIHandler(
+            agents={"su": agent},
+            slack_clients={},
+            pi_slack_id_to_agent_ids={"U1": ["su"]},
+            message_log=MessageLog(),
+        )
+
+        async def _fake_llm(**kwargs):
+            if raises:
+                raise RuntimeError("anthropic is down")
+            return response
+
+        async def _fake_dm(*a, **kw):
+            return None
+
+        monkeypatch.setattr(ph, "generate_agent_response", _fake_llm)
+        monkeypatch.setattr(handler, "_send_dm", _fake_dm)
+        monkeypatch.setattr(agent, "update_private_profile", lambda text: None)
+        return handler, agent
+
+    async def test_pi_question_is_recorded_against_the_agent(self, monkeypatch):
+        handler, agent = self._handler(monkeypatch)
+        await handler._handle_question("su", "U1", "how many threads do you have?")
+        assert agent.api_call_count == 1
+        assert len(agent.state.call_times) == 1
+
+    async def test_profile_rewrite_is_recorded_against_the_agent(self, monkeypatch):
+        handler, agent = self._handler(
+            monkeypatch, response="<profile>new</profile><changes>x</changes>",
+        )
+        await handler._handle_standing_instruction("su", "U1", "always cite DOIs")
+        assert agent.api_call_count == 1
+        assert len(agent.state.call_times) == 1
+
+    async def test_a_failed_call_is_not_recorded(self, monkeypatch):
+        handler, agent = self._handler(monkeypatch, raises=True)
+        await handler._handle_question("su", "U1", "anything")
+        assert agent.api_call_count == 0
+        assert len(agent.state.call_times) == 0
+
+    async def test_dm_classification_is_not_attributed_to_the_agent(
+        self, monkeypatch
+    ):
+        """`_classify_dm` logs under the synthetic agent_id "pi_handler", so the
+        restart rebuild attributes it to nobody. Counting it live would make the
+        in-process ledger disagree in the other direction."""
+        handler, agent = self._handler(monkeypatch, response='{"category": "question"}')
+        await handler._classify_dm("what are you working on?")
+        assert agent.api_call_count == 0
+        assert len(agent.state.call_times) == 0
+
+    async def test_a_pi_dm_burst_shows_up_in_the_live_rate_limiter(
+        self, monkeypatch
+    ):
+        """The end-to-end point of F2: ten PI questions must throttle the agent
+        NOW, exactly as they would after a restart rebuilt them from the DB."""
+        _patch(monkeypatch, llm_calls_per_load_per_window=8)
+        handler, agent = self._handler(monkeypatch)
+        eng = SimulationEngine(agents=[agent], slack_clients={})
+        for _ in range(10):
+            await handler._handle_question("su", "U1", "status?")
+        assert agent.api_call_count == 10
+        assert eng._within_rate_limit(agent, time.time()) is False
+
+
+class TestRateSettingGuards:
+    """F4. `roles.py` rejects a non-positive per-role override; the global
+    settings had no such guard. `llm_calls_per_load_per_window=0` makes
+    `len(times) < 0` false for everyone, so — now that a stall no longer ends the
+    run — a typo buys a silently, permanently idle simulation.
+    """
+
+    def _settings_obj(self, **kw):
+        from src.config import Settings
+
+        return Settings(_env_file=None, environment="development", **kw)
+
+    def test_zero_calls_per_load_is_clamped_to_the_default(self, caplog):
+        with caplog.at_level(logging.WARNING, logger="src.config"):
+            s = self._settings_obj(llm_calls_per_load_per_window=0)
+        assert s.llm_calls_per_load_per_window == 8
+        assert "LLM_CALLS_PER_LOAD_PER_WINDOW" in caplog.text
+
+    def test_negative_window_is_clamped_to_the_default(self, caplog):
+        with caplog.at_level(logging.WARNING, logger="src.config"):
+            s = self._settings_obj(llm_rate_window_seconds=-1)
+        assert s.llm_rate_window_seconds == 600
+        assert "LLM_RATE_WINDOW_SECONDS" in caplog.text
+
+    def test_valid_overrides_are_left_alone(self, caplog):
+        with caplog.at_level(logging.WARNING, logger="src.config"):
+            s = self._settings_obj(
+                llm_calls_per_load_per_window=2, llm_rate_window_seconds=30,
+            )
+        assert (s.llm_calls_per_load_per_window, s.llm_rate_window_seconds) == (2, 30)
+        assert "must be a positive int" not in caplog.text
+
+    def test_a_clamped_setting_leaves_agents_selectable(self, monkeypatch):
+        """The behavioural consequence: with the guard, a 0 in the environment
+        degrades to the default allowance instead of benching the whole roster."""
+        s = self._settings_obj(llm_calls_per_load_per_window=0)
+        monkeypatch.setattr("src.agent.simulation.get_settings", lambda: s)
+        eng = _engine(["a"])
+        assert eng._turn_eligible(eng.agents["a"], time.time()) is True
+
+
+class TestProductionRegression:
+    """Reconstructs the exact state of run 4f1e8395 (2026-08-05), in which the
+    blackbird hub took 0 of 161 turns while 56 spokes took 3-5 each.
+
+    Measured then: hub 42 LLM calls, next-busiest agent 9, cap 40.
+    """
+
+    def _star(self, monkeypatch, budget_cap, **kw):
+        _patch(monkeypatch, active_thread_threshold=12, **kw)
+        ids = ["blackbird"] + [f"pi{i}" for i in range(56)]
+        eng = _engine(ids, budget_cap=budget_cap)
+        eng.agents["blackbird"].api_call_count = 42
+        for i in range(56):
+            eng.agents[f"pi{i}"].api_call_count = 8
+        return eng
+
+    def test_fixed_hub_is_selectable_after_restart(self, monkeypatch):
+        """Case 1 — THE FIX. New default (budget_cap=0), lifetime count 42, but
+        nothing inside the window because step 4b found no recent rows."""
+        eng = self._star(monkeypatch, budget_cap=0)
+        hub = eng.agents["blackbird"]
+        now = time.time()
+        assert eng._turn_eligible(hub, now) is True
+
+        random.seed(20260806)
+        picks = [eng._select_agent().agent_id for _ in range(2000)]
+        assert picks.count("blackbird") > 0, "hub still benched — the fix failed"
+
+    def test_throttling_is_still_real_but_temporary(self, monkeypatch):
+        """Case 2 — the limiter has not been defanged. A load-1 hub that burns
+        its allowance inside the window IS throttled, then recovers."""
+        eng = self._star(monkeypatch, budget_cap=0,
+                         llm_calls_per_load_per_window=8,
+                         llm_rate_window_seconds=600)
+        hub = eng.agents["blackbird"]
+        base = 10_000.0
+        for i in range(8):
+            hub.record_api_call(now=base + i)
+        assert eng._turn_eligible(hub, base + 10) is False
+        assert eng._turn_eligible(hub, base + 700) is True
+
+    def test_legacy_budget_flag_still_benches_the_hub(self, monkeypatch):
+        """Case 3 — the compat path, pinned honestly. --budget 40 was NOT made
+        safe; it was deprecated and defaulted off. If someone passes it, the old
+        behaviour is exactly what they get."""
+        eng = self._star(monkeypatch, budget_cap=40)
+        hub = eng.agents["blackbird"]
+        now = time.time()
+        assert eng._turn_eligible(hub, now) is False
+        picks = [eng._select_agent().agent_id for _ in range(500)]
+        assert "blackbird" not in picks

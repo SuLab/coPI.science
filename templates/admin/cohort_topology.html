@@ -1,0 +1,138 @@
+{% extends "base.html" %}
+{% block title %}Admin — Cohort topology — CoPI{% endblock %}
+
+{% block content %}
+<div class="mb-2">
+    <a href="/admin/cohorts" class="text-sm text-gray-500 hover:text-gray-700">← All cohorts</a>
+</div>
+
+<div class="flex justify-between items-start mb-2">
+    <h1 class="text-2xl font-bold text-gray-900">Topology matrix</h1>
+</div>
+<p class="text-sm text-gray-500 mb-6">
+    Every agent × cohort pair. Tick to add a membership, untick to remove, then save
+    once — a whole re-shaping in a single audited step. Only the cells shown here are
+    compared, so a filtered or stale view can never delete a membership it did not
+    display.
+</p>
+
+{% if error %}
+<div class="mb-4 rounded-md bg-red-50 border border-red-200 px-4 py-3 text-sm text-red-700">{{ error }}</div>
+{% endif %}
+{% if notice %}
+<div class="mb-4 rounded-md bg-green-50 border border-green-200 px-4 py-3 text-sm text-green-800">{{ notice }}</div>
+{% endif %}
+
+{% include "admin/_cohort_gate_banner.html" %}
+
+{% if not cohorts %}
+<div class="bg-white rounded-xl shadow-sm border border-gray-200 px-6 py-8 text-center">
+    <p class="text-sm text-gray-500">
+        No cohorts yet. <a href="/admin/cohorts" class="text-indigo-600 hover:underline">Create one</a>
+        before editing the topology.
+    </p>
+</div>
+{% elif not agents %}
+<div class="bg-white rounded-xl shadow-sm border border-gray-200 px-6 py-8 text-center">
+    <p class="text-sm text-gray-500">No agents in the registry yet.</p>
+</div>
+{% else %}
+<form method="POST" action="/admin/cohorts/topology">
+    {# Rendered rows and columns. The save reconstructs the rendered CELL set as
+       the cross product of these two lists, which is exactly what the template
+       renders below (an unconditional nested loop). Same stale-form guarantee as
+       the old per-cell `present` inputs — a column or row that was not displayed
+       cannot be diffed away — at 116 fields instead of 3,360. #}
+    {% for a in agents %}<input type="hidden" name="present_agent" value="{{ a.agent_id }}">{% endfor %}
+    {% for c in cohorts %}<input type="hidden" name="present_cohort" value="{{ c.id }}">{% endfor %}
+    <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-x-auto">
+        <table class="min-w-full divide-y divide-gray-200">
+            <thead class="bg-gray-50">
+                <tr>
+                    <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase sticky left-0 bg-gray-50">Agent</th>
+                    <th class="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+                    <th class="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase">Role</th>
+                    {% for c in cohorts %}
+                    <th class="px-3 py-3 text-center text-xs font-medium text-gray-500">
+                        <a href="/admin/cohorts/{{ c.id }}" class="text-indigo-600 hover:underline">{{ c.name }}</a>
+                        <div class="mt-1">
+                            <button type="button" class="text-[10px] font-normal text-gray-400 hover:text-gray-600"
+                                    data-toggle-col="{{ c.id }}">all / none</button>
+                        </div>
+                    </th>
+                    {% endfor %}
+                    <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Acts on (preview)</th>
+                </tr>
+            </thead>
+            <tbody class="divide-y divide-gray-100">
+                {% for a in agents %}
+                {% set preview = gate.preview.get(a.agent_id, '__absent__') %}
+                <tr class="hover:bg-gray-50">
+                    <td class="px-4 py-3 text-sm font-medium text-gray-900 sticky left-0 bg-white">
+                        {{ a.bot_name }}
+                        <div class="text-xs font-normal text-gray-400">{{ a.pi_name }}</div>
+                    </td>
+                    <td class="px-3 py-3">
+                        <span class="px-2 py-0.5 text-xs rounded-full
+                            {% if a.status == 'active' %}bg-green-100 text-green-700
+                            {% elif a.status == 'suspended' %}bg-red-100 text-red-700
+                            {% else %}bg-gray-100 text-gray-600{% endif %}">{{ a.status }}</span>
+                    </td>
+                    <td class="px-3 py-3">
+                        <span class="px-2 py-0.5 text-xs rounded-full bg-indigo-100 text-indigo-700">{{ a.role }}</span>
+                    </td>
+                    {% for c in cohorts %}
+                    {% set cell = c.id | string ~ ':' ~ a.agent_id %}
+                    <td class="px-3 py-3 text-center">
+                        <input type="checkbox" name="cell" value="{{ cell }}"
+                               data-col="{{ c.id }}"
+                               class="h-4 w-4 rounded border-gray-300 text-indigo-600"
+                               {% if cell in membership_set %}checked{% endif %}>
+                    </td>
+                    {% endfor %}
+                    <td class="px-4 py-3 text-xs text-gray-500">
+                        {% if a.status != 'active' %}
+                        <span class="text-gray-400 italic">not active — the engine will not load this agent</span>
+                        {% elif preview == '__absent__' %}
+                        <span class="text-gray-400 italic">—</span>
+                        {% elif preview is none %}
+                        <span class="text-gray-600">everyone (gate off for this agent)</span>
+                        {% elif not preview %}
+                        <span class="text-amber-700">humans + PI private channels only</span>
+                        {% else %}
+                        {% for aid in preview if aid != a.agent_id %}<code>{{ gate.bot_names.get(aid, aid) }}</code>{% if not loop.last %}, {% endif %}{% else %}<span class="text-amber-700">humans + PI private channels only</span>{% endfor %}
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+
+    <div class="mt-4 flex items-center gap-3">
+        <button type="submit"
+                class="text-sm bg-indigo-600 hover:bg-indigo-700 text-white font-medium px-4 py-2 rounded">
+            Save topology
+        </button>
+        <a href="/admin/cohorts/topology" class="text-sm text-gray-500 hover:text-gray-700">Reset</a>
+        <p class="text-xs text-gray-400">
+            The “Acts on” column shows the gate as of page load; save to recompute.
+        </p>
+    </div>
+</form>
+
+<script>
+// Column toggle: tick/untick a whole cohort at once. Purely a convenience over the
+// checkboxes — the form still posts one cell per pair, so the server-side diff is
+// unchanged.
+document.querySelectorAll('[data-toggle-col]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+        var col = btn.getAttribute('data-toggle-col');
+        var boxes = document.querySelectorAll('input[type=checkbox][data-col="' + col + '"]');
+        var allChecked = Array.prototype.every.call(boxes, function (b) { return b.checked; });
+        boxes.forEach(function (b) { b.checked = !allChecked; });
+    });
+});
+</script>
+{% endif %}
+{% endblock %}

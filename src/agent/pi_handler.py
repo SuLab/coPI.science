@@ -28,6 +28,7 @@ class PIHandler:
         pi_slack_id_to_agent_ids: dict[str, list[str]],
         message_log: MessageLog,
         session_factory=None,
+        simulation_run_id=None,
     ):
         self.agents = agents
         self.slack_clients = slack_clients
@@ -40,6 +41,7 @@ class PIHandler:
         }
         self.message_log = message_log
         self.session_factory = session_factory
+        self.simulation_run_id = simulation_run_id
 
     # ------------------------------------------------------------------
     # DM handling
@@ -81,6 +83,10 @@ class PIHandler:
                 max_tokens=200,
                 log_meta={"agent_id": "pi_handler", "phase": "dm_classify"},
             )
+            # Deliberately NOT recorded against any Agent: this row is logged
+            # under the synthetic agent_id "pi_handler", so the restart rebuild
+            # attributes it to nobody. Counting it live would make the in-process
+            # ledger disagree with the rebuilt one in the other direction.
             return self._parse_json(response)
         except Exception as exc:
             logger.warning("DM classification failed: %s", exc)
@@ -110,7 +116,20 @@ class PIHandler:
                 model=settings.llm_agent_model_sonnet,
                 max_tokens=2000,
                 log_meta={"agent_id": agent_id, "phase": "profile_rewrite"},
+                # Fires immediately if llm.py's max_tokens retry actually makes
+                # a second call, so a retried turn still books as one call per
+                # real API call, not one per turn. See Agent.record_api_call
+                # and the explicit record_api_call() just below, which books
+                # the (at least one) call every turn makes regardless.
+                on_retry=agent.record_api_call,
             )
+            # This call is logged to llm_call_logs under a REAL agent_id, so the
+            # restart rebuild (simulation step 4/4b) will attribute it to this
+            # agent. Recording it here is what keeps the live counters and the
+            # rebuilt ones consistent — without it, a PI DM burst is invisible to
+            # the rate limiter now and throttles the agent from turn 0 after a
+            # restart. See Agent.record_api_call.
+            agent.record_api_call()
 
             # Parse profile and changes from response
             profile_match = re.search(r"<profile>(.*?)</profile>", response, re.DOTALL)
@@ -200,7 +219,11 @@ class PIHandler:
                 model=settings.llm_agent_model_sonnet,
                 max_tokens=800,
                 log_meta={"agent_id": agent_id, "phase": "pi_question"},
+                on_retry=agent.record_api_call,
             )
+            # Logged under a real agent_id -> counted by the restart rebuild, so
+            # it must be counted live too. See _handle_standing_instruction.
+            agent.record_api_call()
             await self._send_dm(agent_id, pi_slack_id, response.strip())
         except Exception as exc:
             logger.error("[%s] Failed to answer PI question: %s", agent_id, exc)
@@ -369,12 +392,33 @@ class PIHandler:
     # ------------------------------------------------------------------
 
     async def _send_dm(self, agent_id: str, pi_slack_id: str, text: str) -> None:
-        """Send a DM from the agent's bot to the PI."""
+        """Send a DM from the agent's bot to the PI (Slack + DB record).
+
+        Persists an outbound row so the DM is durable and visible in the web UI
+        even when Slack is off. See specs/local-db-conversations.md.
+        """
         client = self.slack_clients.get(agent_id)
+        slack_ts = None
         if client and client.is_connected:
-            client.send_dm(pi_slack_id, text)
+            result = client.send_dm(pi_slack_id, text)
+            if isinstance(result, dict):
+                slack_ts = result.get("ts")
         else:
-            logger.debug("[%s] Cannot send DM — no connected client", agent_id)
+            logger.debug("[%s] Cannot send DM via Slack — recording to DB only", agent_id)
+
+        if self.session_factory and self.simulation_run_id:
+            try:
+                from src.services.pi_inbox import record_pi_dm
+                agent = self.agents.get(agent_id)
+                async with self.session_factory() as db:
+                    await record_pi_dm(
+                        db, run_id=self.simulation_run_id, agent_id=agent_id,
+                        pi_user_id=pi_slack_id, direction="outbound", content=text,
+                        sender_name=agent.bot_name if agent else agent_id, slack_ts=slack_ts,
+                    )
+                    await db.commit()
+            except Exception as exc:
+                logger.debug("[%s] Could not record outbound DM: %s", agent_id, exc)
 
     @staticmethod
     def _parse_json(text: str) -> dict:

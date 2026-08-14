@@ -162,3 +162,37 @@ async def test_proposal_vote_details_happy_path_ok(client, db_session):
     )
     assert r.status_code == 200
     assert r.json() == {"ok": True}
+
+
+@pytest.mark.parametrize("bad_payload", [{}, {"voter_token": "not-the-owner"}])
+async def test_proposal_vote_details_wrong_or_absent_token_403(
+    client, db_session, bad_payload
+):
+    """SEC: `if vote_obj.voter_token and token and vote_obj.voter_token != token`
+    short-circuited to False whenever the caller simply omitted `voter_token`
+    from the body (token is None) — so anyone holding a vote_id could overwrite,
+    or erase (`details: null`), another visitor's free-text comment with no
+    token at all. A wrong token, and an altogether absent one, must both be
+    rejected whenever the stored row actually has a token."""
+    d = await factories.make_thread_decision(
+        db_session, outcome="proposal", origin_visibility="public"
+    )
+    created = await client.post(
+        "/api/proposal-vote",
+        json={"decision_id": str(d.id), "vote": "up", "voter_token": "browser-tok-4"},
+    )
+    vote_id = created.json()["id"]
+    r = await client.post(
+        f"/api/proposal-vote/{vote_id}/details",
+        json={"details": "attacker-supplied", **bad_payload},
+    )
+    assert r.status_code == 403
+
+    # The original comment/attempted tamper must not have landed: the correct
+    # token still works and is the only way to update this row.
+    r2 = await client.post(
+        f"/api/proposal-vote/{vote_id}/details",
+        json={"details": "legit update", "voter_token": "browser-tok-4"},
+    )
+    assert r2.status_code == 200
+    assert r2.json() == {"ok": True}

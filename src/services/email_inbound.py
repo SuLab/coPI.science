@@ -5,7 +5,6 @@ import json
 import logging
 import re
 import secrets
-from datetime import datetime, timezone
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -504,30 +503,50 @@ async def _handle_instruction(
         else:
             # Legacy fallback: flag off → post guidance verbatim to the origin
             # public thread (same behavior as the web legacy path).
-            from slack_sdk import WebClient
+            from src.services.slack_tokens import slack_globally_enabled, token_for_agent_row
 
-            from src.services.slack_tokens import token_for_agent_row
+            # Slack off → write the guidance to the DB inbox on the origin thread
+            # instead of posting to Slack.
+            if not await slack_globally_enabled(db):
+                from src.services.pi_inbox import get_latest_run_id, record_pi_message
+                run_id = await get_latest_run_id(db)
+                if run_id:
+                    await record_pi_message(
+                        db, run_id=run_id, channel_name=td.channel,
+                        content=f"PI guidance from {user.name} (via email): {instruction}",
+                        sender_name=f"{user.name} (PI)", thread_ts=td.thread_id,
+                    )
+                    logger.info("Email guidance for %s written to DB inbox (Slack off)", td.thread_id)
+                    return True
+                logger.error("No simulation run to record email guidance for %s", td.thread_id)
+                return False
+
+            # The channel lookup goes through the boundary. It used to read a
+            # single 200-item page of the paginated conversations.list, so a
+            # workspace with more channels than that reported "Channel not found"
+            # for a channel that exists; list_channel_ids follows every cursor and
+            # raises rather than returning a subset.
+            #
+            # The post goes through it too, threaded: post_message takes thread_ts
+            # precisely so this caller does not need a raw client. It also splits
+            # at 4000 characters, which the raw call did not — a long emailed
+            # instruction was silently chunked by Slack.
+            from src.services.slack_web import list_channel_ids_async, post_message_async
+
             bot_token = token_for_agent_row(agent)
             if not bot_token:
                 logger.error("No bot token for agent %s", agent.agent_id)
                 return False
 
-            client = WebClient(token=bot_token)
-            channels_result = client.conversations_list(
-                types="public_channel,private_channel", limit=200
-            )
-            channel_id = None
-            for ch in channels_result.get("channels", []):
-                if ch["name"] == td.channel:
-                    channel_id = ch["id"]
-                    break
+            channel_id = (await list_channel_ids_async(bot_token)).get(td.channel)
             if not channel_id:
                 logger.error("Channel #%s not found for instruction posting", td.channel)
                 return False
 
-            client.chat_postMessage(
-                channel=channel_id,
-                text=f"*PI guidance from {user.name} (via email):*\n\n{instruction}",
+            await post_message_async(
+                bot_token,
+                channel_id,
+                f"*PI guidance from {user.name} (via email):*\n\n{instruction}",
                 thread_ts=td.thread_id,
             )
             logger.warning(

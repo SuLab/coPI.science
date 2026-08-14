@@ -63,10 +63,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 # Shared provisioning helpers (transport-only; no heavy deps so this stays
 # importable on the host). See src/services/slack_provisioning.py.
 from src.services.slack_provisioning import (
+    BOT_SCOPES,
     create_app,
     exchange_code,
-    lookup_team_id as _slack_lookup_team_id,
     rotate_config_token,
+)
+from src.services.slack_provisioning import (
+    lookup_team_id as _slack_lookup_team_id,
 )
 
 # ---------------------------------------------------------------------------
@@ -109,7 +112,7 @@ def load_roster() -> list[dict]:
     if not ROSTER_PATH.exists():
         raise RuntimeError(
             f"{ROSTER_PATH} not found. Generate it in the container first:\n"
-            f"  docker exec copi-python-app-1 python scripts/export_agent_roster.py"
+            f"  docker compose exec app python scripts/export_agent_roster.py"
         )
     roster = json.loads(ROSTER_PATH.read_text())
     return [r for r in roster if r.get("status") in PROVISIONABLE_STATUSES]
@@ -250,6 +253,13 @@ def main():
              "Auto-detected from an existing bot token if not provided.",
     )
     parser.add_argument(
+        "--omit-scope", action="append", default=[], metavar="AGENT_ID:SCOPE",
+        help="Create AGENT_ID's app without SCOPE. Repeatable. The scope set is fixed "
+             "at manifest time — Slack's consent screen has no per-scope choice — so "
+             "this is the only way to install a bot deliberately missing one. The live "
+             "tier needs it for wiseman: --omit-scope wiseman:groups:write",
+    )
+    parser.add_argument(
         "--only", nargs="+", metavar="AGENT_ID",
         help="Only provision these agent_id(s), e.g. --only good. "
              "Handy for testing the OAuth approval flow on a single bot.",
@@ -288,6 +298,14 @@ def main():
         if not lab.get("has_token") and lab["id"] not in tokenized
     ]
 
+    omit: dict[str, set[str]] = {}
+    for spec in args.omit_scope:
+        aid, _, scope = spec.partition(":")
+        if not aid or not scope:
+            console.print(f"[red]--omit-scope needs AGENT_ID:SCOPE, got {spec!r}[/red]")
+            raise SystemExit(2)
+        omit.setdefault(aid.lower(), set()).add(scope)
+
     if args.only:
         only = {a.lower() for a in args.only}
         unknown = only - {lab["id"].lower() for lab in roster}
@@ -320,15 +338,24 @@ def main():
     config_token = existing_env.get("SLACK_CONFIG_TOKEN", "").strip()
     refresh_token = existing_env.get("SLACK_CONFIG_REFRESH_TOKEN", "").strip()
 
-    if not config_token:
-        console.print("\n[bold red]SLACK_CONFIG_TOKEN is not set in .env[/bold red]")
+    # EITHER credential is enough. Requiring SLACK_CONFIG_TOKEN here was a bug: the
+    # rotation below derives a fresh access token from the refresh token and
+    # overwrites config_token unconditionally, so a refresh-token-only .env — the
+    # normal state after a rotation, since rotation replaces both — was rejected
+    # for want of a value the script was about to discard anyway.
+    if not config_token and not refresh_token:
+        console.print(
+            "\n[bold red]Neither SLACK_CONFIG_TOKEN nor SLACK_CONFIG_REFRESH_TOKEN "
+            "is set in .env[/bold red]"
+        )
         console.print(
             "  1. Open https://api.slack.com/apps in a browser\n"
             "  2. Click 'Your App Configuration Tokens'\n"
             "  3. Click 'Generate Token' for your workspace\n"
-            "  4. Copy the token (xoxe-...) and refresh token into .env:\n"
-            "       SLACK_CONFIG_TOKEN=xoxe-...\n"
-            "       SLACK_CONFIG_REFRESH_TOKEN=xoxe-...\n"
+            "  4. Copy BOTH values into .env. Note the prefixes differ:\n"
+            "       SLACK_CONFIG_TOKEN=xoxe.xoxp-...   (access token, ~12h life)\n"
+            "       SLACK_CONFIG_REFRESH_TOKEN=xoxe-1-...  (refresh token, single use)\n"
+            "  The refresh token alone is sufficient — it mints the access token.\n"
         )
         sys.exit(1)
 
@@ -341,6 +368,25 @@ def main():
             console.print("[green]Config token rotated and saved.[/green]")
         except Exception as exc:
             console.print(f"[yellow]Token rotation failed ({exc}); using existing token.[/yellow]")
+
+    # Rotation can fail with a still-empty config_token — a refresh token that was
+    # revoked, expired, or already spent (they are single use, so a value left in
+    # .env after someone rotated it elsewhere is dead). Stop here rather than
+    # calling apps.manifest.create with an empty Authorization header, which fails
+    # with an opaque Slack error that says nothing about the real cause.
+    if not config_token:
+        console.print(
+            "\n[bold red]No usable config token.[/bold red] The refresh token in "
+            f"{args.env_file} did not rotate, and SLACK_CONFIG_TOKEN is empty."
+        )
+        console.print(
+            "  Config refresh tokens are SINGLE USE: whoever rotated it last holds the\n"
+            "  only live one, and a copy left behind in .env is already dead.\n"
+            "  Generate a fresh pair at https://api.slack.com/apps -> "
+            "'Your App Configuration Tokens'\n"
+            "  and replace BOTH values in .env."
+        )
+        sys.exit(1)
 
     # -----------------------------------------------------------------------
     # 3. Start OAuth callback server (before app creation so URLs work immediately)
@@ -389,7 +435,14 @@ def main():
         failed_count = 0
         for i, lab in enumerate(missing):
             try:
-                app = create_app(config_token, lab["id"], lab["name"], lab["pi"], redirect_uri)
+                dropped = omit.get(lab["id"].lower(), set())
+                scopes = [x for x in BOT_SCOPES if x not in dropped] if dropped else None
+                if dropped:
+                    console.print(f"      [yellow]omitting scope(s) {sorted(dropped)} for {lab['id']}[/yellow]")
+                app = create_app(
+                    config_token, lab["id"], lab["name"], lab["pi"], redirect_uri,
+                    scopes=scopes,
+                )
                 created.append(app)
                 # Persist immediately (0600) so an interruption mid-run doesn't
                 # lose the client_secret we just minted.
@@ -437,12 +490,13 @@ def main():
     if done < total:
         outstanding = [a["bot_name"] for a in created if a["agent_id"] not in _CallbackHandler.received]
         console.print(f"[yellow]Still missing: {', '.join(outstanding)}[/yellow]")
-        console.print(f"Re-run with [bold]--skip-create[/bold] to retry without recreating the apps.")
+        console.print("Re-run with [bold]--skip-create[/bold] to retry without recreating the apps.")
     else:
         if STATE_FILE.exists():
             STATE_FILE.unlink()
-        console.print(f"[green]All done! Restart the agent container to pick up the new tokens.[/green]")
-        console.print("  docker rm -f agent-run")
+        console.print("[green]All done! Restart the agent container to pick up the new tokens.[/green]")
+        console.print("  docker stop -t 30 agent-run  # SIGTERM so the engine flushes")
+        console.print("  docker rm agent-run")
         console.print("  docker compose up -d --build app worker")
         console.print("  docker compose --profile agent run -d --name agent-run agent python -m src.agent.main --budget 0")
 

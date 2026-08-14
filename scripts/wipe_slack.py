@@ -14,19 +14,19 @@ legacy ``.env`` mapping as a fallback.
 
 Usage:
     # See what would be deleted (safe):
-    docker exec copi-python-opus-app-1 python3 scripts/wipe_slack.py \
+    docker compose exec app python3 scripts/wipe_slack.py \
         --workspace T0123ABCD --dry-run
 
     # Actually delete (asks for confirmation):
-    docker exec -it copi-python-opus-app-1 python3 scripts/wipe_slack.py \
+    docker compose exec app python3 scripts/wipe_slack.py \
         --workspace T0123ABCD
 
     # Non-interactive delete + reset memories:
-    docker exec copi-python-opus-app-1 python3 scripts/wipe_slack.py \
+    docker compose exec app python3 scripts/wipe_slack.py \
         --workspace T0123ABCD --yes --memory
 
     # Only reset working memories (no Slack access):
-    docker exec copi-python-opus-app-1 python3 scripts/wipe_slack.py --memory-only
+    docker compose exec app python3 scripts/wipe_slack.py --memory-only
 """
 
 import argparse

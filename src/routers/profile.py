@@ -68,7 +68,6 @@ async def profile_view(
             current_user,
             profile=profile,
             publications=publications,
-            pending_profile=profile.pending_profile if profile else None,
             just_completed_onboarding=onboarding_complete,
         ),
     )

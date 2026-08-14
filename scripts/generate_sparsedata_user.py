@@ -19,8 +19,8 @@ below the floor are audited but not persisted, so a human can review.
 
 Usage (runs inside the app container — needs DB + prompts + profiles):
 
-    docker cp scripts/generate_sparsedata_user.py copi-python-app-1:/app/scripts/
-    docker exec copi-python-app-1 python scripts/generate_sparsedata_user.py \\
+    docker compose cp scripts/generate_sparsedata_user.py app:/app/scripts/
+    docker compose exec app python scripts/generate_sparsedata_user.py \
         --file data/cohorts/newuserlist02.tsv --force
 
 Outputs:

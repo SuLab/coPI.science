@@ -14,7 +14,7 @@ GrantBot is independent of the simulation engine. It:
 import asyncio
 import json
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +29,8 @@ from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from src.agent.ids import WRITER_GRANTBOT, set_default_writer_id
+from src.agent.slack_client import SLACK_MAX_TEXT_CHARS, split_for_slack
 from src.config import get_settings
 from src.models import GrantbotPostedFoa
 from src.services.grants import fetch_opportunity_detail, list_posted_opportunities
@@ -139,7 +141,7 @@ def _parse_close_date(raw: str) -> datetime | None:
         return None
     for fmt in ("%m/%d/%Y", "%Y-%m-%d", "%Y/%m/%d"):
         try:
-            return datetime.strptime(raw, fmt).replace(tzinfo=timezone.utc)
+            return datetime.strptime(raw, fmt).replace(tzinfo=UTC)
         except ValueError:
             continue
     return None
@@ -154,6 +156,85 @@ def _has_sufficient_lead_time(close_date_raw: str, now: datetime, min_days: int)
     if cd is None:
         return True
     return cd >= now + timedelta(days=min_days)
+
+
+async def _post_funding_to_db(session: AsyncSession, channel_name: str, full_post: str) -> None:
+    """Write a GrantBot funding post to agent_messages (Slack-off path).
+
+    Authored by the 'grantbot' identity as a top-level post so agents scan it in
+    Phase 2 and can start funding threads (funding threads are open to all).
+    """
+    from src.agent.ids import mint_local_ts
+    from src.models import AgentMessage
+    from src.services.pi_inbox import get_latest_run_id
+
+    run_id = await get_latest_run_id(session)
+    if not run_id:
+        raise RuntimeError("No simulation run to post funding opportunity into")
+    ts = mint_local_ts()
+    session.add(AgentMessage(
+        simulation_run_id=run_id, agent_id="grantbot",
+        channel_id=f"local:{channel_name}", channel_name=channel_name,
+        message_ts=ts, phase="new_post", visibility="public",
+        content=full_post, sender_name="GrantBot", is_bot=True, posted_at=float(ts),
+    ))
+    await session.flush()
+
+
+async def _post_one_opportunity(
+    session: AsyncSession,
+    *,
+    channel: str,
+    full_post: str,
+    opp_num: str,
+    token: str | None = None,
+) -> list[dict[str, Any]]:
+    """Publish one FOA as N messages, none of them longer than Slack accepts.
+
+    Returns one record per message actually created, ``{"ts", "channel", "text"}``.
+
+    Slack does not reject an over-long ``chat_postMessage``: it splits the body itself and
+    returns only the *last* message's ts (measured live at >4000 characters). A caller
+    that posts an unsplit body therefore believes it published one message when the
+    workspace holds three, and it holds no id for two of them. GrantBot's bodies are
+    LLM-drafted and prefixed with a header, so their length is not something the call site
+    controls. Splitting here — via ``slack_web.post_message`` on the Slack branch and
+    ``split_for_slack`` on the DB branch — makes the count GrantBot reports, the count
+    Slack holds and the count the mirror stores the same number.
+
+    ``token=None`` is the Slack-off branch: the post goes straight into
+    ``agent_messages``, one row per chunk, because a single row holding a body Slack would
+    render as three messages is what breaks the bijection ``split_for_slack`` exists to
+    keep. On the Slack branch nothing is written here — the simulation's channel poller
+    already ingests GrantBot's Slack posts keyed by their Slack ts, and a row minted with
+    a local canonical id would not dedup against it.
+    """
+    if token is None:
+        chunks = split_for_slack(full_post, SLACK_MAX_TEXT_CHARS)
+        try:
+            for chunk in chunks:
+                await _post_funding_to_db(session, channel, chunk)
+        except Exception:
+            # Discard the chunks that did land before re-raising. Splitting opened this
+            # window: one FOA is now several rows, so a failure can land mid-post, and the
+            # caller's recovery — ``_release_foa`` — *commits*. Without this the fragment
+            # becomes permanent and the retry posts the whole FOA on top of it. The claim
+            # was committed by ``_claim_foa``, so rolling back cannot lose it.
+            await session.rollback()
+            raise
+        logger.info(
+            "Posted opportunity %s to #%s in %d message(s) (DB)",
+            opp_num, channel, len(chunks),
+        )
+        return [{"ts": None, "channel": channel, "text": c} for c in chunks]
+
+    from src.services.slack_web import post_message_async
+
+    posted = await post_message_async(token, f"#{channel}", full_post)
+    logger.info(
+        "Posted opportunity %s to #%s in %d message(s)", opp_num, channel, len(posted),
+    )
+    return posted
 
 
 async def _load_posted_numbers(session: AsyncSession) -> set[str]:
@@ -342,38 +423,40 @@ Respond in JSON format:
         return None
 
 
-def _ensure_channel_membership(slack_client, channel_names: set[str]) -> None:
-    """Join any public channels the bot isn't already a member of."""
-    try:
-        # Build a map of channel name -> id for all public channels
-        channel_map: dict[str, str] = {}
-        cursor = None
-        while True:
-            resp = slack_client.conversations_list(
-                types="public_channel",
-                exclude_archived=True,
-                limit=200,
-                cursor=cursor,
-            )
-            for ch in resp.get("channels", []):
-                channel_map[ch["name"]] = ch["id"]
-            cursor = resp.get("response_metadata", {}).get("next_cursor")
-            if not cursor:
-                break
+def _ensure_channel_membership(token: str, channel_names: set[str]) -> None:
+    """Join any public channels the bot isn't already a member of.
 
-        for name in channel_names:
-            clean_name = name.lstrip("#")
-            ch_id = channel_map.get(clean_name)
-            if not ch_id:
-                logger.warning("Channel #%s not found in workspace", clean_name)
-                continue
-            try:
-                slack_client.conversations_join(channel=ch_id)
-                logger.info("Joined #%s", clean_name)
-            except Exception as exc:
-                logger.warning("Could not join #%s: %s", clean_name, exc)
+    Goes through ``slack_web`` rather than a raw client so the listing is fully paginated
+    and every call is retried on a 429. The hand-rolled loop this replaces had neither: a
+    rate-limited ``conversations.list`` raised straight into the ``except`` below, which
+    logs a warning and returns, and GrantBot then posted to channels it had not joined.
+
+    ``exclude_archived=True`` is deliberate and differs from ``list_channel_ids``'s
+    default: this map feeds ``conversations_join``, and an archived channel cannot be
+    joined. Callers that only ask "does this name exist" must count archived channels,
+    because an archived channel still owns its name — hence the differing default.
+    """
+    from src.services.slack_web import join_channel, list_channel_ids
+
+    try:
+        channel_map = list_channel_ids(
+            token, include_private=False, exclude_archived=True
+        )
     except Exception as exc:
         logger.warning("Failed to list channels for auto-join: %s", exc)
+        return
+
+    for name in channel_names:
+        clean_name = name.lstrip("#")
+        ch_id = channel_map.get(clean_name)
+        if not ch_id:
+            logger.warning("Channel #%s not found in workspace", clean_name)
+            continue
+        try:
+            join_channel(token, ch_id)
+            logger.info("Joined #%s", clean_name)
+        except Exception as exc:
+            logger.warning("Could not join #%s: %s", clean_name, exc)
 
 
 async def run_grantbot(
@@ -429,7 +512,7 @@ async def _run_grantbot_with_session(
 
     # 2b. Drop FOAs with insufficient lead time — labs can't prepare a credible
     #     response for a deadline a few days out. See MIN_LEAD_DAYS.
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     short_lead: list[tuple[str, str]] = []
     kept: dict[str, dict] = {}
     for num, opp in all_opps.items():
@@ -456,7 +539,18 @@ async def _run_grantbot_with_session(
     logger.info("Selected %d opportunities for posting", len(selected_opps))
 
     # 4. Fetch details for selected opportunities
+    #
+    # The fallback to the search-shaped `opp` is deliberate — a post with no
+    # description beats no post. But it used to be SILENT, and that hid an
+    # upstream outage completely: measured 2026-08-04, grants.gov's detail
+    # backend answered every id with an outer "Webservice Succeeds" wrapping an
+    # inner "No response received ... at the backend server", so
+    # fetch_opportunity_detail returned None for 5/5 real ids. Search hits carry
+    # no description either, so every drafted post went to the LLM with an empty
+    # Description field and nothing said so. The tally below is what makes that
+    # visible rather than indistinguishable from a normal quiet run.
     detailed_opps = []
+    detail_misses = 0
     for num, opp in selected_opps.items():
         if opp.get("id"):
             try:
@@ -464,9 +558,19 @@ async def _run_grantbot_with_session(
                 if detail:
                     detailed_opps.append(detail)
                     continue
+                logger.warning("No detail returned for %s (id=%s)", num, opp["id"])
             except Exception as exc:
-                logger.debug("Detail fetch failed for %s: %s", num, exc)
+                logger.warning("Detail fetch failed for %s: %s", num, exc)
+        detail_misses += 1
         detailed_opps.append(opp)
+
+    if detail_misses and detailed_opps:
+        level = logger.error if detail_misses == len(detailed_opps) else logger.warning
+        level(
+            "Grants.gov detail unavailable for %d/%d opportunities — those posts are "
+            "drafted from title and agency alone, with no description",
+            detail_misses, len(detailed_opps),
+        )
 
     # 4b. Cache FOA details locally for agent access
     from src.agent.foa_cache import cache_foa
@@ -497,19 +601,32 @@ async def _run_grantbot_with_session(
 
     logger.info("Drafted %d posts, posting %d (max %d per channel)", len(drafted), len(to_post), max_per_channel)
 
-    # 6. Post to Slack (or dry-run)
+    # 6. Post to Slack, or (Slack off) write straight to the DB, or dry-run.
     posted_list: list[dict] = []
-    slack_client = None
+    # "" means no usable credential, which is a different case from Slack being off: the
+    # claim has to be released so a later run with a token can still post the FOA.
+    bot_token = ""
+    slack_on = False
 
     if not dry_run:
-        from slack_sdk import WebClient
-        bot_token = getattr(settings, "slack_bot_token_grantbot", "")
-        if not bot_token or bot_token.startswith("xoxb-placeholder"):
-            bot_token = settings.slack_bot_token_su
-            logger.info("No grantbot Slack token — using SuBot's token as fallback")
-        if bot_token and not bot_token.startswith("xoxb-placeholder"):
-            slack_client = WebClient(token=bot_token)
-            _ensure_channel_membership(slack_client, {item.get("channel", channel) for item in to_post})
+        from src.services.slack_tokens import slack_globally_enabled
+        slack_on = await slack_globally_enabled(session)
+        if slack_on:
+            candidate = getattr(settings, "slack_bot_token_grantbot", "")
+            if not candidate or candidate.startswith("xoxb-placeholder"):
+                candidate = settings.slack_bot_token_su
+                logger.info("No grantbot Slack token — using SuBot's token as fallback")
+            if candidate and not candidate.startswith("xoxb-placeholder"):
+                bot_token = candidate
+                # to_thread: the helper is sync and makes paginated Slack calls
+                # with backoff, and this caller is async. Run inline it would hold
+                # the event loop for the whole listing plus any retry.
+                await asyncio.to_thread(
+                    _ensure_channel_membership,
+                    bot_token, {item.get("channel", channel) for item in to_post},
+                )
+        else:
+            logger.info("Slack disabled — GrantBot posting funding opportunities to the DB")
 
     for item in to_post:
         opp = item["opportunity"]
@@ -536,15 +653,32 @@ async def _run_grantbot_with_session(
             logger.info("Skipping FOA %s — already claimed by another run", opp_num)
             continue
 
-        if not slack_client:
-            # No Slack client available (no token configured). Release the claim
-            # so a future run with credentials can post this FOA.
+        if not slack_on:
+            # Slack off — write the funding post straight to agent_messages so
+            # the sim scans it (funding threads are open to all). Keep the claim.
+            try:
+                await _post_one_opportunity(
+                    session, channel=target_channel, full_post=full_post,
+                    opp_num=opp_num,
+                )
+            except Exception as exc:
+                logger.error("Failed to persist %s to #%s: %s", opp_num, target_channel, exc)
+                await _release_foa(session, opp_num)
+                continue
+            posted_list.append({"number": opp_num, "title": title, "channel": target_channel})
+            continue
+
+        if not bot_token:
+            # Slack on but no usable token. Release the claim so a future run with
+            # credentials can post this FOA.
             await _release_foa(session, opp_num)
             continue
 
         try:
-            slack_client.chat_postMessage(channel=f"#{target_channel}", text=full_post)
-            logger.info("Posted opportunity %s to #%s", opp_num, target_channel)
+            await _post_one_opportunity(
+                session, channel=target_channel, full_post=full_post,
+                opp_num=opp_num, token=bot_token,
+            )
         except Exception as exc:
             logger.error("Failed to post %s to #%s: %s", opp_num, target_channel, exc)
             await _release_foa(session, opp_num)
@@ -565,7 +699,7 @@ LAST_RUN_FILE = Path("data/grantbot_last_run.txt")
 
 def _should_run_today() -> bool:
     """Return True if grantbot hasn't completed a run today (UTC)."""
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today = datetime.now(UTC).strftime("%Y-%m-%d")
     if LAST_RUN_FILE.exists():
         last_date = LAST_RUN_FILE.read_text(encoding="utf-8").strip()
         return last_date != today
@@ -575,7 +709,7 @@ def _should_run_today() -> bool:
 def _mark_run_complete() -> None:
     """Record that grantbot ran today."""
     LAST_RUN_FILE.parent.mkdir(parents=True, exist_ok=True)
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today = datetime.now(UTC).strftime("%Y-%m-%d")
     LAST_RUN_FILE.write_text(today, encoding="utf-8")
 
 
@@ -587,6 +721,7 @@ def main(
     max_per_channel: int = typer.Option(1, "--max-per-channel", help="Max opportunities to post per channel per run"),
 ):
     """Search for funding opportunities and post relevant ones to Slack."""
+    set_default_writer_id(WRITER_GRANTBOT)
     results = asyncio.run(run_grantbot(
         channel=channel,
         dry_run=dry_run,
@@ -618,10 +753,12 @@ def scheduler(
     """
     import time
 
+    # Claim this process's canonical-id writer slot before the first post (R1).
+    set_default_writer_id(WRITER_GRANTBOT)
     logger.info("GrantBot scheduler started (run_hour=%d UTC, check every %ds)", run_hour, check_interval)
 
     while True:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         if _should_run_today() and now.hour >= run_hour:
             logger.info("Running daily grant search...")
             try:

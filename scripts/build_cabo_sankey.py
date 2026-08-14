@@ -1,22 +1,22 @@
-"""Sankey funnel: top-level posts → threads → outcomes, for a simulation cohort.
+"""Sankey funnel: top-level posts → threads → outcomes, for one simulation run window.
 
 Pulls numbers live from Postgres so it can be re-run as the simulation
-progresses. Parameterized by cohort start date so it serves any cohort that
+progresses. Parameterized by window start date so it serves any run window that
 shares the single resumed simulation_run_id (date is the only way to isolate a
-cohort — see src/routers/public.py and memory project_reunion_cohort_boundary).
+window — see the window constants in src/routers/public.py).
 
 Run inside the app container (scripts/ isn't mounted — docker cp it in first):
-  docker cp scripts/build_cabo_sankey.py copi-python-app-1:/app/scripts/
+  docker compose cp scripts/build_cabo_sankey.py app:/app/scripts/
 
   # Cabo run (defaults):
-  docker exec copi-python-app-1 python scripts/build_cabo_sankey.py
+  docker compose exec app python scripts/build_cabo_sankey.py
 
-  # Schultz alumni reunion cohort:
-  docker exec copi-python-app-1 python scripts/build_cabo_sankey.py \
+  # Schultz alumni reunion window:
+  docker compose exec app python scripts/build_cabo_sankey.py \
       --start 2026-06-06 --out /app/data/schultz_viz --label "Schultz Alumni reunion run"
 
 Output (sankey.html + sankey.png) lands in --out inside the container; retrieve
-with `docker cp copi-python-app-1:/app/data/schultz_viz ./data/`.
+with `docker cp app:/app/data/schultz_viz ./data/`.
 """
 
 from __future__ import annotations
@@ -143,7 +143,7 @@ async def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--start", default=DEFAULT_START,
-                    help=f"Cohort start date (ISO, UTC). Default {DEFAULT_START}.")
+                    help=f"Run-window start date (ISO, UTC). Default {DEFAULT_START}.")
     ap.add_argument("--out", default=DEFAULT_OUT,
                     help=f"Output dir (inside container). Default {DEFAULT_OUT}.")
     ap.add_argument("--label", default=DEFAULT_LABEL,

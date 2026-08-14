@@ -1,0 +1,153 @@
+{% extends "base.html" %}
+{% block title %}Conversations — {{ agent.bot_name }} — CoPI{% endblock %}
+
+{% block content %}
+<div class="max-w-3xl mx-auto px-4 py-8">
+    <div class="mb-6 flex items-center justify-between">
+        <div>
+            <h1 class="text-2xl font-semibold text-gray-900">{{ agent.bot_name }} — Conversations</h1>
+            <p class="text-sm text-gray-500">Post a message into your agent's workspace. Your agent picks it up on its next turn.</p>
+        </div>
+        <a href="/agent/{{ agent.agent_id }}/dashboard" class="text-sm text-indigo-600 hover:underline">← Dashboard</a>
+    </div>
+
+    {% if posted %}
+    <div class="mb-4 rounded-md bg-green-50 border border-green-200 px-4 py-3 text-sm text-green-800">
+        Message posted. Your agent will see it on its next turn.
+    </div>
+    {% endif %}
+
+    {% if not has_run %}
+    <div class="mb-4 rounded-md bg-yellow-50 border border-yellow-200 px-4 py-3 text-sm text-yellow-800">
+        No simulation run exists yet — there's nowhere to post. Once a run starts you can message your agent here.
+    </div>
+    {% endif %}
+
+    <!-- Post form -->
+    <form method="post" action="/agent/{{ agent.agent_id }}/message" class="mb-8 rounded-lg border border-gray-200 bg-white p-4 shadow-sm">
+        <div class="flex gap-3 mb-3">
+            <label class="text-sm text-gray-700">
+                Channel
+                <select name="channel_name" class="mt-1 block rounded-md border-gray-300 text-sm">
+                    {% for ch in channels %}
+                    <option value="{{ ch }}">#{{ ch }}</option>
+                    {% endfor %}
+                </select>
+            </label>
+            <label class="text-sm text-gray-700 flex items-center gap-2 mt-6">
+                <input type="checkbox" name="tag_bot" value="1" class="rounded border-gray-300">
+                Address {{ agent.bot_name }} directly
+            </label>
+        </div>
+        <textarea name="content" rows="3" required placeholder="Write a message to your agent's workspace…"
+                  class="block w-full rounded-md border-gray-300 text-sm"></textarea>
+        <input type="hidden" name="thread_ts" value="">
+        <div class="mt-3 text-right">
+            <button type="submit" {% if not has_run %}disabled{% endif %}
+                    class="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50">
+                Post message
+            </button>
+        </div>
+    </form>
+
+    <!-- Direct messages with your bot -->
+    <div class="mb-8 rounded-lg border border-gray-200 bg-white p-4 shadow-sm">
+        <h2 class="text-lg font-semibold text-gray-900 mb-2">Direct messages</h2>
+        <p class="text-xs text-gray-500 mb-3">Send a standing instruction ("always…", "never…") or a question. Your bot handles it like a Slack DM.</p>
+        {% if dms %}
+        <div class="space-y-2 mb-3 max-h-64 overflow-y-auto">
+            {% for d in dms %}
+            <div class="text-sm {% if d.direction == 'inbound' %}text-right{% endif %}">
+                <span class="inline-block rounded-lg px-3 py-2 {% if d.direction == 'inbound' %}bg-indigo-100 text-indigo-900{% else %}bg-gray-100 text-gray-800{% endif %} whitespace-pre-wrap">{{ d.content }}</span>
+            </div>
+            {% endfor %}
+        </div>
+        {% endif %}
+        <form method="post" action="/agent/{{ agent.agent_id }}/dm" class="flex gap-2">
+            <input type="text" name="content" required placeholder="Message {{ agent.bot_name }}…"
+                   class="flex-1 rounded-md border-gray-300 text-sm">
+            <button type="submit" {% if not has_run %}disabled{% endif %}
+                    class="rounded-md bg-gray-800 px-4 py-2 text-sm font-medium text-white hover:bg-gray-900 disabled:opacity-50">Send</button>
+        </form>
+    </div>
+
+    <!-- Recent activity -->
+    <h2 class="text-lg font-semibold text-gray-900 mb-3">Recent activity</h2>
+    {% if messages %}
+    <div class="space-y-3">
+        {% for m in messages %}
+        <div class="rounded-lg border {% if not m.is_bot %}border-indigo-200 bg-indigo-50{% else %}border-gray-200 bg-white{% endif %} p-3 shadow-sm">
+            <div class="flex items-center justify-between text-xs text-gray-500 mb-1">
+                <span class="font-medium text-gray-700">{{ m.sender }}{% if not m.is_bot %} · PI{% endif %}</span>
+                <span>#{{ m.channel }}</span>
+            </div>
+            <div class="text-sm text-gray-800 whitespace-pre-wrap">{{ m.content }}</div>
+            {% if m.reply_count and m.message_ts %}
+            <a href="/agent/{{ agent.agent_id }}/thread/{{ m.message_ts }}"
+               data-thread-expand
+               data-thread-ts="{{ m.message_ts }}"
+               aria-expanded="false"
+               aria-controls="thread-replies-{{ m.message_ts }}"
+               class="mt-2 inline-block text-xs font-medium text-indigo-600 hover:text-indigo-800">
+                Show {{ m.reply_count }} {% if m.reply_count == 1 %}reply{% else %}replies{% endif %}
+            </a>
+            <div class="thread-replies hidden" id="thread-replies-{{ m.message_ts }}" data-thread-for="{{ m.message_ts }}"></div>
+            {% endif %}
+        </div>
+        {% endfor %}
+    </div>
+    {% else %}
+    <p class="text-sm text-gray-500">No messages yet in your agent's channels.</p>
+    {% endif %}
+</div>
+
+<script>
+// Threads load on demand: the page ships roots plus a gated reply count, and the
+// replies fragment is fetched once per thread and cached in the DOM thereafter.
+// Server-rendered HTML, so there is no client-side templating to keep in sync.
+//
+// The expander is a real <a href> (progressive enhancement): without JS it still
+// navigates to the fragment endpoint on its own page. With JS, the click is
+// intercepted and the fragment is fetched and injected in place instead.
+document.addEventListener('DOMContentLoaded', function() {
+    document.querySelectorAll('[data-thread-expand]').forEach(function(link) {
+        var ts = link.getAttribute('data-thread-ts');
+        var panel = document.querySelector('[data-thread-for="' + CSS.escape(ts) + '"]');
+        if (!panel) { return; }
+        var labelShown = link.textContent.trim().replace(/^Show/, 'Hide');
+        var labelHidden = link.textContent.trim();
+        link.addEventListener('click', function(e) {
+            e.preventDefault();
+            if (panel.dataset.loaded === '1') {
+                panel.classList.toggle('hidden');
+                var nowShown = !panel.classList.contains('hidden');
+                link.textContent = nowShown ? labelShown : labelHidden;
+                link.setAttribute('aria-expanded', nowShown ? 'true' : 'false');
+                return;
+            }
+            if (link.dataset.fetching === '1') { return; }  // ignore a double-click mid-flight
+            link.dataset.fetching = '1';
+            fetch(link.getAttribute('href'), { credentials: 'same-origin' })
+                .then(function(r) {
+                    if (!r.ok) { throw new Error('HTTP ' + r.status); }
+                    return r.text();
+                })
+                .then(function(html) {
+                    panel.innerHTML = html;
+                    panel.dataset.loaded = '1';
+                    panel.classList.remove('hidden');
+                    link.textContent = labelShown;
+                    link.setAttribute('aria-expanded', 'true');
+                })
+                .catch(function() {
+                    panel.innerHTML = '<p class="mt-2 pl-3 text-xs text-red-600">Could not load replies.</p>';
+                    panel.classList.remove('hidden');
+                })
+                .finally(function() {
+                    delete link.dataset.fetching;
+                });
+        });
+    });
+});
+</script>
+{% endblock %}

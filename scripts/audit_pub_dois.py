@@ -19,15 +19,15 @@ Categories:
 
 Usage (runs inside the app container — needs DB + network):
     # Audit everyone (report only):
-    docker exec copi-python-app-1 python scripts/audit_pub_dois.py
+    docker compose exec app python scripts/audit_pub_dois.py
 
     # Audit + fix specific users by ORCID:
-    docker exec copi-python-app-1 python scripts/audit_pub_dois.py \\
+    docker compose exec app python scripts/audit_pub_dois.py \
         --orcids 0000-0000-0000-0001 --fix
 
     # Audit + fix specific agents, or everyone:
-    docker exec copi-python-app-1 python scripts/audit_pub_dois.py --agents liu bollong --fix
-    docker exec copi-python-app-1 python scripts/audit_pub_dois.py --fix
+    docker compose exec app python scripts/audit_pub_dois.py --agents liu bollong --fix
+    docker compose exec app python scripts/audit_pub_dois.py --fix
 """
 
 from __future__ import annotations

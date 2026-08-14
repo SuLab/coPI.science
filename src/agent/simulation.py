@@ -7,14 +7,12 @@ import random
 import re
 import time
 import uuid
-from datetime import datetime, timezone
-from pathlib import Path
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from src.agent.agent import PROFILES_DIR, Agent
 from src.agent.channels import SEEDED_CHANNELS
 from src.agent.foa_cache import extract_foa_number, format_foa_for_prompt
-from src.agent.prompt_safety import delimit
 from src.agent.funding_rules import (
     format_funding_thread_summary,
     format_your_prior_messages,
@@ -22,13 +20,24 @@ from src.agent.funding_rules import (
     is_announcement_only_funding_reply,
     summarize_funding_thread,
 )
+from src.agent.ids import WRITER_ENGINE, TsMinter
 from src.agent.message_log import LogEntry, MessageLog, is_funding_post
-from src.agent.slack_client import ThreadNotFound
+from src.agent.prompt_safety import delimit
+from src.agent.roles import load_role
+from src.agent.slack_client import SlackListingIncomplete, ThreadNotFound
 from src.agent.state import PostRef, ProposalRef, ThreadState
-from src.agent.tools import TOOL_DEFINITIONS, execute_tool
+from src.agent.tools import execute_tool, tools_for_role
 from src.config import get_settings
-from src.models import AgentMessage, LlmCallLog, ProposalReview, SimulationRun, ThreadDecision
+from src.models import (
+    AgentChannel,
+    AgentMessage,
+    LlmCallLog,
+    ProposalReview,
+    SimulationRun,
+    ThreadDecision,
+)
 from src.models.agent_activity import VISIBILITY_COLLAB_PRIVATE, VISIBILITY_PUBLIC
+from src.services.cohorts import compute_gates, summarise_gates
 from src.services.llm import (
     generate_agent_response,
     generate_with_tools,
@@ -75,6 +84,32 @@ def _strip_reopen_prefix(comment: str) -> str:
     return comment
 
 
+def _restored_slack_ts(row: AgentMessage) -> str | None:
+    """Slack ts for a restored ``agent_messages`` row, or None if it has none.
+
+    Restoring this mapping is what lets ``_slack_parent_ts`` tell a Slack-backed
+    thread from a DB-origin one after a restart. The column is the only evidence:
+    a NULL means the message is not on Slack.
+
+    This used to *infer* a missing mapping — "a row stored against a real Slack
+    ``channel_id`` was born on Slack, so its canonical id is its Slack ts" — to
+    cover pre-Stage-6 rows written before the mapping was recorded. That
+    inference is unsound, because a DB-origin message can also carry a real Slack
+    channel id: a PI message written through the web inbox resolves ``channel_id``
+    from the ``agent_channels`` row (Slack's id when Slack is on), and so does an
+    agent post whose Slack mirror failed. Both mint a *local* canonical id, and
+    inferring turns that id into a Slack ts Slack never issued — which
+    ``_slack_parent_ts`` then hands to ``chat.postMessage`` as a ``thread_ts``,
+    producing an orphan post, a ``ThreadNotFound`` and an evicted thread. Nothing
+    in the row distinguishes the two cases, so the guess is now refused.
+
+    Legacy rows are repaired by ``scripts/backfill_slack_ts.py``, a one-time pass
+    that asks Slack which timestamps actually exist rather than assuming. Run it
+    before deploying this change on a workspace with pre-Stage-6 history.
+    """
+    return row.slack_ts
+
+
 # Keywords for channel-profile matching
 _CHANNEL_KEYWORDS: dict[str, list[str]] = {
     "drug-repurposing": [
@@ -106,6 +141,56 @@ CHANNEL_POLL_INTERVAL = 15.0   # seconds between conversations.history sweeps
 PROPOSAL_POLL_INTERVAL = 30.0  # seconds between conversations.replies sweeps
 ROSTER_POLL_INTERVAL = 30.0    # seconds between AgentRegistry roster re-syncs
 
+# How often to log the reactive:proactive selection split. Starvation under the
+# reactive-priority tier should be observable, not inferred.
+# See .notes/cohort-system-v2.md §10.3.
+SELECTION_RATIO_LOG_EVERY = 100
+
+# Distinguishes "role has no cached rate yet" from "role's cached rate is None
+# (no override)". A plain dict.get() default cannot tell those apart, so the
+# cache would re-read role.toml from disk on every tick for every default role.
+_UNSET = object()
+
+# The DB inbox pollers bound their query to recent rows for performance, but the
+# timestamp is stamped at row *creation*, not commit. A row written by another
+# process (a PI web message) can therefore become visible only after this process
+# has already advanced its cursor past that timestamp — a read-committed
+# visibility race that would silently, permanently skip the row (PR #19 review
+# H2). To close it, the pollers query a lookback window behind the cursor and
+# dedup by identity (the message log for channels, a seen-set for DMs), so a
+# late-committing row is re-queried within the window and ingested exactly once.
+# Polls are LLM-paced, so the re-scan is cheap; the window is sized far above any
+# realistic write-to-commit latency.
+#
+# The cursor axis is ``created_at``, not ``posted_at`` (R3). posted_at derives
+# from the *writing process's* clock (it is float(minted ts)), so a cursor over it
+# only works while every writer's clock agrees with the engine's to within this
+# window — true on one host, not guaranteed across hosts, and a skewed writer's
+# messages would be dropped silently and forever. created_at is
+# ``server_default=now()``, i.e. stamped by the single Postgres server, so the
+# window depends on one clock only. posted_at remains the *ordering* key for
+# conversation content; it is just no longer the delivery cursor.
+PI_INBOX_LOOKBACK_S = 300.0
+PI_INBOX_LOOKBACK = timedelta(seconds=PI_INBOX_LOOKBACK_S)
+
+# Cursor value meaning "nothing seen yet" — every real created_at sorts after it.
+EPOCH_UTC = datetime.fromtimestamp(0, tz=UTC)
+
+# The run's total_messages / total_api_calls are cosmetic counters shown in the
+# admin UI. Recomputing total_messages with a full COUNT(*) on every flush is
+# wasteful once a run accumulates many rows (B1), so refresh the run-stats row at
+# most this often (a final refresh is forced on shutdown). The message rows
+# themselves are still upserted every flush.
+RUN_STATS_UPDATE_INTERVAL = 30.0
+
+# Startup rebuild window (B2): the MessageLog is hydrated with messages from the
+# last REBUILD_WINDOW_S plus the full history of any still-undecided thread, so
+# RAM/startup cost grows with recent + live volume rather than all-time history.
+# Old *closed* threads are left in the DB and hydrated on demand if a PI reopens
+# one (see _hydrate_thread_from_db). Sized to comfortably cover any active
+# conversation's lifetime.
+REBUILD_WINDOW_S = 14 * 24 * 3600  # 14 days
+
 # Agents exempt from the unreviewed-proposal Phase-5 block — they keep making
 # new posts no matter how many of their proposals are awaiting review. Scoped to
 # SchultzBot (the reunion host) so he stays active without a human reviewer.
@@ -124,10 +209,16 @@ class SimulationEngine:
         agents: list[Agent],
         slack_clients: dict,  # agent_id -> AgentSlackClient
         max_runtime_minutes: int = 60,
-        budget_cap: int = 50,
+        # 0 = off, matching the --budget CLI default and _turn_eligible's
+        # docstring. A nonzero default silently armed the DEPRECATED cumulative
+        # cap for every caller that omitted the kwarg (tests, backfill scripts),
+        # i.e. it re-created the permanent bench this branch exists to remove.
+        # The live throttle is the sliding window (_within_rate_limit).
+        budget_cap: int = 0,
         session_factory=None,
         simulation_run_id: uuid.UUID | None = None,
         reset_cursors: bool = False,
+        slack_enabled: bool = True,
     ):
         self.agents = {a.agent_id: a for a in agents}
         self.slack_clients = slack_clients
@@ -136,6 +227,13 @@ class SimulationEngine:
         self.session_factory = session_factory
         self.simulation_run_id = simulation_run_id
         self._reset_cursors = reset_cursors
+        # When False, the local DB is the sole conversation store and no Slack
+        # API calls are made (transports are NullTransport). Drives the roster
+        # gate and the DB inbox poller. See specs/local-db-conversations.md.
+        self.slack_enabled = slack_enabled
+
+        # role name -> calls_per_load_per_window override (or None). See _calls_per_load.
+        self._role_rate_cache: dict[str, int | None] = {}
 
         self._start_time: datetime | None = None
         self._running = False
@@ -204,6 +302,31 @@ class SimulationEngine:
         # back-to-back LLM calls when it's the only active agent.
         self._last_llm_caller: str | None = None
 
+        # Count of consecutive turns granted to the reactive tier (agents that
+        # owe a thread reply). Reset when a proactive turn is taken. Bounds how
+        # long owed-reply draining can starve new-conversation formation. See
+        # _select_agent and settings.max_consecutive_reactive_turns.
+        self._reactive_streak: int = 0
+        # Running reactive/proactive selection tallies. Logged every
+        # SELECTION_RATIO_LOG_EVERY selections so starvation is observable rather
+        # than inferred. See .notes/cohort-system-v2.md §10.3.
+        self._reactive_selections: int = 0
+        self._proactive_selections: int = 0
+
+        # --- Cohort gate bookkeeping (.notes/cohort-system-v2.md) -------------
+        # True once a recompute has actually applied a gate to at least one agent.
+        self._cohort_gate_active: bool = False
+        # Set to the preflight refusal reason while isolation is being forced off
+        # (§5.3); None when clean. Surfaced on /admin/cohorts.
+        self._cohort_preflight_error: str | None = None
+        # Last logged (cohorts, memberships, gated, isolated) signature, so the
+        # per-resync INFO line fires on change rather than every 30s.
+        self._cohort_log_signature: tuple | None = None
+        # Per-agent count of outbound @mentions stripped because the target was
+        # outside the sender's cohort (§9). Exposed in the admin UI: a high rate
+        # means the topology disagrees with what the agents want to do.
+        self._cohort_tags_stripped: dict[str, int] = {}
+
         # Wall-clock throttles for Slack pollers + round-robin cursor over
         # connected clients, so one agent's token doesn't carry all poll load.
         self._last_channel_poll: float = 0.0
@@ -212,6 +335,43 @@ class SimulationEngine:
         # Last wall-clock time the AgentRegistry roster was re-synced (live
         # add/remove of agents as their status flips). See _sync_roster_from_db.
         self._last_roster_poll: float = 0.0
+
+        # DB persistence buffer for the message log. MessageLog.append fires a
+        # sync callback that enqueues here; _flush_persisted() batch-writes to
+        # agent_messages once per main-loop tick. This makes the DB the primary
+        # conversation store. See specs/local-db-conversations.md.
+        self._pending_persist: list[LogEntry] = []
+        # Monotonic ts-shaped id minter, seeded at DB rebuild. Owns the engine's
+        # writer slot so its ids can never collide with the web app's or
+        # GrantBot's, which mint into the same agent_messages table from other
+        # processes (R1). See mint_ts and src/agent/ids.py.
+        self._ts_minter = TsMinter(WRITER_ENGINE)
+        # High-water mark (created_at — the DB server's clock, not any writer's;
+        # see PI_INBOX_LOOKBACK_S / R3) for the DB inbound poller: the Slack-
+        # independent path by which messages written by other processes (PI web
+        # interface, private-channel handover) enter the simulation. See
+        # _poll_inbound_from_db.
+        self._pi_inbox_cursor: datetime = EPOCH_UTC
+        # Slack ts values already represented in the DB (canonical id may differ
+        # if a DB-origin message was later mirrored to Slack). Lets the Slack
+        # reconcile skip a message it already has. See _rebuild_state_from_slack.
+        self._known_slack_ts: set[str] = set()
+        # High-water mark (created_at) for the DB DM inbox poller (Slack-off /
+        # web PI DMs). See _poll_pi_dms_from_db.
+        self._pi_dm_cursor: datetime = EPOCH_UTC
+        # Identity dedup for the DM poller's lookback re-scan (ts -> created_at),
+        # so a DM is processed exactly once even though the query re-scans a
+        # window behind the cursor (H2). Pruned to the lookback window each poll.
+        self._pi_dm_seen: dict[str, datetime] = {}
+        # Wall-clock of the last cosmetic run-stats refresh (total_messages /
+        # total_api_calls), throttled to RUN_STATS_UPDATE_INTERVAL. See
+        # _flush_persisted (B1).
+        self._last_run_stats_update: float = 0.0
+        # Set by request_stop() (the signal handler's sync entry point) to both
+        # end the main loop and cut short an in-progress idle-backoff sleep, so
+        # the final flush happens well inside the container's stop grace period.
+        # See _sleep / request_stop (R2).
+        self._stop_event = asyncio.Event()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -223,13 +383,78 @@ class SimulationEngine:
             return True  # run forever (until SIGTERM)
         if not self._start_time:
             return True
-        elapsed = (datetime.now(timezone.utc) - self._start_time).total_seconds()
+        elapsed = (datetime.now(UTC) - self._start_time).total_seconds()
         return elapsed < self.max_runtime_minutes * 60
 
     def _agent_within_budget(self, agent: Agent) -> bool:
         if self.budget_cap <= 0:
             return True  # unlimited
         return agent.api_call_count < self.budget_cap
+
+    def _agent_load(self, agent: Agent) -> int:
+        """Concurrent conversational obligations for one agent.
+
+        The shared signal behind BOTH the rate allowance (``_within_rate_limit``)
+        and the selection weight (``_select_agent``). Deriving both from one
+        number is the point: the failure this fixes was the limiter and the
+        scheduler holding contradictory views of what a hub deserves — the
+        reactive tier gave the blackbird hub a 7x boost while the cumulative cap
+        benched it for 161 consecutive turns, and the cap won, silently. See
+        docs/specs/2026-08-06-hub-budget-scheduler-design.md §1.4.
+
+        Floors at 1 so an idle agent stays eligible. Ceilings at
+        ``active_thread_threshold`` so nothing can inflate its own allowance past
+        the thread cap it is already bound by — that clamp is what stops a
+        thread-opening runaway from financing itself (§4.1).
+        """
+        live = sum(
+            1 for t in agent.state.active_threads.values() if t.status == "active"
+        )
+        return max(1, min(live, get_settings().active_thread_threshold))
+
+    def _calls_per_load(self, agent: Agent) -> int:
+        """Per-unit-of-load LLM allowance for this agent's role.
+
+        Cached by role NAME, so an agent flipping roles at runtime simply looks
+        up a different key and needs no invalidation. The only staleness is a
+        role.toml edited mid-run, which matches get_settings() already being
+        lru_cached — both need a container recreate (design §5).
+
+        The cache exists because load_role() reads TOML from disk on every call
+        and this runs for every agent on every scheduler tick.
+        """
+        cached = self._role_rate_cache.get(agent.role, _UNSET)
+        if cached is _UNSET:
+            cached = load_role(agent.role).calls_per_load_per_window
+            self._role_rate_cache[agent.role] = cached
+        if cached is not None:
+            return cached
+        return get_settings().llm_calls_per_load_per_window
+
+    def _within_rate_limit(self, agent: Agent, now: float) -> bool:
+        """Sliding-window LLM rate check — the LIVE throttle.
+
+        allowance = _calls_per_load(agent) * _agent_load(agent), over
+        llm_rate_window_seconds. Unlike the cumulative cap this replaces, it
+        self-heals: entries age out, so an agent throttled now is eligible later.
+        See design §4.2.
+        """
+        allowance = self._calls_per_load(agent) * self._agent_load(agent)
+        window_start = now - get_settings().llm_rate_window_seconds
+        times = agent.state.call_times
+        while times and times[0] < window_start:
+            times.popleft()
+        ok = len(times) < allowance
+        if not ok and not agent.state.throttled:
+            logger.warning(
+                "[%s] throttled: %d LLM calls in the last %ds at load %d "
+                "(allowance %d). Eligible again as the window slides.",
+                agent.agent_id, len(times),
+                get_settings().llm_rate_window_seconds,
+                self._agent_load(agent), allowance,
+            )
+        agent.state.throttled = not ok
+        return ok
 
     def _non_funding_thread_count(self, agent: Agent) -> int:
         """Count active threads that are NOT funding-related."""
@@ -260,7 +485,7 @@ class SimulationEngine:
 
     async def start(self) -> None:
         """Run the full simulation."""
-        self._start_time = datetime.now(timezone.utc)
+        self._start_time = datetime.now(UTC)
         self._running = True
         settings = get_settings()
 
@@ -271,20 +496,43 @@ class SimulationEngine:
 
         # Setup
         self._ensure_seeded_channels()
+        await self._persist_seeded_channels()
         # Load any collab_private channels created via the web-UI reopen flow
         # BEFORE rebuilding state so the rebuild's history-fetch loop covers
         # them too — otherwise the handover message wouldn't land in the
         # message log until the first per-turn poll tick.
         await self._sync_private_channels_from_db()
-        self._build_lab_directories()
         await self._load_pi_mappings()
+        # The DB is the primary conversation store. Register the persist hook,
+        # hydrate the log from the DB, then (only when Slack is connected)
+        # reconcile with Slack history, and finally reconstruct per-agent state
+        # from the combined log. This whole sequence runs with Slack fully off.
+        self.message_log.set_persist_callback(self._enqueue_persist)
+        await self._rebuild_state_from_db()
         await self._rebuild_state_from_slack()
+        await self._rebuild_agent_state()
+        await self._seed_pi_dm_cursor()
         # Rebuild advanced last_seen_cursor to max(all_messages), which can
         # overshoot messages in private channels (typically older than the
         # latest public chatter). Rewind member-bot cursors so Phase 2 can
         # still scan the handover and any subsequent private-channel activity.
         self._rewind_cursors_for_private_channels()
         set_call_log_callback(self._on_llm_call)
+
+        # Compute the cohort gate BEFORE the first turn. The rebuild above is
+        # deliberately gate-blind (it populates the log and state that every agent
+        # shares), so on a resumed run this is where cross-cohort threads inherited
+        # from the previous process get grandfathered and stale banked posts get
+        # pruned. The loop's roster sync would also reach it (_last_roster_poll
+        # starts at 0.0), but doing it here means no turn can ever run with an
+        # unset gate while isolation is on. See .notes/cohort-system-v2.md §8.
+        await self._recompute_allowed_sender_ids()
+        # AFTER the gate, never before: the filter inside reads
+        # agent.allowed_sender_ids, which is None until the line above runs.
+        self.refresh_lab_directories()
+        # Record which topology this run actually started with, so the run's output
+        # stays attributable to its configuration (v2 §13.1).
+        await self._record_topology_snapshot()
 
         # Backfill FOA cache for any previously posted opportunities
         await self._backfill_foa_cache()
@@ -297,16 +545,87 @@ class SimulationEngine:
             pi_slack_id_to_agent_ids=self._pi_slack_id_to_agent_ids,
             message_log=self.message_log,
             session_factory=self.session_factory,
+            simulation_run_id=self.simulation_run_id,
         )
 
-        # Main loop
+        await self._run_main_loop()
+
+    # ------------------------------------------------------------------
+    # Main loop
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _idle_backoff(streak: int) -> int:
+        """Seconds to wait after ``streak`` consecutive unproductive ticks.
+
+        One definition shared by the three places that back off — the
+        no-eligible-agent stall, the back-to-back-caller skip, and the idle turn
+        — so a tick that does no work always costs the same wall time whichever
+        way it came up empty.
+        """
+        if streak <= 3:
+            return 5
+        if streak <= 10:
+            return 15
+        return 30
+
+    def _terminal_stall_reason(self) -> str | None:
+        """Why an empty selection should END the run — or None when it is transient.
+
+        ``_select_agent()`` returning None used to break the loop unconditionally.
+        Under the sliding-window limiter that is wrong and actively dangerous:
+        both remaining live gates LAPSE WITH TIME. ``_within_rate_limit`` expires
+        entries as the window slides, and the per-agent ``turn_delay_seconds``
+        cooldown expires by the clock. Breaking on either turns "one agent is
+        benched for a while" into "the container exits and stays exited" — a
+        strictly worse failure than the one this branch was written to fix, and
+        one that bites every roster small enough for aggregate demand to reach
+        aggregate allowance (e.g. 7 token-holding agents at 8 calls/600s).
+
+        Only two conditions can never recover on their own:
+
+        - an EMPTY ROSTER — nothing will ever become eligible;
+        - the LEGACY cumulative ``--budget`` cap, armed (> 0) and blown by EVERY
+          agent. ``api_call_count`` only ever increases within a process, and
+          ``_rebuild_state_from_db`` restores it across restarts, so this one
+          really is permanent. It is also opt-in and deprecated (design §6).
+
+        ``max_runtime`` and SIGTERM still end the run through the loop condition;
+        this predicate is only about the selection stall.
+        """
+        if not self.agents:
+            return "the roster is empty"
+        if self.budget_cap > 0 and all(
+            not self._agent_within_budget(a) for a in self.agents.values()
+        ):
+            return (
+                f"every agent is over the legacy --budget cap ({self.budget_cap})"
+            )
+        return None
+
+    async def _run_main_loop(self) -> None:
+        """Poll inbound sources, select an agent, run its turn — until stopped.
+
+        Split out of ``start()`` so the scheduling contract (in particular
+        ``_terminal_stall_reason``) is reachable from a unit test without
+        standing up the whole startup sequence.
+        """
         turn_count = 0
         consecutive_idle = 0
         while self._running and self.is_within_time_limit:
-            # Poll Slack for PI messages (channels, DMs, and proposal threads)
+            # Poll Slack for PI messages (channels, DMs, and proposal threads).
+            # No-ops when Slack is off (NullTransport / no connected clients).
             await self._poll_slack_for_pi_messages()
             await self._poll_pi_dms()
             await self._poll_proposal_threads_for_pi()
+
+            # DB-native inbound path: messages written by other processes (PI
+            # web interface, private-channel handover). Runs regardless of Slack,
+            # and is how PIs interact when Slack is off.
+            await self._poll_inbound_from_db()
+            # DB-native PI DM processing (Slack DMs recorded by _poll_pi_dms and
+            # web DMs both converge here).
+            await self._poll_pi_dms_from_db()
 
             # Sync proposal reviews and any newly-created private channels from
             # the web app. Both are DB-driven, so a single tick picks them up.
@@ -322,10 +641,27 @@ class SimulationEngine:
 
             # Select agent
             agent = self._select_agent()
-            if not agent or not self._agent_within_budget(agent):
-                # All agents over budget
-                logger.info("All agents over budget or no agent selected. Stopping.")
-                break
+            if agent is None:
+                # No agent is currently eligible. Throttling and the per-agent
+                # cooldown both lapse with time, so this is normally TRANSIENT:
+                # back off and retry rather than ending the run. Only
+                # _terminal_stall_reason's two permanent cases stop the loop.
+                reason = self._terminal_stall_reason()
+                if reason is not None:
+                    logger.info("No eligible agent: %s. Stopping.", reason)
+                    break
+                consecutive_idle += 1
+                delay = self._idle_backoff(consecutive_idle)
+                logger.info(
+                    "No eligible agent (all throttled or cooling down) — "
+                    "retrying in %ds. Transient: the rate window slides and "
+                    "per-agent cooldowns expire. (stall streak: %d)",
+                    delay, consecutive_idle,
+                )
+                # The sleep is what keeps this a backoff rather than a hot spin,
+                # and it returns early on SIGTERM so shutdown stays prompt.
+                await self._sleep(delay)
+                continue
 
             # Prevent the same agent from making back-to-back LLM calls.
             # If this agent was the last to make an LLM call, skip its turn
@@ -333,17 +669,12 @@ class SimulationEngine:
             if self._last_llm_caller == agent.agent_id:
                 agent.state.last_selected = time.time()
                 consecutive_idle += 1
-                if consecutive_idle <= 3:
-                    delay = 5
-                elif consecutive_idle <= 10:
-                    delay = 15
-                else:
-                    delay = 30
+                delay = self._idle_backoff(consecutive_idle)
                 logger.debug(
                     "[%s] Skipped: was last LLM caller (idle backoff: %ds)",
                     agent.agent_id, delay,
                 )
-                await asyncio.sleep(delay)
+                await self._sleep(delay)
                 continue
 
             logger.info("=== Turn %d: %s ===", turn_count + 1, agent.agent_id)
@@ -376,27 +707,59 @@ class SimulationEngine:
                 consecutive_idle += 1
 
             if consecutive_idle > 0:
-                if consecutive_idle <= 3:
-                    delay = 5
-                elif consecutive_idle <= 10:
-                    delay = 15
-                else:
-                    delay = 30
+                delay = self._idle_backoff(consecutive_idle)
                 logger.debug("Idle backoff: %ds (idle streak: %d)", delay, consecutive_idle)
-                await asyncio.sleep(delay)
-            elif settings.turn_delay_seconds > 0:
-                await asyncio.sleep(settings.turn_delay_seconds)
+                await self._sleep(delay)
+            # turn_delay_seconds is NOT slept on here. It is a *per-agent* tempo
+            # throttle, enforced at selection time in _turn_eligible: the agent that
+            # just ran becomes ineligible for the delay while every other agent
+            # stays selectable. Sleeping the loop instead stalled Slack polling, DB
+            # ingestion and every other agent for one agent's cooldown.
+            # See .notes/cohort-system-v2.md §10.3.
 
-            # Flush LLM logs periodically
+            # Flush buffered message-log entries + LLM logs periodically
+            await self._flush_persisted()
             if self._llm_log_buffer:
                 await self._flush_llm_logs()
 
         logger.info("Main loop exited after %d turns", turn_count)
 
-    async def stop(self) -> None:
-        """Stop the simulation gracefully."""
+    def request_stop(self) -> None:
+        """Ask the main loop to exit — safe to call from a signal handler.
+
+        Deliberately does no I/O: it only flips the flag and wakes any in-flight
+        idle-backoff sleep. The flush is done by ``stop()`` on the main
+        coroutine's own path (see src/agent/main.py), so it can be awaited to
+        completion rather than left in a fire-and-forget task that the
+        interpreter may cancel at shutdown (R2).
+        """
         self._running = False
+        self._stop_event.set()
+
+    async def _sleep(self, delay: float) -> None:
+        """Sleep for ``delay`` seconds, returning early once a stop is requested.
+
+        The idle backoff sleeps up to 30 s; a plain ``asyncio.sleep`` there would
+        burn most of the container's (default 10 s) stop grace period before the
+        loop noticed SIGTERM, and the final flush would never run (R2).
+        """
+        if self._stop_event.is_set():
+            return
+        try:
+            await asyncio.wait_for(self._stop_event.wait(), timeout=delay)
+        except TimeoutError:
+            pass
+
+    async def stop(self) -> None:
+        """Stop the simulation and durably flush everything still buffered.
+
+        Awaited from the entry point's finally-block so a graceful shutdown
+        cannot lose the in-flight turn's messages. Idempotent.
+        """
+        self._running = False
+        self._stop_event.set()
         set_call_log_callback(None)
+        await self._flush_persisted(force_stats=True)
         await self._flush_llm_logs()
         logger.info("Simulation stopping...")
 
@@ -404,28 +767,146 @@ class SimulationEngine:
     # Agent selection (weighted random)
     # ------------------------------------------------------------------
 
-    def _select_agent(self) -> Agent | None:
-        """Weighted random selection: P(agent) ∝ (now - agent.last_selected).
+    def _owes_reply(self, agent: Agent) -> bool:
+        """True if the agent has an active thread with a new reply from the other
+        party that it hasn't answered yet.
 
-        Agents with consecutive Phase 5 skips get a weight penalty:
-        weight is divided by 2^(skips - 2) once skips >= 3.
+        This is the scheduler-visible signal that drives reactive priority: an
+        agent that owes a reply should be selected ahead of the staleness-weighted
+        proactive pool, so 1:1 conversations conclude promptly rather than waiting
+        for a random re-selection. Reuses the same primitive Phase 4 uses.
+
+        Two cohort rules apply here and nowhere else (v2 §8):
+
+        - **Grandfathered threads are skipped.** A thread whose partner has left the
+          cohort still gets answered by Phase 4 so it can conclude, but it must not
+          jump the queue ahead of gate-compliant work. Without this the gate and the
+          scheduler contradict each other and the scheduler wins.
+        - **The remaining threads are read through the agent's gate.** Threads are
+          not always two-party — a funding thread is open to all
+          (``get_thread_allowed_agents`` returns None) — so a non-cohort third party
+          posting into an otherwise legal thread would otherwise manufacture
+          reactive priority for a sender the agent is not supposed to act on.
         """
+        cursor = agent.state.last_seen_cursor
+        for thread in agent.state.active_threads.values():
+            if thread.status != "active":
+                continue
+            if thread.grandfathered:
+                continue
+            if thread.has_pending_reply or self.message_log.has_new_reply_from_other(
+                thread.thread_id, agent.agent_id, cursor,
+                allowed_sender_ids=agent.allowed_sender_ids,
+            ):
+                return True
+        return False
+
+    def _turn_eligible(self, agent: Agent, now: float) -> bool:
+        """Selection eligibility for one agent.
+
+        - within the LEGACY cumulative cap. Inert by default (``budget_cap``
+          defaults to 0, and ``_agent_within_budget`` short-circuits at <= 0);
+          armed only when an operator passes ``--budget``. Retained, not removed,
+          for back-compat — see design §6;
+        - within its sliding-window rate limit. This is the live throttle;
+        - past its per-agent cooldown. ``turn_delay_seconds`` throttles an
+          individual agent's tempo; enforcing it here (rather than as a global
+          ``asyncio.sleep`` after every productive turn) leaves the rest of the
+          roster free to act while one agent sits out. See v2 §10.3.
+        """
+        if not self._agent_within_budget(agent):
+            # Ordering is deliberate and must not change: the legacy cap decides
+            # eligibility first (that is what keeps the --budget compat tests
+            # meaningful). But short-circuiting here also froze
+            # ``state.throttled``, so with --budget armed an agent's next genuine
+            # throttle transition logged nothing. Evaluate the window check for
+            # its SIDE EFFECT (expire old entries, refresh the flag, emit the
+            # one-shot warning) and discard the result — eligibility is still
+            # decided by the cap alone.
+            self._within_rate_limit(agent, now)
+            return False
+        if not self._within_rate_limit(agent, now):
+            return False
+        delay = get_settings().turn_delay_seconds
+        if delay > 0 and (now - agent.state.last_selected) < delay:
+            return False
+        return True
+
+    def _select_agent(self) -> Agent | None:
+        """Select the next agent to take a turn (sequential — one at a time).
+
+        Two tiers:
+        1. **Reactive** — agents that owe a thread reply are chosen first
+           (oldest-waiting), so an in-flight 1:1 conversation drains one message
+           per turn instead of waiting on random re-selection. The just-called
+           agent (`_last_llm_caller`) is excluded so the A→B→A→B baton alternates
+           without a wasted skip-tick. A fairness valve
+           (`max_consecutive_reactive_turns`, default 3) forces a proactive turn
+           after a run of reactive ones so new-conversation formation isn't
+           starved — at the original default of 8, a single live pair took 24 of
+           27 turns. See .notes/cohort-system-v2.md §10.3.
+        2. **Proactive** — staleness-weighted random, scaled by load:
+           P(agent) ∝ (now - last_selected) * _agent_load(agent), with a penalty
+           for agents that have repeatedly skipped Phase 5
+           (weight /= 2^(skips-2) once skips >= 3). The load factor is what makes
+           a star's hub — one endpoint of every conversation — draw a share that
+           tracks the edges it actually sits on, instead of the 1/N a uniform
+           weighting gave it. See design §4.3.
+
+        Both tiers draw from the same eligibility pool (`_turn_eligible`): budget
+        plus the per-agent `turn_delay_seconds` cooldown.
+        """
+        settings = get_settings()
         now = time.time()
-        candidates = [
-            a for a in self.agents.values()
-            if self._agent_within_budget(a)
-        ]
+        candidates = [a for a in self.agents.values() if self._turn_eligible(a, now)]
         if not candidates:
             return None
 
+        # --- Reactive tier: drain owed replies fast ------------------------
+        if self._reactive_streak < settings.max_consecutive_reactive_turns:
+            owed = [
+                a for a in candidates
+                if a.agent_id != self._last_llm_caller and self._owes_reply(a)
+            ]
+            if owed:
+                self._reactive_streak += 1
+                self._reactive_selections += 1
+                self._log_selection_ratio()
+                # Weighted by load, NOT bare last_selected. The hub is selected
+                # often, so its last_selected is always recent — under
+                # min(last_selected) it lost every tiebreak to a long-idle spoke,
+                # i.e. it was penalised precisely for being the busiest agent.
+                # Still "longest wait wins", now scaled by obligation count.
+                # See design §1.3 / §4.3.
+                return max(
+                    owed,
+                    key=lambda a: (now - a.state.last_selected) * self._agent_load(a),
+                )
+
+        # --- Proactive tier: staleness-weighted random ---------------------
+        self._reactive_streak = 0
+        self._proactive_selections += 1
+        self._log_selection_ratio()
         weights = []
         for a in candidates:
-            w = max(now - a.state.last_selected, 1.0)
+            w = max(now - a.state.last_selected, 1.0) * self._agent_load(a)
             skips = a.state.consecutive_phase5_skips
             if skips >= 3:
                 w /= 2 ** (skips - 2)
             weights.append(w)
         return random.choices(candidates, weights=weights, k=1)[0]
+
+    def _log_selection_ratio(self) -> None:
+        """Log the reactive:proactive split every SELECTION_RATIO_LOG_EVERY picks."""
+        total = self._reactive_selections + self._proactive_selections
+        if total and total % SELECTION_RATIO_LOG_EVERY == 0:
+            logger.info(
+                "[sched] selections: %d reactive / %d proactive (%.0f%% reactive, "
+                "valve=%d)",
+                self._reactive_selections, self._proactive_selections,
+                100.0 * self._reactive_selections / total,
+                get_settings().max_consecutive_reactive_turns,
+            )
 
     # ------------------------------------------------------------------
     # Turn execution (5 phases)
@@ -525,6 +1006,7 @@ class SimulationEngine:
             since=agent.state.last_seen_cursor,
             channels=agent.state.subscribed_channels,
             exclude_agent_id=agent.agent_id,
+            allowed_sender_ids=agent.allowed_sender_ids,
         )
 
         # Exclude posts already in interesting_posts or active_threads
@@ -549,7 +1031,7 @@ class SimulationEngine:
 
         system_prompt, messages = agent.build_phase2_scan_prompt(post_dicts)
 
-        agent.api_call_count += 1
+        agent.record_api_call()
         try:
             response = await generate_agent_response(
                 system_prompt=system_prompt,
@@ -595,7 +1077,7 @@ class SimulationEngine:
         """Prune interesting_posts to ≤ cap."""
         system_prompt, messages = agent.build_phase2_prune_prompt()
 
-        agent.api_call_count += 1
+        agent.record_api_call()
         try:
             response = await generate_agent_response(
                 system_prompt=system_prompt,
@@ -636,7 +1118,9 @@ class SimulationEngine:
         cursor = agent.state.last_seen_cursor
 
         # Check for tags
-        tagged_entries = self.message_log.get_tags_for_agent(agent.bot_name, cursor)
+        tagged_entries = self.message_log.get_tags_for_agent(
+            agent.bot_name, cursor, allowed_sender_ids=agent.allowed_sender_ids
+        )
         for entry in tagged_entries:
             # Private channels are flat — no thread activation.
             if self._channel_visibility.get(entry.channel) == VISIBILITY_COLLAB_PRIVATE:
@@ -680,7 +1164,9 @@ class SimulationEngine:
                 )
 
         # Check for replies to agent's own top-level posts
-        reply_entries = self.message_log.get_replies_to_agent_posts(agent.agent_id, cursor)
+        reply_entries = self.message_log.get_replies_to_agent_posts(
+            agent.agent_id, cursor, allowed_sender_ids=agent.allowed_sender_ids
+        )
         for entry in reply_entries:
             # Private channels are flat — no thread activation.
             if self._channel_visibility.get(entry.channel) == VISIBILITY_COLLAB_PRIVATE:
@@ -740,9 +1226,16 @@ class SimulationEngine:
             # handle those flat.
             if self._channel_visibility.get(thread.channel) == VISIBILITY_COLLAB_PRIVATE:
                 continue
-            # Check if there's a new reply from the other agent
+            # Check if there's a new reply from the other agent. Read UNGATED
+            # (allowed_sender_ids=None) on purpose: this thread is already open, so
+            # it is entitled to conclude even if the partner has since dropped out
+            # of the cohort — abandoning it mid-flight would waste every call
+            # already spent on it, and thread participation rules already bound who
+            # may post here. What a grandfathered thread does NOT get is reactive
+            # *priority*; that is enforced in _owes_reply. See v2 §8.
             has_new = self.message_log.has_new_reply_from_other(
                 thread.thread_id, agent.agent_id, agent.state.last_seen_cursor,
+                allowed_sender_ids=None,
             )
             if has_new:
                 # Genuine new reply from the other agent — reset empty-response
@@ -849,14 +1342,16 @@ class SimulationEngine:
 
         # Create tool executor bound to this thread's state
         async def tool_executor(tool_name: str, tool_input: dict) -> str:
-            return await execute_tool(tool_name, tool_input, agent.agent_id, thread)
+            return await execute_tool(
+                tool_name, tool_input, agent.agent_id, thread, role=agent.role
+            )
 
-        agent.api_call_count += 1
+        agent.record_api_call()
         try:
             response_text = await generate_with_tools(
                 system_prompt=system_prompt,
                 messages=messages,
-                tools=TOOL_DEFINITIONS,
+                tools=tools_for_role(agent.role),
                 tool_executor=tool_executor,
                 model=settings.llm_agent_model_opus,
                 max_tokens=1500,
@@ -865,6 +1360,7 @@ class SimulationEngine:
                     "phase": "thread_reply",
                     "channel": thread.channel,
                 },
+                on_retry=agent.record_api_call,
             )
 
             # Extract message from <slack_message> tags, fall back to preamble stripping
@@ -910,17 +1406,23 @@ class SimulationEngine:
                     return
 
             # Post the reply
-            await self._post_message(
+            posted = await self._post_message(
                 agent.agent_id, thread.channel, response_text,
                 thread_ts=thread.thread_id,
             )
-            agent.message_count += 1
-            thread.has_pending_reply = False
-            thread.funding_reject_count = 0
-            thread.empty_response_count = 0
+            if not posted:
+                logger.info(
+                    "[%s] Suppressed post in #%s — not counted, nothing persisted",
+                    agent.agent_id, thread.channel,
+                )
+            else:
+                agent.message_count += 1
+                thread.has_pending_reply = False
+                thread.funding_reject_count = 0
+                thread.empty_response_count = 0
 
-            # Check for thread outcome
-            await self._check_thread_outcome(agent, thread, response_text)
+                # Check for thread outcome
+                await self._check_thread_outcome(agent, thread, response_text)
 
         except Exception as exc:
             logger.error(
@@ -1253,6 +1755,7 @@ class SimulationEngine:
             return
         try:
             from sqlalchemy import select as sa_select
+
             from src.models import AgentChannel, PrivateChannelMember
 
             async with self.session_factory() as db:
@@ -1306,7 +1809,7 @@ class SimulationEngine:
                     # Share channel name↔id with every client cache so post_message
                     # can resolve the name if one is passed.
                     for c in self.slack_clients.values():
-                        c._channel_name_to_id[ac.channel_name] = ac.channel_id
+                        c.cache_channel_ids({ac.channel_name: ac.channel_id})
 
             # Cursor rewind — scoped to the channels discovered in THIS pass.
             # A broad rewind across all known private channels would drag
@@ -1625,7 +2128,7 @@ class SimulationEngine:
         # Restore
         agent.state.interesting_posts = original_posts
 
-        agent.api_call_count += 1
+        agent.record_api_call()
         try:
             response = await generate_agent_response(
                 system_prompt=system_prompt,
@@ -1644,7 +2147,18 @@ class SimulationEngine:
                 logger.warning("[%s] Phase 5: Could not parse response", agent.agent_id)
                 return
 
-            action = action_data.get("action", "new_post")
+            # A missing `action` is an unparseable response, not a license to
+            # post something anyway — defaulting to "new_post" here is what lets
+            # a malformed action dict fall through into posting to #general with
+            # an empty post_type instead of being rejected outright.
+            action = action_data.get("action")
+            if not action:
+                logger.warning(
+                    "[%s] Phase 5: parsed JSON had no 'action' field — "
+                    "treating as unparseable",
+                    agent.agent_id,
+                )
+                return
             if action == "skip":
                 agent.state.consecutive_phase5_skips += 1
                 logger.info(
@@ -1710,6 +2224,12 @@ class SimulationEngine:
             if self._llm_log_buffer:
                 self._llm_log_buffer[-1]["channel"] = channel
 
+            # Cross-cohort mention stripping now happens in _post_message, which
+            # covers every outbound path instead of only this one. Phase 5 still
+            # needs the *cleaned* text locally, though: the tagged_agent decision
+            # and _check_private_channel_outcome below both read message_text.
+            message_text = self._strip_disallowed_tags(message_text, agent)
+
             if action == "reply" and target_post_id:
                 # Enforce thread participation rules
                 allowed = self.message_log.get_thread_allowed_agents(target_post_id)
@@ -1747,71 +2267,89 @@ class SimulationEngine:
                 )
 
                 if is_private_channel:
-                    await self._post_message(agent.agent_id, channel, message_text)
-                    agent.message_count += 1
-                    # Consume the interesting post (we acted on it) but do not
-                    # create an active_thread — private channels don't thread.
-                    agent.state.interesting_posts = [
-                        p for p in agent.state.interesting_posts
-                        if p.post_id != target_post_id
-                    ]
-                    logger.info(
-                        "[%s] Phase 5: Posted flat follow-up to %s in private #%s",
-                        agent.agent_id, target_post_id, channel,
-                    )
+                    posted = await self._post_message(agent.agent_id, channel, message_text)
+                    if not posted:
+                        logger.info(
+                            "[%s] Suppressed post in #%s — not counted, nothing persisted",
+                            agent.agent_id, channel,
+                        )
+                    else:
+                        agent.message_count += 1
+                        # Consume the interesting post (we acted on it) but do not
+                        # create an active_thread — private channels don't thread.
+                        agent.state.interesting_posts = [
+                            p for p in agent.state.interesting_posts
+                            if p.post_id != target_post_id
+                        ]
+                        logger.info(
+                            "[%s] Phase 5: Posted flat follow-up to %s in private #%s",
+                            agent.agent_id, target_post_id, channel,
+                        )
                 else:
                     # Reply to an interesting post → creates a new thread
-                    await self._post_message(
+                    posted = await self._post_message(
                         agent.agent_id, channel, message_text,
                         thread_ts=target_post_id,
                     )
-                    agent.message_count += 1
-
-                    # Move from interesting_posts to active_threads
-                    agent.state.interesting_posts = [
-                        p for p in agent.state.interesting_posts
-                        if p.post_id != target_post_id
-                    ]
-                    # Determine the other agent from the original post
-                    original_entry = self.message_log.get_entry(target_post_id)
-                    other_id = original_entry.sender_agent_id if original_entry else None
-                    if other_id:
-                        # Carry FOA number from the PostRef if this is a funding post
-                        post_foa = None
-                        for p in original_posts:
-                            if p.post_id == target_post_id:
-                                post_foa = p.foa_number
-                                break
-                        agent.state.active_threads[target_post_id] = ThreadState(
-                            thread_id=target_post_id,
-                            channel=channel,
-                            other_agent_id=other_id,
-                            message_count=2,  # original + this reply
-                            foa_number=post_foa,
+                    if not posted:
+                        logger.info(
+                            "[%s] Suppressed post in #%s — not counted, nothing persisted",
+                            agent.agent_id, channel,
                         )
+                    else:
+                        agent.message_count += 1
 
-                    logger.info(
-                        "[%s] Phase 5: Replied to post %s in #%s",
-                        agent.agent_id, target_post_id, channel,
-                    )
+                        # Move from interesting_posts to active_threads
+                        agent.state.interesting_posts = [
+                            p for p in agent.state.interesting_posts
+                            if p.post_id != target_post_id
+                        ]
+                        # Determine the other agent from the original post
+                        original_entry = self.message_log.get_entry(target_post_id)
+                        other_id = original_entry.sender_agent_id if original_entry else None
+                        if other_id:
+                            # Carry FOA number from the PostRef if this is a funding post
+                            post_foa = None
+                            for p in original_posts:
+                                if p.post_id == target_post_id:
+                                    post_foa = p.foa_number
+                                    break
+                            agent.state.active_threads[target_post_id] = ThreadState(
+                                thread_id=target_post_id,
+                                channel=channel,
+                                other_agent_id=other_id,
+                                message_count=2,  # original + this reply
+                                foa_number=post_foa,
+                            )
+
+                        logger.info(
+                            "[%s] Phase 5: Replied to post %s in #%s",
+                            agent.agent_id, target_post_id, channel,
+                        )
 
             else:
                 # New top-level post
-                await self._post_message(agent.agent_id, channel, message_text)
-                agent.message_count += 1
-
-                # Check if it tags another agent
-                tagged_agent = action_data.get("tagged_agent")
-                if tagged_agent:
+                posted = await self._post_message(agent.agent_id, channel, message_text)
+                if not posted:
                     logger.info(
-                        "[%s] Phase 5: New post in #%s tagging @%s",
-                        agent.agent_id, channel, tagged_agent,
-                    )
-                else:
-                    logger.info(
-                        "[%s] Phase 5: New post in #%s",
+                        "[%s] Suppressed post in #%s — not counted, nothing persisted",
                         agent.agent_id, channel,
                     )
+                else:
+                    agent.message_count += 1
+
+                    # Check if it tags another agent
+                    tagged_agent = action_data.get("tagged_agent")
+                    if tagged_agent:
+                        logger.info(
+                            "[%s] Phase 5: New post in #%s tagging @%s",
+                            agent.agent_id, channel, tagged_agent,
+                        )
+                    else:
+                        logger.info(
+                            "[%s] Phase 5: New post in #%s",
+                            agent.agent_id, channel,
+                        )
 
             # In a collab_private channel, a :memo: Summary + ✅ handshake
             # finalizes the refined proposal (the flat path has no
@@ -1824,6 +2362,78 @@ class SimulationEngine:
 
         except Exception as exc:
             logger.error("[%s] Phase 5 failed: %s", agent.agent_id, exc)
+
+    def _strip_disallowed_tags(self, message_text: str | None, agent: Agent) -> str | None:
+        """Remove @BotName mentions of non-cohort agents from an outbound message.
+
+        Defense-in-depth for the cohort gate: the receiving agent already filters
+        tags from non-cohort senders (Phase 3), but emitting a tag toward an agent
+        that will never respond leaves a dangling ask in the channel. No-op when
+        the gate is off for this agent (``allowed_sender_ids is None``).
+
+        Applied from ``_post_message``, so it covers **every** outbound path —
+        Phase 4 replies, Phase 5 posts, private-channel messages — rather than just
+        the one call site Phase 5 used to have.
+
+        Three deliberate behaviours (.notes/cohort-system-v2.md §9):
+
+        - The whole mention is removed and the surrounding whitespace normalised.
+          Keeping the bare name ("Great point WisemanBot") reads like an addressed
+          message that isn't one.
+        - An unknown bot name is left alone and logged at WARNING. A name missing
+          from ``_bot_name_to_id`` means the roster is lagging, which is an
+          operational problem, not a policy decision — fail open, loudly (§5.1).
+        - Self-mentions are never stripped.
+
+        Strips are counted per agent and surfaced in the admin UI: a high rate means
+        the cohort topology disagrees with what the agents are trying to do.
+        """
+        allowed = agent.allowed_sender_ids
+        if allowed is None or not message_text:
+            return message_text
+
+        stripped = 0
+
+        def _repl(m: "re.Match[str]") -> str:
+            nonlocal stripped
+            bot_name = m.group(1)
+            target_id = self._bot_name_to_id.get(bot_name.lower())
+            if target_id is None:
+                logger.warning(
+                    "[%s] cohort gate: unknown bot name @%s in outbound text — "
+                    "leaving the mention in place (roster may be lagging)",
+                    agent.agent_id, bot_name,
+                )
+                return m.group(0)
+            if target_id == agent.agent_id or target_id in allowed:
+                return m.group(0)
+            stripped += 1
+            logger.debug(
+                "[%s] cohort gate: stripped cross-cohort mention @%s",
+                agent.agent_id, bot_name,
+            )
+            return ""
+
+        # The pattern swallows any run of spaces/tabs immediately BEFORE the
+        # mention, so "Great point @CravattBot, shall we?" collapses cleanly to
+        # "Great point, shall we?" without a global reflow. The lookbehind requires
+        # the '@' to start a token, the way a real Slack mention does — without it,
+        # "a@subot.example" or a URL path ending in a bot name would be mangled, and
+        # this strip now runs on EVERY outbound message.
+        cleaned = re.sub(r"[ \t]*(?<![\w./@-])@(\w+[Bb]ot)\b", _repl, message_text)
+        if not stripped:
+            return message_text
+
+        self._cohort_tags_stripped[agent.agent_id] = (
+            self._cohort_tags_stripped.get(agent.agent_id, 0) + stripped
+        )
+        # Targeted tidy-up only. Deliberately NOT a global whitespace normalisation:
+        # stripping leading indentation would mangle the code blocks and bullet lists
+        # agents put in messages. Collapse interior runs only after a non-space, and
+        # trim end-of-line space; never touch line-leading whitespace.
+        cleaned = re.sub(r"(?<=\S)[ \t]{2,}", " ", cleaned)
+        cleaned = re.sub(r"(?m)[ \t]+$", "", cleaned)
+        return cleaned.lstrip(" \t") if cleaned[:1] in (" ", "\t") else cleaned
 
     def _parse_phase5_response(self, response: str) -> tuple[dict | None, str | None]:
         """Parse Phase 5 response into (json_data, message_text).
@@ -1938,6 +2548,13 @@ class SimulationEngine:
             oldest = self._poll_cursors.get(ch_id, "0")
             try:
                 messages = client.poll_channel_messages(ch_id, oldest=oldest)
+                # `msg["thread_ts"]` arrives normalised: Slack sets thread_ts == ts on
+                # a parent once it has replies, and the transport nulls that at ingest
+                # (slack_client.normalize_inbound_message). Copying it verbatim, as
+                # this loop used to, ingested a root as a reply to itself — and
+                # get_new_top_level_posts skips anything with a non-null thread_ts, so
+                # the post vanished from Phase 2 and _rebuild_state_from_db made it
+                # permanent. The rule now lives in exactly one place.
                 for msg in messages:
                     ts = msg.get("ts", "")
                     user_id = msg.get("user", "")
@@ -1964,6 +2581,18 @@ class SimulationEngine:
                             posted_at=float(ts) if ts else 0.0,
                             is_bot=True,
                             visibility=ch_visibility,
+                            # This message came *from* Slack, so record the mirror
+                            # mapping exactly as the human branch below does. Without
+                            # it the entry looks DB-origin, and _slack_parent_ts then
+                            # reports "no Slack root" for any thread rooted here —
+                            # silently keeping every reply off Slack. The roots this
+                            # branch ingests are another workspace bot's posts, i.e.
+                            # GrantBot's funding posts, whose threads are open to all
+                            # agents. Slack-origin ⇒ canonical id *is* the Slack ts,
+                            # so the thread parent needs no translation.
+                            slack_ts=ts or None,
+                            slack_channel_id=ch_id,
+                            slack_thread_ts=msg.get("thread_ts"),
                         )
                         if not self.message_log.get_entry(ts):
                             self.message_log.append(entry)
@@ -1984,6 +2613,11 @@ class SimulationEngine:
                         posted_at=float(ts) if ts else 0.0,
                         is_bot=False,
                         visibility=ch_visibility,
+                        slack_ts=ts or None,
+                        slack_channel_id=ch_id,
+                        # Slack-origin: the canonical id is the Slack ts, so the
+                        # thread parent is already a Slack ts.
+                        slack_thread_ts=msg.get("thread_ts"),
                     )
                     self.message_log.append(entry)
                     logger.info(
@@ -2028,6 +2662,105 @@ class SimulationEngine:
             except Exception as exc:
                 logger.debug("Polling error for #%s: %s", ch_name, exc)
 
+    async def _poll_inbound_from_db(self) -> None:
+        """Ingest messages written to the DB by other processes.
+
+        The DB is the primary store, so any message this process hasn't seen —
+        PI messages and bot-authored handover posts written by the web app, and
+        (later) the Slack mirror's inbound side — must be pulled into the live
+        MessageLog. Human/PI messages are additionally routed through PI handling
+        (proposal-review clearing, thread reopen, pi_context, @bot tags). Runs
+        every tick regardless of Slack. See specs/local-db-conversations.md.
+        """
+        if not self.session_factory or not self.simulation_run_id:
+            return
+        from sqlalchemy import select as sa_select
+        try:
+            async with self.session_factory() as db:
+                rows = (await db.execute(
+                    sa_select(AgentMessage)
+                    .where(
+                        AgentMessage.simulation_run_id == self.simulation_run_id,
+                        # Cursor over created_at (the DB server's clock), with a
+                        # lookback so a row that committed after the cursor
+                        # advanced past its stamp is still caught (H2). Re-scanned
+                        # rows are free — the log dedup below skips anything
+                        # already ingested. See PI_INBOX_LOOKBACK_S (H2 + R3).
+                        AgentMessage.created_at > self._pi_inbox_cursor - PI_INBOX_LOOKBACK,
+                    )
+                    # Ingest in the DB's arrival order; posted_at remains the
+                    # ordering key for the conversation content itself.
+                    .order_by(AgentMessage.created_at.asc())
+                )).scalars().all()
+        except Exception as exc:
+            logger.warning("Inbound DB poll failed: %s", exc)
+            return
+
+        for r in rows:
+            if r.created_at and r.created_at > self._pi_inbox_cursor:
+                self._pi_inbox_cursor = r.created_at
+            if not r.message_ts or self.message_log.get_entry(r.message_ts):
+                # Already known (the engine itself appended and flushed it, or a
+                # prior poll ingested it) — skip re-processing.
+                continue
+            entry = LogEntry(
+                ts=r.message_ts,
+                channel=r.channel_name,
+                sender_agent_id=r.agent_id,
+                sender_name=r.sender_name or ("PI" if not r.is_bot else r.agent_id or "bot"),
+                content=r.content or "",
+                thread_ts=r.thread_ts,
+                posted_at=r.posted_at or 0.0,
+                is_bot=r.is_bot,
+                visibility=r.visibility,
+            )
+            self.message_log.append(entry)
+            if r.is_bot:
+                logger.info("External bot message in #%s: %.60s", entry.channel, entry.content[:60])
+            else:
+                logger.info("PI (web) message in #%s: %.60s", entry.channel, entry.content[:60])
+                await self._handle_pi_inbound_entry(entry)
+
+    async def _handle_pi_inbound_entry(self, entry: LogEntry) -> None:
+        """Apply PI-message side effects, derived from the thread (no Slack map).
+
+        Clears pending-proposal blocks, reopens closed threads, sets pi_context
+        on active threads, and honors @bot tags — using the thread's own
+        participants rather than a Slack user→agent mapping, so it works with
+        Slack off.
+        """
+        # Clears any pending proposal on this thread (keyed purely by thread id).
+        self._check_pi_proposal_review(entry)
+
+        thread_ts = entry.thread_ts
+        if thread_ts:
+            # Reopen a closed thread for its participants.
+            if thread_ts in self._closed_thread_ids:
+                # Old closed threads may have been windowed out of the log at
+                # startup (B2) — pull the history back so participants resolve.
+                await self._hydrate_thread_from_db(thread_ts)
+                history = self.message_log.get_thread_history(thread_ts)
+                participants = [
+                    h.sender_agent_id for h in history
+                    if h.sender_agent_id and h.sender_agent_id in self.agents
+                ]
+                if participants:
+                    await self._reopen_thread(participants[0], thread_ts, entry)
+            else:
+                # Active thread → treat the PI message as authoritative context.
+                for agent in self.agents.values():
+                    thread = agent.state.active_threads.get(thread_ts)
+                    if thread:
+                        thread.pi_context = entry.content
+                        thread.has_pending_reply = True
+                        agent.state.has_pi_directive = True
+
+        # @bot tag → route to the tagged agent (same as the Slack path).
+        tagged_id = self.message_log._extract_tagged_agent(entry.content)
+        if tagged_id and tagged_id in self.agents and self._pi_handler:
+            self.agents[tagged_id].state.has_pi_directive = True
+            await self._pi_handler.handle_channel_tag(tagged_id, entry)
+
     def _check_pi_proposal_review(self, entry: LogEntry) -> None:
         """Check if a PI message clears a pending proposal for any agent."""
         thread_ts = entry.thread_ts
@@ -2050,6 +2783,10 @@ class SimulationEngine:
         if not agent:
             return
 
+        # An old closed thread may have been windowed out of the log at startup
+        # (B2); pull its history so the other-agent lookup and reply budget below
+        # see the real conversation.
+        await self._hydrate_thread_from_db(thread_ts)
         # Find the other agent from thread history
         history = self.message_log.get_thread_history(thread_ts)
         other_id = None
@@ -2089,12 +2826,20 @@ class SimulationEngine:
         logger.info("[%s] PI reopened closed thread %s with %s", agent_id, thread_ts, other_id)
 
     async def _poll_pi_dms(self) -> None:
-        """Poll for DMs from PIs and process them via PIHandler."""
-        if not self._pi_handler or not self._pi_slack_id_to_agent_ids:
+        """Poll Slack for PI DMs and record them as inbound rows.
+
+        Processing is unified through the DB: this method only persists inbound
+        Slack DMs to pi_dm_messages; _poll_pi_dms_from_db is the single place
+        that runs them through PIHandler (so Slack and web DMs are handled
+        identically and never double-processed). See specs/local-db-conversations.md.
+        """
+        if not self._pi_slack_id_to_agent_ids or not self.session_factory or not self.simulation_run_id:
             return
 
         # Default cursor to simulation start time — only process DMs sent after we started
         default_cursor = str(self._start_time.timestamp()) if self._start_time else "0"
+
+        from src.services.pi_inbox import record_pi_dm
 
         for pi_slack_id, agent_ids in self._pi_slack_id_to_agent_ids.items():
             for agent_id in agent_ids:
@@ -2110,25 +2855,112 @@ class SimulationEngine:
                     text = msg.get("text", "").strip()
                     if not text:
                         continue
-
                     logger.info("[%s] PI DM from %s: %s", agent_id, pi_slack_id, text[:80])
-
                     try:
-                        await self._pi_handler.handle_dm(agent_id, pi_slack_id, text)
-                        # PI DMs deliberately do not update public working memory:
-                        # standing instructions are persisted to the private profile
-                        # by _handle_standing_instruction; other DM categories are
-                        # handled in-band. has_pi_directive still flips so Phase 5
-                        # runs this turn.
-                        agent = self.agents.get(agent_id)
-                        if agent:
-                            agent.state.has_pi_directive = True
+                        async with self.session_factory() as db:
+                            await record_pi_dm(
+                                db, run_id=self.simulation_run_id, agent_id=agent_id,
+                                pi_user_id=pi_slack_id, direction="inbound", content=text,
+                                sender_name="PI", slack_ts=ts or None,
+                            )
+                            await db.commit()
                     except Exception as exc:
-                        logger.error("[%s] Failed to handle PI DM: %s", agent_id, exc, exc_info=True)
-
-                    # Update cursor to this message
+                        logger.error("[%s] Failed to record PI DM: %s", agent_id, exc)
                     if ts > oldest:
                         self._dm_poll_cursors[agent_id] = ts
+
+    async def _seed_pi_dm_cursor(self) -> None:
+        """Start the DM poller past existing inbound DMs (don't replay history).
+
+        Seeds both the cursor (max created_at — the DB server's clock, see R3)
+        and the seen-set (ts of inbound DMs within the lookback window), so the
+        first poll's lookback re-scan doesn't re-process history through
+        handle_dm on restart.
+        """
+        if not self.session_factory or not self.simulation_run_id:
+            return
+        from sqlalchemy import func as sa_func
+        from sqlalchemy import select as sa_select
+
+        from src.models import PiDmMessage
+        try:
+            async with self.session_factory() as db:
+                mx = (await db.execute(
+                    sa_select(sa_func.max(PiDmMessage.created_at)).where(
+                        PiDmMessage.simulation_run_id == self.simulation_run_id,
+                        PiDmMessage.direction == "inbound",
+                    )
+                )).scalar_one_or_none()
+                if mx:
+                    self._pi_dm_cursor = max(self._pi_dm_cursor, mx)
+                    seen = (await db.execute(
+                        sa_select(PiDmMessage.ts, PiDmMessage.created_at).where(
+                            PiDmMessage.simulation_run_id == self.simulation_run_id,
+                            PiDmMessage.direction == "inbound",
+                            PiDmMessage.created_at > self._pi_dm_cursor - PI_INBOX_LOOKBACK,
+                        )
+                    )).all()
+                    for ts, created_at in seen:
+                        if ts:
+                            self._pi_dm_seen[ts] = created_at or EPOCH_UTC
+        except Exception as exc:
+            logger.warning("PI DM cursor seed failed: %s", exc)
+
+    async def _poll_pi_dms_from_db(self) -> None:
+        """Process inbound PI DMs recorded in the DB (Slack or web-originated).
+
+        The single processor for PI DMs: reads new inbound pi_dm_messages rows
+        and runs each through PIHandler.handle_dm (classify → standing
+        instruction / feedback / question), then flips has_pi_directive so
+        Phase 5 runs. Works with Slack off. See specs/local-db-conversations.md.
+        """
+        if not self._pi_handler or not self.session_factory or not self.simulation_run_id:
+            return
+        from sqlalchemy import select as sa_select
+
+        from src.models import PiDmMessage
+        floor = self._pi_dm_cursor - PI_INBOX_LOOKBACK
+        try:
+            async with self.session_factory() as db:
+                rows = (await db.execute(
+                    sa_select(PiDmMessage)
+                    .where(
+                        PiDmMessage.simulation_run_id == self.simulation_run_id,
+                        PiDmMessage.direction == "inbound",
+                        # Lookback + seen-set dedup below, mirroring the channel
+                        # poller, so a late-committing DM row isn't skipped (H2).
+                        # created_at, not posted_at, so the window doesn't depend
+                        # on the writing process's clock (R3).
+                        PiDmMessage.created_at > floor,
+                    )
+                    .order_by(PiDmMessage.created_at.asc())
+                )).scalars().all()
+        except Exception as exc:
+            logger.warning("PI DM inbox poll failed: %s", exc)
+            return
+
+        for r in rows:
+            if r.created_at and r.created_at > self._pi_dm_cursor:
+                self._pi_dm_cursor = r.created_at
+            if r.ts and r.ts in self._pi_dm_seen:
+                continue  # already processed (lookback re-scan)
+            if r.agent_id not in self.agents:
+                continue
+            if r.ts:
+                self._pi_dm_seen[r.ts] = r.created_at or EPOCH_UTC
+            try:
+                await self._pi_handler.handle_dm(r.agent_id, r.pi_user_id, r.content)
+                self.agents[r.agent_id].state.has_pi_directive = True
+            except Exception as exc:
+                logger.error("[%s] Failed to handle PI DM (DB): %s", r.agent_id, exc)
+
+        # Prune the seen-set to the lookback window — anything at or below the new
+        # floor won't be re-queried, so it no longer needs tracking.
+        prune_floor = self._pi_dm_cursor - PI_INBOX_LOOKBACK
+        if self._pi_dm_seen:
+            self._pi_dm_seen = {
+                ts: ca for ts, ca in self._pi_dm_seen.items() if ca > prune_floor
+            }
 
     async def _poll_proposal_threads_for_pi(self) -> None:
         """Poll unreviewed proposal threads for PI replies.
@@ -2220,6 +3052,11 @@ class SimulationEngine:
                     thread_ts=thread_id,
                     posted_at=float(ts) if ts else 0.0,
                     is_bot=False,
+                    slack_ts=ts or None,
+                    slack_channel_id=ch_id,
+                    # Slack-origin (polled from a Slack proposal thread), so the
+                    # canonical thread id is already the Slack parent ts.
+                    slack_thread_ts=thread_id,
                 )
 
                 # Avoid re-processing messages already in the log
@@ -2249,64 +3086,206 @@ class SimulationEngine:
     # Message posting
     # ------------------------------------------------------------------
 
+    def mint_ts(self) -> str:
+        """Return a monotonic, unique, ts-shaped id (decimal seconds string).
+
+        The canonical message/channel id when there is no Slack ts (Slack-off,
+        or a DB-origin message). Monotonicity preserves the posted_at=float(ts)
+        ordering the engine relies on; the minter's high-water mark is seeded from
+        the rebuild's max(posted_at) so new ids always sort after restored
+        history. Uniqueness is what makes the idempotent MessageLog.append safe,
+        and it holds across processes too: this minter owns the engine's writer
+        slot, disjoint from the web app's and GrantBot's (R1).
+        See src/agent/ids.py and specs/local-db-conversations.md.
+        """
+        return self._ts_minter.mint()
+
     async def _post_message(
         self,
         agent_id: str,
         channel: str,
         text: str,
         thread_ts: str | None = None,
-    ) -> None:
-        """Post a message to Slack and record it in the message log + DB."""
+    ) -> bool:
+        """Post a message to Slack and record it in the message log + DB.
+
+        Returns whether a message was actually recorded — ``False`` when the
+        text stripped to nothing, or the reply's parent thread was found to be
+        deleted. In either case nothing was posted and no log entry was written,
+        so a caller must not count the turn, clear backoff state, or move posts
+        between ``interesting_posts`` and ``active_threads``.
+        """
         # Final safety: strip any leaked <slack_message> tags
         text = re.sub(r"</?slack_message>", "", text).strip()
+
+        # A truncated response can strip to nothing — the whole body may have been
+        # tags. Slack rejects empty text anyway, but bailing here also matters for
+        # what happens *after* posting: without this guard _post_message still
+        # mints a ts and writes a LogEntry with content="" and slack_ts=None — a DB
+        # row with no corresponding Slack message, breaking the
+        # row-count-matches-Slack-message-count invariant documented below — and the
+        # caller still counts the turn as published even though nothing went out.
+        # Return before any of that: no Slack call, no minted ts, no log entry.
+        if not text:
+            logger.warning(
+                "[%s] Suppressed a post to #%s: text was empty after stripping the "
+                "slack_message tags — likely a truncated response with no real body.",
+                agent_id, channel,
+            )
+            return False
 
         client = self.slack_clients.get(agent_id)
         agent = self.agents.get(agent_id)
 
-        result = None
-        if client and client.is_connected:
+        # Cohort gate, outbound side. Placed here rather than in a phase so it
+        # covers every caller — Phase 4 replies, Phase 5 posts, private-channel
+        # messages — and cannot be bypassed by a new call site. Idempotent, so the
+        # extra Phase 5 pass (which needs the cleaned text locally) is harmless.
+        # No-op when the gate is off for this agent. See v2 §9.
+        if agent is not None:
+            text = self._strip_disallowed_tags(text, agent) or text
+
+        # Slack threads on the *root's Slack ts*, which equals the canonical
+        # thread_ts only when the root was born on Slack. A thread started
+        # Slack-off has a minted root id — passing that to Slack detaches the
+        # reply or errors — so such a reply is kept DB-only rather than mirrored.
+        slack_parent = self._slack_parent_ts(thread_ts)
+        can_mirror = thread_ts is None or slack_parent is not None
+
+        result: dict | None = None
+        if client and client.is_connected and not can_mirror:
+            logger.warning(
+                "[%s] Not mirroring reply to #%s: thread %s has no Slack root "
+                "(started with Slack off). The message is still recorded in the DB.",
+                agent_id, channel, thread_ts,
+            )
+        elif client and client.is_connected:
             try:
-                result = client.post_message(channel, text, thread_ts=thread_ts)
+                result = client.post_message(channel, text, thread_ts=slack_parent)
             except ThreadNotFound:
                 # Parent was deleted. post_message already cleaned up the
                 # orphan top-level post on Slack. Purge the dead thread_ts
-                # from state so no one replies to it again.
+                # from state so no one replies to it again. Keyed by the
+                # canonical id, which is what the engine's state uses.
                 if thread_ts:
                     self._evict_dead_thread(thread_ts)
                 logger.warning(
                     "[%s] Skipped reply to deleted thread %s in #%s",
                     agent_id, thread_ts, channel,
                 )
-                return
+                return False
         else:
             logger.info("[%s] MOCK post to #%s: %s...", agent_id, channel, text[:60])
 
-        ts = result.get("ts", str(time.time())) if result else str(time.time())
+        # One log entry per message that really exists on the transport. Normally
+        # that is one; it is several when the text was over Slack's 4000-character
+        # per-message limit and the client split it (see
+        # AgentSlackClient.post_message). Recording a single row for a post Slack
+        # turned into five messages left four of them in Slack with no row at all,
+        # and named the row's slack_ts after the *tail* — so _slack_parent_ts
+        # threaded replies onto a fragment, posted_at took the tail's clock, and the
+        # next restart's _rebuild_state_from_slack re-ingested the unrecorded head
+        # chunks as brand-new inbound messages. The mirror is only in bijection with
+        # Slack if the row count matches the message count.
+        mirrored = self._mirrored_messages(result, text, slack_parent)
 
-        # Add to message log
-        entry = LogEntry(
-            ts=ts,
-            channel=channel,
-            sender_agent_id=agent_id,
-            sender_name=agent.bot_name if agent else f"{agent_id}Bot",
-            content=text,
-            thread_ts=thread_ts,
-            posted_at=float(ts) if ts else time.time(),
-            is_bot=True,
-        )
-        self.message_log.append(entry)
-
-        # Log to database
-        if self.session_factory and self.simulation_run_id:
-            await self._log_message(
-                agent_id=agent_id,
-                channel_id=result.get("channel", channel) if result else channel,
-                channel_name=channel,
-                message_ts=ts,
-                thread_ts=thread_ts,
-                message_length=len(text),
-                phase="thread_reply" if thread_ts else "new_post",
+        # Canonical id: the Slack ts when a connected client posted, else a
+        # locally-minted ts. Slack ts (when present) is also recorded as the
+        # mirror mapping on the entry.
+        #
+        # `visibility` is stamped from the channel's class. It was previously omitted,
+        # so every agent-authored message defaulted to "public" even in a
+        # collab_private channel — including the ones written into a PI-created
+        # refinement channel. Two readers depend on this field:
+        #
+        #   - the cohort gate's private-channel exemption (_entry_allowed), which is
+        #     how a PI pairing outranks an admin cohort grouping — with the field
+        #     unset the exemption never fired, and two agents in different cohorts
+        #     could not converse in the channel the PI made for them;
+        #   - the G2 memory-synthesis filter, which is meant to keep private-channel
+        #     content out of the public memory segment.
+        #
+        # Found by a real multi-turn run: the private-channel messages persisted with
+        # visibility='public' while the AgentChannel row said collab_private.
+        # See .notes/cohort-system-v2.md §7.
+        visibility = self._resolve_channel_visibility(channel)
+        sender_name = agent.bot_name if agent else f"{agent_id}Bot"
+        root_ts: str | None = None
+        for index, message in enumerate(mirrored or [None]):
+            slack_ts = message.get("ts") if message else None
+            ts = slack_ts or self.mint_ts()
+            try:
+                posted_at = float(ts)
+            except (TypeError, ValueError):
+                posted_at = time.time()
+            # Chunk 0 keeps the caller's canonical thread id. A continuation chunk of
+            # a *root* post hangs off chunk 0 — one logical post stays one top-level
+            # post, so nobody's Phase 2 scan sees N roots where the author wrote one.
+            canonical_parent = thread_ts if (thread_ts or index == 0) else root_ts
+            entry = LogEntry(
+                ts=ts,
+                channel=channel,
+                sender_agent_id=agent_id,
+                sender_name=sender_name,
+                content=(message.get("text") if message else None) or text,
+                thread_ts=canonical_parent,
+                posted_at=posted_at,
+                is_bot=True,
+                visibility=visibility,
+                slack_ts=slack_ts,
+                slack_channel_id=(message.get("channel") if message else None),
+                # The parent the transport reports, so the row always describes the
+                # message the transport actually made rather than the one we asked for.
+                slack_thread_ts=(message.get("thread_ts") if message and slack_ts else None),
             )
+            if index == 0:
+                root_ts = ts
+            # Persisted to agent_messages via the MessageLog append callback
+            # (_enqueue_persist → _flush_persisted). The DB is the primary store.
+            self.message_log.append(entry)
+        return True
+
+    @staticmethod
+    def _mirrored_messages(
+        result: dict | None, text: str, slack_parent: str | None,
+    ) -> list[dict]:
+        """Normalise a transport's post result into one record per real message.
+
+        ``AgentSlackClient`` reports ``posted_messages``; a Transport backend that
+        never splits need not, so a bare ``{"ts": ..., "channel": ...}`` is read as
+        the single message it describes. Returns ``[]`` when nothing was posted,
+        which is the signal to mint a local canonical id instead.
+        See src/agent/transport.py for the declared contract.
+        """
+        if not result:
+            return []
+        posted = result.get("posted_messages")
+        if posted:
+            return list(posted)
+        return [{
+            "ts": result.get("ts"),
+            "channel": result.get("channel"),
+            "text": text,
+            "thread_ts": slack_parent,
+        }]
+
+    def _slack_parent_ts(self, thread_ts: str | None) -> str | None:
+        """Resolve a canonical thread id to the Slack ts Slack must thread on.
+
+        Returns None when the thread has no Slack presence (a DB-origin root
+        minted while Slack was off), so callers can skip the mirror instead of
+        posting against an id Slack has never seen. Falls back to the canonical
+        id when the root is not in the log at all (windowed out by the B2 rebuild
+        bound), which preserves the pure-Slack-on behaviour where the canonical
+        id *is* the Slack ts. The rebuild populates slack_ts on restored entries,
+        so this survives a restart. See specs/local-db-conversations.md.
+        """
+        if not thread_ts:
+            return None
+        root = self.message_log.get_entry(thread_ts)
+        if root is None:
+            return thread_ts
+        return root.slack_ts
 
     # ------------------------------------------------------------------
     # Setup helpers
@@ -2319,6 +3298,7 @@ class SimulationEngine:
             return
         try:
             from sqlalchemy import select
+
             from src.models import AgentRegistry
             async with self.session_factory() as db:
                 result = await db.execute(
@@ -2349,21 +3329,42 @@ class SimulationEngine:
         """Create any missing seeded channels and join relevant bots."""
         client = next(iter(self.slack_clients.values()), None)
         if not client or not client.is_connected:
-            # Mock mode — populate channel map with fake IDs
-            self._channel_id_map = {ch: f"mock_{ch}" for ch in SEEDED_CHANNELS}
+            # Slack off — channels are DB-native with stable local: ids that
+            # can't collide with Slack C…/G… ids. See specs/local-db-conversations.md.
+            self._channel_id_map = {ch: f"local:{ch}" for ch in SEEDED_CHANNELS}
             # All seeded channels are public.
             self._channel_visibility = {ch: VISIBILITY_PUBLIC for ch in SEEDED_CHANNELS}
             return
 
-        existing = client.list_channels()
+        # A *complete* listing, or none. list_channels raises rather than hand back a
+        # subset that looks whole, because the subset is what made this method
+        # re-create channels the workspace already had: conversations.create answers
+        # name_taken, create_channel used to return None, and the channel ended up
+        # with no id in _channel_id_map at all — after which every post to it was
+        # addressed by name and Slack answered not_in_channel. Demonstrated on a real
+        # workspace: #all-copi-test exists as C0BM57CG4HJ and the engine mapped it to
+        # None. With an incomplete listing we adopt what we saw and create nothing,
+        # since "absent from this listing" no longer means "absent from Slack".
+        listing_complete = True
+        try:
+            existing = client.list_channels()
+        except SlackListingIncomplete as exc:
+            listing_complete = False
+            existing = {ch["name"]: ch["id"] for ch in exc.partial}
+            logger.error(
+                "Channel discovery is incomplete (%s) — adopting the %d channel(s) "
+                "seen and creating none, so a channel Slack already has is not "
+                "duplicated", exc.reason, len(existing),
+            )
 
         # Create missing seeded channels
-        for ch_name in SEEDED_CHANNELS:
-            if ch_name not in existing:
-                logger.info("Creating seeded channel #%s", ch_name)
-                ch_data = client.create_channel(ch_name)
-                if ch_data:
-                    existing[ch_name] = ch_data.get("id", "")
+        if listing_complete:
+            for ch_name in SEEDED_CHANNELS:
+                if ch_name not in existing:
+                    logger.info("Creating seeded channel #%s", ch_name)
+                    ch_data = client.create_channel(ch_name)
+                    if ch_data:
+                        existing[ch_name] = ch_data.get("id", "")
 
         self._channel_id_map = dict(existing)
         # Seeded channels are always 'public'. Agent-created channels (including
@@ -2379,7 +3380,47 @@ class SimulationEngine:
 
         # Share channel map across all clients
         for c in self.slack_clients.values():
-            c._channel_name_to_id.update(existing)
+            c.cache_channel_ids(existing)
+
+    async def _persist_seeded_channels(self) -> None:
+        """Record seeded channels in agent_channels for this run (idempotent).
+
+        Keeps channel existence in the DB so the workspace is reconstructable
+        without Slack (and so the admin UI can count channels). Uses the current
+        _channel_id_map (Slack ids when on, local: ids when off).
+        """
+        if not self.session_factory or not self.simulation_run_id:
+            return
+        from sqlalchemy import select as sa_select
+
+        from src.agent.channels import record_channel_created
+        try:
+            async with self.session_factory() as db:
+                existing_names = set(
+                    (await db.execute(
+                        sa_select(AgentChannel.channel_name).where(
+                            AgentChannel.simulation_run_id == self.simulation_run_id
+                        )
+                    )).scalars().all()
+                )
+                created = 0
+                for ch_name in SEEDED_CHANNELS:
+                    if ch_name in existing_names:
+                        continue
+                    await record_channel_created(
+                        db,
+                        simulation_run_id=self.simulation_run_id,
+                        channel_id=self._channel_id_map.get(ch_name, f"local:{ch_name}"),
+                        channel_name=ch_name,
+                        channel_type="thematic",
+                        created_by_agent="system",
+                    )
+                    created += 1
+                if created:
+                    await db.commit()
+                    logger.info("Persisted %d seeded channels to agent_channels", created)
+        except Exception as exc:
+            logger.warning("Failed to persist seeded channels: %s", exc)
 
     def _build_lab_directories(self) -> None:
         """Build a condensed publications directory for each agent (excluding their own lab)."""
@@ -2401,15 +3442,25 @@ class SimulationEngine:
                     lab_pubs[agent.agent_id] = pubs[:5]
 
         for agent in self.agents.values():
+            allowed = agent.allowed_sender_ids  # None == gate off
             sections = []
             for other_id, pubs in sorted(lab_pubs.items()):
                 if other_id == agent.agent_id:
                     continue
+                if allowed is not None and other_id not in allowed:
+                    continue  # cohort gate: don't prime this agent with a non-mate's work
                 other_agent = self.agents[other_id]
                 sections.append(f"### {other_agent.pi_name} Lab")
                 sections.extend(pubs)
                 sections.append("")
             agent._lab_directory = "\n".join(sections) if sections else None
+
+    # Public alias. `_build_lab_directories` is called from three places whose
+    # ordering relative to the cohort gate is the whole bug this name documents:
+    # it must run AFTER _recompute_allowed_sender_ids, never before.
+    def refresh_lab_directories(self) -> None:
+        """Rebuild every agent's lab directory against its CURRENT gate."""
+        self._build_lab_directories()
 
     async def _backfill_foa_cache(self) -> None:
         """Ensure locally cached FOA details exist for all previously posted opportunities."""
@@ -2431,11 +3482,292 @@ class SimulationEngine:
         except Exception as exc:
             logger.warning("FOA cache backfill failed: %s", exc)
 
+    async def _rebuild_state_from_db(self) -> None:
+        """Hydrate the MessageLog from agent_messages — the primary store.
+
+        Loads message bodies (available since migration 0019) via the
+        callback-bypassing path so restored rows aren't re-persisted. Seeds the
+        mint_ts high-water mark and, for rows that were mirrored to Slack, the
+        Slack poll cursors so a later Slack reconcile only fetches newer messages.
+        See specs/local-db-conversations.md.
+        """
+        if not self.session_factory or not self.simulation_run_id:
+            logger.info("No DB session — skipping DB rebuild")
+            return
+        from sqlalchemy import func as sa_func
+        from sqlalchemy import or_
+        from sqlalchemy import select as sa_select
+        # Bound the load (B2): recent messages, plus the full history of any
+        # thread that has no ThreadDecision (still undecided/active). Active-thread
+        # reconstruction only needs undecided threads; old closed-thread bodies
+        # would just bloat RAM and startup. A PI reopening an old closed thread
+        # hydrates it on demand (_hydrate_thread_from_db).
+        recent_floor = time.time() - REBUILD_WINDOW_S
+        closed_thread_ids_subq = sa_select(ThreadDecision.thread_id)
+        try:
+            async with self.session_factory() as db:
+                result = await db.execute(
+                    sa_select(AgentMessage)
+                    .where(
+                        AgentMessage.simulation_run_id == self.simulation_run_id,
+                        or_(
+                            AgentMessage.posted_at > recent_floor,
+                            sa_func.coalesce(
+                                AgentMessage.thread_ts, AgentMessage.message_ts
+                            ).notin_(closed_thread_ids_subq),
+                        ),
+                    )
+                    .order_by(AgentMessage.posted_at.asc(), AgentMessage.created_at.asc())
+                )
+                rows = result.scalars().all()
+        except Exception as exc:
+            logger.warning("DB rebuild failed: %s", exc)
+            return
+
+        loaded = 0
+        max_posted = 0.0
+        for r in rows:
+            # Pre-0019 rows carry only metadata (empty body): skip them. They
+            # hold no conversational signal, and if Slack is on the reconcile
+            # pass re-adds them with content. Stage 7 backfills legacy content.
+            if not r.content or not r.message_ts:
+                continue
+            entry = LogEntry(
+                ts=r.message_ts,
+                channel=r.channel_name,
+                sender_agent_id=r.agent_id,
+                sender_name=r.sender_name or "",
+                content=r.content,
+                thread_ts=r.thread_ts,
+                posted_at=r.posted_at or 0.0,
+                is_bot=r.is_bot,
+                visibility=r.visibility,
+                # Restore the Slack mirror mapping, not just the content: a reply
+                # posted after this restart needs the root's Slack ts to thread
+                # on, and its absence is how a DB-origin thread is recognised.
+                slack_ts=_restored_slack_ts(r),
+                slack_channel_id=r.slack_channel_id,
+                slack_thread_ts=r.slack_thread_ts,
+            )
+            self.message_log.load_entry(entry)
+            loaded += 1
+            if entry.posted_at > max_posted:
+                max_posted = entry.posted_at
+            # Track the Slack mapping so the reconcile can dedup, and advance
+            # the Slack poll cursor so it only fetches genuinely newer messages.
+            if r.slack_ts:
+                self._known_slack_ts.add(r.slack_ts)
+                if r.slack_channel_id:
+                    cur = self._poll_cursors.get(r.slack_channel_id, "0")
+                    if r.slack_ts > cur:
+                        self._poll_cursors[r.slack_channel_id] = r.slack_ts
+        self._ts_minter.seed_floor(max_posted)
+        # Start the inbox poller past everything already in the DB so it only
+        # picks up genuinely new web-written PI messages. Taken from MAX over the
+        # whole run rather than the loaded rows: the rebuild is windowed (B2), and
+        # the cursor's job is "don't replay what is already stored", which covers
+        # windowed-out rows too (a PI reopening one of those hydrates it instead).
+        await self._seed_pi_inbox_cursor()
+        logger.info("Rebuilt MessageLog from DB: %d messages", loaded)
+
+    async def _seed_pi_inbox_cursor(self) -> None:
+        """Advance the inbound-poll cursor past all stored messages for this run.
+
+        Cursor axis is created_at (the DB server's clock) — see
+        PI_INBOX_LOOKBACK_S / R3.
+        """
+        if not self.session_factory or not self.simulation_run_id:
+            return
+        from sqlalchemy import func as sa_func
+        from sqlalchemy import select as sa_select
+        try:
+            async with self.session_factory() as db:
+                mx = (await db.execute(
+                    sa_select(sa_func.max(AgentMessage.created_at)).where(
+                        AgentMessage.simulation_run_id == self.simulation_run_id,
+                    )
+                )).scalar_one_or_none()
+        except Exception as exc:
+            logger.warning("PI inbox cursor seed failed: %s", exc)
+            return
+        if mx:
+            self._pi_inbox_cursor = max(self._pi_inbox_cursor, mx)
+
+    async def _hydrate_thread_from_db(self, thread_ts: str) -> None:
+        """Load one thread's messages into the log if not already present.
+
+        The startup rebuild windows out old *closed*-thread bodies (B2), but a PI
+        can still reopen such a thread, and the reopen paths derive participants /
+        reply budget from the in-memory thread history. This pulls a specific
+        thread's full history on demand. Idempotent (load_entry dedups on ts) and
+        index-backed (run + message_ts/thread_ts).
+        """
+        if not self.session_factory or not self.simulation_run_id or not thread_ts:
+            return
+        from sqlalchemy import or_
+        from sqlalchemy import select as sa_select
+        try:
+            async with self.session_factory() as db:
+                rows = (await db.execute(
+                    sa_select(AgentMessage)
+                    .where(
+                        AgentMessage.simulation_run_id == self.simulation_run_id,
+                        or_(
+                            AgentMessage.message_ts == thread_ts,
+                            AgentMessage.thread_ts == thread_ts,
+                        ),
+                    )
+                    .order_by(AgentMessage.posted_at.asc())
+                )).scalars().all()
+        except Exception as exc:
+            logger.warning("Thread hydrate failed for %s: %s", thread_ts, exc)
+            return
+        for r in rows:
+            if not r.content or not r.message_ts:
+                continue
+            self.message_log.load_entry(LogEntry(
+                ts=r.message_ts,
+                channel=r.channel_name,
+                sender_agent_id=r.agent_id,
+                sender_name=r.sender_name or "",
+                content=r.content,
+                thread_ts=r.thread_ts,
+                posted_at=r.posted_at or 0.0,
+                is_bot=r.is_bot,
+                visibility=r.visibility,
+                slack_ts=_restored_slack_ts(r),
+                slack_channel_id=r.slack_channel_id,
+                slack_thread_ts=r.slack_thread_ts,
+            ))
+
+    async def _flush_persisted(self, force_stats: bool = False) -> None:
+        """Batch-upsert buffered message-log entries into agent_messages.
+
+        Uses ON CONFLICT (simulation_run_id, message_ts) so it is safe to run
+        alongside legacy rows, transitional double-writes, and repeated restarts.
+        Drops the buffer when there is no DB so it can't grow unbounded.
+        """
+        if not self._pending_persist:
+            return
+        if not self.session_factory or not self.simulation_run_id:
+            self._pending_persist.clear()
+            return
+        entries = self._pending_persist
+        self._pending_persist = []
+        # Dedup by canonical id within the batch — a single ON CONFLICT statement
+        # cannot touch the same row twice.
+        by_ts: dict[str, dict] = {}
+        for e in entries:
+            if not e.ts:
+                continue
+            channel_id = self._channel_id_map.get(e.channel) or f"local:{e.channel}"
+            by_ts[e.ts] = {
+                "simulation_run_id": self.simulation_run_id,
+                "agent_id": e.sender_agent_id,
+                "channel_id": channel_id,
+                "channel_name": e.channel,
+                "message_ts": e.ts,
+                "message_length": len(e.content or ""),
+                "thread_ts": e.thread_ts,
+                "phase": "thread_reply" if e.thread_ts else "new_post",
+                "visibility": e.visibility,
+                "content": e.content or "",
+                "sender_name": e.sender_name or "",
+                "is_bot": e.is_bot,
+                "posted_at": e.posted_at,
+                "slack_ts": e.slack_ts,
+                "slack_channel_id": e.slack_channel_id,
+                # The root's *Slack* ts, not the canonical thread_ts — they differ
+                # whenever the thread started Slack-off. Only meaningful when this
+                # entry is itself on Slack. See _slack_parent_ts.
+                "slack_thread_ts": e.slack_thread_ts if e.slack_ts else None,
+            }
+        rows = list(by_ts.values())
+        if not rows:
+            return
+        from sqlalchemy import func as sa_func
+        from sqlalchemy import or_
+        from sqlalchemy import select as sa_select
+        from sqlalchemy.dialects.postgresql import insert as pg_insert
+        try:
+            async with self.session_factory() as db:
+                stmt = pg_insert(AgentMessage.__table__).values(rows)
+                stmt = stmt.on_conflict_do_update(
+                    constraint="uq_agent_messages_run_ts",
+                    set_={
+                        "content": stmt.excluded.content,
+                        "sender_name": stmt.excluded.sender_name,
+                        "is_bot": stmt.excluded.is_bot,
+                        "posted_at": stmt.excluded.posted_at,
+                        "message_length": stmt.excluded.message_length,
+                        "visibility": stmt.excluded.visibility,
+                        "thread_ts": stmt.excluded.thread_ts,
+                        "channel_id": stmt.excluded.channel_id,
+                        "channel_name": stmt.excluded.channel_name,
+                        "agent_id": stmt.excluded.agent_id,
+                        "slack_ts": stmt.excluded.slack_ts,
+                        "slack_channel_id": stmt.excluded.slack_channel_id,
+                        "slack_thread_ts": stmt.excluded.slack_thread_ts,
+                    },
+                    # M1a guard: never let a bot message clobber an existing human
+                    # (PI) row on a cross-process canonical-id collision. Allow the
+                    # update only when the existing row is itself a bot row, or the
+                    # incoming row is human (re-flush of an ingested PI message /
+                    # slack mirror). A blocked conflict is left untouched, like
+                    # DO NOTHING for that row. See PR #19 review M1.
+                    where=or_(
+                        AgentMessage.__table__.c.is_bot.is_(True),
+                        stmt.excluded.is_bot.is_(False),
+                    ),
+                )
+                await db.execute(stmt)
+                # Refresh the run's cosmetic counters at most every
+                # RUN_STATS_UPDATE_INTERVAL (a full COUNT every flush is wasteful
+                # at scale — B1). The bulk upsert can't cheaply tell inserts from
+                # updates, so total_messages is a recomputed count; slight
+                # staleness between refreshes is fine for a display counter.
+                now = time.time()
+                if force_stats or now - self._last_run_stats_update >= RUN_STATS_UPDATE_INTERVAL:
+                    self._last_run_stats_update = now
+                    run = (await db.execute(
+                        sa_select(SimulationRun).where(SimulationRun.id == self.simulation_run_id)
+                    )).scalar_one_or_none()
+                    if run:
+                        total = (await db.execute(
+                            sa_select(sa_func.count(AgentMessage.id)).where(
+                                AgentMessage.simulation_run_id == self.simulation_run_id
+                            )
+                        )).scalar_one()
+                        run.total_messages = total
+                        run.total_api_calls = sum(a.api_call_count for a in self.agents.values())
+                await db.commit()
+        except Exception as exc:
+            # Re-queue the failed batch instead of dropping it. The DB is now the
+            # source of truth for conversations, so a silently-dropped flush is
+            # unrecoverable — a restart rebuilds from the DB and these messages
+            # would be gone for good. New entries may have been enqueued while we
+            # were awaiting the (failed) commit; put the failed batch back in
+            # front to preserve chronological order for the next flush attempt.
+            self._pending_persist[0:0] = entries
+            logger.warning(
+                "Failed to flush %d messages, re-queued for retry: %s",
+                len(rows), exc,
+            )
+
+    def _enqueue_persist(self, entry: LogEntry) -> None:
+        """MessageLog persist callback — buffer a new entry for the next flush."""
+        self._pending_persist.append(entry)
+
     async def _rebuild_state_from_slack(self) -> None:
-        """Rebuild MessageLog and agent state from Slack history + DB."""
+        """Reconcile the MessageLog with Slack history (Slack-on only).
+
+        The DB is the primary store (_rebuild_state_from_db); this pass only
+        adds messages that exist on Slack but not yet in the log — via the
+        idempotent append, which also persists them to the DB.
+        """
         default_client = next(iter(self.slack_clients.values()), None)
         if not default_client or not default_client.is_connected:
-            logger.info("No Slack client available — skipping state rebuild")
+            logger.info("No Slack client available — skipping Slack reconcile")
             return
 
         # Build a mapping of bot_user_id -> agent_id
@@ -2475,20 +3807,39 @@ class SimulationEngine:
                 if is_bot and user_id:
                     sender_agent_id = bot_uid_to_agent.get(user_id)
 
+                # Skip messages already represented in the DB (dedup a message
+                # that was DB-origin then mirrored to Slack, whose canonical id
+                # differs from this Slack ts).
+                if ts and ts in self._known_slack_ts:
+                    if ts:
+                        self._poll_cursors[ch_id] = ts
+                    continue
                 sender_name = msg.get("username", "") or user_id
+                # `thread_ts` is already normalised: Slack marks a parent that has
+                # replies with thread_ts == ts, and the transport nulls that at ingest
+                # for every inbound path (see slack_client.normalize_inbound_message).
+                # The rule used to live here and *only* here, which is why the live
+                # poller ingested roots as replies to themselves.
                 entry = LogEntry(
                     ts=ts,
                     channel=ch_name,
                     sender_agent_id=sender_agent_id,
                     sender_name=sender_name,
                     content=msg.get("text", ""),
-                    thread_ts=msg.get("thread_ts") if msg.get("thread_ts") != ts else None,
+                    thread_ts=msg.get("thread_ts"),
                     posted_at=float(ts) if ts else 0.0,
                     is_bot=is_bot,
                     visibility=ch_visibility,
+                    slack_ts=ts or None,
+                    slack_channel_id=ch_id,
+                    # Slack-origin: canonical id == Slack ts, so the thread
+                    # parent needs no translation.
+                    slack_thread_ts=msg.get("thread_ts"),
                 )
-                self.message_log.append(entry)
-                total_messages += 1
+                if self.message_log.append(entry):
+                    total_messages += 1
+                if ts:
+                    self._known_slack_ts.add(ts)
 
                 # Update poll cursor to latest
                 if ts:
@@ -2506,6 +3857,8 @@ class SimulationEngine:
                         rts = reply.get("ts", "")
                         if rts == ts:
                             continue  # skip parent (already added)
+                        if rts and rts in self._known_slack_ts:
+                            continue
                         r_user_id = reply.get("user", "")
                         r_is_bot = bool(reply.get("bot_id")) or reply.get("subtype") == "bot_message"
                         r_agent_id = bot_uid_to_agent.get(r_user_id) if r_is_bot else None
@@ -2519,16 +3872,28 @@ class SimulationEngine:
                             posted_at=float(rts) if rts else 0.0,
                             is_bot=r_is_bot,
                             visibility=ch_visibility,
+                            slack_ts=rts or None,
+                            slack_channel_id=ch_id,
+                            slack_thread_ts=ts,  # Slack-origin: canonical == Slack ts
                         )
-                        self.message_log.append(r_entry)
-                        total_messages += 1
+                        if self.message_log.append(r_entry):
+                            total_messages += 1
+                        if rts:
+                            self._known_slack_ts.add(rts)
 
         logger.info(
-            "Rebuilt MessageLog: %d messages across %d channels, %d threads",
+            "Slack reconcile: appended %d messages across %d channels, %d threads",
             total_messages, len(polled_ids), total_threads,
         )
 
-        # 2. Rebuild active_threads per agent
+    async def _rebuild_agent_state(self) -> None:
+        """Reconstruct per-agent state from the message log + DB.
+
+        Runs after both the DB rebuild and the optional Slack reconcile, so it
+        behaves identically with Slack on or off. Reads only self.message_log,
+        thread_decisions, proposal_reviews and llm_call_logs — no Slack calls.
+        """
+        # Rebuild active_threads per agent.
         # Get all closed thread IDs and prior thread summaries from thread_decisions
         closed_thread_ids: set[str] = set()
         if self.session_factory:
@@ -2539,6 +3904,18 @@ class SimulationEngine:
                     all_decisions = result.scalars().all()
                     for td in all_decisions:
                         closed_thread_ids.add(td.thread_id)
+                        # _prior_threads is a list per pair, so appending here
+                        # unconditionally is not idempotent: a second rebuild —
+                        # or a rebuild after _close_thread already recorded this
+                        # thread in-process — feeds Phase 5 the same prior
+                        # discussion twice, as "you already tried this N times".
+                        # _closed_thread_ids is the shared already-accounted-for
+                        # marker (_close_thread sets it before its own append),
+                        # and it is only updated after this loop, so a thread with
+                        # several decision rows from repeated propose/reopen cycles
+                        # still contributes each of them on the first pass.
+                        if td.thread_id in self._closed_thread_ids:
+                            continue
                         pair_key = tuple(sorted([td.agent_a, td.agent_b]))
                         self._prior_threads.setdefault(pair_key, []).append({
                             "channel": td.channel,
@@ -2658,14 +4035,31 @@ class SimulationEngine:
                     agent = self.agents[aid]
                     is_reviewed = (td.id, aid) in reviewed_set
                     other = td.agent_b if aid == td.agent_a else td.agent_a
-                    agent.state.pending_proposals.append(ProposalRef(
+                    ref = ProposalRef(
                         thread_id=td.thread_id,
                         channel=td.channel,
                         other_agent_id=other,
                         summary_text=td.summary_text or "",
                         proposed_at=td.decided_at.timestamp() if td.decided_at else 0.0,
                         reviewed=is_reviewed,
-                    ))
+                    )
+                    # pending_proposals is a list, and an unreviewed entry blocks
+                    # its agent. A plain append is therefore not idempotent in a
+                    # way that matters: a second rebuild would give the agent two
+                    # copies of one proposal, and reviewing it pops one — leaving
+                    # the agent blocked on a phantom for the rest of the run.
+                    # Replace in place instead; latest_by_key already holds exactly
+                    # one (latest) decision per thread and the DB is authoritative,
+                    # so this also refreshes a stale `reviewed` flag.
+                    idx = next(
+                        (i for i, p in enumerate(agent.state.pending_proposals)
+                         if p.thread_id == ref.thread_id),
+                        None,
+                    )
+                    if idx is None:
+                        agent.state.pending_proposals.append(ref)
+                    else:
+                        agent.state.pending_proposals[idx] = ref
             except Exception as exc:
                 logger.warning("Failed to rebuild proposals: %s", exc)
 
@@ -2689,6 +4083,55 @@ class SimulationEngine:
                             agent.api_call_count = r.count
             except Exception as exc:
                 logger.warning("Failed to rebuild api_call_count: %s", exc)
+
+        # 4b. Rebuild the sliding-window call ledger from the same table.
+        #
+        # Deliberately SEPARATE from step 4, which stays an all-time COUNT(*):
+        # api_call_count is lifetime accounting (run summary,
+        # SimulationRun.total_api_calls) while call_times is the live throttle.
+        # Folding these together is the bug — it is what made an over-budget
+        # agent over-budget again on every restart, forever. See design §4.2.
+        if self.session_factory and self.simulation_run_id:
+            try:
+                from sqlalchemy import select as sa_select
+
+                # datetime, UTC and timedelta are already module-level imports
+                # (simulation.py:10) — do not re-import them here.
+                cutoff = datetime.now(UTC) - timedelta(
+                    seconds=get_settings().llm_rate_window_seconds
+                )
+                async with self.session_factory() as db:
+                    result = await db.execute(
+                        sa_select(LlmCallLog.agent_id, LlmCallLog.created_at)
+                        .where(
+                            LlmCallLog.simulation_run_id == self.simulation_run_id,
+                            LlmCallLog.created_at >= cutoff,
+                        )
+                        .order_by(LlmCallLog.created_at)
+                    )
+                    rows = result.all()
+                # call_times is a deque that record_api_call appends to, same
+                # shape as pending_proposals above — so a plain append here is
+                # not idempotent either: a second rebuild call would duplicate
+                # every in-window entry and could throttle an agent that isn't
+                # actually over its allowance. Unlike pending_proposals, this
+                # query is a full window snapshot (not one row per agent), so
+                # the fix is a clear-then-repopulate rather than a replace-by-key.
+                # Clear ALL agents, not just the ones with rows in `rows`: the
+                # window query is authoritative for every agent, and an agent
+                # with zero in-window calls must end up with an EMPTY ledger,
+                # not whatever stale entries it had before this rebuild. The
+                # clear is sequenced after the query succeeds (not before) so a
+                # DB failure below is caught and logged without first wiping a
+                # ledger it then fails to repopulate.
+                for agent in self.agents.values():
+                    agent.state.call_times.clear()
+                for r in rows:
+                    agent = self.agents.get(r.agent_id)
+                    if agent:
+                        agent.state.call_times.append(r.created_at.timestamp())
+            except Exception as exc:
+                logger.warning("Failed to rebuild call_times: %s", exc)
 
         # 5. Set last_seen_cursor per agent to latest message time
         if self._reset_cursors:
@@ -2840,14 +4283,68 @@ class SimulationEngine:
                         AgentRegistry.bot_name,
                         AgentRegistry.pi_name,
                         AgentRegistry.slack_bot_token,
+                        AgentRegistry.role,
                     ).where(AgentRegistry.status == "active")
                 )).all()
 
             desired = {r.agent_id: r for r in rows}
+
+            # Role-diff for surviving agents (agents present in both current and
+            # desired). Must run even when to_add/to_remove are empty, or a role
+            # reassignment on a running agent is invisible until the next add/remove.
+            role_changed = False
+            for aid, agent in self.agents.items():
+                r = desired.get(aid)
+                if r is not None and getattr(r, "role", "pi_lab") != agent.role:
+                    logger.info("[roster] %s role %s -> %s", aid, agent.role, r.role)
+                    agent.role = r.role
+                    role_changed = True
+
+            # Token-diff for surviving agents. `main.py` admits every active
+            # agent to self.agents regardless of token, so an agent provisioned
+            # AFTER startup is in neither to_add nor to_remove: the membership
+            # diff below early-returns and the client-building loop (which only
+            # runs over to_add) never sees it. It then posts DB-only, silently,
+            # until the process restarts. Measured 2026-08-06: 48 bots installed
+            # mid-run, tokens all in AgentRegistry, and `Connected as` never rose
+            # above the 7 that had tokens at boot. Adopt them here, before the
+            # early return, so the docstring's promise is actually true.
+            if self.slack_enabled:
+                for aid in self.agents:
+                    r = desired.get(aid)
+                    if r is None or aid in self.slack_clients:
+                        continue
+                    token = (
+                        r.slack_bot_token
+                        if is_valid_token(r.slack_bot_token)
+                        else env_token(aid)
+                    )
+                    if not is_valid_token(token):
+                        continue  # still tokenless — retry on a later tick
+                    client = AgentSlackClient(agent_id=aid, bot_token=token)
+                    if not client.connect():
+                        logger.warning(
+                            "[roster] Slack connect failed adopting %s — will retry", aid,
+                        )
+                        continue
+                    self.slack_clients[aid] = client
+                    logger.info(
+                        "[roster] Adopted Slack client for %s (token provisioned "
+                        "after startup)", aid,
+                    )
+
             current = set(self.agents)
             to_remove = current - set(desired)
             to_add = set(desired) - current
             if not to_remove and not to_add:
+                # Recompute the gate FIRST: _recompute_allowed_sender_ids ends by
+                # refreshing the directory (step 4), so after this line the
+                # directory already agrees with the gate. The role branch stays
+                # because a role change alters the directory's *contents*
+                # (pi_name headings) without moving the gate at all.
+                await self._recompute_allowed_sender_ids()
+                if role_changed:
+                    self.refresh_lab_directories()
                 return
 
             # --- Removals: agent no longer active ---------------------------
@@ -2865,18 +4362,24 @@ class SimulationEngine:
             # --- Additions: agent newly active ------------------------------
             for aid in to_add:
                 r = desired[aid]
-                token = r.slack_bot_token if is_valid_token(r.slack_bot_token) else env_token(aid)
-                if not is_valid_token(token):
-                    logger.info(
-                        "[roster] Agent %s is active but has no usable token yet — "
-                        "skipping (will retry next sync once a token is set)", aid,
-                    )
-                    continue
-                client = AgentSlackClient(agent_id=aid, bot_token=token)
-                if not client.connect():
-                    logger.warning("[roster] Slack connect failed for new agent %s — skipping", aid)
-                    continue
-                agent = Agent(agent_id=aid, bot_name=r.bot_name, pi_name=r.pi_name)
+                if self.slack_enabled:
+                    token = r.slack_bot_token if is_valid_token(r.slack_bot_token) else env_token(aid)
+                    if not is_valid_token(token):
+                        logger.info(
+                            "[roster] Agent %s is active but has no usable token yet — "
+                            "skipping (will retry next sync once a token is set)", aid,
+                        )
+                        continue
+                    client = AgentSlackClient(agent_id=aid, bot_token=token)
+                    if not client.connect():
+                        logger.warning("[roster] Slack connect failed for new agent %s — skipping", aid)
+                        continue
+                else:
+                    # Slack off: admit the agent with a no-op transport (never
+                    # gate on a token/connection that doesn't apply in DB-only mode).
+                    from src.agent.transport import NullTransport
+                    client = NullTransport(agent_id=aid)
+                agent = Agent(agent_id=aid, bot_name=r.bot_name, pi_name=r.pi_name, role=r.role)
                 # In-place inserts (PIHandler shares these dicts by reference).
                 self.agents[aid] = agent
                 self.slack_clients[aid] = client
@@ -2884,16 +4387,283 @@ class SimulationEngine:
                 logger.info("[roster] Added newly-active agent %s to live roster", aid)
 
             # Rebuild cross-agent derived structures after any membership change.
-            self._build_lab_directories()
             self.message_log.set_bot_name_map(self._bot_name_to_id)
             # Rebuild PI mappings from scratch (clear in place — PIHandler shares
             # this dict by reference; _load_pi_mappings appends, so it must start
             # empty to avoid accumulating duplicates).
             self._pi_slack_id_to_agent_ids.clear()
             await self._load_pi_mappings()
+
+            # Recompute cohort interaction sets after roster changes so newly
+            # active agents get their gate populated this tick.
+            await self._recompute_allowed_sender_ids()
         except Exception as exc:
             # A transient DB hiccup must never crash the main loop.
             logger.warning("[roster] roster sync failed: %s", exc)
+
+    def _disable_all_gates(self) -> None:
+        """Set every agent's gate to None (no filtering). See v2 §5.4."""
+        for agent in self.agents.values():
+            agent.allowed_sender_ids = None
+
+    async def _recompute_allowed_sender_ids(self) -> None:
+        """Recompute each live agent's cohort-mate set for the interaction gate.
+
+        Called on the roster-sync cadence (ROSTER_POLL_INTERVAL) and once in setup
+        before the first turn, so no turn can run with an unset gate while isolation
+        is on.
+
+        The decision logic lives in ``src.services.cohorts.compute_gates`` so the
+        engine and the admin UI's preview cannot drift — the whole point of v2 is
+        that a documented rule and the running code agreed. This method is the I/O
+        and side-effect wrapper: read memberships, apply the computed gates, log on
+        change, then reconcile in-memory state (§8 grandfathering, §6.1 pruning).
+
+        On a transient DB error the existing gates are left in place: flapping the
+        gate open on every blip would be worse than a briefly stale topology.
+        """
+        settings = get_settings()
+        if not settings.cohort_isolation_enabled:
+            self._cohort_preflight_error = None
+            self._disable_all_gates()
+            self.refresh_lab_directories()
+            self._cohort_gate_active = False
+            self._cohort_log_signature = None
+            # Reconcile state even on the disabled path: turning isolation off must
+            # clear grandfathered flags, or threads stay permanently deprioritised
+            # after the gate that demoted them is gone.
+            self._apply_cohort_gate_to_state()
+            return
+
+        rows: list[tuple[Any, str]] = []
+        cohort_count = 0
+        if self.session_factory:
+            try:
+                from sqlalchemy import func as sa_func
+                from sqlalchemy import select as sa_select
+
+                from src.models import Cohort, CohortMembership
+
+                async with self.session_factory() as db:
+                    rows = list((await db.execute(
+                        sa_select(CohortMembership.cohort_id, CohortMembership.agent_id)
+                    )).all())
+                    cohort_count = (await db.execute(
+                        sa_select(sa_func.count()).select_from(Cohort)
+                    )).scalar() or 0
+            except Exception as exc:
+                logger.warning("[cohort] membership sync failed: %s", exc)
+                # The gates from the last successful tick are kept above (see the
+                # docstring). But the directory is DERIVED from those gates, so a
+                # gate that is correct-but-stale makes a directory rebuilt from it
+                # correct-but-stale too — which is strictly better than leaving it
+                # absent. Without this, a newly-added agent whose gate isn't
+                # reflected in any directory yet gets _lab_directory = None for the
+                # rest of this failed tick, and existing agents' directories omit
+                # it until the next successful sync.
+                self.refresh_lab_directories()
+                return
+
+        gates, reason = compute_gates(
+            membership_rows=rows,
+            agent_ids=list(self.agents),
+            isolation_enabled=True,
+            policy=settings.cohort_default_policy,
+            cohort_count=cohort_count,
+            has_db=self.session_factory is not None,
+        )
+
+        if reason is not None:
+            if self._cohort_preflight_error != reason:
+                logger.error("[cohort] isolation forced OFF: %s", reason)
+            self._cohort_preflight_error = reason
+            self._disable_all_gates()
+            self.refresh_lab_directories()
+            self._cohort_gate_active = False
+            self._apply_cohort_gate_to_state()
+            return
+        if self._cohort_preflight_error is not None:
+            logger.info("[cohort] preflight now clean — isolation active")
+            self._cohort_preflight_error = None
+
+        for aid, gate in gates.items():
+            agent = self.agents.get(aid)
+            if agent is not None:
+                agent.allowed_sender_ids = gate
+
+        summary = summarise_gates(gates)
+        self._cohort_gate_active = summary["gated"] > 0
+        signature = (
+            cohort_count, len(rows), summary["gated"], tuple(summary["isolated"]),
+        )
+        if signature != self._cohort_log_signature:
+            logger.info(
+                "[cohort] gate: %d cohorts, %d memberships, %d/%d agents gated, "
+                "%d isolated%s",
+                cohort_count, len(rows), summary["gated"], summary["total"],
+                len(summary["isolated"]),
+                (" (" + ", ".join(summary["isolated"]) + ")")
+                if summary["isolated"] else "",
+            )
+            if summary["isolated"]:
+                logger.warning(
+                    "[cohort] uncohorted agents isolated by policy: %s",
+                    ", ".join(summary["isolated"]),
+                )
+            topology_changed = self._cohort_log_signature is not None
+            self._cohort_log_signature = signature
+        else:
+            topology_changed = False
+
+        self._apply_cohort_gate_to_state()
+        # The directory is derived from the gate, so it is refreshed on the same
+        # cadence. Cheap: it re-reads in-memory profiles, no I/O.
+        self.refresh_lab_directories()
+        if topology_changed:
+            # The topology moved mid-run — snapshot the new one so the run stays
+            # attributable to every configuration it actually ran under (v2 §13.1).
+            await self._record_topology_snapshot()
+
+    def _apply_cohort_gate_to_state(self) -> None:
+        """Reconcile in-memory agent state with the freshly computed gate.
+
+        Two jobs, both required because the gate is a *read-time* filter and state
+        outlives a membership change:
+
+        1. **Grandfather** active threads whose partner is no longer permitted
+           (v2 §8). They still get Phase 4 replies — an open conversation is
+           entitled to conclude rather than waste the calls already spent — but
+           they are barred from the reactive-priority tier so they cannot outrank
+           gate-compliant work. This is also the path that marks a *resumed* run's
+           threads: the DB rebuild runs before the first recompute, so every
+           restart reconstructs its open partnerships gate-blind.
+        2. **Prune** banked ``interesting_posts`` whose author is no longer
+           permitted (v2 §6.1). Read-time filtering never removes posts that were
+           already accepted, so without this a membership change leaves stale posts
+           driving Phase 5 forever.
+        """
+        newly_grandfathered = 0
+        pruned_total = 0
+        for agent in self.agents.values():
+            allowed = agent.allowed_sender_ids
+            if allowed is None:
+                # Gate off for this agent: nothing to grandfather, and a partner
+                # that becomes permitted again is un-grandfathered.
+                for thread in agent.state.active_threads.values():
+                    if thread.grandfathered:
+                        thread.grandfathered = False
+                continue
+
+            for thread in agent.state.active_threads.values():
+                other = thread.other_agent_id
+                permitted = bool(other) and other in allowed
+                if permitted:
+                    if thread.grandfathered:
+                        logger.info(
+                            "[cohort] %s: thread %s with %s is permitted again "
+                            "(un-grandfathered)",
+                            agent.agent_id, thread.thread_id, other,
+                        )
+                        thread.grandfathered = False
+                    continue
+                if self._channel_visibility.get(thread.channel) == VISIBILITY_COLLAB_PRIVATE:
+                    # PI-created pairing outranks the gate (v2 §7) — never
+                    # grandfather a private-channel collaboration.
+                    thread.grandfathered = False
+                    continue
+                if not thread.grandfathered:
+                    thread.grandfathered = True
+                    newly_grandfathered += 1
+                    logger.info(
+                        "[cohort] %s: thread %s with %s grandfathered — partner is "
+                        "outside the cohort; it may conclude but loses reactive "
+                        "priority",
+                        agent.agent_id, thread.thread_id, other,
+                    )
+
+            before = len(agent.state.interesting_posts)
+            if before:
+                agent.state.interesting_posts = [
+                    p for p in agent.state.interesting_posts
+                    if not p.sender_agent_id or p.sender_agent_id in allowed
+                ]
+                dropped = before - len(agent.state.interesting_posts)
+                if dropped:
+                    pruned_total += dropped
+                    logger.debug(
+                        "[cohort] %s: pruned %d banked interesting_posts from "
+                        "non-cohort senders", agent.agent_id, dropped,
+                    )
+
+        if newly_grandfathered or pruned_total:
+            logger.info(
+                "[cohort] state reconciled: %d threads grandfathered, %d stale posts pruned",
+                newly_grandfathered, pruned_total,
+            )
+
+    def cohort_topology_snapshot(self) -> dict[str, Any]:
+        """Serialise the gate configuration and its observed effects.
+
+        Written to cohort_audit_events at run start and on every mid-run topology
+        change, so a finished run stays attributable to every configuration it
+        actually ran under (v2 §13.1). Derived from the live in-memory gate rather
+        than re-querying, so it records what the engine actually applied — including
+        a preflight override.
+
+        Also carries the counters the admin UI cannot otherwise see: they live in
+        this process's memory, and the web app is a different process (v2 §9.4/§13).
+        """
+        settings = get_settings()
+        grandfathered = sorted(
+            f"{aid}:{t.thread_id}"
+            for aid, a in self.agents.items()
+            for t in a.state.active_threads.values()
+            if t.grandfathered
+        )
+        return {
+            "cohort_isolation_enabled": settings.cohort_isolation_enabled,
+            "cohort_default_policy": settings.cohort_default_policy,
+            "max_consecutive_reactive_turns": settings.max_consecutive_reactive_turns,
+            "gate_active": self._cohort_gate_active,
+            "preflight_error": self._cohort_preflight_error,
+            "agents": {
+                aid: (
+                    None if a.allowed_sender_ids is None
+                    else sorted(a.allowed_sender_ids)
+                )
+                for aid, a in sorted(self.agents.items())
+            },
+            "counters": {
+                "tags_stripped": dict(sorted(self._cohort_tags_stripped.items())),
+                "grandfathered_threads": grandfathered,
+                "reactive_selections": self._reactive_selections,
+                "proactive_selections": self._proactive_selections,
+            },
+        }
+
+    async def _record_topology_snapshot(self) -> None:
+        """Persist a topology snapshot for this run.
+
+        Called once in setup and again whenever the gate signature changes mid-run.
+        Never raises: provenance is valuable but not worth failing a run over.
+        """
+        if not self.session_factory or not self.simulation_run_id:
+            return
+        try:
+            from src.models import COHORT_ACTION_TOPOLOGY_SNAPSHOT, COHORT_NAME_ALL
+            from src.services.cohorts import record_cohort_audit_event
+
+            async with self.session_factory() as db:
+                await record_cohort_audit_event(
+                    db,
+                    action=COHORT_ACTION_TOPOLOGY_SNAPSHOT,
+                    cohort_name=COHORT_NAME_ALL,
+                    simulation_run_id=self.simulation_run_id,
+                    topology=self.cohort_topology_snapshot(),
+                    commit=True,
+                )
+        except Exception as exc:
+            logger.warning("[cohort] topology snapshot failed: %s", exc)
 
     async def _sync_proposal_reviews_from_db(self) -> None:
         """Check DB for web-app proposal reviews and mark in-memory proposals as reviewed.
@@ -3019,16 +4789,22 @@ class SimulationEngine:
                 if not channel:
                     continue
 
+                # Old closed threads may have been windowed out of the log at
+                # startup (B2); hydrate so the reply-budget offset below counts
+                # the real prior history rather than 0.
+                await self._hydrate_thread_from_db(thread_id)
+
                 # Create a synthetic log entry for the PI guidance so it appears
                 # in thread history and the agents can see it
+                minted = self.mint_ts()
                 pi_entry = LogEntry(
-                    ts=str(time.time()),
+                    ts=minted,
                     channel=channel,
                     sender_agent_id=None,
                     sender_name="PI (via web)",
                     content=guidance,
                     thread_ts=thread_id,
-                    posted_at=time.time(),
+                    posted_at=float(minted),
                     is_bot=False,
                 )
                 self.message_log.append(pi_entry)
@@ -3171,49 +4947,6 @@ class SimulationEngine:
             # poster (the counterpart will be seeded once they're loaded).
             self._db_private_refined_thread_ids.add(thread_id)
 
-    async def _log_message(
-        self,
-        agent_id: str,
-        channel_id: str,
-        channel_name: str,
-        message_ts: str | None,
-        thread_ts: str | None,
-        message_length: int,
-        phase: str,
-    ) -> None:
-        """Log an agent message to the database."""
-        if not self.session_factory or not self.simulation_run_id:
-            return
-        try:
-            async with self.session_factory() as db:
-                record = AgentMessage(
-                    simulation_run_id=self.simulation_run_id,
-                    agent_id=agent_id,
-                    channel_id=channel_id,
-                    channel_name=channel_name,
-                    message_ts=message_ts,
-                    thread_ts=thread_ts,
-                    message_length=message_length,
-                    phase=phase,
-                )
-                db.add(record)
-                # Update run totals
-                from sqlalchemy import select
-                run_result = await db.execute(
-                    select(SimulationRun).where(
-                        SimulationRun.id == self.simulation_run_id
-                    )
-                )
-                run = run_result.scalar_one_or_none()
-                if run:
-                    run.total_messages = (run.total_messages or 0) + 1
-                    run.total_api_calls = sum(
-                        a.api_call_count for a in self.agents.values()
-                    )
-                await db.commit()
-        except Exception as exc:
-            logger.warning("Failed to log message: %s", exc)
-
     # ------------------------------------------------------------------
     # Post-simulation
     # ------------------------------------------------------------------
@@ -3275,11 +5008,17 @@ Keep it concise — under 300 words.""",
                 }
             ]
 
-            agent.api_call_count += 1
+            agent.record_api_call()
             response = await generate_agent_response(
                 system_prompt=system_prompt,
                 messages=messages,
-                max_tokens=800,
+                # 4000, not 800: the Claude 5 models write longer syntheses (and
+                # Sonnet 5's tokenizer spends ~30% more tokens on the same text);
+                # 800 (retried at 1600) truncated every memory turn in the
+                # migration rehearsal. The cap is a ceiling, not a target — unused
+                # headroom costs nothing — and this call is not pinned by the
+                # characterization snapshots.
+                max_tokens=4000,
                 log_meta={"agent_id": agent.agent_id, "phase": "memory"},
             )
             if not response or not response.strip():
@@ -3297,6 +5036,7 @@ Keep it concise — under 300 words.""",
             if self.session_factory:
                 try:
                     from sqlalchemy import select as sa_sel
+
                     from src.models import AgentRegistry
                     from src.services.profile_versioning import create_revision
                     async with self.session_factory() as db:

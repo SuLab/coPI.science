@@ -1,0 +1,105 @@
+from src.agent.agent import Agent
+from src.agent.roles import DEFAULT_ROLE
+
+
+def _agent():
+    return Agent(agent_id="su", bot_name="SuBot", pi_name="Andrew Su")
+
+
+def test_default_role_is_pi_lab():
+    assert _agent().role == DEFAULT_ROLE
+
+
+def test_identity_block_is_present_and_substituted():
+    prompt = _agent().build_scan_system_prompt()
+    assert "You are **SuBot**" in prompt
+    assert 'the Andrew Su lab at Scripps Research' in prompt
+    assert 'agent ID is "su"' in prompt
+
+
+def test_curly_brace_in_profile_does_not_crash(tmp_path, monkeypatch):
+    # A profile containing a bare "{" must not raise (str.replace, not str.format).
+    a = _agent()
+    monkeypatch.setattr(type(a), "public_profile", property(lambda self: "budget is {tight}"))
+    prompt = a.build_scan_system_prompt()  # must not raise
+    assert "budget is {tight}" in prompt
+
+
+def test_scan_prompt_omits_memory_and_lab_directory():
+    a = _agent()
+    a._lab_directory = "### Other Lab\n- paper"
+    scan = a.build_scan_system_prompt()
+    assert "Other Lab" not in scan  # scan prompt excludes the directory
+
+
+def test_phase2_scan_prune_and_phase4_honour_role_overrides(tmp_path, monkeypatch):
+    """build_phase2_scan_prompt, build_phase2_prune_prompt, and build_phase4_prompt each
+    load their template via a hardcoded global path rather than the role-aware
+    resolver, so a role's override file for any of the three would be accepted into
+    the repo and then silently ignored. Pin that each one now resolves through
+    Agent._load_prompt (and therefore src.agent.roles.resolve_prompt_path)."""
+    from src.agent import roles as roles_mod
+    from src.agent.agent import Agent
+    from src.agent.state import PostRef, ThreadState
+
+    prompts = tmp_path / "prompts"
+    (prompts / "roles" / "widget").mkdir(parents=True)
+    (prompts / "phase2-scan-filter.md").write_text("GLOBAL SCAN {posts}", encoding="utf-8")
+    (prompts / "phase2-prune.md").write_text("GLOBAL PRUNE {interesting_posts}", encoding="utf-8")
+    (prompts / "phase4-thread-reply.md").write_text("GLOBAL REPLY", encoding="utf-8")
+    (prompts / "roles" / "widget" / "phase2-scan-filter.md").write_text(
+        "WIDGET SCAN {posts}", encoding="utf-8"
+    )
+    (prompts / "roles" / "widget" / "phase2-prune.md").write_text(
+        "WIDGET PRUNE {interesting_posts}", encoding="utf-8"
+    )
+    (prompts / "roles" / "widget" / "phase4-thread-reply.md").write_text(
+        "WIDGET REPLY", encoding="utf-8"
+    )
+    monkeypatch.setattr(roles_mod, "PROMPTS_DIR", prompts)
+    monkeypatch.setattr(roles_mod, "ROLES_DIR", prompts / "roles")
+
+    agent = Agent("w", "WBot", "W Lab", role="widget")
+    _, scan_messages = agent.build_phase2_scan_prompt(
+        [{"post_id": "p1", "channel": "general", "sender": "x", "content_snippet": "s"}]
+    )
+    assert "WIDGET SCAN" in scan_messages[0]["content"]
+
+    agent.state.interesting_posts = [
+        PostRef(post_id="p1", channel="general", sender_agent_id="x", content_snippet="s", posted_at=0.0)
+    ]
+    _, prune_messages = agent.build_phase2_prune_prompt()
+    assert "WIDGET PRUNE" in prune_messages[0]["content"]
+
+    thread = ThreadState(thread_id="t1", channel="general", other_agent_id="o", message_count=1)
+    _, reply_messages = agent.build_phase4_prompt(
+        thread=thread,
+        thread_history=[{"sender": "o", "content": "hello"}],
+        other_agent_name="OBot",
+        other_agent_lab="O Lab",
+    )
+    assert "WIDGET REPLY" in reply_messages[0]["content"]
+
+
+def test_phase5_menu_token_is_always_substituted():
+    """No caller may leak the raw token into a prompt. prompts/ is bind-mounted
+    and re-read per call while src/ is baked into the agent image, so a template
+    that ships ahead of its renderer would put `{post_type_menu}` in front of a
+    live model."""
+    from src.agent.agent import Agent
+
+    a = Agent("gill", "GillBot", "Gill")
+    _, messages = a.build_phase5_prompt()
+    assert "{post_type_menu}" not in messages[0]["content"]
+
+
+def test_phase5_default_menu_never_prints_an_empty_enumeration():
+    """The default path has no roster to enumerate from. Guarded here as well as
+    in test_post_types because this is the caller that reaches a snapshot."""
+    from src.agent.agent import Agent
+
+    a = Agent("gill", "GillBot", "Gill")
+    _, messages = a.build_phase5_prompt()
+    assert "one of: ." not in messages[0]["content"]
+
+

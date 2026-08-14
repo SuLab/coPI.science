@@ -1,14 +1,17 @@
 """My Agent page router."""
 
+import asyncio
 import logging
 import re
 import uuid
+from datetime import UTC
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import distinct, func, select
+from sqlalchemy import distinct, func, select, tuple_
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -24,7 +27,7 @@ from src.models import (
     ThreadDecision,
     User,
 )
-from src.services.profile_export import export_private_profile, export_profile_to_markdown
+from src.services.profile_export import export_profile_to_markdown
 from src.services.validators import is_valid_email
 
 logger = logging.getLogger(__name__)
@@ -36,6 +39,30 @@ SLACK_INVITE_URL = (
     "https://join.slack.com/t/labbot-workspace/shared_invite/"
     "zt-3sxfrrisw-t4hRz4aMfZZPxThxUaTGKA"
 )
+
+# Thread roots per page. The window's unit is threads, not messages: replies no
+# longer consume slots, so this surfaces more distinct conversations than the
+# previous flat 100-message window did.
+_ROOT_LIMIT = 50
+
+
+async def _visible_channels(db: AsyncSession, run_id, aid: str) -> list[str]:
+    """Channels this agent participates in (has authored a message in), plus
+    #general.
+
+    Shared by ``agent_conversations`` and ``agent_thread_replies`` — the
+    channel set is one of the thread-expand endpoint's four authorization
+    axes (``channel_name.in_(channels)`` on the root re-resolution query), not
+    just a display filter, so it must be computed identically in both places
+    rather than copy-pasted and left free to drift.
+    """
+    ch_rows = await db.execute(
+        select(distinct(AgentMessage.channel_name)).where(
+            AgentMessage.simulation_run_id == run_id,
+            AgentMessage.agent_id == aid,
+        )
+    )
+    return sorted({r[0] for r in ch_rows} | {"general"})
 
 
 def _extract_proposal_title(text: str | None) -> str:
@@ -285,8 +312,13 @@ async def agent_dashboard(
     delegates = []
     if agent.delegate_slack_ids:
         from src.services.slack_tokens import get_any_bot_token
-        delegates = _resolve_delegate_names(
-            agent.delegate_slack_ids, await get_any_bot_token(db)
+        # to_thread because _resolve_delegate_names is sync and calls
+        # slack_web.get_user_info once per delegate, each of which can retry with
+        # backoff. Run inline it would block the event loop for every other
+        # request the process is serving, not just this dashboard render.
+        delegates = await asyncio.to_thread(
+            _resolve_delegate_names,
+            agent.delegate_slack_ids, await get_any_bot_token(db),
         )
 
     # Pending invitations (for PI view)
@@ -358,6 +390,30 @@ def _user_slack_id_in_list(user: User, slack_ids: list[str]) -> bool:
 # --------------------------------------------------------------------------
 
 
+async def derive_agent_identity(
+    db: AsyncSession, full_name: str
+) -> tuple[str, str]:
+    """Return ``(agent_id, bot_name)`` for a PI's display name.
+
+    Both values are derived here, together, because they must agree: the
+    collision prefix used to be applied to agent_id at one line and bot_name
+    rebuilt from the bare last name four lines later, so Peng Wu got
+    ``pwu`` / ``WuBot`` — colliding with Chunlei Wu's bot while the ids differed.
+    CLAUDE.md documents ``pwu`` / ``PWuBot``.
+    """
+    last_name = full_name.split()[-1]
+    stem = "".join(c for c in last_name.lower() if c.isalpha())
+    display = last_name
+
+    collision = await db.execute(
+        select(AgentRegistry).where(AgentRegistry.agent_id == stem)
+    )
+    if collision.scalar_one_or_none():
+        initial = full_name[0]
+        return f"{initial.lower()}{stem}", f"{initial.upper()}{display}Bot"
+    return stem, f"{display}Bot"
+
+
 @router.post("/request")
 async def request_agent(
     request: Request,
@@ -374,20 +430,12 @@ async def request_agent(
     if existing.scalar_one_or_none():
         return RedirectResponse(url="/agent", status_code=302)
 
-    last_name = current_user.name.split()[-1].lower()
-    agent_id = "".join(c for c in last_name if c.isalpha())
-
-    collision = await db.execute(
-        select(AgentRegistry).where(AgentRegistry.agent_id == agent_id)
-    )
-    if collision.scalar_one_or_none():
-        first_initial = current_user.name[0].lower()
-        agent_id = f"{first_initial}{agent_id}"
+    agent_id, bot_name = await derive_agent_identity(db, current_user.name)
 
     agent = AgentRegistry(
         agent_id=agent_id,
         user_id=current_user.id,
-        bot_name=f"{current_user.name.split()[-1]}Bot",
+        bot_name=bot_name,
         pi_name=current_user.name,
         status="pending",
     )
@@ -499,9 +547,13 @@ async def reopen_proposal(
 
     # Reopening re-injects the agent into a live discussion (posts guidance to
     # Slack / spins up a private refinement channel), so it is blocked while the
-    # agent is inactive — exactly the cross-cohort interaction inactivation is
+    # agent is inactive — exactly the interaction that inactivating an agent is
     # meant to stop. Reactivate the agent to reopen proposals for further
     # discussion. (Unlike `review`, this requires status == 'active'.)
+    #
+    # Note: the reopen flow creates a collab_private channel, and the cohort gate
+    # deliberately exempts those — a PI explicitly pairing two agents outranks an
+    # admin-level cohort grouping. See .notes/cohort-system-v2.md §7.
     if agent.status != "active":
         raise HTTPException(
             status_code=403,
@@ -583,41 +635,59 @@ async def reopen_proposal(
         # Legacy fallback: flag is off → post guidance verbatim to the origin
         # public thread. This reproduces the pre-refactor behavior and is the
         # same code as before; kept gated so rollback is a config change.
-        try:
-            from slack_sdk import WebClient
+        from src.services.slack_tokens import slack_globally_enabled, token_for_agent_row
 
-            from src.services.slack_tokens import token_for_agent_row
-            bot_token = token_for_agent_row(agent)
-            if not bot_token:
-                raise HTTPException(status_code=500, detail="No bot token available")
-            client = WebClient(token=bot_token)
-            channels_result = client.conversations_list(
-                types="public_channel,private_channel", limit=200,
-            )
-            channel_id = None
-            for ch in channels_result.get("channels", []):
-                if ch["name"] == td.channel:
-                    channel_id = ch["id"]
-                    break
-            if not channel_id:
-                raise HTTPException(status_code=500, detail=f"Channel #{td.channel} not found")
-            client.chat_postMessage(
-                channel=channel_id,
-                text=f"*PI guidance from {current_user.name}:*\n\n{guidance}",
-                thread_ts=td.thread_id,
-            )
-            logger.warning(
-                "LEGACY PATH: PI %s posted guidance in proposal thread %s via %s "
-                "(enable_private_refinement=False)",
-                current_user.name, td.thread_id, agent.agent_id,
-            )
-        except HTTPException:
-            raise
-        except Exception as exc:
-            logger.error("Failed to post PI guidance to Slack: %s", exc)
-            raise HTTPException(
-                status_code=500, detail=f"Failed to post to Slack: {str(exc)[:100]}",
-            )
+        if not await slack_globally_enabled(db):
+            # Slack off → write the guidance to the DB inbox on the origin thread.
+            from src.services.pi_inbox import get_latest_run_id, record_pi_message
+            run_id = await get_latest_run_id(db)
+            if run_id:
+                await record_pi_message(
+                    db, run_id=run_id, channel_name=td.channel,
+                    content=f"PI guidance from {current_user.name}: {guidance}",
+                    sender_name=f"{current_user.name} (PI)", thread_ts=td.thread_id,
+                )
+            logger.info("Reopen guidance for %s written to DB inbox (Slack off)", td.thread_id)
+        else:
+            try:
+                # The channel lookup goes through the boundary. It used to read a
+                # single 200-item page of the paginated conversations.list, so a
+                # workspace with more channels than that reported "Channel not
+                # found" for a channel that exists; list_channel_ids follows every
+                # cursor and raises rather than returning a subset. Archived
+                # channels are counted deliberately — this asks "which id owns
+                # this name", not "can the bot join it".
+                #
+                # The post goes through it too, threaded: post_message takes
+                # thread_ts precisely so this caller does not need a raw client.
+                # It also splits at 4000 characters, which the raw call did not —
+                # long PI guidance was silently chunked by Slack.
+                from src.services.slack_web import list_channel_ids_async, post_message_async
+
+                bot_token = token_for_agent_row(agent)
+                if not bot_token:
+                    raise HTTPException(status_code=500, detail="No bot token available")
+                channel_id = (await list_channel_ids_async(bot_token)).get(td.channel)
+                if not channel_id:
+                    raise HTTPException(status_code=500, detail=f"Channel #{td.channel} not found")
+                await post_message_async(
+                    bot_token,
+                    channel_id,
+                    f"*PI guidance from {current_user.name}:*\n\n{guidance}",
+                    thread_ts=td.thread_id,
+                )
+                logger.warning(
+                    "LEGACY PATH: PI %s posted guidance in proposal thread %s via %s "
+                    "(enable_private_refinement=False)",
+                    current_user.name, td.thread_id, agent.agent_id,
+                )
+            except HTTPException:
+                raise
+            except Exception as exc:
+                logger.error("Failed to post PI guidance to Slack: %s", exc)
+                raise HTTPException(
+                    status_code=500, detail=f"Failed to post to Slack: {str(exc)[:100]}",
+                )
 
     existing = await db.execute(
         select(ProposalReview).where(
@@ -651,6 +721,346 @@ async def reopen_proposal(
 # --------------------------------------------------------------------------
 # Private profile view/edit
 # --------------------------------------------------------------------------
+
+
+@router.get("/{agent_id}/conversations", response_class=HTMLResponse)
+async def agent_conversations(
+    agent_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Read view of the agent's recent conversations + a form to post a message.
+
+    This is the Slack-independent way for a PI to see what their agent is
+    discussing and to inject a message/tag — it writes to the DB inbox, which
+    the running simulation ingests. See specs/local-db-conversations.md.
+    """
+    from src.services.conversation_feed import own_or_gated, resolve_agent_gate
+    from src.services.pi_inbox import get_latest_run_id
+
+    agent, is_owner = await get_agent_with_access(agent_id, db, current_user)
+    if agent.status not in ("active", "inactive"):
+        return RedirectResponse(url="/agent", status_code=302)
+    aid = agent.agent_id
+
+    run_id = await get_latest_run_id(db)
+    channels: list[str] = []
+    messages: list[dict] = []
+    dms: list[dict] = []
+    if run_id:
+        from src.models import PiDmMessage
+        dm_rows = await db.execute(
+            select(PiDmMessage)
+            .where(
+                PiDmMessage.simulation_run_id == run_id,
+                PiDmMessage.agent_id == aid,
+            )
+            # Total ordering. posted_at alone is not one: pi_dm_messages.posted_at
+            # carries server_default '0' (migration 0020), so any writer that omits
+            # it produces a tie group, and with LIMIT the tie makes row SELECTION
+            # plan-dependent, not just row order.
+            .order_by(PiDmMessage.posted_at.desc(), PiDmMessage.created_at.desc(),
+                      PiDmMessage.id.desc())
+            .limit(20)
+        )
+        dms = [
+            {"direction": d.direction, "sender": d.sender_name or "", "content": d.content}
+            for d in reversed(dm_rows.scalars().all())
+        ]
+        channels = await _visible_channels(db, run_id, aid)
+        # What this PI may read == what their bot may act on. Filtering happens in
+        # SQL, before LIMIT: #general carries every other cohort's traffic, so
+        # filtering in Python afterwards would leave the page nearly empty.
+        gate = await resolve_agent_gate(db, aid)
+        # own_or_gated (src/services/conversation_feed.py) is gate_clause widened
+        # with the PI's own-post carve-out — see its docstring for why the OR is
+        # needed. One expression here, in the reply-count query below, and in
+        # agent_thread_replies keeps the feed, the badge, and the expansion from
+        # ever disagreeing on what a PI may see.
+        gated = own_or_gated(gate, aid)
+
+        # Thread ROOTS, newest first. `phase` is belt-and-braces alongside
+        # `thread_ts IS NULL`; the two agree on every row.
+        #
+        # The three-column ordering is load-bearing, not stylistic. Migration
+        # 0019 adds posted_at with server_default '0', so EVERY row that
+        # predates it shares one value. With `ORDER BY posted_at DESC LIMIT
+        # 50` over a tie group larger than 50, Postgres is free to return any
+        # 50 — measured on a 200-row tie group, the index-scan and seq-scan
+        # plans returned two DISJOINT pages, so half the messages were
+        # unreachable and which half flipped with the plan. Adding created_at
+        # and the primary key makes the sort total, so the page is stable and
+        # every row is reachable by paging.
+        root_rows = await db.execute(
+            select(AgentMessage)
+            .where(
+                AgentMessage.simulation_run_id == run_id,
+                AgentMessage.channel_name.in_(channels),
+                AgentMessage.thread_ts.is_(None),
+                AgentMessage.phase == "new_post",
+                gated,
+            )
+            .order_by(AgentMessage.posted_at.desc(), AgentMessage.created_at.desc(),
+                      AgentMessage.id.desc())
+            .limit(_ROOT_LIMIT)
+        )
+        roots = list(reversed(root_rows.scalars().all()))
+
+        # Reply counts, gated with the SAME clause (including the own-post
+        # carve-out) so the badge can never promise turns the expansion will not
+        # show. The real invariant a reply query must honour is that a reply
+        # lives in ITS ROOT's channel — `uq_agent_messages_run_ts`
+        # (src/models/agent_activity.py) only proves root ids don't collide
+        # across channels within a run; it says nothing about where a reply
+        # naming that root as `thread_ts` was posted. Nothing else enforces that
+        # a `collab_private` reply's `thread_ts` can't coincide with a public
+        # root's `message_ts` — and `gate_clause`'s unconditional
+        # `collab_private` pass would let such a reply count toward (and, via
+        # the expand endpoint, render into) a conversation it does not belong
+        # to. So this matches `(thread_ts, channel_name)` pairs against each
+        # root's own channel, not `thread_ts` alone.
+        root_pairs = [(r.message_ts, r.channel_name) for r in roots if r.message_ts]
+        counts: dict[str, int] = {}
+        if root_pairs:
+            count_rows = await db.execute(
+                select(AgentMessage.thread_ts, func.count(AgentMessage.id))
+                .where(
+                    AgentMessage.simulation_run_id == run_id,
+                    tuple_(AgentMessage.thread_ts, AgentMessage.channel_name).in_(root_pairs),
+                    gated,
+                )
+                .group_by(AgentMessage.thread_ts)
+            )
+            counts = {ts: n for ts, n in count_rows}
+
+        messages = [
+            {
+                "channel": m.channel_name,
+                "sender": m.sender_name or (m.agent_id or "PI"),
+                "is_bot": m.is_bot,
+                "content": m.content,
+                "message_ts": m.message_ts,
+                "thread_ts": m.thread_ts,
+                "reply_count": counts.get(m.message_ts, 0),
+                "posted_at": m.posted_at,
+            }
+            for m in roots
+        ]
+    else:
+        channels = ["general"]
+
+    return templates.TemplateResponse(
+        request,
+        "agent/conversations.html",
+        _template_context(
+            request, current_user, agent=agent, is_owner=is_owner,
+            channels=channels, messages=messages, dms=dms,
+            has_run=run_id is not None,
+            posted=request.query_params.get("posted"),
+        ),
+    )
+
+
+@router.get("/{agent_id}/thread/{message_ts}", response_class=HTMLResponse)
+async def agent_thread_replies(
+    agent_id: str,
+    message_ts: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Replies for one thread, as an HTML fragment for the conversations page.
+
+    ``message_ts`` is a guessable identifier, so authorisation cannot stop at the
+    agent: the ROOT is re-resolved under this agent's channel set and cohort gate
+    before any reply is read. Anything that does not resolve is a 404 — absent,
+    not-a-root, another channel, and out-of-cohort are deliberately
+    indistinguishable to the caller.
+
+    Replies are gated too, with the same clause that produced the count on the
+    page (``own_or_gated``), so the badge and the expansion can never disagree.
+    This diverges from the engine, which classifies ``get_thread_history`` as
+    UNGATED (``src/agent/message_log.py:224-226``) because it is thread-internal;
+    here the whole point is that out-of-cohort traffic must not become reachable
+    by clicking, and a future reader should not "fix" this back toward engine
+    parity.
+    """
+    from src.services.conversation_feed import own_or_gated, resolve_agent_gate
+    from src.services.pi_inbox import get_latest_run_id
+
+    agent, _is_owner = await get_agent_with_access(agent_id, db, current_user)
+    if agent.status not in ("active", "inactive"):
+        raise HTTPException(status_code=404)
+    aid = agent.agent_id
+
+    run_id = await get_latest_run_id(db)
+    if not run_id:
+        raise HTTPException(status_code=404)
+
+    channels = await _visible_channels(db, run_id, aid)
+
+    gate = await resolve_agent_gate(db, aid)
+    gated = own_or_gated(gate, aid)
+    root = (await db.execute(
+        select(AgentMessage)
+        .where(
+            AgentMessage.simulation_run_id == run_id,
+            AgentMessage.message_ts == message_ts,
+            AgentMessage.thread_ts.is_(None),
+            AgentMessage.phase == "new_post",
+            AgentMessage.channel_name.in_(channels),
+            gated,
+        )
+        .limit(1)
+    )).scalar_one_or_none()
+    if root is None:
+        raise HTTPException(status_code=404)
+
+    # Scoped to the root's OWN channel, not just `thread_ts` — see the count
+    # query's comment in `agent_conversations` for why `thread_ts` alone is not
+    # the invariant a reply query can rely on.
+    reply_rows = await db.execute(
+        select(AgentMessage)
+        .where(
+            AgentMessage.simulation_run_id == run_id,
+            AgentMessage.thread_ts == message_ts,
+            AgentMessage.channel_name == root.channel_name,
+            gated,
+        )
+        .order_by(AgentMessage.posted_at.asc(), AgentMessage.created_at.asc(),
+                  AgentMessage.id.asc())
+    )
+    replies = [
+        {
+            "sender": m.sender_name or (m.agent_id or "PI"),
+            "is_bot": m.is_bot,
+            "content": m.content,
+        }
+        for m in reply_rows.scalars().all()
+    ]
+
+    return templates.TemplateResponse(
+        request, "agent/_thread_replies.html", {"replies": replies}
+    )
+
+
+@router.post("/{agent_id}/message")
+async def post_agent_message(
+    agent_id: str,
+    request: Request,
+    channel_name: str = Form(...),
+    content: str = Form(...),
+    thread_ts: str = Form(""),
+    tag_bot: str = Form(""),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Write a PI-authored message into the DB inbox for the agent's workspace.
+
+    Ingested by the running simulation via _poll_inbound_from_db — the
+    Slack-independent equivalent of a PI posting in a Slack channel.
+    """
+    from src.services.pi_inbox import (
+        get_latest_run_id,
+        pi_may_post_to_channel,
+        record_pi_message,
+    )
+
+    agent, is_owner = await get_agent_with_access(agent_id, db, current_user)
+    if agent.status != "active":
+        raise HTTPException(status_code=403, detail="Agent is not active")
+
+    text = content.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Message cannot be empty")
+    # Optionally address the PI's own bot so it engages (same @BotName convention
+    # the Slack path uses; the engine's tag detection is identical).
+    if tag_bot and f"@{agent.bot_name.lower()}" not in text.lower():
+        text = f"@{agent.bot_name} {text}"
+
+    run_id = await get_latest_run_id(db)
+    if not run_id:
+        raise HTTPException(status_code=409, detail="No simulation run to post into yet")
+
+    # `channel_name` is form input, so it can name any channel in the run —
+    # including another pair's collab_private refinement channel. The DB-only
+    # path has no Slack ACL to fall back on, so authorization is checked here
+    # against private_channel_members. See specs/privacy-and-channel-visibility.md.
+    target_channel = channel_name.strip() or "general"
+    if not await pi_may_post_to_channel(
+        db,
+        run_id=run_id,
+        channel_name=target_channel,
+        user_id=current_user.id,
+        agent_id=agent.agent_id,
+    ):
+        raise HTTPException(status_code=403, detail="Not a member of that channel")
+
+    async def _write() -> None:
+        await record_pi_message(
+            db,
+            run_id=run_id,
+            channel_name=target_channel,
+            content=text,
+            sender_name=f"{current_user.name} (PI)",
+            thread_ts=thread_ts.strip() or None,
+        )
+        await db.commit()
+
+    # M1b guard: the canonical id can collide with another process (the sim)
+    # minting the same microsecond for this run, which hits the
+    # uq_agent_messages_run_ts constraint and would otherwise surface as a raw
+    # 500. Roll back and retry once — record_pi_message mints a fresh, monotonic
+    # id, so the retry gets a new ts. See PR #19 review M1.
+    try:
+        await _write()
+    except IntegrityError:
+        await db.rollback()
+        try:
+            await _write()
+        except IntegrityError:
+            await db.rollback()
+            raise HTTPException(
+                status_code=409,
+                detail="Message could not be saved due to a conflict, please retry",
+            )
+    logger.info("[%s] PI %s posted a web message to #%s", agent_id, current_user.name, channel_name)
+    return RedirectResponse(url=f"/agent/{agent_id}/conversations?posted=1", status_code=302)
+
+
+@router.post("/{agent_id}/dm")
+async def send_agent_dm(
+    agent_id: str,
+    request: Request,
+    content: str = Form(...),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Send a DM directive to the agent's bot (standing instruction / question).
+
+    Writes an inbound pi_dm_messages row; the sim processes it via
+    _poll_pi_dms_from_db (same path as a Slack DM). See specs/local-db-conversations.md.
+    """
+    from src.services.pi_inbox import get_latest_run_id, record_pi_dm, web_pi_user_id
+
+    agent, is_owner = await get_agent_with_access(agent_id, db, current_user)
+    if agent.status != "active":
+        raise HTTPException(status_code=403, detail="Agent is not active")
+    text = content.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Message cannot be empty")
+    run_id = await get_latest_run_id(db)
+    if not run_id:
+        raise HTTPException(status_code=409, detail="No simulation run yet")
+    await record_pi_dm(
+        db, run_id=run_id, agent_id=agent_id,
+        pi_user_id=web_pi_user_id(current_user.id), direction="inbound",
+        content=text, sender_name=f"{current_user.name} (PI)",
+    )
+    await db.commit()
+    logger.info("[%s] PI %s sent a web DM directive", agent_id, current_user.name)
+    return RedirectResponse(url=f"/agent/{agent_id}/conversations?posted=1", status_code=302)
 
 
 @router.get("/{agent_id}/profile", response_class=HTMLResponse)
@@ -911,23 +1321,25 @@ async def connect_slack(
     error = None
 
     try:
-        from slack_sdk import WebClient
         from src.services.slack_tokens import get_any_bot_token
+        from src.services.slack_web import lookup_user_by_email_async
 
         bot_token = await get_any_bot_token(db)
         if not bot_token:
             error = "No Slack bot token available to perform lookup."
         else:
-            client = WebClient(token=bot_token)
-            result = client.users_lookupByEmail(email=email)
-            slack_user_id = result["user"]["id"]
+            # The boundary translates Slack's users_not_found into None, so "no
+            # such user" is a return value here rather than a substring match on
+            # an exception message.
+            slack_user_id = await lookup_user_by_email_async(bot_token, email)
+            if not slack_user_id:
+                error = (
+                    f"No Slack user found with email {email}. "
+                    "Have you joined the workspace first?"
+                )
     except Exception as exc:
-        error_msg = str(exc)
-        if "users_not_found" in error_msg:
-            error = f"No Slack user found with email {email}. Have you joined the workspace first?"
-        else:
-            logger.warning("Slack lookup failed for %s: %s", email, exc)
-            error = f"Slack lookup failed: {error_msg[:100]}"
+        logger.warning("Slack lookup failed for %s: %s", email, exc)
+        error = f"Slack lookup failed: {str(exc)[:100]}"
 
     if slack_user_id:
         agent.slack_user_id = slack_user_id
@@ -941,20 +1353,30 @@ async def connect_slack(
 
 
 def _resolve_delegate_names(slack_ids: list[str], bot_token: str | None) -> list[dict]:
-    """Resolve Slack user IDs to display names using the given bot token."""
-    from slack_sdk import WebClient
+    """Resolve Slack user IDs to display names using the given bot token.
+
+    A name that will not resolve falls back to the raw id — this only feeds the
+    dashboard's delegate list, so one unresolvable id must not blank the rest.
+    """
+    from src.services.slack_web import get_user_info
+
     if not bot_token:
         return [{"slack_id": sid, "name": sid} for sid in slack_ids]
 
-    client = WebClient(token=bot_token)
     delegates = []
     for sid in slack_ids:
+        info = None
         try:
-            info = client.users_info(user=sid)
-            name = info["user"].get("real_name") or info["user"].get("name") or sid
-            delegates.append({"slack_id": sid, "name": name})
-        except Exception:
-            delegates.append({"slack_id": sid, "name": sid})
+            # Returns None for a user Slack does not know, so the fallback below
+            # covers both "no such user" and a failed call.
+            info = get_user_info(bot_token, sid)
+        except Exception as exc:
+            logger.warning("Could not resolve Slack display name for %s: %s", sid, exc)
+        info = info or {}
+        delegates.append({
+            "slack_id": sid,
+            "name": info.get("real_name") or info.get("name") or sid,
+        })
     return delegates
 
 
@@ -981,27 +1403,36 @@ async def delegate_connect_slack(
 
     error = None
     try:
-        from slack_sdk import WebClient
         from src.services.slack_tokens import get_any_bot_token
+        from src.services.slack_web import lookup_user_by_email_async
+
         bot_token = await get_any_bot_token(db)
         if not bot_token:
             error = "No Slack bot token available."
         else:
-            client = WebClient(token=bot_token)
-            result = client.users_lookupByEmail(email=current_user.email)
-            sid = result["user"]["id"]
-            current_ids = list(agent.delegate_slack_ids or [])
-            if sid not in current_ids:
-                current_ids.append(sid)
-                agent.delegate_slack_ids = current_ids
-                await db.commit()
-            return RedirectResponse(url=f"/agent/{agent_id}/dashboard", status_code=302)
+            # None means Slack has no such user (the boundary translates
+            # users_not_found), so the "join the workspace first" message is
+            # driven by a value rather than by a substring of an exception.
+            sid = await lookup_user_by_email_async(bot_token, current_user.email)
+            if not sid:
+                error = (
+                    f"No Slack account found for {current_user.email}. "
+                    "Please join the workspace first."
+                )
+            else:
+                current_ids = list(agent.delegate_slack_ids or [])
+                if sid not in current_ids:
+                    current_ids.append(sid)
+                    agent.delegate_slack_ids = current_ids
+                    await db.commit()
+                return RedirectResponse(
+                    url=f"/agent/{agent_id}/dashboard", status_code=302
+                )
     except Exception as exc:
-        error_msg = str(exc)
-        if "users_not_found" in error_msg:
-            error = f"No Slack account found for {current_user.email}. Please join the workspace first."
-        else:
-            error = f"Slack lookup failed: {error_msg[:100]}"
+        logger.warning(
+            "Delegate Slack lookup failed for %s: %s", current_user.email, exc
+        )
+        error = f"Slack lookup failed: {str(exc)[:100]}"
 
     return RedirectResponse(
         url=f"/agent/{agent_id}/dashboard?slack_error=" + (error or "Unknown error"),
@@ -1025,7 +1456,7 @@ async def invite_delegate(
     """Send delegate invitation(s) by email."""
     import re
     import secrets
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
 
     from src.config import get_settings
     from src.models import DelegateInvitation
@@ -1092,7 +1523,7 @@ async def invite_delegate(
             email=email,
             token=token,
             status="pending",
-            expires_at=datetime.now(timezone.utc) + timedelta(days=30),
+            expires_at=datetime.now(UTC) + timedelta(days=30),
         )
         db.add(invitation)
         await db.flush()  # Get the ID
@@ -1169,19 +1600,18 @@ async def remove_delegate(
         # Remove Slack ID if present
         if delegate.user.email and agent.delegate_slack_ids:
             try:
-                from slack_sdk import WebClient
                 from src.services.slack_tokens import get_any_bot_token
+                from src.services.slack_web import lookup_user_by_email_async
+
                 bot_token = await get_any_bot_token(db)
                 if bot_token:
-                    client = WebClient(token=bot_token)
-                    slack_result = client.users_lookupByEmail(email=delegate.user.email)
-                    sid = slack_result["user"]["id"]
+                    sid = await lookup_user_by_email_async(bot_token, delegate.user.email)
                     current_ids = list(agent.delegate_slack_ids or [])
-                    if sid in current_ids:
+                    if sid and sid in current_ids:
                         current_ids.remove(sid)
                         agent.delegate_slack_ids = current_ids if current_ids else None
-            except Exception:
-                pass  # Slack sync is best-effort
+            except Exception as exc:
+                logger.warning("Delegate Slack sync is best-effort; skipped: %s", exc)
 
         await db.delete(delegate)
         await db.commit()

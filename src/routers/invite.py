@@ -1,7 +1,7 @@
 """Invitation acceptance router."""
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -56,7 +56,7 @@ async def accept_invite(
         )
 
     # Check expiry
-    if invitation.expires_at < datetime.now(timezone.utc):
+    if invitation.expires_at < datetime.now(UTC):
         if invitation.status == "pending":
             invitation.status = "expired"
             await db.commit()
@@ -145,7 +145,7 @@ async def confirm_accept_invite(
             {"request": request, "error": "This invitation is no longer valid."},
         )
 
-    if invitation.expires_at < datetime.now(timezone.utc):
+    if invitation.expires_at < datetime.now(UTC):
         invitation.status = "expired"
         await db.commit()
         return templates.TemplateResponse(
@@ -198,7 +198,7 @@ async def _accept_invitation(
         # Already a delegate — just mark invitation and redirect
         invitation.status = "accepted"
         invitation.accepted_by_user_id = user.id
-        invitation.accepted_at = datetime.now(timezone.utc)
+        invitation.accepted_at = datetime.now(UTC)
         await db.commit()
 
         # Get agent_id for redirect
@@ -221,7 +221,7 @@ async def _accept_invitation(
     # Mark invitation accepted
     invitation.status = "accepted"
     invitation.accepted_by_user_id = user.id
-    invitation.accepted_at = datetime.now(timezone.utc)
+    invitation.accepted_at = datetime.now(UTC)
 
     # Try Slack sync
     agent_result = await db.execute(
@@ -231,19 +231,25 @@ async def _accept_invitation(
 
     if user.email:
         try:
-            from slack_sdk import WebClient
-            from src.routers.agent_page import _get_bot_token
-            bot_token = _get_bot_token()
+            from src.services.slack_tokens import token_for_agent_row
+            from src.services.slack_web import lookup_user_by_email_async
+
+            bot_token = token_for_agent_row(agent)
             if bot_token:
-                client = WebClient(token=bot_token)
-                slack_result = client.users_lookupByEmail(email=user.email)
-                sid = slack_result["user"]["id"]
-                current_ids = list(agent.delegate_slack_ids or [])
-                if sid not in current_ids:
-                    current_ids.append(sid)
-                    agent.delegate_slack_ids = current_ids
-        except Exception:
-            pass  # Slack sync is best-effort
+                sid = await lookup_user_by_email_async(bot_token, user.email)
+                if sid:
+                    current_ids = list(agent.delegate_slack_ids or [])
+                    if sid not in current_ids:
+                        current_ids.append(sid)
+                        agent.delegate_slack_ids = current_ids
+        except Exception as exc:
+            # Best-effort by design (specs/web-delegates.md §Slack Linkage): a
+            # delegate is useful without a Slack id. But LOG it — a bare `pass`
+            # here hid an ImportError for an unknown length of time, and the
+            # whole sync was dead code with nothing to show for it.
+            logger.warning(
+                "Delegate Slack-ID sync failed for agent %s: %s", agent.agent_id, exc
+            )
 
     await db.commit()
 

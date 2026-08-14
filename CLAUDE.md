@@ -2,9 +2,26 @@
 
 ## Testing
 
-Run `python -m pytest tests/ -v` before committing. All tests must pass.
-Tests run inside Docker: `docker compose exec app python -m pytest tests/ -v`
-(may need `pip install pytest pytest-asyncio` first if the container was rebuilt).
+Run `./scripts/ci.sh` before committing — alembic sanity (single head, no
+duplicate revision ids), `ruff check` on the test suite, then the full pytest run
+with a branch-coverage floor. This is exactly what the `pre-push` hook runs, and
+it is the whole gate: there is no server-side CI.
+
+To run pytest alone **inside the container**, `TEST_DATABASE_URL` is required.
+Without it `tests/conftest.py` falls back to spinning an ephemeral Postgres via
+testcontainers, and the `app` container has no Docker socket — so every test that
+needs a database errors out (469 of them, measured 2026-08-04):
+
+```bash
+docker compose exec -T -e TEST_DATABASE_URL=postgresql+asyncpg://copi:copi@postgres:5432/copi_a3 \
+  app python -m pytest tests/ -v
+```
+
+The named database must already exist — the suite migrates it, it does not create
+it. Add a fresh scratch DB with
+`docker compose exec -T postgres createdb -U copi copi_xN`, and give concurrent
+suites distinct names so they do not migrate each other's schema mid-run. Never
+point `TEST_DATABASE_URL` at `copi`, the dev database.
 
 ## Compose file set (read this before any `docker compose` command)
 
@@ -68,8 +85,12 @@ C="-f docker-compose.prod.yml -f docker-compose.override.yml"
 docker logs agent-run > logs/run_$(date +%s).log 2>&1
 ls -t logs/run_*.log | tail -n +11 | xargs rm -f
 
-# 2. Stop the old container
-docker rm -f agent-run
+# 2. Stop the old container — GRACEFULLY. `docker rm -f` sends SIGKILL, which
+#    skips the shutdown flush and permanently loses the in-flight turn's
+#    messages (the DB, not Slack, is the durable store). `docker stop` sends
+#    SIGTERM; -t 30 leaves room for an in-flight LLM call to finish.
+docker stop -t 30 agent-run
+docker rm agent-run
 
 # 3. Rebuild app + worker (picks up code changes)
 docker compose $C up -d --build app worker
@@ -135,14 +156,14 @@ rotating pair is persisted in the `app_settings` KV table) and a public `base_ur
 roster from the container, then run the script on the host:
 
 ```bash
-docker exec copi-python-app-1 python scripts/export_agent_roster.py   # writes data/agent_roster.json
+docker compose exec app python scripts/export_agent_roster.py   # writes data/agent_roster.json
 python3 scripts/provision_slack_bots.py                               # host: creates apps, prints OAuth URLs
 ```
 
 The host script writes tokens to `.env`; import them into the DB column with:
 
 ```bash
-docker exec copi-python-app-1 python scripts/backfill_agent_tokens.py
+docker compose exec app python scripts/backfill_agent_tokens.py
 ```
 
 (`.env` + `config.py get_slack_tokens()` remain a read fallback, but the DB column is

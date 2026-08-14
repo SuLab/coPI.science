@@ -66,6 +66,11 @@ data/agent_roster.json
 # Local scratch notes
 .notes/
 
+# Superpowers working files (implementation plans, per-session scratch). Local
+# process artifacts, not project documentation — docs/agent-flow.md and specs/
+# are where anything durable belongs.
+docs/superpowers/
+
 # Slack provisioning state — holds app client_secrets during a bulk provisioning
 # run (scripts/provision_slack_bots.py). Must never be committed.
 .provision_state.json
@@ -75,6 +80,12 @@ data/agent_roster.json
 .mutmut-cache
 mutants/
 
+# Playwright MCP browser artifacts (console logs, page snapshots)
+.playwright-mcp/
+
+# Production migration dumps (scripts/migrate/run_migration.sh). Never commit these:
+# they are full database copies containing message bodies and tokens.
+backups/
 # Local Claude Code state
 .claude/
 

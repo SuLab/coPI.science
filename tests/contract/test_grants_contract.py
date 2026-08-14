@@ -34,7 +34,6 @@ async def test_search_opportunities_maps_fields():
         "agencyCode": "HHS-NIH11",
         "openDate": "2026-01-01",
         "closeDate": "2026-06-01",
-        "description": "Study immunology.",
     }
     respx.post(SEARCH_URL).mock(return_value=httpx.Response(200, json=_search_payload([hit])))
     results = await grants.search_opportunities("immunology")
@@ -46,7 +45,11 @@ async def test_search_opportunities_maps_fields():
             "agency": "HHS-NIH11",
             "open_date": "2026-01-01",
             "close_date": "2026-06-01",
-            "description": "Study immunology.",
+            # The provider literal above sends no description — search2 does not,
+            # measured live 2026-08-04 — so the projection maps it to "". Asserting
+            # the empty string rather than dropping the key keeps both halves
+            # honest: what grants.gov sends, and what we hand our callers.
+            "description": "",
         }
     ]
 
@@ -131,7 +134,7 @@ async def test_fetch_opportunity_detail_synopsis_non_dict_is_blank():
 @respx.mock
 async def test_search_for_researchers_dedups_by_number_and_tags_keyword():
     hit = {"id": 1, "number": "N1", "title": "T1", "agencyCode": "NSF",
-           "openDate": "", "closeDate": "", "description": ""}
+           "openDate": "", "closeDate": ""}
     route = respx.post(SEARCH_URL).mock(return_value=httpx.Response(200, json=_search_payload([hit])))
     out = await grants.search_for_researchers({"agent1": ["kw-a", "kw-b"]})
     # Both keywords were actually searched (not short-circuited) — without this, a bug

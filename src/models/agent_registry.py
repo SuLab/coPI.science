@@ -28,6 +28,9 @@ class AgentRegistry(Base):
     status: Mapped[str] = mapped_column(
         String(20), nullable=False, default="pending"
     )  # pending, active, suspended, inactive (parked: excluded from sim runs, reversible)
+    role: Mapped[str] = mapped_column(
+        String(20), nullable=False, server_default="pi_lab", default="pi_lab"
+    )  # selects per-role prompts + tool allow-list; 'pi_lab' == legacy behaviour
     slack_bot_token: Mapped[str | None] = mapped_column(Text, nullable=True)
     slack_user_id: Mapped[str | None] = mapped_column(String(50), nullable=True)
     delegate_slack_ids: Mapped[list[str] | None] = mapped_column(ARRAY(String), nullable=True)

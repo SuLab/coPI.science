@@ -3,7 +3,21 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import CheckConstraint, DateTime, Enum, Float, ForeignKey, Index, Integer, String, Text, func
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    Enum,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+    text,
+)
 from sqlalchemy.dialects.postgresql import JSON, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -13,8 +27,11 @@ from src.database import Base
 # Channel visibility classes. See specs/privacy-and-channel-visibility.md.
 # 'public' — all bots and PIs; seeded and agent-created thematic channels.
 # 'collab_private' — 2 bots + up to 2 PIs; Slack is_private=true.
-VISIBILITY_PUBLIC = "public"
-VISIBILITY_COLLAB_PRIVATE = "collab_private"
+#
+# Defined in src/visibility.py (dependency-free) and re-exported here so the
+# in-memory message log can use them without importing the ORM, while every
+# existing `from src.models.agent_activity import VISIBILITY_*` keeps working.
+from src.visibility import VISIBILITY_COLLAB_PRIVATE, VISIBILITY_PUBLIC  # noqa: E402
 
 
 class SimulationRun(Base):
@@ -62,9 +79,14 @@ class AgentMessage(Base):
         ForeignKey("simulation_runs.id", ondelete="CASCADE"),
         nullable=False,
     )
-    agent_id: Mapped[str] = mapped_column(String(50), nullable=False)
+    # Nullable: the sender's agent_id, or NULL for human/PI messages
+    # (mirrors LogEntry.sender_agent_id). Every reader filters for a specific
+    # agent_id, so NULL rows are naturally excluded. See specs/local-db-conversations.md.
+    agent_id: Mapped[str | None] = mapped_column(String(50), nullable=True)
     channel_id: Mapped[str] = mapped_column(String(100), nullable=False)
     channel_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    # Canonical message id: a locally-minted ts-shaped string (Slack-off) or the
+    # Slack ts (Slack-on). Unique within a run.
     message_ts: Mapped[str | None] = mapped_column(String(50), nullable=True)
     message_length: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     thread_ts: Mapped[str | None] = mapped_column(String(50), nullable=True)
@@ -72,8 +94,35 @@ class AgentMessage(Base):
     visibility: Mapped[str] = mapped_column(
         String(20), nullable=False, default=VISIBILITY_PUBLIC,
     )  # denormalized from agent_channels.visibility; see specs/privacy-and-channel-visibility.md §G1/G2
+    # Content columns (DB is now the primary conversation store, not Slack).
+    content: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    sender_name: Mapped[str] = mapped_column(String(100), nullable=False, server_default="")
+    is_bot: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
+    posted_at: Mapped[float] = mapped_column(Float, nullable=False, server_default="0")
+    # Slack mirror mapping (NULL when Slack is off / message is DB-origin).
+    slack_ts: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    slack_channel_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    slack_thread_ts: Mapped[str | None] = mapped_column(String(50), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        UniqueConstraint("simulation_run_id", "message_ts", name="uq_agent_messages_run_ts"),
+        Index("ix_agent_messages_run_posted", "simulation_run_id", "posted_at"),
+        # Backs the inbound poller's cursor, which pages over created_at (the DB
+        # server's clock) rather than the writer-clock-derived posted_at. See
+        # SimulationEngine._poll_inbound_from_db / PI_INBOX_LOOKBACK_S (R3).
+        Index("ix_agent_messages_run_created", "simulation_run_id", "created_at"),
+        Index(
+            "ix_agent_messages_run_channel_posted",
+            "simulation_run_id", "channel_name", "posted_at",
+        ),
+        Index(
+            "ix_agent_messages_run_slack_ts",
+            "simulation_run_id", "slack_ts",
+            postgresql_where=text("slack_ts IS NOT NULL"),
+        ),
     )
 
     # Relationships
@@ -251,3 +300,49 @@ class PrivateChannelMember(Base):
     def __repr__(self) -> str:
         who = f"agent={self.agent_id}" if self.agent_id else f"user={self.user_id}"
         return f"<PrivateChannelMember channel={self.agent_channel_id} {who} role={self.role}>"
+
+
+class PiDmMessage(Base):
+    """A direct message between a PI (human) and their agent's bot.
+
+    DMs never enter the shared MessageLog, so they get their own durable home
+    here (the DB is the primary store, not Slack). Inbound rows (direction=
+    'inbound') are written by the Slack DM poller or the PI web interface and
+    ingested by SimulationEngine._poll_pi_dms_from_db; outbound rows record
+    what the bot sent back. See specs/local-db-conversations.md.
+    """
+
+    __tablename__ = "pi_dm_messages"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    simulation_run_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("simulation_runs.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    agent_id: Mapped[str] = mapped_column(String(50), nullable=False)
+    # PI identity: Slack user id (Slack-on) or "local:<users.id>" (Slack-off).
+    pi_user_id: Mapped[str] = mapped_column(String(50), nullable=False)
+    direction: Mapped[str] = mapped_column(
+        Enum("inbound", "outbound", name="pi_dm_direction_enum"), nullable=False
+    )
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    sender_name: Mapped[str] = mapped_column(String(100), nullable=False, server_default="")
+    ts: Mapped[str] = mapped_column(String(50), nullable=False)  # canonical id
+    slack_ts: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    posted_at: Mapped[float] = mapped_column(Float, nullable=False, server_default="0")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        Index("ix_pi_dm_run_agent_posted", "simulation_run_id", "agent_id", "posted_at"),
+        Index("ix_pi_dm_run_direction_posted", "simulation_run_id", "direction", "posted_at"),
+        # Backs the DM poller's created_at cursor (R3), as above.
+        Index("ix_pi_dm_run_direction_created", "simulation_run_id", "direction", "created_at"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<PiDmMessage agent={self.agent_id} dir={self.direction}>"

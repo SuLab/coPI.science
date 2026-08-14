@@ -2,17 +2,19 @@
 
 import logging
 import re
+import time
 from pathlib import Path
-from typing import Any
 
+from src.agent.post_types import render_menu
 from src.agent.prompt_safety import delimit
-from src.agent.state import AgentState, PostRef, ThreadState
+from src.agent.roles import DEFAULT_ROLE, load_role, resolve_prompt_path
+from src.agent.state import AgentState, ThreadState
+from src.agent.thread_guidance import phase4_guidance
 from src.models.agent_activity import VISIBILITY_COLLAB_PRIVATE, VISIBILITY_PUBLIC
 
 logger = logging.getLogger(__name__)
 
 PROFILES_DIR = Path("profiles")
-PROMPTS_DIR = Path("prompts")
 
 # Matches a bare DOI. The character class deliberately excludes the delimiters
 # that wrap DOIs in Slack posts (whitespace, quotes, angle brackets from
@@ -64,10 +66,12 @@ class Agent:
     Holds identity, profiles, and per-simulation mutable state.
     """
 
-    def __init__(self, agent_id: str, bot_name: str, pi_name: str):
+    def __init__(self, agent_id: str, bot_name: str, pi_name: str,
+                 role: str = DEFAULT_ROLE):
         self.agent_id = agent_id  # e.g., "su"
         self.bot_name = bot_name  # e.g., "SuBot"
         self.pi_name = pi_name  # e.g., "Andrew Su"
+        self.role = role  # e.g., "pi_lab" — selects prompt/role overrides
         self._public_profile: str | None = None
         self._private_profile: str | None = None
         self._public_working_memory: str | None = None  # cached public memory segment
@@ -76,6 +80,22 @@ class Agent:
         self.api_call_count: int = 0
         self.message_count: int = 0
         self.state = AgentState()
+        # Cohort interaction gate: set of agent_ids this agent may act on (its
+        # cohort-mates), or None when isolation is disabled (all-vs-all).
+        # Recomputed each roster sync by SimulationEngine. See specs/cohort-system.md.
+        self.allowed_sender_ids: set[str] | None = None
+
+    def record_api_call(self, now: float | None = None) -> None:
+        """Record one LLM call against both the lifetime counter and the
+        sliding-window ledger.
+
+        The single write point for both. Every call site must use this rather
+        than bumping ``api_call_count`` directly — a site that bumps only the
+        counter is invisible to the rate limiter, and a site that appends only to
+        the ledger corrupts ``SimulationRun.total_api_calls``.
+        """
+        self.api_call_count += 1
+        self.state.call_times.append(time.time() if now is None else now)
 
     # ------------------------------------------------------------------
     # Profile properties (cached, loaded from disk)
@@ -184,34 +204,12 @@ class Agent:
         ``channel_id`` is also injected and a Private Channel Rules block is
         appended. See specs/privacy-and-channel-visibility.md §G1, §G4.
         """
-        base_prompt = self._load_file(
-            PROMPTS_DIR / "agent-system.md",
-            _default_system_prompt(),
+        return self._compose_system_prompt(
+            include_memory=True,
+            include_lab_directory=True,
+            visibility=visibility,
+            channel_id=channel_id,
         )
-        lab_directory_section = ""
-        if self._lab_directory:
-            lab_directory_section = f"""
-## Other Labs' Recent Publications
-Use these to reference other labs' work in conversations. Include links when citing.
-{self._lab_directory}
-"""
-        working_memory_text = self._compose_working_memory(visibility, channel_id)
-        private_rules = PRIVATE_CHANNEL_RULES if visibility == VISIBILITY_COLLAB_PRIVATE else ""
-        return f"""{base_prompt}
-
-## Your Identity
-You are **{self.bot_name}**, the AI agent representing the {self.pi_name} lab at Scripps Research.
-Your agent ID is "{self.agent_id}". When communicating, represent your lab professionally.
-
-## Your Lab Profile (Public)
-{self.public_profile}
-
-## Your Private Instructions
-{self.private_profile}
-
-## Your Working Memory
-{working_memory_text}
-{lab_directory_section}{private_rules}"""
 
     def build_scan_system_prompt(self) -> str:
         """Build a lightweight system prompt for scan/filter phases.
@@ -219,21 +217,10 @@ Your agent ID is "{self.agent_id}". When communicating, represent your lab profe
         Omits working memory and lab directory — scan only needs identity,
         research focus, and private priorities to judge relevance.
         """
-        base_prompt = self._load_file(
-            PROMPTS_DIR / "agent-system.md",
-            _default_system_prompt(),
+        return self._compose_system_prompt(
+            include_memory=False,
+            include_lab_directory=False,
         )
-        return f"""{base_prompt}
-
-## Your Identity
-You are **{self.bot_name}**, the AI agent representing the {self.pi_name} lab at Scripps Research.
-Your agent ID is "{self.agent_id}". When communicating, represent your lab professionally.
-
-## Your Lab Profile (Public)
-{self.public_profile}
-
-## Your Private Instructions
-{self.private_profile}"""
 
     def build_thread_reply_system_prompt(
         self,
@@ -250,26 +237,81 @@ Your agent ID is "{self.agent_id}". When communicating, represent your lab profe
         which memory segment is injected and whether the Private Channel Rules
         block is appended.
         """
-        base_prompt = self._load_file(
-            PROMPTS_DIR / "agent-system.md",
-            _default_system_prompt(),
+        return self._compose_system_prompt(
+            include_memory=True,
+            include_lab_directory=False,
+            visibility=visibility,
+            channel_id=channel_id,
         )
-        working_memory_text = self._compose_working_memory(visibility, channel_id)
-        private_rules = PRIVATE_CHANNEL_RULES if visibility == VISIBILITY_COLLAB_PRIVATE else ""
-        return f"""{base_prompt}
 
-## Your Identity
-You are **{self.bot_name}**, the AI agent representing the {self.pi_name} lab at Scripps Research.
-Your agent ID is "{self.agent_id}". When communicating, represent your lab professionally.
+    def _load_prompt(self, filename: str, default: str) -> str:
+        """Load a prompt file honouring this agent's role override.
+
+        See src/agent/roles.py: ``pi_lab`` (the default role) always falls
+        through to the global ``prompts/{filename}`` — that fallthrough *is*
+        what keeps existing agents byte-identical after this method's
+        introduction.
+        """
+        return self._load_file(resolve_prompt_path(self.role, filename), default)
+
+    def _render_identity(self) -> str:
+        """Render the '## Your Identity' block for this agent."""
+        template = self._load_prompt("identity.md", _DEFAULT_IDENTITY)
+        # str.replace, NOT str.format: profiles/role files may contain bare
+        # curly braces (e.g. "budget is {tight}") that must not be treated as
+        # format fields.
+        return (
+            template.replace("{bot_name}", self.bot_name)
+            .replace("{pi_name}", self.pi_name)
+            .replace("{agent_id}", self.agent_id)
+        )
+
+    def _compose_system_prompt(
+        self,
+        *,
+        include_memory: bool,
+        include_lab_directory: bool,
+        visibility: str = VISIBILITY_PUBLIC,
+        channel_id: str | None = None,
+    ) -> str:
+        """Assemble a system prompt from the shared sections.
+
+        This is the single composer behind build_system_prompt,
+        build_scan_system_prompt, and build_thread_reply_system_prompt — the
+        include_memory/include_lab_directory flags reproduce each builder's
+        original section set byte-for-byte (see the callers below).
+        """
+        base_prompt = self._load_prompt("agent-system.md", _default_system_prompt())
+        identity = self._render_identity()
+        private_rules = PRIVATE_CHANNEL_RULES if visibility == VISIBILITY_COLLAB_PRIVATE else ""
+
+        header = f"""{base_prompt}
+
+{identity}
 
 ## Your Lab Profile (Public)
 {self.public_profile}
 
 ## Your Private Instructions
-{self.private_profile}
+{self.private_profile}"""
 
-## Your Working Memory
-{working_memory_text}{private_rules}"""
+        if not include_memory:
+            return header
+
+        working_memory_text = self._compose_working_memory(visibility, channel_id)
+        memory_block = f"\n\n## Your Working Memory\n{working_memory_text}"
+
+        if include_lab_directory:
+            lab_directory_section = ""
+            if self._lab_directory:
+                lab_directory_section = f"""
+## Other Labs' Recent Publications
+Use these to reference other labs' work in conversations. Include links when citing.
+{self._lab_directory}
+"""
+            return f"{header}{memory_block}\n{lab_directory_section}{private_rules}"
+
+        return f"{header}{memory_block}{private_rules}"
 
     def _compose_working_memory(
         self,
@@ -308,8 +350,8 @@ Your agent ID is "{self.agent_id}". When communicating, represent your lab profe
         Returns (system_prompt, messages).
         """
         system_prompt = self.build_scan_system_prompt()
-        phase2_template = self._load_file(
-            PROMPTS_DIR / "phase2-scan-filter.md",
+        phase2_template = self._load_prompt(
+            "phase2-scan-filter.md",
             "Evaluate posts and return JSON with selected_post_ids.",
         )
 
@@ -338,8 +380,8 @@ Your agent ID is "{self.agent_id}". When communicating, represent your lab profe
     def build_phase2_prune_prompt(self) -> tuple[str, list[dict]]:
         """Build system + messages for Phase 2 prune."""
         system_prompt = self.build_scan_system_prompt()
-        prune_template = self._load_file(
-            PROMPTS_DIR / "phase2-prune.md",
+        prune_template = self._load_prompt(
+            "phase2-prune.md",
             "Prune interesting_posts to ≤20. Return JSON with keep_post_ids.",
         )
 
@@ -380,59 +422,22 @@ Your agent ID is "{self.agent_id}". When communicating, represent your lab profe
         system_prompt = self.build_thread_reply_system_prompt(
             visibility=visibility, channel_id=channel_id,
         )
-        phase4_template = self._load_file(
-            PROMPTS_DIR / "phase4-thread-reply.md",
+        phase4_template = self._load_prompt(
+            "phase4-thread-reply.md",
             "Compose a thread reply.",
         )
 
-        # Thread phase guidance
-        if thread.message_count <= 4:
-            thread_phase = "EXPLORE"
-            phase_guidance = (
-                "You are in the EXPLORE phase. Share relevant specifics from your lab's recent work. "
-                "Ask clarifying questions about the other lab's capabilities. Use retrieve_profile and "
-                "retrieve_abstract tools to learn more. Do NOT propose a full collaboration yet."
-            )
-        elif thread.message_count <= 11:
-            thread_phase = "DECIDE"
-            phase_guidance = (
-                "You are in the DECIDE phase. Narrow the scope: is there genuine complementarity? "
-                "Can you name a specific first experiment? If yes, build toward a :memo: Summary proposal. "
-                "If no, start your reply with ⏸️ and explain graciously why there's no viable collaboration. "
-                "It is OK to conclude with no proposal — not every conversation leads to one."
-            )
-        else:
-            thread_phase = "MUST CONCLUDE"
-            phase_guidance = (
-                "This is message 12 — you MUST conclude the thread now. Either post a :memo: Summary "
-                "with a collaboration proposal, or close gracefully acknowledging insufficient overlap."
-            )
+        # Thread phase guidance + instructions, per role. scout_hub scouts ideas
+        # against Blackbird's screening rubric; it has no lab and never proposes a
+        # collaboration. See src/agent/thread_guidance.py.
+        thread_phase, phase_guidance, instructions = phase4_guidance(
+            self.role, thread.message_count
+        )
 
         # Format thread history
         history_text = "\n".join(
             f"**{m['sender']}**: {m['content']}" for m in thread_history
         )
-
-        # Build instructions based on phase
-        if thread_phase == "EXPLORE":
-            instructions = (
-                "Write a reply that shares specific details from your lab and asks a clarifying "
-                "question. Use tools proactively to research the other lab."
-            )
-        elif thread_phase == "DECIDE":
-            instructions = (
-                "Write a reply that moves toward a conclusion. Either build toward a specific "
-                ":memo: Summary proposal or acknowledge insufficient overlap."
-            )
-        else:
-            instructions = (
-                "This is the final message. You MUST either:\n"
-                "1. Post a :memo: Summary with a specific collaboration proposal, OR\n"
-                "2. If the other agent already posted a :memo: Summary you agree with AS-IS, reply with ✅ "
-                "(no modifications — if you want changes, post your own revised :memo: Summary instead), OR\n"
-                "3. Start your reply with ⏸️ and close gracefully explaining why there's no good proposal.\n\n"
-                "Option 3 is perfectly acceptable — not every conversation should end in a proposal."
-            )
 
         # If the thread's root post is about a paper this lab authored, warn the
         # model not to engage as if it were external work (see issue #7).
@@ -514,6 +519,7 @@ Your agent ID is "{self.agent_id}". When communicating, represent your lab profe
         funding_thread_summaries: dict[str, str] | None = None,
         visibility: str = VISIBILITY_PUBLIC,
         channel_id: str | None = None,
+        post_type_menu: str | None = None,
     ) -> tuple[str, list[dict]]:
         """
         Build system + messages for Phase 5 new post.
@@ -531,10 +537,16 @@ Your agent ID is "{self.agent_id}". When communicating, represent your lab profe
             always operates in a public channel. The parameters are plumbed
             through for symmetry with the other phase builders; future work
             that lets agents initiate private-channel posts will use them.
+
+        post_type_menu: pre-rendered {post_type_menu} block. The engine computes
+            it from the role's allow-list filtered by the live cohort gate, and
+            enforces the SAME set when the response comes back. None renders
+            THIS AGENT'S ROLE's declared set with no topology filtering — used by
+            direct callers and tests that have no topology to apply.
         """
         system_prompt = self.build_system_prompt(visibility=visibility, channel_id=channel_id)
-        phase5_template = self._load_file(
-            PROMPTS_DIR / "phase5-new-post.md",
+        phase5_template = self._load_prompt(
+            "phase5-new-post.md",
             "Choose to reply to an interesting post or make a new top-level post.",
         )
 
@@ -633,6 +645,23 @@ Your agent ID is "{self.agent_id}". When communicating, represent your lab profe
         prompt_text = prompt_text.replace("{subscribed_channels}", channels_text)
         prompt_text = prompt_text.replace("{your_recent_posts}", recent_text)
         prompt_text = prompt_text.replace("{prior_conversations}", prior_text)
+        if post_type_menu is None:
+            # No topology supplied — render THIS agent's role set with no
+            # filtering, matching the "gate is None means no filtering" rule.
+            # Role-aware, not DEFAULT_POST_TYPES: a scout_hub agent built by a
+            # direct caller would otherwise get the pi_lab menu, offering it
+            # three types its own role.toml forbids.
+            #
+            # gate=None also makes render_menu emit guidance instead of an
+            # enumeration for an addressed type. There is no roster here to
+            # enumerate, and the enumeration would come out as the literal
+            # "one of: ." — in a live prompt, and in test_phase5_prompt_gm's
+            # committed snapshot.
+            post_type_menu = render_menu(
+                load_role(self.role).post_types, gate=None, roles_by_agent={},
+                self_id=self.agent_id, bot_names={},
+            )
+        prompt_text = prompt_text.replace("{post_type_menu}", post_type_menu)
 
         # Inject pre-loaded FOA details for Option B (funding collaborations)
         if thread_foa_contexts:
@@ -739,6 +768,16 @@ Your agent ID is "{self.agent_id}". When communicating, represent your lab profe
             return path.read_text(encoding="utf-8")
         except FileNotFoundError:
             return default
+
+
+# Fallback identity block used only if prompts/identity.md (or a role's
+# override) is missing from disk. Must match prompts/identity.md verbatim,
+# including the absence of a trailing newline — see _compose_system_prompt,
+# which relies on exactly one blank line separating this block from its
+# neighbors.
+_DEFAULT_IDENTITY = """## Your Identity
+You are **{bot_name}**, the AI agent representing the {pi_name} lab at Scripps Research.
+Your agent ID is "{agent_id}". When communicating, represent your lab professionally."""
 
 
 def _default_system_prompt() -> str:

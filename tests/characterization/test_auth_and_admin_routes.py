@@ -163,3 +163,104 @@ async def test_unsubscribe_invalid_token_renders_error_200(client):
     r = await client.get("/settings/unsubscribe/bogus-token")
     assert r.status_code == 200
     assert "text/html" in r.headers["content-type"]
+
+
+# --- /admin/discussions: nullable agent_id on Slack-imported posts ------------
+
+
+async def test_admin_discussions_survives_a_bot_post_with_no_agent_id(client, db_session):
+    """Regression: /admin/discussions 500'd in production.
+
+    `_rebuild_state_from_slack` records real Slack messages whose sender cannot
+    be mapped to a known bot as `is_bot=True, agent_id=NULL` — measured: 7 such
+    rows, all from raw Slack user id U0BKJ6US485. The handler collected them
+    into `available_agents` unguarded (every sibling `.add()` IS guarded) and
+    then `sorted()` the set, so one NULL took the whole page down with
+    `TypeError: '<' not supported between instances of 'NoneType' and 'str'`.
+    """
+    u = await factories.make_user(db_session, is_admin=True)
+    run = await factories.make_simulation_run(db_session)
+    # A normal bot post, so the set is genuinely mixed rather than all-None.
+    await factories.make_agent_message(
+        db_session, run=run, agent_id="gill", is_bot=True,
+        message_ts="1786000000.000100", thread_ts=None, channel_name="general",
+    )
+    # The Slack-imported post with no mappable sender.
+    await factories.make_agent_message(
+        db_session, run=run, agent_id=None, is_bot=True,
+        message_ts="1786000000.000200", thread_ts=None, channel_name="general",
+        sender_name="U0BKJ6US485",
+    )
+    await db_session.flush()
+
+    r = await client.get("/admin/discussions", headers=_auth_headers(u.id))
+    assert r.status_code == 200
+    # The NULL-agent thread's "Posted By" cell must not read as a real bot —
+    # `{{ t.agent_id | capitalize }}Bot` printed the literal "NoneBot".
+    assert "NoneBot" not in r.text
+    assert "(unknown sender)" in r.text
+
+
+async def test_admin_activity_detail_survives_a_bot_post_with_no_agent_id(client, db_session):
+    """Regression: /admin/activity/{run_id} 500'd the same way /admin/discussions
+    did (fixed in 73a78c3 for that route only).
+
+    `admin_activity_detail` builds `channel_stats[...]["agents"]` as a set and
+    does `channel_stats[channel]["agents"].add(msg.agent_id)` with no guard, then
+    `templates/admin/activity_detail.html` does `{{ stats.agents | sort | join(', ') }}`
+    — Jinja's `sort` is `sorted()`, so one NULL `agent_id` (the same
+    `_rebuild_state_from_slack` "sender maps to no known bot" case) takes the whole
+    page down with `TypeError: '<' not supported between instances of 'NoneType'
+    and 'str'`. This run is the one that is FIRST in the Activity table today, so
+    it is the most likely click in production.
+    """
+    u = await factories.make_user(db_session, is_admin=True)
+    run = await factories.make_simulation_run(db_session)
+    # A normal bot post, so the set is genuinely mixed rather than all-None.
+    await factories.make_agent_message(
+        db_session, run=run, agent_id="gill", is_bot=True,
+        message_ts="1786000000.000100", thread_ts=None, channel_name="general",
+    )
+    # The Slack-imported post with no mappable sender, in the same channel.
+    await factories.make_agent_message(
+        db_session, run=run, agent_id=None, is_bot=True,
+        message_ts="1786000000.000200", thread_ts=None, channel_name="general",
+        sender_name="U0BKJ6US485",
+    )
+    await db_session.flush()
+
+    r = await client.get(f"/admin/activity/{run.id}", headers=_auth_headers(u.id))
+    assert r.status_code == 200
+    # The NULL-agent row must not be rendered as a lie: no literal "NoneBot"
+    # anywhere on the page (Messages-by-Agent table, by-channel agent list, or
+    # the message timeline).
+    assert "NoneBot" not in r.text
+    assert "(unknown sender)" in r.text
+
+
+# --- /admin/activity/{run_id}/llm-calls: unbounded `page` ---------------------
+
+
+async def test_admin_llm_calls_page_zero_rejected_not_500(client, db_session):
+    """Regression: `page: int = 1` had no lower bound, so `?page=0` computed
+    `offset = (0 - 1) * 50 = -50` and Postgres raised `OFFSET must not be
+    negative` as an unhandled 500. `Query(1, ge=1)` rejects an out-of-range
+    page with a clean 422 instead, and `?page=1` still works.
+    """
+    u = await factories.make_user(db_session, is_admin=True)
+    run = await factories.make_simulation_run(db_session)
+    await db_session.flush()
+
+    r = await client.get(
+        f"/admin/activity/{run.id}/llm-calls",
+        params={"page": 0},
+        headers=_auth_headers(u.id),
+    )
+    assert r.status_code == 422
+
+    r2 = await client.get(
+        f"/admin/activity/{run.id}/llm-calls",
+        params={"page": 1},
+        headers=_auth_headers(u.id),
+    )
+    assert r2.status_code == 200

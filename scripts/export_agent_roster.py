@@ -15,7 +15,7 @@ Usage (inside the app container / on the compose network):
         python scripts/export_agent_roster.py
 
     # or simply:
-    docker exec copi-python-app-1 python scripts/export_agent_roster.py
+    docker compose exec app python scripts/export_agent_roster.py
 """
 
 from __future__ import annotations

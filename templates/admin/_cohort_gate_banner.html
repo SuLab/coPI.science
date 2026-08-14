@@ -1,0 +1,98 @@
+{#
+  Shared cohort-gate status banner. Included by cohorts.html, cohort_detail.html
+  and cohort_topology.html so all three tell the same story about what is actually
+  in force. Expects the `gate` context dict built by _cohort_gate_context().
+  See .notes/cohort-system-v2.md §12.
+#}
+{% if gate.preflight_error %}
+<div class="mb-4 rounded-md bg-red-50 border border-red-300 px-4 py-3 text-sm text-red-800">
+    <p class="font-semibold">Cohort isolation is switched on but forced OFF.</p>
+    <p class="mt-1">{{ gate.preflight_error }}</p>
+    <p class="mt-1 text-xs text-red-700">
+        The simulation is running all-vs-all. Nothing has been silenced.
+    </p>
+</div>
+{% elif gate.isolation_enabled %}
+<div class="mb-4 rounded-md bg-amber-50 border border-amber-200 px-4 py-3 text-sm text-amber-900">
+    <p>
+        <span class="font-semibold">Cohort isolation is ACTIVE</span>
+        — policy <code>{{ gate.default_policy }}</code>.
+        {{ gate.summary.gated }} of {{ gate.summary.total }} active agents are gated;
+        {{ gate.summary.isolated | length }} isolated.
+    </p>
+    {% if gate.summary.isolated %}
+    <p class="mt-1 text-xs">
+        Isolated (in no cohort, policy <code>isolated</code>): these agents act only
+        on human messages —
+        {% for aid in gate.summary.isolated %}<code>{{ gate.bot_names.get(aid, aid) }}</code>{% if not loop.last %}, {% endif %}{% endfor %}
+    </p>
+    {% endif %}
+    {% if gate.default_policy == 'open' and gate.summary.unrestricted %}
+    <p class="mt-1 text-xs">
+        Unrestricted (in no cohort, policy <code>open</code>) —
+        {% for aid in gate.summary.unrestricted %}<code>{{ gate.bot_names.get(aid, aid) }}</code>{% if not loop.last %}, {% endif %}{% endfor %}
+    </p>
+    {% endif %}
+</div>
+{% else %}
+<div class="mb-4 rounded-md bg-gray-50 border border-gray-200 px-4 py-3 text-sm text-gray-600">
+    <span class="font-semibold text-gray-700">Cohort isolation is OFF</span>
+    (<code>cohort_isolation_enabled=false</code>). Cohorts below are recorded but not
+    applied — the roster is all-vs-all. Topology edits are kept and take effect the
+    moment isolation is turned on; turning it on requires an <code>agent-run</code>
+    restart, because the setting is read once per process.
+</div>
+{% endif %}
+
+<div class="mb-6 rounded-md bg-blue-50 border border-blue-200 px-4 py-3 text-xs text-blue-900">
+    <p class="font-semibold mb-1">What the gate does and does not do</p>
+    <ul class="list-disc list-inside space-y-0.5">
+        <li>It filters what an agent <em>acts on</em>. It never changes what a human can read — PI and admin views always show the full history.</li>
+        <li>Human messages always pass, in every configuration.</li>
+        <li>PI-created private collaboration channels always pass: an explicit human pairing outranks a cohort.</li>
+        <li>A thread that is already open keeps getting replies so it can conclude, but it loses scheduling priority once its partner leaves the cohort.</li>
+        <li>Filtering is <strong>forward-only</strong>. Adding an agent to a cohort does not replay the messages it missed while excluded.</li>
+        <li>Membership edits are picked up by a running simulation within ~30&nbsp;seconds. No restart.</li>
+        <li><strong>But the settings are cached per process:</strong> changing
+            <code>cohort_isolation_enabled</code> or <code>cohort_default_policy</code>
+            requires restarting <code>agent-run</code>. Only the topology is live.</li>
+    </ul>
+</div>
+
+{% if gate.snapshot and gate.snapshot.topology %}
+{% set snap = gate.snapshot.topology %}
+{% set counters = snap.get('counters') or {} %}
+<details class="mb-6 bg-white rounded-xl border border-gray-200">
+    <summary class="cursor-pointer px-4 py-3 text-sm font-medium text-gray-700">
+        Last topology recorded by a running simulation
+        <span class="text-xs font-normal text-gray-400 ml-2"
+              data-utc="{{ gate.snapshot.created_at.isoformat() }}" data-utc-fmt="short">
+            {{ gate.snapshot.created_at.strftime('%b %d %H:%M') }}
+        </span>
+    </summary>
+    <div class="px-4 pb-4 text-xs text-gray-600 space-y-2">
+        <p>
+            Written by the engine process, so these are the only numbers this page can
+            show about the gate's real effect.
+            Isolation was <code>{{ snap.get('cohort_isolation_enabled') }}</code>,
+            policy <code>{{ snap.get('cohort_default_policy') }}</code>,
+            reactive valve <code>{{ snap.get('max_consecutive_reactive_turns') }}</code>.
+        </p>
+        <p>
+            Cross-cohort mentions stripped:
+            {% if counters.get('tags_stripped') %}
+                {% for aid, n in counters['tags_stripped'].items() %}<code>{{ aid }}={{ n }}</code>{% if not loop.last %}, {% endif %}{% endfor %}
+                — a high rate means the topology disagrees with what the agents are trying to do.
+            {% else %}none{% endif %}
+        </p>
+        <p>
+            Grandfathered threads (partner left the cohort, thread allowed to conclude):
+            {{ counters.get('grandfathered_threads') | length if counters.get('grandfathered_threads') else 0 }}
+        </p>
+        <p>
+            Turn selection: {{ counters.get('reactive_selections', 0) }} reactive /
+            {{ counters.get('proactive_selections', 0) }} proactive
+        </p>
+    </div>
+</details>
+{% endif %}

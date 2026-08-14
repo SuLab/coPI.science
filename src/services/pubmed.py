@@ -73,11 +73,21 @@ def reconcile_pub_doi(
 _request_semaphore = asyncio.Semaphore(8)  # Conservative limit
 
 
+# NCBI's E-utilities usage policy requires every request to identify the caller with
+# `tool` and `email`. Anonymous traffic is throttled first and IP-blocked second, and
+# NCBI has no way to warn us because it does not know who we are. Every NCBI call in
+# the system — the profile pipeline, DOI reconciliation, PMC methods extraction —
+# funnels through _ncbi_get, so omitting these made the whole deployment anonymous.
+_NCBI_TOOL = "copi-science"
+
+
 async def _ncbi_get(url: str, params: dict[str, Any]) -> httpx.Response:
-    """Make a rate-limited GET request to NCBI."""
+    """Make a rate-limited, identified GET request to NCBI."""
     settings = get_settings()
     if settings.ncbi_api_key:
         params["api_key"] = settings.ncbi_api_key
+    params.setdefault("tool", _NCBI_TOOL)
+    params.setdefault("email", settings.ncbi_contact_email or settings.ses_sender_email)
     async with _request_semaphore:
         async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
             resp = await client.get(url, params=params)

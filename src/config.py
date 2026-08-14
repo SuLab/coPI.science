@@ -1,7 +1,9 @@
 """Application configuration from environment variables using Pydantic Settings."""
 
 import logging
+import re
 from functools import lru_cache
+from typing import Literal
 
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -18,10 +20,79 @@ INSECURE_SECRET_KEY = "insecure-dev-key-change-me"
 # tolerated with a warning). Anything else fails fast.
 _DEV_ENVIRONMENTS = {"development", "dev", "local", "test"}
 
-# Field-name substrings that mark a setting as a credential. Any such field with
-# a non-empty value is masked in repr()/str() of the Settings object so an
-# accidental log line or `repr(settings)` can't dump the ~130 secrets (SEC-19).
-_SECRET_NAME_HINTS = ("secret", "token", "key", "password")
+_MASK = "***REDACTED***"
+
+# Field-name substrings that mark a setting whose ENTIRE value is a credential. Any
+# such field with a non-empty value is masked in repr()/str() of the Settings object
+# so an accidental log line or `repr(settings)` can't dump the ~130 secrets (SEC-19).
+#
+# Deliberately NOT hinted: "url"/"uri". Those fields carry a credential only inside
+# their userinfo or query string, and blanking base_url or database_url wholesale
+# would cost an operator the host they are actually pointed at — the first thing you
+# read in a deploy postmortem. _redact_url_credentials masks them positionally
+# instead. "passwd"/"credential" match no field today; they are here so a future
+# `db_passwd` is covered on arrival rather than after the next audit.
+_SECRET_NAME_HINTS = ("secret", "token", "key", "password", "passwd", "credential")
+
+# A URL/DSN split into scheme, authority and everything after it.
+_URL_RE = re.compile(
+    r"(?P<scheme>[A-Za-z][A-Za-z0-9+.-]*://)(?P<authority>[^/?#]*)(?P<rest>.*)",
+    re.DOTALL,
+)
+
+# Query-parameter names whose value is a credential — libpq/asyncpg DSNs accept
+# "?password=...". Narrower than _SECRET_NAME_HINTS on purpose: a Postgres URL also
+# carries "?sslkey=/etc/ssl/client.key", a filename an operator needs to be able to
+# read, so bare "key" is not enough of a signal on this side.
+_URL_QUERY_SECRET_HINTS = (
+    "password", "passwd", "secret", "token", "api_key", "apikey", "access_key",
+    "credential",
+)
+_URL_QUERY_SECRET_RE = re.compile(
+    r"(?P<sep>[?&])(?P<name>[^=&#\s]*(?:"
+    + "|".join(_URL_QUERY_SECRET_HINTS)
+    + r")[^=&#\s]*)=(?P<value>[^&#\s]+)",
+    re.IGNORECASE,
+)
+
+
+def _redact_url_credentials(value: str) -> str:
+    """Mask credentials embedded in a URL/DSN without hiding the rest of it.
+
+    `database_url` is a credential-carrying field whose name matches none of
+    `_SECRET_NAME_HINTS`, so `repr(settings)` printed the deployed DSN — password
+    included — verbatim. Masking only the password component (the same choice
+    SQLAlchemy makes in ``URL.render_as_string(hide_password=True)``) keeps the
+    scheme/host/port/database legible, which is the diagnostic value of the field.
+
+    Left deliberately untouched, so that the mask always means "a real credential is
+    hidden here" rather than "this field might have one":
+
+    * A URL with no userinfo (``postgresql://host/db``). There is no secret in it;
+      masking would destroy the only useful diagnostic and would make the mask
+      ambiguous about whether a password is configured at all.
+    * A bare userinfo with no ``":"`` (``postgresql://copi@host/db``) — that is a
+      username, not a credential. A URL whose userinfo *is* the credential
+      (``https://<token>@host``) would live in a ``*_token`` field and be masked
+      whole by name.
+    * A present-but-empty password (``postgresql://copi:@host/db``), mirroring the
+      empty-value rule on the name-based path.
+
+    Non-URL strings are returned unchanged, so this is safe to run over every field.
+    """
+    m = _URL_RE.match(value)
+    if not m:
+        return value
+    authority = m.group("authority")
+    if "@" in authority:
+        userinfo, _, host = authority.rpartition("@")
+        user, sep, password = userinfo.partition(":")
+        if sep and password:
+            authority = f"{user}:{_MASK}@{host}"
+    rest = _URL_QUERY_SECRET_RE.sub(
+        lambda q: f"{q['sep']}{q['name']}={_MASK}", m.group("rest")
+    )
+    return f"{m['scheme']}{authority}{rest}"
 
 
 class Settings(BaseSettings):
@@ -44,6 +115,9 @@ class Settings(BaseSettings):
 
     # NCBI
     ncbi_api_key: str = ""
+    # Sent as `email=` on every E-utilities request. NCBI requires it (with `tool=`)
+    # and throttles or blocks unidentified clients. Falls back to ses_sender_email.
+    ncbi_contact_email: str = ""
 
     # App
     secret_key: str = INSECURE_SECRET_KEY
@@ -59,6 +133,12 @@ class Settings(BaseSettings):
     # config token on every use). See src/services/slack_provisioning.py.
     slack_config_token: str = ""
     slack_config_refresh_token: str = ""
+
+    # Master switch for all Slack integration. None = auto-detect (Slack is on
+    # iff at least one agent has a usable bot token); set SLACK_ENABLED=false to
+    # force the DB-only mode where the local database is the sole conversation
+    # store and no Slack API calls are made. See specs/local-db-conversations.md.
+    slack_enabled: bool | None = None
 
     # AWS SES
     aws_region: str = "us-east-2"
@@ -214,8 +294,18 @@ class Settings(BaseSettings):
 
     # LLM models
     llm_profile_model: str = "claude-opus-4-6"
-    llm_agent_model: str = "claude-sonnet-4-6"
-    llm_agent_model_opus: str = "claude-opus-4-6"
+    # Agent-turn models, tiered by phase. llm_agent_model is the default for
+    # the high-volume cheap paths (phase-2 scan/prune, memory synthesis,
+    # make_decision) and stays on the Sonnet tier to cost-match the original
+    # claude-sonnet-4-6 profile; the phase-4/5 call sites pass
+    # llm_agent_model_opus explicitly. Both Sonnet 5 and Opus 5 think by
+    # default and max_tokens caps thinking + text together, so the agent-path
+    # LLM calls pin thinking={"type": "disabled"} (src/services/llm.py) to
+    # keep today's token/latency envelope — the per-phase max_tokens values
+    # are pinned by the characterization golden masters. Revisit (adaptive
+    # thinking + larger caps + effort) when prompts unfreeze.
+    llm_agent_model: str = "claude-sonnet-5"
+    llm_agent_model_opus: str = "claude-opus-5"
     llm_agent_model_sonnet: str = "claude-sonnet-4-6"
 
     # Worker
@@ -234,6 +324,54 @@ class Settings(BaseSettings):
     max_abstracts_other_per_thread: int = 10
     max_full_text_per_thread: int = 2
 
+    # Cohort isolation — when True, an agent only acts on posts/threads/tags from
+    # agents that share at least one cohort with it. When False (default), the
+    # roster is all-vs-all as before. Humans, PI-created private channels and
+    # already-open threads always pass the gate.
+    # See .notes/cohort-system-v2.md §5.
+    cohort_isolation_enabled: bool = False
+    # What happens to an agent that belongs to no cohort while isolation is on:
+    #   "open"     — unrestricted (default). Enabling isolation is then safe even
+    #                with zero cohorts defined: nothing changes until an admin
+    #                actually builds a topology.
+    #   "isolated" — the agent sees only humans. Cohort membership becomes
+    #                mandatory to participate. Guarded by the startup preflight
+    #                (_cohort_preflight): with zero cohorts defined this policy
+    #                would silence the entire roster, so it is refused and
+    #                isolation is forced off with an ERROR.
+    # See .notes/cohort-system-v2.md §5.2 / §5.3.
+    cohort_default_policy: Literal["open", "isolated"] = "open"
+    # Reactive-priority scheduler: after this many consecutive turns given to
+    # agents that owe a thread reply, force a normal (proactive) selection so
+    # new-conversation formation isn't starved. Default matches
+    # active_thread_threshold so the two levers stay in proportion — at the
+    # original 8 a single live pair took 24 of 27 turns. See _select_agent and
+    # .notes/cohort-system-v2.md §10.3.
+    max_consecutive_reactive_turns: int = 3
+
+    # Load-proportional rate limiter. Replaces the cumulative --budget cap as the
+    # LIVE throttle: allowance = llm_calls_per_load_per_window * _agent_load(agent),
+    # measured over a sliding llm_rate_window_seconds.
+    #
+    # A rate self-heals — a throttled agent is eligible again as the window slides
+    # — where a cumulative cap benches permanently, and, because _rebuild_state
+    # restores api_call_count from llm_call_logs, benches permanently ACROSS
+    # RESTARTS. That is what took the blackbird hub off the air for 161 turns.
+    #
+    # Calibrated against run 4f1e8395: a spoke ran ~0.27 calls/10min and the hub
+    # ~2.6, so 8 leaves a spoke ~30x headroom while tripping a runaway (back-to-back
+    # calls) in ~25s. Lower this to tighten it.
+    #
+    # The hub's ceiling depends on active_thread_threshold, which _agent_load
+    # clamps to. At the IN-CODE default of 3 a hub gets at most 3 * 8 = 24 calls
+    # per window (and 3x the selection weight of an idle spoke). The deployed
+    # blackbird .env raises active_thread_threshold to 12, which is where the
+    # often-quoted 96/window and 12x weight come from — a fresh checkout gets
+    # neither. Raise active_thread_threshold, not this number, to widen a hub.
+    # See docs/specs/2026-08-06-hub-budget-scheduler-design.md §4.2 / §5.
+    llm_rate_window_seconds: int = 600
+    llm_calls_per_load_per_window: int = 8
+
     # Privacy rollout — when True (default), POST /agent/{id}/proposals/{tid}/reopen
     # migrates the thread into a new collab_private channel instead of posting
     # the PI's guidance text into the origin public thread. Can be set to False
@@ -246,15 +384,33 @@ class Settings(BaseSettings):
         """Redact credential-valued fields in repr()/str().
 
         Pydantic v2 routes both ``repr(settings)`` and ``str(settings)`` through
-        ``__repr_args__``, so masking here closes the only described leak path
-        for SEC-19 (an accidental log/repr of the settings object) with no
-        change to how any field is *read*. Fields keep their plain ``str`` type,
-        avoiding a ``.get_secret_value()`` churn across ~130 call sites; a
-        deliberate reader of a specific attribute still gets the real value.
+        ``__repr_args__`` (``BaseModel.__str__`` -> ``__repr_str__`` ->
+        ``__repr_args__``; verified against pydantic 2.13 and asserted in
+        tests/unit/test_config_secret_redaction.py), so masking here closes the
+        only described leak path for SEC-19 (an accidental log/repr of the
+        settings object) with no change to how any field is *read*. Fields keep
+        their plain ``str`` type, avoiding a ``.get_secret_value()`` churn across
+        ~130 call sites; a deliberate reader of a specific attribute still gets
+        the real value.
+
+        Two rules, because credentials arrive in two shapes:
+
+        1. Whole-value secrets, recognised by field name (``_SECRET_NAME_HINTS``)
+           — the ~130 bot tokens, API keys, the signing key.
+        2. Credentials embedded in an otherwise-public URL/DSN, recognised by
+           value shape (``_redact_url_credentials``) — ``database_url``, whose
+           name matches no hint. Masked positionally so the host and database
+           stay readable.
+
+        Still out of scope, by design: ``model_dump()`` returns everything in the
+        clear. The invariant that keeps that safe is tested in
+        tests/unit/test_slack_tokens.py (nothing in src/ dumps a settings object).
         """
         for name, value in super().__repr_args__():
             if value and any(h in str(name).lower() for h in _SECRET_NAME_HINTS):
-                yield name, "***REDACTED***"
+                yield name, _MASK
+            elif value and isinstance(value, str):
+                yield name, _redact_url_credentials(value)
             else:
                 yield name, value
 
@@ -287,6 +443,37 @@ class Settings(BaseSettings):
     def audit_recipient_list(self) -> list[str]:
         """Daily-audit recipients, parsed from the comma-separated setting."""
         return [e.strip() for e in self.audit_recipients.split(",") if e.strip()]
+
+    @model_validator(mode="after")
+    def _guard_rate_limiter_settings(self) -> "Settings":
+        """Clamp non-positive rate-limiter settings back to their defaults.
+
+        Both fields are divisors of behaviour, not knobs with a meaningful zero:
+
+        - ``llm_calls_per_load_per_window`` <= 0 makes ``len(times) < allowance``
+          false for every agent forever, so nobody is ever eligible. The engine no
+          longer exits on that (it backs off and retries), which means a typo'd
+          ``0`` buys a silent, permanently idle run;
+        - ``llm_rate_window_seconds`` <= 0 collapses the window to a point, so
+          every recorded call is expired and the limiter never fires at all.
+
+        Clamping rather than raising matches ``roles.py``'s treatment of the
+        per-role override (warn, fall back) and keeps a bad value from taking the
+        whole deployment down. The WARNING names the setting so the cause is
+        greppable — the failure mode this guards against is otherwise invisible.
+        """
+        for name in ("llm_calls_per_load_per_window", "llm_rate_window_seconds"):
+            value = getattr(self, name)
+            if value <= 0:
+                fallback = type(self).model_fields[name].default
+                logger.warning(
+                    "%s must be a positive int, got %r — falling back to %r. "
+                    "The LLM rate limiter would otherwise never let any agent "
+                    "take a turn.",
+                    name.upper(), value, fallback,
+                )
+                setattr(self, name, fallback)
+        return self
 
     def get_slack_tokens(self) -> dict[str, str]:
         """Return slack bot tokens keyed by agent_id."""
