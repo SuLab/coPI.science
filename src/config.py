@@ -293,7 +293,7 @@ class Settings(BaseSettings):
     posthog_api_key: str = ""
 
     # LLM models
-    llm_profile_model: str = "claude-opus-4-6"
+    llm_profile_model: str = "claude-opus-5"
     # Agent-turn models, tiered by phase. llm_agent_model is the default for
     # the high-volume cheap paths (phase-2 scan/prune, memory synthesis,
     # make_decision) and stays on the Sonnet tier to cost-match the original
@@ -304,9 +304,19 @@ class Settings(BaseSettings):
     # keep today's token/latency envelope — the per-phase max_tokens values
     # are pinned by the characterization golden masters. Revisit (adaptive
     # thinking + larger caps + effort) when prompts unfreeze.
+    #
+    # llm_agent_model_sonnet is the ancillary knob (GrantBot, PI-DM classify,
+    # inbound-email classify). It is NOT the same tier as llm_agent_model
+    # despite the name: llm_agent_model IS the Sonnet-5 tier, and this one
+    # trailed on claude-sonnet-4-6 until it was moved up alongside
+    # llm_profile_model. Every call site of both — including the three that
+    # call client.messages.create directly rather than going through
+    # generate_agent_response — pins thinking={"type": "disabled"}, because
+    # each reads message.content[0].text and a thinking block would take
+    # content[0] on any 5-series model.
     llm_agent_model: str = "claude-sonnet-5"
     llm_agent_model_opus: str = "claude-opus-5"
-    llm_agent_model_sonnet: str = "claude-sonnet-4-6"
+    llm_agent_model_sonnet: str = "claude-sonnet-5"
 
     # Worker
     worker_poll_interval: int = 5  # seconds

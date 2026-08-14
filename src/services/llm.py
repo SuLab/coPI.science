@@ -53,6 +53,12 @@ Return your response as valid JSON matching the specified schema."""
         message = client.messages.create(
             model=settings.llm_profile_model,
             max_tokens=4000,
+            # Opus 5 thinks by default, and max_tokens caps thinking + text
+            # together. Without this pin content[0] is a thinking block, so the
+            # .text read below raises and every profile synthesis fails; the
+            # 4000-token cap would also be shared with reasoning. Same pin the
+            # agent paths use, for the same reason.
+            thinking={"type": "disabled"},
             system=system_prompt,
             messages=[{"role": "user", "content": user_message}],
         )
@@ -99,6 +105,11 @@ Return ONLY the markdown profile content — no JSON, no code fences."""
         message = client.messages.create(
             model=settings.llm_profile_model,
             max_tokens=2000,
+            # See synthesize_profile: Opus 5 thinks by default, which would put
+            # a thinking block at content[0] and share the 2000-token cap with
+            # reasoning. This path returns raw markdown, so a leaked reasoning
+            # block would land directly in the stored private profile.
+            thinking={"type": "disabled"},
             system=system_prompt,
             messages=[{"role": "user", "content": user_message}],
         )
