@@ -81,9 +81,13 @@ Then, in this order:
    `_amazonses` TXT verification record if the domain was newly verified.
 2. Attach the printed S3 policy to `copi-ec2-ses-role`.
 3. Re-run `--check` until all layers are OK.
-4. Set `ENABLE_INBOUND_EMAIL=true` in the prod `.env` and recreate the
-   worker:
-   `docker compose -f docker-compose.prod.yml -f docker-compose.override.yml up -d worker`
+4. Set `ENABLE_INBOUND_EMAIL=true` in the prod `.env` and recreate BOTH the
+   worker (polling + proposal/reminder emails) and the app (the welcome email
+   reads the same flag for its reply-vs-dashboard copy — recreating only the
+   worker leaves new signups being told the dashboard is the only way in):
+   `docker compose -f docker-compose.prod.yml -f docker-compose.override.yml up -d app worker`
+   (`up -d` recreates on env change; a bare `docker restart` re-runs the OLD
+   environment — `env_file` is resolved at container creation.)
 5. End-to-end test: trigger a proposal notification to a test recipient,
    reply with "3 sounds great", and watch
    `docker logs -f copi-python-worker-1` for `Email review created`.
