@@ -198,6 +198,43 @@ def build_welcome_email(to_email: str, name: str | None = None, user_id: str | N
 
     greeting_name = (name or "").strip().split(" ")[0] if name else ""
     greeting = f"Hi {greeting_name}," if greeting_name else "Hi there,"
+
+    # Only describe the reply-by-email review flow when the inbound pipeline
+    # is actually enabled; otherwise point at the web dashboard alone.
+    reply_enabled = settings.enable_inbound_email
+    if reply_enabled:
+        review_how_text = (
+            "HOW PROPOSAL REVIEW WORKS\n"
+            "When your agent and another lab's agent develop a promising idea, we email\n"
+            "you a short proposal. You can:\n"
+            "  - Reply with a rating from 1 to 4:\n"
+            "      1 = Not a good idea   2 = Good idea\n"
+            "      3 = Great idea        4 = Excellent idea\n"
+            '  - Reply with instructions (e.g. "focus on the mitochondrial angle") and\n'
+            "    your agent will re-engage to refine the idea.\n"
+            "  - Or review it on the web dashboard.\n"
+            "Note: while you have unreviewed proposals, your agent pauses new\n"
+            "conversations — reviewing promptly keeps it active."
+        )
+        review_how_html = (
+            "<li><strong>Rate it</strong> by replying with a number from 1 to 4.</li>\n"
+            "            <li><strong>Give instructions</strong> to refine it, and your agent re-engages.</li>\n"
+            "            <li><strong>Review it on the web</strong> dashboard.</li>"
+        )
+    else:
+        review_how_text = (
+            "HOW PROPOSAL REVIEW WORKS\n"
+            "When your agent and another lab's agent develop a promising idea, we email\n"
+            "you a short proposal. Open your dashboard to rate it from 1 to 4\n"
+            "(1 = Not a good idea, 2 = Good idea, 3 = Great idea, 4 = Excellent idea)\n"
+            "or to give your agent instructions to refine the idea.\n"
+            "Note: while you have unreviewed proposals, your agent pauses new\n"
+            "conversations — reviewing promptly keeps it active."
+        )
+        review_how_html = (
+            "<li><strong>Rate it</strong> from 1 to 4 on your dashboard.</li>\n"
+            "            <li><strong>Give instructions</strong> to refine it, and your agent re-engages.</li>"
+        )
     # HTML-escaped greeting for the HTML body (the name is the ORCID display
     # name, i.e. user-controlled) (SEC-13).
     greeting_html = f"Hi {esc(greeting_name)}," if greeting_name else "Hi there,"
@@ -226,17 +263,7 @@ FINDING YOUR WAY AROUND
 - My Agent ({agent_url}) — request your agent and manage it.
 - Settings ({settings_url}) — choose which emails you receive and how often.
 
-HOW PROPOSAL REVIEW WORKS
-When your agent and another lab's agent develop a promising idea, we email
-you a short proposal. You can:
-  - Reply with a rating from 1 to 4:
-      1 = Not a good idea   2 = Good idea
-      3 = Great idea        4 = Excellent idea
-  - Reply with instructions (e.g. "focus on the mitochondrial angle") and
-    your agent will re-engage to refine the idea.
-  - Or review it on the web dashboard.
-Note: while you have unreviewed proposals, your agent pauses new
-conversations — reviewing promptly keeps it active.
+{review_how_text}
 
 Welcome aboard,
 The CoPI team — Scripps Research
@@ -321,9 +348,7 @@ Manage email preferences: {settings_url}
             you a short proposal. You can:
         </p>
         <ul style="color: #374151; line-height: 1.8; margin: 0 0 12px; padding-left: 20px; font-size: 14px;">
-            <li><strong>Rate it</strong> by replying with a number from 1 to 4.</li>
-            <li><strong>Give instructions</strong> to refine it, and your agent re-engages.</li>
-            <li><strong>Review it on the web</strong> dashboard.</li>
+            {review_how_html}
         </ul>
         <p style="color: #9ca3af; font-size: 12px; margin: 0 0 16px;">
             1 = Not a good idea &bull; 2 = Good idea &bull; 3 = Great idea &bull; 4 = Excellent idea
