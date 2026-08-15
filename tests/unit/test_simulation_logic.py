@@ -1144,10 +1144,11 @@ class TestPhase4ReplySuppression:
 # (`reopen_proposal` -> `src/services/pi_inbox.py::record_pi_message`) writes
 # a human-authored row that the DB-inbound poller ingests into the shared
 # MessageLog; before this fix, `MessageLog.has_new_reply_from_other` (via
-# `_owes_reply` and `_phase4_reply_threads`'s ungated call) would have treated
-# that row as "a new reply from the other participant" — setting
-# `has_pending_reply`, granting reactive priority, and (via
-# `_reply_to_thread`'s message-count recompute) shifting the thread's ordinal.
+# `_owes_reply` and the reply lane's ungated call, `_pending_reply_pairs`
+# since Task 11) would have treated that row as "a new reply from the other
+# participant" — setting `has_pending_reply`, granting reactive priority, and
+# (via `_reply_to_thread`'s message-count recompute) shifting the thread's
+# ordinal.
 # ---------------------------------------------------------------
 
 class TestHumanRepliesAreInertToPhase4:
@@ -1209,9 +1210,9 @@ class TestHumanRepliesAreInertToPhase4:
 
         monkeypatch.setattr(engine, "_reply_to_thread", _fake_reply_to_thread)
 
-        replied = await engine._phase4_reply_threads(agent)
+        pairs = engine._pending_reply_pairs()
 
-        assert replied == set(), "a human-only entry must not select the thread for reply"
+        assert pairs == [], "a human-only entry must not select the thread for reply"
         assert called["reply"] is False
         assert thread.has_pending_reply is False
         assert thread.message_count == 3, (
@@ -1232,9 +1233,12 @@ class TestHumanRepliesAreInertToPhase4:
 
         monkeypatch.setattr(engine, "_reply_to_thread", _fake_reply_to_thread)
 
-        replied = await engine._phase4_reply_threads(agent)
+        pairs = engine._pending_reply_pairs()
+        assert [(a.agent_id, t.thread_id) for a, t in pairs] == [("blackbird", "t1")]
 
-        assert replied == {"t1"}
+        for a, t in pairs:
+            await engine._service_reply(a, t)
+
         assert called["reply"] is True
 
 

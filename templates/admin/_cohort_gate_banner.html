@@ -75,8 +75,7 @@
             Written by the engine process, so these are the only numbers this page can
             show about the gate's real effect.
             Isolation was <code>{{ snap.get('cohort_isolation_enabled') }}</code>,
-            policy <code>{{ snap.get('cohort_default_policy') }}</code>,
-            reactive valve <code>{{ snap.get('max_consecutive_reactive_turns') }}</code>.
+            policy <code>{{ snap.get('cohort_default_policy') }}</code>.
         </p>
         <p>
             Cross-cohort mentions stripped:
@@ -97,10 +96,6 @@
         <p>
             Grandfathered threads (partner left the cohort, thread allowed to conclude):
             {{ counters.get('grandfathered_threads') | length if counters.get('grandfathered_threads') else 0 }}
-        </p>
-        <p>
-            Turn selection: {{ counters.get('reactive_selections', 0) }} reactive /
-            {{ counters.get('proactive_selections', 0) }} proactive
         </p>
     </div>
 </details>

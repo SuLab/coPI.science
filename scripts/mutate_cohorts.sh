@@ -119,7 +119,11 @@ MUTANTS=(
 # kill, which is the one thing the old harness did get right.
 "src/agent/simulation.py~~        visibility = self._resolve_channel_visibility(channel)~~        visibility = VISIBILITY_PUBLIC~~M6 outbound messages are never stamped collab_private (a REAL defect the suite missed)"
 "src/agent/simulation.py~~            if thread.grandfathered:\n                continue~~            if False:\n                continue~~M7 a grandfathered thread keeps reactive priority"
-"src/agent/simulation.py~~        if self._reactive_streak < settings.max_consecutive_reactive_turns:~~        if True:~~M8 the fairness valve never closes"
+# M8 was pinned to `_select_agent`'s reactive-tier valve
+# (`self._reactive_streak < settings.max_consecutive_reactive_turns`). Task 11
+# (two-lane concurrent scheduler) deleted the reactive tier outright — replies
+# leave the paced pool entirely — so there is no equivalent line left to
+# mutate; removed rather than re-pointed.
 "src/agent/simulation.py~~            if target_id == agent.agent_id or target_id in allowed:~~            if True:~~M9 the outbound tag strip never strips"
 )
 

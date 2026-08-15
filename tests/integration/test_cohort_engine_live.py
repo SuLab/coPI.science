@@ -103,7 +103,7 @@ def _engine(factory, run_id, agent_ids=AGENT_IDS, roles=None):
     return eng
 
 
-def _cfg(monkeypatch, *, enabled=True, policy="isolated", valve=3, delay=0.0):
+def _cfg(monkeypatch, *, enabled=True, policy="isolated", delay=0.0):
     """Override only the cohort knobs on the REAL Settings object.
 
     A SimpleNamespace would work for the gate alone, but these tests drive real
@@ -115,7 +115,6 @@ def _cfg(monkeypatch, *, enabled=True, policy="isolated", valve=3, delay=0.0):
     patched = _real().model_copy(update={
         "cohort_isolation_enabled": enabled,
         "cohort_default_policy": policy,
-        "max_consecutive_reactive_turns": valve,
         "turn_delay_seconds": delay,
     })
     monkeypatch.setattr("src.agent.simulation.get_settings", lambda: patched)
@@ -758,12 +757,17 @@ async def test_grandfathered_thread_still_gets_a_phase4_reply(live, monkeypatch)
 
     # It must not win reactive priority...
     assert eng._owes_reply(su) is False
-    # ...but Phase 4 must still pick it up and reply.
-    replied = await eng._phase4_reply_threads(su)
+    # ...but the reply lane must still pick it up and reply (Task 11: the
+    # reactive tier and _phase4_reply_threads are gone; the reply lane's
+    # ungated _pending_reply_pairs / _service_reply replace it).
+    pairs = eng._pending_reply_pairs()
+    replied = {t.thread_id for a, t in pairs if a.agent_id == "su"}
     assert "1000.0071" in replied, (
         "a grandfathered thread must still be answered so it can conclude"
     )
-    assert fake.calls, "Phase 4 should have called the LLM for the grandfathered thread"
+    for a, t in pairs:
+        await eng._service_reply(a, t)
+    assert fake.calls, "the reply lane should have called the LLM for the grandfathered thread"
 
 
 # ===========================================================================
@@ -1252,12 +1256,17 @@ async def test_grandfathered_thread_concludes_but_loses_priority(live, monkeypat
     # Absence: it no longer jumps the queue.
     assert eng._owes_reply(su) is False
 
-    # Presence: Phase 4 still replies, so it can conclude.
-    replied = await eng._phase4_reply_threads(su)
+    # Presence: the reply lane still replies, so it can conclude (Task 11:
+    # _phase4_reply_threads is gone; _pending_reply_pairs / _service_reply
+    # replace it).
+    pairs = eng._pending_reply_pairs()
+    replied = {t.thread_id for a, t in pairs if a.agent_id == "su"}
     assert "4000.0001" in replied, (
         "a grandfathered thread must still be answered so it can conclude"
     )
-    assert fake.calls, "Phase 4 made no LLM call — the thread stalled, not concluded"
+    for a, t in pairs:
+        await eng._service_reply(a, t)
+    assert fake.calls, "the reply lane made no LLM call — the thread stalled, not concluded"
 
 
 async def test_start_computes_the_gate_and_records_a_snapshot(live, monkeypatch):
@@ -1364,7 +1373,7 @@ async def test_start_records_a_snapshot_even_when_the_gate_is_off(live, monkeypa
 
 
 # ===========================================================================
-# §9 outbound tag hygiene, §10.3 the fairness valve
+# §9 outbound tag hygiene
 # ===========================================================================
 
 
@@ -1449,66 +1458,3 @@ async def test_strip_indentation_is_preserved(live, monkeypatch):
     assert "        yield h" in out, "nested code indentation was reflowed"
     assert "  - nested bullet" in out, "list indentation was reflowed"
 
-
-async def test_valve_holds_over_sustained_load(live20, monkeypatch):
-    """§10.3 at pilot scale over 200 selections.
-
-    A fake clock is essential: with wall time every pick lands in the same instant, the
-    staleness weight clamps to 1.0 for everyone, and the proactive tier becomes uniform
-    — which would make the pair's share a property of the fake, not of the valve.
-
-    Both bounds matter. The upper one is the valve doing its job; the LOWER one is the
-    control — a scheduler with no reactive tier at all would give the pair roughly
-    2/20 of the turns and would pass an upper bound alone.
-    """
-    import random
-    import types
-
-    import src.agent.simulation as sim
-    from src.agent.state import ThreadState
-
-    factory, run_id = live20
-    await _topology(factory, {"alpha": list(AGENT_IDS_20)})
-    _cfg(monkeypatch, enabled=True, policy="isolated", valve=3)
-    eng = _engine(factory, run_id, agent_ids=AGENT_IDS_20)
-    await eng._recompute_allowed_sender_ids()
-
-    random.seed(20260730)
-    clock = [1000.0]
-    monkeypatch.setattr(sim, "time", types.SimpleNamespace(time=lambda: clock[0]))
-
-    # Two agents locked in a perpetual exchange — the starvation scenario §10.3 exists
-    # for. The other 18 have nothing owed and can only be reached proactively.
-    for a, b in (("su", "wiseman"), ("wiseman", "su")):
-        eng.agents[a].state.active_threads[f"t-{a}"] = ThreadState(
-            thread_id=f"t-{a}", channel="general", other_agent_id=b,
-            has_pending_reply=True,
-        )
-
-    picks = []
-    for _ in range(200):
-        got = eng._select_agent()
-        assert got is not None
-        picks.append(got.agent_id)
-        eng._last_llm_caller = got.agent_id
-        got.state.last_selected = clock[0]
-        clock[0] += 10.0
-
-    pair = sum(1 for p in picks if p in {"su", "wiseman"})
-    assert pair <= 160, (
-        f"the pair took {pair}/200 turns — the valve is not holding"
-    )
-    assert pair >= 100, (
-        f"the pair took only {pair}/200 — the reactive tier is not firing at all, so "
-        "the upper bound above proves nothing"
-    )
-    # The valve's purpose: everyone else still gets to form new conversations.
-    others = set(picks) - {"su", "wiseman"}
-    assert len(others) >= 15, (
-        f"only {len(others)} of the other 18 agents were ever selected: {sorted(others)}"
-    )
-    assert eng._reactive_selections + eng._proactive_selections == 200
-    assert eng._proactive_selections >= 40, (
-        f"only {eng._proactive_selections} proactive picks in 200 — the valve should "
-        "force roughly one in four"
-    )

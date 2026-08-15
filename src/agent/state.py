@@ -109,3 +109,13 @@ class AgentState:
     # Phase 5 throttling (state-change gate + skip backoff)
     consecutive_phase5_skips: int = 0
     last_phase5_action_time: float = 0.0  # last time Phase 5 was evaluated (gates the spontaneous-post timer)
+
+    # True for the duration of this agent's post-lane turn (_run_post_turn),
+    # excluded from selection while set (_turn_eligible). Replaces
+    # _last_llm_caller's crude "was this the last caller" back-to-back guard
+    # with a precise "is this specific agent's turn actively running" check —
+    # a no-op today (the post lane is strictly sequential, so the previous
+    # turn always finishes before the next selection), but load-bearing once
+    # loop iterations can overlap. Reset in a finally so an exception mid-turn
+    # cannot strand an agent permanently ineligible.
+    in_flight: bool = False

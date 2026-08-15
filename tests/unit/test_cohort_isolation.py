@@ -126,7 +126,6 @@ def _settings(**kw):
     base = dict(
         cohort_isolation_enabled=False,
         cohort_default_policy=POLICY_OPEN,
-        max_consecutive_reactive_turns=3,
         turn_delay_seconds=0.0,
         # Required since _turn_eligible gained the rate limiter: _agent_load reads
         # active_thread_threshold, _within_rate_limit reads the other two. Values are
@@ -136,8 +135,8 @@ def _settings(**kw):
         llm_rate_window_seconds=600,
         llm_calls_per_load_per_window=8,
         # Required since SimulationEngine.__init__ eagerly constructs the
-        # Phase-4 fan-out semaphore (self._llm_fanout_sem) rather than
-        # per-call — see _phase4_reply_threads / test_phase4_concurrency.py.
+        # (now unused-pending-Task-13) Phase-4 fan-out semaphore
+        # (self._llm_fanout_sem) rather than per-call.
         phase4_max_concurrent_replies=4,
     )
     base.update(kw)
@@ -950,10 +949,13 @@ class TestGrandfathering:
         assert "cravatt" not in allowed
 
     def test_phase4_reads_ungated_so_threads_can_conclude(self):
-        """Phase 4 must see a grandfathered partner's reply — the thread is open and
-        entitled to finish. Pinned on the call site, since the whole point of §8 is
-        that Phase 4 and the scheduler deliberately differ."""
-        src = inspect.getsource(SimulationEngine._phase4_reply_threads)
+        """The reply lane must see a grandfathered partner's reply — the thread is
+        open and entitled to finish. Pinned on the call site (now
+        `_pending_reply_pairs`, the reply lane's selection function — Task 11
+        split `_phase4_reply_threads` into this plus `_service_reply`), since
+        the whole point of §8 is that the reply lane and the (former)
+        scheduler priority deliberately differ."""
+        src = inspect.getsource(SimulationEngine._pending_reply_pairs)
         assert "allowed_sender_ids=None" in src
         assert "entitled to conclude" in src
 
@@ -1085,32 +1087,6 @@ class TestTagHygiene:
 
 
 class TestScheduler:
-    def test_owed_agent_selected_first(self, monkeypatch):
-        _patch(monkeypatch)
-        eng = _engine(["su", "wiseman", "cravatt"])
-        _thread(eng.agents["wiseman"], "t1", "su", pending=True)
-        assert eng._select_agent().agent_id == "wiseman"
-        assert eng._reactive_streak == 1
-
-    def test_oldest_waiting_owed_agent_wins(self, monkeypatch):
-        _patch(monkeypatch)
-        eng = _engine(["su", "wiseman"])
-        _thread(eng.agents["su"], "t1", "wiseman", pending=True)
-        _thread(eng.agents["wiseman"], "t2", "su", pending=True)
-        eng.agents["su"].state.last_selected = 100.0
-        eng.agents["wiseman"].state.last_selected = 5.0
-        assert eng._select_agent().agent_id == "wiseman"
-
-    def test_excludes_last_llm_caller(self, monkeypatch):
-        _patch(monkeypatch)
-        eng = _engine(["su", "wiseman"])
-        _thread(eng.agents["su"], "t1", "wiseman", pending=True)
-        _thread(eng.agents["wiseman"], "t2", "su", pending=True)
-        eng.agents["su"].state.last_selected = 1.0
-        eng.agents["wiseman"].state.last_selected = 50.0
-        eng._last_llm_caller = "su"
-        assert eng._select_agent().agent_id == "wiseman"
-
     def test_no_candidates_returns_none(self, monkeypatch):
         _patch(monkeypatch)
         assert _engine([])._select_agent() is None
@@ -1133,15 +1109,6 @@ class TestScheduler:
         picked = eng._select_agent()
         assert picked is not None and picked.agent_id == "wiseman"
 
-    def test_cooldown_applies_to_the_reactive_tier_too(self, monkeypatch):
-        import time
-        _patch(monkeypatch, turn_delay_seconds=10_000.0)
-        eng = _engine(["su", "wiseman"])
-        _thread(eng.agents["su"], "t1", "wiseman", pending=True)
-        eng.agents["su"].state.last_selected = time.time()
-        eng.agents["wiseman"].state.last_selected = 0.0
-        assert eng._select_agent().agent_id == "wiseman"
-
     def test_global_sleep_removed_from_main_loop(self):
         # The loop was split out of start() into _run_main_loop() so the
         # stall-is-transient contract is reachable from a unit test; check both
@@ -1151,67 +1118,6 @@ class TestScheduler:
         )
         assert "_sleep(settings.turn_delay_seconds)" not in src
         assert "enforced at selection time in _turn_eligible" in src
-
-    def test_valve_forces_proactive_at_cap(self, monkeypatch):
-        _patch(monkeypatch, max_consecutive_reactive_turns=3)
-        eng = _engine(["su", "wiseman"])
-        _thread(eng.agents["wiseman"], "t1", "su", pending=True)
-        eng._reactive_streak = 3
-        assert eng._select_agent() is not None
-        assert eng._reactive_streak == 0
-
-    def test_default_valve_is_three(self):
-        from src.config import Settings
-        assert Settings.model_fields["max_consecutive_reactive_turns"].default == 3
-
-    def test_valve_caps_starvation_at_three_to_one(self, monkeypatch):
-        """At the original default of 8 a live pair took 24 of 27 turns.
-
-        Models the real loop: `start()` advances `last_selected` after every turn,
-        which is what lets the staleness-weighted proactive tier favour the agents
-        the reactive pair has been starving. A fake clock is required — with wall
-        time every delta is sub-second and `max(now - last_selected, 1.0)` clamps
-        every weight to 1.0, making the proactive tier uniform and the assertion
-        meaningless.
-        """
-        import random
-
-        import src.agent.simulation as sim
-
-        # The proactive tier is random.choices. Seed it so this bound is a fact
-        # about the scheduler rather than about today's RNG state.
-        random.seed(20260730)
-        _patch(monkeypatch, max_consecutive_reactive_turns=3)
-        clock = [1000.0]
-        monkeypatch.setattr(sim.time, "time", lambda: clock[0])
-
-        eng = _engine(["su", "wiseman", "a", "b", "c"])
-        _thread(eng.agents["su"], "t1", "wiseman", pending=True)
-        _thread(eng.agents["wiseman"], "t2", "su", pending=True)
-        picks = []
-        for _ in range(40):
-            got = eng._select_agent()
-            picks.append(got.agent_id)
-            eng._last_llm_caller = got.agent_id
-            got.state.last_selected = clock[0]   # as start() does
-            clock[0] += 10.0
-        pair = sum(1 for p in picks if p in {"su", "wiseman"})
-        assert pair <= 32, f"{pair}/40 went to the live pair: {picks}"
-        assert pair >= 24, "the reactive tier should still dominate"
-        starved = {a for a in ("a", "b", "c") if a in picks}
-        assert starved == {"a", "b", "c"}, (
-            f"every idle agent must get a turn within 40 selections, got {starved}"
-        )
-
-    def test_selection_counters_advance(self, monkeypatch):
-        _patch(monkeypatch)
-        eng = _engine(["su", "wiseman"])
-        _thread(eng.agents["wiseman"], "t1", "su", pending=True)
-        eng._select_agent()
-        assert eng._reactive_selections == 1 and eng._proactive_selections == 0
-        eng.agents["wiseman"].state.active_threads.clear()
-        eng._select_agent()
-        assert eng._proactive_selections == 1
 
     def test_budget_still_filters(self, monkeypatch):
         _patch(monkeypatch)

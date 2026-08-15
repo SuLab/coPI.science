@@ -47,7 +47,7 @@ async def cohort_engine(engine, slack_clients, slack_probe_channel, monkeypatch)
 
     patched = _real().model_copy(update={
         "cohort_isolation_enabled": True, "cohort_default_policy": "isolated",
-        "max_consecutive_reactive_turns": 3, "turn_delay_seconds": 0.0,
+        "turn_delay_seconds": 0.0,
     })
     monkeypatch.setattr(sim, "get_settings", lambda: patched)
 

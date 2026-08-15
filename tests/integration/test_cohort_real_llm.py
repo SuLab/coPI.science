@@ -97,7 +97,7 @@ async def test_real_model_prose_gets_its_cross_cohort_mention_stripped(monkeypat
 
     settings_ns = types.SimpleNamespace(
         cohort_isolation_enabled=True, cohort_default_policy="isolated",
-        max_consecutive_reactive_turns=3, turn_delay_seconds=0.0,
+        turn_delay_seconds=0.0,
     )
     monkeypatch.setattr(sim, "get_settings", lambda: settings_ns)
 

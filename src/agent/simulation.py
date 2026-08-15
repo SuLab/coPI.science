@@ -129,11 +129,6 @@ _UNIVERSAL_CHANNELS = {"general"}
 CHANNEL_POLL_INTERVAL = 15.0   # seconds between conversations.history sweeps
 ROSTER_POLL_INTERVAL = 30.0    # seconds between AgentRegistry roster re-syncs
 
-# How often to log the reactive:proactive selection split. Starvation under the
-# reactive-priority tier should be observable, not inferred.
-# See .notes/cohort-system-v2.md §10.3.
-SELECTION_RATIO_LOG_EVERY = 100
-
 # Distinguishes "role has no cached rate yet" from "role's cached rate is None
 # (no override)". A plain dict.get() default cannot tell those apart, so the
 # cache would re-read role.toml from disk on every tick for every default role.
@@ -281,21 +276,6 @@ class SimulationEngine:
         # external edit happened and the cache must be invalidated. See
         # _sync_profiles_from_disk.
         self._profile_mtimes: dict[str, float] = {}
-
-        # Last agent to make an LLM call — prevents the same agent from making
-        # back-to-back LLM calls when it's the only active agent.
-        self._last_llm_caller: str | None = None
-
-        # Count of consecutive turns granted to the reactive tier (agents that
-        # owe a thread reply). Reset when a proactive turn is taken. Bounds how
-        # long owed-reply draining can starve new-conversation formation. See
-        # _select_agent and settings.max_consecutive_reactive_turns.
-        self._reactive_streak: int = 0
-        # Running reactive/proactive selection tallies. Logged every
-        # SELECTION_RATIO_LOG_EVERY selections so starvation is observable rather
-        # than inferred. See .notes/cohort-system-v2.md §10.3.
-        self._reactive_selections: int = 0
-        self._proactive_selections: int = 0
 
         # --- Cohort gate bookkeeping (.notes/cohort-system-v2.md) -------------
         # True once a recompute has actually applied a gate to at least one agent.
@@ -647,7 +627,13 @@ class SimulationEngine:
             # Pick up profile edits made from the web app (separate process).
             self._sync_profiles_from_disk()
 
-            # Select agent
+            # Reply lane: service every (agent, thread) pair owing a reply,
+            # every tick, with no pacing at all — before the post lane's
+            # weighted draw runs. See docs/specs/2026-08-14-two-lane-
+            # concurrent-scheduler-design.md §2.1.
+            await self._dispatch_reply_lane()
+
+            # Select agent (post lane — paced, one at a time)
             agent = self._select_agent()
             if agent is None:
                 # No agent is currently eligible. Throttling and the per-agent
@@ -671,38 +657,14 @@ class SimulationEngine:
                 await self._sleep(delay)
                 continue
 
-            # Prevent the same agent from making back-to-back LLM calls.
-            # If this agent was the last to make an LLM call, skip its turn
-            # so other agents get a chance (or the simulation idles).
-            if self._last_llm_caller == agent.agent_id:
-                agent.state.last_selected = time.time()
-                consecutive_idle += 1
-                delay = self._idle_backoff(consecutive_idle)
-                logger.debug(
-                    "[%s] Skipped: was last LLM caller (idle backoff: %ds)",
-                    agent.agent_id, delay,
-                )
-                await self._sleep(delay)
-                continue
-
             logger.info("=== Turn %d: %s ===", turn_count + 1, agent.agent_id)
 
-            # Run 5-phase turn
+            # Run the post-lane turn (Phase 1 + Phase 5)
             did_work = False
             try:
-                did_work = await self._run_turn(agent)
+                did_work = await self._run_post_turn(agent)
             except Exception:
                 logger.exception("Error during turn for %s", agent.agent_id)
-
-            # Track last agent to make an LLM call. Clear it on an idle turn:
-            # the back-to-back guard only needs to block the agent that just
-            # *called*. If this turn did no work, leaving the flag set would
-            # perpetually skip the OTHER agent while this one idles — a 2-agent
-            # livelock. See project_two_agent_scheduler_livelock.
-            if did_work:
-                self._last_llm_caller = agent.agent_id
-            else:
-                self._last_llm_caller = None
 
             # Update last_selected
             agent.state.last_selected = time.time()
@@ -783,22 +745,24 @@ class SimulationEngine:
         """True if the agent has an active thread with a new reply from the other
         party that it hasn't answered yet.
 
-        This is the scheduler-visible signal that drives reactive priority: an
-        agent that owes a reply should be selected ahead of the staleness-weighted
-        proactive pool, so 1:1 conversations conclude promptly rather than waiting
-        for a random re-selection. Reuses the same primitive Phase 4 uses.
+        Historical note (Task 11 — two-lane scheduler): this used to be the
+        scheduler-visible signal driving the post lane's reactive-priority
+        tier, but that tier is gone — replies leave the paced pool entirely
+        (see `_dispatch_reply_lane` / `_pending_reply_pairs`, which are
+        deliberately ungated and carry no such distinction). This method is
+        kept for the GATED cohort-gate distinction it still encodes, which
+        nothing else in the engine computes:
 
         Two cohort rules apply here and nowhere else (v2 §8):
 
         - **Grandfathered threads are skipped.** A thread whose partner has left the
-          cohort still gets answered by Phase 4 so it can conclude, but it must not
-          jump the queue ahead of gate-compliant work. Without this the gate and the
-          scheduler contradict each other and the scheduler wins.
+          cohort still gets answered by Phase 4 so it can conclude, but this method
+          reports it as no longer "owed" in the gated sense.
         - **The remaining threads are read through the agent's gate.** An
           untagged thread with fewer than 2 posters is still open
           (``get_thread_allowed_agents`` returns None) — so a non-cohort third
           party posting into an otherwise legal thread would otherwise
-          manufacture reactive priority for a sender the agent is not supposed
+          manufacture a false positive for a sender the agent is not supposed
           to act on. (Funding threads used to be unconditionally open-to-all
           here too; that exception was removed — ex-funding thread roots now
           follow this same normal rule. See message_log.get_thread_allowed_agents.)
@@ -828,7 +792,13 @@ class SimulationEngine:
           individual agent's tempo; enforcing it here (rather than as a global
           ``asyncio.sleep`` after every productive turn) leaves the rest of the
           roster free to act while one agent sits out. See v2 §10.3.
+        - not already ``in_flight``: a post-lane turn for this agent is
+          currently running. A no-op today (the post lane is strictly
+          sequential — the previous turn always finishes before the next
+          selection), but load-bearing once loop iterations can overlap.
         """
+        if agent.state.in_flight:
+            return False
         if not self._agent_within_budget(agent):
             # Ordering is deliberate and must not change: the legacy cap decides
             # eligibility first (that is what keeps the --budget compat tests
@@ -848,60 +818,27 @@ class SimulationEngine:
         return True
 
     def _select_agent(self) -> Agent | None:
-        """Select the next agent to take a turn (sequential — one at a time).
+        """Select the next agent for a post-lane turn (sequential — one at a time).
 
-        Two tiers:
-        1. **Reactive** — agents that owe a thread reply are chosen first
-           (oldest-waiting), so an in-flight 1:1 conversation drains one message
-           per turn instead of waiting on random re-selection. The just-called
-           agent (`_last_llm_caller`) is excluded so the A→B→A→B baton alternates
-           without a wasted skip-tick. A fairness valve
-           (`max_consecutive_reactive_turns`, default 3) forces a proactive turn
-           after a run of reactive ones so new-conversation formation isn't
-           starved — at the original default of 8, a single live pair took 24 of
-           27 turns. See .notes/cohort-system-v2.md §10.3.
-        2. **Proactive** — staleness-weighted random, scaled by load:
-           P(agent) ∝ (now - last_selected) * _agent_load(agent), with a penalty
-           for agents that have repeatedly skipped Phase 5
-           (weight /= 2^(skips-2) once skips >= 3). The load factor is what makes
-           a star's hub — one endpoint of every conversation — draw a share that
-           tracks the edges it actually sits on, instead of the 1/N a uniform
-           weighting gave it. See design §4.3.
+        Staleness-weighted random, scaled by load:
+        P(agent) ∝ (now - last_selected) * _agent_load(agent), with a penalty
+        for agents that have repeatedly skipped Phase 5
+        (weight /= 2^(skips-2) once skips >= 3). The load factor is what makes
+        a star's hub — one endpoint of every conversation — draw a share that
+        tracks the edges it actually sits on, instead of the 1/N a uniform
+        weighting gave it. See design §4.3.
 
-        Both tiers draw from the same eligibility pool (`_turn_eligible`): budget
-        plus the per-agent `turn_delay_seconds` cooldown.
+        There is no reactive tier here any more: replies leave the paced pool
+        entirely (see `_dispatch_reply_lane`), so this is pure proactive
+        selection over the eligibility pool (`_turn_eligible`) — budget, the
+        sliding-window rate limit, the per-agent `turn_delay_seconds`
+        cooldown, and not already `in_flight`.
         """
-        settings = get_settings()
         now = time.time()
         candidates = [a for a in self.agents.values() if self._turn_eligible(a, now)]
         if not candidates:
             return None
 
-        # --- Reactive tier: drain owed replies fast ------------------------
-        if self._reactive_streak < settings.max_consecutive_reactive_turns:
-            owed = [
-                a for a in candidates
-                if a.agent_id != self._last_llm_caller and self._owes_reply(a)
-            ]
-            if owed:
-                self._reactive_streak += 1
-                self._reactive_selections += 1
-                self._log_selection_ratio()
-                # Weighted by load, NOT bare last_selected. The hub is selected
-                # often, so its last_selected is always recent — under
-                # min(last_selected) it lost every tiebreak to a long-idle spoke,
-                # i.e. it was penalised precisely for being the busiest agent.
-                # Still "longest wait wins", now scaled by obligation count.
-                # See design §1.3 / §4.3.
-                return max(
-                    owed,
-                    key=lambda a: (now - a.state.last_selected) * self._agent_load(a),
-                )
-
-        # --- Proactive tier: staleness-weighted random ---------------------
-        self._reactive_streak = 0
-        self._proactive_selections += 1
-        self._log_selection_ratio()
         weights = []
         for a in candidates:
             w = max(now - a.state.last_selected, 1.0) * self._agent_load(a)
@@ -911,89 +848,166 @@ class SimulationEngine:
             weights.append(w)
         return random.choices(candidates, weights=weights, k=1)[0]
 
-    def _log_selection_ratio(self) -> None:
-        """Log the reactive:proactive split every SELECTION_RATIO_LOG_EVERY picks."""
-        total = self._reactive_selections + self._proactive_selections
-        if total and total % SELECTION_RATIO_LOG_EVERY == 0:
-            logger.info(
-                "[sched] selections: %d reactive / %d proactive (%.0f%% reactive, "
-                "valve=%d)",
-                self._reactive_selections, self._proactive_selections,
-                100.0 * self._reactive_selections / total,
-                get_settings().max_consecutive_reactive_turns,
+    # ------------------------------------------------------------------
+    # Reply lane — every (agent, thread) pair owing a reply, unpaced
+    # ------------------------------------------------------------------
+
+    def _pending_reply_pairs(self) -> list[tuple[Agent, ThreadState]]:
+        """Every (agent, thread) owing a reply. The reply lane's work queue.
+
+        Unpaced by construction: no staleness weighting, no streak cap, no
+        cooldown. A thread that is ready is serviced.
+
+        Ungated (``allowed_sender_ids=None``): this thread is already open, so
+        it is entitled to conclude even if the partner has since dropped out
+        of the cohort — abandoning it mid-flight would waste every call
+        already spent on it. What a grandfathered thread does NOT get is
+        reactive *priority*, but that concept no longer exists now that every
+        owed reply is serviced every pass regardless of staleness — the only
+        thing left to preserve is that it still gets answered at all. See
+        v2 §8 and `_owes_reply`, which stays gated for the callers that still
+        care about that distinction (the cohort tests).
+
+        A genuine new reply resets ``empty_response_count`` so the thread's
+        2-strike empty-response backoff gets a fresh attempt at the new
+        content, mirroring the old `_phase4_reply_threads` selection half.
+        """
+        pairs: list[tuple[Agent, ThreadState]] = []
+        for agent in self.agents.values():
+            for thread in list(agent.state.active_threads.values()):
+                if thread.status != "active":
+                    continue
+                if self._channel_visibility.get(thread.channel) == VISIBILITY_COLLAB_PRIVATE:
+                    continue
+                has_new = self.message_log.has_new_reply_from_other(
+                    thread.thread_id, agent.agent_id, agent.state.last_seen_cursor,
+                    allowed_sender_ids=None,
+                )
+                if has_new:
+                    thread.empty_response_count = 0
+                if has_new or thread.has_pending_reply:
+                    pairs.append((agent, thread))
+        return pairs
+
+    async def _service_reply(self, agent: Agent, thread: ThreadState) -> None:
+        """Phase 4 for one (agent, thread) pair.
+
+        Promotes ``has_pending_reply`` to durable True before the (possibly
+        failing) reply attempt — mirrors the old `_phase4_reply_threads`
+        promotion, so a failed/empty/exception reply is retried on the next
+        dispatch. Also resets the post lane's skip-backoff streak (Task 10):
+        replying is real engagement, just no longer bundled into the same
+        turn as Phase 5's decision. Deliberately does NOT touch
+        ``last_phase5_action_time`` — only a real Phase 5 action (inside
+        `_phase5_new_post`) may stamp that; conflating replying with posting
+        is exactly the cross-lane coupling Task 10 removed.
+        """
+        thread.has_pending_reply = True
+        agent.state.consecutive_phase5_skips = 0
+        await self._reply_to_thread(agent, thread)
+
+    async def _dispatch_reply_lane(self) -> int:
+        """Service every pending pair. Sequential for now; Task 13 makes it
+        concurrent behind ``reply_lane_max_in_flight``.
+
+        Phase 3 (thread activation) runs first for every agent: nothing else
+        calls it now that `_run_post_turn` is Phase 1 + 5 only, so without
+        this a brand-new @-mention or reply-to-a-post would never open a
+        thread at all.
+
+        Cursor advancement mirrors Task 6's snapshot-then-assign idempotent
+        pattern, applied per agent: `_phase3_activate_threads` and
+        `_pending_reply_pairs`'s `has_new_reply_from_other` check both read
+        `last_seen_cursor` to bound their "since cursor" scans (linear scans
+        over the whole log — see message_log.py), and nothing else advances
+        it for an agent the post lane does not happen to pick this tick.
+        Without this, such an agent would rescan the entire message log from
+        turn zero on every single main-loop tick, forever. The snapshot is
+        taken BEFORE Phase 3 runs and only assigned AFTER `_pending_reply_
+        pairs` has read the (still old) cursor — advancing early would hide
+        the very replies this pass exists to find, exactly as it would in
+        `_run_post_turn`.
+        """
+        cursor_snapshots = {
+            agent.agent_id: self.message_log.latest_timestamp
+            for agent in self.agents.values()
+        }
+        for agent in self.agents.values():
+            self._phase3_activate_threads(agent)
+
+        pairs = self._pending_reply_pairs()
+
+        for agent in self.agents.values():
+            agent.state.last_seen_cursor = max(
+                agent.state.last_seen_cursor, cursor_snapshots[agent.agent_id]
             )
 
+        for agent, thread in pairs:
+            await self._service_reply(agent, thread)
+        return len(pairs)
+
     # ------------------------------------------------------------------
-    # Turn execution (5 phases)
+    # Turn execution — post lane (Phase 1 + Phase 5)
     # ------------------------------------------------------------------
 
-    async def _run_turn(self, agent: Agent) -> bool:
-        """Run all 5 phases for a single agent turn. Returns True if work was done."""
+    async def _run_post_turn(self, agent: Agent) -> bool:
+        """Run Phase 1 + Phase 5 for one agent. Returns True if work was done.
+
+        The paced lane: Phase 3 (thread activation) and Phase 4 (thread
+        reply) moved to the reply lane (`_dispatch_reply_lane` /
+        `_service_reply`) entirely — see docs/specs/2026-08-14-two-lane-
+        concurrent-scheduler-design.md §2.
+        """
         settings = get_settings()
         api_calls_before = agent.api_call_count
+        agent.state.in_flight = True
+        try:
+            # Snapshot BEFORE any phase reads the log. Assigning time.time() at
+            # the end marked as read anything that arrived mid-turn, and compared
+            # a wall clock against posted_at (= float(minted ts)), which TsMinter
+            # can push ahead of wall clock under fan-out. Snapshot-then-assign is
+            # idempotent and uses one clock — the log's own, which is what every
+            # reader of last_seen_cursor actually compares posted_at against.
+            cursor_snapshot = self.message_log.latest_timestamp
 
-        # Snapshot BEFORE any phase reads the log. Assigning time.time() at the
-        # end marked as read anything that arrived mid-turn (after Phase 3/4
-        # already read the log), and compared a wall clock against posted_at
-        # (= float(minted ts)), which TsMinter can push ahead of wall clock
-        # under fan-out. Snapshot-then-assign is idempotent and uses one clock
-        # — the log's own, which is what every reader of last_seen_cursor
-        # actually compares posted_at against.
-        cursor_snapshot = self.message_log.latest_timestamp
+            # Phase 1: Channel discovery
+            self._phase1_channel_discovery(agent)
 
-        # Phase 1: Channel discovery
-        self._phase1_channel_discovery(agent)
+            # Spontaneous post timer — allow one Phase 5 call after enough
+            # idle time so agents can organically start new conversations. This
+            # is the ONLY Phase 5 gate here: the paced post lane must not be
+            # driven by reply volume from the unpaced reply lane — see
+            # tests/unit/test_post_lane.py. The daily cap and the other Phase 5
+            # guards are unchanged and live inside `_phase5_new_post` itself.
+            base_interval = settings.phase5_spontaneous_interval * 60  # to seconds
+            skips = agent.state.consecutive_phase5_skips
+            stretch = min(
+                max(skips, 1), settings.phase5_spontaneous_interval_max_multiplier
+            )
+            spontaneous_interval = base_interval * stretch
+            since_last_action = time.time() - agent.state.last_phase5_action_time
+            spontaneous_ready = since_last_action >= spontaneous_interval
 
-        # Phase 3: Activate threads from tags and replies
-        self._phase3_activate_threads(agent)
+            if spontaneous_ready:
+                await self._phase5_new_post(agent)
+            else:
+                logger.debug(
+                    "[%s] Phase 5: Skipped (spontaneous timer not due for %ds)",
+                    agent.agent_id,
+                    int(spontaneous_interval - since_last_action),
+                )
 
-        # Phase 4: Reply to active threads (parallel)
-        phase4_thread_ids = await self._phase4_reply_threads(agent)
-
-        # Phase 4 activity resets skip backoff — agent is actively engaged,
-        # so it shouldn't carry a stretched-out backoff interval into its next
-        # spontaneous check. Deliberately NOT stamping last_phase5_action_time
-        # here: that field means "when a Phase 5 action was last taken" (see
-        # its two legitimate stamps, both inside _phase5_new_post itself), and
-        # replying is not posting. Stamping it from Phase 4 was the coupling
-        # this task exists to remove, just inverted in sign — an
-        # always-replying agent would perpetually push its own spontaneous
-        # timer back and never become eligible to post at all. See
-        # tests/unit/test_post_lane.py.
-        if phase4_thread_ids:
-            agent.state.consecutive_phase5_skips = 0
-
-        # Spontaneous post timer — allow one Phase 5 call after enough
-        # idle time so agents can organically start new conversations. This
-        # is the ONLY Phase 5 gate here: the paced post lane must not be
-        # driven by reply (Phase 4) volume from the unpaced reply lane — see
-        # tests/unit/test_post_lane.py. The daily cap and the other Phase 5
-        # guards are unchanged and live inside `_phase5_new_post` itself.
-        base_interval = settings.phase5_spontaneous_interval * 60  # to seconds
-        skips = agent.state.consecutive_phase5_skips
-        stretch = min(max(skips, 1), settings.phase5_spontaneous_interval_max_multiplier)
-        spontaneous_interval = base_interval * stretch
-        since_last_action = time.time() - agent.state.last_phase5_action_time
-        spontaneous_ready = since_last_action >= spontaneous_interval
-
-        if spontaneous_ready:
-            await self._phase5_new_post(agent)
-        else:
-            logger.debug(
-                "[%s] Phase 5: Skipped (spontaneous timer not due for %ds)",
-                agent.agent_id,
-                int(spontaneous_interval - since_last_action),
+            # Update cursor. max(...) keeps it monotonic — a private-channel
+            # rewind (see _rewind_cursors_for_private_channels) can leave the
+            # pre-turn cursor further back than this snapshot on purpose, and
+            # this must never undo that by moving the cursor backwards.
+            agent.state.last_seen_cursor = max(
+                agent.state.last_seen_cursor, cursor_snapshot
             )
 
-        # Update cursor. max(...) keeps it monotonic — a private-channel rewind
-        # (see _rewind_cursors_for_private_channels) can leave the pre-turn
-        # cursor further back than this snapshot on purpose, and this must
-        # never undo that by moving the cursor backwards.
-        agent.state.last_seen_cursor = max(
-            agent.state.last_seen_cursor, cursor_snapshot
-        )
-
-        return agent.api_call_count > api_calls_before
+            return agent.api_call_count > api_calls_before
+        finally:
+            agent.state.in_flight = False
 
     # ------------------------------------------------------------------
     # Phase 1: Channel Discovery
@@ -1177,77 +1191,8 @@ class SimulationEngine:
                     )
 
     # ------------------------------------------------------------------
-    # Phase 4: Reply to Active Threads (parallel)
+    # Phase 4: Reply to a single thread
     # ------------------------------------------------------------------
-
-    async def _phase4_reply_threads(self, agent: Agent) -> set[str]:
-        """Reply to all active threads that have a pending reply from the other agent.
-
-        Returns the set of thread IDs that were replied to (so Phase 5 can skip them).
-        """
-        # Identify threads needing a reply
-        threads_to_reply: list[ThreadState] = []
-        for thread in agent.state.active_threads.values():
-            if thread.status != "active":
-                continue
-            # Safety net: Phase 4 does threaded replies, which are never the
-            # right thing in a collab_private channel. Skip any active_thread
-            # that somehow ended up pointing at a private channel — that
-            # channel's flat conversation is handled elsewhere.
-            if self._channel_visibility.get(thread.channel) == VISIBILITY_COLLAB_PRIVATE:
-                continue
-            # Check if there's a new reply from the other agent. Read UNGATED
-            # (allowed_sender_ids=None) on purpose: this thread is already open, so
-            # it is entitled to conclude even if the partner has since dropped out
-            # of the cohort — abandoning it mid-flight would waste every call
-            # already spent on it, and thread participation rules already bound who
-            # may post here. What a grandfathered thread does NOT get is reactive
-            # *priority*; that is enforced in _owes_reply. See v2 §8.
-            has_new = self.message_log.has_new_reply_from_other(
-                thread.thread_id, agent.agent_id, agent.state.last_seen_cursor,
-                allowed_sender_ids=None,
-            )
-            if has_new:
-                # Genuine new reply from the other agent — reset empty-response
-                # backoff so we give the thread a fresh attempt.
-                thread.empty_response_count = 0
-            if has_new or thread.has_pending_reply:
-                # Promote to durable flag so a failed/empty/exception reply
-                # attempt is retried on the next turn. The cursor advances
-                # unconditionally each turn, so has_new can't be relied on
-                # for retry — only has_pending_reply persists. Successful
-                # replies clear this back to False.
-                thread.has_pending_reply = True
-                threads_to_reply.append(thread)
-
-        if not threads_to_reply:
-            logger.debug("[%s] Phase 4: No threads needing reply", agent.agent_id)
-            return set()
-
-        logger.info(
-            "[%s] Phase 4: Replying to %d threads",
-            agent.agent_id, len(threads_to_reply),
-        )
-
-        # Run replies in parallel, bounded. These genuinely overlap now that the
-        # Anthropic call is awaited off the loop thread (services/llm._acreate);
-        # before that they could not, so the cap is new alongside it. The hub is
-        # why it exists: it sits on every spoke edge and has logged "Replying to
-        # 37 threads" in one turn, which unbounded is 37 concurrent Opus requests
-        # that the per-turn rate limiter never gets a chance to shape. The cap
-        # paces the fan-out; it never drops a thread. The semaphore itself is
-        # engine-lifetime (see __init__ / self._llm_fanout_sem) so the bound is
-        # process-wide, not per-turn — a per-call semaphore here would let N
-        # concurrent turns each get their own cap's worth of concurrency.
-
-        async def _reply_bounded(thread: ThreadState) -> None:
-            async with self._llm_fanout_sem:
-                await self._reply_to_thread(agent, thread)
-
-        tasks = [_reply_bounded(thread) for thread in threads_to_reply]
-        await asyncio.gather(*tasks, return_exceptions=True)
-
-        return {t.thread_id for t in threads_to_reply}
 
     async def _reply_to_thread(self, agent: Agent, thread: ThreadState) -> None:
         """Compose and post a reply to a single thread."""
@@ -3154,7 +3099,7 @@ class SimulationEngine:
         ``get_replies_to_agent_posts``/``get_tags_for_agent``), but
         ``has_new_reply_from_other`` filters ``is_bot=False`` unconditionally
         (so appending one here can never set a bot's ``has_pending_reply`` or
-        grant reactive priority), and ``_phase3_activate_threads`` filters
+        make it a pending reply-lane pair), and ``_phase3_activate_threads`` filters
         ``is_bot`` before acting on any entry it reads (so it can never
         activate a new thread either). There is no PI-interaction handling
         left to route it into
@@ -4741,13 +4686,14 @@ class SimulationEngine:
 
         **Grandfather** active threads whose partner is no longer permitted
         (v2 §8), because the gate is a *read-time* filter and state outlives a
-        membership change. They still get Phase 4 replies — an open
-        conversation is entitled to conclude rather than waste the calls
-        already spent — but they are barred from the reactive-priority tier
-        so they cannot outrank gate-compliant work. This is also the path
-        that marks a *resumed* run's threads: the DB rebuild runs before the
-        first recompute, so every restart reconstructs its open partnerships
-        gate-blind.
+        membership change. They still get Phase 4 replies (via the reply lane —
+        an open conversation is entitled to conclude rather than waste the
+        calls already spent), but ``_owes_reply`` still reports them as
+        not-owed in the gated sense, so a caller that cares about that
+        distinction cannot let them outrank gate-compliant work. This is also
+        the path that marks a *resumed* run's threads: the DB rebuild runs
+        before the first recompute, so every restart reconstructs its open
+        partnerships gate-blind.
         """
         newly_grandfathered = 0
         for agent in self.agents.values():
@@ -4782,8 +4728,8 @@ class SimulationEngine:
                     newly_grandfathered += 1
                     logger.info(
                         "[cohort] %s: thread %s with %s grandfathered — partner is "
-                        "outside the cohort; it may conclude but loses reactive "
-                        "priority",
+                        "outside the cohort; it may conclude but is no longer "
+                        "treated as owed by _owes_reply",
                         agent.agent_id, thread.thread_id, other,
                     )
 
@@ -4815,7 +4761,6 @@ class SimulationEngine:
         return {
             "cohort_isolation_enabled": settings.cohort_isolation_enabled,
             "cohort_default_policy": settings.cohort_default_policy,
-            "max_consecutive_reactive_turns": settings.max_consecutive_reactive_turns,
             "gate_active": self._cohort_gate_active,
             "preflight_error": self._cohort_preflight_error,
             "agents": {
@@ -4829,8 +4774,6 @@ class SimulationEngine:
                 "tags_stripped": dict(sorted(self._cohort_tags_stripped.items())),
                 "post_type_rejections": dict(sorted(self._post_type_rejections.items())),
                 "grandfathered_threads": grandfathered,
-                "reactive_selections": self._reactive_selections,
-                "proactive_selections": self._proactive_selections,
             },
         }
 

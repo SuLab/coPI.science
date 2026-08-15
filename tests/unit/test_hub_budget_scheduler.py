@@ -34,14 +34,13 @@ def _settings(**kw):
     base = dict(
         cohort_isolation_enabled=False,
         cohort_default_policy="open",
-        max_consecutive_reactive_turns=3,
         turn_delay_seconds=0.0,
         active_thread_threshold=12,
         llm_rate_window_seconds=600,
         llm_calls_per_load_per_window=8,
         # Required since SimulationEngine.__init__ eagerly constructs the
-        # Phase-4 fan-out semaphore (self._llm_fanout_sem) rather than
-        # per-call — see _phase4_reply_threads / test_phase4_concurrency.py.
+        # (now unused-pending-Task-13) Phase-4 fan-out semaphore
+        # (self._llm_fanout_sem) rather than per-call.
         phase4_max_concurrent_replies=4,
     )
     base.update(kw)
@@ -70,6 +69,10 @@ _TICK_IO = (
     "_sync_roster_from_db",
     "_flush_persisted",
     "_flush_llm_logs",
+    # The reply lane dispatch (Task 11) also runs every tick, before
+    # selection. It is I/O-shaped (Phase 3 + Phase 4 over every agent) and
+    # does not affect post-lane selection, so it is stubbed out here too.
+    "_dispatch_reply_lane",
 )
 
 
@@ -99,13 +102,13 @@ def _drive_loop(eng, monkeypatch, *, stop_after=4):
         sleeps.append(delay)
         _budget()
 
-    async def _run_turn(agent):
+    async def _run_post_turn(agent):
         turns.append(agent.agent_id)
         _budget()
         return False
 
     monkeypatch.setattr(eng, "_sleep", _sleep)
-    monkeypatch.setattr(eng, "_run_turn", _run_turn)
+    monkeypatch.setattr(eng, "_run_post_turn", _run_post_turn)
     eng._running = True
     return sleeps, turns
 
@@ -355,13 +358,22 @@ class TestScheduler:
         share = picks.count("hub") / 2000
         assert 0.42 < share < 0.58, f"hub share {share:.3f} not load-proportional"
 
-    def test_reactive_tiebreak_no_longer_penalises_the_busy_agent(
+    def test_load_weighting_no_longer_penalises_the_busy_agent(
         self, monkeypatch
     ):
         """The hub is selected often, so its last_selected is always recent. Under
         min(last_selected) it lost every tiebreak to a long-idle spoke — it was
-        penalised precisely for being busy. Weighted by load, it wins."""
+        penalised precisely for being busy. Weighted by load, it gets a
+        load-proportional share instead.
+
+        Retargeted for Task 11: with the reactive tier gone, `_select_agent`
+        has one (proactive, weighted-random) path, not a deterministic
+        max()-based tiebreak — so this is checked as a share over many draws,
+        like `test_proactive_weight_scales_with_load` above, rather than a
+        single call.
+        """
         _patch(monkeypatch, active_thread_threshold=12)
+        random.seed(20260814)
         eng = _engine(["hub", "spoke"])
         now = time.time()
         _add_threads(eng.agents["hub"], 12, pending=True)
@@ -369,14 +381,19 @@ class TestScheduler:
         eng.agents["hub"].state.last_selected = now - 10.0    # 10 * 12 = 120
         eng.agents["spoke"].state.last_selected = now - 60.0  # 60 *  1 =  60
 
-        assert eng._select_agent().agent_id == "hub"
+        picks = [eng._select_agent().agent_id for _ in range(1000)]
+        share = picks.count("hub") / 1000
+        assert share > 0.55, f"hub share {share:.3f} too low — busy agent still penalised"
 
-    def test_reactive_tier_still_prefers_a_genuinely_starved_spoke(
+    def test_load_weighting_still_favours_a_genuinely_starved_spoke(
         self, monkeypatch
     ):
         """The load weighting must not become a blank cheque: a spoke that has
-        waited long enough still outranks the hub."""
+        waited long enough still gets the large majority of picks over the hub.
+
+        Retargeted for Task 11 — see the docstring above."""
         _patch(monkeypatch, active_thread_threshold=12)
+        random.seed(20260814)
         eng = _engine(["hub", "spoke"])
         now = time.time()
         _add_threads(eng.agents["hub"], 2, pending=True)
@@ -384,7 +401,9 @@ class TestScheduler:
         eng.agents["hub"].state.last_selected = now - 10.0     # 10 * 2 =  20
         eng.agents["spoke"].state.last_selected = now - 600.0  # 600 * 1 = 600
 
-        assert eng._select_agent().agent_id == "spoke"
+        picks = [eng._select_agent().agent_id for _ in range(1000)]
+        share = picks.count("spoke") / 1000
+        assert share > 0.85, f"spoke share {share:.3f} too low — starved agent not favoured"
 
     def test_throttled_hub_is_not_selected(self, monkeypatch):
         _patch(monkeypatch, llm_calls_per_load_per_window=1,

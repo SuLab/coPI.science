@@ -355,13 +355,6 @@ class Settings(BaseSettings):
     #                isolation is forced off with an ERROR.
     # See .notes/cohort-system-v2.md §5.2 / §5.3.
     cohort_default_policy: Literal["open", "isolated"] = "open"
-    # Reactive-priority scheduler: after this many consecutive turns given to
-    # agents that owe a thread reply, force a normal (proactive) selection so
-    # new-conversation formation isn't starved. Default matches
-    # active_thread_threshold so the two levers stay in proportion — at the
-    # original 8 a single live pair took 24 of 27 turns. See _select_agent and
-    # .notes/cohort-system-v2.md §10.3.
-    max_consecutive_reactive_turns: int = 3
 
     # Load-proportional rate limiter. Replaces the cumulative --budget cap as the
     # LIVE throttle: allowance = llm_calls_per_load_per_window * _agent_load(agent),

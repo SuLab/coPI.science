@@ -313,7 +313,6 @@ def _build_engine(factory, run_id, roster, policy):
     patched = real_settings().model_copy(update={
         "cohort_isolation_enabled": True,
         "cohort_default_policy": policy,
-        "max_consecutive_reactive_turns": 3,
         "turn_delay_seconds": 0.0,
         "phase5_skip_probability": 0.0,
     })
@@ -470,17 +469,18 @@ async def run_scenario(
             # Snapshot here: by the end of the run a grandfathered thread that did what
             # §8 wants — concluded — has been popped out of active_threads.
             grandfathered_at_split = _grandfathered_now()
+        # Reply lane first (Task 11): every (agent, thread) pair owing a
+        # reply, every tick, unpaced — mirrors _run_main_loop's ordering.
+        await eng._dispatch_reply_lane()
         agent = eng._select_agent()
         if agent is None:
             break
         taken += 1
         try:
-            did = await eng._run_turn(agent)
+            await eng._run_post_turn(agent)
         except Exception as exc:  # a turn must never abort the whole scenario
             errors.append(f"{agent.agent_id}: {type(exc).__name__}: {exc}")
-            did = False
         agent.state.last_selected = time.time()
-        eng._last_llm_caller = agent.agent_id if did else None
         await eng._flush_persisted()
 
     await eng._flush_persisted()

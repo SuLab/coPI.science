@@ -135,18 +135,22 @@ LABS = {
 # fast enough to need this; a real turn takes seconds of LLM time between posts.
 POST_GAP = 1.1
 
-# Bounds. The turn count is the primary one, enforced by wrapping `_run_turn` (a signal
-# the loop itself does not expose). `budget_cap` is a real ceiling the engine enforces, but
-# it is deliberately set clear of the turn bound rather than used to stop the run, because
-# a run stopped by budget exhaustion WEDGES instead of exiting:
+# Bounds. The turn count is the primary one, enforced by wrapping `_run_post_turn` (a
+# signal the loop itself does not expose). `budget_cap` is a real ceiling the engine
+# enforces, but it is deliberately set clear of the turn bound rather than used to stop
+# the run, because a run stopped by budget exhaustion used to WEDGE instead of exiting:
 #
 #   `_turn_eligible` already excludes over-budget agents, so `_select_agent` returns None
 #   (and the loop breaks) only once EVERY agent is over budget. With exactly one agent
-#   still under budget, and that agent being `_last_llm_caller`, the loop takes the
-#   `continue` branch at simulation.py:504-518 forever: no turn is taken, `turn_count`
-#   never advances, `_last_llm_caller` is never cleared on that path, and nothing is
-#   logged above DEBUG. Measured: su=7/7, cravatt=7/7, wiseman=4/7 and the process spun
-#   until the wall-clock deadline. Reported, not fixed.
+#   still under budget, the old `_last_llm_caller` back-to-back guard could take the
+#   `continue` branch in `_run_main_loop` forever: no turn was taken, `turn_count` never
+#   advanced, `_last_llm_caller` was never cleared on that path, and nothing was logged
+#   above DEBUG. Measured: su=7/7, cravatt=7/7, wiseman=4/7 and the process spun until the
+#   wall-clock deadline. Task 11 deleted `_last_llm_caller` and that guard entirely (the
+#   post lane's only remaining exclusion is budget/rate-limit/cooldown/`in_flight`), which
+#   removes this specific wedge — a single remaining under-budget agent is now simply
+#   re-selected each tick, paced by its own `turn_delay_seconds` cooldown, rather than
+#   perpetually skipped. Not independently re-verified against a live run.
 TURNS = int(os.environ.get("FULL_RUN_TURNS", "20"))
 BUDGET = int(os.environ.get("FULL_RUN_BUDGET", "40"))
 RESTART_TURNS_A = int(os.environ.get("FULL_RUN_RESTART_TURNS_A", "4"))
@@ -253,7 +257,6 @@ async def full_run(engine, slack_clients, slack_probe_channel, tmp_path, monkeyp
     patched = real_settings().model_copy(update={
         "cohort_isolation_enabled": True,
         "cohort_default_policy": "isolated",
-        "max_consecutive_reactive_turns": 3,
         "turn_delay_seconds": 0.0,
         "phase5_skip_probability": 0.0,
     })
@@ -463,7 +466,7 @@ def _bound_turns(eng, rec, limit):
     costs 1-3 calls). Wrapping the bound method also gives us the per-turn errors that
     `start()` otherwise only writes to the log.
     """
-    real = eng._run_turn
+    real = eng._run_post_turn
 
     async def _wrapped(agent):
         rec.turns += 1
@@ -482,7 +485,7 @@ def _bound_turns(eng, rec, limit):
             if rec.turns >= limit:
                 eng.request_stop()
 
-    eng._run_turn = _wrapped
+    eng._run_post_turn = _wrapped
 
 
 async def _deadline(eng, rec, seconds):
