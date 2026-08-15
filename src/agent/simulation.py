@@ -955,12 +955,12 @@ class SimulationEngine:
             agent.state.consecutive_phase5_skips = 0
             agent.state.last_phase5_action_time = time.time()
 
-        # State-change gate: skip Phase 5 (no LLM call) unless there's
-        # new actionable state or the spontaneous post timer has expired.
-        has_phase4_work = len(phase4_thread_ids) > 0
-
         # Spontaneous post timer — allow one Phase 5 call after enough
-        # idle time so agents can organically start new conversations.
+        # idle time so agents can organically start new conversations. This
+        # is the ONLY Phase 5 gate here: the paced post lane must not be
+        # driven by reply (Phase 4) volume from the unpaced reply lane — see
+        # tests/unit/test_post_lane.py. The daily cap and the other Phase 5
+        # guards are unchanged and live inside `_phase5_new_post` itself.
         base_interval = settings.phase5_spontaneous_interval * 60  # to seconds
         skips = agent.state.consecutive_phase5_skips
         stretch = min(max(skips, 1), settings.phase5_spontaneous_interval_max_multiplier)
@@ -968,13 +968,11 @@ class SimulationEngine:
         since_last_action = time.time() - agent.state.last_phase5_action_time
         spontaneous_ready = since_last_action >= spontaneous_interval
 
-        has_new_work = has_phase4_work
-
-        if has_new_work or spontaneous_ready:
+        if spontaneous_ready:
             await self._phase5_new_post(agent)
         else:
             logger.debug(
-                "[%s] Phase 5: Skipped (no state change, spontaneous in %ds)",
+                "[%s] Phase 5: Skipped (spontaneous timer not due for %ds)",
                 agent.agent_id,
                 int(spontaneous_interval - since_last_action),
             )
