@@ -1857,6 +1857,15 @@ class SimulationEngine:
             post_type_menu=post_type_menu,
         )
 
+        # Correlation id for this specific call's log row, generated BEFORE the
+        # call and carried through log_meta. `channel` isn't known until the
+        # model's response is parsed below, so it can't go in log_meta up
+        # front — but the row this call appends to the shared
+        # `_llm_log_buffer` can be found again afterward by this id, without
+        # trusting the buffer's tail (see the retroactive-channel comment
+        # below for why position is unsafe under concurrency).
+        llm_call_id = uuid.uuid4().hex
+
         agent.record_api_call()
         try:
             response = await generate_agent_response(
@@ -1878,7 +1887,11 @@ class SimulationEngine:
                 # retry-at-2x path logs loudly (logger.error) if the retry
                 # ALSO truncates, but it does not retry again.
                 max_tokens=2500,
-                log_meta={"agent_id": agent.agent_id, "phase": "new_post"},
+                log_meta={
+                    "agent_id": agent.agent_id,
+                    "phase": "new_post",
+                    "call_id": llm_call_id,
+                },
                 on_retry=agent.record_api_call,
             )
             if not response or not response.strip():
@@ -1930,9 +1943,22 @@ class SimulationEngine:
             channel = action_data.get("channel", "general").lstrip("#")
             post_type = action_data.get("post_type", "")
 
-            # Retroactively add channel to the LLM log entry (unknown at call time)
-            if self._llm_log_buffer:
-                self._llm_log_buffer[-1]["channel"] = channel
+            # Retroactively add channel to the LLM log entry (unknown at call
+            # time). Found by `llm_call_id`, NOT by buffer position — under
+            # concurrency (two agents' Phase-5 turns interleaved on the same
+            # event loop), another agent's own `_on_llm_call` can append its
+            # row to this SHARED buffer in the gap between this call
+            # returning and this line running, so `_llm_log_buffer[-1]` is
+            # not reliably this call's row. Scanning from the tail is just an
+            # optimization (our own row, being the most recent thing we
+            # appended, is usually near the end); if it was already flushed
+            # to the DB before we got here, skip silently — the row is still
+            # a valid log entry without `channel`, and there's nothing to
+            # retry.
+            for _entry in reversed(self._llm_log_buffer):
+                if _entry.get("call_id") == llm_call_id:
+                    _entry["channel"] = channel
+                    break
 
             # Cross-cohort mention stripping now happens in _post_message, which
             # covers every outbound path instead of only this one. Phase 5 still
