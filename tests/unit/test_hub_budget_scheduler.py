@@ -5,12 +5,16 @@ Implements the test plan in docs/specs/2026-08-06-hub-budget-scheduler-design.md
 
 - TestAgentLoad            §4.1  the shared load signal
 - TestRoleRateOverride     §4.4  optional per-role allowance
-- TestCallLedger           §4.2  record_api_call maintains both counters
+- TestCallLedger           §4.2  record_api_call maintains the lifetime counter
+                                 only (Task 9: the ledger append moved to
+                                 Agent.try_reserve, so record_api_call cannot
+                                 double-book it)
 - TestRateLimiter          §4.2  sliding-window eligibility, and that it self-heals
 - TestRestartRebuild       §4.2  step 4b repopulates call_times from llm_call_logs
 - TestScheduler            §4.3  load-proportional weight, reactive tiebreak
 - TestStallIsTransient     F1    a throttled roster must NOT end the run
-- TestPhase5CallAccounting F2    real-agent_id LLM calls go through record_api_call
+- TestPhase5CallAccounting F2    real-agent_id LLM calls reserve a window slot
+                                 then go through record_api_call (Task 9)
 - TestRateSettingGuards    F4    non-positive rate settings are clamped, loudly
 - TestProductionRegression §8    the exact run-4f1e8395 state
 """
@@ -146,20 +150,15 @@ class TestAgentLoad:
 
 
 class TestCallLedger:
-    def test_record_api_call_increments_both_counters(self):
+    def test_record_api_call_increments_the_lifetime_counter_only(self):
+        """Task 9: the sliding-window append moved to Agent.try_reserve. If
+        record_api_call also appended to call_times, every reserved call would
+        be double-booked and the effective allowance halved."""
         a = Agent(agent_id="hub", bot_name="HubBot", pi_name="PI hub")
         a.record_api_call(now=100.0)
         a.record_api_call(now=101.0)
         assert a.api_call_count == 2
-        assert list(a.state.call_times) == [100.0, 101.0]
-
-    def test_record_api_call_defaults_to_wall_clock(self):
-        a = Agent(agent_id="hub", bot_name="HubBot", pi_name="PI hub")
-        before = time.time()
-        a.record_api_call()
-        after = time.time()
-        assert a.api_call_count == 1
-        assert before <= a.state.call_times[0] <= after
+        assert list(a.state.call_times) == []
 
     def test_call_times_starts_empty(self):
         a = Agent(agent_id="hub", bot_name="HubBot", pi_name="PI hub")
@@ -172,8 +171,10 @@ class TestRateLimiter:
         _patch(monkeypatch, llm_calls_per_load_per_window=8)
         eng = _engine(["spoke"])
         a = eng.agents["spoke"]
+        # Seed the ledger directly — Task 9 moved the append to
+        # Agent.try_reserve, so record_api_call no longer populates it.
         for i in range(7):
-            a.record_api_call(now=1000.0 + i)
+            a.state.call_times.append(1000.0 + i)
         assert eng._within_rate_limit(a, 1010.0) is True
 
     def test_at_allowance_is_throttled(self, monkeypatch):
@@ -181,7 +182,7 @@ class TestRateLimiter:
         eng = _engine(["spoke"])
         a = eng.agents["spoke"]
         for i in range(8):
-            a.record_api_call(now=1000.0 + i)
+            a.state.call_times.append(1000.0 + i)
         assert eng._within_rate_limit(a, 1010.0) is False
 
     def test_throttle_self_heals_as_the_window_slides(self, monkeypatch):
@@ -193,7 +194,7 @@ class TestRateLimiter:
         eng = _engine(["spoke"])
         a = eng.agents["spoke"]
         for i in range(8):
-            a.record_api_call(now=1000.0 + i)
+            a.state.call_times.append(1000.0 + i)
         assert eng._within_rate_limit(a, 1010.0) is False
         # 700s later every recorded call is outside the 600s window.
         assert eng._within_rate_limit(a, 1710.0) is True
@@ -206,13 +207,13 @@ class TestRateLimiter:
         hub = eng.agents["hub"]
         _add_threads(hub, 12)
         for i in range(50):
-            hub.record_api_call(now=1000.0 + i)
+            hub.state.call_times.append(1000.0 + i)
         # load 12 -> allowance 96, so 50 calls is fine for a hub...
         assert eng._within_rate_limit(hub, 1060.0) is True
         # ...but the identical ledger throttles a load-1 spoke.
         spoke = Agent(agent_id="spoke", bot_name="SpokeBot", pi_name="PI spoke")
         for i in range(50):
-            spoke.record_api_call(now=1000.0 + i)
+            spoke.state.call_times.append(1000.0 + i)
         assert eng._within_rate_limit(spoke, 1060.0) is False
 
     def test_role_override_beats_the_global_setting(self, monkeypatch):
@@ -224,7 +225,7 @@ class TestRateLimiter:
         eng = _engine(["spoke"])
         a = eng.agents["spoke"]
         for i in range(3):
-            a.record_api_call(now=1000.0 + i)
+            a.state.call_times.append(1000.0 + i)
         assert eng._calls_per_load(a) == 2
         assert eng._within_rate_limit(a, 1010.0) is False
 
@@ -235,7 +236,7 @@ class TestRateLimiter:
         a = eng.agents["spoke"]
         # Rate limit fine (1 call), legacy cap blown (api_call_count 6 >= 5).
         a.api_call_count = 6
-        a.record_api_call(now=1000.0)
+        a.state.call_times.append(1000.0)
         assert eng._turn_eligible(a, 1010.0) is False
 
     def test_turn_eligible_passes_when_both_pass(self, monkeypatch):
@@ -255,8 +256,8 @@ class TestRateLimiter:
         _patch(monkeypatch, llm_calls_per_load_per_window=2)
         eng = _engine(["spoke"], budget_cap=5)
         a = eng.agents["spoke"]
-        a.record_api_call(now=1000.0)
-        a.record_api_call(now=1001.0)  # at the window allowance
+        a.state.call_times.append(1000.0)
+        a.state.call_times.append(1001.0)  # at the window allowance
         a.api_call_count = 6           # ...and over the legacy cap
 
         assert eng._turn_eligible(a, 1010.0) is False
@@ -280,8 +281,8 @@ class TestRateLimiter:
         _patch(monkeypatch, llm_calls_per_load_per_window=2)
         eng = _engine(["spoke"])
         a = eng.agents["spoke"]
-        a.record_api_call(now=1000.0)
-        a.record_api_call(now=1001.0)
+        a.state.call_times.append(1000.0)
+        a.state.call_times.append(1001.0)
         with caplog.at_level(logging.WARNING):
             eng._within_rate_limit(a, 1010.0)
             eng._within_rate_limit(a, 1011.0)
@@ -379,7 +380,7 @@ class TestScheduler:
         now = time.time()
         hub = eng.agents["hub"]
         _add_threads(hub, 1)
-        hub.record_api_call(now=now)
+        hub.state.call_times.append(now)
         for _ in range(50):
             assert eng._select_agent().agent_id == "spoke"
 
@@ -469,7 +470,7 @@ class TestStallIsTransient:
         eng = _engine(["a", "b"], budget_cap=0)
         now = time.time()
         for a in eng.agents.values():
-            a.record_api_call(now=now)  # allowance is 1 * load 1
+            a.state.call_times.append(now)  # allowance is 1 * load 1
         assert eng._select_agent() is None
 
         sleeps, turns = _drive_loop(eng, monkeypatch, stop_after=4)
@@ -490,7 +491,7 @@ class TestStallIsTransient:
         _patch(monkeypatch, llm_calls_per_load_per_window=1)
         eng = _engine(["over", "throttled"], budget_cap=5)
         eng.agents["over"].api_call_count = 99
-        eng.agents["throttled"].record_api_call(now=time.time())
+        eng.agents["throttled"].state.call_times.append(time.time())
         assert eng._select_agent() is None
 
         sleeps, turns = _drive_loop(eng, monkeypatch, stop_after=2)
@@ -523,7 +524,7 @@ class TestStallIsTransient:
         tick selects the agent it was waiting for."""
         _patch(monkeypatch, llm_calls_per_load_per_window=1)
         eng = _engine(["a"], budget_cap=0)
-        eng.agents["a"].record_api_call(now=time.time())
+        eng.agents["a"].state.call_times.append(time.time())
 
         sleeps, turns = _drive_loop(eng, monkeypatch, stop_after=3)
         # The first stall clears the ledger the way an expiring window would.
@@ -543,7 +544,7 @@ class TestStallIsTransient:
         once `_stop_event` is set, and the loop condition then fails."""
         _patch(monkeypatch, llm_calls_per_load_per_window=1)
         eng = _engine(["a"], budget_cap=0)
-        eng.agents["a"].record_api_call(now=time.time())
+        eng.agents["a"].state.call_times.append(time.time())
 
         sleeps, turns = _drive_loop(eng, monkeypatch, stop_after=50)
         real_sleep = eng._sleep
@@ -570,9 +571,11 @@ class TestPhase5CallAccounting:
     (`pi_handler.py`, `PIHandler`) is gone — this removal cycle retires all
     human-PI-to-bot interaction — so this class re-anchors the same invariant
     to Phase 5's `_phase5_new_post`, which follows the identical pattern:
-    `agent.record_api_call()` immediately before a `generate_agent_response`
-    call logged under the agent's own real `agent_id`
-    (`log_meta={"agent_id": agent.agent_id, ...}`).
+    `agent.try_reserve(...)` claims the window slot, then `agent.record_api_call()`
+    immediately before a `generate_agent_response` call logged under the
+    agent's own real `agent_id` (`log_meta={"agent_id": agent.agent_id, ...}`)
+    (Task 9: the reservation now caps real spend directly, not just visibility
+    to the limiter after the fact).
     """
 
     _SKIP = '```json\n{"action": "skip"}\n```'
@@ -615,13 +618,16 @@ class TestPhase5CallAccounting:
         assert len(agent.state.call_times) == 1
 
     async def test_a_call_burst_shows_up_in_the_live_rate_limiter(self, monkeypatch):
-        """The end-to-end point of F2: repeated real-agent_id LLM calls must
-        throttle the agent NOW, exactly as they would after a restart rebuilt
-        them from the DB."""
+        """The end-to-end point of F2, sharpened by Task 9: the reservation now
+        caps real spend directly, so only the first 8 of 10 attempts (the
+        allowance) ever reach the LLM — the other 2 are refused by
+        `try_reserve` before `record_api_call` or the call itself runs. Before
+        Task 9 this was a post-hoc entry gate: all 10 calls would have gone out
+        and only the NEXT attempt would have been throttled."""
         eng, agent = self._engine(monkeypatch, llm_calls_per_load_per_window=8)
         for _ in range(10):
             await eng._phase5_new_post(agent)
-        assert agent.api_call_count == 10
+        assert agent.api_call_count == 8
         assert eng._within_rate_limit(agent, time.time()) is False
 
 
@@ -703,7 +709,7 @@ class TestProductionRegression:
         hub = eng.agents["blackbird"]
         base = 10_000.0
         for i in range(8):
-            hub.record_api_call(now=base + i)
+            hub.state.call_times.append(base + i)
         assert eng._turn_eligible(hub, base + 10) is False
         assert eng._turn_eligible(hub, base + 700) is True
 

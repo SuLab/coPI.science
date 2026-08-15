@@ -312,6 +312,9 @@ async def _drive(monkeypatch, response, *, capture=None):
             lab_daily_post_cap=50, active_thread_threshold=12,
             phase5_skip_probability=0.0,
             llm_agent_model_opus="test-model",
+            # Task 9: _phase5_new_post now reserves a rate-limiter window slot
+            # before the LLM call, which reads both of these.
+            llm_calls_per_load_per_window=8, llm_rate_window_seconds=600,
         ),
     )
     monkeypatch.setattr(gill, "build_phase5_prompt", _stub_prompt)
@@ -390,6 +393,9 @@ async def test_repeated_rejections_accumulate_instead_of_pinning_at_one(monkeypa
             lab_daily_post_cap=50, active_thread_threshold=12,
             phase5_skip_probability=0.0,
             llm_agent_model_opus="test-model",
+            # Task 9: _phase5_new_post now reserves a rate-limiter window slot
+            # before the LLM call, which reads both of these.
+            llm_calls_per_load_per_window=8, llm_rate_window_seconds=600,
         ),
     )
     monkeypatch.setattr(gill, "build_phase5_prompt", lambda **kw: ("sys", []))

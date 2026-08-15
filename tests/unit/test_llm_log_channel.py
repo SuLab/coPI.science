@@ -31,6 +31,10 @@ def _settings(**over):
         active_thread_threshold=12,
         phase5_skip_probability=0.0,
         llm_agent_model_opus="test-model",
+        # Task 9: _phase5_new_post now reserves a rate-limiter window slot
+        # before the LLM call, which reads both of these.
+        llm_calls_per_load_per_window=8,
+        llm_rate_window_seconds=600,
     )
     base.update(over)
     return types.SimpleNamespace(**base)

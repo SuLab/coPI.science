@@ -386,6 +386,12 @@ class Settings(BaseSettings):
     llm_rate_window_seconds: int = 600
     llm_calls_per_load_per_window: int = 8
 
+    # The hub's own ceiling. It is on an unpaced lane, so the per-load allowance
+    # no longer applies to it; this is a BRAKE, not a budget. Measured hub rate
+    # was ~2.6 calls/10min, so 600 is unreachable in normal operation and only
+    # trips a runaway.
+    hub_llm_calls_per_window: int = 600
+
     def __repr_args__(self):
         """Redact credential-valued fields in repr()/str().
 

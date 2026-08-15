@@ -428,15 +428,40 @@ class SimulationEngine:
             return cached
         return get_settings().llm_calls_per_load_per_window
 
+    def _allowance_for(self, agent: Agent) -> int:
+        """Window allowance for one agent. The hub is on its own ceiling.
+
+        A ``scout_hub`` sits on an unpaced lane (Task 9's reservation reply
+        path fires without the per-turn fan-out cap re-checking it), so the
+        per-load allowance that bounds every ``pi_lab`` no longer applies to
+        it — it gets ``hub_llm_calls_per_window`` instead, a brake against
+        runaway rather than a load-scaled budget. Every other role keeps the
+        existing formula. Shared by both ``_within_rate_limit`` (selection)
+        and ``Agent.try_reserve`` (spend) so the two checks cannot disagree
+        about what the hub deserves — that disagreement is exactly what
+        benched the hub for 161 turns in run 4f1e8395.
+        """
+        settings = get_settings()
+        if agent.role == "scout_hub":
+            return settings.hub_llm_calls_per_window
+        return self._calls_per_load(agent) * self._agent_load(agent)
+
     def _within_rate_limit(self, agent: Agent, now: float) -> bool:
         """Sliding-window LLM rate check — the LIVE throttle.
 
-        allowance = _calls_per_load(agent) * _agent_load(agent), over
-        llm_rate_window_seconds. Unlike the cumulative cap this replaces, it
-        self-heals: entries age out, so an agent throttled now is eligible later.
-        See design §4.2.
+        allowance = ``self._allowance_for(agent)``: ``_calls_per_load(agent) *
+        _agent_load(agent)`` for a pi_lab, or ``hub_llm_calls_per_window`` for
+        the scout_hub, over llm_rate_window_seconds. Unlike the cumulative cap
+        this replaces, it self-heals: entries age out, so an agent throttled
+        now is eligible later. See design §4.2, §5.
+
+        This is the SELECTION-time check (consulted by ``_turn_eligible``).
+        The SPEND-time check is ``Agent.try_reserve``, called immediately
+        before each LLM call in ``_reply_to_thread`` / ``_phase5_new_post`` —
+        a selection-time-only check cannot bound concurrent spend once several
+        calls are in flight for one agent.
         """
-        allowance = self._calls_per_load(agent) * self._agent_load(agent)
+        allowance = self._allowance_for(agent)
         window_start = now - get_settings().llm_rate_window_seconds
         times = agent.state.call_times
         while times and times[0] < window_start:
@@ -444,11 +469,10 @@ class SimulationEngine:
         ok = len(times) < allowance
         if not ok and not agent.state.throttled:
             logger.warning(
-                "[%s] throttled: %d LLM calls in the last %ds at load %d "
-                "(allowance %d). Eligible again as the window slides.",
+                "[%s] throttled: %d LLM calls in the last %ds (allowance %d). "
+                "Eligible again as the window slides.",
                 agent.agent_id, len(times),
-                get_settings().llm_rate_window_seconds,
-                self._agent_load(agent), allowance,
+                get_settings().llm_rate_window_seconds, allowance,
             )
         agent.state.throttled = not ok
         return ok
@@ -1352,6 +1376,13 @@ class SimulationEngine:
                 own_dois=agent.own_publication_dois,
             )
 
+        if not agent.try_reserve(
+            self._allowance_for(agent), get_settings().llm_rate_window_seconds
+        ):
+            logger.warning(
+                "[%s] rate-limited; deferring this reply", agent.agent_id,
+            )
+            return
         agent.record_api_call()
         try:
             raw_response = await generate_with_tools(
@@ -1938,6 +1969,13 @@ class SimulationEngine:
         # below for why position is unsafe under concurrency).
         llm_call_id = uuid.uuid4().hex
 
+        if not agent.try_reserve(
+            self._allowance_for(agent), get_settings().llm_rate_window_seconds
+        ):
+            logger.warning(
+                "[%s] rate-limited; deferring this post", agent.agent_id,
+            )
+            return
         agent.record_api_call()
         try:
             response = await generate_agent_response(
@@ -4211,7 +4249,8 @@ class SimulationEngine:
                         .order_by(LlmCallLog.created_at)
                     )
                     rows = result.all()
-                # call_times is a deque that record_api_call appends to, same
+                # call_times is a deque that try_reserve appends to (Task 9;
+                # record_api_call only bumps the lifetime counter now), same
                 # shape as pending_proposals above — so a plain append here is
                 # not idempotent either: a second rebuild call would duplicate
                 # every in-window entry and could throttle an agent that isn't

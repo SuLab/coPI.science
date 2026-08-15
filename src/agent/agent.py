@@ -54,16 +54,51 @@ class Agent:
         self.allowed_sender_ids: set[str] | None = None
 
     def record_api_call(self, now: float | None = None) -> None:
-        """Record one LLM call against both the lifetime counter and the
-        sliding-window ledger.
+        """Record one LLM call against the lifetime counter.
 
-        The single write point for both. Every call site must use this rather
-        than bumping ``api_call_count`` directly — a site that bumps only the
-        counter is invisible to the rate limiter, and a site that appends only to
-        the ledger corrupts ``SimulationRun.total_api_calls``.
+        Through Task 8 this also appended to the sliding-window ledger
+        (``state.call_times``). As of Task 9 that append moved to
+        ``try_reserve``, which claims the window slot BEFORE the call is
+        issued — a selection-time-only check cannot bound concurrent spend
+        (``_phase4_reply_threads`` fires several calls per turn with no
+        re-check). Every real LLM call site now reserves first, then calls
+        this method; if this method also appended to ``call_times``, every
+        call would be double-booked and the effective allowance halved. So
+        ``call_times`` is untouched here — ``now`` is accepted only for
+        backward-compatible callers and is otherwise unused.
+
+        Still the single write point for ``api_call_count``: every call site
+        must use this rather than bumping the counter directly, or that call
+        is invisible to ``SimulationRun.total_api_calls``.
         """
         self.api_call_count += 1
-        self.state.call_times.append(time.time() if now is None else now)
+
+    def try_reserve(
+        self, allowance: int, window_s: int, now: float | None = None
+    ) -> bool:
+        """Claim one slot in the sliding window BEFORE issuing the call.
+
+        The old check was an entry gate consulted at selection, which cannot
+        bound spend once several calls are in flight for one agent. Reserving
+        up front makes the window a true spend gate. There is no await in this
+        method, so it is atomic against other coroutines.
+        """
+        now = time.time() if now is None else now
+        window_start = now - window_s
+        times = self.state.call_times
+        while times and times[0] < window_start:
+            times.popleft()
+        if len(times) >= allowance:
+            self.state.throttled = True
+            return False
+        times.append(now)
+        self.state.throttled = False
+        return True
+
+    def release_reservation(self) -> None:
+        """Give back a reservation whose call was never issued."""
+        if self.state.call_times:
+            self.state.call_times.pop()
 
     # ------------------------------------------------------------------
     # Profile properties (cached, loaded from disk)
