@@ -94,3 +94,43 @@ async def test_phase4_still_overlaps_up_to_the_cap(monkeypatch):
     await engine._phase4_reply_threads(hub)
 
     assert peak > 1, "fan-out serialized to one reply at a time"
+
+
+@pytest.mark.asyncio
+async def test_the_fanout_bound_is_global_not_per_turn(monkeypatch):
+    """Two agents replying at once must share one budget. A per-call semaphore
+    bounds each turn separately, so N turns give N x cap concurrent calls."""
+    from src.config import get_settings
+
+    cap = get_settings().phase4_max_concurrent_replies
+    engine_a, hub_a = _hub_with_threads(cap * 2)
+    # Second agent inside the SAME engine.
+    from src.agent.agent import Agent
+    from src.agent.state import ThreadState
+
+    lab = Agent("wang", "WangBot", "Wang", role="pi_lab")
+    for i in range(cap * 2):
+        lab.state.active_threads[f"L{i}"] = ThreadState(
+            thread_id=f"L{i}", channel="general", other_agent_id="blackbird",
+            message_count=1, has_pending_reply=True,
+        )
+    engine_a.agents["wang"] = lab
+
+    live = 0
+    peak = 0
+
+    async def _fake_reply(agent, thread):
+        nonlocal live, peak
+        live += 1
+        peak = max(peak, live)
+        await asyncio.sleep(0.02)
+        live -= 1
+
+    monkeypatch.setattr(engine_a, "_reply_to_thread", _fake_reply)
+
+    await asyncio.gather(
+        engine_a._phase4_reply_threads(hub_a),
+        engine_a._phase4_reply_threads(lab),
+    )
+
+    assert peak <= cap, f"two concurrent turns reached {peak}, above the global cap {cap}"

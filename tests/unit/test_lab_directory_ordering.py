@@ -115,7 +115,11 @@ async def test_recompute_refreshes_the_directory_when_it_disables_the_gate(monke
 
     monkeypatch.setattr(
         "src.agent.simulation.get_settings",
-        lambda: types.SimpleNamespace(cohort_isolation_enabled=False),
+        # phase4_max_concurrent_replies is required since __init__ eagerly
+        # constructs the Phase-4 fan-out semaphore (self._llm_fanout_sem).
+        lambda: types.SimpleNamespace(
+            cohort_isolation_enabled=False, phase4_max_concurrent_replies=4,
+        ),
     )
     a, b = _agent("a", "paper A"), _agent("b", "paper B")
     a.allowed_sender_ids = {"a"}          # isolated under the old topology

@@ -35,6 +35,10 @@ def _settings(**kw):
         active_thread_threshold=12,
         llm_rate_window_seconds=600,
         llm_calls_per_load_per_window=8,
+        # Required since SimulationEngine.__init__ eagerly constructs the
+        # Phase-4 fan-out semaphore (self._llm_fanout_sem) rather than
+        # per-call — see _phase4_reply_threads / test_phase4_concurrency.py.
+        phase4_max_concurrent_replies=4,
     )
     base.update(kw)
     return types.SimpleNamespace(**base)

@@ -363,6 +363,13 @@ class SimulationEngine:
         # See _sleep / request_stop (R2).
         self._stop_event = asyncio.Event()
 
+        # Bounds concurrent LLM calls PROCESS-WIDE. Constructed once: a
+        # per-call semaphore bounds each turn separately, so N concurrent
+        # turns gave N x cap concurrent requests.
+        self._llm_fanout_sem = asyncio.Semaphore(
+            max(1, get_settings().phase4_max_concurrent_replies)
+        )
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -1122,8 +1129,6 @@ class SimulationEngine:
 
         Returns the set of thread IDs that were replied to (so Phase 5 can skip them).
         """
-        settings = get_settings()
-
         # Identify threads needing a reply
         threads_to_reply: list[ThreadState] = []
         for thread in agent.state.active_threads.values():
@@ -1174,11 +1179,13 @@ class SimulationEngine:
         # why it exists: it sits on every spoke edge and has logged "Replying to
         # 37 threads" in one turn, which unbounded is 37 concurrent Opus requests
         # that the per-turn rate limiter never gets a chance to shape. The cap
-        # paces the fan-out; it never drops a thread.
-        sem = asyncio.Semaphore(max(1, settings.phase4_max_concurrent_replies))
+        # paces the fan-out; it never drops a thread. The semaphore itself is
+        # engine-lifetime (see __init__ / self._llm_fanout_sem) so the bound is
+        # process-wide, not per-turn — a per-call semaphore here would let N
+        # concurrent turns each get their own cap's worth of concurrency.
 
         async def _reply_bounded(thread: ThreadState) -> None:
-            async with sem:
+            async with self._llm_fanout_sem:
                 await self._reply_to_thread(agent, thread)
 
         tasks = [_reply_bounded(thread) for thread in threads_to_reply]
