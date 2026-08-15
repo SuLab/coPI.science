@@ -330,6 +330,14 @@ class SimulationEngine:
         # agent_messages once per main-loop tick. This makes the DB the primary
         # conversation store. See specs/local-db-conversations.md.
         self._pending_persist: list[LogEntry] = []
+        # DB persistence buffer for OpportunityAssessment rows that failed
+        # their first write attempt (e.g. a pool-checkout timeout) — queued
+        # here by _persist_assessment instead of being dropped, and drained by
+        # _flush_pending_assessments on the SAME per-turn cadence as
+        # _pending_persist/_llm_log_buffer above (see _run_main_loop and
+        # stop()), so the shutdown flush covers the last assessment of a run
+        # too. This table is the actual product of the screening pipeline.
+        self._pending_assessments: list[dict] = []
         # Monotonic ts-shaped id minter, seeded at DB rebuild. Owns the engine's
         # writer slot so its ids can never collide with the web app's or
         # GrantBot's, which mint into the same agent_messages table from other
@@ -686,10 +694,13 @@ class SimulationEngine:
             # ingestion and every other agent for one agent's cooldown.
             # See .notes/cohort-system-v2.md §10.3.
 
-            # Flush buffered message-log entries + LLM logs periodically
+            # Flush buffered message-log entries + LLM logs + any assessment
+            # rows that failed their first write, periodically
             await self._flush_persisted()
             if self._llm_log_buffer:
                 await self._flush_llm_logs()
+            if self._pending_assessments:
+                await self._flush_pending_assessments()
 
         logger.info("Main loop exited after %d turns", turn_count)
 
@@ -730,6 +741,7 @@ class SimulationEngine:
         set_call_log_callback(None)
         await self._flush_persisted(force_stats=True)
         await self._flush_llm_logs()
+        await self._flush_pending_assessments()
         logger.info("Simulation stopping...")
 
     # ------------------------------------------------------------------
@@ -2294,29 +2306,33 @@ class SimulationEngine:
         funnel_stage = _bounded_str(verdict.get("funnel_stage"), 20)
         recommendation = _bounded_str(verdict.get("recommendation"), 30)
         confidence = _bounded_str(verdict.get("confidence"), 20)
+        # Built once, up front, so a failed first attempt has a plain dict —
+        # not a session-bound ORM instance — ready to hand straight to
+        # _pending_assessments for a later retry.
+        assessment_kwargs = dict(
+            simulation_run_id=self.simulation_run_id,
+            agent_id=agent_id,
+            subject_agent_id=subject_agent_id,
+            channel_name=channel,
+            slack_ts=slack_ts,
+            company_or_project=_str_or_none(verdict.get("company_or_project")),
+            funnel_stage=funnel_stage,
+            recommendation=recommendation,
+            confidence=confidence,
+            weighted_score=computed_score,
+            band=computed_band,
+            gating=gating,
+            scores=scores or None,
+            red_flags=red_flags if isinstance(red_flags, list) else None,
+            derisking_milestones=(
+                milestones if isinstance(milestones, list) else None
+            ),
+            rationale=_str_or_none(verdict.get("rationale")),
+            raw_verdict=verdict,
+        )
         try:
             async with self.session_factory() as db:
-                db.add(OpportunityAssessment(
-                    simulation_run_id=self.simulation_run_id,
-                    agent_id=agent_id,
-                    subject_agent_id=subject_agent_id,
-                    channel_name=channel,
-                    slack_ts=slack_ts,
-                    company_or_project=_str_or_none(verdict.get("company_or_project")),
-                    funnel_stage=funnel_stage,
-                    recommendation=recommendation,
-                    confidence=confidence,
-                    weighted_score=computed_score,
-                    band=computed_band,
-                    gating=gating,
-                    scores=scores or None,
-                    red_flags=red_flags if isinstance(red_flags, list) else None,
-                    derisking_milestones=(
-                        milestones if isinstance(milestones, list) else None
-                    ),
-                    rationale=_str_or_none(verdict.get("rationale")),
-                    raw_verdict=verdict,
-                ))
+                db.add(OpportunityAssessment(**assessment_kwargs))
                 await db.commit()
             logger.info(
                 "[%s] Assessment stored: %s -> %s (%s, %s)",
@@ -2324,18 +2340,21 @@ class SimulationEngine:
                 recommendation or "?", computed_score, computed_band,
             )
         except Exception as exc:  # noqa: BLE001 — never lose a posted assessment
-            # No natural retry buffer for this write, unlike _flush_persisted/
-            # _flush_llm_logs: a verdict is extracted and persisted exactly
-            # once, right here, from a value the caller does not keep — there
-            # is no accumulating list to requeue it into without inventing one
-            # purpose-built for this single call site. Make the loss
-            # unmistakable instead: ERROR + a full traceback, so a
-            # pool-checkout timeout (which raises the same generic exception
-            # as any other DB failure here) cannot be mistaken for routine
-            # background noise.
+            # This row is the actual product of the screening pipeline, and
+            # unlike _close_thread/_record_assessment_drop it is fully built
+            # before this point with nothing else in-process reading it back
+            # immediately — the same shape as _pending_persist/
+            # _llm_log_buffer. Queue it for retry (drained by
+            # _flush_pending_assessments on the same cadence as those two —
+            # see _run_main_loop and stop()) instead of dropping it. Still
+            # loud: a pool-checkout timeout on the FIRST attempt is worth an
+            # ERROR + traceback even though it is now recoverable, so an
+            # operator sees the pool pressure immediately rather than only if
+            # the retry also fails.
+            self._pending_assessments.append(assessment_kwargs)
             logger.error(
-                "[%s] Failed to persist assessment: %s — verdict LOST, no "
-                "retry path for this write",
+                "[%s] Failed to persist assessment on first attempt, queued "
+                "for retry: %s",
                 agent_id, exc, exc_info=True,
             )
 
@@ -3617,6 +3636,49 @@ class SimulationEngine:
             logger.warning(
                 "Failed to flush %d messages, re-queued for retry: %s",
                 len(rows), exc,
+            )
+
+    async def _flush_pending_assessments(self) -> None:
+        """Retry OpportunityAssessment rows queued by _persist_assessment.
+
+        _persist_assessment attempts an immediate write; a failure there
+        (most commonly the pool-checkout timeout Task 2 sized the pool for)
+        appends the fully-built row here instead of dropping it. Mirrors
+        _flush_persisted's buffer/retry pattern exactly, just against
+        _pending_assessments instead of _pending_persist.
+
+        Must be drained by the SAME per-turn cadence as _flush_persisted/
+        _flush_llm_logs (see _run_main_loop) so the shutdown flush in
+        stop() covers it too — a buffer only retried on the next assessment
+        would strand the last one at shutdown, which is exactly the
+        durability gap this exists to close. An opportunity_assessments row
+        is the actual product of the screening pipeline, so a repeat failure
+        here stays at ERROR (louder than _flush_persisted/_flush_llm_logs'
+        WARNING on the same kind of retry failure).
+        """
+        if not self._pending_assessments:
+            return
+        if not self.session_factory or not self.simulation_run_id:
+            self._pending_assessments.clear()
+            return
+        rows = self._pending_assessments
+        self._pending_assessments = []
+        try:
+            async with self.session_factory() as db:
+                for row in rows:
+                    db.add(OpportunityAssessment(**row))
+                await db.commit()
+            logger.info("Flushed %d queued assessment(s) to DB", len(rows))
+        except Exception as exc:
+            # Same re-queue-in-front reasoning as _flush_persisted: new
+            # failures may have been appended to _pending_assessments while
+            # we were awaiting the (failed) commit, so put this batch back in
+            # front to preserve retry order.
+            self._pending_assessments[0:0] = rows
+            logger.error(
+                "Failed to flush %d queued assessment(s), still queued for "
+                "retry: %s",
+                len(rows), exc, exc_info=True,
             )
 
     def _enqueue_persist(self, entry: LogEntry) -> None:

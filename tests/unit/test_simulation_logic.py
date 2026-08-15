@@ -613,8 +613,93 @@ class TestFlushLlmLogsFailure:
 
 
 # ---------------------------------------------------------------
-# _persist_assessment / _record_assessment_drop / _close_thread — none of
-# these has a natural retry buffer the way _flush_persisted/_flush_llm_logs
+# _persist_assessment — a fully-built OpportunityAssessment row (Task 2 fix
+# round 1, Finding 1). Structurally it is the same shape as the message-log/
+# LLM-log buffers above: every field is computed synchronously before the
+# write, and nothing else in-process reads the row back the way MessageLog
+# does — so, unlike _record_assessment_drop/_close_thread below, a failure
+# here IS requeued, draining through _flush_pending_assessments on the same
+# per-turn cadence as _flush_persisted/_flush_llm_logs (see _run_main_loop
+# and stop()). This table is the actual product of the screening pipeline,
+# so the first-attempt failure still logs LOUD (ERROR + traceback) even
+# though it is now recoverable — visibility and durability are both kept.
+# ---------------------------------------------------------------
+
+class TestPersistAssessmentRequeue:
+    @staticmethod
+    def _failing_engine():
+        import uuid
+
+        def failing_factory():
+            raise RuntimeError("pool checkout timed out")
+
+        return SimulationEngine(
+            agents=[], slack_clients={},
+            session_factory=failing_factory, simulation_run_id=uuid.uuid4(),
+        )
+
+    @pytest.mark.asyncio
+    async def test_first_failure_queues_the_row_instead_of_dropping_it(self, caplog):
+        engine = self._failing_engine()
+
+        with caplog.at_level("ERROR"):
+            await engine._persist_assessment("blackbird", "general", {"scores": {}})
+
+        # The row must survive as a queued retry, not vanish.
+        assert len(engine._pending_assessments) == 1
+        assert engine._pending_assessments[0]["agent_id"] == "blackbird"
+        # Still loud on the first failure — a full traceback, and explicit
+        # that this is queued (not "LOST": there IS a retry path now).
+        assert "queued for retry" in caplog.text
+        assert "LOST" not in caplog.text
+        assert any(r.exc_info for r in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_flush_requeues_a_batch_that_fails_again(self):
+        engine = self._failing_engine()
+        engine._pending_assessments = [
+            {"simulation_run_id": engine.simulation_run_id, "agent_id": "su",
+             "channel_name": "general"},
+            {"simulation_run_id": engine.simulation_run_id, "agent_id": "wu",
+             "channel_name": "general"},
+        ]
+
+        await engine._flush_pending_assessments()
+
+        # The batch must survive for the next attempt, not vanish.
+        assert len(engine._pending_assessments) == 2
+
+    @pytest.mark.asyncio
+    async def test_flush_requeued_batch_preserves_order_ahead_of_new_entries(self):
+        engine = self._failing_engine()
+        engine._pending_assessments = [
+            {"simulation_run_id": engine.simulation_run_id, "agent_id": "old-1"},
+            {"simulation_run_id": engine.simulation_run_id, "agent_id": "old-2"},
+        ]
+        await engine._flush_pending_assessments()
+        # A newer failure queues after the failed flush re-queued the old
+        # batch; the re-queued batch must remain ahead of it.
+        engine._pending_assessments.append(
+            {"simulation_run_id": engine.simulation_run_id, "agent_id": "new"}
+        )
+
+        assert [r["agent_id"] for r in engine._pending_assessments] == [
+            "old-1", "old-2", "new",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_no_db_clears_buffer(self):
+        # Without a session_factory the buffer is intentionally dropped so it
+        # can't grow unbounded — matches _flush_persisted's own no-DB case.
+        engine = SimulationEngine(agents=[], slack_clients={})
+        engine._pending_assessments = [{"agent_id": "su"}]
+        await engine._flush_pending_assessments()
+        assert engine._pending_assessments == []
+
+
+# ---------------------------------------------------------------
+# _record_assessment_drop / _close_thread — neither has a natural retry
+# buffer the way _flush_persisted/_flush_llm_logs/_flush_pending_assessments
 # do: each is a single, already-final write triggered once per event rather
 # than drained from an accumulating list on a timer, so a DB failure here
 # can't be requeued without inventing a queue purpose-built for just that
@@ -625,23 +710,6 @@ class TestFlushLlmLogsFailure:
 # ---------------------------------------------------------------
 
 class TestUnretryableWriteFailuresAreLoud:
-    @pytest.mark.asyncio
-    async def test_persist_assessment_failure_logs_a_traceback(self, caplog):
-        import uuid
-
-        def failing_factory():
-            raise RuntimeError("pool checkout timed out")
-
-        engine = SimulationEngine(
-            agents=[], slack_clients={},
-            session_factory=failing_factory, simulation_run_id=uuid.uuid4(),
-        )
-        with caplog.at_level("ERROR"):
-            await engine._persist_assessment("blackbird", "general", {"scores": {}})
-
-        assert "LOST" in caplog.text
-        assert any(r.exc_info for r in caplog.records)
-
     @pytest.mark.asyncio
     async def test_record_assessment_drop_failure_logs_a_traceback(self, caplog):
         import uuid

@@ -347,6 +347,89 @@ async def test_persist_assessment_never_raises_when_the_write_fails(caplog):
 
 
 @pytest.mark.asyncio
+async def test_persist_assessment_failure_is_buffered_and_a_later_flush_persists_it(engine):
+    """Task 2 fix round 1, Finding 1: a write that fails on its first attempt
+    (e.g. the pool-checkout timeout Task 2 sized the pool for) must not be
+    logged-and-dropped — the fully-built row must survive in
+    ``_pending_assessments`` and actually reach ``opportunity_assessments`` on
+    the next ``_flush_pending_assessments``, the same durability contract
+    ``_flush_persisted`` already gives the message log. Discriminating test:
+    this asserts the row is really in the DB after the retry, not merely that
+    a list became non-empty (a bug that only clears/repopulates the list
+    would pass a weaker assertion)."""
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from src.agent.simulation import SimulationEngine
+
+    real_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with real_factory() as setup:
+        run = SimulationRun()
+        setup.add(run)
+        await setup.commit()
+        run_id = run.id
+
+    # Fails exactly once (the "pool checkout timed out" moment), then behaves
+    # normally — so one engine instance can prove both halves of the
+    # contract: the failed first attempt is queued, and a later flush against
+    # a now-healthy pool actually persists it.
+    calls = {"n": 0}
+
+    def flaky_factory():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("pool checkout timed out")
+        return real_factory()
+
+    # A real (if agent-less) SimulationEngine, not a bare SimpleNamespace —
+    # same reason as the neighboring tests above: _specialist_floor_gap needs
+    # real engine attributes a stub wouldn't carry.
+    stub = SimulationEngine(
+        agents=[], slack_clients={},
+        session_factory=flaky_factory, simulation_run_id=run_id,
+    )
+    # No `recommendation` key: _specialist_floor_gap only holds "advance"/
+    # "conditional" to the specialist panel, and this stub has consulted no
+    # one — a bare verdict like this reaches the DB write unconditionally.
+    verdict = {"subject_agent_id": "wang", "scores": {"differentiation": 3}}
+
+    await SimulationEngine._persist_assessment(stub, "blackbird", "general", verdict)
+
+    try:
+        # First attempt failed: nothing in the DB yet, but the row survived
+        # as a queued retry rather than vanishing.
+        assert len(stub._pending_assessments) == 1
+        async with real_factory() as check:
+            none_yet = (await check.execute(
+                select(OpportunityAssessment).where(
+                    OpportunityAssessment.simulation_run_id == run_id
+                )
+            )).scalars().all()
+            assert none_yet == []
+
+        await SimulationEngine._flush_pending_assessments(stub)
+
+        # The retry succeeded against the now-healthy factory: the buffer
+        # drained AND the row genuinely landed in the table.
+        assert stub._pending_assessments == []
+        async with real_factory() as check:
+            row = (await check.execute(
+                select(OpportunityAssessment).where(
+                    OpportunityAssessment.simulation_run_id == run_id
+                )
+            )).scalar_one()
+            assert row.agent_id == "blackbird"
+            assert row.subject_agent_id == "wang"
+    finally:
+        async with real_factory() as cleanup:
+            stale = (await cleanup.execute(
+                select(SimulationRun).where(SimulationRun.id == run_id)
+            )).scalar_one_or_none()
+            if stale is not None:
+                await cleanup.delete(stale)  # cascades to the assessment
+                await cleanup.commit()
+
+
+@pytest.mark.asyncio
 async def test_persist_assessment_skips_quietly_without_a_database(caplog):
     """SimulationEngine can run with no database at all — session_factory and
     simulation_run_id are both None in that mode (see __init__). Persistence must
