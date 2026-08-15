@@ -157,7 +157,12 @@ async def _run_simulation(
         from sqlalchemy import select
         from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
         from src.models import AgentChannel, AgentMessage, PiDmMessage, SimulationRun
-        engine = create_async_engine(settings.database_url)
+        engine = create_async_engine(
+            settings.database_url,
+            pool_size=settings.db_pool_size,
+            max_overflow=settings.db_max_overflow,
+            pool_pre_ping=True,
+        )
         session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
         if fresh:

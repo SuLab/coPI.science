@@ -558,6 +558,141 @@ class TestFlushPersistedFailure:
 
 
 # ---------------------------------------------------------------
+# _flush_llm_logs — same requirement as _flush_persisted above (H1): a failed
+# flush must not drop the buffered LLM call logs. Unlike the three writers
+# below, this one already has a natural retry buffer (_llm_log_buffer, drained
+# on a timer from the main loop each turn), so the fix mirrors
+# _flush_persisted's re-queue exactly, just against a different buffer.
+# ---------------------------------------------------------------
+
+class TestFlushLlmLogsFailure:
+    @pytest.mark.asyncio
+    async def test_failed_flush_requeues_batch(self):
+        import uuid
+
+        def failing_factory():
+            raise RuntimeError("transient DB error")
+
+        engine = SimulationEngine(
+            agents=[], slack_clients={},
+            session_factory=failing_factory, simulation_run_id=uuid.uuid4(),
+        )
+        engine._llm_log_buffer = [
+            {"agent_id": "su", "phase": "phase4"},
+            {"agent_id": "wu", "phase": "phase5"},
+        ]
+
+        await engine._flush_llm_logs()
+
+        # The batch must survive for the next attempt, not vanish.
+        assert len(engine._llm_log_buffer) == 2
+
+    @pytest.mark.asyncio
+    async def test_requeued_batch_preserves_order_ahead_of_new_entries(self):
+        import uuid
+
+        def failing_factory():
+            raise RuntimeError("transient DB error")
+
+        engine = SimulationEngine(
+            agents=[], slack_clients={},
+            session_factory=failing_factory, simulation_run_id=uuid.uuid4(),
+        )
+        engine._llm_log_buffer = [
+            {"agent_id": "su", "phase": "old-1"},
+            {"agent_id": "su", "phase": "old-2"},
+        ]
+        await engine._flush_llm_logs()
+        # A newer entry arrives after the failed flush re-queued the old batch;
+        # the re-queued batch must remain chronologically ahead of it.
+        engine._llm_log_buffer.append({"agent_id": "su", "phase": "new"})
+
+        assert [e["phase"] for e in engine._llm_log_buffer] == [
+            "old-1", "old-2", "new",
+        ]
+
+
+# ---------------------------------------------------------------
+# _persist_assessment / _record_assessment_drop / _close_thread — none of
+# these has a natural retry buffer the way _flush_persisted/_flush_llm_logs
+# do: each is a single, already-final write triggered once per event rather
+# than drained from an accumulating list on a timer, so a DB failure here
+# can't be requeued without inventing a queue purpose-built for just that
+# write. Instead the failure is made LOUD — ERROR level plus a full
+# traceback — so a pool-checkout timeout reads as unmistakable data loss
+# rather than routine background noise indistinguishable from any other
+# warning in the log.
+# ---------------------------------------------------------------
+
+class TestUnretryableWriteFailuresAreLoud:
+    @pytest.mark.asyncio
+    async def test_persist_assessment_failure_logs_a_traceback(self, caplog):
+        import uuid
+
+        def failing_factory():
+            raise RuntimeError("pool checkout timed out")
+
+        engine = SimulationEngine(
+            agents=[], slack_clients={},
+            session_factory=failing_factory, simulation_run_id=uuid.uuid4(),
+        )
+        with caplog.at_level("ERROR"):
+            await engine._persist_assessment("blackbird", "general", {"scores": {}})
+
+        assert "LOST" in caplog.text
+        assert any(r.exc_info for r in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_record_assessment_drop_failure_logs_a_traceback(self, caplog):
+        import uuid
+
+        def failing_factory():
+            raise RuntimeError("pool checkout timed out")
+
+        engine = SimulationEngine(
+            agents=[], slack_clients={},
+            session_factory=failing_factory, simulation_run_id=uuid.uuid4(),
+        )
+        with caplog.at_level("ERROR"):
+            await engine._record_assessment_drop("blackbird", "specialist_floor")
+
+        assert "LOST" in caplog.text
+        assert any(r.exc_info for r in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_close_thread_db_failure_logs_a_traceback(self, caplog, monkeypatch):
+        import uuid
+
+        from src.agent.agent import Agent
+        from src.agent.state import ThreadState
+
+        def failing_factory():
+            raise RuntimeError("pool checkout timed out")
+
+        agent = Agent("blackbird", "BlackbirdBot", "Blackbird")
+        thread = ThreadState(
+            thread_id="t1", channel="general", other_agent_id="wang",
+            message_count=3, has_pending_reply=False,
+        )
+        agent.state.active_threads["t1"] = thread
+        engine = SimulationEngine(
+            agents=[agent], slack_clients={},
+            session_factory=failing_factory, simulation_run_id=uuid.uuid4(),
+        )
+
+        async def _noop_memory_update(*a, **kw):
+            return None
+
+        monkeypatch.setattr(engine, "_update_agent_memory", _noop_memory_update)
+
+        with caplog.at_level("ERROR"):
+            await engine._close_thread(agent, thread, "no_proposal")
+
+        assert "LOST" in caplog.text
+        assert any(r.exc_info for r in caplog.records)
+
+
+# ---------------------------------------------------------------
 # Graceful shutdown (R2). A hard kill loses the in-flight turn's messages
 # because the DB — not Slack — is now the durable store, so the SIGTERM path
 # must (a) cut short the idle backoff and (b) leave the flush awaitable on the

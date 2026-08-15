@@ -1466,7 +1466,20 @@ class SimulationEngine:
                     db.add(decision)
                     await db.commit()
             except Exception as exc:
-                logger.warning("Failed to log thread decision: %s", exc)
+                # No natural retry buffer for a ThreadDecision (unlike
+                # _flush_persisted/_flush_llm_logs, there is no accumulating
+                # list this row is drained from — it is written once, right
+                # here) and the in-memory thread state above has already moved
+                # to "closed" either way, so requeueing would mean inventing a
+                # queue purpose-built for this call site. Make the loss
+                # unmistakable instead: ERROR + a full traceback, up from the
+                # WARNING this used to log.
+                logger.error(
+                    "[%s] Failed to log thread decision for %s (outcome=%s): "
+                    "%s — LOST, this write will never be retried",
+                    agent.agent_id, thread.thread_id, outcome, exc,
+                    exc_info=True,
+                )
 
         logger.info(
             "[%s] Thread %s closed: %s",
@@ -2311,7 +2324,20 @@ class SimulationEngine:
                 recommendation or "?", computed_score, computed_band,
             )
         except Exception as exc:  # noqa: BLE001 — never lose a posted assessment
-            logger.error("[%s] Failed to persist assessment: %s", agent_id, exc)
+            # No natural retry buffer for this write, unlike _flush_persisted/
+            # _flush_llm_logs: a verdict is extracted and persisted exactly
+            # once, right here, from a value the caller does not keep — there
+            # is no accumulating list to requeue it into without inventing one
+            # purpose-built for this single call site. Make the loss
+            # unmistakable instead: ERROR + a full traceback, so a
+            # pool-checkout timeout (which raises the same generic exception
+            # as any other DB failure here) cannot be mistaken for routine
+            # background noise.
+            logger.error(
+                "[%s] Failed to persist assessment: %s — verdict LOST, no "
+                "retry path for this write",
+                agent_id, exc, exc_info=True,
+            )
 
     async def _record_assessment_drop(
         self,
@@ -2348,8 +2374,14 @@ class SimulationEngine:
                 ))
                 await db.commit()
         except Exception as exc:  # noqa: BLE001 — visibility must never cost a reply
+            # This is already the fallback path for a verdict _persist_assessment
+            # lost — if the fallback's own write fails there is nothing left to
+            # requeue it into (same reasoning as _persist_assessment above), so
+            # make the double loss unmistakable: ERROR + a full traceback.
             logger.error(
-                "[%s] Failed to record assessment drop (%s): %s", agent_id, reason, exc
+                "[%s] Failed to record assessment drop (%s): %s — LOST, the "
+                "verdict AND its drop record are both gone now",
+                agent_id, reason, exc, exc_info=True,
             )
 
     def _strip_disallowed_tags(self, message_text: str | None, agent: Agent) -> str | None:
@@ -4046,7 +4078,16 @@ class SimulationEngine:
                 await db.commit()
             logger.debug("Flushed %d LLM call logs to DB", len(batch))
         except Exception as exc:
-            logger.warning("Failed to flush LLM call logs: %s", exc)
+            # Re-queue the failed batch instead of dropping it, exactly like
+            # _flush_persisted does for its own buffer: new entries may have
+            # been appended to _llm_log_buffer while we were awaiting the
+            # (failed) commit, so put the failed batch back in front to
+            # preserve chronological order for the next flush attempt.
+            self._llm_log_buffer[0:0] = batch
+            logger.warning(
+                "Failed to flush %d LLM call logs, re-queued for retry: %s",
+                len(batch), exc,
+            )
 
     def _sync_profiles_from_disk(self) -> None:
         """Reload any agent whose public profile file changed on disk since last turn.

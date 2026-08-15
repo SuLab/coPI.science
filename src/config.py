@@ -320,6 +320,19 @@ class Settings(BaseSettings):
     # would fire 37 simultaneous Opus requests. The sliding-window limiter cannot
     # shape that burst — it is consulted once per turn at selection, not per call.
     phase4_max_concurrent_replies: int = 4
+    # Two-lane concurrent scheduler: max reply-lane tasks in flight at once.
+    # 1 means concurrency is off — the reply lane processes one thread reply
+    # at a time, same as today's sequential behaviour. Task 13 consumes this;
+    # Task 14 re-defaults it to 4. Neither re-declares it here.
+    reply_lane_max_in_flight: int = 1
+    # DB pool for the AGENT process. The default (5 + 10) predates concurrency;
+    # each in-flight reply task can hold a session, and the loop's own pollers
+    # and flushers need headroom on top, so the pool must exceed
+    # reply_lane_max_in_flight by a margin. Past the ceiling, checkout blocks
+    # for pool_timeout and then raises — and the assessment/decision/log writers
+    # catch and log, so exhaustion looks like silently missing rows.
+    db_pool_size: int = 25
+    db_max_overflow: int = 10
     phase5_spontaneous_interval: float = 20.0  # minutes before allowing a spontaneous Phase 5
     phase5_spontaneous_interval_max_multiplier: int = 5  # cap for skip-backoff stretch
     max_abstracts_other_per_thread: int = 10
