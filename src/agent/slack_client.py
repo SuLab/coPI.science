@@ -21,6 +21,7 @@ import asyncio
 import logging
 import re
 import secrets
+import threading
 import time
 from collections.abc import Callable
 from typing import Any
@@ -283,6 +284,20 @@ class AgentSlackClient:
         self._bot_user_id: str | None = None
         self._channel_name_to_id: dict[str, str] = {}  # name -> ID cache
         self._dm_channels: dict[str, str] = {}  # user_id -> DM channel_id
+        # Guards both caches above. Before Task 1 (2026-08-14) moved the
+        # transport off the event loop, "concurrent" asyncio callers of a
+        # synchronous method never actually overlapped in execution, so the
+        # check-then-act reads/writes on these two dicts were safe by
+        # accident. Now that post_message/poll_channel_messages etc. run
+        # inside asyncio.to_thread, Phase 4's bounded-concurrency replies
+        # (asyncio.gather over a semaphore, simulation.py's
+        # _phase4_reply_threads) can genuinely run several of this SAME
+        # client's calls on different OS threads at once, so the two caches
+        # need a real lock, not just a comment. Reentrant (RLock) because
+        # _resolve_channel_id/get_channel_id hold it across the refresh call
+        # below, and that refresh (_refresh_channel_cache -> list_channels)
+        # re-enters the same lock on the same thread to record what it found.
+        self._cache_lock = threading.RLock()
         # Channel-visibility lookup: takes a Slack channel_id and returns
         # 'public' | 'collab_private' | None (unknown). Used to gate the
         # auto-join retry so bots never try conversations.join on private
@@ -823,19 +838,32 @@ class AgentSlackClient:
     # ------------------------------------------------------------------
 
     def open_dm_channel(self, user_id: str) -> str | None:
-        """Open a DM channel with a user. Returns the DM channel ID, cached."""
-        if user_id in self._dm_channels:
-            return self._dm_channels[user_id]
-        if not self._client:
-            return None
-        try:
-            result = self._api("conversations_open", users=user_id)
-            ch_id = result["channel"]["id"]
-            self._dm_channels[user_id] = ch_id
-            return ch_id
-        except SlackApiError as exc:
-            logger.error("[%s] Failed to open DM with %s: %s", self.agent_id, user_id, exc)
-            return None
+        """Open a DM channel with a user. Returns the DM channel ID, cached.
+
+        The whole check-then-act — cache read, the ``conversations.open``
+        call, and the cache write — is held under one lock, not split into
+        smaller pieces, so two callers racing on the same not-yet-cached
+        ``user_id`` cannot both reach Slack: the second blocks, then finds the
+        first's result already cached and returns it instead of opening a
+        second (redundant, if harmless) DM channel. Not reachable
+        concurrently today — this method has no caller in ``src/`` — but it
+        has the identical check-then-act shape as ``_channel_name_to_id``
+        below, so it gets the same guard rather than leaving a second
+        instance of the same bug for whenever a caller does appear.
+        """
+        with self._cache_lock:
+            if user_id in self._dm_channels:
+                return self._dm_channels[user_id]
+            if not self._client:
+                return None
+            try:
+                result = self._api("conversations_open", users=user_id)
+                ch_id = result["channel"]["id"]
+                self._dm_channels[user_id] = ch_id
+                return ch_id
+            except SlackApiError as exc:
+                logger.error("[%s] Failed to open DM with %s: %s", self.agent_id, user_id, exc)
+                return None
 
     def send_dm(self, user_id: str, text: str) -> dict | None:
         """Send a DM to a user. Returns message result or None."""
@@ -900,7 +928,11 @@ class AgentSlackClient:
             )
             return None
         ch = result["channel"]
-        self._channel_name_to_id[ch["name"]] = ch["id"]
+        # Guarded: see _cache_lock's docstring at __init__. The network call above
+        # is already done by this point, so the lock here covers only the dict
+        # write itself.
+        with self._cache_lock:
+            self._channel_name_to_id[ch["name"]] = ch["id"]
         return ch
 
     def create_private_channel(self, name: str) -> dict | None:
@@ -933,7 +965,8 @@ class AgentSlackClient:
                     "conversations_create", name=candidate, is_private=True,
                 )
                 ch = result["channel"]
-                self._channel_name_to_id[ch["name"]] = ch["id"]
+                with self._cache_lock:  # see _cache_lock's docstring at __init__
+                    self._channel_name_to_id[ch["name"]] = ch["id"]
                 return ch
             except SlackApiError as exc:
                 err = exc.response.get("error")
@@ -1045,10 +1078,13 @@ class AgentSlackClient:
         except SlackListingIncomplete as exc:
             # Caching the partial answer is purely additive — a name->id pair we
             # did see is still correct — but the *return* must not pretend to be
-            # the whole workspace.
-            self._channel_name_to_id.update(
-                {ch["name"]: ch["id"] for ch in exc.partial}
-            )
+            # the whole workspace. Guarded: see _cache_lock's docstring at
+            # __init__ — the network call above is already done, so this only
+            # covers the dict write.
+            with self._cache_lock:
+                self._channel_name_to_id.update(
+                    {ch["name"]: ch["id"] for ch in exc.partial}
+                )
             logger.error(
                 "[%s] Channel listing INCOMPLETE: %s", self.agent_id, exc.reason,
             )
@@ -1057,7 +1093,8 @@ class AgentSlackClient:
             logger.warning("[%s] Failed to list channels: %s", self.agent_id, exc)
             return {}
         mapping = {ch["name"]: ch["id"] for ch in channels}
-        self._channel_name_to_id.update(mapping)
+        with self._cache_lock:  # see _cache_lock's docstring at __init__
+            self._channel_name_to_id.update(mapping)
         return mapping
 
     def _refresh_channel_cache(self) -> None:
@@ -1079,25 +1116,49 @@ class AgentSlackClient:
             logger.warning("[%s] Channel cache refresh failed: %s", self.agent_id, exc)
 
     def _resolve_channel_id(self, channel: str) -> str:
-        """Resolve a channel name to its ID."""
+        """Resolve a channel name to its ID.
+
+        The check-then-refresh-then-return is held as ONE critical section —
+        unlike the smaller per-write locks elsewhere in this file — because
+        the check-then-act here genuinely needs it: Phase 4 can run up to
+        ``phase4_max_concurrent_replies`` of this same agent's posts on
+        different OS threads at once (see ``_cache_lock``'s docstring at
+        __init__), and without holding the lock across ``_refresh_channel_cache``,
+        N concurrent misses on the same (or different) not-yet-cached channel
+        name would each trigger their own full ``conversations.list`` pass. With
+        it, the second caller blocks, then finds the first caller's refresh
+        already sitting in the cache and never calls Slack at all — a redundant
+        full listing is worse than a redundant single-message post, so this one
+        is worth serializing.
+        """
         if channel.startswith("C") or channel.startswith("G"):
             return channel
-        if channel in self._channel_name_to_id:
-            return self._channel_name_to_id[channel]
-        # Refresh cache
-        self._refresh_channel_cache()
-        return self._channel_name_to_id.get(channel, channel)
+        with self._cache_lock:
+            if channel in self._channel_name_to_id:
+                return self._channel_name_to_id[channel]
+            # Refresh cache
+            self._refresh_channel_cache()
+            return self._channel_name_to_id.get(channel, channel)
 
     def get_channel_id(self, channel_name: str) -> str | None:
-        """Get channel ID for a channel name, or None."""
-        if channel_name in self._channel_name_to_id:
-            return self._channel_name_to_id[channel_name]
-        self._refresh_channel_cache()
-        return self._channel_name_to_id.get(channel_name)
+        """Get channel ID for a channel name, or None.
+
+        Same held-across-the-refresh rationale as ``_resolve_channel_id``.
+        """
+        with self._cache_lock:
+            if channel_name in self._channel_name_to_id:
+                return self._channel_name_to_id[channel_name]
+            self._refresh_channel_cache()
+            return self._channel_name_to_id.get(channel_name)
 
     def cache_channel_ids(self, mapping: dict[str, str]) -> None:
-        """Seed the name→id cache (engine shares discovered channel ids here)."""
-        self._channel_name_to_id.update(mapping)
+        """Seed the name→id cache (engine shares discovered channel ids here).
+
+        Guarded: see ``_cache_lock``'s docstring at __init__. No network call
+        here, so this is a small critical section around the write itself.
+        """
+        with self._cache_lock:
+            self._channel_name_to_id.update(mapping)
 
     # ------------------------------------------------------------------
     # Async wrappers — network calls awaited OFF the event-loop thread
