@@ -69,12 +69,23 @@ _HUB_CONCLUDE_RESPONSE = (
 
 # ---------------------------------------------------------------------------
 # 1. Two simultaneous replies into ONE thread -> one CONCLUDE, one assessment,
-#    one ThreadDecision (spec §4.1/§4.2). Isolates the THREAD LOCK
-#    specifically: `_service_reply` is driven directly, wrapped in the exact
-#    lock span `_dispatch_reply_lane._run` uses, bypassing the dispatcher's
-#    own in-flight dedup set (that dedup is tested separately, in test 6
-#    below) so this test cannot pass merely because the dispatcher never
-#    spawned a second attempt.
+#    one ThreadDecision (spec §4.1/§4.2). Isolates the THREAD LOCK'S EFFECT ON
+#    `_service_reply`'s own guard logic: `_service_reply` is driven directly,
+#    wrapped in the exact lock span `_dispatch_reply_lane._run` uses,
+#    bypassing the dispatcher's own in-flight dedup set (that dedup is tested
+#    separately, in test 6 below).
+#
+# IMPORTANT SCOPE NOTE (task review, Critical C1): the lock applied here is
+# one this TEST builds (`eng._thread_locks.acquire_all(...)`), not the
+# production one at `simulation.py:1201` inside `_dispatch_reply_lane._run`.
+# Deleting that production line leaves this test (and the two static lock-
+# order guards) green — confirmed via a disposable worktree, see
+# task-14-report.md's C1 fix section. This test still has standalone value
+# (it pins that `_service_reply`'s closed/evicted guard correctly prevents a
+# double-service WHEN serialized), but the production call site's OWN
+# protection is what
+# test_two_agents_replying_into_one_thread_do_not_overlap_at_the_production_call_site
+# below actually proves.
 # ---------------------------------------------------------------------------
 
 
@@ -135,6 +146,106 @@ async def test_two_concurrent_replies_produce_one_conclude_and_one_assessment(
 
         assert len(client.posted) == 1, (
             f"{len(client.posted)} replies posted for one interview turn"
+        )
+        async with factory() as check:
+            rows = (await check.execute(
+                select(OpportunityAssessment).where(
+                    OpportunityAssessment.simulation_run_id == run_id
+                )
+            )).scalars().all()
+            decisions = (await check.execute(
+                select(ThreadDecision).where(ThreadDecision.thread_id == "t1")
+            )).scalars().all()
+        assert len(rows) == 1, f"{len(rows)} assessments written for one interview"
+        assert len(decisions) == 1, f"thread closed {len(decisions)} times"
+    finally:
+        await _delete_run(factory, run_id)
+
+
+# ---------------------------------------------------------------------------
+# 1b. Task review, Critical C1: the SAME race as test 1, but driven through
+#     the REAL `_dispatch_reply_lane()` with two DIFFERENT real agents (hub
+#     and lab) each owing a reply into the SAME thread — the star topology's
+#     normal steady state, and literally spec §4.1's own scenario. No lock is
+#     applied by this test anywhere; only the production line at
+#     `simulation.py:1201` (inside `_dispatch_reply_lane._run`) can prevent
+#     overlap here. `_pending_reply_pairs()` returns both (agent, thread)
+#     pairs; the in-flight dedup key is `(agent_id, thread_id)`, which does
+#     NOT collide for two different agents on the same thread_id, so both are
+#     genuinely scheduled as concurrent tasks at cap>=2.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_two_agents_replying_into_one_thread_do_not_overlap_at_the_production_call_site(
+    engine, monkeypatch,
+):
+    """Confirmed via a disposable worktree (task-14-report.md, C1 fix
+    section) that deleting `simulation.py:1201`'s
+    `async with self._thread_locks.acquire_all(thread.thread_id):` makes this
+    test fail: peak overlapping `_service_reply` calls goes from 1 to 2, and
+    a second `ThreadDecision` row appears."""
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    run_id = await _make_run(factory)
+
+    hub = Agent("blackbird", "BlackbirdBot", "Blackbird", role="scout_hub")
+    lab = Agent("wang", "WangBot", "Wang", role="pi_lab")
+    hub.state.active_threads["t1"] = ThreadState(
+        thread_id="t1", channel="general", other_agent_id="wang",
+        has_pending_reply=True,
+    )
+    lab.state.active_threads["t1"] = ThreadState(
+        thread_id="t1", channel="general", other_agent_id="blackbird",
+        has_pending_reply=True,
+    )
+    hub_client = FakeSlackClient(agent_id="blackbird")
+    lab_client = FakeSlackClient(agent_id="wang")
+    eng = SimulationEngine(
+        agents=[hub, lab],
+        slack_clients={"blackbird": hub_client, "wang": lab_client},
+        session_factory=factory, simulation_run_id=run_id,
+    )
+    eng._running = True
+    eng._reply_sem = asyncio.Semaphore(4)  # cap >= 2: genuine concurrency
+    _seed_thread_history(eng, "t1", "general", 11)
+    monkeypatch.setattr(hub, "build_phase4_prompt", lambda **kw: ("sys", []))
+    monkeypatch.setattr(lab, "build_phase4_prompt", lambda **kw: ("sys", []))
+
+    async def _fast_memory_update(agent, event, *a, **kw):
+        return None  # avoid the real, unmocked network call test 1 found
+
+    monkeypatch.setattr(eng, "_update_agent_memory", _fast_memory_update)
+
+    live = 0
+    peak = 0
+
+    async def _fake_generate(**kwargs):
+        nonlocal live, peak
+        live += 1
+        peak = max(peak, live)
+        # The real await: without it both tasks would race through their
+        # whole body in one scheduler step and never overlap regardless of
+        # locking.
+        await asyncio.sleep(0.05)
+        live -= 1
+        return _HUB_CONCLUDE_RESPONSE
+
+    monkeypatch.setattr("src.agent.simulation.generate_with_tools", _fake_generate)
+
+    try:
+        await asyncio.wait_for(eng._dispatch_reply_lane(), timeout=10.0)
+
+        assert peak == 1, (
+            f"peak overlapping _service_reply calls into one thread was "
+            f"{peak}, not 1 — the production thread lock did not prevent "
+            "the overlap"
+        )
+        total_posted = len(hub_client.posted) + len(lab_client.posted)
+        assert total_posted == 1, (
+            f"{total_posted} replies posted for one interview turn — only "
+            "whichever agent the thread lock let through first should ever "
+            "reach Slack; the other's _service_reply must see the "
+            "already-closed thread and return before composing anything"
         )
         async with factory() as check:
             rows = (await check.execute(
@@ -213,11 +324,22 @@ async def test_concurrent_phase5_respects_the_daily_cap(engine, monkeypatch):
 # ---------------------------------------------------------------------------
 # 3. A cross-agent close in both directions must complete, not deadlock (spec
 #    §3.2/§4). `_close_thread` mutates the OTHER agent's state, so hub-closes-
-#    against-lab and lab-closes-against-hub acquire the SAME two agent locks;
-#    real contention (the two Opus-shaped `_update_agent_memory` calls slowed
-#    down) forces the second close to genuinely suspend waiting on the first,
-#    exactly the case sorted acquisition (§3.2) exists for. asyncio.wait_for
-#    turns a hang into a failure rather than a stuck suite.
+#    against-lab and lab-closes-against-hub acquire the SAME two agent locks.
+#
+# Task review, Important I1: an uncontended `asyncio.Lock.acquire()` never
+# suspends, so `ensure_future(close_ab)` followed by `sleep(0.001)` lets
+# close_ab silently acquire BOTH its agent locks in one uninterrupted step
+# before close_ba even starts — close_ba then just queues behind an
+# already-fully-held pair, and no AB-BA cross-hold is structurally possible.
+# That shape passes even against an UNSORTED `acquire_all`. Fixed by
+# manufacturing genuine contention the same way
+# `test_engine_locks.py::test_acquire_all_does_not_deadlock_under_genuine_contention`
+# does: pre-acquire one of the two shared locks (`"blackbird"`) externally so
+# BOTH closes are forced to actually suspend and interleave, then release it.
+# Verified via a disposable worktree (task-14-report.md, I1 fix section)
+# that this reproduces a genuine timeout when `LockRegistry.acquire_all`'s
+# `sorted(set(keys))` is removed, and passes cleanly against the real
+# (sorted) implementation.
 # ---------------------------------------------------------------------------
 
 
@@ -252,26 +374,38 @@ async def test_cross_agent_close_does_not_deadlock(engine, monkeypatch):
     )
 
     async def _slow_memory_update(agent, event, *a, **kw):
-        # Real await, genuinely holding both agent locks open while it runs —
-        # long enough that the second close, if it can run at all, is forced
-        # to actually wait rather than merely appear to by scheduling luck.
+        # Real await once each close is genuinely running its own body.
         await asyncio.sleep(0.05)
 
     monkeypatch.setattr(eng, "_update_agent_memory", _slow_memory_update)
+
+    # Manufacture GENUINE contention: pre-hold "blackbird" (the hub's own
+    # agent lock — shared by both closes, since every interview in this pair
+    # involves the hub) externally, so BOTH close_ab (whose own acquisition
+    # order starts with "blackbird") and close_ba (whose own order starts
+    # with "wang", then "blackbird") are forced to actually suspend and
+    # interleave rather than one racing through uncontended.
+    blackbird_lock = eng._agent_locks.get("blackbird")
+    await blackbird_lock.acquire()
 
     try:
         close_ab = asyncio.ensure_future(
             eng._close_thread(hub, thread_ab, "no_proposal")
         )
-        # Let close_ab actually acquire both agent locks and reach its first
-        # genuine suspension (inside the mocked _update_agent_memory) before
-        # the opposite-direction close starts.
-        await asyncio.sleep(0.001)
+        # Let close_ab register as a genuine waiter on the externally-held
+        # "blackbird" lock.
+        await asyncio.sleep(0.01)
 
         close_ba = asyncio.ensure_future(
             eng._close_thread(lab, thread_ba, "no_proposal")
         )
-        await asyncio.sleep(0.001)  # let it register as a genuine waiter
+        # Let close_ba grab its own first key ("wang", uncontended) and then
+        # also queue on "blackbird" — by this point BOTH tasks are genuinely
+        # blocked on the same externally-held resource, not on each other by
+        # scheduling luck.
+        await asyncio.sleep(0.01)
+
+        blackbird_lock.release()
 
         await asyncio.wait_for(asyncio.gather(close_ab, close_ba), timeout=5.0)
 
