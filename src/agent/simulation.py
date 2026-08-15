@@ -950,10 +950,18 @@ class SimulationEngine:
         # Phase 4: Reply to active threads (parallel)
         phase4_thread_ids = await self._phase4_reply_threads(agent)
 
-        # Phase 4 activity resets skip backoff — agent is actively engaged
+        # Phase 4 activity resets skip backoff — agent is actively engaged,
+        # so it shouldn't carry a stretched-out backoff interval into its next
+        # spontaneous check. Deliberately NOT stamping last_phase5_action_time
+        # here: that field means "when a Phase 5 action was last taken" (see
+        # its two legitimate stamps, both inside _phase5_new_post itself), and
+        # replying is not posting. Stamping it from Phase 4 was the coupling
+        # this task exists to remove, just inverted in sign — an
+        # always-replying agent would perpetually push its own spontaneous
+        # timer back and never become eligible to post at all. See
+        # tests/unit/test_post_lane.py.
         if phase4_thread_ids:
             agent.state.consecutive_phase5_skips = 0
-            agent.state.last_phase5_action_time = time.time()
 
         # Spontaneous post timer — allow one Phase 5 call after enough
         # idle time so agents can organically start new conversations. This
