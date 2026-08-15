@@ -76,13 +76,19 @@ _TICK_IO = (
 )
 
 
-def _drive_loop(eng, monkeypatch, *, stop_after=4):
+def _drive_loop(eng, monkeypatch, *, stop_after=4, dispatch_stub=None):
     """Run the REAL ``_run_main_loop`` with every per-tick I/O call stubbed out.
 
     Returns ``(sleeps, turns)``, both filled in as the loop runs. The engine is
     stopped once ``stop_after`` events have been recorded, so a regression that
     reinstates the old spin-or-break behaviour fails an assertion instead of
     hanging the suite.
+
+    ``dispatch_stub``, if given, replaces the generic no-op for
+    ``_dispatch_reply_lane`` — used by ``TestReplyLaneIsNotPacedByTheIdleBackoff``
+    (I2), which needs it to return a nonzero count and to own its own
+    termination signal (reply-lane work alone does not touch ``sleeps``/
+    ``turns``, so the generic ``_budget()`` below would never fire).
     """
     async def _noop(*a, **kw):
         return None
@@ -90,6 +96,8 @@ def _drive_loop(eng, monkeypatch, *, stop_after=4):
     for name in _TICK_IO:
         monkeypatch.setattr(eng, name, _noop)
     monkeypatch.setattr(eng, "_sync_profiles_from_disk", lambda *a, **kw: None)
+    if dispatch_stub is not None:
+        monkeypatch.setattr(eng, "_dispatch_reply_lane", dispatch_stub)
 
     sleeps: list[int] = []
     turns: list[str] = []
@@ -415,6 +423,82 @@ class TestScheduler:
         hub.state.call_times.append(now)
         for _ in range(50):
             assert eng._select_agent().agent_id == "spoke"
+
+
+class TestReplyLaneIsNotPacedByTheIdleBackoff:
+    """I2 (task review fix round 1). Before this fix, ``did_work`` came only
+    from ``_run_post_turn``, which is False whenever Phase 5 doesn't fire —
+    the common case once a lab hits ``lab_daily_post_cap``, and ALWAYS for
+    the hub (no ``post_types`` at all) — so ``consecutive_idle`` climbed to
+    the 30s ceiling and the loop slept 30s before every single reply sweep,
+    directly contradicting design §2.1: "Nothing in the reply lane delays a
+    reply that is ready." The fix folds ``_dispatch_reply_lane``'s "how many
+    ran" return into the ``did_work`` decision.
+    """
+
+    async def test_no_idle_sleep_when_reply_lane_worked_but_no_agent_was_eligible(
+        self, monkeypatch
+    ):
+        _patch(monkeypatch)
+        eng = _engine(["hub"])
+        monkeypatch.setattr(eng, "_select_agent", lambda: None)
+
+        sleeps: list[int] = []
+        ticks = {"n": 0}
+
+        async def _sleep(delay):
+            sleeps.append(delay)
+
+        async def _dispatch():
+            ticks["n"] += 1
+            if ticks["n"] >= 3:
+                eng._running = False
+            return 2  # the reply lane always has work this tick
+
+        _drive_loop(eng, monkeypatch, dispatch_stub=_dispatch)
+        monkeypatch.setattr(eng, "_sleep", _sleep)
+
+        await eng._run_main_loop()
+
+        assert sleeps == [], (
+            "reply-lane work must not be paced behind the idle backoff even "
+            "when no post-lane agent is eligible right now"
+        )
+        assert ticks["n"] == 3
+
+    async def test_no_idle_sleep_when_reply_lane_worked_and_the_post_turn_did_not(
+        self, monkeypatch
+    ):
+        _patch(monkeypatch)
+        eng = _engine(["hub"])
+
+        sleeps: list[int] = []
+        ticks = {"n": 0}
+
+        async def _sleep(delay):
+            sleeps.append(delay)
+
+        async def _dispatch():
+            ticks["n"] += 1
+            if ticks["n"] >= 3:
+                eng._running = False
+            return 1
+
+        async def _run_post_turn(agent):
+            return False  # no work of its own this tick
+
+        _drive_loop(eng, monkeypatch, dispatch_stub=_dispatch)
+        monkeypatch.setattr(eng, "_sleep", _sleep)
+        monkeypatch.setattr(eng, "_run_post_turn", _run_post_turn)
+
+        await eng._run_main_loop()
+
+        assert sleeps == [], (
+            "a tick where the reply lane worked must not sleep the idle "
+            "backoff even though the post turn (stubbed to return False) "
+            "did no work of its own"
+        )
+        assert ticks["n"] == 3
 
 
 class TestBudgetDeprecation:

@@ -630,8 +630,17 @@ class SimulationEngine:
             # Reply lane: service every (agent, thread) pair owing a reply,
             # every tick, with no pacing at all — before the post lane's
             # weighted draw runs. See docs/specs/2026-08-14-two-lane-
-            # concurrent-scheduler-design.md §2.1.
-            await self._dispatch_reply_lane()
+            # concurrent-scheduler-design.md §2.1. Wrapped in try/except as
+            # defense in depth: `_dispatch_reply_lane` already isolates one
+            # pair's failure from its siblings (fix round 1, C2), but this
+            # call itself — covering Phase 3 activation and pair selection,
+            # not just per-pair servicing — was otherwise the one await left
+            # in this loop body with no failure isolation at all.
+            reply_lane_count = 0
+            try:
+                reply_lane_count = await self._dispatch_reply_lane()
+            except Exception:
+                logger.exception("Error during reply-lane dispatch")
 
             # Select agent (post lane — paced, one at a time)
             agent = self._select_agent()
@@ -644,6 +653,14 @@ class SimulationEngine:
                 if reason is not None:
                     logger.info("No eligible agent: %s. Stopping.", reason)
                     break
+                if reply_lane_count:
+                    # The reply lane did real work this tick even though no
+                    # post-lane agent was eligible right now. This is not an
+                    # idle tick — sleeping the idle backoff here would pace
+                    # the "unpaced" lane, delaying the next reply sweep by up
+                    # to 30s (fix round 1, I2).
+                    consecutive_idle = 0
+                    continue
                 consecutive_idle += 1
                 delay = self._idle_backoff(consecutive_idle)
                 logger.info(
@@ -670,8 +687,13 @@ class SimulationEngine:
             agent.state.last_selected = time.time()
             turn_count += 1
 
-            # Idle backoff: if no LLM calls were made, delay before next turn
-            if did_work:
+            # Idle backoff: if no LLM calls were made in EITHER lane this
+            # tick, delay before next turn. Reply-lane activity counts too
+            # (fix round 1, I2) — the hub in particular has no post_types at
+            # all, so `did_work` alone is false on nearly every one of its
+            # ticks, and gating solely on it would pace the reply lane behind
+            # a 30s idle-backoff ceiling on every tick it only replied.
+            if did_work or reply_lane_count:
                 consecutive_idle = 0
             else:
                 consecutive_idle += 1
@@ -892,18 +914,41 @@ class SimulationEngine:
     async def _service_reply(self, agent: Agent, thread: ThreadState) -> None:
         """Phase 4 for one (agent, thread) pair.
 
-        Promotes ``has_pending_reply`` to durable True before the (possibly
-        failing) reply attempt — mirrors the old `_phase4_reply_threads`
-        promotion, so a failed/empty/exception reply is retried on the next
-        dispatch. Also resets the post lane's skip-backoff streak (Task 10):
-        replying is real engagement, just no longer bundled into the same
-        turn as Phase 5's decision. Deliberately does NOT touch
-        ``last_phase5_action_time`` — only a real Phase 5 action (inside
-        `_phase5_new_post`) may stamp that; conflating replying with posting
-        is exactly the cross-lane coupling Task 10 removed.
+        Fix round 1 (task review, Important I4): guards against a thread that
+        closed *mid-sweep* — `pairs` is snapshotted once by
+        `_dispatch_reply_lane` before any of its (possibly many, possibly
+        slow) LLM calls run, and `_close_thread` can pop this exact thread out
+        from under a sibling pair's call in the same sweep. Without this, the
+        agent spends a real Opus call composing a reply into a thread that is
+        already closed.
+
+        Otherwise promotes ``has_pending_reply`` to durable True before the
+        (possibly failing) reply attempt — mirrors the old
+        `_phase4_reply_threads` promotion, so a failed/empty/exception reply
+        is retried on the next dispatch (this is also done, for the WHOLE
+        batch, by `_dispatch_reply_lane` itself before servicing starts — see
+        its docstring; the repeat here is a defensive no-op for anything that
+        calls `_service_reply` directly without going through dispatch, e.g.
+        tests).
+
+        Does NOT touch ``last_phase5_action_time`` — only a real Phase 5
+        action (inside `_phase5_new_post`) may stamp that; conflating
+        replying with posting is exactly the cross-lane coupling Task 10
+        removed. Does NOT touch ``consecutive_phase5_skips`` either any more
+        (Fix round 1, Important I3) — that reset moved to `_dispatch_reply_
+        lane`, which fires it at most once per agent per tick rather than
+        once per pending pair; see that method's docstring for why.
         """
+        if thread.status != "active" or agent.state.active_threads.get(
+            thread.thread_id
+        ) is not thread:
+            logger.debug(
+                "[%s] Reply lane: skipping thread %s — closed or evicted "
+                "mid-sweep",
+                agent.agent_id, thread.thread_id,
+            )
+            return
         thread.has_pending_reply = True
-        agent.state.consecutive_phase5_skips = 0
         await self._reply_to_thread(agent, thread)
 
     async def _dispatch_reply_lane(self) -> int:
@@ -926,7 +971,41 @@ class SimulationEngine:
         taken BEFORE Phase 3 runs and only assigned AFTER `_pending_reply_
         pairs` has read the (still old) cursor — advancing early would hide
         the very replies this pass exists to find, exactly as it would in
-        `_run_post_turn`.
+        `_run_post_turn`. Nothing in `_run_post_turn` writes this cursor any
+        more (Fix round 1, Critical C1) — this function is its sole owner.
+
+        Fix round 1 (task review):
+        - **C2**: every pair's `has_pending_reply` is promoted for the WHOLE
+          batch, immediately after `_pending_reply_pairs()` returns and
+          before the cursor advances or any servicing `await` runs. A pair
+          found only via `has_new` (not yet durable) whose SIBLING later in
+          this same sequential loop raises must still carry a retry signal —
+          the cursor is about to move past whatever made it "new", and
+          `has_pending_reply` is the only thing that survives that (see
+          `_pending_reply_pairs`'s docstring). Each pair is then serviced
+          inside its own try/except so one failing reply can never abort the
+          rest of the sweep (spec §8) or propagate out of this call — this
+          was, before this fix, the only await in `_run_main_loop`'s body
+          with no failure isolation at all.
+        - **I3**: the skip-backoff reset (Task 10 carry-forward) fires at
+          most once per agent per tick, computed from the distinct agents in
+          `pairs` up front — not once per pending pair inside `_service_reply`
+          as it did before this fix. An agent holding several simultaneous
+          pending threads was otherwise pinned at `consecutive_phase5_skips
+          == 0` for as long as any of them stayed open, silently disabling
+          both the spontaneous-interval stretch and `_select_agent`'s skip
+          de-weighting — replying again bought a shorter path to a post and a
+          higher selection weight, a softer version of the Phase-4-drives-
+          Phase-5 coupling Task 10 removed. Chose to own this in the
+          dispatcher (not in `_run_post_turn`) because the tick-scoped view
+          of "which agents did reply work this tick" belongs to the reply
+          lane's own dispatch, not to a per-agent post-lane turn function
+          that has no other reason to know about reply-lane activity.
+        - **I5**: checks `self._running` between pairs so a shutdown request
+          is honoured within one reply's worth of latency instead of first
+          draining the whole sweep — worst case today is ~12 sequential Opus
+          calls in a 12-interview star, well past the documented `docker stop
+          -t 30` grace period.
         """
         cursor_snapshots = {
             agent.agent_id: self.message_log.latest_timestamp
@@ -937,14 +1016,37 @@ class SimulationEngine:
 
         pairs = self._pending_reply_pairs()
 
+        # Promote the whole batch's retry flag and compute which agents
+        # engaged this tick — both BEFORE the cursor advances and before any
+        # servicing await runs. See "C2" / "I3" above.
+        engaged_agent_ids: set[str] = set()
+        for agent, thread in pairs:
+            thread.has_pending_reply = True
+            engaged_agent_ids.add(agent.agent_id)
+
         for agent in self.agents.values():
             agent.state.last_seen_cursor = max(
                 agent.state.last_seen_cursor, cursor_snapshots[agent.agent_id]
             )
 
+        serviced = 0
         for agent, thread in pairs:
-            await self._service_reply(agent, thread)
-        return len(pairs)
+            if not self._running:
+                break
+            try:
+                await self._service_reply(agent, thread)
+            except Exception:
+                logger.exception(
+                    "[reply-lane] %s: error servicing thread %s",
+                    agent.agent_id, thread.thread_id,
+                )
+            serviced += 1
+
+        for agent in self.agents.values():
+            if agent.agent_id in engaged_agent_ids:
+                agent.state.consecutive_phase5_skips = 0
+
+        return serviced
 
     # ------------------------------------------------------------------
     # Turn execution — post lane (Phase 1 + Phase 5)
@@ -957,19 +1059,27 @@ class SimulationEngine:
         reply) moved to the reply lane (`_dispatch_reply_lane` /
         `_service_reply`) entirely — see docs/specs/2026-08-14-two-lane-
         concurrent-scheduler-design.md §2.
+
+        Fix round 1 (task review, Critical C1): this function does NOT touch
+        `last_seen_cursor` at all — neither Phase 1 nor Phase 5 reads it, and
+        `_dispatch_reply_lane` already owns cursor advancement for every
+        agent, every tick (that is the only reader: `_phase3_activate_threads`
+        / `_pending_reply_pairs`'s `has_new_reply_from_other` check). A
+        second writer here, taking its OWN snapshot after `_dispatch_reply_
+        lane` has already run (and possibly spent many seconds/minutes making
+        LLM calls that posted new messages), would capture a `latest_
+        timestamp` far ahead of what this agent's Phase 3 actually saw this
+        tick — and assigning it would silently mark a message Phase 3 never
+        processed as "seen", permanently stalling that thread with no
+        backstop (`has_pending_reply` was already cleared by the reply that
+        made the thread's status update). This is exactly the Task-6 bug,
+        reintroduced by a second cursor writer with no corresponding reader.
+        See tests/unit/test_cursor_advance.py.
         """
         settings = get_settings()
         api_calls_before = agent.api_call_count
         agent.state.in_flight = True
         try:
-            # Snapshot BEFORE any phase reads the log. Assigning time.time() at
-            # the end marked as read anything that arrived mid-turn, and compared
-            # a wall clock against posted_at (= float(minted ts)), which TsMinter
-            # can push ahead of wall clock under fan-out. Snapshot-then-assign is
-            # idempotent and uses one clock — the log's own, which is what every
-            # reader of last_seen_cursor actually compares posted_at against.
-            cursor_snapshot = self.message_log.latest_timestamp
-
             # Phase 1: Channel discovery
             self._phase1_channel_discovery(agent)
 
@@ -996,14 +1106,6 @@ class SimulationEngine:
                     agent.agent_id,
                     int(spontaneous_interval - since_last_action),
                 )
-
-            # Update cursor. max(...) keeps it monotonic — a private-channel
-            # rewind (see _rewind_cursors_for_private_channels) can leave the
-            # pre-turn cursor further back than this snapshot on purpose, and
-            # this must never undo that by moving the cursor backwards.
-            agent.state.last_seen_cursor = max(
-                agent.state.last_seen_cursor, cursor_snapshot
-            )
 
             return agent.api_call_count > api_calls_before
         finally:
