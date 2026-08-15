@@ -908,6 +908,15 @@ class SimulationEngine:
         settings = get_settings()
         api_calls_before = agent.api_call_count
 
+        # Snapshot BEFORE any phase reads the log. Assigning time.time() at the
+        # end marked as read anything that arrived mid-turn (after Phase 3/4
+        # already read the log), and compared a wall clock against posted_at
+        # (= float(minted ts)), which TsMinter can push ahead of wall clock
+        # under fan-out. Snapshot-then-assign is idempotent and uses one clock
+        # — the log's own, which is what every reader of last_seen_cursor
+        # actually compares posted_at against.
+        cursor_snapshot = self.message_log.latest_timestamp
+
         # Phase 1: Channel discovery
         self._phase1_channel_discovery(agent)
 
@@ -946,8 +955,13 @@ class SimulationEngine:
                 int(spontaneous_interval - since_last_action),
             )
 
-        # Update cursor
-        agent.state.last_seen_cursor = time.time()
+        # Update cursor. max(...) keeps it monotonic — a private-channel rewind
+        # (see _rewind_cursors_for_private_channels) can leave the pre-turn
+        # cursor further back than this snapshot on purpose, and this must
+        # never undo that by moving the cursor backwards.
+        agent.state.last_seen_cursor = max(
+            agent.state.last_seen_cursor, cursor_snapshot
+        )
 
         return agent.api_call_count > api_calls_before
 
