@@ -33,16 +33,40 @@ class ThreadState:
     # outrank gate-compliant work. Cleared if the partner becomes permitted again.
     # See .notes/cohort-system-v2.md §8.
     grandfathered: bool = False
-    # Whether the specialist floor (SimulationEngine._specialist_floor_gap) was
-    # already recording consults ANYWHERE in this process when this interview
-    # was activated. Snapshotted at activation, not read live: the floor's
-    # "map empty overall => fail open" is a process-global predicate over
-    # SimulationEngine._specialist_consults, so under concurrency a DIFFERENT
-    # interview's first-ever consult could otherwise flip that map from empty
-    # to non-empty mid-interview and retroactively arm the floor for a verdict
-    # that began under fail-open — refusing it after the concluding reply is
-    # already posted to Slack, with no later turn to recover it. See
-    # _specialist_floor_gap's docstring for the full fail-open rationale.
+    # Whether the specialist floor (SimulationEngine._specialist_floor_gap) has
+    # seen the GLOBAL SimulationEngine._specialist_consults map be non-empty at
+    # some point during this thread's life. Initialized at activation (the
+    # four ThreadState(...) construction sites) to whatever the map held at
+    # that moment, then MONOTONICALLY LATCHED at the top of every
+    # `_reply_to_thread` turn on this thread (`floor_armed = floor_armed or
+    # bool(_specialist_consults)`) — never reset, only ever flipped False ->
+    # True.
+    #
+    # Deliberately NOT a live read of the global map at persist time, and
+    # deliberately NOT frozen forever at whatever activation saw either:
+    #   - A pure live read at persist time (the original bug) lets a
+    #     DIFFERENT interview's consult, landing mid-await in some other
+    #     task's turn, retroactively arm the floor for an in-flight verdict
+    #     that began under fail-open — refusing it after the concluding reply
+    #     is already posted to Slack, with no later turn to recover it.
+    #   - Freezing forever at activation (this field's first shape) instead
+    #     made a thread that activated while the map was empty permanently
+    #     unable to arm even once ITS OWN later specialist consults made the
+    #     global map non-empty — silently exempting an under-vetted verdict.
+    #     It also made every `_rebuild_agent_state`-restored thread (always
+    #     constructed with floor_armed=False) permanently unenforceable no
+    #     matter how many consults the restarted process went on to record.
+    # The per-turn re-latch fixes both: it re-reads the global map once per
+    # turn, at a point before that turn's own `await`s run, so the value used
+    # at persist time (later in that same turn) cannot be changed by another
+    # task's concurrent write — but a LATER turn on this same thread gets a
+    # fresh chance to see the map having become non-empty since.
+    #
+    # Re-latched on the GLOBAL map, never on this PI's own consulted domains:
+    # an earlier version of the floor failed open whenever the SUBJECT had no
+    # consults, which quietly excused the commonest failure of all — a hub
+    # that simply never convenes a panel. See _specialist_floor_gap's
+    # docstring for that history and the full fail-open rationale.
     floor_armed: bool = False
 
 

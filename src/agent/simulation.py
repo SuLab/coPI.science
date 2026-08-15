@@ -1052,7 +1052,9 @@ class SimulationEngine:
                     other_agent_id=other_id,
                     message_count=self.message_log.get_thread_message_count(thread_id),
                     has_pending_reply=True,
-                    # Snapshot, not a live read — see ThreadState.floor_armed.
+                    # Initial seed for the monotonic latch — see
+                    # ThreadState.floor_armed and the latch at the top of
+                    # _reply_to_thread.
                     floor_armed=bool(self._specialist_consults),
                 )
                 logger.info(
@@ -1089,7 +1091,9 @@ class SimulationEngine:
                     other_agent_id=other_id,
                     message_count=self.message_log.get_thread_message_count(thread_id),
                     has_pending_reply=True,
-                    # Snapshot, not a live read — see ThreadState.floor_armed.
+                    # Initial seed for the monotonic latch — see
+                    # ThreadState.floor_armed and the latch at the top of
+                    # _reply_to_thread.
                     floor_armed=bool(self._specialist_consults),
                 )
                 logger.info(
@@ -1132,7 +1136,9 @@ class SimulationEngine:
                         other_agent_id=other_id,
                         message_count=self.message_log.get_thread_message_count(thread_id),
                         has_pending_reply=True,
-                        # Snapshot, not a live read — see ThreadState.floor_armed.
+                        # Initial seed for the monotonic latch — see
+                        # ThreadState.floor_armed and the latch at the top of
+                        # _reply_to_thread.
                         floor_armed=bool(self._specialist_consults),
                     )
                     logger.info(
@@ -1215,6 +1221,49 @@ class SimulationEngine:
 
     async def _reply_to_thread(self, agent: Agent, thread: ThreadState) -> None:
         """Compose and post a reply to a single thread."""
+        # Monotonic latch for the specialist floor's fail-open snapshot
+        # (ThreadState.floor_armed), re-evaluated at the START of every turn on
+        # this thread, before any `await` in this method.
+        #
+        # `floor_armed` is set once at activation (see the four ThreadState(...)
+        # construction sites), but activation happens long before this thread's
+        # own interview does its own specialist consulting — freezing it there
+        # and never touching it again meant a thread activated while
+        # `_specialist_consults` was still globally empty could never arm,
+        # even once ITS OWN later consult calls (via `on_consult` in the tool
+        # executor below) made the global map non-empty. That silently exempted
+        # an under-vetted "advance"/"conditional" verdict from the floor
+        # entirely — worse than the concurrency race this field was built to
+        # fix. The same staleness made a restart-rebuilt thread
+        # (`_rebuild_agent_state`, always constructed with floor_armed=False)
+        # permanently unenforceable even after the process had recorded many
+        # consults.
+        #
+        # The `or` makes this monotonic — once armed, always armed for this
+        # thread — and it re-reads the GLOBAL map, never this thread's own
+        # subject's consults, on purpose: an earlier version of the floor
+        # failed open whenever the SUBJECT had no consults, which quietly
+        # excused the commonest failure of all, a hub that never convenes a
+        # panel at all (see _specialist_floor_gap's docstring). Latching on
+        # "this PI has a consult" would walk straight back into that hole.
+        #
+        # Doing this BEFORE any await, rather than reading the global map live
+        # at persist time, is what keeps the original race fixed: this turn's
+        # `floor_armed` value is captured once, here, and is not re-read from
+        # the live global again before `_persist_assessment` consults it later
+        # in this same turn — so a DIFFERENT interview's consult landing in
+        # some other task's turn, mid-await, cannot flip this verdict's fate.
+        #
+        # Accepted residual: if the process's very first-ever consult happens
+        # DURING this thread's own concluding turn (recorded by a tool call
+        # inside this same call, after this latch already ran), this turn
+        # still reads fail-open. That is deliberate — a false positive here
+        # (wrongly enforcing) loses an already-Slack-posted verdict for good;
+        # a false negative (failing open) just persists an under-vetted
+        # verdict a human can still review at /admin/assessments. Bias to
+        # fail-open.
+        thread.floor_armed = thread.floor_armed or bool(self._specialist_consults)
+
         settings = get_settings()
 
         # Get thread history from message log
@@ -2272,11 +2321,15 @@ class SimulationEngine:
 
         ``thread``, when given, is passed straight through to
         ``_specialist_floor_gap`` so the fail-open decision is read from
-        ``thread.floor_armed`` (a snapshot taken at activation) instead of the
-        live, process-global ``_specialist_consults`` map — see that method's
-        docstring for why a live read is unsafe under concurrency. It is NOT
-        used to key the join itself (that stays ``subject_agent_id`` — see the
-        ``thread_id`` paragraph below); it exists purely to carry the snapshot.
+        ``thread.floor_armed`` (latched once per turn, at the top of
+        ``_reply_to_thread``, before this same turn's own consult calls or any
+        other task's writes can reach it) instead of a live, process-global
+        ``_specialist_consults`` read at this later point in the same turn —
+        see that method's docstring, and ``ThreadState.floor_armed``'s own
+        comment, for why a plain live read here is unsafe under concurrency.
+        It is NOT used to key the join itself (that stays ``subject_agent_id``
+        — see the ``thread_id`` paragraph below); it exists purely to carry
+        the latched snapshot.
 
         There is no ``thread_id`` parameter here, despite the verdict coming
         from a specific Phase-4 interview thread today (Option A relocation)
@@ -2618,18 +2671,21 @@ class SimulationEngine:
         nothing, so requiring eight opinions to say no would burn calls on
         exactly the ideas that do not warrant them.
 
-        ``thread``, when given, supplies ``floor_armed`` — a snapshot, taken
-        when the interview was ACTIVATED, of whether ``_specialist_consults``
-        was non-empty at that moment. It is consulted INSTEAD OF the live
-        global map-emptiness check below, because that global read happens at
-        persist time, long after activation: under concurrency, a different
-        interview's first-ever consult can flip the map from empty to
-        non-empty mid-interview, and a live read would retroactively arm the
-        floor for a verdict that began under fail-open — refusing it after the
-        concluding reply is already posted to Slack, with no later turn to
-        recover it. ``thread=None`` (every direct caller with no thread to
-        offer, and all pre-existing tests) falls back to the live global read
-        exactly as before this snapshot existed.
+        ``thread``, when given, supplies ``floor_armed`` — whether
+        ``_specialist_consults`` has been seen non-empty at any point in this
+        thread's life, latched once per turn at the top of
+        ``_reply_to_thread`` (see that latch's comment, and
+        ``ThreadState.floor_armed``'s own comment, for the full history: a
+        plain live read here was the original concurrency bug, and freezing
+        the value forever at activation was a second bug fixed in a later
+        round). It is consulted INSTEAD OF a live global map-emptiness check
+        at persist time, because persist happens even later in the same turn
+        as the latch, after this turn's own tool calls and after any `await` —
+        long enough for a DIFFERENT interview's consult, landing in another
+        task, to have changed the live map. ``thread=None`` (every direct
+        caller with no thread to offer, and all pre-existing tests) falls back
+        to a live global read, matching this method's behavior before
+        ``floor_armed`` existed at all.
 
         The record is keyed on the PI (``subject_agent_id``), not on a thread.
         An earlier version keyed on ``thread_id`` instead, back when the
@@ -2647,14 +2703,15 @@ class SimulationEngine:
         "the panel approved":
         - the verdict names no ``subject_agent_id``, so there is nothing to
           join on;
-        - the consult map was EMPTY OVERALL as of the moment this interview was
-          activated (``thread.floor_armed`` is False), which means this
-          process had never recorded a consult for anyone yet at that point —
-          the post-restart case, where the in-memory map was cleared and the
-          interview genuinely happened. When ``thread`` is ``None`` this reads
-          the LIVE map instead (``bool(self._specialist_consults)``), matching
-          the pre-snapshot behavior exactly — every direct caller that has no
-          thread to offer.
+        - the consult map has never been seen non-empty at the top of any turn
+          on this thread so far (``thread.floor_armed`` is False), which means
+          this process had not recorded a consult for anyone as of that last
+          check — the post-restart case, where the in-memory map was cleared
+          and the interview genuinely happened, is exactly this with every
+          check so far having seen an empty map. When ``thread`` is ``None``
+          this reads the LIVE map instead (``bool(self._specialist_consults)``),
+          matching the pre-``floor_armed`` behavior exactly — every direct
+          caller that has no thread to offer.
 
         Note the second condition is about the whole map, not this PI's slot.
         An earlier version failed open whenever the SUBJECT had no consults,
@@ -4011,12 +4068,16 @@ class SimulationEngine:
                     other_agent_id=other_id,
                     message_count=msg_count,
                     has_pending_reply=has_pending,
-                    # Snapshot, not a live read — see ThreadState.floor_armed.
-                    # This rebuild runs at process startup, before this fresh
-                    # process's _specialist_consults could hold anything, so
-                    # this is always False here — correctly matching the
-                    # post-restart fail-open case _specialist_floor_gap's
-                    # docstring describes, rather than leaving it implicit.
+                    # Initial seed for the monotonic latch — see
+                    # ThreadState.floor_armed. This rebuild runs at process
+                    # startup, before this fresh process's _specialist_consults
+                    # could hold anything, so this always starts False here —
+                    # correctly matching the post-restart fail-open case
+                    # _specialist_floor_gap's docstring describes. It is not
+                    # stuck there: the per-turn latch at the top of
+                    # _reply_to_thread re-checks the global map on every later
+                    # turn this restored thread takes, and arms once the
+                    # restarted process itself records any consult.
                     floor_armed=bool(self._specialist_consults),
                 )
 

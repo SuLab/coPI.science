@@ -690,6 +690,7 @@ async def test_persist_assessment_drops_non_string_text_fields_instead_of_dying(
 
 async def _drive_reply_to_thread(
     engine, monkeypatch, raw_response, *, other_agent_id="wang",
+    initial_floor_armed=False, pre_consults=(), on_generate=None,
 ):
     """Build a real engine wired to the test DB and run `_reply_to_thread`
     for a scout_hub agent against ``raw_response`` as if it were the LLM's
@@ -697,6 +698,24 @@ async def _drive_reply_to_thread(
     just the `<slack_message>` body). Returns
     (agent, thread, client, factory, run_id) for the caller's own
     assertions/cleanup.
+
+    ``initial_floor_armed`` seeds ``ThreadState.floor_armed`` — defaulting to
+    ``False``, matching every real activation site when the consult map is
+    still globally empty (and, permanently, every thread `_rebuild_agent_state`
+    restores after a restart).
+
+    ``pre_consults``, an iterable of ``(pi_agent_id, domain)`` pairs, is
+    recorded on the engine's live ``_specialist_consults`` map BEFORE
+    `_reply_to_thread` runs — simulating consults recorded on earlier turns of
+    this same interview (or any other), i.e. before this turn's own
+    top-of-turn latch reads the map.
+
+    ``on_generate``, if given, is called (with the engine) from INSIDE the
+    faked ``generate_with_tools`` — i.e. AFTER `_reply_to_thread`'s
+    top-of-turn latch has already run and captured `thread.floor_armed`, but
+    BEFORE the verdict is extracted and persisted. This simulates a
+    *different* interview's consult landing concurrently, mid-turn (the
+    original race), without needing real concurrent tasks.
     """
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -715,7 +734,7 @@ async def _drive_reply_to_thread(
     agent = Agent("blackbird", "BlackbirdBot", "Blackbird", role="scout_hub")
     thread = ThreadState(
         thread_id="t1", channel="general", other_agent_id=other_agent_id,
-        message_count=11, has_pending_reply=True,
+        message_count=11, has_pending_reply=True, floor_armed=initial_floor_armed,
     )
     agent.state.active_threads["t1"] = thread
     client = FakeSlackClient(agent_id="blackbird")
@@ -723,11 +742,15 @@ async def _drive_reply_to_thread(
         agents=[agent], slack_clients={"blackbird": client},
         session_factory=factory, simulation_run_id=run_id,
     )
+    for pi, domain in pre_consults:
+        sim._record_consult(pi, domain)
     # Bypass real prompt construction (profile files on disk, etc.) — this
     # class tests what happens AFTER the LLM responds, not prompt building.
     monkeypatch.setattr(agent, "build_phase4_prompt", lambda **kw: ("sys", []))
 
     async def _fake_generate_with_tools(**kwargs):
+        if on_generate is not None:
+            on_generate(sim)
         return raw_response
 
     monkeypatch.setattr(
@@ -1739,3 +1762,172 @@ async def test_admin_page_has_no_drop_banner_on_a_clean_run(client, db_session, 
     resp = await client.get("/admin/assessments", headers=_auth(admin.id))
     assert resp.status_code == 200
     assert "generated but not stored" not in resp.text
+
+
+# --- Round 2: the per-turn monotonic latch (Task 7 fix round) ---------------
+#
+# `ThreadState.floor_armed` was originally frozen forever at whatever value
+# activation saw. Review caught that this reintroduced exactly the failure
+# mode the field was built to fix, from the other direction:
+#
+# - CRITICAL: a thread activated while `_specialist_consults` was globally
+#   empty (floor_armed=False) could never arm again — not even once THIS
+#   SAME interview went on to consult specialists for its own subject. An
+#   incomplete panel was silently persisted as if fully vetted.
+# - IMPORTANT: `_rebuild_agent_state` always constructs a restart-restored
+#   ThreadState with floor_armed=False. Frozen forever, that made every
+#   restart-restored thread permanently unenforceable, no matter how many
+#   consults the restarted process went on to record.
+#
+# The fix (Ruling R3): re-latch `thread.floor_armed = thread.floor_armed or
+# bool(self._specialist_consults)` at the very top of `_reply_to_thread`,
+# before any `await` in that method — monotonic (never un-arms), global (never
+# keyed on this thread's own subject, so "the hub never convenes a panel at
+# all" still bites), and still race-safe (captured once per turn, before that
+# turn's own tool calls or any other task's writes can reach it).
+#
+# These three tests drive `_reply_to_thread` end-to-end via
+# `_drive_reply_to_thread` (same harness as the "Option A relocation" tests
+# above), because the latch lives inside that method — a test that only calls
+# `_specialist_floor_gap` directly cannot exercise it at all.
+
+
+@pytest.mark.asyncio
+async def test_floor_arms_from_this_threads_own_later_consult(engine, monkeypatch):
+    """Critical finding: a thread activated while the map was globally empty
+    (floor_armed=False — exactly what every real activation site produces
+    then) must not stay permanently unable to arm. Here THIS SAME interview's
+    subject ("wang") already got one of the two always-required consults
+    ("scientific", missing "talent") — recorded as if it happened on an
+    earlier turn, before this concluding turn's own top-of-turn latch runs.
+
+    Before the per-turn latch, `floor_armed` stayed frozen at its
+    activation-time False forever, so this incomplete panel would have been
+    silently persisted as if fully vetted — the bug reported empirically:
+    "with an incomplete panel, the frozen snapshot returned set() (no
+    refusal) where the live global correctly returned {'talent'}".
+    """
+    from src.models import AssessmentDrop
+
+    response = (
+        _SLACK_BODY + "\n\n"
+        '<assessment_json>\n'
+        '{"subject_agent_id": "wang", "recommendation": "advance", '
+        '"scores": {"differentiation": 5}}\n'
+        '</assessment_json>'
+    )
+    agent, thread, client, factory, run_id = await _drive_reply_to_thread(
+        engine, monkeypatch, response,
+        initial_floor_armed=False,
+        pre_consults=[("wang", "scientific")],
+    )
+    try:
+        assert thread.floor_armed is True, (
+            "the concluding turn's own top-of-turn latch must see the map "
+            "non-empty and arm, since 'wang' already has a recorded consult"
+        )
+        assert len(client.posted) == 1  # the reply still went out to Slack
+        rows = await _assessment_rows(factory, run_id)
+        assert rows == [], (
+            "an incomplete panel (missing 'talent') must be refused, not "
+            "silently persisted because floor_armed was frozen False at "
+            "activation and never re-checked"
+        )
+        async with factory() as check:
+            drops = (await check.execute(
+                select(AssessmentDrop).where(AssessmentDrop.simulation_run_id == run_id)
+            )).scalars().all()
+        assert len(drops) == 1
+        assert drops[0].reason == "specialist_floor"
+        assert "talent" in (drops[0].detail or "")
+    finally:
+        await _delete_run(factory, run_id)
+
+
+@pytest.mark.asyncio
+async def test_floor_arms_for_a_restart_rebuilt_thread_once_any_consult_is_recorded(
+    engine, monkeypatch,
+):
+    """Important finding: `_rebuild_agent_state` always constructs a restored
+    ThreadState with floor_armed=False (the process has recorded nothing yet
+    — it just started). Frozen forever, that was permanent: even after the
+    restarted process went on to record consults for OTHER PIs, a restored
+    thread's own concluding turn still read the stale False and failed open
+    forever, no matter how long the process had been running.
+
+    This constructs the thread with floor_armed=False directly — exactly the
+    shape `_rebuild_agent_state` always produces — rather than re-running the
+    whole rebuild machinery, which does not touch this latch at all. The
+    consult recorded here is for a DIFFERENT PI entirely, proving the latch
+    arms off the GLOBAL map, never off this thread's own subject: keying it
+    on the subject would walk back into the exact hole
+    `_specialist_floor_gap`'s docstring already warns about — "a hub that
+    simply never convenes a panel" for THIS PI must still be caught.
+    """
+    response = (
+        _SLACK_BODY + "\n\n"
+        '<assessment_json>\n'
+        '{"subject_agent_id": "wang", "recommendation": "advance", '
+        '"scores": {"differentiation": 5}}\n'
+        '</assessment_json>'
+    )
+    agent, thread, client, factory, run_id = await _drive_reply_to_thread(
+        engine, monkeypatch, response,
+        initial_floor_armed=False,  # exactly what _rebuild_agent_state always seeds
+        pre_consults=[("someone-else", "scientific")],
+    )
+    try:
+        assert thread.floor_armed is True
+        rows = await _assessment_rows(factory, run_id)
+        assert rows == [], (
+            "wang's own panel was never convened at all — the floor must "
+            "bite, not fail open forever just because this thread survived "
+            "a restart"
+        )
+    finally:
+        await _delete_run(factory, run_id)
+
+
+@pytest.mark.asyncio
+async def test_a_concurrent_consult_landing_mid_turn_does_not_flip_this_verdict(
+    engine, monkeypatch,
+):
+    """The ORIGINAL race this whole mechanism exists to close, re-pinned
+    against the per-turn latch (not just the frozen-at-activation snapshot):
+    a DIFFERENT interview's first-ever consult must not retroactively arm
+    THIS turn's floor.
+
+    `on_generate` fires a consult for an unrelated PI from INSIDE the faked
+    `generate_with_tools` call — i.e. AFTER `_reply_to_thread`'s top-of-turn
+    latch has already captured `thread.floor_armed=False` from the
+    then-still-empty map, simulating a concurrent task's write landing
+    mid-await. Because the latch already ran before that write, this
+    interview — which began this turn under fail-open — must persist
+    normally, exactly as it would have if no consult had ever been recorded
+    anywhere.
+    """
+    response = (
+        _SLACK_BODY + "\n\n"
+        '<assessment_json>\n'
+        '{"subject_agent_id": "wang", "recommendation": "advance", '
+        '"scores": {"differentiation": 5}}\n'
+        '</assessment_json>'
+    )
+    agent, thread, client, factory, run_id = await _drive_reply_to_thread(
+        engine, monkeypatch, response,
+        initial_floor_armed=False,  # map is empty when this turn starts
+        on_generate=lambda sim: sim._record_consult("someone-else", "scientific"),
+    )
+    try:
+        assert thread.floor_armed is False, (
+            "the latch already ran, before this turn's own generate call, "
+            "and must not be re-read live at persist time"
+        )
+        rows = await _assessment_rows(factory, run_id)
+        assert len(rows) == 1, (
+            "this interview began under fail-open and must stay there for "
+            "this turn, even though the global map is no longer empty by "
+            "the time persistence runs"
+        )
+    finally:
+        await _delete_run(factory, run_id)
