@@ -1052,6 +1052,8 @@ class SimulationEngine:
                     other_agent_id=other_id,
                     message_count=self.message_log.get_thread_message_count(thread_id),
                     has_pending_reply=True,
+                    # Snapshot, not a live read — see ThreadState.floor_armed.
+                    floor_armed=bool(self._specialist_consults),
                 )
                 logger.info(
                     "[%s] Phase 3: Activated thread %s (tagged by %s)",
@@ -1087,6 +1089,8 @@ class SimulationEngine:
                     other_agent_id=other_id,
                     message_count=self.message_log.get_thread_message_count(thread_id),
                     has_pending_reply=True,
+                    # Snapshot, not a live read — see ThreadState.floor_armed.
+                    floor_armed=bool(self._specialist_consults),
                 )
                 logger.info(
                     "[%s] Phase 3: Activated thread %s (reply from %s)",
@@ -1128,6 +1132,8 @@ class SimulationEngine:
                         other_agent_id=other_id,
                         message_count=self.message_log.get_thread_message_count(thread_id),
                         has_pending_reply=True,
+                        # Snapshot, not a live read — see ThreadState.floor_armed.
+                        floor_armed=bool(self._specialist_consults),
                     )
                     logger.info(
                         "[%s] Phase 3: Auto-activated interview thread %s (lab post by %s)",
@@ -2130,6 +2136,7 @@ class SimulationEngine:
                 await self._persist_assessment(
                     agent.agent_id, thread.channel, verdict, slack_ts=slack_ts,
                     subject_agent_id_fallback=thread.other_agent_id,
+                    thread=thread,
                 )
             elif _ASSESSMENT_UNCLOSED_RE.search(raw_response or ""):
                 # An <assessment_json> opening tag is present but
@@ -2239,7 +2246,7 @@ class SimulationEngine:
 
     async def _persist_assessment(
         self, agent_id: str, channel: str, verdict: dict, slack_ts: str | None = None,
-        *, subject_agent_id_fallback: str | None = None,
+        *, subject_agent_id_fallback: str | None = None, thread: ThreadState | None = None,
     ) -> None:
         """Store a scouting verdict. Best-effort: a failure here must never cost
         the Slack post that already went out.
@@ -2262,6 +2269,14 @@ class SimulationEngine:
         has a real interview thread behind it, so the engine always knows who
         the sidecar is about. The name is kept for its existing callers; it is
         a fallback only in the sense that callers without a thread omit it.
+
+        ``thread``, when given, is passed straight through to
+        ``_specialist_floor_gap`` so the fail-open decision is read from
+        ``thread.floor_armed`` (a snapshot taken at activation) instead of the
+        live, process-global ``_specialist_consults`` map — see that method's
+        docstring for why a live read is unsafe under concurrency. It is NOT
+        used to key the join itself (that stays ``subject_agent_id`` — see the
+        ``thread_id`` paragraph below); it exists purely to carry the snapshot.
 
         There is no ``thread_id`` parameter here, despite the verdict coming
         from a specific Phase-4 interview thread today (Option A relocation)
@@ -2298,7 +2313,7 @@ class SimulationEngine:
         if subject_agent_id_fallback:
             subject_view = {**verdict, "subject_agent_id": subject_agent_id_fallback}
 
-        gap = self._specialist_floor_gap(subject_view)
+        gap = self._specialist_floor_gap(subject_view, thread=thread)
         if gap:
             subject_hint = subject_view.get("subject_agent_id")
             logger.warning(
@@ -2593,13 +2608,28 @@ class SimulationEngine:
 
     _PANEL_REQUIRED_FOR = frozenset({"advance", "conditional"})
 
-    def _specialist_floor_gap(self, verdict: dict) -> set[str]:
+    def _specialist_floor_gap(
+        self, verdict: dict, *, thread: ThreadState | None = None,
+    ) -> set[str]:
         """Domains this verdict was obliged to consult but did not.
 
         Empty means the verdict may be persisted. Only ``advance`` and
         ``conditional`` are held to the panel: a ``pass`` costs Blackbird
         nothing, so requiring eight opinions to say no would burn calls on
         exactly the ideas that do not warrant them.
+
+        ``thread``, when given, supplies ``floor_armed`` — a snapshot, taken
+        when the interview was ACTIVATED, of whether ``_specialist_consults``
+        was non-empty at that moment. It is consulted INSTEAD OF the live
+        global map-emptiness check below, because that global read happens at
+        persist time, long after activation: under concurrency, a different
+        interview's first-ever consult can flip the map from empty to
+        non-empty mid-interview, and a live read would retroactively arm the
+        floor for a verdict that began under fail-open — refusing it after the
+        concluding reply is already posted to Slack, with no later turn to
+        recover it. ``thread=None`` (every direct caller with no thread to
+        offer, and all pre-existing tests) falls back to the live global read
+        exactly as before this snapshot existed.
 
         The record is keyed on the PI (``subject_agent_id``), not on a thread.
         An earlier version keyed on ``thread_id`` instead, back when the
@@ -2617,9 +2647,14 @@ class SimulationEngine:
         "the panel approved":
         - the verdict names no ``subject_agent_id``, so there is nothing to
           join on;
-        - the consult map is EMPTY OVERALL, which means this process has never
-          recorded a consult for anyone — the post-restart case, where the
-          in-memory map was cleared and the interview genuinely happened.
+        - the consult map was EMPTY OVERALL as of the moment this interview was
+          activated (``thread.floor_armed`` is False), which means this
+          process had never recorded a consult for anyone yet at that point —
+          the post-restart case, where the in-memory map was cleared and the
+          interview genuinely happened. When ``thread`` is ``None`` this reads
+          the LIVE map instead (``bool(self._specialist_consults)``), matching
+          the pre-snapshot behavior exactly — every direct caller that has no
+          thread to offer.
 
         Note the second condition is about the whole map, not this PI's slot.
         An earlier version failed open whenever the SUBJECT had no consults,
@@ -2644,7 +2679,11 @@ class SimulationEngine:
             )
             return set()
 
-        if not self._specialist_consults:
+        if thread is not None:
+            armed = thread.floor_armed
+        else:
+            armed = bool(self._specialist_consults)
+        if not armed:
             logger.info(
                 "[specialists] no consult record for ANY PI — floor fails open "
                 "(process restarted mid-interview?)",
@@ -3972,6 +4011,13 @@ class SimulationEngine:
                     other_agent_id=other_id,
                     message_count=msg_count,
                     has_pending_reply=has_pending,
+                    # Snapshot, not a live read — see ThreadState.floor_armed.
+                    # This rebuild runs at process startup, before this fresh
+                    # process's _specialist_consults could hold anything, so
+                    # this is always False here — correctly matching the
+                    # post-restart fail-open case _specialist_floor_gap's
+                    # docstring describes, rather than leaving it implicit.
+                    floor_armed=bool(self._specialist_consults),
                 )
 
         # 3. Rebuild pending_proposals per agent

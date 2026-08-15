@@ -33,6 +33,17 @@ class ThreadState:
     # outrank gate-compliant work. Cleared if the partner becomes permitted again.
     # See .notes/cohort-system-v2.md §8.
     grandfathered: bool = False
+    # Whether the specialist floor (SimulationEngine._specialist_floor_gap) was
+    # already recording consults ANYWHERE in this process when this interview
+    # was activated. Snapshotted at activation, not read live: the floor's
+    # "map empty overall => fail open" is a process-global predicate over
+    # SimulationEngine._specialist_consults, so under concurrency a DIFFERENT
+    # interview's first-ever consult could otherwise flip that map from empty
+    # to non-empty mid-interview and retroactively arm the floor for a verdict
+    # that began under fail-open — refusing it after the concluding reply is
+    # already posted to Slack, with no later turn to recover it. See
+    # _specialist_floor_gap's docstring for the full fail-open rationale.
+    floor_armed: bool = False
 
 
 @dataclass

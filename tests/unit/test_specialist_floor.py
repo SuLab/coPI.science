@@ -7,6 +7,7 @@ See docs/specs/2026-08-07-nine-evaluator-panel-design.md §4.
 import pytest
 
 from src.agent.agent import Agent
+from src.agent.message_log import LogEntry
 from src.agent.simulation import SimulationEngine
 
 
@@ -16,6 +17,37 @@ def _engine(*agents):
 
 def _hub():
     return Agent("blackbird", "BlackbirdBot", "Blackbird", role="scout_hub")
+
+
+def _activated_thread(eng, thread_id, *, other_agent_id, channel="general"):
+    """Drive a REAL activation site — the hub auto-activation loop inside
+    `_phase3_activate_threads` — rather than hand-building a `ThreadState`, so
+    this test exercises the exact code path that must snapshot `floor_armed`.
+
+    Asserts the invariant every activation site owes: `floor_armed` reflects
+    `bool(engine._specialist_consults)` at the MOMENT of activation, not
+    whatever the map happens to hold later.
+    """
+    hub = eng.agents["blackbird"]
+    hub.state.subscribed_channels.add(channel)
+    expected_armed = bool(eng._specialist_consults)
+    eng.message_log.append(
+        LogEntry(
+            ts=thread_id,
+            channel=channel,
+            sender_agent_id=other_agent_id,
+            sender_name=f"{other_agent_id}Bot",
+            content="An update from the lab.",
+            posted_at=1.0,
+            is_bot=True,
+        )
+    )
+    eng._phase3_activate_threads(hub)
+    thread = hub.state.active_threads[thread_id]
+    assert thread.floor_armed is expected_armed, (
+        "floor_armed must be snapshotted from the live map at activation time"
+    )
+    return thread
 
 
 def test_the_consult_map_starts_empty():
@@ -185,3 +217,54 @@ def test_a_verdict_with_no_subject_fails_open():
     eng = _engine(_hub())
     eng._record_consult("gill", "scientific")
     assert eng._specialist_floor_gap({"recommendation": "advance"}) == set()
+
+
+# --- snapshotting the fail-open decision at activation ------------------------
+#
+# `_specialist_floor_gap`'s "map empty overall => fail open" read used to be
+# LIVE at persist time, long after an interview began. Under concurrency, a
+# DIFFERENT interview's first-ever consult flips the global map from empty to
+# non-empty mid-flight, retroactively arming the floor for an in-flight verdict
+# that began under fail-open — refusing it after the concluding reply is
+# already in Slack, with no later turn to recover it. The fix snapshots the
+# decision onto `ThreadState.floor_armed` at activation and consults that
+# snapshot instead of the live global.
+
+
+def test_fail_open_is_decided_at_activation_not_at_persist_time():
+    """Another thread's first consult must not retroactively arm the floor for
+    an interview that started while the map was empty."""
+    eng = _engine(_hub())
+    thread = _activated_thread(eng, "t1", other_agent_id="wang")
+    assert thread.floor_armed is False   # map was empty when this began
+
+    # A DIFFERENT interview consults someone. The global map is no longer empty.
+    eng._record_consult("someone-else", "scientific")
+
+    verdict = {"recommendation": "advance", "subject_agent_id": "wang"}
+    assert eng._specialist_floor_gap(verdict, thread=thread) == set(), (
+        "this interview began under fail-open and must stay there"
+    )
+
+
+def test_floor_armed_true_when_activated_after_another_consult_exists():
+    """The complementary case: an interview that starts AFTER the map is
+    already non-empty is armed from the start, and the floor bites normally."""
+    eng = _engine(_hub())
+    eng._record_consult("someone-else", "scientific")
+
+    thread = _activated_thread(eng, "t2", other_agent_id="wang")
+    assert thread.floor_armed is True
+
+    verdict = {"recommendation": "advance", "subject_agent_id": "wang"}
+    assert eng._specialist_floor_gap(verdict, thread=thread) == {"scientific", "talent"}
+
+
+def test_specialist_floor_gap_thread_none_falls_back_to_live_global():
+    """Direct callers (existing tests, and any caller with no thread) keep the
+    old process-global behavior unchanged."""
+    eng = _engine(_hub())
+    verdict = {"recommendation": "advance", "subject_agent_id": "gill"}
+    # Empty map overall -> fails open, exactly as before this change.
+    assert eng._specialist_floor_gap(verdict) == set()
+    assert eng._specialist_floor_gap(verdict, thread=None) == set()
