@@ -396,6 +396,15 @@ async def test_service_reply_skips_a_thread_evicted_from_active_threads(monkeypa
 
 @pytest.mark.asyncio
 async def test_dispatch_stops_early_when_the_engine_stops_mid_sweep(monkeypatch):
+    """Fix round 3 (task review, Critical): the mock MUST contain a real
+    `await` — production `_service_reply` awaits a 10-60s Opus call, and a
+    mock with no `await` at all cannot exercise (or fail against) the bug
+    this test guards: `asyncio.gather` schedules every pair's task up front,
+    and an uncontended `Semaphore`/`Lock.acquire` never actually suspends, so
+    with no real await anywhere, every task races through its whole body in
+    one scheduler step before the shutdown flag set by an earlier pair is
+    ever visible to a later one. `await asyncio.sleep(0)` is the minimal real
+    yield point that reproduces the production task-scheduling gap."""
     eng, hub = _engine_with_pending(5)
     served = []
 
@@ -403,6 +412,7 @@ async def test_dispatch_stops_early_when_the_engine_stops_mid_sweep(monkeypatch)
         served.append(thread.thread_id)
         if len(served) == 2:
             eng._running = False  # shutdown requested mid-sweep
+        await asyncio.sleep(0)
 
     monkeypatch.setattr(eng, "_service_reply", _serve)
     n = await eng._dispatch_reply_lane()
@@ -509,9 +519,18 @@ async def test_the_fanout_bound_is_global_not_per_turn(monkeypatch):
     """
     from src.config import get_settings
 
+    # Deliberately NOT skipped at cap < 2 (unlike
+    # test_dispatch_runs_pairs_concurrently_up_to_the_cap above, which
+    # legitimately needs `peak > 1` to prove overlap happened at all): this
+    # test's property — a SHARED budget, not a per-call one — holds and
+    # discriminates correctly even at cap=1. A per-call semaphore bug would
+    # let sweep two's disjoint pair run under its own fresh allowance WHILE
+    # sweep one's pair is still asleep holding the (buggy, non-shared) first
+    # one, pushing peak to 2 against a cap of 1; the real (shared) `_reply_
+    # sem` keeps peak at 1. Verified empirically before this test was written
+    # (see task-13-report.md's TDD evidence) — this is exactly the property
+    # that must run in the default-config gate, not skip in it.
     cap = get_settings().reply_lane_max_in_flight
-    if cap < 2:
-        pytest.skip("concurrency disabled by configuration")
 
     eng, hub = _engine_with_pending(cap)
     live = 0
@@ -567,7 +586,15 @@ def test_no_call_site_bypasses_acquire_all():
     """spec §3.2: acquire_all is the only sanctioned way to take more than
     one lock at a time. A direct `.get(key).acquire()` on either registry
     would let a call site invent its own (possibly unsorted, possibly
-    inverted) acquisition order outside that discipline."""
+    inverted) acquisition order outside that discipline.
+
+    NOTE (task review, Important 3): this only guards against bypassing the
+    registry's own sorted multi-key acquisition — it does NOT by itself
+    catch a call site that correctly uses `acquire_all` for each registry but
+    nests them in the wrong order (agent lock outer, thread lock inner). See
+    `test_agent_lock_never_precedes_thread_lock_in_the_same_function_scope`
+    below for that.
+    """
     import inspect
 
     src = inspect.getsource(SimulationEngine)
@@ -577,6 +604,93 @@ def test_no_call_site_bypasses_acquire_all():
     assert "_thread_locks.get(" not in src, (
         "a call site is bypassing acquire_all for _thread_locks"
     )
+
+
+def test_agent_lock_never_precedes_thread_lock_in_the_same_function_scope():
+    """Task review, Important 3: the previous test greps for registry
+    BYPASSES, not order INVERSIONS — a call site written as
+    ``async with self._agent_locks.acquire_all(a): async with
+    self._thread_locks.acquire_all(t): ...`` passes it cleanly and still
+    deadlocks against the reply lane's thread-lock-then-agent-lock nesting.
+
+    This is a real static check (line-order via the AST), not a grep: for
+    every method of `SimulationEngine` (and every function nested inside one,
+    checked as its OWN separate scope — a nested function's own calls must
+    not be misattributed to its enclosing method, and vice versa), collect
+    every `self._agent_locks.acquire_all(...)` / `self._thread_locks.
+    acquire_all(...)` call textually in that scope and assert no agent-lock
+    call has a smaller line number than a later thread-lock call. Line order
+    within one scope is a reasonable proxy for acquisition order here — every
+    real call site in this file acquires at most one of the two locks
+    directly (the other, if any, is nested one level down. inside a call this
+    scope makes to a DIFFERENT method), so there is no control-flow subtlety
+    (branching, loops) between sibling `acquire_all` calls in any one scope
+    today for this to falsely wave through.
+
+    Verified this actually catches the counterexample above: parsing that
+    exact snippet in isolation reports one violation.
+    """
+    import ast
+    import inspect
+
+    import src.agent.simulation as sim_module
+
+    source = inspect.getsource(sim_module)
+    tree = ast.parse(source)
+
+    class_node = next(
+        n for n in tree.body
+        if isinstance(n, ast.ClassDef) and n.name == "SimulationEngine"
+    )
+
+    def _lock_calls(node, calls, top):
+        # Do NOT descend into a nested function's body when collecting for
+        # the OUTER scope -- it is checked separately, as its own scope.
+        if not top and isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            return
+        if isinstance(node, ast.Call):
+            func = node.func
+            if isinstance(func, ast.Attribute) and func.attr == "acquire_all":
+                obj = func.value
+                if (
+                    isinstance(obj, ast.Attribute)
+                    and isinstance(obj.value, ast.Name)
+                    and obj.value.id == "self"
+                ):
+                    if obj.attr == "_agent_locks":
+                        calls.append((node.lineno, "agent"))
+                    elif obj.attr == "_thread_locks":
+                        calls.append((node.lineno, "thread"))
+        for child in ast.iter_child_nodes(node):
+            _lock_calls(child, calls, top=False)
+
+    violations: list[str] = []
+
+    def _check_scope(func_node, path):
+        calls: list[tuple[int, str]] = []
+        _lock_calls(func_node, calls, top=True)
+        seen_agent_at = None
+        for lineno, kind in sorted(calls):
+            if kind == "agent":
+                seen_agent_at = lineno
+            elif kind == "thread" and seen_agent_at is not None:
+                violations.append(
+                    f"{path}: thread lock acquire_all at line {lineno} "
+                    f"follows an agent lock acquire_all at line "
+                    f"{seen_agent_at} in the SAME function scope — thread "
+                    "lock must be acquired before agent lock, never after"
+                )
+        for child in ast.walk(func_node):
+            if child is not func_node and isinstance(
+                child, ast.FunctionDef | ast.AsyncFunctionDef
+            ):
+                _check_scope(child, f"{path}.{child.name}")
+
+    for item in class_node.body:
+        if isinstance(item, ast.FunctionDef | ast.AsyncFunctionDef):
+            _check_scope(item, item.name)
+
+    assert not violations, "\n".join(violations)
 
 
 @pytest.mark.asyncio

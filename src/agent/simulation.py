@@ -1057,15 +1057,11 @@ class SimulationEngine:
           `_pending_reply_pairs`'s docstring). Each pair is then serviced
           inside its own try/except so one failing reply can never abort the
           rest of the sweep (spec §8) or propagate out of this call.
-        - **I5**: checks `self._running` per pair, at the moment that pair's
-          own task actually starts running, so a shutdown request is honoured
+        - **I5**: checks `self._running` so a shutdown request is honoured
           within roughly one reply's worth of latency instead of first
           draining the whole sweep — worst case today is ~12 sequential Opus
           calls in a 12-interview star, well past the documented `docker stop
-          -t 30` grace period. (At the default `reply_lane_max_in_flight=1`
-          this is exactly "between pairs", matching the pre-Task-13 sequential
-          loop this replaced; a higher cap admits more than one pair before a
-          stop takes effect, trading strict latency for throughput.)
+          -t 30` grace period.
 
         Fix round 2 (task review):
         - **Ruling R10**: this function no longer touches
@@ -1094,6 +1090,30 @@ class SimulationEngine:
           agent's from running too. `_pending_reply_pairs()` itself, and
           anything below it, is now genuinely unguarded — a bug there
           surfaces (crashes the run) rather than being swallowed wholesale.
+
+        Fix round 3 (task review, Critical):
+        - **I5 regressed by the concurrent rewrite**: `_run` originally
+          checked `self._running` only once, at the top, before acquiring
+          anything. `asyncio.gather` schedules every pair's `_run` task up
+          front, and an uncontended `Semaphore.acquire`/`Lock.acquire` never
+          actually suspends — so with only that one check, pair 0 reaches
+          its first genuine `await` (the Opus call inside `_service_reply`)
+          before pair 1 even LOOKS at `self._running`, which is still True at
+          that instant. Every other pair then passes the same stale check and
+          parks on the semaphore; a stop requested while pair 0 is in flight
+          is invisible to all of them, and the WHOLE sweep drains instead of
+          stopping after pair 0 — measured, at cap=1, with a real `await`
+          inside the mocked `_service_reply`: 6 pending pairs, stop requested
+          during pair 0, served 6 instead of 1. `_run` now re-checks
+          `self._running` a second time, inside the semaphore, immediately
+          before the thread lock and the real service call — that is the
+          check that actually matters, since it fires at the moment a pair
+          is genuinely about to be serviced rather than at task-creation
+          time. `test_dispatch_stops_early_when_the_engine_stops_mid_sweep`'s
+          mock now does a real `await asyncio.sleep(0)` inside
+          `_service_reply` — without it, the test cannot fail even against
+          the pre-fix single-check code, because a mock with no `await` never
+          exercises the task-scheduling gap the bug lived in.
         """
         cursor_snapshots = {
             agent.agent_id: self.message_log.latest_timestamp
@@ -1124,12 +1144,10 @@ class SimulationEngine:
 
         async def _run(agent: Agent, thread: ThreadState) -> None:
             nonlocal serviced
-            # I5, preserved under concurrency: checked at the moment this
-            # pair's own task starts running (not up front, when `pairs` was
-            # built) so a shutdown requested while a sibling pair was being
-            # serviced is honoured — this pair is simply never attempted,
-            # same as the old loop's `break`. Not counted (mirrors `break`
-            # never reaching this pair's `serviced += 1` either).
+            # I5, cheap early exit: catches a stop requested before this
+            # pair's task got a look-in at all. NOT sufficient on its own —
+            # see the second check below, which is the one that actually
+            # matters.
             if not self._running:
                 return
             key = (agent.agent_id, thread.thread_id)
@@ -1144,6 +1162,27 @@ class SimulationEngine:
             self._reply_in_flight.add(key)
             try:
                 async with self._reply_sem:
+                    # I5, THE check that matters (task review, Critical):
+                    # `asyncio.gather` schedules every pair's task up front,
+                    # and an uncontended `Semaphore`/`Lock.acquire` never
+                    # actually suspends — so at cap=1, pair 0 reaches its
+                    # first genuine `await` (the Opus call inside
+                    # `_service_reply`) before pair 1 even looks at
+                    # `self._running` above. A stop requested WHILE pair 0 is
+                    # in flight is invisible to every pair still queued
+                    # behind the semaphore unless it is re-checked here, at
+                    # the moment a pair is actually about to be serviced
+                    # (immediately after acquiring the semaphore slot,
+                    # immediately before the thread lock and the real
+                    # service call). Without this second check, a stop
+                    # requested during pair 0 drains the ENTIRE sweep instead
+                    # of stopping after pair 0 — measured: a 6-pair sweep
+                    # with a real `await` inside `_service_reply`, stopped
+                    # during pair 0, served all 6 instead of 1. See
+                    # test_dispatch_stops_early_when_the_engine_stops_mid_sweep,
+                    # whose mock now awaits for exactly this reason.
+                    if not self._running:
+                        return
                     # Thread lock held ACROSS the LLM call: the stale-history
                     # (§4.1) and CONCLUDE-ordinal (§4.2) races both happen
                     # between the read and the act, not inside either — a
