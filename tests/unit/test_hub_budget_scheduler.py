@@ -150,14 +150,27 @@ class TestAgentLoad:
 
 
 class TestCallLedger:
-    def test_record_api_call_increments_the_lifetime_counter_only(self):
-        """Task 9: the sliding-window append moved to Agent.try_reserve. If
-        record_api_call also appended to call_times, every reserved call would
-        be double-booked and the effective allowance halved."""
+    def test_record_api_call_books_both_by_default(self):
+        """Fix round 1 (Ruling R5): record_api_call's DEFAULT
+        (already_reserved=False) still appends to call_times — this is what
+        the six call sites that are never separately reserved (consults,
+        retries, the memory update) rely on to be booked into the window at
+        all. Only the two call sites that call try_reserve immediately
+        beforehand pass already_reserved=True to skip this append."""
         a = Agent(agent_id="hub", bot_name="HubBot", pi_name="PI hub")
         a.record_api_call(now=100.0)
         a.record_api_call(now=101.0)
         assert a.api_call_count == 2
+        assert list(a.state.call_times) == [100.0, 101.0]
+
+    def test_already_reserved_skips_the_ledger_append(self):
+        """The two call sites that DO call try_reserve immediately
+        beforehand pass already_reserved=True, or the one real call they make
+        would be double-booked (reserved once by try_reserve, booked again
+        here) and the effective allowance halved."""
+        a = Agent(agent_id="hub", bot_name="HubBot", pi_name="PI hub")
+        a.record_api_call(now=100.0, already_reserved=True)
+        assert a.api_call_count == 1
         assert list(a.state.call_times) == []
 
     def test_call_times_starts_empty(self):
@@ -629,6 +642,42 @@ class TestPhase5CallAccounting:
             await eng._phase5_new_post(agent)
         assert agent.api_call_count == 8
         assert eng._within_rate_limit(agent, time.time()) is False
+
+
+class TestUnreservedCallSitesStillBookTheLedger:
+    """Fix round 1 (Ruling R5). Round 1's fix for the double-book bug (making
+    record_api_call never append to call_times) silently regressed six OTHER
+    call sites off the sliding window entirely: specialist consults, both
+    truncation-retry hooks, the memory update, and its own retry hook. None
+    of those six calls try_reserve, so record_api_call's default
+    (already_reserved=False) is the only thing that puts them in the window
+    at all. This class pins the memory-update call specifically (the
+    consult/retry pins live in test_consult_accounting.py, next to the
+    fixture that already exercises _reply_to_thread's tool executor)."""
+
+    async def test_a_memory_update_appends_to_the_sliding_window_ledger(
+        self, monkeypatch,
+    ):
+        agent = Agent(agent_id="su", bot_name="SuBot", pi_name="Andrew Su")
+        eng = SimulationEngine(agents=[agent], slack_clients={})
+
+        async def _fake_generate(**kwargs):
+            return "Updated memory."
+
+        monkeypatch.setattr(
+            "src.agent.simulation.generate_agent_response", _fake_generate
+        )
+        monkeypatch.setattr(
+            agent, "build_thread_reply_system_prompt", lambda **kw: "sys"
+        )
+        # Avoid a real write to profiles/memory/su/public.md — this class
+        # exercises call accounting, not the memory-file side effect.
+        monkeypatch.setattr(agent, "update_working_memory_file", lambda *a, **kw: None)
+
+        await eng._update_agent_memory(agent, "thread closed")
+
+        assert agent.api_call_count == 1
+        assert len(agent.state.call_times) == 1
 
 
 class TestRateSettingGuards:

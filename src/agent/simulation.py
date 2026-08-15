@@ -1383,7 +1383,9 @@ class SimulationEngine:
                 "[%s] rate-limited; deferring this reply", agent.agent_id,
             )
             return
-        agent.record_api_call()
+        # already_reserved=True: try_reserve just appended this exact call to
+        # call_times — appending again here would double-book it (Ruling R5).
+        agent.record_api_call(already_reserved=True)
         try:
             raw_response = await generate_with_tools(
                 system_prompt=system_prompt,
@@ -1976,7 +1978,9 @@ class SimulationEngine:
                 "[%s] rate-limited; deferring this post", agent.agent_id,
             )
             return
-        agent.record_api_call()
+        # already_reserved=True: try_reserve just appended this exact call to
+        # call_times — appending again here would double-book it (Ruling R5).
+        agent.record_api_call(already_reserved=True)
         try:
             response = await generate_agent_response(
                 system_prompt=system_prompt,

@@ -53,25 +53,60 @@ class Agent:
         # Recomputed each roster sync by SimulationEngine. See specs/cohort-system.md.
         self.allowed_sender_ids: set[str] | None = None
 
-    def record_api_call(self, now: float | None = None) -> None:
-        """Record one LLM call against the lifetime counter.
+    def record_api_call(
+        self, now: float | None = None, *, already_reserved: bool = False
+    ) -> None:
+        """Record one LLM call against the lifetime counter, and — unless the
+        caller already reserved a window slot for this exact call — against
+        the sliding-window ledger (``state.call_times``) too.
 
-        Through Task 8 this also appended to the sliding-window ledger
-        (``state.call_times``). As of Task 9 that append moved to
-        ``try_reserve``, which claims the window slot BEFORE the call is
-        issued — a selection-time-only check cannot bound concurrent spend
-        (``_phase4_reply_threads`` fires several calls per turn with no
-        re-check). Every real LLM call site now reserves first, then calls
-        this method; if this method also appended to ``call_times``, every
-        call would be double-booked and the effective allowance halved. So
-        ``call_times`` is untouched here — ``now`` is accepted only for
-        backward-compatible callers and is otherwise unused.
+        Task 9 split call accounting into two questions that used to be
+        conflated: "should this call be GATED against the window before it is
+        issued?" (only ``_reply_to_thread``/``_phase5_new_post`` need this —
+        ``try_reserve``, called immediately before the LLM call, both checks
+        the allowance and appends) and "should this call be BOOKED into the
+        window at all?" (every real billed call, always — this method).
+
+        ``already_reserved=True`` skips the ledger append here because
+        ``try_reserve`` already did it for this exact call. Pass it ONLY at
+        the two call sites that call ``try_reserve`` immediately beforehand
+        (``_reply_to_thread``, ``_phase5_new_post``) — appending again there
+        would double-book one real call as two window entries and halve the
+        effective allowance (this was fix round 1's regression: an earlier
+        version of this method never appended at all once ``try_reserve``
+        existed, which fixed that double-count but silently took SIX other
+        call sites off the window entirely).
+
+        The default (``already_reserved=False``) is for every call site that
+        was never separately reserved and so relies on THIS method as the
+        only place it is booked into the window:
+        - specialist consults (``on_api_call=agent.record_api_call`` in
+          ``_reply_to_thread``'s tool executor) — booking these is what keeps
+          a concluding reply that fires up to 8 consults visible to the
+          limiter and to ``SimulationRun.total_api_calls``, not just its own
+          one reply;
+        - truncation retries (``on_retry=agent.record_api_call`` on both
+          ``generate_with_tools``/``generate_agent_response`` calls in
+          ``_reply_to_thread``/``_phase5_new_post``) — a retry is a second
+          real billed call for a turn that already reserved once;
+        - the working-memory update (``_update_agent_memory``) and its own
+          retry — a real billed call that is never gated (it is not part of
+          the two-lane fan-out this task bounds), but must still count.
+
+        None of these six sites are gated by ``try_reserve`` on purpose:
+        gating a retry is meaningless (the call was already issued), and
+        refusing a consult mid-turn could leave the specialist panel
+        incomplete, which Task 7's floor treats as an unvetted verdict rather
+        than a completed one — a worse outcome than letting the consult
+        through and merely booking it after the fact.
 
         Still the single write point for ``api_call_count``: every call site
         must use this rather than bumping the counter directly, or that call
         is invisible to ``SimulationRun.total_api_calls``.
         """
         self.api_call_count += 1
+        if not already_reserved:
+            self.state.call_times.append(time.time() if now is None else now)
 
     def try_reserve(
         self, allowance: int, window_s: int, now: float | None = None

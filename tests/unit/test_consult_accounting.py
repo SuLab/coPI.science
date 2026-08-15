@@ -70,6 +70,63 @@ async def test_a_consult_is_booked_against_the_rate_limiter(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_a_consult_appends_to_the_sliding_window_ledger(monkeypatch):
+    """Fix round 1 (Ruling R5): booking a consult against api_call_count is
+    not enough — it must also land in call_times, or the limiter's coverage
+    silently narrows to just the two reserved call sites and a hub that fires
+    consults all day never looks throttled for them."""
+    engine, hub, thread = _hub_engine()
+
+    async def _fake_opinion(**kwargs):
+        return _OPINION
+
+    async def _fake_reply(**kwargs):
+        await kwargs["tool_executor"](
+            "consult_specialist",
+            {"domain": "chemistry", "question": "q", "context": "c"},
+        )
+        return "<slack_message>Thanks — one more question.</slack_message>"
+
+    monkeypatch.setattr(hub, "build_phase4_prompt", lambda **kw: ("sys", []))
+    monkeypatch.setattr("src.agent.simulation.generate_with_tools", _fake_reply)
+    monkeypatch.setattr("src.agent.tools.generate_agent_response", _fake_opinion)
+
+    await engine._reply_to_thread(hub, thread)
+
+    # try_reserve appends once for the reply itself; record_api_call's
+    # default (already_reserved=False) must append a second time for the
+    # consult, which was never separately reserved.
+    assert len(hub.state.call_times) == 2, (
+        f"expected reply + consult both in the ledger, got {len(hub.state.call_times)}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_truncation_retry_appends_to_the_sliding_window_ledger(monkeypatch):
+    """The on_retry hook passed into generate_with_tools is agent.record_api_call
+    — a second real billed call for a turn that already reserved once. It must
+    still land in call_times, or a heavily-retried agent looks artificially
+    under its allowance."""
+    engine, hub, thread = _hub_engine()
+
+    async def _fake_reply(**kwargs):
+        # Simulate generate_with_tools detecting a max_tokens truncation and
+        # firing its second, billed call.
+        kwargs["on_retry"]()
+        return "<slack_message>Concluding.</slack_message>"
+
+    monkeypatch.setattr(hub, "build_phase4_prompt", lambda **kw: ("sys", []))
+    monkeypatch.setattr("src.agent.simulation.generate_with_tools", _fake_reply)
+
+    await engine._reply_to_thread(hub, thread)
+
+    assert hub.api_call_count == 2, "expected the reply + the retry to be booked"
+    assert len(hub.state.call_times) == 2, (
+        f"expected reply + retry both in the ledger, got {len(hub.state.call_times)}"
+    )
+
+
+@pytest.mark.asyncio
 async def test_every_consult_in_a_turn_is_booked(monkeypatch):
     engine, hub, thread = _hub_engine()
 
