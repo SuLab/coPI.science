@@ -21,6 +21,7 @@ from src.services.email_inbound import (
     poll_inbound_emails,
     process_inbound_email,
 )
+from tests.factories import SES_PASS_HEADER
 
 
 def _msg(raw: str) -> email.message.Message:
@@ -120,14 +121,11 @@ def test_plain_text_part_still_wins_over_html():
 # --- Auto-submitted mail is dropped before any processing --------------------
 
 
-_SES_PASS = "Authentication-Results: amazonses.com; spf=pass; dkim=pass; dmarc=pass\n"
-
-
 async def test_auto_submitted_reply_is_ignored_before_touching_the_db():
     """RFC 3834: an OOO auto-reply answering our help email must not trigger
     another help email (mail loop). db=None proves the early return."""
     raw = (
-        _SES_PASS
+        SES_PASS_HEADER
         + "Auto-Submitted: auto-replied\n"
         "From: pi@scripps.edu\n"
         "To: review+sometoken@reply.copi.science\n"
@@ -137,12 +135,50 @@ async def test_auto_submitted_reply_is_ignored_before_touching_the_db():
     await process_inbound_email(raw, db=None)  # must not raise
 
 
+async def test_precedence_bulk_autoresponder_is_ignored_before_touching_the_db():
+    """Ticketing systems and older Exchange mark auto-replies with legacy
+    headers (Precedence: bulk/junk/list, X-Autoreply, X-Auto-Response-Suppress)
+    instead of Auto-Submitted. Now that the help email is reply-able (it
+    carries a token Reply-To), missing these re-opens the mail loop that the
+    Auto-Submitted check exists to prevent."""
+    raw = (
+        SES_PASS_HEADER
+        + "Precedence: bulk\n"
+        "From: pi@scripps.edu\n"
+        "To: review+sometoken@reply.copi.science\n"
+        "\n"
+        "Your message has been received.\n"
+    ).encode()
+    await process_inbound_email(raw, db=None)  # must not raise
+
+
+def test_legacy_auto_reply_markers_are_detected():
+    for headers in (
+        "Precedence: bulk\n",
+        "Precedence: junk\n",
+        "Precedence: list\n",
+        "Precedence: auto_reply\n",
+        "X-Autoreply: yes\n",
+        "X-Autorespond: OOO\n",
+        "X-Auto-Response-Suppress: All\n",
+    ):
+        msg = _msg(headers + "From: pi@scripps.edu\n\nbody")
+        assert inbound._is_auto_submitted(msg) is True, headers
+
+
+def test_ordinary_reply_headers_are_not_flagged_as_auto():
+    msg = _msg(
+        "Precedence: first-class\nFrom: pi@scripps.edu\n\n3 great idea"
+    )
+    assert inbound._is_auto_submitted(msg) is False
+
+
 async def test_auto_submitted_no_is_not_treated_as_an_auto_reply():
     """``Auto-Submitted: no`` explicitly marks human-generated mail; it must
     proceed into normal processing (here: to the token lookup, which needs a
     db — the AttributeError on db=None is the evidence it got past the gate)."""
     raw = (
-        _SES_PASS
+        SES_PASS_HEADER
         + "Auto-Submitted: no\n"
         "From: pi@scripps.edu\n"
         "To: review+sometoken@reply.copi.science\n"

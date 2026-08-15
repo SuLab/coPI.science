@@ -18,7 +18,11 @@ from src.models import (
     User,
 )
 from src.models.agent_activity import VISIBILITY_PUBLIC
-from src.services.email_notifications import mark_notification_responded, record_engagement
+from src.services.email_notifications import (
+    build_reply_address,
+    mark_notification_responded,
+    record_engagement,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -28,8 +32,18 @@ MAX_REPLIES_PER_TOKEN_PER_HOUR = 10
 # Processing attempts per S3 object before it is quarantined under failed/.
 MAX_S3_PROCESS_ATTEMPTS = 3
 
+# Help emails per notification. Unparseable replies deliberately never consume
+# the token, so without a ceiling a confused sender (or an autoresponder the
+# RFC 3834 gate misses) trades help emails with us at the rate limiter's pace
+# forever. Replies keep being processed past the cap — only the help emails stop.
+MAX_HELP_EMAILS_PER_NOTIFICATION = 3
+
 # token -> recent reply timestamps (monotonic-ish epoch seconds).
 _RECENT_REPLY_TIMES: dict[str, list[float]] = {}
+
+# token -> help emails sent (in-memory, like the rate limiter: the worker is a
+# single long-lived process and a restart merely resets the count).
+_HELP_EMAILS_SENT: dict[str, int] = {}
 
 # s3 key -> consecutive processing failures (in-memory; resets on restart).
 _S3_FAILURE_COUNTS: dict[str, int] = {}
@@ -51,12 +65,24 @@ def _reply_rate_ok(token: str, now: float | None = None) -> bool:
     return True
 
 
+# Legacy auto-responder markers (RFC 3834 §3.1.8 plus the Microsoft header).
+# Ticketing systems and older Exchange set these INSTEAD of Auto-Submitted.
+_AUTO_PRECEDENCE_VALUES = {"bulk", "junk", "list", "auto_reply"}
+_AUTO_REPLY_HEADERS = ("X-Autoreply", "X-Autorespond", "X-Auto-Response-Suppress")
+
+
 def _is_auto_submitted(msg: email.message.Message) -> bool:
     """RFC 3834: any Auto-Submitted value other than "no" marks auto-generated
     mail (out-of-office replies, list expansions). Processing those — and
-    answering them with a help email — is how mail loops start."""
+    answering them with a help email — is how mail loops start. Legacy markers
+    (Precedence, X-Autoreply, ...) count too: the help email carries a token
+    Reply-To, so an autoresponder the gate misses would answer it forever."""
     auto = (msg.get("Auto-Submitted") or "").strip().lower()
-    return bool(auto) and auto != "no" and not auto.startswith("no ")
+    if bool(auto) and auto != "no" and not auto.startswith("no "):
+        return True
+    if (msg.get("Precedence") or "").strip().lower() in _AUTO_PRECEDENCE_VALUES:
+        return True
+    return any(msg.get(h) for h in _AUTO_REPLY_HEADERS)
 
 # Auth verdicts (from the SES-stamped Authentication-Results header) that mean
 # the message failed a check — any of these on spf/dkim/dmarc rejects the reply.
@@ -250,10 +276,18 @@ async def process_inbound_email(raw_email: bytes, db: AsyncSession) -> None:
         logger.error("User %s not found for notification %s", notification.user_id, notification.id)
         return
 
-    # When we know the PI's address, the authenticated From must match it. (If
-    # user.email is None — e.g. a private-ORCID user — the secret reply token
-    # plus the SPF/DKIM/DMARC gate above are the controls we rely on.)
-    if user.email and from_addr.lower() != user.email.lower():
+    # Fail closed: an unidentifiable sender cannot review on a PI's behalf. A
+    # NULL user.email (e.g. a private-ORCID user) previously fell through to
+    # token-only auth; the dashboard remains that PI's review path.
+    if not user.email:
+        logger.warning(
+            "Rejecting reply for notification %s: user %s has no registered "
+            "email to match the sender against (fail closed)",
+            notification.id,
+            user.id,
+        )
+        return
+    if from_addr.lower() != user.email.lower():
         logger.warning(
             "Sender email mismatch: expected %s, got %s (notification %s)",
             user.email,
@@ -319,7 +353,16 @@ async def process_inbound_email(raw_email: bytes, db: AsyncSession) -> None:
         return
 
     # Unparseable
-    await _send_help_email(user, notification)
+    sent_so_far = _HELP_EMAILS_SENT.get(token, 0)
+    if sent_so_far < MAX_HELP_EMAILS_PER_NOTIFICATION:
+        _HELP_EMAILS_SENT[token] = sent_so_far + 1
+        await _send_help_email(user, notification)
+    else:
+        logger.warning(
+            "Help-email cap (%d) reached for notification %s — not replying",
+            MAX_HELP_EMAILS_PER_NOTIFICATION,
+            notification.id,
+        )
     logger.info("Unparseable reply for notification %s from %s", notification.id, from_addr)
 
 
@@ -700,8 +743,6 @@ async def _send_review_confirmation(
     db: AsyncSession,
 ) -> None:
     """Send confirmation email after a review is processed."""
-    settings = get_settings()
-
     agent_result = await db.execute(
         select(AgentRegistry).where(AgentRegistry.id == notification.agent_registry_id)
     )
@@ -717,7 +758,8 @@ async def _send_review_confirmation(
     subject = f"Review received - {other_name} proposal rated {rating}"
     text_body = (
         f"Got it - you rated the {other_name} collaboration proposal a {rating}. "
-        f"{agent.bot_name} is unblocked and can start new conversations."
+        f"{agent.bot_name} is unblocked and can start new conversations. "
+        "To change your rating, use your dashboard."
     )
 
     _send_simple_email(user.email, subject, text_body)
@@ -730,8 +772,6 @@ async def _send_instruction_confirmation(
     db: AsyncSession,
 ) -> None:
     """Send confirmation email after an instruction is processed."""
-    settings = get_settings()
-
     agent_result = await db.execute(
         select(AgentRegistry).where(AgentRegistry.id == notification.agent_registry_id)
     )
@@ -768,16 +808,32 @@ async def _send_help_email(user: User, notification: EmailNotification) -> None:
         '"focus on the mitochondrial angle instead").\n'
     )
 
-    _send_simple_email(user.email, subject, text_body)
+    # This email tells the PI to reply, so it must be reply-able: without a
+    # token Reply-To, a reply targets the noreply@ sender and bounces off the
+    # apex domain's mail forwarding. The token is still valid here — an
+    # unparseable reply deliberately leaves the notification at status='sent'.
+    reply_to = build_reply_address(notification.reply_token)
+    _send_simple_email(user.email, subject, text_body, reply_to=reply_to)
 
 
-def _send_simple_email(to_email: str, subject: str, text_body: str) -> bool:
+def _send_simple_email(
+    to_email: str, subject: str, text_body: str, reply_to: str | None = None
+) -> bool:
     """Send a simple text email via SES."""
     settings = get_settings()
     from src.services.email import is_allowed_recipient
     if not is_allowed_recipient(to_email):
         logger.info("Email to %s suppressed by outbound allowlist (subject=%r)", to_email, subject)
         return False
+    kwargs = {}
+    if reply_to:
+        kwargs["ReplyToAddresses"] = [reply_to]
+    else:
+        # Every no-Reply-To mail here answers a PI action, and a natural reply
+        # would bounce off the apex domain's mail forwarding — say so uniformly
+        # rather than per call site, so no current or future caller can miss it.
+        text_body = f"{text_body.rstrip()}\n\nReplies to this address are not monitored."
+
     try:
         import boto3
 
@@ -791,6 +847,7 @@ def _send_simple_email(to_email: str, subject: str, text_body: str) -> bool:
                     "Text": {"Data": text_body, "Charset": "UTF-8"},
                 },
             },
+            **kwargs,
         )
         return True
     except Exception as exc:

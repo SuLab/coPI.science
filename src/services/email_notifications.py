@@ -297,6 +297,14 @@ async def _process_user_notifications(user: User, db: AsyncSession) -> bool:
     return success
 
 
+def build_reply_address(reply_token: str) -> str:
+    """The address PIs reply to. The inbound parser (_extract_reply_token in
+    email_inbound.py) must recognize every address this builds — change the
+    two together."""
+    settings = get_settings()
+    return f"review+{reply_token}@{settings.ses_reply_domain}"
+
+
 async def send_proposal_notification(
     user: User,
     thread_decision: ThreadDecision,
@@ -335,9 +343,7 @@ async def send_proposal_notification(
     # is actually on — otherwise PIs answer a dead reply domain and get
     # silence (this is exactly what happened on prod through 2026-08).
     reply_enabled = settings.enable_inbound_email
-    reply_to = (
-        f"review+{reply_token}@{settings.ses_reply_domain}" if reply_enabled else None
-    )
+    reply_to = build_reply_address(reply_token) if reply_enabled else None
     dashboard_url = f"{settings.base_url}/agent/{agent.agent_id}/dashboard"
     unsubscribe_token = _generate_unsubscribe_token(str(user.id))
     unsubscribe_url = f"{settings.base_url}/settings/unsubscribe/{unsubscribe_token}"
@@ -1002,9 +1008,7 @@ async def _send_new_proposal_email(
     # Same gating as send_proposal_notification: never solicit a reply while
     # the inbound pipeline is off.
     reply_enabled = settings.enable_inbound_email
-    reply_to = (
-        f"review+{reply_token}@{settings.ses_reply_domain}" if reply_enabled else None
-    )
+    reply_to = build_reply_address(reply_token) if reply_enabled else None
     dashboard_url = f"{settings.base_url}/agent/{agent.agent_id}/dashboard"
     unsubscribe_token = _generate_unsubscribe_token(str(user.id))
     unsubscribe_url = f"{settings.base_url}/settings/unsubscribe/{unsubscribe_token}"

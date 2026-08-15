@@ -24,6 +24,13 @@ from src.models import (
 
 _counter = itertools.count(1)
 
+# The SES-stamped header every legitimately delivered inbound email carries.
+# Shared by the inbound-email suites so a change to the validator's
+# requirements (authserv-id, verdicts) is made in one place.
+SES_PASS_HEADER = (
+    "Authentication-Results: amazonses.com; spf=pass; dkim=pass; dmarc=pass\n"
+)
+
 
 async def make_user(session, **overrides) -> User:
     n = next(_counter)
