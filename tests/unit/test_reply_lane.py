@@ -151,6 +151,56 @@ async def test_dispatch_isolates_one_agents_phase3_failure_from_the_others(
 
 
 @pytest.mark.asyncio
+async def test_dispatch_does_not_advance_the_cursor_for_an_agent_whose_phase3_failed(
+    monkeypatch,
+):
+    """Final review fix: the try/except above isolates a Phase 3 failure so
+    OTHER agents keep working (see the test above), but isolation alone is
+    not enough — the cursor-advance loop used to run unconditionally for
+    EVERY agent, so a caught-and-logged exception for the hub still marked
+    the hub's own unprocessed messages "seen" for good. This is the exact
+    permanent, silent loss C2's promotion (see the section below) exists to
+    prevent, just for the cursor instead of has_pending_reply. Only an agent
+    whose Phase 3 pass actually ran this tick may have its cursor advanced;
+    a failed agent's cursor must hold where it was, so the message it never
+    got to process is retried on the next dispatch instead of lost."""
+    hub = Agent("blackbird", "BlackbirdBot", "Blackbird", role="scout_hub")
+    lab = Agent("wang", "WangBot", "Wang", role="pi_lab")
+    eng = SimulationEngine(
+        agents=[hub, lab],
+        slack_clients={
+            "blackbird": FakeSlackClient(agent_id="blackbird"),
+            "wang": FakeSlackClient(agent_id="wang"),
+        },
+    )
+    eng._running = True
+    eng.message_log.append(LogEntry(
+        ts="5.0", channel="general", sender_agent_id="pi0", sender_name="Pi0Bot",
+        content="unrelated post", thread_ts=None, posted_at=5.0, is_bot=True,
+    ))
+    monkeypatch.setattr(eng, "_service_reply", _noop_async)
+
+    real_phase3 = eng._phase3_activate_threads
+
+    def _phase3(agent):
+        if agent.agent_id == "blackbird":
+            raise RuntimeError("boom")
+        return real_phase3(agent)
+
+    monkeypatch.setattr(eng, "_phase3_activate_threads", _phase3)
+
+    await eng._dispatch_reply_lane()
+
+    assert hub.state.last_seen_cursor == 0.0, (
+        "the hub's Phase 3 raised this tick — its cursor must NOT advance, "
+        "or its unprocessed messages are silently marked seen forever"
+    )
+    assert lab.state.last_seen_cursor == 5.0, (
+        "wang's own Phase 3 succeeded and must still advance normally"
+    )
+
+
+@pytest.mark.asyncio
 async def test_dispatch_advances_the_cursor_so_phase3_does_not_rescan_forever(
     monkeypatch,
 ):
@@ -404,8 +454,21 @@ async def test_dispatch_stops_early_when_the_engine_stops_mid_sweep(monkeypatch)
     with no real await anywhere, every task races through its whole body in
     one scheduler step before the shutdown flag set by an earlier pair is
     ever visible to a later one. `await asyncio.sleep(0)` is the minimal real
-    yield point that reproduces the production task-scheduling gap."""
+    yield point that reproduces the production task-scheduling gap.
+
+    Final review fix: Task 14 raised ``reply_lane_max_in_flight``'s default
+    from 1 to 4 (see ``src/config.py``), which silently disarmed the SECOND
+    check this test guards (``simulation.py:1184-1185``, inside the acquired
+    semaphore). At the default cap=4, all 5 pending pairs take a semaphore
+    slot without ever parking on it, `_running` flips during pair 1's
+    `_serve`, and pair 2's own FIRST check (`:1151`, before the semaphore) is
+    the one that actually catches the stop — the whole unit suite stayed
+    green with `:1184-1185` deleted outright (confirmed via a disposable
+    worktree). Pin the semaphore to 1 explicitly, independent of the
+    configured default, so a contended semaphore is exercised and this test
+    discriminates on the guard it names."""
     eng, hub = _engine_with_pending(5)
+    eng._reply_sem = asyncio.Semaphore(1)
     served = []
 
     async def _serve(agent, thread):
@@ -428,6 +491,90 @@ async def test_dispatch_stops_early_when_the_engine_stops_mid_sweep(monkeypatch)
         assert hub.state.active_threads[f"t{i}"].has_pending_reply is True, (
             f"t{i} was never reached this tick but must still retry next dispatch"
         )
+
+
+@pytest.mark.asyncio
+async def test_a_pair_found_only_via_new_reply_keeps_its_retry_signal_if_skipped(
+    monkeypatch,
+):
+    """Final review fix: the C2 property, isolated from `_engine_with_pending`'s
+    fixture, which seeds every thread with ``has_pending_reply=True`` already
+    — under that fixture, deleting the promotion loop at
+    `simulation.py:1135-1136` (``for _agent, thread in pairs: thread.
+    has_pending_reply = True``) cannot be caught: every pair the assertion
+    above checks was ALREADY durably True before the sweep even started, from
+    `_engine_with_pending`'s own construction, not from the promotion loop
+    (confirmed via a disposable worktree: the whole unit suite, including
+    `test_dispatch_stops_early_when_the_engine_stops_mid_sweep` above, stays
+    green with that loop deleted outright).
+
+    This test seeds TWO threads discovered ONLY via
+    ``has_new_reply_from_other`` (``has_pending_reply=False`` plus a real log
+    entry after each thread's root — same construction as
+    `test_dispatch_does_not_hide_a_reply_that_arrives_during_its_own_pass`
+    above), then stops the sweep after the first pair. The second pair's
+    retry signal must already be durably set — because
+    `_dispatch_reply_lane` advances `last_seen_cursor` past BOTH threads'
+    triggering replies for the WHOLE batch this same tick (see its own
+    docstring), regardless of how far servicing actually got. Without the
+    promotion, the second thread's ``has_pending_reply`` stays False AND the
+    cursor now covers its triggering reply — so `has_new_reply_from_other`
+    alone can never find it again on any later dispatch: a silent, permanent
+    loss, the exact shape C2 exists to prevent.
+    """
+    hub = Agent("blackbird", "BlackbirdBot", "Blackbird", role="scout_hub")
+    eng = SimulationEngine(
+        agents=[hub], slack_clients={"blackbird": FakeSlackClient(agent_id="blackbird")}
+    )
+    eng._running = True
+    eng._reply_sem = asyncio.Semaphore(1)
+
+    for i in range(2):
+        root_ts = f"{i}.0"
+        reply_ts = f"{i}.5"
+        eng.message_log.append(LogEntry(
+            ts=root_ts, channel="general", sender_agent_id="blackbird",
+            sender_name="BlackbirdBot", content="root", thread_ts=None,
+            posted_at=float(i), is_bot=True,
+        ))
+        hub.state.active_threads[root_ts] = ThreadState(
+            thread_id=root_ts, channel="general", other_agent_id="pi0",
+            message_count=1, has_pending_reply=False,
+        )
+        eng.message_log.append(LogEntry(
+            ts=reply_ts, channel="general", sender_agent_id="pi0",
+            sender_name="Pi0Bot", content="a reply", thread_ts=root_ts,
+            posted_at=float(i) + 0.5, is_bot=True,
+        ))
+
+    served = []
+
+    async def _serve(agent, thread):
+        served.append(thread.thread_id)
+        eng._running = False  # stop the sweep before the second pair runs
+        await asyncio.sleep(0)
+
+    monkeypatch.setattr(eng, "_service_reply", _serve)
+
+    n = await eng._dispatch_reply_lane()
+
+    assert served == ["0.0"], "the sweep must have stopped after the first pair"
+    assert n == 1
+
+    skipped = hub.state.active_threads["1.0"]
+    assert skipped.has_pending_reply is True, (
+        "a pair discovered only via has_new_reply_from_other, and never "
+        "reached this tick, must still have its retry flag promoted for the "
+        "WHOLE batch before the cursor advances past its triggering message"
+    )
+    # Confirm the hazard is real: the cursor now covers thread "1.0"'s
+    # triggering reply (posted_at=1.5), so has_new_reply_from_other alone
+    # would never find it again on a later dispatch — has_pending_reply is
+    # the ONLY thing left carrying the signal forward.
+    assert hub.state.last_seen_cursor >= 1.5
+    assert not eng.message_log.has_new_reply_from_other(
+        "1.0", "blackbird", hub.state.last_seen_cursor, allowed_sender_ids=None,
+    ), "test fixture assumption broke: the cursor should already cover this reply"
 
 
 def _hub_with_one_pending_thread():

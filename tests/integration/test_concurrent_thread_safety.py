@@ -154,7 +154,10 @@ async def test_two_concurrent_replies_produce_one_conclude_and_one_assessment(
                 )
             )).scalars().all()
             decisions = (await check.execute(
-                select(ThreadDecision).where(ThreadDecision.thread_id == "t1")
+                select(ThreadDecision).where(
+                    ThreadDecision.simulation_run_id == run_id,
+                    ThreadDecision.thread_id == "t1",
+                )
             )).scalars().all()
         assert len(rows) == 1, f"{len(rows)} assessments written for one interview"
         assert len(decisions) == 1, f"thread closed {len(decisions)} times"
@@ -254,7 +257,10 @@ async def test_two_agents_replying_into_one_thread_do_not_overlap_at_the_product
                 )
             )).scalars().all()
             decisions = (await check.execute(
-                select(ThreadDecision).where(ThreadDecision.thread_id == "t1")
+                select(ThreadDecision).where(
+                    ThreadDecision.simulation_run_id == run_id,
+                    ThreadDecision.thread_id == "t1",
+                )
             )).scalars().all()
         assert len(rows) == 1, f"{len(rows)} assessments written for one interview"
         assert len(decisions) == 1, f"thread closed {len(decisions)} times"
@@ -422,6 +428,206 @@ async def test_cross_agent_close_does_not_deadlock(engine, monkeypatch):
         )
     finally:
         await _delete_run(factory, run_id)
+
+
+# ---------------------------------------------------------------------------
+# 3b. Final review fix (item 1) — `_close_thread`'s OWN agent lock
+# (`simulation.py:1792`) is untested: test 3 above only proves no DEADLOCK,
+# and removing a lock cannot introduce a deadlock (fewer locks can only ever
+# remove one), so no assertion there can fail against that mutation. This
+# test instead proves the lock's actual job: mutual exclusion. Two closes
+# that share the hub as their common agent both read-then-write the hub's
+# working-memory FILE via `_update_agent_memory` (read current memory ->
+# await a real LLM call -> write the result back) — a classic lost-update
+# window if they are allowed to overlap. `_close_thread`'s agent lock is
+# held across the WHOLE method, including both `_update_agent_memory` calls,
+# specifically to serialize this. No lock is applied by this test anywhere;
+# only the production line at `simulation.py:1792` can prevent the loss.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_close_threads_agent_lock_prevents_a_lost_memory_update(
+    monkeypatch, tmp_path,
+):
+    """Two interviews close concurrently, both involving the hub: hub+lab1
+    on thread AB, hub+lab2 on thread CD. Both closes call `_update_agent_
+    memory(hub, ...)`. The fake `generate_agent_response` below plays the
+    part of the real LLM: it reads whatever "current working memory" text
+    the prompt embeds, sleeps (a REAL await, so a genuine interleaving is
+    possible), then returns that prior text with its own event appended —
+    exactly the read-await-write shape a real memory-update call has.
+
+    If `_close_thread`'s agent lock serializes the two closes (as it must,
+    since both acquire_all calls share the "blackbird" key), the second
+    close's memory update reads the FIRST close's already-written result, so
+    the final file accumulates BOTH events. If the lock is missing, both
+    reads happen against the same stale ("(empty)") prior text before either
+    writes, and whichever write lands last erases the other's event
+    entirely — confirmed via a disposable worktree that deleting
+    `simulation.py:1792`'s `async with self._agent_locks.acquire_all(...):`
+    makes this fail (only one of the two agent ids ends up present)."""
+    monkeypatch.setattr("src.agent.agent.PROFILES_DIR", tmp_path)
+
+    hub = Agent("blackbird", "BlackbirdBot", "Blackbird", role="scout_hub")
+    lab1 = Agent("wang1", "Wang1Bot", "Wang1", role="pi_lab")
+    lab2 = Agent("wang2", "Wang2Bot", "Wang2", role="pi_lab")
+
+    thread_ab = ThreadState(thread_id="tAB", channel="general", other_agent_id="wang1")
+    hub.state.active_threads["tAB"] = thread_ab
+    lab1.state.active_threads["tAB"] = ThreadState(
+        thread_id="tAB", channel="general", other_agent_id="blackbird",
+    )
+    thread_cd = ThreadState(thread_id="tCD", channel="general", other_agent_id="wang2")
+    hub.state.active_threads["tCD"] = thread_cd
+    lab2.state.active_threads["tCD"] = ThreadState(
+        thread_id="tCD", channel="general", other_agent_id="blackbird",
+    )
+
+    eng = SimulationEngine(
+        agents=[hub, lab1, lab2],
+        slack_clients={
+            "blackbird": FakeSlackClient(agent_id="blackbird"),
+            "wang1": FakeSlackClient(agent_id="wang1"),
+            "wang2": FakeSlackClient(agent_id="wang2"),
+        },
+        session_factory=None, simulation_run_id=None,
+    )
+
+    async def _fake_generate(*, messages, **kwargs):
+        content = messages[0]["content"]
+        event_marker = "The event that triggered this update:\n"
+        mem_marker = "Your current working memory:\n"
+        e_start = content.index(event_marker) + len(event_marker)
+        e_end = content.index("\n\n", e_start)
+        event = content[e_start:e_end]
+        m_start = content.index(mem_marker) + len(mem_marker)
+        m_end = content.index("\n\nWrite the complete", m_start)
+        prior = content[m_start:m_end]
+        # The real await: without it both "concurrent" calls would race
+        # through their entire body in one scheduler tick and could never
+        # observe each other's write regardless of locking.
+        await asyncio.sleep(0.05)
+        if prior == "(empty)":
+            return event
+        return f"{prior} || {event}"
+
+    monkeypatch.setattr(
+        "src.agent.simulation.generate_agent_response", _fake_generate
+    )
+
+    close_ab = asyncio.ensure_future(
+        eng._close_thread(hub, thread_ab, "no_proposal")
+    )
+    # Let close_ab acquire the shared "blackbird" agent lock and settle into
+    # its own genuine await inside _update_agent_memory.
+    await asyncio.sleep(0.01)
+    close_cd = asyncio.ensure_future(
+        eng._close_thread(hub, thread_cd, "no_proposal")
+    )
+    # Let close_cd register as a genuine waiter on "blackbird".
+    await asyncio.sleep(0.01)
+
+    await asyncio.wait_for(asyncio.gather(close_ab, close_cd), timeout=5.0)
+
+    final_memory = hub.working_memory
+    assert "wang1" in final_memory and "wang2" in final_memory, (
+        f"hub's working memory lost one of the two closes' events entirely: "
+        f"{final_memory!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 3c. Final review fix (item 2) — `_evict_dead_thread`'s OWN agent lock
+# (`simulation.py:1902`) is likewise untested. It takes EVERY agent's key,
+# so it can never truly overlap with `_close_thread` for the SAME thread
+# unless it is allowed to run while `_close_thread` is genuinely suspended
+# waiting to ACQUIRE its own (narrower) agent lock — before close has
+# mutated anything at all, since every mutation in `_close_thread` lives
+# INSIDE its `async with` block. Manufacture that exact window: pre-hold
+# the OTHER agent's key externally so close is blocked immediately after
+# acquiring "blackbird" but before entering its body, then let (unlocked, in
+# the mutation) eviction for the SAME thread_id run to completion in that
+# gap — it pops the thread out of the other agent's `active_threads` before
+# close ever gets there, so close's own `if thread.thread_id in other_agent.
+# state.active_threads:` check (which gates BOTH marking that ThreadState
+# "closed" and, for a real proposal, appending it) comes back False and
+# silently skips. The test holds its own reference to that ThreadState
+# object (not just the dict) so it can tell whether `.status` was ever
+# actually set, independent of whether the dict entry survives.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_evict_dead_threads_agent_lock_prevents_it_from_racing_ahead_of_close(
+    monkeypatch,
+):
+    """With the real lock, eviction cannot run until close_thread has fully
+    released both agent locks — by which point close has already set
+    `wang`'s own ThreadState.status = "closed". Confirmed via a disposable
+    worktree that deleting `simulation.py:1902`'s
+    `async with self._agent_locks.acquire_all(*self.agents.keys()):` makes
+    this fail (status never gets set at all)."""
+    hub = Agent("blackbird", "BlackbirdBot", "Blackbird", role="scout_hub")
+    lab = Agent("wang", "WangBot", "Wang", role="pi_lab")
+
+    thread_hub_side = ThreadState(
+        thread_id="t1", channel="general", other_agent_id="wang",
+    )
+    hub.state.active_threads["t1"] = thread_hub_side
+    thread_lab_side = ThreadState(
+        thread_id="t1", channel="general", other_agent_id="blackbird",
+    )
+    lab.state.active_threads["t1"] = thread_lab_side
+
+    eng = SimulationEngine(
+        agents=[hub, lab],
+        slack_clients={"blackbird": FakeSlackClient(agent_id="blackbird"),
+                       "wang": FakeSlackClient(agent_id="wang")},
+        session_factory=None, simulation_run_id=None,
+    )
+
+    async def _fast_memory_update(agent, event, *a, **kw):
+        return None  # no real LLM call — this test is about lock timing only
+
+    monkeypatch.setattr(eng, "_update_agent_memory", _fast_memory_update)
+
+    # Manufacture genuine contention: pre-hold "wang" externally so
+    # close_thread's acquire_all("blackbird", "wang") gets "blackbird"
+    # (uncontended) and then genuinely suspends waiting for "wang" — BEFORE
+    # entering its body, i.e. before it has mutated anything at all.
+    wang_lock = eng._agent_locks.get("wang")
+    await wang_lock.acquire()
+
+    try:
+        close_task = asyncio.ensure_future(
+            eng._close_thread(hub, thread_hub_side, "no_proposal")
+        )
+        # Let close_task grab "blackbird" and queue as a genuine waiter on
+        # the externally-held "wang".
+        await asyncio.sleep(0.01)
+
+        evict_task = asyncio.ensure_future(eng._evict_dead_thread("t1"))
+        # With the lock, evict_task's acquire_all(*agents.keys()) tries
+        # "blackbird" first and queues behind close_task, which already
+        # holds it. Without the lock (mutation), evict_task has nothing to
+        # wait on at all and runs to completion right here, before "wang" is
+        # ever released.
+        await asyncio.sleep(0.01)
+
+        wang_lock.release()
+
+        await asyncio.wait_for(asyncio.gather(close_task, evict_task), timeout=5.0)
+
+        assert thread_lab_side.status == "closed", (
+            "wang's own ThreadState was never marked closed — eviction ran "
+            "ahead of close_thread and removed the dict entry before close "
+            "reached its own status-setting check, so the check silently "
+            "saw it as already gone and skipped"
+        )
+    finally:
+        if wang_lock.locked():
+            wang_lock.release()
 
 
 # ---------------------------------------------------------------------------

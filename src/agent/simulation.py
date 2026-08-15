@@ -1091,6 +1091,16 @@ class SimulationEngine:
           anything below it, is now genuinely unguarded — a bug there
           surfaces (crashes the run) rather than being swallowed wholesale.
 
+        Final review fix: catching that per-agent Phase 3 failure is not
+        enough on its own — the cursor-advance loop below used to run
+        unconditionally for every agent, so a caught-and-logged exception
+        for agent X still marked X's own unprocessed messages "seen" for
+        good, the exact permanent, silent loss this whole guard exists to
+        avoid. `failed_agent_ids` is collected in the Phase 3 loop and
+        consulted in the advance loop so a failed agent's cursor holds where
+        it was; its unactivated messages are retried on the next dispatch
+        rather than lost.
+
         Fix round 3 (task review, Critical):
         - **I5 regressed by the concurrent rewrite**: `_run` originally
           checked `self._running` only once, at the top, before acquiring
@@ -1119,10 +1129,20 @@ class SimulationEngine:
             agent.agent_id: self.message_log.latest_timestamp
             for agent in self.agents.values()
         }
+        # Final review fix: an agent whose Phase 3 pass raises must NOT have
+        # its cursor advanced below — that would mark this exact agent's
+        # unprocessed messages "seen" on the strength of a pass that never
+        # actually ran, a permanent silent loss of the same shape C2 was
+        # added to prevent (see test_dispatch_isolates_one_agents_phase3_
+        # failure_from_the_others above, which only pins that OTHER agents
+        # keep working — it says nothing about the failed agent's own
+        # cursor). Collected here, consulted in the advance loop below.
+        failed_agent_ids: set[str] = set()
         for agent in self.agents.values():
             try:
                 self._phase3_activate_threads(agent)
             except Exception:
+                failed_agent_ids.add(agent.agent_id)
                 logger.exception(
                     "[reply-lane] %s: error activating threads (Phase 3)",
                     agent.agent_id,
@@ -1136,6 +1156,8 @@ class SimulationEngine:
             thread.has_pending_reply = True
 
         for agent in self.agents.values():
+            if agent.agent_id in failed_agent_ids:
+                continue
             agent.state.last_seen_cursor = max(
                 agent.state.last_seen_cursor, cursor_snapshots[agent.agent_id]
             )
@@ -4535,8 +4557,12 @@ class SimulationEngine:
                         .order_by(LlmCallLog.created_at)
                     )
                     rows = result.all()
-                # call_times is a deque that try_reserve appends to (Task 9;
-                # record_api_call only bumps the lifetime counter now), same
+                # call_times is a deque that try_reserve appends to (Task 9)
+                # AND that record_api_call's default (already_reserved=False)
+                # path also appends to (Ruling R5 — see that method's
+                # docstring; the six call sites that rely on this default are
+                # never separately reserved, so record_api_call is the only
+                # place they are booked into the window at all), same
                 # shape as pending_proposals above — so a plain append here is
                 # not idempotent either: a second rebuild call would duplicate
                 # every in-window entry and could throttle an agent that isn't

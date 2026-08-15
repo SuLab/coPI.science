@@ -15,14 +15,6 @@ def test_reserve_admits_up_to_the_allowance_then_refuses():
     ]
 
 
-def test_a_released_reservation_is_reusable():
-    a = Agent("wang", "WangBot", "Wang")
-    assert a.try_reserve(1, 600, now=1000.0) is True
-    assert a.try_reserve(1, 600, now=1000.0) is False
-    a.release_reservation()
-    assert a.try_reserve(1, 600, now=1000.0) is True
-
-
 def test_reservations_age_out_of_the_window():
     a = Agent("wang", "WangBot", "Wang")
     assert a.try_reserve(1, 600, now=1000.0) is True

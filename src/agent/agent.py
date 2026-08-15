@@ -130,11 +130,6 @@ class Agent:
         self.state.throttled = False
         return True
 
-    def release_reservation(self) -> None:
-        """Give back a reservation whose call was never issued."""
-        if self.state.call_times:
-            self.state.call_times.pop()
-
     # ------------------------------------------------------------------
     # Profile properties (cached, loaded from disk)
     # ------------------------------------------------------------------
