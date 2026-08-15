@@ -136,7 +136,8 @@ class TestEvictDeadThread:
             assert not any(p.thread_id == dead_ts for p in ag.state.pending_proposals)
 
         assert f"proposal_thread:{dead_ts}" not in engine._poll_cursors
-        assert dead_ts not in engine._closed_thread_ids
+        # Eviction is additive: it removes per-agent state but never un-closes a thread
+        assert dead_ts in engine._closed_thread_ids
 
     def test_unknown_thread_id_is_noop(self, engine_with_agents):
         engine, _, a, b = engine_with_agents

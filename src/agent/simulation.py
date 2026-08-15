@@ -1612,7 +1612,10 @@ class SimulationEngine:
             if removed:
                 evicted_from += 1
         self._poll_cursors.pop(f"proposal_thread:{thread_id}", None)
-        self._closed_thread_ids.discard(thread_id)
+        # Eviction removes per-agent state but must NEVER un-close a thread.
+        # If another caller is racing a _close_thread add() against this eviction,
+        # the discard would remove the closed marker, and Phase 3 would re-activate
+        # the finished interview. _closed_thread_ids is insert-only.
         if evicted_from:
             logger.info(
                 "Evicted dead thread %s from %d agent(s)' state",
