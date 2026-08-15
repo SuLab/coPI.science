@@ -13,6 +13,7 @@ from typing import Any
 from src.agent.agent import PROFILES_DIR, Agent
 from src.agent.channels import SEEDED_CHANNELS
 from src.agent.ids import WRITER_ENGINE, TsMinter
+from src.agent.locks import LockRegistry
 from src.agent.message_log import LogEntry, MessageLog
 from src.agent.post_types import (
     PostTypeSpec,
@@ -343,12 +344,45 @@ class SimulationEngine:
         # See _sleep / request_stop (R2).
         self._stop_event = asyncio.Event()
 
-        # Bounds concurrent LLM calls PROCESS-WIDE. Constructed once: a
-        # per-call semaphore bounds each turn separately, so N concurrent
-        # turns gave N x cap concurrent requests.
-        self._llm_fanout_sem = asyncio.Semaphore(
-            max(1, get_settings().phase4_max_concurrent_replies)
+        # Two-lane concurrent scheduler (docs/specs/2026-08-14-two-lane-
+        # concurrent-scheduler-design.md §3). Per-key lock registries, keyed
+        # by thread_id and agent_id respectively — disjoint namespaces, so a
+        # single coroutine holding one can never re-acquire the other under
+        # the same key and deadlock on itself. That disjointness does NOT by
+        # itself rule out a cross-coroutine deadlock, though: two coroutines
+        # acquiring the SAME TWO registries in opposite order still can. The
+        # one global rule that prevents it, enforced by convention (no
+        # compiler-checked guarantee exists — see
+        # test_thread_lock_then_agent_lock_does_not_deadlock_against_an_agent_lock_only_caller
+        # and test_no_call_site_bypasses_acquire_all, both in
+        # tests/unit/test_reply_lane.py, for the empirical regression):
+        #
+        #   Acquire the thread lock before the agent lock. Never the reverse.
+        #
+        # Every call site that takes both follows this: the reply lane
+        # (_dispatch_reply_lane's _run) holds a thread lock for the whole
+        # servicing span, and everything nested under it that also needs an
+        # agent lock (_close_thread, _evict_dead_thread) acquires the agent
+        # lock WHILE the thread lock is already held. _phase5_new_post takes
+        # only the agent lock and never a thread lock (its own _post_message
+        # call never carries a thread_ts, so it can never reach
+        # _evict_dead_thread), so it can't invert the order.
+        self._thread_locks = LockRegistry()
+        self._agent_locks = LockRegistry()
+        # Bounds concurrent reply-lane tasks PROCESS-WIDE. Constructed once,
+        # here, and never re-constructed per call/per turn — the whole reason
+        # the OLD Phase-4 fan-out semaphore (`_llm_fanout_sem`, deleted here)
+        # failed at this: it bounded one turn's own fan-out, so N concurrent
+        # turns gave N x cap concurrent requests (spec §6.3, ported test
+        # `test_the_fanout_bound_is_global_not_per_turn` below).
+        self._reply_sem = asyncio.Semaphore(
+            max(1, get_settings().reply_lane_max_in_flight)
         )
+        # Dispatcher-level in-flight dedup (spec §4.3): a (agent, thread) pair
+        # already being serviced — by this dispatch call's own sub-tasks, or
+        # by an earlier dispatch call that is still draining when the next
+        # tick's call starts — must not be spawned a second time.
+        self._reply_in_flight: set[tuple[str, str]] = set()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -985,8 +1019,12 @@ class SimulationEngine:
         await self._reply_to_thread(agent, thread)
 
     async def _dispatch_reply_lane(self) -> int:
-        """Service every pending pair. Sequential for now; Task 13 makes it
-        concurrent behind ``reply_lane_max_in_flight``.
+        """Service every pending pair, concurrently, bounded by
+        ``reply_lane_max_in_flight`` (Task 13). Default is 1, which keeps
+        this behaviourally sequential — one pair fully serviced (thread lock
+        released, semaphore released) before the next one's own lock/
+        semaphore acquisition can succeed. Task 14 raises the default once
+        the adversarial concurrency tests exist.
 
         Phase 3 (thread activation) runs first for every agent, each guarded
         by its own try/except (fix round 2 — see below): nothing else calls
@@ -1019,11 +1057,15 @@ class SimulationEngine:
           `_pending_reply_pairs`'s docstring). Each pair is then serviced
           inside its own try/except so one failing reply can never abort the
           rest of the sweep (spec §8) or propagate out of this call.
-        - **I5**: checks `self._running` between pairs so a shutdown request
-          is honoured within one reply's worth of latency instead of first
+        - **I5**: checks `self._running` per pair, at the moment that pair's
+          own task actually starts running, so a shutdown request is honoured
+          within roughly one reply's worth of latency instead of first
           draining the whole sweep — worst case today is ~12 sequential Opus
           calls in a 12-interview star, well past the documented `docker stop
-          -t 30` grace period.
+          -t 30` grace period. (At the default `reply_lane_max_in_flight=1`
+          this is exactly "between pairs", matching the pre-Task-13 sequential
+          loop this replaced; a higher cap admits more than one pair before a
+          stop takes effect, trading strict latency for throughput.)
 
         Fix round 2 (task review):
         - **Ruling R10**: this function no longer touches
@@ -1079,18 +1121,61 @@ class SimulationEngine:
             )
 
         serviced = 0
-        for agent, thread in pairs:
-            if not self._running:
-                break
-            try:
-                await self._service_reply(agent, thread)
-            except Exception:
-                logger.exception(
-                    "[reply-lane] %s: error servicing thread %s",
-                    agent.agent_id, thread.thread_id,
-                )
-            serviced += 1
 
+        async def _run(agent: Agent, thread: ThreadState) -> None:
+            nonlocal serviced
+            # I5, preserved under concurrency: checked at the moment this
+            # pair's own task starts running (not up front, when `pairs` was
+            # built) so a shutdown requested while a sibling pair was being
+            # serviced is honoured — this pair is simply never attempted,
+            # same as the old loop's `break`. Not counted (mirrors `break`
+            # never reaching this pair's `serviced += 1` either).
+            if not self._running:
+                return
+            key = (agent.agent_id, thread.thread_id)
+            # Dispatcher-level in-flight dedup (spec §4.3): a pair already
+            # being serviced by another still-draining `_dispatch_reply_lane`
+            # call must not be spawned again. Check-then-add with NO `await`
+            # between them — the same check-then-act shape every other
+            # invariant in this file is careful about — so two concurrent
+            # dispatch calls racing this exact pair can't both pass.
+            if key in self._reply_in_flight:
+                return
+            self._reply_in_flight.add(key)
+            try:
+                async with self._reply_sem:
+                    # Thread lock held ACROSS the LLM call: the stale-history
+                    # (§4.1) and CONCLUDE-ordinal (§4.2) races both happen
+                    # between the read and the act, not inside either — a
+                    # lock released before `_service_reply` returns would not
+                    # fix them.
+                    #
+                    # LOCK ORDER (see the note on `_thread_locks` in
+                    # __init__): this acquires the THREAD lock. Everything
+                    # nested inside `_service_reply` that also needs an AGENT
+                    # lock (`_close_thread` via `_check_thread_outcome` or the
+                    # system-enforced-close branch of `_reply_to_thread`;
+                    # `_evict_dead_thread` via `_post_message`'s
+                    # ThreadNotFound handling) acquires it while this thread
+                    # lock is already held — thread-lock-outer, agent-lock-
+                    # inner, never the reverse.
+                    async with self._thread_locks.acquire_all(thread.thread_id):
+                        try:
+                            await self._service_reply(agent, thread)
+                        except Exception:
+                            logger.exception(
+                                "[reply-lane] %s: error servicing thread %s",
+                                agent.agent_id, thread.thread_id,
+                            )
+                        finally:
+                            serviced += 1
+            finally:
+                self._reply_in_flight.discard(key)
+
+        await asyncio.gather(
+            *(_run(agent, thread) for agent, thread in pairs),
+            return_exceptions=True,
+        )
         return serviced
 
     # ------------------------------------------------------------------
@@ -1342,7 +1427,22 @@ class SimulationEngine:
     # ------------------------------------------------------------------
 
     async def _reply_to_thread(self, agent: Agent, thread: ThreadState) -> None:
-        """Compose and post a reply to a single thread."""
+        """Compose and post a reply to a single thread.
+
+        Runs under `_dispatch_reply_lane`'s THREAD lock for
+        `thread.thread_id`, held for this call's entire duration (across the
+        LLM call) by the caller — see `_run` there. That is deliberate, not
+        incidental: the stale-history read below and the CONCLUDE-ordinal
+        computed from it (spec §4.1, §4.2) are a check-then-act pair that
+        only holds if nothing else can touch this same thread between the
+        read and the reply landing. Both `_close_thread` (via
+        `_check_thread_outcome`, and the system-enforced-close branch below)
+        and `_evict_dead_thread` (via `_post_message`'s ThreadNotFound
+        handling) may additionally take an AGENT lock while this thread lock
+        is held — that nesting order (thread-lock-outer, agent-lock-inner) is
+        the one documented on `_thread_locks` in __init__ and must never
+        invert.
+        """
         # Monotonic latch for the specialist floor's fail-open snapshot
         # (ThreadState.floor_armed), re-evaluated at the START of every turn on
         # this thread, before any `await` in this method.
@@ -1634,92 +1734,108 @@ class SimulationEngine:
         outcome: str,
         summary_text: str | None = None,
     ) -> None:
-        """Close a thread and log the decision."""
-        thread.status = "closed"
-        self._closed_thread_ids.add(thread.thread_id)
+        """Close a thread and log the decision.
 
-        # Track for Phase 5 dedup context
-        pair_key = tuple(sorted([agent.agent_id, thread.other_agent_id]))
-        self._prior_threads.setdefault(pair_key, []).append({
-            "channel": thread.channel,
-            "outcome": outcome,
-            "summary": (summary_text or "")[:400] or None,
-        })
-        # Remove from active threads
-        agent.state.active_threads.pop(thread.thread_id, None)
+        Fires from inside `_reply_to_thread` (system-enforced close) or
+        `_check_thread_outcome` (⏸️ decline), both of which run under the
+        reply lane's THREAD lock for `thread.thread_id` — see
+        `_dispatch_reply_lane`. This method's own mutation of BOTH agents'
+        `active_threads` (this ruling — Task 12 review Finding B / Ruling
+        R11 — is one of the two motivating cases for `_agent_locks` at all,
+        alongside `_evict_dead_thread` below) is additionally guarded by the
+        AGENT lock, acquired here, nested INSIDE the already-held thread
+        lock: thread-lock-outer, agent-lock-inner, per the ordering note on
+        `_thread_locks` in __init__. `acquire_all` sorts the two agent ids,
+        so two closes racing in opposite directions (this agent/other vs.
+        other/this agent — spec §3.2's motivating scenario) converge on the
+        same acquisition order and cannot deadlock on each other.
+        """
+        async with self._agent_locks.acquire_all(agent.agent_id, thread.other_agent_id):
+            thread.status = "closed"
+            self._closed_thread_ids.add(thread.thread_id)
 
-        # Also close for the other agent if they have this thread active
-        other_agent = self.agents.get(thread.other_agent_id)
-        if other_agent and thread.thread_id in other_agent.state.active_threads:
-            other_agent.state.active_threads[thread.thread_id].status = "closed"
-            other_agent.state.active_threads.pop(thread.thread_id, None)
-            # If proposal, add to other agent's pending_proposals too.
-            # Replace any existing entry for the same thread so reopen/re-propose
-            # cycles don't accumulate duplicates during a single run.
-            if outcome == "proposal" and summary_text:
-                other_agent.state.pending_proposals = [
-                    p for p in other_agent.state.pending_proposals
-                    if p.thread_id != thread.thread_id
-                ]
-                other_agent.state.pending_proposals.append(ProposalRef(
-                    thread_id=thread.thread_id,
-                    channel=thread.channel,
-                    other_agent_id=agent.agent_id,
-                    summary_text=summary_text,
-                    proposed_at=time.time(),
-                ))
+            # Track for Phase 5 dedup context
+            pair_key = tuple(sorted([agent.agent_id, thread.other_agent_id]))
+            self._prior_threads.setdefault(pair_key, []).append({
+                "channel": thread.channel,
+                "outcome": outcome,
+                "summary": (summary_text or "")[:400] or None,
+            })
+            # Remove from active threads
+            agent.state.active_threads.pop(thread.thread_id, None)
 
-        # Log to DB
-        if self.session_factory and self.simulation_run_id:
-            try:
-                async with self.session_factory() as db:
-                    decision = ThreadDecision(
-                        simulation_run_id=self.simulation_run_id,
+            # Also close for the other agent if they have this thread active
+            other_agent = self.agents.get(thread.other_agent_id)
+            if other_agent and thread.thread_id in other_agent.state.active_threads:
+                other_agent.state.active_threads[thread.thread_id].status = "closed"
+                other_agent.state.active_threads.pop(thread.thread_id, None)
+                # If proposal, add to other agent's pending_proposals too.
+                # Replace any existing entry for the same thread so reopen/re-propose
+                # cycles don't accumulate duplicates during a single run.
+                if outcome == "proposal" and summary_text:
+                    other_agent.state.pending_proposals = [
+                        p for p in other_agent.state.pending_proposals
+                        if p.thread_id != thread.thread_id
+                    ]
+                    other_agent.state.pending_proposals.append(ProposalRef(
                         thread_id=thread.thread_id,
                         channel=thread.channel,
-                        agent_a=agent.agent_id,
-                        agent_b=thread.other_agent_id,
-                        outcome=outcome,
+                        other_agent_id=agent.agent_id,
                         summary_text=summary_text,
+                        proposed_at=time.time(),
+                    ))
+
+            # Log to DB
+            if self.session_factory and self.simulation_run_id:
+                try:
+                    async with self.session_factory() as db:
+                        decision = ThreadDecision(
+                            simulation_run_id=self.simulation_run_id,
+                            thread_id=thread.thread_id,
+                            channel=thread.channel,
+                            agent_a=agent.agent_id,
+                            agent_b=thread.other_agent_id,
+                            outcome=outcome,
+                            summary_text=summary_text,
+                        )
+                        db.add(decision)
+                        await db.commit()
+                except Exception as exc:
+                    # No natural retry buffer for a ThreadDecision (unlike
+                    # _flush_persisted/_flush_llm_logs, there is no accumulating
+                    # list this row is drained from — it is written once, right
+                    # here) and the in-memory thread state above has already moved
+                    # to "closed" either way, so requeueing would mean inventing a
+                    # queue purpose-built for this call site. Make the loss
+                    # unmistakable instead: ERROR + a full traceback, up from the
+                    # WARNING this used to log.
+                    logger.error(
+                        "[%s] Failed to log thread decision for %s (outcome=%s): "
+                        "%s — LOST, this write will never be retried",
+                        agent.agent_id, thread.thread_id, outcome, exc,
+                        exc_info=True,
                     )
-                    db.add(decision)
-                    await db.commit()
-            except Exception as exc:
-                # No natural retry buffer for a ThreadDecision (unlike
-                # _flush_persisted/_flush_llm_logs, there is no accumulating
-                # list this row is drained from — it is written once, right
-                # here) and the in-memory thread state above has already moved
-                # to "closed" either way, so requeueing would mean inventing a
-                # queue purpose-built for this call site. Make the loss
-                # unmistakable instead: ERROR + a full traceback, up from the
-                # WARNING this used to log.
-                logger.error(
-                    "[%s] Failed to log thread decision for %s (outcome=%s): "
-                    "%s — LOST, this write will never be retried",
-                    agent.agent_id, thread.thread_id, outcome, exc,
-                    exc_info=True,
-                )
 
-        logger.info(
-            "[%s] Thread %s closed: %s",
-            agent.agent_id, thread.thread_id, outcome,
-        )
+            logger.info(
+                "[%s] Thread %s closed: %s",
+                agent.agent_id, thread.thread_id, outcome,
+            )
 
-        # Update working memory for both agents
-        # summary_text is derived from a cross-agent conversation, so fence it
-        # as untrusted before it lands in working memory (which is later fed
-        # back into prompts) (SEC-14).
-        event = f"Thread in #{thread.channel} with {thread.other_agent_id} closed: {outcome}"
-        if summary_text:
-            event += f". Summary: {delimit(summary_text[:200], 'proposal_summary')}"
-        await self._update_agent_memory(agent, event)
-        if other_agent:
-            other_event = f"Thread in #{thread.channel} with {agent.agent_id} closed: {outcome}"
+            # Update working memory for both agents
+            # summary_text is derived from a cross-agent conversation, so fence it
+            # as untrusted before it lands in working memory (which is later fed
+            # back into prompts) (SEC-14).
+            event = f"Thread in #{thread.channel} with {thread.other_agent_id} closed: {outcome}"
             if summary_text:
-                other_event += f". Summary: {delimit(summary_text[:200], 'proposal_summary')}"
-            await self._update_agent_memory(other_agent, other_event)
+                event += f". Summary: {delimit(summary_text[:200], 'proposal_summary')}"
+            await self._update_agent_memory(agent, event)
+            if other_agent:
+                other_event = f"Thread in #{thread.channel} with {agent.agent_id} closed: {outcome}"
+                if summary_text:
+                    other_event += f". Summary: {delimit(summary_text[:200], 'proposal_summary')}"
+                await self._update_agent_memory(other_agent, other_event)
 
-    def _evict_dead_thread(self, thread_id: str) -> None:
+    async def _evict_dead_thread(self, thread_id: str) -> None:
         """Remove a thread_id from every agent's in-memory state.
 
         Fires when Slack reports the parent message no longer exists (via
@@ -1727,31 +1843,48 @@ class SimulationEngine:
         on chat.postMessage). Without eviction the same dead thread gets
         re-polled and replied-to forever, producing noisy error logs and —
         worse — cascading top-level posts.
+
+        Called from `_post_message`'s ThreadNotFound handling, itself called
+        from `_reply_to_thread` — i.e. from inside the reply lane's THREAD
+        lock for this exact `thread_id` (see `_dispatch_reply_lane`). This
+        loops over EVERY agent's `active_threads`, so — Task 12 review
+        Finding B / Ruling R11 — it needs the AGENT lock for every agent, not
+        just the two `_close_thread` above locks: without it, `_close_thread`
+        would be the only mutator of `active_threads` under agent-lock
+        protection while this one, mutating the SAME dict, raced unguarded.
+        `acquire_all` takes every key sorted, so this composes with
+        `_close_thread`'s narrower 2-key acquisition (and any other
+        `_evict_dead_thread` racing it) without deadlocking on each other —
+        one global sorted order across every multi-key acquisition, agent or
+        thread. Nested inside the already-held thread lock: thread-lock-
+        outer, agent-lock-inner, per the ordering note on `_thread_locks` in
+        __init__.
         """
-        evicted_from = 0
-        for ag in self.agents.values():
-            removed = False
-            if thread_id in ag.state.active_threads:
-                ag.state.active_threads.pop(thread_id, None)
-                removed = True
-            before = len(ag.state.pending_proposals)
-            ag.state.pending_proposals = [
-                p for p in ag.state.pending_proposals if p.thread_id != thread_id
-            ]
-            if len(ag.state.pending_proposals) != before:
-                removed = True
-            if removed:
-                evicted_from += 1
-        self._poll_cursors.pop(f"proposal_thread:{thread_id}", None)
-        # Eviction removes per-agent state but must NEVER un-close a thread.
-        # If another caller is racing a _close_thread add() against this eviction,
-        # the discard would remove the closed marker, and Phase 3 would re-activate
-        # the finished interview. _closed_thread_ids is insert-only.
-        if evicted_from:
-            logger.info(
-                "Evicted dead thread %s from %d agent(s)' state",
-                thread_id, evicted_from,
-            )
+        async with self._agent_locks.acquire_all(*self.agents.keys()):
+            evicted_from = 0
+            for ag in self.agents.values():
+                removed = False
+                if thread_id in ag.state.active_threads:
+                    ag.state.active_threads.pop(thread_id, None)
+                    removed = True
+                before = len(ag.state.pending_proposals)
+                ag.state.pending_proposals = [
+                    p for p in ag.state.pending_proposals if p.thread_id != thread_id
+                ]
+                if len(ag.state.pending_proposals) != before:
+                    removed = True
+                if removed:
+                    evicted_from += 1
+            self._poll_cursors.pop(f"proposal_thread:{thread_id}", None)
+            # Eviction removes per-agent state but must NEVER un-close a thread.
+            # If another caller is racing a _close_thread add() against this eviction,
+            # the discard would remove the closed marker, and Phase 3 would re-activate
+            # the finished interview. _closed_thread_ids is insert-only.
+            if evicted_from:
+                logger.info(
+                    "Evicted dead thread %s from %d agent(s)' state",
+                    thread_id, evicted_from,
+                )
 
     async def _sync_private_channels_from_db(self) -> None:
         """Discover collab_private channels created via the web-UI reopen flow.
@@ -1978,309 +2111,321 @@ class SimulationEngine:
         if agent.role == "scout_hub":
             return
 
-        settings = get_settings()
+        # Serialises this agent's Phase-5 turn against the reply lane's
+        # _close_thread / _evict_dead_thread mutations of THIS agent's
+        # active_threads (spec §4.4/§4.5) — both read by
+        # _active_thread_count/_count_today_posts above, and by the daily-cap
+        # / thread-threshold checks just below. Single-key acquisition, so
+        # ordering relative to _close_thread/_evict_dead_thread's (possibly
+        # multi-key) acquisitions is irrelevant here — acquire_all sorts
+        # regardless. This never nests a THREAD lock inside it: the only
+        # _post_message call below carries no thread_ts, so it can never
+        # raise ThreadNotFound / reach _evict_dead_thread — see the ordering
+        # note on _thread_locks in __init__.
+        async with self._agent_locks.acquire_all(agent.agent_id):
+            settings = get_settings()
 
-        # Stamp the spontaneous-post timer up front: consulting Phase 5 consumes
-        # the opportunity regardless of whether we end up posting, skipping, or
-        # bailing out early. Without this, a "skip" leaves the timer stale and
-        # every subsequent turn re-fires Phase 5, burning an LLM call per turn.
-        agent.state.last_phase5_action_time = time.time()
+            # Stamp the spontaneous-post timer up front: consulting Phase 5 consumes
+            # the opportunity regardless of whether we end up posting, skipping, or
+            # bailing out early. Without this, a "skip" leaves the timer stale and
+            # every subsequent turn re-fires Phase 5, burning an LLM call per turn.
+            agent.state.last_phase5_action_time = time.time()
 
-        # Daily post cap — pi_lab is capped to one pitch per day (design §9).
-        # scout_hub never reaches this line (hard-gated above), and it is the
-        # only other role, so `lab_daily_post_cap` is unconditional here — the
-        # generic `daily_post_cap` setting this once ternaried against was
-        # unreachable and was deleted (2026-08-12 release-gating fix pass, M1).
-        today_posts = self._count_today_posts(agent)
-        cap = settings.lab_daily_post_cap
-        if today_posts >= cap:
-            logger.debug("[%s] Phase 5: Skipped (daily cap %d/%d)", agent.agent_id, today_posts, cap)
-            return
-
-        # Backpressure against STARTING more work than the agent can finish:
-        # too many threads open at once. This used to have a second clause
-        # (too many of the agent's proposals awaiting web review) and an
-        # exemption letting a blocked agent still file one *terminal*
-        # artifact past the block — the hub's assessment. Both are gone: the
-        # reconciliation deleted the only post type that was ever exempt (see
-        # post_types.py), and nothing on this branch creates a new proposal
-        # for a PI to review anymore, so there is nothing left to gate on
-        # either. A blocked agent (only ever pi_lab in practice — scout_hub
-        # is gated above) now has nothing left it could post regardless, so
-        # it skips outright here, no LLM call, exactly like the daily cap.
-        if self._active_thread_count(agent) >= settings.active_thread_threshold:
-            logger.debug(
-                "[%s] Phase 5: Skipped (at/over active_thread_threshold)",
-                agent.agent_id,
-            )
-            return
-
-        if random.random() < settings.phase5_skip_probability:
-            logger.debug("[%s] Phase 5: Skipped (random)", agent.agent_id)
-            return
-
-        # Build prompt — include agent's recent posts for dedup
-        recent_entries = self.message_log.get_agent_top_level_posts(agent.agent_id, limit=10)
-        recent_posts = [
-            {"channel": e.channel, "content_snippet": e.content[:150]}
-            for e in recent_entries
-        ]
-
-        # Phase 5 always operates in a public channel (see build_phase5_prompt's
-        # docstring) — there is no longer any per-turn state that could put it in
-        # a private-channel context, so prior-threads dedup uses the default
-        # (public) visibility.
-        prior_threads = self._get_prior_threads_for_agent(agent.agent_id)
-
-        available_types = self._available_post_types(agent)
-        if not available_types:
-            # Nothing satisfies role ∩ topology — either a misconfigured
-            # role.toml or a cohort gate that leaves this agent with no
-            # reachable counterparty for anything it declares. This point is
-            # only ever reached by an UNBLOCKED agent (a blocked one already
-            # returned above), so an empty menu here is always worth a
-            # WARNING — there is no longer a quiet/expected empty-menu case
-            # to distinguish it from (that was the hub's, and the hub never
-            # reaches this line).
-            logger.warning(
-                "[%s] Phase 5: no post type satisfiable — check cohort/roster "
-                "for role %r", agent.agent_id, agent.role,
-            )
-        post_type_menu = render_menu(
-            available_types,
-            gate=agent.allowed_sender_ids,
-            roles_by_agent=self._roles_by_agent(),
-            self_id=agent.agent_id,
-            bot_names={aid: a.bot_name for aid, a in self.agents.items()},
-        )
-
-        system_prompt, messages = agent.build_phase5_prompt(
-            recent_posts=recent_posts,
-            prior_threads=prior_threads,
-            post_type_menu=post_type_menu,
-        )
-
-        # Correlation id for this specific call's log row, generated BEFORE the
-        # call and carried through log_meta. `channel` isn't known until the
-        # model's response is parsed below, so it can't go in log_meta up
-        # front — but the row this call appends to the shared
-        # `_llm_log_buffer` can be found again afterward by this id, without
-        # trusting the buffer's tail (see the retroactive-channel comment
-        # below for why position is unsafe under concurrency).
-        llm_call_id = uuid.uuid4().hex
-
-        if not agent.try_reserve(
-            self._allowance_for(agent), get_settings().llm_rate_window_seconds
-        ):
-            logger.warning(
-                "[%s] rate-limited; deferring this post", agent.agent_id,
-            )
-            return
-        # already_reserved=True: try_reserve just appended this exact call to
-        # call_times — appending again here would double-book it (Ruling R5).
-        agent.record_api_call(already_reserved=True)
-        try:
-            response = await generate_agent_response(
-                system_prompt=system_prompt,
-                messages=messages,
-                model=settings.llm_agent_model_opus,
-                # Historical sizing note: this used to also cover scout_hub's
-                # opportunity-assessment post here (an 11-section body plus a
-                # ~15-line <assessment_json> sidecar emitted LAST, where 1000
-                # — sized for a short reply/skip decision — truncated the
-                # verdict first while leaving the Slack post looking
-                # complete, F8). The hub is hard-gated out of this function
-                # now (see the docstring) and its assessment moved to the
-                # Phase-4 CONCLUDE reply's own budget instead, so this
-                # function's only caller today (pi_lab) never needs anywhere
-                # near 2500 tokens for a pitch or a skip — kept at this size
-                # anyway rather than re-tuned down, since a smaller ceiling
-                # buys nothing but risk here. NOTE: src/services/llm.py's
-                # retry-at-2x path logs loudly (logger.error) if the retry
-                # ALSO truncates, but it does not retry again.
-                max_tokens=2500,
-                log_meta={
-                    "agent_id": agent.agent_id,
-                    "phase": "new_post",
-                    "call_id": llm_call_id,
-                },
-                on_retry=agent.record_api_call,
-            )
-            if not response or not response.strip():
-                logger.warning("[%s] Phase 5: Empty response from LLM, skipping", agent.agent_id)
+            # Daily post cap — pi_lab is capped to one pitch per day (design §9).
+            # scout_hub never reaches this line (hard-gated above), and it is the
+            # only other role, so `lab_daily_post_cap` is unconditional here — the
+            # generic `daily_post_cap` setting this once ternaried against was
+            # unreachable and was deleted (2026-08-12 release-gating fix pass, M1).
+            today_posts = self._count_today_posts(agent)
+            cap = settings.lab_daily_post_cap
+            if today_posts >= cap:
+                logger.debug("[%s] Phase 5: Skipped (daily cap %d/%d)", agent.agent_id, today_posts, cap)
                 return
 
-            # Parse the JSON + message from the response
-            action_data, message_text = self._parse_phase5_response(response)
-            if not action_data:
-                logger.warning("[%s] Phase 5: Could not parse response", agent.agent_id)
-                return
-
-            # A missing `action` is an unparseable response, not a license to
-            # post something anyway — defaulting to "new_post" here is exactly
-            # what let a hijacked action dict (see _parse_phase5_response's
-            # sidecar-strip fix) fall through into posting to #general with an
-            # empty post_type instead of being rejected outright.
-            action = action_data.get("action")
-            if not action:
-                logger.warning(
-                    "[%s] Phase 5: parsed JSON had no 'action' field — "
-                    "treating as unparseable",
+            # Backpressure against STARTING more work than the agent can finish:
+            # too many threads open at once. This used to have a second clause
+            # (too many of the agent's proposals awaiting web review) and an
+            # exemption letting a blocked agent still file one *terminal*
+            # artifact past the block — the hub's assessment. Both are gone: the
+            # reconciliation deleted the only post type that was ever exempt (see
+            # post_types.py), and nothing on this branch creates a new proposal
+            # for a PI to review anymore, so there is nothing left to gate on
+            # either. A blocked agent (only ever pi_lab in practice — scout_hub
+            # is gated above) now has nothing left it could post regardless, so
+            # it skips outright here, no LLM call, exactly like the daily cap.
+            if self._active_thread_count(agent) >= settings.active_thread_threshold:
+                logger.debug(
+                    "[%s] Phase 5: Skipped (at/over active_thread_threshold)",
                     agent.agent_id,
                 )
                 return
 
-            if action == "skip":
-                agent.state.consecutive_phase5_skips += 1
-                logger.info(
-                    "[%s] Phase 5: Agent chose to skip (streak: %d)",
-                    agent.agent_id, agent.state.consecutive_phase5_skips,
+            if random.random() < settings.phase5_skip_probability:
+                logger.debug("[%s] Phase 5: Skipped (random)", agent.agent_id)
+                return
+
+            # Build prompt — include agent's recent posts for dedup
+            recent_entries = self.message_log.get_agent_top_level_posts(agent.agent_id, limit=10)
+            recent_posts = [
+                {"channel": e.channel, "content_snippet": e.content[:150]}
+                for e in recent_entries
+            ]
+
+            # Phase 5 always operates in a public channel (see build_phase5_prompt's
+            # docstring) — there is no longer any per-turn state that could put it in
+            # a private-channel context, so prior-threads dedup uses the default
+            # (public) visibility.
+            prior_threads = self._get_prior_threads_for_agent(agent.agent_id)
+
+            available_types = self._available_post_types(agent)
+            if not available_types:
+                # Nothing satisfies role ∩ topology — either a misconfigured
+                # role.toml or a cohort gate that leaves this agent with no
+                # reachable counterparty for anything it declares. This point is
+                # only ever reached by an UNBLOCKED agent (a blocked one already
+                # returned above), so an empty menu here is always worth a
+                # WARNING — there is no longer a quiet/expected empty-menu case
+                # to distinguish it from (that was the hub's, and the hub never
+                # reaches this line).
+                logger.warning(
+                    "[%s] Phase 5: no post type satisfiable — check cohort/roster "
+                    "for role %r", agent.agent_id, agent.role,
                 )
-                return
-
-            if not message_text:
-                logger.warning("[%s] Phase 5: No message text in response", agent.agent_id)
-                return
-
-            # Real action — reset skip backoff. Capture the pre-reset value
-            # first: several rejection paths below need the TRUE streak, not
-            # the just-reset 0, to feed _select_next_agent's damping
-            # (`skips >= 3`). Every remaining rejection path (unsupported
-            # action, post-type rejection, body-mention rejection) restores it
-            # correctly via `previous_skips + 1`.
-            previous_skips = agent.state.consecutive_phase5_skips
-            agent.state.consecutive_phase5_skips = 0
-            agent.state.last_phase5_action_time = time.time()
-
-            channel = action_data.get("channel", "general").lstrip("#")
-            post_type = action_data.get("post_type", "")
-
-            # Retroactively add channel to the LLM log entry (unknown at call
-            # time). Found by `llm_call_id`, NOT by buffer position — under
-            # concurrency (two agents' Phase-5 turns interleaved on the same
-            # event loop), another agent's own `_on_llm_call` can append its
-            # row to this SHARED buffer in the gap between this call
-            # returning and this line running, so `_llm_log_buffer[-1]` is
-            # not reliably this call's row. Scanning from the tail is just an
-            # optimization (our own row, being the most recent thing we
-            # appended, is usually near the end); if it was already flushed
-            # to the DB before we got here, skip silently — the row is still
-            # a valid log entry without `channel`, and there's nothing to
-            # retry.
-            for _entry in reversed(self._llm_log_buffer):
-                if _entry.get("call_id") == llm_call_id:
-                    _entry["channel"] = channel
-                    break
-
-            # Cross-cohort mention stripping now happens in _post_message, which
-            # covers every outbound path instead of only this one. Phase 5 still
-            # needs the *cleaned* text locally, though: the tagged_agent decision
-            # below reads message_text.
-            #
-            # The JSON `post_type`/`tagged_agent` pair is not the only place a
-            # disallowed mention can hide — a spoke can also name an
-            # unreachable lab in PROSE with tagged_agent left null, which
-            # layers 1-3 below wave through (a broadcast type addresses no one
-            # by declaration). Recording whether THIS strip actually removed
-            # something lets the new-post branch reject that case instead of
-            # publishing a body with the mention silently deleted out from
-            # under it — see the mutilation check below.
-            #
-            # This reads the count _strip_disallowed_tags returns for THIS call,
-            # not a before/after delta on the shared self._cohort_tags_stripped
-            # counter — under the two-lane scheduler another agent's concurrent
-            # post can bump that counter between the "before" and "after" reads,
-            # which used to make Phase 5 reject a perfectly clean post.
-            message_text, this_call_stripped = self._strip_disallowed_tags(
-                message_text, agent
-            )
-            body_mention_was_stripped = this_call_stripped > 0
-
-            if action != "new_post":
-                logger.info(
-                    "[%s] Phase 5: unsupported action %r — skipping",
-                    agent.agent_id, action,
-                )
-                agent.state.consecutive_phase5_skips = previous_skips + 1
-                return
-
-            # New top-level post. Layers 1-3, against the SAME set that was
-            # rendered into the prompt above. Reject rather than strip-and-
-            # publish: a mention stripped out of an addressed post leaves a
-            # dangling ask no one can answer (259 such posts, 0.8% reply
-            # rate). WARNING, not DEBUG — the cohort strip was logged at
-            # DEBUG and 200 of them produced no operator-visible signal.
-            rejection = self._post_type_rejection(
-                agent,
-                post_type,
-                action_data.get("tagged_agent"),
+            post_type_menu = render_menu(
                 available_types,
+                gate=agent.allowed_sender_ids,
+                roles_by_agent=self._roles_by_agent(),
+                self_id=agent.agent_id,
+                bot_names={aid: a.bot_name for aid, a in self.agents.items()},
             )
-            if rejection is not None:
-                logger.warning(
-                    "[%s] Phase 5: rejected new post in #%s — %s",
-                    agent.agent_id, channel, rejection,
-                )
-                agent.state.consecutive_phase5_skips = previous_skips + 1
-                return
-            # Layer 1-3 judge the JSON declaration, but the mutilation this
-            # whole gate exists to prevent is driven by the message BODY.
-            # A broadcast type with tagged_agent=null sails through the
-            # check above even when the body itself @-mentions an
-            # unreachable lab in prose — and the strip above would then
-            # publish the post with that mention silently deleted,
-            # producing exactly the dangling-ask artifact (measured in
-            # production: 42 of 259 posts named a lab in prose with no
-            # tag). Reject instead of publishing a mutilated body.
-            if body_mention_was_stripped:
-                logger.warning(
-                    "[%s] Phase 5: rejected new post in #%s — the message "
-                    "body @-mentions an agent this cohort gate cannot "
-                    "reach; publishing it would silently delete that "
-                    "mention rather than deliver it (post_type=%r)",
-                    agent.agent_id, channel, post_type,
-                )
-                agent.state.consecutive_phase5_skips = previous_skips + 1
-                return
-            # New top-level post
-            posted = await self._post_message(agent.agent_id, channel, message_text)
-            if not posted:
-                # _post_message already logged why (e.g. the text stripped to
-                # empty). Nothing reached Slack, so neither the turn counter
-                # nor an assessment row may be written for it — either would
-                # be a phantom record with no corresponding Slack message
-                # (Task 11 fix round 1, Finding 3).
-                logger.info(
-                    "[%s] Phase 5: New post in #%s suppressed — not counted, "
-                    "nothing persisted",
-                    agent.agent_id, channel,
-                )
-            else:
-                agent.message_count += 1
 
-                # No post type reaching here ever carries an assessment
-                # sidecar anymore — the hub is hard-gated out of this
-                # function entirely (see the docstring), and CANONICAL has
-                # no entry for one (post_types.py). The extraction/persist
-                # step that used to live here for `opportunity_assessment`
-                # moved to `_reply_to_thread`'s Phase-4 CONCLUDE handling
-                # (Option A relocation).
+            system_prompt, messages = agent.build_phase5_prompt(
+                recent_posts=recent_posts,
+                prior_threads=prior_threads,
+                post_type_menu=post_type_menu,
+            )
 
-                # Check if it tags another agent
-                tagged_agent = action_data.get("tagged_agent")
-                if tagged_agent:
-                    logger.info(
-                        "[%s] Phase 5: New post in #%s tagging @%s",
-                        agent.agent_id, channel, tagged_agent,
+            # Correlation id for this specific call's log row, generated BEFORE the
+            # call and carried through log_meta. `channel` isn't known until the
+            # model's response is parsed below, so it can't go in log_meta up
+            # front — but the row this call appends to the shared
+            # `_llm_log_buffer` can be found again afterward by this id, without
+            # trusting the buffer's tail (see the retroactive-channel comment
+            # below for why position is unsafe under concurrency).
+            llm_call_id = uuid.uuid4().hex
+
+            if not agent.try_reserve(
+                self._allowance_for(agent), get_settings().llm_rate_window_seconds
+            ):
+                logger.warning(
+                    "[%s] rate-limited; deferring this post", agent.agent_id,
+                )
+                return
+            # already_reserved=True: try_reserve just appended this exact call to
+            # call_times — appending again here would double-book it (Ruling R5).
+            agent.record_api_call(already_reserved=True)
+            try:
+                response = await generate_agent_response(
+                    system_prompt=system_prompt,
+                    messages=messages,
+                    model=settings.llm_agent_model_opus,
+                    # Historical sizing note: this used to also cover scout_hub's
+                    # opportunity-assessment post here (an 11-section body plus a
+                    # ~15-line <assessment_json> sidecar emitted LAST, where 1000
+                    # — sized for a short reply/skip decision — truncated the
+                    # verdict first while leaving the Slack post looking
+                    # complete, F8). The hub is hard-gated out of this function
+                    # now (see the docstring) and its assessment moved to the
+                    # Phase-4 CONCLUDE reply's own budget instead, so this
+                    # function's only caller today (pi_lab) never needs anywhere
+                    # near 2500 tokens for a pitch or a skip — kept at this size
+                    # anyway rather than re-tuned down, since a smaller ceiling
+                    # buys nothing but risk here. NOTE: src/services/llm.py's
+                    # retry-at-2x path logs loudly (logger.error) if the retry
+                    # ALSO truncates, but it does not retry again.
+                    max_tokens=2500,
+                    log_meta={
+                        "agent_id": agent.agent_id,
+                        "phase": "new_post",
+                        "call_id": llm_call_id,
+                    },
+                    on_retry=agent.record_api_call,
+                )
+                if not response or not response.strip():
+                    logger.warning("[%s] Phase 5: Empty response from LLM, skipping", agent.agent_id)
+                    return
+
+                # Parse the JSON + message from the response
+                action_data, message_text = self._parse_phase5_response(response)
+                if not action_data:
+                    logger.warning("[%s] Phase 5: Could not parse response", agent.agent_id)
+                    return
+
+                # A missing `action` is an unparseable response, not a license to
+                # post something anyway — defaulting to "new_post" here is exactly
+                # what let a hijacked action dict (see _parse_phase5_response's
+                # sidecar-strip fix) fall through into posting to #general with an
+                # empty post_type instead of being rejected outright.
+                action = action_data.get("action")
+                if not action:
+                    logger.warning(
+                        "[%s] Phase 5: parsed JSON had no 'action' field — "
+                        "treating as unparseable",
+                        agent.agent_id,
                     )
-                else:
+                    return
+
+                if action == "skip":
+                    agent.state.consecutive_phase5_skips += 1
                     logger.info(
-                        "[%s] Phase 5: New post in #%s",
+                        "[%s] Phase 5: Agent chose to skip (streak: %d)",
+                        agent.agent_id, agent.state.consecutive_phase5_skips,
+                    )
+                    return
+
+                if not message_text:
+                    logger.warning("[%s] Phase 5: No message text in response", agent.agent_id)
+                    return
+
+                # Real action — reset skip backoff. Capture the pre-reset value
+                # first: several rejection paths below need the TRUE streak, not
+                # the just-reset 0, to feed _select_next_agent's damping
+                # (`skips >= 3`). Every remaining rejection path (unsupported
+                # action, post-type rejection, body-mention rejection) restores it
+                # correctly via `previous_skips + 1`.
+                previous_skips = agent.state.consecutive_phase5_skips
+                agent.state.consecutive_phase5_skips = 0
+                agent.state.last_phase5_action_time = time.time()
+
+                channel = action_data.get("channel", "general").lstrip("#")
+                post_type = action_data.get("post_type", "")
+
+                # Retroactively add channel to the LLM log entry (unknown at call
+                # time). Found by `llm_call_id`, NOT by buffer position — under
+                # concurrency (two agents' Phase-5 turns interleaved on the same
+                # event loop), another agent's own `_on_llm_call` can append its
+                # row to this SHARED buffer in the gap between this call
+                # returning and this line running, so `_llm_log_buffer[-1]` is
+                # not reliably this call's row. Scanning from the tail is just an
+                # optimization (our own row, being the most recent thing we
+                # appended, is usually near the end); if it was already flushed
+                # to the DB before we got here, skip silently — the row is still
+                # a valid log entry without `channel`, and there's nothing to
+                # retry.
+                for _entry in reversed(self._llm_log_buffer):
+                    if _entry.get("call_id") == llm_call_id:
+                        _entry["channel"] = channel
+                        break
+
+                # Cross-cohort mention stripping now happens in _post_message, which
+                # covers every outbound path instead of only this one. Phase 5 still
+                # needs the *cleaned* text locally, though: the tagged_agent decision
+                # below reads message_text.
+                #
+                # The JSON `post_type`/`tagged_agent` pair is not the only place a
+                # disallowed mention can hide — a spoke can also name an
+                # unreachable lab in PROSE with tagged_agent left null, which
+                # layers 1-3 below wave through (a broadcast type addresses no one
+                # by declaration). Recording whether THIS strip actually removed
+                # something lets the new-post branch reject that case instead of
+                # publishing a body with the mention silently deleted out from
+                # under it — see the mutilation check below.
+                #
+                # This reads the count _strip_disallowed_tags returns for THIS call,
+                # not a before/after delta on the shared self._cohort_tags_stripped
+                # counter — under the two-lane scheduler another agent's concurrent
+                # post can bump that counter between the "before" and "after" reads,
+                # which used to make Phase 5 reject a perfectly clean post.
+                message_text, this_call_stripped = self._strip_disallowed_tags(
+                    message_text, agent
+                )
+                body_mention_was_stripped = this_call_stripped > 0
+
+                if action != "new_post":
+                    logger.info(
+                        "[%s] Phase 5: unsupported action %r — skipping",
+                        agent.agent_id, action,
+                    )
+                    agent.state.consecutive_phase5_skips = previous_skips + 1
+                    return
+
+                # New top-level post. Layers 1-3, against the SAME set that was
+                # rendered into the prompt above. Reject rather than strip-and-
+                # publish: a mention stripped out of an addressed post leaves a
+                # dangling ask no one can answer (259 such posts, 0.8% reply
+                # rate). WARNING, not DEBUG — the cohort strip was logged at
+                # DEBUG and 200 of them produced no operator-visible signal.
+                rejection = self._post_type_rejection(
+                    agent,
+                    post_type,
+                    action_data.get("tagged_agent"),
+                    available_types,
+                )
+                if rejection is not None:
+                    logger.warning(
+                        "[%s] Phase 5: rejected new post in #%s — %s",
+                        agent.agent_id, channel, rejection,
+                    )
+                    agent.state.consecutive_phase5_skips = previous_skips + 1
+                    return
+                # Layer 1-3 judge the JSON declaration, but the mutilation this
+                # whole gate exists to prevent is driven by the message BODY.
+                # A broadcast type with tagged_agent=null sails through the
+                # check above even when the body itself @-mentions an
+                # unreachable lab in prose — and the strip above would then
+                # publish the post with that mention silently deleted,
+                # producing exactly the dangling-ask artifact (measured in
+                # production: 42 of 259 posts named a lab in prose with no
+                # tag). Reject instead of publishing a mutilated body.
+                if body_mention_was_stripped:
+                    logger.warning(
+                        "[%s] Phase 5: rejected new post in #%s — the message "
+                        "body @-mentions an agent this cohort gate cannot "
+                        "reach; publishing it would silently delete that "
+                        "mention rather than deliver it (post_type=%r)",
+                        agent.agent_id, channel, post_type,
+                    )
+                    agent.state.consecutive_phase5_skips = previous_skips + 1
+                    return
+                # New top-level post
+                posted = await self._post_message(agent.agent_id, channel, message_text)
+                if not posted:
+                    # _post_message already logged why (e.g. the text stripped to
+                    # empty). Nothing reached Slack, so neither the turn counter
+                    # nor an assessment row may be written for it — either would
+                    # be a phantom record with no corresponding Slack message
+                    # (Task 11 fix round 1, Finding 3).
+                    logger.info(
+                        "[%s] Phase 5: New post in #%s suppressed — not counted, "
+                        "nothing persisted",
                         agent.agent_id, channel,
                     )
+                else:
+                    agent.message_count += 1
 
-        except Exception as exc:
-            logger.error("[%s] Phase 5 failed: %s", agent.agent_id, exc)
+                    # No post type reaching here ever carries an assessment
+                    # sidecar anymore — the hub is hard-gated out of this
+                    # function entirely (see the docstring), and CANONICAL has
+                    # no entry for one (post_types.py). The extraction/persist
+                    # step that used to live here for `opportunity_assessment`
+                    # moved to `_reply_to_thread`'s Phase-4 CONCLUDE handling
+                    # (Option A relocation).
+
+                    # Check if it tags another agent
+                    tagged_agent = action_data.get("tagged_agent")
+                    if tagged_agent:
+                        logger.info(
+                            "[%s] Phase 5: New post in #%s tagging @%s",
+                            agent.agent_id, channel, tagged_agent,
+                        )
+                    else:
+                        logger.info(
+                            "[%s] Phase 5: New post in #%s",
+                            agent.agent_id, channel,
+                        )
+
+            except Exception as exc:
+                logger.error("[%s] Phase 5 failed: %s", agent.agent_id, exc)
 
     async def _capture_hub_assessment(
         self, agent: Agent, thread: ThreadState, raw_response: str, slack_ts: str | None,
@@ -3408,7 +3553,7 @@ class SimulationEngine:
                 # from state so no one replies to it again. Keyed by the
                 # canonical id, which is what the engine's state uses.
                 if thread_ts:
-                    self._evict_dead_thread(thread_ts)
+                    await self._evict_dead_thread(thread_ts)
                 logger.warning(
                     "[%s] Skipped reply to deleted thread %s in #%s",
                     agent_id, thread_ts, channel,

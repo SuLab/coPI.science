@@ -1814,7 +1814,8 @@ class TestMissingSidecarIsRecordedAsADrop:
 
 
 class TestEvictionIsAdditive:
-    def test_evicting_a_thread_does_not_unclose_it(self):
+    @pytest.mark.asyncio
+    async def test_evicting_a_thread_does_not_unclose_it(self):
         """discard racing a concurrent close resurrects a finished interview."""
         from src.agent.agent import Agent
         from src.agent.simulation import SimulationEngine
@@ -1823,7 +1824,7 @@ class TestEvictionIsAdditive:
             agents=[Agent("wang", "WangBot", "Wang")], slack_clients={}
         )
         eng._closed_thread_ids.add("t1")
-        eng._evict_dead_thread("t1")
+        await eng._evict_dead_thread("t1")
         assert "t1" in eng._closed_thread_ids, (
             "eviction must not remove a closed marker — Phase 3 would re-activate it"
         )

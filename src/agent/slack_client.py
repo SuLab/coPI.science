@@ -1120,8 +1120,8 @@ class AgentSlackClient:
 
         The check-then-refresh-then-return is held as ONE critical section —
         unlike the smaller per-write locks elsewhere in this file — because
-        the check-then-act here genuinely needs it: Phase 4 can run up to
-        ``phase4_max_concurrent_replies`` of this same agent's posts on
+        the check-then-act here genuinely needs it: the reply lane can run up
+        to ``reply_lane_max_in_flight`` of this same agent's posts on
         different OS threads at once (see ``_cache_lock``'s docstring at
         __init__), and without holding the lock across ``_refresh_channel_cache``,
         N concurrent misses on the same (or different) not-yet-cached channel

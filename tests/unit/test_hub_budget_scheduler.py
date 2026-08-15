@@ -41,9 +41,8 @@ def _settings(**kw):
         llm_rate_window_seconds=600,
         llm_calls_per_load_per_window=8,
         # Required since SimulationEngine.__init__ eagerly constructs the
-        # (now unused-pending-Task-13) Phase-4 fan-out semaphore
-        # (self._llm_fanout_sem) rather than per-call.
-        phase4_max_concurrent_replies=4,
+        # reply-lane semaphore (self._reply_sem).
+        reply_lane_max_in_flight=1,
     )
     base.update(kw)
     return types.SimpleNamespace(**base)

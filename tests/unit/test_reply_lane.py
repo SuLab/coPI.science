@@ -13,6 +13,7 @@ reply_lane` now checks ``self._running`` between pairs (I5), which is False
 by default on a freshly constructed engine (it only becomes True inside
 ``start()``) — so every test that drives the real dispatch sets it explicitly.
 """
+import asyncio
 import time
 
 import pytest
@@ -427,3 +428,216 @@ def _hub_with_one_pending_thread():
     )
     hub.state.active_threads["t1"] = thread
     return hub, thread
+
+
+# ---------------------------------------------------------------------------
+# Task 13 — concurrent reply lane behind reply_lane_max_in_flight.
+#
+# The default is 1 (concurrency OFF); the two tests below that actually
+# exercise overlap skip under that default and must be re-run with
+# REPLY_LANE_MAX_IN_FLIGHT=4 (or any cap >= 2) to be exercised at all — see
+# the task-13-report.md TDD evidence section for that run's output.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_dispatch_runs_pairs_concurrently_up_to_the_cap(monkeypatch):
+    from src.config import get_settings
+
+    cap = get_settings().reply_lane_max_in_flight
+    if cap < 2:
+        pytest.skip("concurrency disabled by configuration")
+
+    eng, hub = _engine_with_pending(cap * 3)
+    live = 0
+    peak = 0
+
+    async def _serve(agent, thread):
+        nonlocal live, peak
+        live += 1
+        peak = max(peak, live)
+        await asyncio.sleep(0.01)
+        live -= 1
+
+    monkeypatch.setattr(eng, "_service_reply", _serve)
+    await eng._dispatch_reply_lane()
+
+    assert peak > 1, "reply lane did not overlap"
+    assert peak <= cap
+
+
+@pytest.mark.asyncio
+async def test_a_pair_already_in_flight_is_not_spawned_twice(monkeypatch):
+    eng, hub = _engine_with_pending(1)
+    starts = 0
+
+    async def _serve(agent, thread):
+        nonlocal starts
+        starts += 1
+        await asyncio.sleep(0.02)
+
+    monkeypatch.setattr(eng, "_service_reply", _serve)
+    await asyncio.gather(eng._dispatch_reply_lane(), eng._dispatch_reply_lane())
+
+    assert starts == 1, "the same (agent, thread) was serviced twice concurrently"
+
+
+@pytest.mark.asyncio
+async def test_the_fanout_bound_is_global_not_per_turn(monkeypatch):
+    """Ruling R7 / spec §6.3, ported from the deleted
+    tests/unit/test_phase4_concurrency.py (Task 11 deleted its only subject,
+    ``_phase4_reply_threads``, along with the whole file). The property:
+    N concurrent turns must share ONE budget, not each get their own cap — a
+    semaphore constructed per-call (as ``_llm_fanout_sem`` effectively was,
+    being sized from a per-turn-fanout setting) bounds each call's own
+    fan-out separately, so two overlapping calls together could spend up to
+    2x cap. ``_reply_sem`` is constructed exactly once, in ``__init__``, for
+    exactly this reason.
+
+    Two full ``_dispatch_reply_lane()`` sweeps overlapping is exactly the
+    scenario ``_dispatch_reply_lane``'s own docstring (fix round 1, I5) calls
+    out as possible: a sweep slow enough that the next tick's call starts
+    before it finishes. Engineered contention (real overlap, not scheduling
+    luck — same technique as
+    test_engine_locks.test_acquire_all_does_not_deadlock_under_genuine_contention):
+    the first sweep is allowed to run until its ``cap`` pairs are genuinely
+    parked mid-reply, holding ``_reply_sem``, before a SECOND, disjoint set of
+    pending pairs (a different agent, added only now) is handed to a second
+    concurrent sweep. If the two sweeps had independent semaphores, the
+    second sweep's pairs would run immediately, pushing peak concurrency past
+    ``cap``; because they share one, the second sweep's pairs must wait.
+    """
+    from src.config import get_settings
+
+    cap = get_settings().reply_lane_max_in_flight
+    if cap < 2:
+        pytest.skip("concurrency disabled by configuration")
+
+    eng, hub = _engine_with_pending(cap)
+    live = 0
+    peak = 0
+
+    async def _serve(agent, thread):
+        nonlocal live, peak
+        live += 1
+        peak = max(peak, live)
+        await asyncio.sleep(0.05)
+        live -= 1
+
+    monkeypatch.setattr(eng, "_service_reply", _serve)
+
+    sweep_one = asyncio.ensure_future(eng._dispatch_reply_lane())
+    # Real wall-clock wait, not a bare yield: give sweep one's `cap` sub-tasks
+    # time to actually acquire _reply_sem and settle into `_serve`'s sleep —
+    # only then are they GENUINELY holding the semaphore rather than merely
+    # scheduled.
+    await asyncio.sleep(0.01)
+    assert live == cap, "sweep one did not reach the cap before sweep two started"
+
+    lab = Agent("wang", "WangBot", "Wang", role="pi_lab")
+    for i in range(cap):
+        lab.state.active_threads[f"L{i}"] = ThreadState(
+            thread_id=f"L{i}", channel="general", other_agent_id="blackbird",
+            message_count=1, has_pending_reply=True,
+        )
+    eng.agents["wang"] = lab
+
+    sweep_two = asyncio.ensure_future(eng._dispatch_reply_lane())
+
+    await asyncio.wait_for(asyncio.gather(sweep_one, sweep_two), timeout=5.0)
+
+    assert peak <= cap, (
+        f"two overlapping sweeps reached {peak}, above the shared cap {cap} — "
+        "the semaphore is no longer global"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Ruling R11 — lock order. `_close_thread` and `_evict_dead_thread` both take
+# an AGENT lock (or several, sorted) while the reply lane's THREAD lock is
+# already held around the whole `_service_reply` call (see `_dispatch_reply_
+# lane`'s `_run`). `_phase5_new_post` takes only an agent lock and never a
+# thread lock. The documented, enforced-by-convention invariant is: thread
+# lock before agent lock, NEVER the reverse — see the note on `_thread_locks`
+# in `SimulationEngine.__init__`.
+# ---------------------------------------------------------------------------
+
+
+def test_no_call_site_bypasses_acquire_all():
+    """spec §3.2: acquire_all is the only sanctioned way to take more than
+    one lock at a time. A direct `.get(key).acquire()` on either registry
+    would let a call site invent its own (possibly unsorted, possibly
+    inverted) acquisition order outside that discipline."""
+    import inspect
+
+    src = inspect.getsource(SimulationEngine)
+    assert "_agent_locks.get(" not in src, (
+        "a call site is bypassing acquire_all for _agent_locks"
+    )
+    assert "_thread_locks.get(" not in src, (
+        "a call site is bypassing acquire_all for _thread_locks"
+    )
+
+
+@pytest.mark.asyncio
+async def test_thread_lock_then_agent_lock_does_not_deadlock_against_an_agent_lock_only_caller(
+    monkeypatch,
+):
+    """Drives the two REAL nesting paths this ruling added to the brief:
+    `_close_thread` takes agent locks while the reply lane's thread lock is
+    already held (simulated here exactly as `_dispatch_reply_lane._run`
+    holds it), concurrently with `_phase5_new_post`, which takes ONLY an
+    agent lock and never a thread lock.
+
+    Engineered contention: `_update_agent_memory` (awaited twice inside
+    `_close_thread`, once per agent) is slowed down so the close call is
+    still holding BOTH agent locks — "blackbird" and "wang" — when the
+    concurrent `_phase5_new_post(wang)` call attempts to acquire "wang" and
+    is forced to genuinely block on it. If thread-lock-then-agent-lock
+    nesting could deadlock against an agent-lock-only caller, this hangs;
+    `asyncio.wait_for` turns that into a test failure instead.
+    """
+    hub = Agent("blackbird", "BlackbirdBot", "Blackbird", role="scout_hub")
+    wang = Agent("wang", "WangBot", "Wang", role="pi_lab")
+
+    thread = ThreadState(
+        thread_id="t1", channel="general", other_agent_id="wang",
+        message_count=3, has_pending_reply=True,
+    )
+    hub.state.active_threads["t1"] = thread
+    # wang's own view of the same interview.
+    wang.state.active_threads["t1"] = ThreadState(
+        thread_id="t1", channel="general", other_agent_id="blackbird",
+    )
+
+    eng = SimulationEngine(agents=[hub, wang], slack_clients={})
+
+    async def _slow_memory_update(agent, event, *a, **kw):
+        await asyncio.sleep(0.05)
+
+    monkeypatch.setattr(eng, "_update_agent_memory", _slow_memory_update)
+    # Force _phase5_new_post to return (inside its own agent-lock span, right
+    # after the rate-limit check) without ever reaching a real LLM call —
+    # this test is about lock nesting, not Phase 5's own behaviour.
+    monkeypatch.setattr(wang, "try_reserve", lambda *a, **kw: False)
+
+    async def _close_under_thread_lock():
+        # Mirrors _dispatch_reply_lane._run: thread lock acquired first,
+        # _close_thread (agent lock(s)) nested inside it.
+        async with eng._thread_locks.acquire_all(thread.thread_id):
+            await eng._close_thread(hub, thread, "no_proposal")
+
+    close_task = asyncio.ensure_future(_close_under_thread_lock())
+    # Let the close task run up to its first genuine suspension point (inside
+    # the mocked _update_agent_memory) — by then it holds BOTH agent locks.
+    await asyncio.sleep(0.001)
+
+    phase5_task = asyncio.ensure_future(eng._phase5_new_post(wang))
+    # Let phase5 register as a genuine waiter on wang's agent lock.
+    await asyncio.sleep(0.001)
+
+    await asyncio.wait_for(asyncio.gather(close_task, phase5_task), timeout=2.0)
+
+    # Sanity: the close actually ran (not a false pass from both tasks no-op
+    # returning without ever contending for anything).
+    assert thread.status == "closed"

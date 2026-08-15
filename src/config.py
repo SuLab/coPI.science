@@ -314,12 +314,6 @@ class Settings(BaseSettings):
     turn_delay_seconds: float = 0.0         # pause between turns
     phase5_skip_probability: float = 0.0    # chance agent skips new post
     lab_daily_post_cap: int = 1  # pi_lab: one pitch per day (design §9)
-    # Max Phase-4 replies a single agent may have in flight at once. The LLM call
-    # is awaited off-thread (services/llm._acreate), so gather() genuinely
-    # overlaps now; unbounded, a hub turn that logged "Replying to 37 threads"
-    # would fire 37 simultaneous Opus requests. The sliding-window limiter cannot
-    # shape that burst — it is consulted once per turn at selection, not per call.
-    phase4_max_concurrent_replies: int = 4
     # Two-lane concurrent scheduler: max reply-lane tasks in flight at once.
     # 1 means concurrency is off — the reply lane processes one thread reply
     # at a time, same as today's sequential behaviour. Task 13 consumes this;

@@ -127,9 +127,10 @@ class TestEvictDeadThread:
         engine._closed_thread_ids.add(dead_ts)
         return engine, dead_ts, a, b
 
-    def test_evicts_from_all_agents(self, engine_with_agents):
+    @pytest.mark.asyncio
+    async def test_evicts_from_all_agents(self, engine_with_agents):
         engine, dead_ts, a, b = engine_with_agents
-        engine._evict_dead_thread(dead_ts)
+        await engine._evict_dead_thread(dead_ts)
 
         for ag in (a, b):
             assert dead_ts not in ag.state.active_threads
@@ -139,10 +140,11 @@ class TestEvictDeadThread:
         # Eviction is additive: it removes per-agent state but never un-closes a thread
         assert dead_ts in engine._closed_thread_ids
 
-    def test_unknown_thread_id_is_noop(self, engine_with_agents):
+    @pytest.mark.asyncio
+    async def test_unknown_thread_id_is_noop(self, engine_with_agents):
         engine, _, a, b = engine_with_agents
         # Unknown ts — must not raise, must not touch the dead_ts data
-        engine._evict_dead_thread("9999999999.999999")
+        await engine._evict_dead_thread("9999999999.999999")
         for ag in (a, b):
             assert len(ag.state.active_threads) == 1
             assert len(ag.state.pending_proposals) == 1
