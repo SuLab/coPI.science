@@ -142,3 +142,33 @@ async def test_new_post_pitch_still_posts(monkeypatch):
     assert len(client.posted) == 1
     assert client.posted[0]["text"].startswith(":bulb:")
     assert lab.message_count == 1
+
+
+async def test_a_successful_post_resets_the_skip_streak(monkeypatch):
+    """Task 11 fix round 2, Ruling R10: `consecutive_phase5_skips` is now
+    wholly post-lane-owned — the reply lane no longer resets it at all, so
+    this is the ONLY place in the engine that may. Pins it with a genuinely
+    nonzero starting streak, not just the post-reset default of 0."""
+    lab = _lab()
+    lab.state.consecutive_phase5_skips = 4
+    lab.allowed_sender_ids = None
+    hub = _hub()
+    client = FakeSlackClient(agent_id="gill")
+    eng = SimulationEngine(
+        agents=[lab, hub],
+        slack_clients={"gill": client, "blackbird": FakeSlackClient(agent_id="blackbird")},
+    )
+    monkeypatch.setattr("src.agent.simulation.get_settings", lambda: _settings())
+    monkeypatch.setattr(lab, "build_phase5_prompt", lambda **kw: ("sys", []))
+
+    async def _fake_generate(**kwargs):
+        return _PITCH
+
+    monkeypatch.setattr("src.agent.simulation.generate_agent_response", _fake_generate)
+
+    await eng._phase5_new_post(lab)
+
+    assert len(client.posted) == 1, "precondition: the post must actually succeed"
+    assert lab.state.consecutive_phase5_skips == 0, (
+        "a genuinely successful post must reset the skip streak"
+    )

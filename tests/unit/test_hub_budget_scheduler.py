@@ -25,6 +25,8 @@ import random
 import time
 import types
 
+import pytest
+
 from src.agent.agent import Agent
 from src.agent.simulation import SimulationEngine
 from src.agent.state import ThreadState
@@ -426,17 +428,31 @@ class TestScheduler:
 
 
 class TestReplyLaneIsNotPacedByTheIdleBackoff:
-    """I2 (task review fix round 1). Before this fix, ``did_work`` came only
-    from ``_run_post_turn``, which is False whenever Phase 5 doesn't fire —
-    the common case once a lab hits ``lab_daily_post_cap``, and ALWAYS for
-    the hub (no ``post_types`` at all) — so ``consecutive_idle`` climbed to
-    the 30s ceiling and the loop slept 30s before every single reply sweep,
+    """I2 (task review fix round 1), corrected by fix round 2 (task review,
+    NEW Critical). Before fix round 1, ``did_work`` came only from
+    ``_run_post_turn``, which is False whenever Phase 5 doesn't fire — the
+    common case once a lab hits ``lab_daily_post_cap``, and ALWAYS for the
+    hub (no ``post_types`` at all) — so ``consecutive_idle`` climbed to the
+    30s ceiling and the loop slept 30s before every single reply sweep,
     directly contradicting design §2.1: "Nothing in the reply lane delays a
-    reply that is ready." The fix folds ``_dispatch_reply_lane``'s "how many
-    ran" return into the ``did_work`` decision.
+    reply that is ready."
+
+    Fix round 1 folded ``_dispatch_reply_lane``'s "how many ran" return
+    directly into the backoff decision — but that count is pairs ATTEMPTED,
+    not pairs that actually spent an LLM call. The reservation limiter defers
+    a pair with zero calls and leaves ``has_pending_reply`` True, so the same
+    pair recurs every tick — composed with the fix-round-1 logic, that spun
+    the main loop at native tick speed forever (measured ~2,800
+    iterations/s), never sleeping and never yielding to the periodic
+    flushes. Fix round 2 replaces the attempt count with a SPEND comparison
+    (total ``api_call_count`` across the roster, before vs. after the
+    dispatch call — mirroring what ``_run_post_turn`` already does with
+    ``api_calls_before``), so the tests below simulate spend explicitly by
+    bumping an agent's ``api_call_count`` inside the dispatch stub, and a new
+    test pins the zero-spend case directly.
     """
 
-    async def test_no_idle_sleep_when_reply_lane_worked_but_no_agent_was_eligible(
+    async def test_no_idle_sleep_when_reply_lane_spent_but_no_agent_was_eligible(
         self, monkeypatch
     ):
         _patch(monkeypatch)
@@ -451,9 +467,10 @@ class TestReplyLaneIsNotPacedByTheIdleBackoff:
 
         async def _dispatch():
             ticks["n"] += 1
+            eng.agents["hub"].api_call_count += 1  # a real LLM call happened
             if ticks["n"] >= 3:
                 eng._running = False
-            return 2  # the reply lane always has work this tick
+            return 2  # attempted count, kept only as a log/metric value
 
         _drive_loop(eng, monkeypatch, dispatch_stub=_dispatch)
         monkeypatch.setattr(eng, "_sleep", _sleep)
@@ -461,12 +478,12 @@ class TestReplyLaneIsNotPacedByTheIdleBackoff:
         await eng._run_main_loop()
 
         assert sleeps == [], (
-            "reply-lane work must not be paced behind the idle backoff even "
+            "reply-lane SPEND must not be paced behind the idle backoff even "
             "when no post-lane agent is eligible right now"
         )
         assert ticks["n"] == 3
 
-    async def test_no_idle_sleep_when_reply_lane_worked_and_the_post_turn_did_not(
+    async def test_no_idle_sleep_when_reply_lane_spent_and_the_post_turn_did_not(
         self, monkeypatch
     ):
         _patch(monkeypatch)
@@ -480,6 +497,7 @@ class TestReplyLaneIsNotPacedByTheIdleBackoff:
 
         async def _dispatch():
             ticks["n"] += 1
+            eng.agents["hub"].api_call_count += 1  # a real LLM call happened
             if ticks["n"] >= 3:
                 eng._running = False
             return 1
@@ -494,11 +512,85 @@ class TestReplyLaneIsNotPacedByTheIdleBackoff:
         await eng._run_main_loop()
 
         assert sleeps == [], (
-            "a tick where the reply lane worked must not sleep the idle "
+            "a tick where the reply lane SPENT must not sleep the idle "
             "backoff even though the post turn (stubbed to return False) "
             "did no work of its own"
         )
         assert ticks["n"] == 3
+
+    async def test_idle_sleep_still_applies_when_the_reply_lane_only_attempted_but_spent_nothing(
+        self, monkeypatch
+    ):
+        """THE regression test for the NEW Critical: a rate-limited pending
+        pair is "serviced" in the sense that ``_dispatch_reply_lane`` attempts
+        it and counts it in its return value (mirroring
+        ``_reply_to_thread``'s real behaviour — it logs "rate-limited;
+        deferring this reply" and returns immediately, leaving
+        ``has_pending_reply`` True so the identical pair recurs next tick),
+        but makes no LLM call at all. That attempt count alone must NOT
+        suppress the idle backoff, or the main loop spins at native tick
+        speed forever."""
+        _patch(monkeypatch)
+        eng = _engine(["hub"])
+        monkeypatch.setattr(eng, "_select_agent", lambda: None)
+
+        sleeps: list[int] = []
+
+        async def _sleep(delay):
+            sleeps.append(delay)
+            if len(sleeps) >= 2:
+                eng._running = False
+
+        async def _dispatch():
+            # Attempted (rate-limited), but no LLM call — no spend at all.
+            return 1
+
+        _drive_loop(eng, monkeypatch, dispatch_stub=_dispatch)
+        monkeypatch.setattr(eng, "_sleep", _sleep)
+
+        await eng._run_main_loop()
+
+        assert sleeps == [5, 5], (
+            "a tick where the reply lane only ATTEMPTED (rate-limited, zero "
+            "spend) must still apply the idle backoff — otherwise a "
+            "rate-limited pending pair spins the main loop forever"
+        )
+
+
+class TestDispatchFailuresAreNoLongerSwallowedWholesale:
+    """NEW Important (task review fix round 2). The blanket try/except that
+    used to wrap the entire `_dispatch_reply_lane()` call in `_run_main_loop`
+    is gone. `_dispatch_reply_lane` itself now isolates one pair's servicing
+    failure (fix round 1, C2) and one agent's Phase-3-activation failure (fix
+    round 2) from their siblings — so what is left unguarded at the call
+    site is a genuine failure in pair *selection*, which is a real bug that
+    must surface (crash the run) rather than repeat one swallowed ERROR per
+    tick forever while no interview progresses and the post lane keeps
+    posting as if nothing were wrong.
+    """
+
+    async def test_a_pair_selection_failure_propagates_out_of_the_main_loop(
+        self, monkeypatch
+    ):
+        _patch(monkeypatch)
+        eng = _engine(["hub"])
+        for name in _TICK_IO:
+            if name != "_dispatch_reply_lane":
+                monkeypatch.setattr(eng, name, _noop_coro)
+        monkeypatch.setattr(eng, "_sync_profiles_from_disk", lambda *a, **kw: None)
+
+        async def _boom():
+            raise RuntimeError("pair selection exploded")
+
+        monkeypatch.setattr(eng, "_dispatch_reply_lane", _boom)
+        eng._running = True
+
+        with pytest.raises(RuntimeError, match="pair selection exploded"):
+            await eng._run_main_loop()
+
+
+async def _noop_coro(*_a, **_kw):
+    return None
 
 
 class TestBudgetDeprecation:

@@ -108,6 +108,48 @@ async def test_dispatch_activates_newly_tagged_threads(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_dispatch_isolates_one_agents_phase3_failure_from_the_others(
+    monkeypatch,
+):
+    """NEW Important, fix round 2: `_phase3_activate_threads` runs once per
+    agent, so one agent's activation bug must not stop every OTHER agent's
+    from running too — the same shape of silent, tick-forever failure the
+    two Criticals in this same review round fixed elsewhere."""
+    hub = Agent("blackbird", "BlackbirdBot", "Blackbird", role="scout_hub")
+    lab = Agent("wang", "WangBot", "Wang", role="pi_lab")
+    eng = SimulationEngine(
+        agents=[hub, lab],
+        slack_clients={
+            "blackbird": FakeSlackClient(agent_id="blackbird"),
+            "wang": FakeSlackClient(agent_id="wang"),
+        },
+    )
+    eng._running = True
+    eng.message_log.set_bot_name_map({"wangbot": "wang"})
+    eng.message_log.append(LogEntry(
+        ts="1.0", channel="general", sender_agent_id="pi0", sender_name="Pi0Bot",
+        content="hey @WangBot", thread_ts=None, posted_at=1.0, is_bot=True,
+    ))
+    monkeypatch.setattr(eng, "_service_reply", _noop_async)
+
+    real_phase3 = eng._phase3_activate_threads
+
+    def _phase3(agent):
+        if agent.agent_id == "blackbird":
+            raise RuntimeError("boom")
+        return real_phase3(agent)
+
+    monkeypatch.setattr(eng, "_phase3_activate_threads", _phase3)
+
+    await eng._dispatch_reply_lane()
+
+    assert "1.0" in lab.state.active_threads, (
+        "the hub's activation failure must not stop wang's own Phase 3 from "
+        "running"
+    )
+
+
+@pytest.mark.asyncio
 async def test_dispatch_advances_the_cursor_so_phase3_does_not_rescan_forever(
     monkeypatch,
 ):
@@ -176,14 +218,22 @@ async def test_dispatch_does_not_hide_a_reply_that_arrives_during_its_own_pass(
 
 
 # ---------------------------------------------------------------------------
-# Carry forward from Task 10: Phase 4 activity resets the skip-backoff streak
-# but must never stamp last_phase5_action_time — that reset lived inside
-# _run_turn's Phase-4 block, which no longer exists now that Phase 4 moved
-# into _service_reply entirely.
+# Carry forward from Task 10: Phase 4 activity must never stamp
+# last_phase5_action_time — that stamp lived inside _run_turn's Phase-4
+# block, which no longer exists now that Phase 4 moved into _service_reply
+# entirely.
 #
-# Fix round 1 (task review, Important I3): the reset moved AGAIN, out of
-# _service_reply and into _dispatch_reply_lane, so it fires at most once per
-# agent per tick instead of once per pending pair. See test_dispatch_resets_*
+# Fix round 1 (task review, Important I3) moved the skip-backoff reset out of
+# _service_reply (per pair) and into _dispatch_reply_lane (once per engaged
+# agent per tick), on the theory that batching would fix the cross-lane
+# coupling. Fix round 2 (task review, Ruling R10) found that idempotent — a
+# reset that fires 5 times a tick and one that fires once produce identical
+# final state, so an agent holding an open pending thread was STILL zeroed
+# every single tick either way, permanently disabling `_select_agent`'s
+# `skips >= 3` de-weighting. Ruling R10 deletes the reply lane's ownership of
+# this counter entirely: it is now wholly post-lane-owned (`_phase5_new_post`
+# increments it on a skip/rejection, resets it on a genuinely successful
+# post — see tests/unit/test_phase5_actions.py). See the two tests right
 # below.
 # ---------------------------------------------------------------------------
 
@@ -207,79 +257,37 @@ async def test_service_reply_does_not_stamp_the_spontaneous_timer(monkeypatch):
     )
 
 
-def test_service_reply_no_longer_owns_the_skip_reset():
-    """Structural pin for I3: the reset moved to _dispatch_reply_lane so it can
-    fire once per agent per tick rather than once per pending pair inside
-    _service_reply."""
+def test_reply_lane_never_touches_the_skip_streak():
+    """Structural pin for Ruling R10: neither `_service_reply` nor
+    `_dispatch_reply_lane` may reference `consecutive_phase5_skips` at all —
+    it is wholly post-lane-owned now."""
     import inspect
 
     assert "consecutive_phase5_skips =" not in inspect.getsource(
         SimulationEngine._service_reply
     )
-    assert "consecutive_phase5_skips =" in inspect.getsource(
+    assert "consecutive_phase5_skips =" not in inspect.getsource(
         SimulationEngine._dispatch_reply_lane
     )
 
 
 @pytest.mark.asyncio
-async def test_dispatch_resets_the_skip_streak_for_an_engaged_agent(monkeypatch):
-    eng, hub = _engine_with_pending(1)
-    hub.state.consecutive_phase5_skips = 3
-    monkeypatch.setattr(eng, "_service_reply", _noop_async)
-
-    await eng._dispatch_reply_lane()
-
-    assert hub.state.consecutive_phase5_skips == 0, (
-        "reply-lane activity must still clear the skip-backoff streak"
-    )
-
-
-@pytest.mark.asyncio
-async def test_dispatch_resets_skip_streak_even_when_service_reply_is_stubbed(
+async def test_dispatch_does_not_reset_the_skip_streak_for_an_engaged_agent(
     monkeypatch,
 ):
-    """Proves the reset lives in the dispatcher, not in _service_reply: a stub
-    that does nothing to consecutive_phase5_skips must not prevent the reset,
-    which would not be true if the reset still lived inside _service_reply."""
+    """The regression test for Ruling R10: an agent that engages in reply-lane
+    activity (has a pending pair serviced this tick) must NOT have its
+    skip-backoff streak touched — a reply-lane write of a post-lane pacing
+    variable is the cross-lane coupling this feature exists to remove, and
+    the reset is idempotent so "once per tick" is no fix at all."""
     eng, hub = _engine_with_pending(1)
-    hub.state.consecutive_phase5_skips = 5
-
-    async def _stub(agent, thread):
-        pass  # deliberately does not touch consecutive_phase5_skips
-
-    monkeypatch.setattr(eng, "_service_reply", _stub)
-    await eng._dispatch_reply_lane()
-
-    assert hub.state.consecutive_phase5_skips == 0
-
-
-@pytest.mark.asyncio
-async def test_dispatch_only_resets_agents_that_had_a_pending_pair(monkeypatch):
-    """A second, idle agent with no pending pairs must not have its skip
-    streak touched at all this tick."""
-    hub = Agent("blackbird", "BlackbirdBot", "Blackbird", role="scout_hub")
-    idle = Agent("wang", "WangBot", "Wang", role="pi_lab")
-    idle.state.consecutive_phase5_skips = 4
-    hub.state.active_threads["t0"] = ThreadState(
-        thread_id="t0", channel="general", other_agent_id="pi0",
-        message_count=1, has_pending_reply=True,
-    )
     hub.state.consecutive_phase5_skips = 3
-    eng = SimulationEngine(
-        agents=[hub, idle],
-        slack_clients={
-            "blackbird": FakeSlackClient(agent_id="blackbird"),
-            "wang": FakeSlackClient(agent_id="wang"),
-        },
-    )
-    eng._running = True
     monkeypatch.setattr(eng, "_service_reply", _noop_async)
 
     await eng._dispatch_reply_lane()
 
-    assert hub.state.consecutive_phase5_skips == 0
-    assert idle.state.consecutive_phase5_skips == 4, (
-        "an agent with no pending pair this tick must not be reset"
+    assert hub.state.consecutive_phase5_skips == 3, (
+        "the reply lane must not reset consecutive_phase5_skips at all"
     )
 
 
@@ -294,7 +302,17 @@ async def test_one_failing_pair_does_not_abort_the_sweep(monkeypatch):
     """Before this fix, the servicing loop was a bare ``for ... await`` with
     no try/except, and its call site in _run_main_loop was the only await in
     the main-loop body not wrapped in one either — one pair raising took down
-    the rest of the sweep (and, uncaught, the whole tick)."""
+    the rest of the sweep (and, uncaught, the whole tick).
+
+    ``n`` here is the ATTEMPTED count — `_dispatch_reply_lane`'s return value
+    (kept as a log/metric, see its docstring). It does NOT mean "3 units of
+    real work happened" and does not drive the main loop's idle backoff any
+    more (fix round 2, NEW Critical): that decision is spend-based
+    (`api_call_count` before/after) and tested separately in
+    test_hub_budget_scheduler.py's ``TestReplyLaneIsNotPacedByTheIdleBackoff``,
+    including the regression case where every pair is attempted but none of
+    them spend anything (a rate-limited pending pair).
+    """
     eng, hub = _engine_with_pending(3)
     served = []
 
@@ -309,7 +327,7 @@ async def test_one_failing_pair_does_not_abort_the_sweep(monkeypatch):
     assert sorted(served) == ["t0", "t2"], (
         "a sibling pair's failure must not abort the rest of the sweep"
     )
-    assert n == 3
+    assert n == 3, "n counts ATTEMPTS (including the one that raised), not spend"
 
 
 # ---------------------------------------------------------------------------
