@@ -316,9 +316,14 @@ class Settings(BaseSettings):
     lab_daily_post_cap: int = 1  # pi_lab: one pitch per day (design §9)
     # Two-lane concurrent scheduler: max reply-lane tasks in flight at once.
     # 1 means concurrency is off — the reply lane processes one thread reply
-    # at a time, same as today's sequential behaviour. Task 13 consumes this;
-    # Task 14 re-defaults it to 4. Neither re-declares it here.
-    reply_lane_max_in_flight: int = 1
+    # at a time, same as today's sequential behaviour. Task 13 consumed this;
+    # Task 14 raises it to 4 now that the adversarial concurrency tests
+    # (tests/integration/test_concurrent_thread_safety.py) are green — see
+    # that file and task-14-report.md for the evidence. The .env on the
+    # deployed host does not set REPLY_LANE_MAX_IN_FLIGHT, so this default is
+    # what production actually gets. Rollback: set REPLY_LANE_MAX_IN_FLIGHT=1
+    # and recreate the agent container — no code change, no migration.
+    reply_lane_max_in_flight: int = 4
     # DB pool for the AGENT process. The default (5 + 10) predates concurrency;
     # each in-flight reply task can hold a session, and the loop's own pollers
     # and flushers need headroom on top, so the pool must exceed
