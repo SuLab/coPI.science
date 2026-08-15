@@ -1399,7 +1399,8 @@ async def test_strip_cases(live, monkeypatch, text, expected):
     eng = _engine(factory, run_id)
     await eng._recompute_allowed_sender_ids()
     assert eng.agents["su"].allowed_sender_ids == {"su", "wiseman"}
-    assert eng._strip_disallowed_tags(text, eng.agents["su"]) == expected
+    out, _ = eng._strip_disallowed_tags(text, eng.agents["su"])
+    assert out == expected
 
 
 def test_strip_cases_include_survival_rows():
@@ -1442,7 +1443,7 @@ async def test_strip_indentation_is_preserved(live, monkeypatch):
         "- first bullet\n"
         "  - nested bullet\n"
     )
-    out = eng._strip_disallowed_tags(text, eng.agents["su"])
+    out, _ = eng._strip_disallowed_tags(text, eng.agents["su"])
     assert "@CravattBot" not in out, "the mention must still be stripped"
     assert "    for h in hits:" in out, "code-block indentation was reflowed"
     assert "        yield h" in out, "nested code indentation was reflowed"

@@ -983,32 +983,34 @@ class TestTagHygiene:
     def test_no_op_when_gate_off(self, monkeypatch):
         eng = self._eng(monkeypatch, None)
         text = "Hey @WisemanBot, thoughts?"
-        assert eng._strip_disallowed_tags(text, eng.agents["su"]) == text
+        assert eng._strip_disallowed_tags(text, eng.agents["su"]) == (text, 0)
 
     def test_cohort_mate_mention_survives(self, monkeypatch):
         eng = self._eng(monkeypatch, {"su", "wiseman"})
         text = "Hey @WisemanBot, thoughts?"
-        assert eng._strip_disallowed_tags(text, eng.agents["su"]) == text
+        assert eng._strip_disallowed_tags(text, eng.agents["su"]) == (text, 0)
 
     def test_non_mate_mention_is_removed_not_de_atted(self, monkeypatch):
         eng = self._eng(monkeypatch, {"su", "wiseman"})
-        out = eng._strip_disallowed_tags("Great point @CravattBot, shall we?",
+        out, n = eng._strip_disallowed_tags("Great point @CravattBot, shall we?",
                                          eng.agents["su"])
         assert "CravattBot" not in out
         assert "@" not in out
         assert out == "Great point, shall we?", out
+        assert n == 1
 
     def test_self_mention_survives(self, monkeypatch):
         eng = self._eng(monkeypatch, set())
         assert eng._strip_disallowed_tags("as @SuBot said", eng.agents["su"]) == (
-            "as @SuBot said"
+            "as @SuBot said", 0
         )
 
     def test_unknown_bot_name_is_left_alone_and_warned(self, monkeypatch, caplog):
         eng = self._eng(monkeypatch, set())
         with caplog.at_level("WARNING"):
-            out = eng._strip_disallowed_tags("ping @GhostBot", eng.agents["su"])
+            out, n = eng._strip_disallowed_tags("ping @GhostBot", eng.agents["su"])
         assert out == "ping @GhostBot"
+        assert n == 0
         assert any("unknown bot name" in r.getMessage().lower() for r in caplog.records)
 
     def test_strips_are_counted_per_agent(self, monkeypatch):
@@ -1023,8 +1025,8 @@ class TestTagHygiene:
 
     def test_empty_and_none_text(self, monkeypatch):
         eng = self._eng(monkeypatch, set())
-        assert eng._strip_disallowed_tags(None, eng.agents["su"]) is None
-        assert eng._strip_disallowed_tags("", eng.agents["su"]) == ""
+        assert eng._strip_disallowed_tags(None, eng.agents["su"]) == (None, 0)
+        assert eng._strip_disallowed_tags("", eng.agents["su"]) == ("", 0)
 
     def test_all_outbound_paths_are_covered(self):
         """The strip lives in _post_message, so every caller inherits it — Phase 4
@@ -1041,7 +1043,7 @@ class TestTagHygiene:
             "Proposal:\n\n```python\n    def f():\n        return 1\n```\n\n"
             "- point one\n  - nested\ncc @CravattBot"
         )
-        out = eng._strip_disallowed_tags(text, eng.agents["su"])
+        out, _ = eng._strip_disallowed_tags(text, eng.agents["su"])
         assert "    def f():" in out
         assert "        return 1" in out
         assert "  - nested" in out
@@ -1049,30 +1051,32 @@ class TestTagHygiene:
 
     def test_mention_at_line_start_leaves_no_leading_space(self, monkeypatch):
         eng = self._eng(monkeypatch, {"su"})
-        assert eng._strip_disallowed_tags("@CravattBot hi", eng.agents["su"]) == "hi"
+        assert eng._strip_disallowed_tags("@CravattBot hi", eng.agents["su"]) == ("hi", 1)
 
     def test_trailing_mention_leaves_no_trailing_space(self, monkeypatch):
         eng = self._eng(monkeypatch, {"su"})
-        assert eng._strip_disallowed_tags("cc @CravattBot", eng.agents["su"]) == "cc"
+        assert eng._strip_disallowed_tags("cc @CravattBot", eng.agents["su"]) == ("cc", 1)
 
     def test_email_and_url_are_not_mangled(self, monkeypatch):
         """The strip now runs on every outbound message, so a bare '@' inside an
         address or URL path must not be read as a mention."""
         eng = self._eng(monkeypatch, {"su"})
         for text in ("mail a@cravattbot.example", "see http://x/@cravattbot"):
-            assert eng._strip_disallowed_tags(text, eng.agents["su"]) == text
+            assert eng._strip_disallowed_tags(text, eng.agents["su"]) == (text, 0)
 
     def test_mention_needs_a_word_boundary(self, monkeypatch):
         eng = self._eng(monkeypatch, {"su"})
         assert eng._strip_disallowed_tags("@CravattBotly", eng.agents["su"]) == (
-            "@CravattBotly"
+            "@CravattBotly", 0
         )
 
     def test_idempotent(self, monkeypatch):
         eng = self._eng(monkeypatch, {"su"})
-        once = eng._strip_disallowed_tags("hi @CravattBot there", eng.agents["su"])
-        twice = eng._strip_disallowed_tags(once, eng.agents["su"])
+        once, first_n = eng._strip_disallowed_tags("hi @CravattBot there", eng.agents["su"])
+        twice, second_n = eng._strip_disallowed_tags(once, eng.agents["su"])
         assert once == twice
+        assert first_n == 1
+        assert second_n == 0
 
 
 # ---------------------------------------------------------------------------

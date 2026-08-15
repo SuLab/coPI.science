@@ -120,7 +120,7 @@ async def test_real_model_prose_gets_its_cross_cohort_mention_stripped(monkeypat
     )
     assert response, "the real API returned nothing"
 
-    cleaned = eng._strip_disallowed_tags(response, su)
+    cleaned, _ = eng._strip_disallowed_tags(response, su)
     assert cleaned is not None
     if "@CravattBot" in response:
         assert "CravattBot" not in cleaned, (

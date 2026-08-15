@@ -1973,11 +1973,16 @@ class SimulationEngine:
             # something lets the new-post branch reject that case instead of
             # publishing a body with the mention silently deleted out from
             # under it — see the mutilation check below.
-            tags_stripped_before = self._cohort_tags_stripped.get(agent.agent_id, 0)
-            message_text = self._strip_disallowed_tags(message_text, agent)
-            body_mention_was_stripped = (
-                self._cohort_tags_stripped.get(agent.agent_id, 0) > tags_stripped_before
+            #
+            # This reads the count _strip_disallowed_tags returns for THIS call,
+            # not a before/after delta on the shared self._cohort_tags_stripped
+            # counter — under the two-lane scheduler another agent's concurrent
+            # post can bump that counter between the "before" and "after" reads,
+            # which used to make Phase 5 reject a perfectly clean post.
+            message_text, this_call_stripped = self._strip_disallowed_tags(
+                message_text, agent
             )
+            body_mention_was_stripped = this_call_stripped > 0
 
             if action != "new_post":
                 logger.info(
@@ -2436,7 +2441,9 @@ class SimulationEngine:
                 agent_id, reason, exc, exc_info=True,
             )
 
-    def _strip_disallowed_tags(self, message_text: str | None, agent: Agent) -> str | None:
+    def _strip_disallowed_tags(
+        self, message_text: str | None, agent: Agent
+    ) -> tuple[str | None, int]:
         """Remove @BotName mentions of non-cohort agents from an outbound message.
 
         Defense-in-depth for the cohort gate: the receiving agent already filters
@@ -2460,10 +2467,18 @@ class SimulationEngine:
 
         Strips are counted per agent and surfaced in the admin UI: a high rate means
         the cohort topology disagrees with what the agents are trying to do.
+
+        Returns ``(cleaned_text, n_stripped_this_call)`` — the second element is
+        how many mentions THIS call removed, never inferred from the shared
+        ``self._cohort_tags_stripped`` counter below (that counter is engine-wide
+        and any concurrent agent's post can bump it between two reads of it, which
+        is exactly the bug this per-call return exists to avoid — see Phase 5's
+        caller). No-op paths (gate off, empty/None text, nothing matched) always
+        report 0.
         """
         allowed = agent.allowed_sender_ids
         if allowed is None or not message_text:
-            return message_text
+            return message_text, 0
 
         stripped = 0
 
@@ -2495,7 +2510,7 @@ class SimulationEngine:
         # this strip now runs on EVERY outbound message.
         cleaned = re.sub(r"[ \t]*(?<![\w./@-])@(\w+[Bb]ot)\b", _repl, message_text)
         if not stripped:
-            return message_text
+            return message_text, 0
 
         self._cohort_tags_stripped[agent.agent_id] = (
             self._cohort_tags_stripped.get(agent.agent_id, 0) + stripped
@@ -2506,7 +2521,8 @@ class SimulationEngine:
         # trim end-of-line space; never touch line-leading whitespace.
         cleaned = re.sub(r"(?<=\S)[ \t]{2,}", " ", cleaned)
         cleaned = re.sub(r"(?m)[ \t]+$", "", cleaned)
-        return cleaned.lstrip(" \t") if cleaned[:1] in (" ", "\t") else cleaned
+        cleaned = cleaned.lstrip(" \t") if cleaned[:1] in (" ", "\t") else cleaned
+        return cleaned, stripped
 
     def _roles_by_agent(self) -> dict[str, str]:
         """Live roster agent_id -> role. Agents absent from this map (e.g.
@@ -3113,7 +3129,8 @@ class SimulationEngine:
         # extra Phase 5 pass (which needs the cleaned text locally) is harmless.
         # No-op when the gate is off for this agent. See v2 §9.
         if agent is not None:
-            text = self._strip_disallowed_tags(text, agent) or text
+            cleaned_text, _ = self._strip_disallowed_tags(text, agent)
+            text = cleaned_text or text
 
         # Slack threads on the *root's Slack ts*, which equals the canonical
         # thread_ts only when the root was born on Slack. A thread started
