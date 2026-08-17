@@ -1,5 +1,9 @@
 """The /manager surface: deny-by-default, read-only, and PI-scoped."""
 
+import re
+import uuid
+from datetime import UTC, datetime
+
 import pytest
 
 from src.models import USER_ROLE_ADMIN, USER_ROLE_MANAGER, USER_ROLE_PI
@@ -9,17 +13,30 @@ from tests.integration.test_manager_access import auth_headers
 
 pytestmark = pytest.mark.integration
 
+_PARAM_RE = re.compile(r"\{(\w+)\}")
 
-def _manager_get_paths() -> list[str]:
-    """Every GET path on the manager router, with path params filled by name.
 
-    Enumerated from the router rather than hand-listed so a route added later
-    is automatically covered by the sweeps below. This is what keeps
-    deny-by-default honest instead of aspirational.
+def _manager_get_paths(param_values: dict[str, str] | None = None) -> list[str]:
+    """Full ``/manager``-prefixed path for every GET route on the *live*
+    router, with each ``{param}`` slot filled from ``param_values`` (a fresh
+    UUID for anything not supplied — syntactically valid, even if it 404s).
+
+    Enumerated from ``manager_router.router.routes`` rather than hand-listed,
+    so a route added later — Tasks 5/6 add four more — is picked up by both
+    sweeps below automatically instead of silently skipped. That enumeration
+    is what keeps deny-by-default honest instead of aspirational: a hand-list
+    only ever proves the routes someone remembered to add to it.
     """
-    return sorted(
-        r.path for r in manager_router.router.routes if "GET" in getattr(r, "methods", ())
-    )
+    param_values = param_values or {}
+    paths = []
+    for route in manager_router.router.routes:
+        if "GET" not in getattr(route, "methods", ()):
+            continue
+        path = f"/manager{route.path}"
+        for name in _PARAM_RE.findall(path):
+            path = path.replace("{" + name + "}", param_values.get(name, str(uuid.uuid4())))
+        paths.append(path)
+    return sorted(paths)
 
 
 def test_manager_router_exposes_no_mutating_routes():
@@ -36,10 +53,28 @@ async def test_unauthenticated_manager_root_redirects_to_login(client):
 
 
 async def test_pi_is_denied_the_manager_surface(client, db_session):
+    """Enumerates every current GET route on the live router (not a
+    hand-list), so a route added later without a matching test entry still
+    gets exercised here — see ``_manager_get_paths``."""
     pi = await factories.make_user(db_session, user_role=USER_ROLE_PI)
-    for path in ("/manager", "/manager/pis"):
+    paths = _manager_get_paths({"user_id": str(pi.id)})
+    assert len(paths) >= 3, "the enumeration matched too few routes to be meaningful"
+    for path in paths:
         r = await client.get(path, headers=auth_headers(pi.id), follow_redirects=False)
         assert r.status_code == 403, f"{path} was reachable by a PI"
+
+
+async def test_staff_can_reach_every_manager_route(client, db_session):
+    """Paired with the denial sweep above: the same live-router enumeration
+    also proves staff are NOT accidentally locked out of a route added later.
+    A 200 (rendered page) or a 302 (the root's redirect to /manager/pis) both
+    count as reached; a 403 or 404 does not."""
+    mgr = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
+    pi = await factories.make_user(db_session, user_role=USER_ROLE_PI)
+    paths = _manager_get_paths({"user_id": str(pi.id)})
+    for path in paths:
+        r = await client.get(path, headers=auth_headers(mgr.id), follow_redirects=False)
+        assert r.status_code in (200, 302), f"{path} was unreachable by a manager: {r.status_code}"
 
 
 @pytest.mark.parametrize("role", [USER_ROLE_MANAGER, USER_ROLE_ADMIN])
@@ -72,6 +107,47 @@ async def test_directory_excludes_staff_accounts(client, db_session):
     assert f"/manager/pis/{pi.id}" in r.text
     assert f"/manager/pis/{admin.id}" not in r.text
     assert "Sneaky Admin" not in r.text
+
+
+async def test_pi_directory_has_no_admin_controls(client, db_session):
+    """F6, applied to pis.html rather than pi_detail.html: this is the
+    template actually derived from templates/admin/users.html, which is the
+    one that carries the impersonation widget. The reachability gate cannot
+    catch a regression here — /admin/impersonate is a real route, so a stray
+    link to it would resolve fine — so this inspects the rendered body
+    directly instead."""
+    mgr = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
+    await factories.make_user(db_session, user_role=USER_ROLE_PI)
+    body = (await client.get("/manager/pis", headers=auth_headers(mgr.id))).text
+    assert "impersonate" not in body.lower()
+    assert "/admin/" not in body
+    assert "/delete" not in body
+
+
+async def test_pi_directory_renders_a_complete_profile_row(client, db_session):
+    """No other test in this file creates a claimed PI with a profile, so
+    pis.html's profile-status/profile-version columns only ever exercised
+    their empty branches. This exercises the populated path.
+
+    The name deliberately avoids the substring "Complete" (unlike, say, "Dr
+    Complete") because the status-filter dropdown always renders a "Complete"
+    `<option>` regardless of data — a name collision would let this test pass
+    even if the status badge itself never rendered. Requiring a *second*
+    occurrence of "Complete" is what actually proves the populated badge, not
+    just the dropdown, rendered.
+    """
+    mgr = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
+    pi = await factories.make_user(
+        db_session,
+        user_role=USER_ROLE_PI,
+        name="Dr Populated",
+        claimed_at=datetime.now(UTC),
+    )
+    await factories.make_profile(db_session, user=pi)
+    r = await client.get("/manager/pis", headers=auth_headers(mgr.id))
+    assert r.status_code == 200
+    assert "Dr Populated" in r.text
+    assert r.text.count("Complete") >= 2, "expected the dropdown option AND this row's badge"
 
 
 async def test_pi_detail_is_readable(client, db_session):
