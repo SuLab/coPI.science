@@ -1563,8 +1563,11 @@ async def check_blocking_sessions(conn, max_xact_age_s: float = DEFAULT_MAX_TOLE
         rem = [
             "Stop the writers first — the agent simulation is the main one, and it must be "
             "stopped GRACEFULLY or the in-flight turn's messages are lost:",
-            "  docker stop -t 30 agent-run",
-            "  docker compose stop app worker",
+            # blackbird-agent-run, NOT agent-run: the unprefixed name belongs to the
+            # OTHER deployment on this host (project copi-python), and stopping it
+            # would halt that deployment's production simulation.
+            "  docker stop -t 30 blackbird-agent-run",
+            "  docker compose -f docker-compose.prod.yml stop blackbird-app worker",
             "Then re-check, and only terminate what is left if you know what it is:",
             "  SELECT pid, state, now()-xact_start AS age, query FROM pg_stat_activity\n"
             "   WHERE datname = current_database() AND xact_start IS NOT NULL;",
@@ -1708,7 +1711,9 @@ async def check_sizing(conn, rev: str | None = None):
     if status != PASS:
         rem = [
             "Announce the window and stop the writers for its duration:",
-            "  docker stop -t 30 agent-run && docker compose stop app worker",
+            # See the note above: the unprefixed `agent-run` is org1's container.
+            "  docker stop -t 30 blackbird-agent-run && "
+            "docker compose -f docker-compose.prod.yml stop blackbird-app worker",
             "There is no CONCURRENTLY option available here: alembic runs the whole chain "
             "in one transaction and CREATE INDEX CONCURRENTLY cannot run inside one.",
         ]

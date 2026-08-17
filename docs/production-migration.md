@@ -1,5 +1,23 @@
 # Production migration to alembic 0023 (`cohort-db-conversations`)
 
+> ## ⚠️ STOP — this runbook predates the two-stack host. Read this before running any command in it.
+>
+> It was written when this repo was the only deployment on its host, and it is kept for
+> the 0023 history. **This host now runs TWO production stacks**, and several commands
+> below are actively dangerous as written:
+>
+> * Every bare **`agent-run`** in this file refers to the *unprefixed* container, which on
+>   this host belongs to the OTHER deployment (compose project `copi-python`, serving
+>   copi.science). `docker stop agent-run` / `docker rm agent-run` **stops that
+>   deployment's live simulation.** This repo's container is **`blackbird-agent-run`**.
+> * Every bare **`docker compose`** resolves to `docker-compose.yml`, a *different* (dev)
+>   stack. The deployed stack is **`-f docker-compose.prod.yml`**, whose web service is
+>   **`blackbird-app`**, not `app`.
+> * Never pass `--remove-orphans` — it has killed the other stack's nginx and certbot.
+>
+> Substitute those throughout, or use `scripts/migrate/run_migration.sh`, which has been
+> corrected. Current head is 0028, well past this document's target.
+
 **Audience: an operator or agent who has not done any of the analysis behind this.**
 You do not need to understand the branch to run this. You do need to follow the order,
 and you need to stop when something says STOP.

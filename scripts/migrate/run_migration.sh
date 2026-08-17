@@ -261,7 +261,7 @@ if [ "$MIG" -ne 0 ]; then
   echo "  The chain runs in one transaction, so the database is unchanged — verify:" >&2
   echo "    docker compose exec -T $PG_SVC psql -U copi -d <db> -c 'select * from alembic_version'" >&2
   echo "  A LockNotAvailableError means something held a lock on agent_messages." >&2
-  echo "  Stop the writers (docker stop -t 30 agent-run) and re-run." >&2
+  echo "  Stop the writers (docker stop -t 30 blackbird-agent-run) and re-run." >&2
   exit "$EX_BLOCKED"
 fi
 
@@ -322,5 +322,5 @@ echo "        docker compose exec -T -e PYTHONPATH=/app $SVC \\"
 echo "          python scripts/backfill_slack_ts.py --apply"
 echo "      Read its output. Exit 2 means rows were UNVERIFIED, not absent."
 echo "   9. Deploy the application code, then restart app + worker."
-echo "  10. Start agent-run last."
+echo "  10. Start blackbird-agent-run last (NOT agent-run — that is org1's)."
 echo "=============================================================="
