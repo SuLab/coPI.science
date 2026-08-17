@@ -494,11 +494,22 @@ def main():
     else:
         if STATE_FILE.exists():
             STATE_FILE.unlink()
+        # These names are NOT interchangeable with org1's. This host runs a second,
+        # unrelated CoPI deployment (project `copi-python`) whose simulation container
+        # is named `agent-run` — the UNPREFIXED name. `docker stop agent-run` /
+        # `docker rm agent-run` would kill THAT deployment's production run. This repo's
+        # container is `blackbird-agent-run`. Likewise `-f docker-compose.prod.yml` is
+        # not optional: a bare `docker compose` resolves to the dev stack, whose web
+        # service is `app`, while the deployed prod service is `blackbird-app`.
         console.print("[green]All done! Restart the agent container to pick up the new tokens.[/green]")
-        console.print("  docker stop -t 30 agent-run  # SIGTERM so the engine flushes")
-        console.print("  docker rm agent-run")
-        console.print("  docker compose up -d --build app worker")
-        console.print("  docker compose --profile agent run -d --name agent-run agent python -m src.agent.main --budget 0")
+        console.print("  docker stop -t 30 blackbird-agent-run  # SIGTERM so the engine flushes")
+        console.print("  docker rm blackbird-agent-run")
+        console.print("  docker compose -f docker-compose.prod.yml up -d --build blackbird-app worker")
+        console.print("  docker compose -f docker-compose.prod.yml --profile agent build agent")
+        console.print(
+            "  docker compose -f docker-compose.prod.yml --profile agent run -d "
+            "--name blackbird-agent-run agent python -m src.agent.main"
+        )
 
 
 if __name__ == "__main__":

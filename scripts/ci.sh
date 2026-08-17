@@ -149,7 +149,7 @@ echo "    single head: $(printf '%s\n' "$heads_out" | tr -d '\n')"
 # CI_MIGRATION_DB=none skips the step. CI_MIGRATION_DB=<dsn> runs it against a
 # database you supply instead of the throwaway container — NEVER point that at a
 # database with data you want.
-migcheck_cleanup() { docker rm -f "$MIGCHECK_CONTAINER" >/dev/null 2>&1 || true; }
+migcheck_cleanup() { docker rm -fv "$MIGCHECK_CONTAINER" >/dev/null 2>&1 || true; }
 
 if [ "${CI_MIGRATION_DB:-}" = "none" ]; then
   echo "==> alembic round trip SKIPPED (CI_MIGRATION_DB=none)"
