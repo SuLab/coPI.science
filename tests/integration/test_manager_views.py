@@ -374,6 +374,81 @@ async def test_manager_activity_detail_404s_on_an_unknown_run(client, db_session
     assert r.status_code == 404
 
 
+async def test_manager_activity_detail_renders_the_populated_shared_partial(
+    client, db_session
+):
+    """Every table in ``templates/admin/_run_detail_body.html`` sits behind an
+    ``{% if %}`` guard (agent_stats / channel_stats / channels / messages), and
+    the only other manager request that reaches it — the route sweep in
+    ``test_staff_can_reach_every_manager_route`` — seeds a bare SimulationRun
+    and asserts nothing about the body. So a manager route that dropped a key
+    from its ``**view`` splat, or a wrapper that lost the ``{% include %}``
+    entirely, would still 200 with an empty page and every other test here
+    would keep passing. This is the third instance of that trap on this branch
+    (the assessments and discussions partials were the first two).
+
+    Seeds one message and one channel so all four guards open, then asserts on
+    markup that can ONLY come from the partial's populated path:
+
+    * the channel name, printed by both the Channels Created and Messages by
+      Channel rows. It is a fixture-unique literal, and the wrapper (which
+      prints only the run's date and status) has no channel names at all.
+    * ``PartialbotBot``, i.e. the partial's own ``{{ msg.agent_id }}Bot``
+      concatenation, not the bare agent_id — that suffix exists nowhere in the
+      wrapper.
+    * the ``Message Timeline (1)`` heading, whose count comes from
+      ``messages | length``: it distinguishes "the timeline block rendered with
+      a row in it" from "the block rendered empty", which a bare "Message
+      Timeline" substring could not.
+    * the summary card values, which prove the ``run`` object itself carried
+      through the splat.
+
+    Each assertion was confirmed to fail without the data: rerunning with the
+    message/channel seeding removed drops all four (the guards close, the page
+    renders as the three summary cards alone), and deleting the
+    ``{% include %}`` from ``manager/activity_detail.html`` drops all four as
+    well while the wrapper's own heading assertions keep passing.
+    """
+    mgr = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
+    run = await factories.make_simulation_run(db_session, total_messages=1, total_api_calls=7)
+    await factories.make_agent_channel(
+        db_session,
+        run=run,
+        channel_name="partial-proof-channel",
+        channel_type="thematic",
+        created_by_agent="partialbot",
+    )
+    await factories.make_agent_message(
+        db_session,
+        run=run,
+        agent_id="partialbot",
+        channel_name="partial-proof-channel",
+        message_length=140,
+        phase="new_post",
+    )
+    await db_session.flush()
+
+    r = await client.get(f"/manager/activity/{run.id}", headers=auth_headers(mgr.id))
+    assert r.status_code == 200
+    body = r.text
+
+    # The wrapper rendered (control for the four partial assertions below).
+    assert "Simulation Run" in body
+    assert "/manager/activity" in body
+
+    # The partial's populated path.
+    assert "partial-proof-channel" in body
+    assert "PartialbotBot" in body
+    assert "Message Timeline (1)" in body
+    assert "Messages by Agent" in body
+    assert "Channels Created" in body
+    assert "140 chars" in body
+
+    # Still no admin-only drill-down anywhere on the page (D10).
+    assert "/admin/" not in body
+    assert "llm-calls" not in body
+
+
 async def test_manager_discussions_renders_a_real_thread_with_no_export_control(
     client, db_session
 ):

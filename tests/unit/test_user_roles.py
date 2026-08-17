@@ -91,6 +91,10 @@ def test_is_staff_compiles_to_a_sql_in_clause():
     assert "'admin'" in sql
 
 
-def test_default_role_is_pi():
-    u = User(name="X", orcid="0000-0000-0000-0002")
-    assert u.user_role is None or u.user_role == USER_ROLE_PI
+# The default-role case is NOT tested here. A pre-flush `User()` has no
+# user_role at all (the mapped default is applied by the INSERT, not the
+# constructor), so the only assertion this file could make was
+# `is None or == 'pi'` — which accepts both answers and therefore cannot fail.
+# The real, DB-backed default is pinned in
+# tests/integration/test_manager_access.py::test_default_role_is_pi_in_the_database,
+# which flushes and reads the column back.

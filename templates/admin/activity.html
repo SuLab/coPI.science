@@ -1,5 +1,12 @@
 {% extends "base.html" %}
 {% block title %}Admin — Agent Activity — CoPI{% endblock %}
+{# TWIN — keep in sync with templates/manager/activity.html.
+   These two files are byte-identical apart from their title and the
+   run-detail links in the runs table, so drift here is invisible: no
+   test diffs them and nothing renders both. Change one, change the
+   other. Unlike the run-DETAIL pages, which share
+   admin/_run_detail_body.html, this list page was copied rather than
+   extracted. #}
 
 {% block content %}
 <h1 class="text-2xl font-bold text-gray-900 mb-6">Agent Activity</h1>
