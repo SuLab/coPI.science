@@ -235,10 +235,14 @@ authoritative.)
 ## Account Types (PI / manager / admin)
 
 **`users.user_role` is the single source of truth**, with values `pi`, `manager`,
-`admin`. There is no `is_admin` column any more — `User.is_admin` is a read-only
+`admin`. `User.is_admin` is no longer a mapped column — it is a read-only
 `hybrid_property` over `user_role`, so it still works in both SQL
 (`select(User.is_admin)`) and Python, but **cannot be assigned**. Set the role
-instead.
+instead. The physical `users.is_admin` column itself is still in the database,
+unmapped and defaulted (migration `0028_add_user_role` is additive on purpose, so the
+already-running container kept working against the new schema with no window where
+live code and applied schema disagreed); dropping it is a separate later migration,
+`0029`, not yet applied — see the design doc's §8.
 
 - **PI** — the original account: own profile, own lab agent, `/profile` and `/agent`.
 - **Manager** — global, strictly **read-only**: `/manager/pis`, `/manager/assessments`,

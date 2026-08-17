@@ -2,8 +2,8 @@
 
 **Status:** IMPLEMENTED (Tasks 1-9) as of 2026-08-17. 0029 (the is_admin column drop) is
 NOT yet applied — see §8 and Task 10 of the plan.
-**Companion plan:** `docs/plans/2026-08-17-user-account-types-plan.md` (the *how* —
-not yet written).
+**Companion plan:** `docs/plans/2026-08-17-user-account-types-plan.md` (the *how*
+— written, and the document Tasks 1-9 were executed from).
 **Scope:** web tier only (`src/routers/`, `src/models/user.py`, `src/dependencies.py`,
 `templates/`). Nothing in `src/agent/` changes, so the simulation needs no restart for
 correctness — see §8.
