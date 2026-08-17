@@ -24,6 +24,8 @@ from src.models import (
     COHORT_ACTION_CREATED,
     COHORT_ACTION_DELETED,
     COHORT_ACTION_TOPOLOGY_SNAPSHOT,
+    USER_ROLE_ADMIN,
+    VALID_USER_ROLES,
     AccessAllowlist,
     AgentRegistry,
     Cohort,
@@ -132,6 +134,7 @@ async def admin_user_detail(
             profile=detail["profile"],
             publications=detail["publications"],
             jobs=detail["jobs"],
+            valid_user_roles=VALID_USER_ROLES,
         ),
     )
 
@@ -156,6 +159,59 @@ async def admin_delete_user(
     await db.commit()
     logger.info("Admin %s deleted user %s (%s)", current_user.name, name, user_id)
     return RedirectResponse(url="/admin/users", status_code=302)
+
+
+@router.post("/users/{user_id}/role")
+async def admin_set_user_role(
+    user_id: uuid.UUID,
+    request: Request,
+    user_role: str = Form(...),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_admin_user),
+):
+    """Set a user's account type (admin only).
+
+    Named for users, not agents: POST /agents/{agent_id}/role already exists
+    and sets a BOT role (pi_lab / scout_hub), which is a different thing.
+    """
+    if user_role not in VALID_USER_ROLES:
+        raise HTTPException(status_code=400, detail=f"Invalid role: {user_role}")
+
+    result = await db.execute(select(User).where(User.id == user_id))
+    user = result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    # Mirrors the self-delete guard above: an admin editing their own row is
+    # how you lose your own access mid-session.
+    if user.id == current_user.id:
+        raise HTTPException(status_code=400, detail="Cannot change your own role")
+
+    # Demoting the last admin locks every human out of /admin; the only way
+    # back is `python -m src.cli role:set` from a container shell. This branch
+    # is unreachable over HTTP while the self-change guard above stands —
+    # demoting the last admin X requires an actor with admin rights who is not
+    # X, and if X is the last admin no such actor exists — but it stays as a
+    # backstop for if that guard is ever relaxed, and it is what
+    # tests/integration/test_role_appointment.py exercises by calling this
+    # function directly with a non-admin actor.
+    if user.user_role == USER_ROLE_ADMIN and user_role != USER_ROLE_ADMIN:
+        admin_count = await db.scalar(
+            select(func.count(User.id)).where(User.user_role == USER_ROLE_ADMIN)
+        )
+        if (admin_count or 0) <= 1:
+            raise HTTPException(
+                status_code=400, detail="Cannot demote the last remaining admin"
+            )
+
+    previous = user.user_role
+    user.user_role = user_role
+    await db.commit()
+    logger.info(
+        "Admin %s changed role of %s (%s) from %s to %s",
+        current_user.name, user.name, user_id, previous, user_role,
+    )
+    return RedirectResponse(url=f"/admin/users/{user_id}", status_code=302)
 
 
 @router.get("/jobs", response_class=HTMLResponse)

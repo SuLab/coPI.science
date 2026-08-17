@@ -175,6 +175,38 @@ def admin_revoke(
         raise typer.Exit(1)
 
 
+@app.command(name="role:set")
+def role_set(
+    orcid: str = typer.Option(..., "--orcid", help="ORCID ID of the account"),
+    role: str = typer.Option(..., "--role", help="pi | manager | admin"),
+):
+    """Set a user's account type. The escape hatch when no admin can log in."""
+    async def _set() -> bool:
+        from sqlalchemy import select
+
+        from src.models import VALID_USER_ROLES, User
+        if role not in VALID_USER_ROLES:
+            console.print(f"[red]Invalid role {role!r}; expected one of {VALID_USER_ROLES}[/red]")
+            return False
+        engine, factory = await _get_db()
+        try:
+            async with factory() as db:
+                result = await db.execute(select(User).where(User.orcid == orcid))
+                user = result.scalar_one_or_none()
+                if not user:
+                    console.print(f"[red]User with ORCID {orcid} not found[/red]")
+                    return False
+                user.user_role = role
+                await db.commit()
+                console.print(f"[green]Set {user.name} ({orcid}) to {role}[/green]")
+                return True
+        finally:
+            await engine.dispose()
+
+    if not _run(_set()):
+        raise typer.Exit(1)
+
+
 @app.command(name="list-users")
 def list_users():
     """List all users in the database."""

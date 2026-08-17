@@ -34,8 +34,8 @@
                 <dd class="font-medium">{{ target_user.department or '—' }}</dd>
             </div>
             <div>
-                <dt class="text-gray-500">Admin</dt>
-                <dd class="font-medium">{{ 'Yes' if target_user.is_admin else 'No' }}</dd>
+                <dt class="text-gray-500">Role</dt>
+                <dd class="font-medium">{{ target_user.user_role }}</dd>
             </div>
             <div>
                 <dt class="text-gray-500">Onboarding Complete</dt>
@@ -50,6 +50,32 @@
                 <dd class="font-medium">{{ target_user.created_at.strftime('%b %d, %Y') }}</dd>
             </div>
         </dl>
+    </div>
+
+    <!-- Account type -->
+    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
+        <h2 class="font-semibold text-gray-800 mb-2">Account Type</h2>
+        <p class="text-sm text-gray-600 mb-4">
+            <strong>PI</strong> — own profile and lab agent.
+            <strong>Manager</strong> — read-only view of every PI, the assessments
+            queue and agent activity; no lab of their own, and cannot impersonate.
+            <strong>Admin</strong> — full access.
+        </p>
+        {% if target_user.id != current_user.id %}
+        <form method="POST" action="/admin/users/{{ target_user.id }}/role" class="flex gap-2 items-center">
+            <select name="user_role" class="border border-gray-300 rounded px-3 py-2 text-sm">
+                {% for role in valid_user_roles %}
+                <option value="{{ role }}" {% if target_user.user_role == role %}selected{% endif %}>{{ role }}</option>
+                {% endfor %}
+            </select>
+            <button type="submit"
+                    class="px-4 py-2 bg-indigo-600 text-white text-sm font-medium rounded-lg hover:bg-indigo-700">
+                Save Role
+            </button>
+        </form>
+        {% else %}
+        <p class="text-sm text-gray-400">You cannot change your own role.</p>
+        {% endif %}
     </div>
 
     {% if profile %}
