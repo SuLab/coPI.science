@@ -132,3 +132,23 @@ async def get_admin_user(
     if not current_user.is_admin:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required")
     return current_user
+
+
+async def get_staff_user(
+    current_user: User = Depends(get_current_user),
+) -> User:
+    """Dependency that requires admin OR manager.
+
+    Used ONLY by the /manager router. This is deliberately a separate
+    dependency rather than a relaxation of get_admin_user: /admin declares its
+    gate on 34 individual handlers (F5), and widening the one they share is how
+    a read-only role would quietly acquire write endpoints.
+
+    Note this also 403s an admin who is currently impersonating a PI, because
+    get_current_user returns the impersonated user. That is correct.
+    """
+    if not current_user.is_staff:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="Manager access required"
+        )
+    return current_user
