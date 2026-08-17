@@ -215,3 +215,25 @@ async def test_a_hand_set_impersonate_cookie_is_ignored_for_a_manager(client, db
     assert r.status_code == 200          # still the manager, not the admin
     r2 = await client.get("/admin/users", headers=headers, follow_redirects=False)
     assert r2.status_code == 403         # did NOT become an admin
+
+
+async def test_manager_can_read_assessments(client, db_session):
+    mgr = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
+    r = await client.get("/manager/assessments", headers=auth_headers(mgr.id))
+    assert r.status_code == 200
+    assert "Opportunity Assessments" in r.text
+
+
+async def test_pi_is_denied_assessments(client, db_session):
+    pi = await factories.make_user(db_session, user_role=USER_ROLE_PI)
+    r = await client.get(
+        "/manager/assessments", headers=auth_headers(pi.id), follow_redirects=False
+    )
+    assert r.status_code == 403
+
+
+async def test_manager_assessments_never_links_into_admin(client, db_session):
+    """A live-looking control that 403s on click is worse than no control (F6)."""
+    mgr = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
+    body = (await client.get("/manager/assessments", headers=auth_headers(mgr.id))).text
+    assert "/admin/" not in body

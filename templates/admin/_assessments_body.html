@@ -1,0 +1,249 @@
+{# Shared assessments body: gating legend, dropped-verdict banner, summary
+   cards and the verdict table. Rendered by both the admin assessments page
+   and the manager assessments page.
+
+   MUST stay free of absolute admin or manager URLs. Links live in the two
+   wrappers, as literal strings, because tests/unit/test_reachability.py's
+   _link_credits only accepts a Jinja expression in a {path_param} slot — a
+   templated base path would leave the manager routes unreferenced and fail
+   the gate. Verify with a grep for absolute admin/manager paths against this
+   file — it must print nothing. #}
+<p class="text-xs text-gray-400 mb-6">
+    Gating: <span class="text-green-600 font-medium">&#9989; met</span> &middot;
+    <span class="text-red-600 font-medium">&#10060; not met</span> &middot;
+    <span class="text-blue-500 font-medium">&#10067; unconfirmed</span>
+    (the rubric question was never answered — distinct from a gate that failed).
+</p>
+
+{# Lost verdicts. Without this an empty page is ambiguous: "nothing screened
+   yet" and "everything screened and every verdict discarded" look identical.
+   Each reason has a different fix, so they are broken out rather than summed
+   into one number. #}
+{% if drops_total %}
+<div class="rounded-xl border border-amber-300 bg-amber-50 p-4 mb-6">
+    <div class="flex items-start gap-3">
+        <span class="text-amber-600 text-xl leading-none">&#9888;</span>
+        <div class="text-sm text-amber-900">
+            <div class="font-semibold mb-1">
+                {{ drops_total }} verdict{{ '' if drops_total == 1 else 's' }}
+                generated but not stored{% if not show_all_runs %} in this run{% endif %}.
+            </div>
+            <ul class="list-disc list-inside space-y-0.5">
+                {% for reason, n in drop_counts %}
+                <li>
+                    <span class="font-mono text-xs">{{ reason }}</span> &times; {{ n }}
+                    {% if reason == 'specialist_floor' %}
+                        &mdash; an advance/conditional verdict whose required specialist
+                        panel was never convened, so it was refused.
+                    {% elif reason == 'unparseable_sidecar' %}
+                        &mdash; the <code>&lt;assessment_json&gt;</code> sidecar was present
+                        but could not be read (commonly a max-tokens truncation that ate
+                        the closing tag).
+                    {% elif reason == 'missing_sidecar' %}
+                        &mdash; the interview concluded without declining, but carried no
+                        sidecar at all.
+                    {% endif %}
+                </li>
+                {% endfor %}
+            </ul>
+            <div class="mt-2 text-xs text-amber-700">
+                The Slack reply for each of these was posted normally &mdash; only the
+                machine-readable verdict was lost, and it cannot be recovered from a
+                later turn.
+            </div>
+        </div>
+    </div>
+</div>
+{% endif %}
+
+{# These four cards summarize the rows actually rendered below (bounded by
+   assessments_limit), not total_count (the true count of the current
+   filter, which may exceed what's shown) — so "Total" here always equals
+   Advance + Conditional + Pass + unscored, and the "top N of TOTAL" note
+   above is the one place a wider count appears. #}
+<div class="grid grid-cols-4 gap-4 mb-8">
+    <div class="bg-white rounded-xl border border-gray-200 p-4 text-center">
+        <div class="text-3xl font-bold text-gray-900">{{ assessments | length }}</div>
+        <div class="text-sm text-gray-500 mt-1">Total</div>
+    </div>
+    <div class="bg-white rounded-xl border border-gray-200 p-4 text-center">
+        <div class="text-3xl font-bold text-green-600">
+            {{ assessments | selectattr("band", "equalto", "advance") | list | length }}
+        </div>
+        <div class="text-sm text-gray-500 mt-1">Advance</div>
+    </div>
+    <div class="bg-white rounded-xl border border-gray-200 p-4 text-center">
+        <div class="text-3xl font-bold text-amber-600">
+            {{ assessments | selectattr("band", "equalto", "conditional") | list | length }}
+        </div>
+        <div class="text-sm text-gray-500 mt-1">Conditional</div>
+    </div>
+    <div class="bg-white rounded-xl border border-gray-200 p-4 text-center">
+        <div class="text-3xl font-bold text-gray-400">
+            {{ assessments | selectattr("band", "equalto", "pass") | list | length }}
+        </div>
+        <div class="text-sm text-gray-500 mt-1">Pass</div>
+    </div>
+</div>
+
+{% if assessments %}
+<div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+    <table class="min-w-full divide-y divide-gray-200">
+        <thead class="bg-gray-50">
+            <tr>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Project</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Lab</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Stage</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Score</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Recommendation</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Gating</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Red flags</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">When</th>
+            </tr>
+        </thead>
+        <tbody class="divide-y divide-gray-100">
+        {% for a in assessments %}
+            <tr>
+                <td class="px-4 py-3 text-sm text-gray-900">
+                    {{ a.company_or_project or "—" }}
+                    {% if a.confidence %}
+                        {# The prompt shows the confidence label bracketed in the
+                           Slack body text (*[High]*) but bare in the sidecar
+                           ("High") — a model that copies the bracketed body
+                           style into the sidecar field too would double-wrap
+                           here if this just added its own brackets unconditionally.
+                           Strip any brackets the value already carries before
+                           re-wrapping, so exactly one bracket pair ever renders. #}
+                        <span class="text-xs text-gray-400">[{{ a.confidence.strip("[]") }}]</span>
+                    {% endif %}
+                </td>
+                <td class="px-4 py-3 text-sm text-gray-600">{{ a.subject_agent_id or "—" }}</td>
+                <td class="px-4 py-3 text-sm text-gray-600">{{ a.funnel_stage or "—" }}</td>
+                <td class="px-4 py-3 text-sm">
+                    <span class="font-semibold
+                        {% if a.band == 'advance' %}text-green-600
+                        {% elif a.band == 'conditional' %}text-amber-600
+                        {% else %}text-gray-400{% endif %}">
+                        {% if a.weighted_score is not none %}{{ "%.2f"|format(a.weighted_score) }}{% else %}—{% endif %}
+                    </span>
+                    {% if a.band %}
+                        {# No title here: the band already renders as visible
+                           uppercase text (never colour alone), so a title
+                           that just repeats it word-for-word is pure noise
+                           for a screen reader. The band/weighted-score
+                           relationship it used to gesture at is spelled out
+                           once in the page intro instead. #}
+                        <span class="band-label ml-1.5 text-xs font-medium uppercase tracking-wide align-middle
+                            {% if a.band == 'advance' %}text-green-600
+                            {% elif a.band == 'conditional' %}text-amber-600
+                            {% else %}text-gray-400{% endif %}">{{ a.band }}</span>
+                    {% else %}
+                        <span class="band-label ml-1.5 text-xs text-gray-400 align-middle">—</span>
+                    {% endif %}
+                </td>
+                <td class="px-4 py-3 text-sm text-gray-900">{{ a.recommendation or "—" }}</td>
+                <td class="px-4 py-3 text-xs text-gray-600">
+                    {% if a.gating %}
+                        {% for key, gate_state in a.gating.items() %}
+                        <div class="gating-row gating-{{ gate_state if gate_state in ('met', 'not_met', 'unconfirmed') else 'unknown' }}">
+                            {% if gate_state == 'met' %}
+                                <span class="text-green-600" title="Met">&#9989;</span>
+                            {% elif gate_state == 'not_met' %}
+                                <span class="text-red-600" title="Not met">&#10060;</span>
+                            {% elif gate_state == 'unconfirmed' %}
+                                <span class="text-blue-500" title="Unconfirmed — never asked">&#10067;</span>
+                            {% else %}
+                                <span class="text-gray-400" title="Unrecognized gating value: {{ gate_state }}">&bull;</span>
+                            {% endif %}
+                            {{ key.replace("_", " ") }}
+                        </div>
+                        {% endfor %}
+                    {% else %}
+                        <span class="text-gray-400">—</span>
+                    {% endif %}
+                </td>
+                <td class="px-4 py-3 text-xs text-gray-600">
+                    {% if a.red_flags %}
+                        {% for flag in a.red_flags %}<div>• {{ flag }}</div>{% endfor %}
+                    {% else %}none{% endif %}
+                </td>
+                <td class="px-4 py-3 text-xs text-gray-500">
+                    {{ a.created_at.strftime("%Y-%m-%d %H:%M") }}
+                    {% if show_all_runs %}
+                        {# Provenance: which run this row belongs to, so "All
+                           Runs" never mixes current and stale verdicts without
+                           a way to tell them apart. #}
+                        {% set src_run = runs_by_id.get(a.simulation_run_id) %}
+                        <div class="text-gray-400 whitespace-nowrap">
+                            {% if src_run %}
+                                run {{ src_run.started_at.strftime('%b %d %H:%M') }}{% if runs and src_run.id == runs[0].id %} (current){% endif %}
+                            {% else %}
+                                run unknown
+                            {% endif %}
+                        </div>
+                    {% endif %}
+                </td>
+            </tr>
+            {# Detail row. The triage row above answers "which of these deserves
+               attention"; this one answers "on what basis", which is the
+               difference between a triage queue and a scoreboard. Kept as a
+               spanning row rather than extra columns because the table is
+               already eight wide. Omitted entirely when there is nothing to
+               show, so a sparse verdict does not leave an empty band. #}
+            {% if a.rationale or a.scores or a.derisking_milestones %}
+            <tr class="assessment-detail">
+                <td colspan="8" class="px-4 pb-3 pt-0 text-xs text-gray-600 bg-gray-50">
+                    {% if a.rationale %}
+                        <div class="assessment-rationale mb-1">
+                            <span class="font-medium text-gray-500">Rationale:</span>
+                            {{ a.rationale }}
+                        </div>
+                    {% endif %}
+                    {% if a.derisking_milestones %}
+                        {# The concrete next results that would unlock the next
+                           funnel stage — the most actionable content in the
+                           verdict, so it belongs next to the rationale rather
+                           than buried after the score breakdown. None and []
+                           both skip this block entirely (never an empty
+                           heading, never the literal "None"). #}
+                        <div class="assessment-derisking mb-1">
+                            <span class="font-medium text-gray-500">De-risking milestones:</span>
+                            <ul class="list-disc list-inside">
+                                {% for milestone in a.derisking_milestones %}
+                                    <li>{{ milestone }}</li>
+                                {% endfor %}
+                            </ul>
+                        </div>
+                    {% endif %}
+                    {% if a.scores %}
+                        {# Weight order, not dict order, so the dimensions that
+                           actually move the score read first. Every one of the
+                           nine is listed even when unscored: an unscored
+                           dimension counts as ZERO in the weighted score
+                           (src/services/blackbird_rubric.py), so a reader has to
+                           be able to tell "scored low" from "never answered". #}
+                        <div class="assessment-scores flex flex-wrap gap-x-3 gap-y-1">
+                            <span class="font-medium text-gray-500">Scores:</span>
+                            {% for key, weight in rubric_weights.items() %}
+                                {% set val = a.scores.get(key) %}
+                                <span class="score-{{ key }}{% if val is none %} text-gray-400{% endif %}"
+                                      title="{{ key.replace('_', ' ') }} — {{ weight }}% of the weighted score{% if val is none %} (not scored: counts as zero){% endif %}">
+                                    {{ key.replace("_", " ") }}
+                                    <span class="font-semibold">{% if val is none %}—{% else %}{{ val }}{% endif %}</span>
+                                    <span class="text-gray-400">/{{ weight }}%</span>
+                                </span>
+                            {% endfor %}
+                        </div>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endif %}
+        {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% else %}
+<div class="bg-white rounded-xl border border-gray-200 p-8 text-center text-gray-500">
+    No assessments recorded yet.
+</div>
+{% endif %}

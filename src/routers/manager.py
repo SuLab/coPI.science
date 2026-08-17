@@ -26,7 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.database import get_db
 from src.dependencies import get_staff_user
 from src.models import USER_ROLE_PI, User
-from src.services.directory import list_pi_directory, load_user_detail
+from src.services.directory import list_assessments, list_pi_directory, load_user_detail
 
 logger = logging.getLogger(__name__)
 router = APIRouter(dependencies=[Depends(get_staff_user)])
@@ -111,4 +111,21 @@ async def manager_pi_detail(
             publications=detail["publications"],
             jobs=detail["jobs"],
         ),
+    )
+
+
+@router.get("/assessments", response_class=HTMLResponse)
+async def manager_assessments(
+    request: Request,
+    run_id: str | None = None,
+    db: AsyncSession = _DB,
+    current_user: User = _STAFF,
+):
+    """BlackbirdBot's screening verdicts. Same data and same run-scoping as
+    /admin/assessments; read-only, and it has no export path."""
+    view = await list_assessments(db, run_id)
+    return templates.TemplateResponse(
+        request,
+        "manager/assessments.html",
+        _template_context(request, current_user, active_manager="assessments", **view),
     )

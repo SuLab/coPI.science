@@ -1,11 +1,11 @@
 {% extends "base.html" %}
-{% block title %}Admin — Assessments — CoPI{% endblock %}
+{% block title %}Manager — Assessments — CoPI{% endblock %}
 
 {% block content %}
 <div class="flex items-center justify-between mb-2 gap-4">
     <h1 class="text-2xl font-bold text-gray-900">Opportunity Assessments</h1>
     {% if runs %}
-    <form method="GET" action="/admin/assessments" class="flex items-center gap-2">
+    <form method="GET" action="/manager/assessments" class="flex items-center gap-2">
         <label class="text-sm text-gray-500">Run:</label>
         <select name="run_id" onchange="this.form.submit()"
                 class="text-sm border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500">
@@ -31,9 +31,9 @@
     {% if show_all_runs %}
         Showing every run on record.
     {% else %}
-        Showing the current run only — assessments from earlier (e.g.
-        <code>--fresh</code>-wiped) runs still exist and are never deleted;
-        pick a run above or <a class="underline" href="/admin/assessments?run_id=all">view all runs</a>.
+        Showing the current run only — assessments from earlier runs still exist
+        and are never deleted; pick a run above or
+        <a class="underline" href="/manager/assessments?run_id=all">view all runs</a>.
     {% endif %}
     {% if total_count > assessments_limit %}
         Displaying the top {{ assessments_limit }} of {{ total_count }} matching
