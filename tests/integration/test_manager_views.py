@@ -234,6 +234,50 @@ async def test_a_hand_set_impersonate_cookie_is_ignored_for_a_manager(client, db
     assert r2.status_code == 403         # did NOT become an admin
 
 
+async def test_admin_impersonating_a_manager_has_a_way_back(client, db_session):
+    """The hotfix: an admin impersonating a manager satisfies get_staff_user
+    (is_staff is true for the impersonated manager) and reaches /manager/*,
+    but the effective user's is_admin is false, so the nav's Admin link is
+    hidden (base.html gates it on `not impersonation_banner` anyway). Without
+    src/routers/manager.py::_template_context setting `impersonation_banner`,
+    there was no banner and no Stop form anywhere on the page — the admin was
+    stranded. Assert on the actual form action, not just the word
+    "Impersonating", so a revert of the fix fails this test."""
+    admin = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN, name="Adm One")
+    mgr = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER, name="Mgr Two")
+    headers = auth_headers(admin.id)
+    headers["Cookie"] += f"; copi-impersonate={mgr.id}"
+    r = await client.get("/manager/pis", headers=headers)
+    assert r.status_code == 200
+    assert 'action="/admin/impersonate/stop"' in r.text
+    assert "Mgr Two" in r.text  # banner names the impersonated user
+
+
+async def test_admin_impersonating_another_admin_has_a_way_back(client, db_session):
+    """Same omission in src/routers/admin.py::_template_context: two admins
+    both satisfy get_admin_user, so impersonating one admin from another
+    reaches /admin/* with no banner and no Stop form either."""
+    admin = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN, name="Adm Real")
+    other_admin = await factories.make_user(
+        db_session, user_role=USER_ROLE_ADMIN, name="Adm Borrowed"
+    )
+    headers = auth_headers(admin.id)
+    headers["Cookie"] += f"; copi-impersonate={other_admin.id}"
+    r = await client.get("/admin/users", headers=headers)
+    assert r.status_code == 200
+    assert 'action="/admin/impersonate/stop"' in r.text
+    assert "Adm Borrowed" in r.text  # banner names the impersonated user
+
+
+async def test_a_non_impersonating_manager_sees_no_banner(client, db_session):
+    """The banner must not render unconditionally — only under real
+    impersonation. Paired negative for the two positive tests above."""
+    mgr = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER, name="Plain Mgr")
+    r = await client.get("/manager/pis", headers=auth_headers(mgr.id))
+    assert r.status_code == 200
+    assert 'action="/admin/impersonate/stop"' not in r.text
+
+
 async def test_manager_can_read_assessments(client, db_session):
     mgr = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
     r = await client.get("/manager/assessments", headers=auth_headers(mgr.id))

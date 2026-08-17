@@ -47,9 +47,28 @@ _AGENT_FILTER = Query(default=[])
 def _template_context(
     request: Request, current_user: User, active_manager: str = "", **kwargs
 ) -> dict:
+    """Build the template context, surfacing the impersonation banner.
+
+    ``current_user`` here is the *effective* user from ``get_staff_user`` —
+    the impersonated user when an admin is impersonating a manager (see that
+    dependency's docstring: it 403s an admin impersonating a PI, but an admin
+    impersonating a *manager* satisfies ``is_staff`` and reaches this router).
+    Without this, every /manager/* page rendered with no banner and no Stop
+    button, and because the effective user is a manager, `is_admin` is false
+    on the nav too — stranding the admin with no visible route back to
+    /admin. Mirrors the same pattern in onboarding.py / profile.py /
+    agent_page.py / settings.py.
+
+    None of the manager templates key page data off `current_user` (they are
+    read-only listings driven entirely by `**kwargs`), so swapping it for the
+    real admin here only affects the banner/nav, not what data is shown.
+    """
+    impersonated = getattr(current_user, "_is_impersonated", False)
+    real_admin = getattr(current_user, "_real_admin", None)
     ctx = {
         "request": request,
-        "current_user": current_user,
+        "current_user": real_admin if impersonated else current_user,
+        "impersonation_banner": current_user if impersonated else None,
         "active_page": "manager",
         "active_manager": active_manager,
     }
