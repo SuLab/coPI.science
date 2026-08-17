@@ -229,9 +229,21 @@ def test_revision_status_blocks_anywhere_else(rev):
 
 def test_supported_start_revisions_are_exactly_the_documented_set():
     assert pf.SUPPORTED_START_REVISIONS == (
-        "0018", "0019", "0020", "0021", "0023", "0024", "0025",
+        "0018", "0019", "0020", "0021", "0023", "0024", "0025", "0026", "0027",
     )
     assert pf.DEFAULT_TARGET == "0028"
+
+
+def test_a_database_stamped_one_migration_behind_target_is_not_blocked():
+    """Regression: DEFAULT_TARGET moved to 0028 without 0026/0027 joining
+    SUPPORTED_START_REVISIONS, so a database stamped 0027 (the previous head,
+    and the most likely real-world starting point for this very migration) was
+    neither `current == target` nor a supported start, and revision_status()
+    BLOCKED the migration this task adds. Never let that regress silently."""
+    status, _reason = pf.revision_status("0027", pf.DEFAULT_TARGET)
+    assert status == pf.PASS
+    status, _reason = pf.revision_status("0026", pf.DEFAULT_TARGET)
+    assert status == pf.PASS
 
 
 def test_0021_is_supported_because_that_is_origin_mains_own_alembic_head():

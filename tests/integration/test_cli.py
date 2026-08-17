@@ -31,7 +31,15 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from typer.testing import CliRunner
 
 from src.cli import app as cli_app
-from src.models import USER_ROLE_ADMIN, USER_ROLE_PI, AgentRegistry, Job, ProfileRevision, User
+from src.models import (
+    USER_ROLE_ADMIN,
+    USER_ROLE_MANAGER,
+    USER_ROLE_PI,
+    AgentRegistry,
+    Job,
+    ProfileRevision,
+    User,
+)
 from tests import factories
 
 pytestmark = pytest.mark.integration
@@ -404,6 +412,30 @@ def test_admin_grant_and_revoke_flip_is_admin_and_are_idempotent(db, runner):
     _ok(runner.invoke(cli_app, ["admin:revoke", "--orcid", target_orcid]))
     assert _is_admin(bystander_orcid) is True
     assert _is_admin(target_orcid) is False
+
+
+def test_admin_revoke_does_not_demote_a_manager(db, runner):
+    """Regression: admin:revoke used to write user_role = pi unconditionally, so
+    once managers exist, revoking a manager (who was never an admin) silently
+    stripped their manager status while printing "Revoked admin from ..." about
+    someone who was never granted it. Revoke must be a no-op for any non-admin,
+    manager included, and must still exit 0 (the command is documented as
+    idempotent — see test_admin_grant_and_revoke_flip_is_admin_and_are_idempotent)."""
+    manager_orcid = _orcid("admin-revoke-manager")
+
+    async def _seed(session):
+        await factories.make_user(
+            session, orcid=manager_orcid, name="Manager PI", user_role=USER_ROLE_MANAGER
+        )
+
+    db(_seed)
+
+    result = _ok(runner.invoke(cli_app, ["admin:revoke", "--orcid", manager_orcid]))
+    assert "not an admin" in result.output
+    user = db(lambda s: _user_by_orcid(s, manager_orcid))
+    assert user.user_role == USER_ROLE_MANAGER
+    assert user.is_admin is False
+    assert user.is_manager is True
 
 
 def test_admin_grant_on_unknown_orcid_changes_nothing_and_says_so(db, runner):

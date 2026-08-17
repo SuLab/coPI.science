@@ -143,7 +143,7 @@ def admin_revoke(
     async def _revoke() -> bool:
         from sqlalchemy import select
 
-        from src.models import USER_ROLE_PI, User
+        from src.models import USER_ROLE_ADMIN, USER_ROLE_PI, User
         engine, factory = await _get_db()
         try:
             async with factory() as db:
@@ -152,6 +152,18 @@ def admin_revoke(
                 if not user:
                     console.print(f"[red]User with ORCID {orcid} not found[/red]")
                     return False
+                if user.user_role != USER_ROLE_ADMIN:
+                    # Not an admin — including a manager, whose role this must never
+                    # overwrite. Leave the row untouched. This is still success (exit
+                    # 0), not just an empty message: admin:revoke against an
+                    # already-revoked (or never-admin) user is documented as
+                    # idempotent, and tests/integration/test_cli.py invokes it twice
+                    # in a row through the _ok() helper, which requires exit 0.
+                    console.print(
+                        f"[yellow]{user.name} ({orcid}) is not an admin "
+                        f"(role: {user.user_role}); no change[/yellow]"
+                    )
+                    return True
                 user.user_role = USER_ROLE_PI
                 await db.commit()
                 console.print(f"[green]Revoked admin from {user.name} ({orcid})[/green]")

@@ -67,12 +67,28 @@ def test_is_admin_is_read_only():
 
 def test_is_admin_compiles_to_sql_over_user_role():
     """Pins src/main.py:52, which runs select(User.is_admin). A plain
-    @property is invisible to SQL and that query would raise."""
-    assert "user_role" in str(select(User.is_admin))
+    @property is invisible to SQL and that query would raise.
+
+    Compile with literal_binds and assert on the actual predicate, not just on
+    "user_role" appearing in the SQL: the escalation formulation
+    `user_role.in_(("manager", "admin"))` also contains the string "user_role"
+    and would pass a bare substring check while silently granting managers
+    is_admin. Never weaken this back to `"user_role" in str(select(...))`.
+    """
+    sql = str(select(User.is_admin).compile(compile_kwargs={"literal_binds": True}))
+    assert "users.user_role = 'admin'" in sql
+    assert "manager" not in sql
 
 
 def test_is_staff_compiles_to_a_sql_in_clause():
-    assert "user_role" in str(select(User).where(User.is_staff))
+    """Same rationale as above: assert on the literal values inside the IN
+    clause, not just that "user_role" appears, so a narrowed is_staff (e.g.
+    admin-only) would fail this test instead of passing it vacuously."""
+    sql = str(
+        select(User).where(User.is_staff).compile(compile_kwargs={"literal_binds": True})
+    )
+    assert "'manager'" in sql
+    assert "'admin'" in sql
 
 
 def test_default_role_is_pi():
