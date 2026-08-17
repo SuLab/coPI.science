@@ -379,6 +379,32 @@ async def admin_discussions(
         agent_filter=agent_filter,
     )
 
+    # No simulation runs exist at all: render the normal HTML page and return
+    # here, BEFORE the `if export:` branch below. This ordering is
+    # deliberate and matches the pre-extraction code — an export request
+    # must never swallow the no-runs page (e.g. GET
+    # /admin/discussions?export=true with zero SimulationRun rows previously
+    # returned the HTML page, not a "No proposals found" text attachment).
+    if view["selected_run_id"] is None:
+        return templates.TemplateResponse(
+            request,
+            "admin/discussions.html",
+            _template_context(
+                request,
+                current_user,
+                active_admin="discussions",
+                runs=view["runs"],
+                selected_run_id=view["selected_run_id"],
+                threads=view["threads"],
+                counts=view["counts"],
+                channels=view["channels"],
+                agents=view["agents"],
+                channel_filter=view["channel_filter"],
+                status_filter=view["status_filter"],
+                agent_filter=view["agent_filter"],
+            ),
+        )
+
     if export:
         proposals = []
         for t in view["threads"]:

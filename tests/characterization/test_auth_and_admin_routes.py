@@ -202,6 +202,27 @@ async def test_admin_discussions_survives_a_bot_post_with_no_agent_id(client, db
     assert "(unknown sender)" in r.text
 
 
+async def test_admin_discussions_export_with_zero_runs_still_renders_html(client, db_session):
+    """Regression: the services/directory extraction (Task 3) moved the
+    "no simulation runs exist at all" early return to AFTER the `if export:`
+    branch was evaluated, so `?export=true` on a fresh instance (zero
+    `SimulationRun` rows) started returning a `PlainTextResponse` attachment
+    ("No proposals found with current filters.") instead of the normal HTML
+    discussions page — the only behaviour delta the refactor introduced.
+    `build_discussions_view` signals this state via `selected_run_id=None`;
+    the router must check that and return the HTML page before ever looking
+    at `export`.
+    """
+    u = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN)
+
+    r = await client.get(
+        "/admin/discussions", params={"export": "true"}, headers=_auth_headers(u.id)
+    )
+    assert r.status_code == 200
+    assert "text/html" in r.headers["content-type"]
+    assert "Content-Disposition" not in r.headers
+
+
 async def test_admin_activity_detail_survives_a_bot_post_with_no_agent_id(client, db_session):
     """Regression: /admin/activity/{run_id} 500'd the same way /admin/discussions
     did (fixed in 73a78c3 for that route only).
