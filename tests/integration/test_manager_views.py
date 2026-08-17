@@ -269,6 +269,58 @@ async def test_admin_impersonating_another_admin_has_a_way_back(client, db_sessi
     assert "Adm Borrowed" in r.text  # banner names the impersonated user
 
 
+async def test_admin_impersonating_a_manager_sees_the_manager_nav_link(client, db_session):
+    """The regression this hotfix closes: templates/base.html gated the
+    Manager nav link on ``current_user.is_staff and not impersonation_banner``.
+    Before c6cca1e, /manager/* pages never set ``impersonation_banner``, so
+    ``not impersonation_banner`` was vacuously true and the link rendered off
+    the real admin's own is_staff. Once c6cca1e set the banner (to give the
+    admin a Stop-impersonating button), that same clause flipped false and
+    hid the nav link exactly while impersonating — the one time it's needed.
+    The fix gates on the *effective* user's is_staff instead, with no
+    impersonation-banner clause at all, so both the link and the Stop form
+    must be present together here — that pairing is exactly what regressed."""
+    admin = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN, name="Adm Nav")
+    mgr = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER, name="Mgr Nav")
+    headers = auth_headers(admin.id)
+    headers["Cookie"] += f"; copi-impersonate={mgr.id}"
+    r = await client.get("/manager/pis", headers=headers)
+    assert r.status_code == 200
+    assert 'href="/manager"' in r.text
+    assert 'action="/admin/impersonate/stop"' in r.text
+
+
+async def test_admin_impersonating_a_pi_has_no_manager_nav_link(client, db_session):
+    """The effective user while impersonating a PI is the PI, who cannot
+    reach /manager (get_staff_user 403s) — so the nav link must not render;
+    a visible link that 403s on click is worse than no link at all (F6). The
+    PI's own onboarding gate makes most PI-only pages an unreliable place to
+    check this (they may redirect), so this reads /settings, which every
+    logged-in user — any role, impersonated or not — can always reach, and
+    confirms the actual route still 403s so hiding the link is the right
+    call, not an accidental omission."""
+    admin = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN, name="Adm PI Nav")
+    pi = await factories.make_user(db_session, user_role=USER_ROLE_PI, name="Impersonated PI")
+    headers = auth_headers(admin.id)
+    headers["Cookie"] += f"; copi-impersonate={pi.id}"
+
+    r = await client.get("/settings", headers=headers)
+    assert r.status_code == 200
+    assert 'href="/manager"' not in r.text
+
+    r2 = await client.get("/manager/pis", headers=headers, follow_redirects=False)
+    assert r2.status_code == 403
+
+
+async def test_a_plain_manager_sees_the_manager_nav_link(client, db_session):
+    """Not impersonated at all: the effective-user rule must reduce to the
+    real user's own is_staff, same as before this hotfix."""
+    mgr = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER, name="Plain Mgr Nav")
+    r = await client.get("/manager/pis", headers=auth_headers(mgr.id))
+    assert r.status_code == 200
+    assert 'href="/manager"' in r.text
+
+
 async def test_a_non_impersonating_manager_sees_no_banner(client, db_session):
     """The banner must not render unconditionally — only under real
     impersonation. Paired negative for the two positive tests above."""

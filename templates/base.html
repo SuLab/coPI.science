@@ -38,6 +38,8 @@
 </div>
 {% endif %}
 
+{% set effective_user = impersonation_banner or current_user %}
+
 <!-- Navigation -->
 <nav class="bg-white shadow-sm border-b border-gray-200">
     <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
@@ -76,7 +78,7 @@
                         Admin
                     </a>
                     {% endif %}
-                    {% if current_user.is_staff and not impersonation_banner %}
+                    {% if effective_user.is_staff %}
                     <a href="/manager" class="text-gray-600 hover:text-indigo-600 px-3 py-2 rounded-md text-sm font-medium
                         {% if active_page == 'manager' %}text-indigo-600 font-semibold{% endif %}">
                         Manager
@@ -118,7 +120,7 @@
 </div>
 {% endif %}
 
-{% if active_page == 'manager' and current_user and current_user.is_staff %}
+{% if active_page == 'manager' and effective_user and effective_user.is_staff %}
 <!-- Manager sub-navigation -->
 <div class="bg-gray-50 border-b border-gray-200">
     <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
