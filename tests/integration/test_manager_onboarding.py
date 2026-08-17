@@ -1,9 +1,14 @@
-"""A manager is not a PI (D7): no onboarding, no profile pipeline, no PI nav."""
+"""A manager is not a PI (D7): no onboarding, no profile pipeline, no PI nav.
+
+An ADMIN is not a `pi` either, but keeps all three — the tests here pin that
+distinction, because collapsing it to "non-PI" locked admins out of their own
+profile.
+"""
 
 import pytest
 from sqlalchemy import func, select
 
-from src.models import USER_ROLE_MANAGER, USER_ROLE_PI, Job
+from src.models import USER_ROLE_ADMIN, USER_ROLE_MANAGER, USER_ROLE_PI, Job
 from tests import factories
 from tests.integration.test_manager_access import auth_headers
 
@@ -38,18 +43,57 @@ async def test_manager_visiting_onboarding_enqueues_no_profile_job(client, db_se
     assert count == 0
 
 
-async def test_pi_visiting_onboarding_still_gets_the_self_heal(client, db_session):
-    """The guard must narrow the self-heal, not delete it."""
-    pi = await factories.make_user(
-        db_session, user_role=USER_ROLE_PI, onboarding_complete=False
+@pytest.mark.parametrize("role", [USER_ROLE_PI, USER_ROLE_ADMIN])
+async def test_a_non_manager_visiting_onboarding_still_gets_the_self_heal(
+    client, db_session, role
+):
+    """The guard must narrow the self-heal to managers, not to non-PIs.
+
+    The admin case is the regression: an admin is not a `pi` either, so a
+    `user_role == 'pi'` self-heal left them on "Building Your Profile" with no
+    job, no profile and (per the template) no retry control — the exact spin
+    the self-heal exists to prevent.
+    """
+    u = await factories.make_user(
+        db_session, user_role=role, onboarding_complete=False
     )
-    await client.get("/onboarding", headers=auth_headers(pi.id), follow_redirects=False)
+    await client.get("/onboarding", headers=auth_headers(u.id), follow_redirects=False)
     count = await db_session.scalar(
         select(func.count(Job.id)).where(
-            Job.user_id == pi.id, Job.type == "generate_profile"
+            Job.user_id == u.id, Job.type == "generate_profile"
         )
     )
     assert count == 1
+
+
+async def test_an_admin_with_incomplete_onboarding_is_not_locked_out(client, db_session):
+    """templates/base.html still offers admins the My Profile link, and
+    /profile bounces anyone with onboarding_complete=False to /onboarding. A
+    `user_role != 'pi'` bounce there therefore sent admins on to /manager/pis
+    forever: the page whose form is the ONLY writer of onboarding_complete was
+    unreachable, so the state could never be cleared.
+
+    Both hops are asserted. /onboarding must render (not deflect), and the
+    /profile entry point must arrive there rather than at /manager/pis — a fix
+    applied to only one of the two would still leave the link in the nav
+    broken.
+    """
+    admin = await factories.make_user(
+        db_session, user_role=USER_ROLE_ADMIN, onboarding_complete=False
+    )
+    direct = await client.get(
+        "/onboarding", headers=auth_headers(admin.id), follow_redirects=False
+    )
+    assert direct.status_code == 200, "an admin was deflected out of onboarding"
+    assert "Building Your Profile" in direct.text
+
+    cookie_value = auth_headers(admin.id)["Cookie"].split("=", 1)[1]
+    client.cookies.set("copi-session", cookie_value)
+    followed = await client.get("/profile", follow_redirects=True)
+    assert followed.status_code == 200
+    assert str(followed.url).endswith("/onboarding"), (
+        "the My Profile link still dead-ends for an admin mid-onboarding"
+    )
 
 
 async def test_manager_profile_url_bounce_terminates(client, db_session):

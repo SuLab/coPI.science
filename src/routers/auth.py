@@ -15,7 +15,7 @@ from fastapi.templating import Jinja2Templates
 
 from src.config import get_settings
 from src.database import get_db
-from src.models import USER_ROLE_PI, AccessAllowlist, Job, User
+from src.models import AccessAllowlist, Job, User
 from src.services.orcid import fetch_orcid_profile
 
 templates = Jinja2Templates(directory="templates")
@@ -291,12 +291,17 @@ async def auth_callback(
         return RedirectResponse(url=f"/invite/{pending_token}", status_code=302)
 
     # New PIs go through onboarding first; the saved destination is left in the
-    # session and consumed when onboarding completes. Managers and admins are
-    # not PIs (D7) and have no research profile to review, so they skip it —
+    # session and consumed when onboarding completes. A MANAGER is not a PI
+    # (D7) and has no research profile to review, so it skips onboarding —
     # without this a manager is sent to a page whose only exit is saving a
-    # research profile (onboarding.py:193 is the sole write of
+    # research profile (POST /onboarding/save-profile is the sole write of
     # onboarding_complete in src/).
-    if not user.onboarding_complete and user.user_role == USER_ROLE_PI:
+    #
+    # Admins are excluded from the skip, not included in it: they keep the PI
+    # surfaces (base.html still shows them My Profile / My Agent), so sending
+    # an admin with incomplete onboarding anywhere but /onboarding just defers
+    # the same bounce one hop, via /profile.
+    if not user.onboarding_complete and not user.is_manager:
         return RedirectResponse(url="/onboarding", status_code=302)
 
     # Resume the page the user originally requested, if any.

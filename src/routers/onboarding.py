@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.database import get_db
 from src.dependencies import get_current_user, get_pi_user
-from src.models import USER_ROLE_PI, AgentRegistry, Job, ResearcherProfile, User
+from src.models import AgentRegistry, Job, ResearcherProfile, User
 from src.routers.auth import pop_post_login_redirect
 from src.services.validators import is_valid_email
 
@@ -54,9 +54,18 @@ async def onboarding_start(
     """Main onboarding page — shows profile review."""
     if current_user.onboarding_complete:
         return RedirectResponse(url="/profile", status_code=302)
-    # Managers and admins have no research profile to review (D7). Bounce them
-    # rather than render a PI page they can never complete.
-    if current_user.user_role != USER_ROLE_PI:
+    # A MANAGER has no research profile to review (D7). Bounce it rather than
+    # render a PI page it can never complete.
+    #
+    # Deliberately is_manager, not `!= USER_ROLE_PI`. An admin is not a `pi`
+    # either, but admins keep the PI surfaces: templates/base.html still shows
+    # them My Profile / My Agent, and /profile bounces anyone whose onboarding
+    # is incomplete straight back here. A `!= 'pi'` test therefore trapped an
+    # admin with onboarding_complete=False in a permanent
+    # /profile -> /onboarding -> /manager/pis deflection with no way to ever
+    # finish onboarding — locked out of their own profile by a guard aimed at
+    # managers.
+    if current_user.is_manager:
         return RedirectResponse(url="/manager/pis", status_code=302)
 
     # Get latest job for this user
@@ -76,11 +85,18 @@ async def onboarding_start(
     # Self-heal: an allowed user with no job and no profile would otherwise
     # spin on "Building Your Profile" forever (the template treats job_status
     # 'none' the same as pending/processing and offers no retry).
+    #
+    # `not is_manager` for the same reason as the bounce above: F8's concern is
+    # firing ORCID/PubMed profile generation for an account that has no lab and
+    # may have no relevant publications, which is a MANAGER. Narrowing this to
+    # `== 'pi'` would leave an admin staring at "Building Your Profile" with no
+    # job, no profile and no retry — the exact spin this self-heal exists to
+    # prevent.
     if (
         job is None
         and profile is None
         and current_user.access_status == "allowed"
-        and current_user.user_role == USER_ROLE_PI
+        and not current_user.is_manager
     ):
         job = Job(
             type="generate_profile",
