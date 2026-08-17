@@ -87,9 +87,7 @@ async def test_staff_can_reach_every_manager_route(client, db_session):
     than a syntactically-valid-but-absent one."""
     mgr = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
     pi = await factories.make_user(db_session, user_role=USER_ROLE_PI)
-    run = SimulationRun()
-    db_session.add(run)
-    await db_session.flush()
+    run = await factories.make_simulation_run(db_session)
     paths = _manager_get_paths({"user_id": str(pi.id), "run_id": str(run.id)})
     for path in paths:
         r = await client.get(path, headers=auth_headers(mgr.id), follow_redirects=False)
@@ -376,16 +374,86 @@ async def test_manager_activity_detail_404s_on_an_unknown_run(client, db_session
     assert r.status_code == 404
 
 
-async def test_manager_discussions_has_no_export_control(client, db_session):
-    """Export stays admin-only; a manager page must not offer it.
+async def test_manager_discussions_renders_a_real_thread_with_no_export_control(
+    client, db_session
+):
+    """With no ``SimulationRun`` at all, ``build_discussions_view`` returns
+    ``selected_run_id=None`` and ``manager/discussions.html`` renders only its
+    empty-state branch — the filter form that carries the admin export
+    buttons is never emitted regardless of what the template contains. An
+    earlier version of this test asserted export's absence against exactly
+    that empty page, so it would have passed even with the export buttons
+    copied in verbatim. This seeds a run, a root post and a decision with
+    ``summary_text`` so a real thread renders through
+    ``templates/admin/_discussions_threads.html``, then checks three things
+    that can only be verified once a thread is actually on the page:
 
-    Both forms are asserted: the loose lower-cased substring check is the
-    intent ("no mention of export anywhere"), and the precise
-    ``name="export"`` check is the actual invariant that would survive
-    unrelated copy changes to the page (e.g. a future "export" word in prose
-    would trip the loose check without indicating a real regression)."""
+    * the partial rendered a real row (scoped to the agent name it prints,
+      not the wrapper's static chrome) rather than the "No discussions
+      found" empty-table placeholder.
+    * R4: the sanitizing markdown renderer (``/static/js/markdown.js``,
+      loaded from ``{% block extra_head %}``) and the ``data-markdown``
+      attribute it renders both survived the extract-partial/wrapper split —
+      dropping ``extra_head`` would leave ``data-markdown`` with nothing to
+      render it, silently, with no error.
+    * export now means something: the filter form (where the admin
+      template's two export buttons live) is actually being rendered on
+      this response, so its absence is no longer vacuous.
+    """
     mgr = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
+    run = await factories.make_simulation_run(db_session)
+    await factories.make_agent_message(
+        db_session,
+        run=run,
+        agent_id="gill",
+        is_bot=True,
+        message_ts="1786000000.000100",
+        thread_ts=None,
+        phase="new_post",
+        channel_name="general",
+    )
+    await factories.make_thread_decision(
+        db_session,
+        run=run,
+        thread_id="1786000000.000100",
+        channel="general",
+        agent_a="gill",
+        agent_b="wang",
+        outcome="proposal",
+        summary_text="A **markdown** summary of the proposal.",
+    )
+    await db_session.flush()
+
     body = (await client.get("/manager/discussions", headers=auth_headers(mgr.id))).text
+
+    # The partial rendered a real row, not the empty-state placeholder. The
+    # rendered `data-markdown` attribute's *value* is asserted, not just its
+    # presence as an attribute name, and not "GillBot" — the wrapper's own
+    # agent_filter <option> also prints "GillBot" ({{ a | capitalize }}Bot in
+    # the filter form), so that string is not scoped to the partial and would
+    # false-pass even if the include were deleted (confirmed by temporarily
+    # deleting {% include "admin/_discussions_threads.html" %} and rerunning
+    # this test: "GillBot" alone kept passing, the exact attribute value did
+    # not). This fixture's summary_text is unique to this test, so it can
+    # only appear here via the partial's `data-markdown="{{
+    # t.decision.summary_text | e }}"` div.
+    assert 'data-markdown="A **markdown** summary of the proposal."' in body
+    assert "No discussions found" not in body
+
+    # R4: renderer + the attribute it renders both present. The literal
+    # <script src="..."> tag is asserted rather than a bare substring check,
+    # because {% block scripts %} carries an explanatory HTML *comment* that
+    # also mentions "/static/js/markdown.js" — a bare substring check would
+    # false-pass off that comment alone even with extra_head (and the actual
+    # <script> tag) missing entirely.
+    assert '<script src="/static/js/markdown.js">' in body
+
+    # Export stays admin-only. Both forms: the loose lower-cased substring
+    # check is the intent ("no mention of export anywhere"), and the precise
+    # ``name="export"`` check is the actual invariant that would survive
+    # unrelated copy changes to the page (e.g. a future "export" word in
+    # prose would trip the loose check without indicating a real
+    # regression).
     assert "export" not in body.lower()
     assert 'name="export"' not in body
     assert "/admin/" not in body
