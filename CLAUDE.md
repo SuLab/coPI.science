@@ -238,11 +238,25 @@ authoritative.)
 `admin`. `User.is_admin` is no longer a mapped column — it is a read-only
 `hybrid_property` over `user_role`, so it still works in both SQL
 (`select(User.is_admin)`) and Python, but **cannot be assigned**. Set the role
-instead. The physical `users.is_admin` column itself is still in the database,
-unmapped and defaulted (migration `0028_add_user_role` is additive on purpose, so the
-already-running container kept working against the new schema with no window where
-live code and applied schema disagreed); dropping it is a separate later migration,
-`0029`, not yet applied — see the design doc's §8.
+instead. The physical `users.is_admin` column stays in the database, unmapped and
+defaulted. Dropping it is deferred to a separate later migration, `0029`, which **has
+not been written, let alone applied** — see the design doc's §8.
+
+> **Deploy order for `0028_add_user_role` — migrate BEFORE the new code serves.**
+> `0028` is additive and gives `is_admin` a server default, so *old code against the
+> new schema* is safe: the running container keeps reading and inserting users. The
+> reverse is not. The new code **maps `users.user_role`**, so it is named in the SELECT
+> list of every `select(User)`, and against a pre-`0028` database each one raises
+> `UndefinedColumn` — login included, for the whole gap. `up -d --build` builds and
+> starts in one step, which is exactly that broken direction, and you cannot `exec`
+> alembic in the *old* container because `0028` is only in the new image. Build, then
+> migrate from a one-off container off that image, then start:
+>
+>     DC="docker compose -f docker-compose.prod.yml"
+>     $DC build blackbird-app worker
+>     $DC run --rm blackbird-app alembic upgrade head
+>     $DC run --rm blackbird-app alembic current      # must equal `alembic heads`
+>     $DC up -d blackbird-app worker
 
 - **PI** — the original account: own profile, own lab agent, `/profile` and `/agent`.
 - **Manager** — global, strictly **read-only**: `/manager/pis`, `/manager/assessments`,
@@ -258,8 +272,20 @@ predicate is **`is_staff`** (admin OR manager). **Never widen `is_admin`** — i
 returns a fully substituted user, so a manager satisfying `is_admin` would be a full
 privilege escalation.
 
+**Exclude `manager`, never "non-PI".** An admin is not a `pi` either, and admins keep
+the PI surfaces (`base.html` still offers them My Profile / My Agent), so a `!= 'pi'`
+guard locks admins out of their own account — `/profile` bounces an admin whose
+onboarding is incomplete to `/onboarding`, and only `POST /onboarding/save-profile` can
+ever clear that flag. The PI-write POSTs (`/onboarding/save-profile`,
+`/onboarding/retry`, `/profile/refresh`, `/agent/request`) are gated on
+**`get_pi_user`** in `src/dependencies.py`, which 403s a manager and lets an admin
+through. A read-only redirect is not enough there: `save-profile` writes
+`onboarding_complete` and creates the profile, which is the whole gate on
+`/agent/request` — so an ungated pair is a manager with a lab bot.
+
 Appoint from **/admin/users/{id} → Account Type**. The last admin cannot be demoted
-there. If no admin can log in at all, recover from a container shell:
+there (that guard counts only admins with `access_status='allowed'` — a denied admin
+cannot log in, so counting one would just make demotion easier). If no admin can log in at all, recover from a container shell:
 
     docker compose -f docker-compose.prod.yml exec blackbird-app \
       python -m src.cli role:set --orcid 0000-0000-0000-0000 --role admin

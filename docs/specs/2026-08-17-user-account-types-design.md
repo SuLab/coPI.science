@@ -209,7 +209,9 @@ name `is_staff`; there is no formulation of `is_admin` that a manager satisfies.
 ```
 
 Step 3 is F14's fix and is the reason this migration is safe to apply *before* the new
-code is running: the unmapped `is_admin` column stays insertable.
+code is running: the unmapped `is_admin` column stays insertable. That direction —
+old code against the new schema — is the only safe one; see §8 for why the reverse is
+not, and why the deploy order follows from it.
 
 Step 4's constraint is belt-and-braces — a typo'd role already fails closed, since all
 three predicates return false and the account degrades to PI-equivalent — but a
@@ -312,13 +314,35 @@ stay admin-only; the manager route simply does not accept the parameter.
 D7 makes the roles exclusive, so every PI-shaped assumption about "any logged-in user"
 has to be narrowed. F8, F9 and F10 are all in this section.
 
-- `auth.py:295` — gate the `/onboarding` redirect on `user_role == 'pi'`. Non-PI staff
-  skip onboarding entirely.
-- `auth.py:300` — default post-login landing becomes `/manager/pis` for managers. PIs
+**The role being excluded is `manager`, never "non-PI".** An earlier draft of this
+section said both — it gated the nav on `user_role == 'pi' or is_admin` while telling
+the onboarding guards to test `!= 'pi'` — and those two are contradictory, because an
+admin is not a `pi`. Implemented literally it locked admins out: `templates/base.html`
+offers an admin **My Profile**, `/profile` bounces anyone with
+`onboarding_complete=False` to `/onboarding`, and `/onboarding` then deflected them to
+`/manager/pis`. Since `POST /onboarding/save-profile` is the only writer of
+`onboarding_complete` in `src/`, the flag could never be cleared and the deflection was
+permanent. Every guard below therefore reads `is_manager`, and admins keep the PI
+surfaces exactly as they had them before this change.
+
+- `auth.py` — skip the post-login `/onboarding` redirect for `is_manager` only. A
+  manager has no research profile to review; an admin mid-onboarding still goes there.
+- `auth.py` — default post-login landing becomes `/manager/pis` for managers. PIs
   and admins keep `/profile`, unchanged.
-- `onboarding.py:55` — bounce non-PI roles to `/manager/pis`.
-- `onboarding.py:75` — add `and current_user.user_role == 'pi'` to the self-heal, so a
-  manager who reaches the URL never fires `generate_profile` (F8).
+- `onboarding.py` (`GET /onboarding`) — bounce `is_manager` to `/manager/pis`.
+- `onboarding.py` (the self-heal) — add `and not current_user.is_manager`, so a
+  manager who reaches the URL never fires `generate_profile` (F8). Not `== 'pi'`: that
+  leaves an admin on "Building Your Profile" with no job, no profile and no retry
+  control — the exact spin the self-heal exists to prevent.
+- **The four PI-write POSTs** — `POST /onboarding/save-profile`, `POST
+  /onboarding/retry`, `POST /profile/refresh` and `POST /agent/request` take a new
+  `get_pi_user` dependency (`src/dependencies.py`, alongside `get_admin_user` /
+  `get_staff_user`), which 403s `is_manager`. Redirect-based bounces are not sufficient
+  here: `save-profile` is the sole writer of `onboarding_complete=True` **and** creates
+  the `ResearcherProfile`, which together are the entire gate on `/agent/request` — so
+  without this a manager was two form POSTs from an `AgentRegistry` row of its own,
+  i.e. a lab, which D7 forbids. 403 rather than a redirect because all four are POSTs
+  and replaying a POST as a GET navigation is wrong.
 - `templates/base.html:52-68` — gate **My Profile** and **My Agent** on
   `user_role == 'pi' or is_admin`. **Settings stays visible to everyone**: it is email
   notification preferences, which a manager still needs.
@@ -346,7 +370,11 @@ Guards, following the self-delete precedent at `admin.py:210`:
 
 1. An admin cannot change their **own** role.
 2. The submitted value must be in `VALID_USER_ROLES`.
-3. **Refuse to demote the last remaining admin** — defense in depth.
+3. **Refuse to demote the last remaining admin** — defense in depth. The count is
+   filtered on `access_status == 'allowed'`, because the invariant is "at least one
+   admin can still **log in**" and `auth.py` hands no session to anyone who is not
+   allowed. Counting denied/pending admins inflates the number, which makes `<= 1` fire
+   *less* often and therefore makes demotion *easier* — the opposite of conservative.
 4. Log the change, as `admin.py:216` does.
 
 Guard 3 is deliberately kept, but note what actually protects the invariant: **guard 1
@@ -400,13 +428,40 @@ TDD: tests first, per `superpowers:test-driven-development`.
   this assertion is not silently over-broad.
 - Manager gets 403 on every `/admin/*` route (also parametrized).
 - **Manager cannot impersonate**: `POST /admin/impersonate` → 403, *and* a hand-set
-  `copi-impersonate` cookie is ignored for a manager (exercising `dependencies.py:74`
-  and `main.py:50-59` from the manager side).
+  `copi-impersonate` cookie is ignored for a manager. That test asserts status codes
+  only (200 on `/manager/pis`, 403 on `/admin/users`), and **both of those come from
+  `get_current_user`'s check alone — it does not exercise `main.py`'s duplicate gate at
+  all.** `AgentBadgeMiddleware` re-implements the check independently, and its only
+  observable is *whose* nav badge count it computed, which no status code reveals; with
+  that gate deleted the whole suite stayed green. `tests/integration/
+  test_badge_impersonation_gate.py` covers it separately, reading the count back from a
+  probe app (conftest's `client` fixture deliberately points the middleware at a
+  separate committed connection, which cannot see a test's rolled-back rows, so every
+  badge count is 0 through the shared client). The manager's own count is 1 and the
+  impersonation target's is 3, so "saw their own" is distinguishable both from the
+  escalation and from a middleware that failed outright and returned 0.
 - `/manager/pis/{admin_user_id}` → 404.
 - `/manager/activity/{run_id}/llm-calls` → 404.
 - The PI list excludes admin and manager rows and includes unclaimed PI stubs.
 - Manager login enqueues **no** `generate_profile` job and is not redirected to
   `/onboarding`; the `/profile` → `/onboarding` → `/manager/pis` bounce terminates.
+
+**`tests/integration/test_pi_only_writes.py`** (new) — the four PI-write POSTs, swept
+for a manager (403 *and* unchanged state) and paired with PI and admin controls that
+must still succeed, plus the escalation end to end: a manager holding
+`onboarding_complete` and a `ResearcherProfile` still gets no `AgentRegistry` row.
+
+**Two empty-branch traps closed by seeding data, not by asserting on chrome.**
+`test_manager_views.py` drives both the assessments partial and
+`templates/admin/_run_detail_body.html` through populated rows; every table in the
+latter sits behind an `{% if %}`, so a bare `SimulationRun` renders three summary cards
+and nothing else, and a dropped `**view` key or a lost `{% include %}` would still
+return 200.
+
+**The last-admin guard counts only `access_status='allowed'` admins**, and
+`test_role_appointment.py` pins the counterexample: a denied admin plus an allowed one
+must NOT make the allowed one demotable. The parametrized `allowed` variant is the
+false-pass guard.
 
 **Existing tests to update** — mechanical but non-optional, because `is_admin=` is no
 longer a constructor kwarg: `tests/factories.py:28-43` (add `user_role`),
@@ -426,21 +481,37 @@ not by inspection.
 
 ## §8 — Deploy sequence
 
-The two-phase migration (§2) is what buys zero downtime. Because `0028` is purely
-additive **and** step 3 gives `is_admin` a server default, the currently-running
-container keeps working against the new schema — there is no window in which live code
-and applied schema disagree.
+**Only one of the two mismatch directions is safe, and the order below is chosen for
+that reason.**
 
-Per `CLAUDE.md`, in order:
+- **Old code + new schema — SAFE.** `0028` is purely additive, and its step 3 gives
+  `is_admin` a server default, so the currently-running container (which maps
+  `is_admin` and knows nothing of `user_role`) keeps reading and, critically, keeps
+  *inserting* users. This is the window the migration is allowed to sit in.
+- **New code + old schema — BROKEN.** The new code maps `users.user_role`, so it is
+  named in the SELECT list of every `select(User)`. Against a database where `0028` has
+  not run, each one raises `UndefinedColumn` — login included. There is no partial
+  degradation here: the web tier is down for the length of the gap.
+
+So the migration must land **before** the new code starts serving, and it cannot be run
+with `exec` in the *old* container — `0028` exists only in the new image. Build the
+image, migrate from a one-off container off that image, confirm, then bring the service
+up:
 
 ```bash
 DC="docker compose -f docker-compose.prod.yml"
 
-./scripts/ci.sh                                    # must be green first
-$DC up -d --build blackbird-app worker             # web tier carries the new code
-$DC exec -T blackbird-app alembic upgrade head     # NOTHING ELSE DOES THIS
-$DC exec -T blackbird-app alembic current          # must equal `alembic heads`
+./scripts/ci.sh                                      # must be green first
+$DC build blackbird-app worker                       # build; do NOT start it yet
+$DC run --rm blackbird-app alembic upgrade head      # migrate FROM the new image
+$DC run --rm blackbird-app alembic current           # must equal `alembic heads`
+$DC up -d blackbird-app worker                       # only now does new code serve
 ```
+
+`run --rm` is deliberate: it starts a throwaway container from the just-built image
+without publishing ports or replacing the running service, so the old container is still
+the one answering requests while the DDL applies. `up -d --build` cannot be used here —
+it builds *and* starts in one step, which is exactly the broken direction above.
 
 `src/agent/` is untouched, so the simulation does not need a rebuild or a restart for
 this change. `$DC --profile agent build agent` is harmless if run anyway.
