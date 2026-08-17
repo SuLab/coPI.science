@@ -137,6 +137,59 @@ async def test_the_last_admin_guard_fires_when_the_target_is_the_only_admin(db_s
     assert await _role_of(db_session, sole_admin.id) == USER_ROLE_ADMIN
 
 
+@pytest.mark.parametrize(
+    "other_admin_access,expect_refused",
+    [("denied", True), ("allowed", False)],
+    ids=["other-admin-cannot-log-in", "other-admin-can-log-in"],
+)
+async def test_the_last_admin_guard_counts_only_admins_who_can_log_in(
+    db_session, other_admin_access, expect_refused
+):
+    """The counterexample that an unfiltered count gets wrong.
+
+    Admins X (access_status='denied') and Y ('allowed'). Counting every row
+    with user_role='admin' gives 2, so `<= 1` does not fire and Y is
+    demotable — leaving zero admins who can actually reach /admin, because
+    auth.py refuses a session to anyone whose access_status is not 'allowed'.
+    A larger count makes the guard fire LESS often, so the unfiltered version
+    was not "more conservative"; it was weaker.
+
+    The parametrized second case is the false-pass guard: flip X to 'allowed'
+    and the identical call must go through. Without it, a guard hard-wired to
+    refuse every demotion would pass the first case.
+    """
+    from fastapi import HTTPException
+
+    from src.routers.admin import admin_set_user_role
+
+    await factories.make_user(
+        db_session, user_role=USER_ROLE_ADMIN, access_status=other_admin_access
+    )
+    target = await factories.make_user(
+        db_session, user_role=USER_ROLE_ADMIN, access_status="allowed"
+    )
+    actor = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
+
+    async def _demote():
+        return await admin_set_user_role(
+            user_id=target.id,
+            request=None,          # the handler never reads it
+            user_role=USER_ROLE_PI,
+            db=db_session,
+            current_user=actor,
+        )
+
+    if expect_refused:
+        with pytest.raises(HTTPException) as exc:
+            await _demote()
+        assert exc.value.status_code == 400
+        assert "last remaining admin" in exc.value.detail
+        assert await _role_of(db_session, target.id) == USER_ROLE_ADMIN
+    else:
+        await _demote()
+        assert await _role_of(db_session, target.id) == USER_ROLE_PI
+
+
 async def test_user_detail_shows_the_role_and_no_admin_yes_no_row(client, db_session):
     admin = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN)
     mgr = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)

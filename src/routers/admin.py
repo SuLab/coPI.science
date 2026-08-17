@@ -195,9 +195,20 @@ async def admin_set_user_role(
     # backstop for if that guard is ever relaxed, and it is what
     # tests/integration/test_role_appointment.py exercises by calling this
     # function directly with a non-admin actor.
+    # access_status is part of the count on purpose. The invariant being
+    # defended is "at least one admin can still LOG IN", and auth.py refuses a
+    # user whose access_status is not 'allowed' — so a denied/pending admin is
+    # not a way back in. Counting them anyway inflates the number, which makes
+    # `<= 1` fire LESS often and therefore makes demotion EASIER: admins X
+    # (denied) and Y (allowed) count as 2, Y is demotable, and zero loginable
+    # admins remain. An earlier note recorded the unfiltered count as "more
+    # conservative"; that was backwards.
     if user.user_role == USER_ROLE_ADMIN and user_role != USER_ROLE_ADMIN:
         admin_count = await db.scalar(
-            select(func.count(User.id)).where(User.user_role == USER_ROLE_ADMIN)
+            select(func.count(User.id)).where(
+                User.user_role == USER_ROLE_ADMIN,
+                User.access_status == "allowed",
+            )
         )
         if (admin_count or 0) <= 1:
             raise HTTPException(
