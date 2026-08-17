@@ -18,7 +18,7 @@ headroom under.
 import logging
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -26,7 +26,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.database import get_db
 from src.dependencies import get_staff_user
 from src.models import USER_ROLE_PI, User
-from src.services.directory import list_assessments, list_pi_directory, load_user_detail
+from src.services.directory import (
+    build_discussions_view,
+    build_run_detail,
+    list_assessments,
+    list_pi_directory,
+    list_runs_overview,
+    load_user_detail,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(dependencies=[Depends(get_staff_user)])
@@ -34,6 +41,7 @@ templates = Jinja2Templates(directory="templates")
 
 _DB = Depends(get_db)
 _STAFF = Depends(get_staff_user)
+_AGENT_FILTER = Query(default=[])
 
 
 def _template_context(
@@ -128,4 +136,71 @@ async def manager_assessments(
         request,
         "manager/assessments.html",
         _template_context(request, current_user, active_manager="assessments", **view),
+    )
+
+
+@router.get("/discussions", response_class=HTMLResponse)
+async def manager_discussions(
+    request: Request,
+    run_id: str | None = None,
+    channel_filter: str | None = None,
+    status_filter: str | None = None,
+    agent_filter: list[str] = _AGENT_FILTER,
+    db: AsyncSession = _DB,
+    current_user: User = _STAFF,
+):
+    """Thread-level view of what each lab's bot did.
+
+    Carries no `export` parameter: the export branch is admin-only, and this
+    router is strictly read-only-and-render (D12).
+
+    Per D5 this includes threads from collab_private channels. That is a
+    deliberate policy decision recorded in the spec, not an oversight — no
+    visibility filter exists anywhere in this code path (F12).
+    """
+    view = await build_discussions_view(
+        db,
+        run_id=run_id,
+        channel_filter=channel_filter,
+        status_filter=status_filter,
+        agent_filter=agent_filter,
+    )
+    return templates.TemplateResponse(
+        request,
+        "manager/discussions.html",
+        _template_context(request, current_user, active_manager="discussions", **view),
+    )
+
+
+@router.get("/activity", response_class=HTMLResponse)
+async def manager_activity(
+    request: Request,
+    db: AsyncSession = _DB,
+    current_user: User = _STAFF,
+):
+    """Simulation-run overview."""
+    view = await list_runs_overview(db)
+    return templates.TemplateResponse(
+        request,
+        "manager/activity.html",
+        _template_context(request, current_user, active_manager="activity", **view),
+    )
+
+
+@router.get("/activity/{run_id}", response_class=HTMLResponse)
+async def manager_activity_detail(
+    run_id: uuid.UUID,
+    request: Request,
+    db: AsyncSession = _DB,
+    current_user: User = _STAFF,
+):
+    """One run's per-agent and per-channel stats. There is deliberately no
+    llm-calls drill-down here (D10)."""
+    view = await build_run_detail(db, run_id)
+    if view is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return templates.TemplateResponse(
+        request,
+        "manager/activity_detail.html",
+        _template_context(request, current_user, active_manager="activity", **view),
     )

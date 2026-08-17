@@ -1,0 +1,98 @@
+{# Shared discussions threads body: summary cards' companion thread table,
+   plus the per-thread detail row (decision summary + PI reviews). Rendered by
+   both the admin discussions page and the manager discussions page.
+
+   MUST stay free of absolute admin or manager URLs. Links live in the two
+   wrappers, as literal strings, because tests/unit/test_reachability.py's
+   _link_credits only accepts a Jinja expression in a {path_param} slot — a
+   templated base path would leave the manager routes unreferenced and fail
+   the gate. Verify with a grep for absolute admin/manager paths against this
+   file — it must print nothing. #}
+<!-- Threads table -->
+<div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+    <table class="min-w-full divide-y divide-gray-200">
+        <thead class="bg-gray-50">
+            <tr>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Channel</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Posted By</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Replies</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Replier</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Outcome</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Date/Time</th>
+            </tr>
+        </thead>
+        <tbody class="divide-y divide-gray-100">
+            {% for t in threads %}
+            {% set meta = status_meta.get(t.status, {'label': t.status, 'color': 'gray'}) %}
+            <tr class="hover:bg-gray-50 {% if t.decision %}cursor-pointer{% endif %}"
+                {% if t.decision %}onclick="document.getElementById('detail-{{ loop.index }}').classList.toggle('hidden')"{% endif %}>
+                <td class="px-4 py-3">
+                    <span class="px-2 py-0.5 rounded-full text-xs bg-{{ meta.color }}-100 text-{{ meta.color }}-700">
+                        {{ meta.label }}
+                    </span>
+                </td>
+                <td class="px-4 py-3 text-sm">#{{ t.channel_name }}</td>
+                <td class="px-4 py-3 text-sm font-medium">{% if t.agent_id %}{{ t.agent_id | capitalize }}Bot{% else %}(unknown sender){% endif %}</td>
+                <td class="px-4 py-3 text-sm">{{ t.reply_count }}</td>
+                <td class="px-4 py-3 text-sm">
+                    {% if t.decision %}
+                        {% if t.decision.agent_a == t.agent_id %}
+                            {{ t.decision.agent_b | capitalize }}Bot
+                        {% else %}
+                            {{ t.decision.agent_a | capitalize }}Bot
+                        {% endif %}
+                    {% elif t.replier %}
+                        {{ t.replier | capitalize }}Bot
+                    {% else %}
+                        —
+                    {% endif %}
+                </td>
+                <td class="px-4 py-3 text-sm text-gray-500">
+                    {% if t.decision %}
+                        {{ t.decision.outcome | replace('_', ' ') | capitalize }}
+                        <span class="text-xs text-gray-400"><span data-utc="{{ t.decision.decided_at.isoformat() }}" data-utc-fmt="time">{{ t.decision.decided_at.strftime('%H:%M') }}</span></span>
+                    {% else %}
+                        —
+                    {% endif %}
+                </td>
+                <td class="px-4 py-3 text-sm text-gray-500"><span data-utc="{{ t.created_at.isoformat() }}" data-utc-fmt="short">{{ t.created_at.strftime('%b %d %H:%M') }}</span></td>
+            </tr>
+            {% if t.decision and (t.decision.summary_text or t.reviews) %}
+            <tr id="detail-{{ loop.index }}" class="hidden">
+                <td colspan="7" class="px-6 py-4 bg-gray-50">
+                    {% if t.decision.summary_text %}
+                    <div class="text-sm text-gray-700 max-w-3xl proposal-md mb-4" data-markdown="{{ t.decision.summary_text | e }}"></div>
+                    {% endif %}
+                    {% if t.reviews %}
+                    <div class="border-t border-gray-200 pt-3 mt-3">
+                        <h4 class="text-xs font-semibold text-gray-500 uppercase mb-2">PI Reviews</h4>
+                        {% for rev in t.reviews %}
+                        <div class="flex items-start gap-3 mb-2 text-sm">
+                            <span class="px-2 py-0.5 rounded-full text-xs bg-indigo-100 text-indigo-700">{{ rev.rating }}/4</span>
+                            <span class="font-medium text-gray-700">{{ rev.agent_id | capitalize }}Bot's PI</span>
+                            {% if rev.comment %}
+                            <span class="text-gray-500 italic">"{{ rev.comment }}"</span>
+                            {% endif %}
+                            <span class="text-xs text-gray-400">{{ rev.reviewed_at.strftime('%b %d %H:%M') }}</span>
+                        </div>
+                        {% endfor %}
+                    </div>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endif %}
+            {% else %}
+            <tr>
+                <td colspan="7" class="px-4 py-8 text-center text-gray-400 text-sm">No discussions found</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<div class="mt-4 text-sm text-gray-400">
+    Showing {{ threads | length }} thread{{ 's' if threads | length != 1 }}
+    {% if channel_filter or status_filter %}(filtered){% endif %}
+    &bull; Total root posts: {{ counts.values() | sum }}
+</div>

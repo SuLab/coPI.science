@@ -79,10 +79,18 @@ async def test_staff_can_reach_every_manager_route(client, db_session):
     """Paired with the denial sweep above: the same live-router enumeration
     also proves staff are NOT accidentally locked out of a route added later.
     A 200 (rendered page) or a 302 (the root's redirect to /manager/pis) both
-    count as reached; a 403 or 404 does not."""
+    count as reached; a 403 or 404 does not.
+
+    A real SimulationRun backs the {run_id} slot: /manager/activity/{run_id}
+    correctly 404s on a random UUID, and a 404 does not count as "reached" per
+    the assertion above, so this sweep needs a run that actually exists rather
+    than a syntactically-valid-but-absent one."""
     mgr = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
     pi = await factories.make_user(db_session, user_role=USER_ROLE_PI)
-    paths = _manager_get_paths({"user_id": str(pi.id)})
+    run = SimulationRun()
+    db_session.add(run)
+    await db_session.flush()
+    paths = _manager_get_paths({"user_id": str(pi.id), "run_id": str(run.id)})
     for path in paths:
         r = await client.get(path, headers=auth_headers(mgr.id), follow_redirects=False)
         assert r.status_code in (200, 302), f"{path} was unreachable by a manager: {r.status_code}"
@@ -333,3 +341,51 @@ async def test_manager_assessments_renders_a_populated_verdict_row(client, db_se
     assert _gating_state_for(html, "fto achievable") == "unconfirmed"
     assert _score_cell(html, "differentiation") == "differentiation 4 /15%"
     assert _score_cell(html, "external_signals") == "external signals — /8%"
+
+
+async def test_manager_can_read_discussions_and_activity(client, db_session):
+    mgr = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
+    for path in ("/manager/discussions", "/manager/activity"):
+        r = await client.get(path, headers=auth_headers(mgr.id))
+        assert r.status_code == 200, path
+
+
+async def test_manager_has_no_llm_calls_route(client, db_session):
+    """D10: those rows carry full system prompts and raw model output."""
+    mgr = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
+    run = uuid.uuid4()
+    r = await client.get(
+        f"/manager/activity/{run}/llm-calls",
+        headers=auth_headers(mgr.id),
+        follow_redirects=False,
+    )
+    assert r.status_code == 404
+    r2 = await client.get(
+        f"/admin/activity/{run}/llm-calls",
+        headers=auth_headers(mgr.id),
+        follow_redirects=False,
+    )
+    assert r2.status_code == 403
+
+
+async def test_manager_activity_detail_404s_on_an_unknown_run(client, db_session):
+    mgr = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
+    r = await client.get(
+        f"/manager/activity/{uuid.uuid4()}", headers=auth_headers(mgr.id)
+    )
+    assert r.status_code == 404
+
+
+async def test_manager_discussions_has_no_export_control(client, db_session):
+    """Export stays admin-only; a manager page must not offer it.
+
+    Both forms are asserted: the loose lower-cased substring check is the
+    intent ("no mention of export anywhere"), and the precise
+    ``name="export"`` check is the actual invariant that would survive
+    unrelated copy changes to the page (e.g. a future "export" word in prose
+    would trip the loose check without indicating a real regression)."""
+    mgr = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
+    body = (await client.get("/manager/discussions", headers=auth_headers(mgr.id))).text
+    assert "export" not in body.lower()
+    assert 'name="export"' not in body
+    assert "/admin/" not in body

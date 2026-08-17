@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}Admin — Discussions — CoPI{% endblock %}
+{% block title %}Manager — Discussions — CoPI{% endblock %}
 
 {% block extra_head %}
 <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"
@@ -24,7 +24,7 @@
 <div class="flex items-center justify-between mb-6">
     <h1 class="text-2xl font-bold text-gray-900">Discussions</h1>
     {% if runs %}
-    <form method="GET" action="/admin/discussions" class="flex items-center gap-2">
+    <form method="GET" action="/manager/discussions" class="flex items-center gap-2">
         <label class="text-sm text-gray-500">Run:</label>
         <select name="run_id" onchange="this.form.submit()"
                 class="text-sm border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500">
@@ -54,7 +54,7 @@
 <div class="grid grid-cols-2 md:grid-cols-5 gap-4 mb-8">
     {% for key, meta in status_meta.items() %}
     {% set n = counts.get(key, 0) %}
-    <a href="/admin/discussions?run_id={{ selected_run_id }}{% if status_filter != key %}&status_filter={{ key }}{% endif %}"
+    <a href="/manager/discussions?run_id={{ selected_run_id }}{% if status_filter != key %}&status_filter={{ key }}{% endif %}"
        class="bg-white rounded-xl border border-gray-200 p-4 text-center hover:border-{{ meta.color }}-300 transition
               {% if status_filter == key %}ring-2 ring-{{ meta.color }}-400{% endif %}">
         <div class="text-3xl font-bold text-{{ meta.color }}-600">{{ n }}</div>
@@ -65,7 +65,7 @@
 
 <!-- Filters -->
 <div class="flex items-center gap-4 mb-4">
-    <form method="GET" action="/admin/discussions" class="flex items-center gap-3">
+    <form method="GET" action="/manager/discussions" class="flex items-center gap-3">
         <input type="hidden" name="run_id" value="{{ selected_run_id }}">
         <select name="channel_filter" class="text-sm border-gray-300 rounded-md shadow-sm">
             <option value="">All Channels</option>
@@ -88,12 +88,8 @@
         </select>
         <button type="submit"
                 class="px-3 py-1.5 bg-indigo-600 text-white text-sm rounded-md hover:bg-indigo-700">Filter</button>
-        <button type="submit" name="export" value="true"
-                class="px-3 py-1.5 bg-gray-600 text-white text-sm rounded-md hover:bg-gray-700">Export TXT</button>
-        <button type="submit" name="export" value="html"
-                class="px-3 py-1.5 bg-gray-600 text-white text-sm rounded-md hover:bg-gray-700">Export HTML</button>
         {% if channel_filter or status_filter or agent_filter %}
-        <a href="/admin/discussions?run_id={{ selected_run_id }}" class="text-sm text-gray-500 hover:text-gray-700">Clear</a>
+        <a href="/manager/discussions?run_id={{ selected_run_id }}" class="text-sm text-gray-500 hover:text-gray-700">Clear</a>
         {% endif %}
     </form>
 </div>
