@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from src.database import get_db
-from src.dependencies import get_agent_with_access, get_current_user
+from src.dependencies import get_agent_with_access, get_current_user, get_pi_user
 from src.models import (
     AgentDelegate,
     AgentMessage,
@@ -410,9 +410,16 @@ async def derive_agent_identity(
 async def request_agent(
     request: Request,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_pi_user),
 ):
-    """Submit an agent request."""
+    """Submit an agent request.
+
+    The dependency, not the body check, is what keeps managers out. The
+    onboarding_complete/profile test below is a readiness check, not an
+    authorization one: a manager who acquired both (by any route, now or
+    later) would otherwise walk straight through it and receive an
+    AgentRegistry row — a lab of its own, which D7 forbids.
+    """
     if not current_user.onboarding_complete or not current_user.profile:
         raise HTTPException(status_code=400, detail="Complete your profile first")
 

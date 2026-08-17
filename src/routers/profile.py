@@ -9,7 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.database import get_db
-from src.dependencies import get_current_user
+from src.dependencies import get_current_user, get_pi_user
 from src.models import Job, Publication, ResearcherProfile, User
 from src.services.validators import is_valid_email
 
@@ -199,9 +199,14 @@ async def profile_save(
 async def profile_refresh(
     request: Request,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_pi_user),
 ):
-    """Enqueue a profile refresh job."""
+    """Enqueue a profile refresh job.
+
+    get_pi_user: a manager has no research profile to refresh (D7), and this
+    fires the same ORCID/PubMed generate_profile pipeline that F8 kept off
+    manager accounts on the onboarding side.
+    """
     job = Job(
         type="generate_profile",
         user_id=current_user.id,

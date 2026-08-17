@@ -9,7 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.database import get_db
-from src.dependencies import get_current_user
+from src.dependencies import get_current_user, get_pi_user
 from src.models import USER_ROLE_PI, AgentRegistry, Job, ResearcherProfile, User
 from src.routers.auth import pop_post_login_redirect
 from src.services.validators import is_valid_email
@@ -120,9 +120,16 @@ async def save_profile(
     key_targets: str = Form(""),
     keywords: str = Form(""),
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_pi_user),
 ):
-    """Save profile edits from onboarding."""
+    """Save profile edits from onboarding.
+
+    get_pi_user, not get_current_user: this is the only writer of
+    `onboarding_complete = True` in src/ and it also creates the
+    ResearcherProfile, which together are the entire gate on
+    POST /agent/request. A manager reaching it would be two POSTs from a lab
+    bot of its own (D7).
+    """
 
     # Email is required at onboarding. Validate before persisting anything so a
     # bad value rejects the whole submission (mirrors profile_save on /profile).
@@ -221,7 +228,7 @@ async def save_profile(
 async def retry_pipeline(
     request: Request,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_pi_user),
 ):
     """Re-enqueue profile generation job.
 
@@ -229,6 +236,11 @@ async def retry_pipeline(
     cross-site request-forgery target (a forged navigation could enqueue work
     on the victim's behalf). SameSite=lax on the session cookie blocks forged
     cross-site POSTs, so the "Try Again" control posts this form. (SEC-8)
+
+    Gated on get_pi_user: this is the POST twin of the GET self-heal at
+    ``onboarding_start``, which already refuses to enqueue generate_profile
+    for a manager (F8). Narrowing only the GET left the pipeline one form
+    POST away.
     """
     job = Job(
         type="generate_profile",
