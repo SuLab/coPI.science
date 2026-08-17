@@ -6,10 +6,21 @@ from datetime import UTC, datetime
 
 import pytest
 
-from src.models import USER_ROLE_ADMIN, USER_ROLE_MANAGER, USER_ROLE_PI
+from src.models import (
+    USER_ROLE_ADMIN,
+    USER_ROLE_MANAGER,
+    USER_ROLE_PI,
+    OpportunityAssessment,
+    SimulationRun,
+)
 from src.routers import manager as manager_router
 from tests import factories
 from tests.integration.test_manager_access import auth_headers
+from tests.integration.test_opportunity_assessment_persistence import (
+    _band_label,
+    _gating_state_for,
+    _score_cell,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -237,3 +248,88 @@ async def test_manager_assessments_never_links_into_admin(client, db_session):
     mgr = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
     body = (await client.get("/manager/assessments", headers=auth_headers(mgr.id))).text
     assert "/admin/" not in body
+
+
+async def test_manager_assessments_renders_a_populated_verdict_row(client, db_session):
+    """The three tests above never populate ``opportunity_assessments``, so they
+    only prove the static wrapper (title, empty-state) renders through
+    ``/manager``. The verdict table itself — the whole point of the shared
+    partial — sits behind ``{% if assessments %}``
+    (``templates/admin/_assessments_body.html``) and is the only consumer of
+    ``rubric_weights``/``runs_by_id``; a manager route that dropped either key
+    from its ``**view`` splat would still 200 with a clean empty state and
+    every other test here would keep passing. This drives one row through the
+    real table markup and asserts on content that can only come from it:
+
+    * the project name — a literal fixture string, present nowhere else on
+      the page.
+    * the band label — scoped to the dedicated ``band-label`` span via
+      ``_band_label``, not a bare ``"advance" in body`` check: the intro
+      prose already contains the lowercase words "advance"/"conditional"/
+      "pass" while explaining the band thresholds, so a substring check
+      would false-pass even against the empty-state page.
+    * two distinct gating states (``met`` and ``unconfirmed``) via
+      ``_gating_state_for``, scoped to the per-row ``gating-<state>`` class —
+      not a bare substring check, because the gating legend paragraph above
+      the table already prints the words "met" and "unconfirmed" while
+      explaining the glyphs, on every page render including the empty state.
+    * a scored dimension's label/value/weight and the omitted dimension's
+      em-dash placeholder, via ``_score_cell``, scoped to the per-row
+      ``score-<key>`` class — this class only exists inside a detail row, so
+      it cannot be satisfied by the tooltip text or intro prose either.
+
+    All three helpers are imported from
+    ``test_opportunity_assessment_persistence`` (the suite that already
+    proves this same markup renders correctly on ``/admin/assessments``)
+    rather than reimplemented, so a future template change that broke one of
+    these scoped matchers would show up as a failure in both suites, not a
+    silently-diverged regex in this one.
+    """
+    mgr = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
+    run = SimulationRun()
+    db_session.add(run)
+    await db_session.flush()
+    db_session.add(
+        OpportunityAssessment(
+            simulation_run_id=run.id,
+            agent_id="blackbird",
+            subject_agent_id="wang",
+            channel_name="general",
+            company_or_project="Manager View Fixture Co",
+            recommendation="advance",
+            weighted_score=4.20,
+            band="advance",
+            gating={
+                "life_sciences_domain": "met",
+                "fto_achievable": "unconfirmed",
+            },
+            scores={
+                "differentiation": 4,
+                "market_unmet_need": 4,
+                "team": 4,
+                "ip_fto": 2,
+                "platform": 3,
+                "dev_regulatory_feasibility": 3,
+                "workplan_capital_efficiency": 3,
+                "exit_thesis": 2,
+                "mechanism_validation": 4,
+                "toxicity_selectivity": 3,
+                "experimental_rigor": 4,
+                "chemistry_dc_path": 2,
+                # external_signals deliberately omitted: must render as a
+                # gap ("—"), not indistinguishable from a scored 0.
+            },
+        )
+    )
+    await db_session.flush()
+
+    resp = await client.get("/manager/assessments", headers=auth_headers(mgr.id))
+    assert resp.status_code == 200
+    html = resp.text
+
+    assert "Manager View Fixture Co" in html
+    assert _band_label(html) == "advance"
+    assert _gating_state_for(html, "life sciences domain") == "met"
+    assert _gating_state_for(html, "fto achievable") == "unconfirmed"
+    assert _score_cell(html, "differentiation") == "differentiation 4 /15%"
+    assert _score_cell(html, "external_signals") == "external signals — /8%"
