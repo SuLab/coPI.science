@@ -76,11 +76,14 @@ class User(Base):
     )
 
     # is_admin stays readable as a hybrid rather than a plain @property because
-    # src/main.py:52 runs `select(User.is_admin)` — SQL, which a @property
+    # src/main.py:53 runs `select(User.is_admin)` — SQL, which a @property
     # cannot satisfy (F13). The hybrid compiles to `users.user_role = 'admin'`,
-    # so main.py, templates/base.html:69, base.html:93,
-    # templates/admin/user_detail.html:38 and tests/integration/test_cli.py:383
-    # all keep working with no edit. It is READ-ONLY on purpose: `is_admin =
+    # so main.py, templates/base.html's nav gating (lines 52, 62, 73) and
+    # tests/integration/test_cli.py's
+    # test_admin_grant_and_revoke_flip_is_admin_and_are_idempotent all keep
+    # working with no edit. `templates/admin/user_detail.html` no longer reads
+    # is_admin: task 8 replaced its Admin Yes/No row with a Role row bound to
+    # `user_role` directly. It is READ-ONLY on purpose: `is_admin =
     # False` on a manager would have no correct answer.
     @hybrid_property
     def is_admin(self) -> bool:

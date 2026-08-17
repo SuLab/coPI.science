@@ -476,6 +476,82 @@ def test_admin_grant_on_unknown_orcid_should_exit_nonzero(runner):
 
 
 # ===========================================================================
+# T6.2b — role:set
+# ===========================================================================
+
+
+def test_role_set_round_trips_through_all_three_roles(db, runner):
+    """The round trip admin:grant/admin:revoke cannot express: pi -> manager
+    -> admin -> pi, driven purely by --role."""
+    target_orcid = _orcid("role-target")
+
+    async def _seed(session):
+        await factories.make_user(
+            session, orcid=target_orcid, name="Role Target", user_role=USER_ROLE_PI
+        )
+
+    db(_seed)
+
+    def _role(orcid):
+        return db(lambda s: _user_by_orcid(s, orcid)).user_role
+
+    result = _ok(
+        runner.invoke(cli_app, ["role:set", "--orcid", target_orcid, "--role", "manager"])
+    )
+    assert "Set Role Target" in result.output
+    assert _role(target_orcid) == USER_ROLE_MANAGER
+
+    _ok(runner.invoke(cli_app, ["role:set", "--orcid", target_orcid, "--role", "admin"]))
+    assert _role(target_orcid) == USER_ROLE_ADMIN
+
+    _ok(runner.invoke(cli_app, ["role:set", "--orcid", target_orcid, "--role", "pi"]))
+    assert _role(target_orcid) == USER_ROLE_PI
+
+
+def test_role_set_rejects_an_invalid_role_and_leaves_the_row_untouched(db, runner):
+    target_orcid = _orcid("role-invalid")
+
+    async def _seed(session):
+        await factories.make_user(
+            session, orcid=target_orcid, name="Invalid Target", user_role=USER_ROLE_PI
+        )
+
+    db(_seed)
+
+    result = runner.invoke(
+        cli_app, ["role:set", "--orcid", target_orcid, "--role", "superuser"]
+    )
+    assert result.exit_code != 0
+    assert db(lambda s: _user_by_orcid(s, target_orcid)).user_role == USER_ROLE_PI
+
+
+def test_role_set_on_unknown_orcid_exits_nonzero_and_says_so(runner):
+    ghost = _orcid("role-ghost")
+    result = runner.invoke(cli_app, ["role:set", "--orcid", ghost, "--role", "manager"])
+    assert result.exit_code != 0
+    assert f"User with ORCID {ghost} not found" in result.output
+
+
+def test_role_set_is_scoped_to_the_named_orcid(db, runner):
+    target_orcid = _orcid("role-scope-target")
+    bystander_orcid = _orcid("role-scope-bystander")
+
+    async def _seed(session):
+        await factories.make_user(
+            session, orcid=target_orcid, name="Scope Target", user_role=USER_ROLE_PI
+        )
+        await factories.make_user(
+            session, orcid=bystander_orcid, name="Scope Bystander", user_role=USER_ROLE_PI
+        )
+
+    db(_seed)
+
+    _ok(runner.invoke(cli_app, ["role:set", "--orcid", target_orcid, "--role", "admin"]))
+    assert db(lambda s: _user_by_orcid(s, target_orcid)).user_role == USER_ROLE_ADMIN
+    assert db(lambda s: _user_by_orcid(s, bystander_orcid)).user_role == USER_ROLE_PI
+
+
+# ===========================================================================
 # T6.3 — list-users
 # ===========================================================================
 

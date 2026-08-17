@@ -1,6 +1,8 @@
 """Admin-UI role appointment, and the guards that keep it from locking
 everyone out of /admin."""
 
+import uuid
+
 import pytest
 from sqlalchemy import select
 
@@ -38,6 +40,32 @@ async def test_a_manager_cannot_appoint_anyone(client, db_session):
     )
     assert r.status_code == 403
     assert await _role_of(db_session, pi.id) == USER_ROLE_PI
+
+
+async def test_a_pi_cannot_appoint_anyone(client, db_session):
+    """The manager case (test_a_manager_cannot_appoint_anyone) and this one are
+    both worth pinning explicitly on a privilege endpoint — a PI is gated out
+    by the same get_admin_user dependency, but that shouldn't be inferred from
+    the manager case alone."""
+    pi_actor = await factories.make_user(db_session, user_role=USER_ROLE_PI)
+    target = await factories.make_user(db_session, user_role=USER_ROLE_PI)
+    r = await client.post(
+        f"/admin/users/{target.id}/role",
+        data={"user_role": USER_ROLE_ADMIN},
+        headers=auth_headers(pi_actor.id),
+    )
+    assert r.status_code == 403
+    assert await _role_of(db_session, target.id) == USER_ROLE_PI
+
+
+async def test_a_nonexistent_target_user_gets_404(client, db_session):
+    admin = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN)
+    r = await client.post(
+        f"/admin/users/{uuid.uuid4()}/role",
+        data={"user_role": USER_ROLE_MANAGER},
+        headers=auth_headers(admin.id),
+    )
+    assert r.status_code == 404
 
 
 async def test_an_invalid_role_is_rejected(client, db_session):
