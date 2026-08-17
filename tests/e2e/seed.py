@@ -113,6 +113,7 @@ async def _get_or_create_agent(session, agent_id, **kw):
 async def seed(session) -> dict[str, str]:
     """Create every fixture row. Returns a summary keyed by flow."""
     from src.models import (
+        USER_ROLE_ADMIN,
         AgentChannel,
         AgentMessage,
         AgentRegistry,
@@ -130,11 +131,11 @@ async def seed(session) -> dict[str, str]:
         name="E2E Admin",
         email=ADMIN_EMAIL,
         institution="Scripps Research",
-        is_admin=True,
+        user_role=USER_ROLE_ADMIN,
         access_status="allowed",
         onboarding_complete=True,
     )
-    admin.is_admin = True  # repair a row that predates the flag
+    admin.user_role = USER_ROLE_ADMIN  # repair a row that predates the flag
     out["admin_user_id"] = str(admin.id)
 
     # Self-service signup needs a completed profile and no agent of its own.

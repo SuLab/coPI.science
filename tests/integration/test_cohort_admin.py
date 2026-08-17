@@ -14,7 +14,14 @@ from itsdangerous import TimestampSigner
 from sqlalchemy import select
 
 from src.config import get_settings
-from src.models import AgentRegistry, Cohort, CohortAuditEvent, CohortMembership
+from src.models import (
+    USER_ROLE_ADMIN,
+    USER_ROLE_PI,
+    AgentRegistry,
+    Cohort,
+    CohortAuditEvent,
+    CohortMembership,
+)
 from tests import factories
 
 pytestmark = pytest.mark.integration
@@ -29,7 +36,7 @@ def _auth(user_id) -> dict:
 
 @pytest.fixture
 async def admin(db_session):
-    return await factories.make_user(db_session, is_admin=True, email="admin@example.org")
+    return await factories.make_user(db_session, user_role=USER_ROLE_ADMIN, email="admin@example.org")
 
 
 @pytest.fixture
@@ -93,7 +100,7 @@ async def test_setting_an_unknown_role_is_rejected_without_a_500(
 
 async def test_setting_agent_role_requires_admin(client, db_session, admin, roster):
     agent = roster["su"]
-    plain = await factories.make_user(db_session, is_admin=False, email="plain2@example.org")
+    plain = await factories.make_user(db_session, user_role=USER_ROLE_PI, email="plain2@example.org")
     await db_session.flush()
     r = await client.post(
         f"/admin/agents/{agent.id}/role",
@@ -148,7 +155,7 @@ async def test_cohort_pages_require_login(client):
 
 
 async def test_cohort_pages_require_admin(client, db_session):
-    plain = await factories.make_user(db_session, is_admin=False, email="plain@example.org")
+    plain = await factories.make_user(db_session, user_role=USER_ROLE_PI, email="plain@example.org")
     await db_session.flush()
     r = await client.get("/admin/cohorts", headers=_auth(plain.id))
     assert r.status_code == 403

@@ -7,7 +7,7 @@ from itsdangerous import TimestampSigner
 from sqlalchemy import select
 
 from src.config import get_settings
-from src.models import OpportunityAssessment, SimulationRun
+from src.models import USER_ROLE_ADMIN, USER_ROLE_PI, OpportunityAssessment, SimulationRun
 from tests import factories
 
 pytestmark = pytest.mark.integration
@@ -23,7 +23,7 @@ def _auth(user_id) -> dict:
 @pytest.fixture
 async def admin(db_session):
     return await factories.make_user(
-        db_session, is_admin=True, email="assessments-admin@example.org"
+        db_session, user_role=USER_ROLE_ADMIN, email="assessments-admin@example.org"
     )
 
 
@@ -1166,7 +1166,7 @@ async def test_admin_assessments_page_renders_band_as_text_not_just_colour(
 
 @pytest.mark.asyncio
 async def test_admin_assessments_page_requires_admin(client, db_session):
-    plain = await factories.make_user(db_session, is_admin=False, email="plain-assess@example.org")
+    plain = await factories.make_user(db_session, user_role=USER_ROLE_PI, email="plain-assess@example.org")
     await db_session.flush()
     resp = await client.get("/admin/assessments", headers=_auth(plain.id))
     assert resp.status_code == 403

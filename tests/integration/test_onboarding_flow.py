@@ -38,6 +38,8 @@ from sqlalchemy import func, select
 
 from src.config import get_settings
 from src.models import (
+    USER_ROLE_ADMIN,
+    USER_ROLE_PI,
     EmailEngagementTracker,
     EmailNotificationPreference,
     Job,
@@ -1309,7 +1311,7 @@ async def test_no_logged_in_user_can_read_or_write_another_users_data(client, db
         db_session,
         name="Attacker Beta",
         email="attacker@example.org",
-        is_admin=False,
+        user_role=USER_ROLE_PI,
         onboarding_complete=ep.onboarding_complete,
         access_status="allowed",
     )
@@ -1382,7 +1384,7 @@ async def test_no_logged_in_user_can_read_or_write_another_users_data(client, db
 
     # CONTROL — the same cookie, from a real admin, must reach the victim.
     admin = await factories.make_user(
-        db_session, name="Real Admin", email="realadmin@example.org", is_admin=True
+        db_session, name="Real Admin", email="realadmin@example.org", user_role=USER_ROLE_ADMIN
     )
     await db_session.flush()
     control_before = await _snapshot(db_session, victim.id)

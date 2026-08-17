@@ -71,7 +71,7 @@ EXIT_OK = 0
 EXIT_BLOCKED = 1
 EXIT_WARN = 2
 
-DEFAULT_TARGET = "0027"
+DEFAULT_TARGET = "0028"
 #: Revisions this migration path has been exercised from. 0026 means "already done"
 #: (that state is a no-op, handled by the current == target branch of revision_status(),
 #: not by membership in this tuple).
@@ -229,10 +229,13 @@ PLANNED_OBJECTS: tuple[PlannedObject, ...] = (
         "0027", "index", "ix_assessment_drops_simulation_run_id", "assessment_drops",
     ),
     PlannedObject("0027", "index", "ix_assessment_drops_reason", "assessment_drops"),
+    # 0028_add_user_role
+    PlannedObject("0028", "column", "user_role", "users"),
+    PlannedObject("0028", "constraint", "ck_users_user_role", "users"),
 )
 
 REVISION_ORDER = (
-    "0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027",
+    "0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027", "0028",
 )
 
 

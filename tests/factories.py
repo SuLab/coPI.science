@@ -11,6 +11,7 @@ writes live inside the test's rolled-back transaction — see tests/conftest.py.
 import itertools
 
 from src.models import (
+    USER_ROLE_PI,
     AgentChannel,
     AgentMessage,
     AgentRegistry,
@@ -32,7 +33,7 @@ async def make_user(session, **overrides) -> User:
         orcid=f"0000-0000-0000-{n:04d}",
         email=f"user{n}@example.edu",
         institution="Test University",
-        is_admin=False,
+        user_role=USER_ROLE_PI,
         onboarding_complete=True,
         access_status="allowed",
     )

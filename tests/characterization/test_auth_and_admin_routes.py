@@ -12,6 +12,7 @@ import pytest
 from itsdangerous import TimestampSigner
 
 from src.config import get_settings
+from src.models import USER_ROLE_ADMIN, USER_ROLE_PI
 from tests import factories
 
 pytestmark = pytest.mark.characterization
@@ -140,13 +141,13 @@ async def test_agent_landing_authenticated_200(client, db_session):
 
 
 async def test_admin_non_admin_user_403(client, db_session):
-    u = await factories.make_user(db_session, is_admin=False)
+    u = await factories.make_user(db_session, user_role=USER_ROLE_PI)
     r = await client.get("/admin", headers=_auth_headers(u.id))
     assert r.status_code == 403
 
 
 async def test_admin_admin_user_200(client, db_session):
-    u = await factories.make_user(db_session, is_admin=True)
+    u = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN)
     r = await client.get("/admin", headers=_auth_headers(u.id))
     assert r.status_code == 200
 
@@ -178,7 +179,7 @@ async def test_admin_discussions_survives_a_bot_post_with_no_agent_id(client, db
     then `sorted()` the set, so one NULL took the whole page down with
     `TypeError: '<' not supported between instances of 'NoneType' and 'str'`.
     """
-    u = await factories.make_user(db_session, is_admin=True)
+    u = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN)
     run = await factories.make_simulation_run(db_session)
     # A normal bot post, so the set is genuinely mixed rather than all-None.
     await factories.make_agent_message(
@@ -214,7 +215,7 @@ async def test_admin_activity_detail_survives_a_bot_post_with_no_agent_id(client
     and 'str'`. This run is the one that is FIRST in the Activity table today, so
     it is the most likely click in production.
     """
-    u = await factories.make_user(db_session, is_admin=True)
+    u = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN)
     run = await factories.make_simulation_run(db_session)
     # A normal bot post, so the set is genuinely mixed rather than all-None.
     await factories.make_agent_message(
@@ -247,7 +248,7 @@ async def test_admin_llm_calls_page_zero_rejected_not_500(client, db_session):
     negative` as an unhandled 500. `Query(1, ge=1)` rejects an out-of-range
     page with a clean 422 instead, and `?page=1` still works.
     """
-    u = await factories.make_user(db_session, is_admin=True)
+    u = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN)
     run = await factories.make_simulation_run(db_session)
     await db_session.flush()
 

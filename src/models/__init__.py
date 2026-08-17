@@ -40,7 +40,13 @@ from src.models.profile import ResearcherProfile
 from src.models.proposal_vote import VOTE_DOWN, VOTE_UP, ProposalVote
 from src.models.provisioning import AppSetting, SlackAppProvision
 from src.models.publication import Publication
-from src.models.user import User
+from src.models.user import (
+    USER_ROLE_ADMIN,
+    USER_ROLE_MANAGER,
+    USER_ROLE_PI,
+    VALID_USER_ROLES,
+    User,
+)
 
 __all__ = [
     "User",
@@ -82,4 +88,8 @@ __all__ = [
     "WaitlistSignup",
     "AppSetting",
     "SlackAppProvision",
+    "USER_ROLE_PI",
+    "USER_ROLE_MANAGER",
+    "USER_ROLE_ADMIN",
+    "VALID_USER_ROLES",
 ]

@@ -13,8 +13,8 @@ async def test_container_is_migrated(engine):
         # 0019-0021 db-primary-conversations, 0022 cohorts,
         # 0023 researcher_profiles synthesis provenance, 0024 agents.role column,
         # 0025 opportunity_assessments (BlackbirdBot screening verdicts),
-        # 0027 add_assessment_drops
-        assert v == "0027"
+        # 0027 add_assessment_drops, 0028 users.user_role account types
+        assert v == "0028"
 
 
 async def test_writes_are_rolled_back_part1(db_session):

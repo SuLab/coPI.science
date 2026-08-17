@@ -31,7 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from typer.testing import CliRunner
 
 from src.cli import app as cli_app
-from src.models import AgentRegistry, Job, ProfileRevision, User
+from src.models import USER_ROLE_ADMIN, USER_ROLE_PI, AgentRegistry, Job, ProfileRevision, User
 from tests import factories
 
 pytestmark = pytest.mark.integration
@@ -372,9 +372,11 @@ def test_admin_grant_and_revoke_flip_is_admin_and_are_idempotent(db, runner):
     bystander_orcid = _orcid("admin-bystander")
 
     async def _seed(session):
-        await factories.make_user(session, orcid=target_orcid, name="Target PI", is_admin=False)
         await factories.make_user(
-            session, orcid=bystander_orcid, name="Bystander PI", is_admin=False
+            session, orcid=target_orcid, name="Target PI", user_role=USER_ROLE_PI
+        )
+        await factories.make_user(
+            session, orcid=bystander_orcid, name="Bystander PI", user_role=USER_ROLE_PI
         )
 
     db(_seed)
@@ -413,7 +415,9 @@ def test_admin_grant_on_unknown_orcid_changes_nothing_and_says_so(db, runner):
     ghost = _orcid("admin-ghost")
 
     async def _seed(session):
-        await factories.make_user(session, orcid=real_orcid, name="Real PI", is_admin=False)
+        await factories.make_user(
+            session, orcid=real_orcid, name="Real PI", user_role=USER_ROLE_PI
+        )
 
     db(_seed)
     before = len(db(_mine))
@@ -456,7 +460,7 @@ def test_list_users_renders_real_rows_including_the_null_institution_case(db, ru
             orcid=admin_orcid,
             name="Listed Admin",
             institution="Scripps Research",
-            is_admin=True,
+            user_role=USER_ROLE_ADMIN,
             onboarding_complete=True,
         )
         # institution=None exercises the "—" fallback branch.
@@ -465,7 +469,7 @@ def test_list_users_renders_real_rows_including_the_null_institution_case(db, ru
             orcid=plain_orcid,
             name="Listed Plain",
             institution=None,
-            is_admin=False,
+            user_role=USER_ROLE_PI,
             onboarding_complete=False,
         )
 
@@ -486,10 +490,14 @@ def test_list_users_renders_real_rows_including_the_null_institution_case(db, ru
     plain_row = _row(plain_orcid)
     assert "Scripps Research" in admin_row
     assert "—" in plain_row, "a null institution should render the em-dash placeholder"
-    # Admin + Onboarded are the last two cells. The admin row is Yes/Yes and the plain
-    # row No/No, so a hard-coded flag column cannot satisfy both.
-    assert (admin_row.count("Yes"), admin_row.count("No")) == (2, 0), admin_row
-    assert (plain_row.count("Yes"), plain_row.count("No")) == (0, 2), plain_row
+
+    def _cells(row: str) -> list[str]:
+        return [c.strip() for c in row.split("│")][1:-1]
+
+    # Role + Onboarded are the last two cells. The admin row is admin/Yes and the
+    # plain row pi/No, so a hard-coded flag column cannot satisfy both.
+    assert _cells(admin_row)[-2:] == ["admin", "Yes"], admin_row
+    assert _cells(plain_row)[-2:] == ["pi", "No"], plain_row
 
 
 # ===========================================================================

@@ -112,7 +112,7 @@ def admin_grant(
     async def _grant() -> bool:
         from sqlalchemy import select
 
-        from src.models import User
+        from src.models import USER_ROLE_ADMIN, User
         engine, factory = await _get_db()
         try:
             async with factory() as db:
@@ -121,7 +121,7 @@ def admin_grant(
                 if not user:
                     console.print(f"[red]User with ORCID {orcid} not found[/red]")
                     return False
-                user.is_admin = True
+                user.user_role = USER_ROLE_ADMIN
                 await db.commit()
                 console.print(f"[green]Granted admin to {user.name} ({orcid})[/green]")
                 return True
@@ -143,7 +143,7 @@ def admin_revoke(
     async def _revoke() -> bool:
         from sqlalchemy import select
 
-        from src.models import User
+        from src.models import USER_ROLE_PI, User
         engine, factory = await _get_db()
         try:
             async with factory() as db:
@@ -152,7 +152,7 @@ def admin_revoke(
                 if not user:
                     console.print(f"[red]User with ORCID {orcid} not found[/red]")
                     return False
-                user.is_admin = False
+                user.user_role = USER_ROLE_PI
                 await db.commit()
                 console.print(f"[green]Revoked admin from {user.name} ({orcid})[/green]")
                 return True
@@ -179,7 +179,7 @@ def list_users():
         table.add_column("Name", style="cyan")
         table.add_column("ORCID", style="green")
         table.add_column("Institution")
-        table.add_column("Admin", style="red")
+        table.add_column("Role", style="red")
         table.add_column("Onboarded")
 
         for user in users:
@@ -187,7 +187,7 @@ def list_users():
                 user.name,
                 user.orcid,
                 user.institution or "—",
-                "Yes" if user.is_admin else "No",
+                user.user_role,
                 "Yes" if user.onboarding_complete else "No",
             )
         console.print(table)
