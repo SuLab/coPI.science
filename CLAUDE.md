@@ -232,6 +232,38 @@ docker compose -f docker-compose.prod.yml exec blackbird-app python scripts/back
 (`.env` + `config.py get_slack_tokens()` remain a read fallback, but the DB column is
 authoritative.)
 
+## Account Types (PI / manager / admin)
+
+**`users.user_role` is the single source of truth**, with values `pi`, `manager`,
+`admin`. There is no `is_admin` column any more — `User.is_admin` is a read-only
+`hybrid_property` over `user_role`, so it still works in both SQL
+(`select(User.is_admin)`) and Python, but **cannot be assigned**. Set the role
+instead.
+
+- **PI** — the original account: own profile, own lab agent, `/profile` and `/agent`.
+- **Manager** — global, strictly **read-only**: `/manager/pis`, `/manager/assessments`,
+  `/manager/discussions`, `/manager/activity`. No lab, no PI onboarding, **cannot
+  impersonate**, and there is deliberately no LLM-call drill-down and no export.
+  Managers *do* see private (`collab_private`) discussion threads — a policy decision,
+  recorded in the design doc.
+- **Admin** — everything, including `/admin/*` and impersonation.
+
+`is_manager` means exactly `user_role == 'manager'`. The "may see the manager views"
+predicate is **`is_staff`** (admin OR manager). **Never widen `is_admin`** — impersonation
+(`src/dependencies.py`, and a duplicate check in `src/main.py`) is gated on it and
+returns a fully substituted user, so a manager satisfying `is_admin` would be a full
+privilege escalation.
+
+Appoint from **/admin/users/{id} → Account Type**. The last admin cannot be demoted
+there. If no admin can log in at all, recover from a container shell:
+
+    docker compose -f docker-compose.prod.yml exec blackbird-app \
+      python -m src.cli role:set --orcid 0000-0000-0000-0000 --role admin
+
+New managers are provisioned in two steps: they sign in with ORCID (landing on
+`/access-pending`), an admin approves them at `/admin/access-requests`, then sets their
+role. Between approval and role-setting the account behaves as a PI.
+
 ## BlackbirdBot (the scout_hub role)
 
 BlackbirdBot screens PI ideas against `data/Blackbird_initial_priorities-criteria_v1.pdf`.
