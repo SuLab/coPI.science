@@ -10,7 +10,10 @@ Host runs TWO stacks. Every claim below was verified live, not from memory.
 | copi-python-{app,worker,grantbot,nginx,certbot,postgres}-1 | copi-python | org1 — DO NOT TOUCH |
 | **agent-run** | **copi-python** | **org1's PRODUCTION simulation — DO NOT TOUCH** |
 
-No `blackbird-agent-run` exists; this repo's simulation is not running.
+This repo's simulation is NOT running. (Correction: a *stopped* container named
+`blackbird-agent-run` does exist — Exited(137), from a run 2 days ago. An earlier
+draft of this file wrongly said none existed. It still holds the name and is pinned
+to a pre-merge image; see the agent trap below.)
 
 ## Confirmed hazards and the mitigations chosen
 
@@ -19,15 +22,25 @@ No `blackbird-agent-run` exists; this repo's simulation is not running.
 copi-python-nginx-1 currently holds those ports. Mitigation: name services explicitly
 (`up -d blackbird-app worker`); never bare `up -d`, never `--remove-orphans`.
 
-**H2 — `compose run` would steal production traffic.** blackbird-app joins the shared
+**H2 — RETRACTED. This hazard is FALSE; the mitigation was harmless but the reasoning was wrong.**
+
+ORIGINAL CLAIM (kept so the error is visible, not quietly deleted): blackbird-app joins the shared
 `copi-edge` network and Compose adds the SERVICE NAME as a network alias. Verified:
 org1's nginx has `upstream blackbird_app { server blackbird-app:8000; }` and proxies
 blackbird.copi.science to it; copi-blackbird-app-1 holds alias `blackbird-app` on
 copi-edge. A `docker compose run blackbird-app alembic ...` container would join
 copi-edge under the SAME alias, so nginx DNS could round-robin production requests into
 a container running alembic rather than uvicorn -> 502s.
-Mitigation: run the migration with a plain `docker run` attached ONLY to
-`copi-blackbird_default` (where postgres lives, alias `postgres`), never copi-edge.
+Mitigation used: a plain `docker run` attached ONLY to `copi-blackbird_default`.
+
+**CORRECTION, measured on Compose 2.37.1 (this host):** a `compose run` container is
+given ONLY its own container name as a network alias — never the service name.
+Verified empirically: a `compose run` probe showed aliases `[alias-probe]`, while the
+`up`-created app container shows `[copi-blackbird-app-1 blackbird-app]`. So
+`docker compose run blackbird-app alembic ...` could NOT have acquired the
+`blackbird-app` alias on copi-edge and could NOT have taken production traffic.
+The isolated `docker run` remains fine (it is still tighter isolation), but do not
+propagate the stated hazard — it is not real.
 
 **H3 — data.** Full `pg_dump -Fc` taken BEFORE any DDL and verified restorable.
 
@@ -158,3 +171,11 @@ the new image. So old code must SERVE while alembic runs FROM the new image.
 
 Last resort, if the schema is damaged rather than merely ahead: restore the pre-0028 dump in
 `backups/` (pg_restore into a clean database). That dump predates all DDL from this deploy.
+
+## Rollback — correction to the corrected procedure
+
+The step-1 `docker tag ...:rollback-pre0028 ...:latest` retag would orphan the only
+reference to the CURRENTLY RUNNING build. Tag the running build FIRST. As of the latest
+deploy this is already done: `copi-blackbird-{blackbird-app,worker,agent}:5961bc5` point at
+the live images. Note `:post0028` predates BOTH hotfixes (c6cca1e impersonation banner,
+5961bc5 manager nav), so it is NOT a valid forward target — use `:5961bc5`.
