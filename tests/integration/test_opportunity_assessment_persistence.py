@@ -1504,9 +1504,13 @@ async def test_admin_assessments_page_bounds_the_query_and_says_so(
     of rows to exercise the real cap, shrink it via monkeypatch and prove the
     truncation is visible on the page, not silent — and that it drops the
     lowest-scoring rows first, never the highest."""
-    from src.routers import admin as admin_router
+    from src.services import directory as directory_service
 
-    monkeypatch.setattr(admin_router, "_ASSESSMENTS_LIMIT", 1)
+    # The limit constant and the query that consumes it both live in
+    # src.services.directory as of the admin-router extraction (Task 3 of
+    # the user-account-types plan) — patch it there rather than on the old
+    # src.routers.admin._ASSESSMENTS_LIMIT alias, which no longer exists.
+    monkeypatch.setattr(directory_service, "ASSESSMENTS_LIMIT", 1)
 
     run = SimulationRun()
     db_session.add(run)

@@ -11,7 +11,6 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import delete as sa_delete
 from sqlalchemy import func, select
-from sqlalchemy import true as sa_true
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -20,34 +19,36 @@ from src.config import get_settings
 from src.database import get_db
 from src.dependencies import get_admin_user, get_current_user
 from src.models import (
-    AssessmentDrop,
     COHORT_ACTION_AGENT_ADDED,
     COHORT_ACTION_AGENT_REMOVED,
     COHORT_ACTION_CREATED,
     COHORT_ACTION_DELETED,
     COHORT_ACTION_TOPOLOGY_SNAPSHOT,
     AccessAllowlist,
-    AgentChannel,
-    AgentMessage,
     AgentRegistry,
     Cohort,
     CohortAuditEvent,
     CohortMembership,
     Job,
     LlmCallLog,
-    OpportunityAssessment,
-    Publication,
     ResearcherProfile,
     SimulationRun,
     ThreadDecision,
     User,
     WaitlistSignup,
 )
-from src.services.blackbird_rubric import RUBRIC_WEIGHTS
 from src.services.cohorts import (
     compute_gates,
     record_cohort_audit_event,
     summarise_gates,
+)
+from src.services.directory import (
+    build_discussions_view,
+    build_run_detail,
+    list_assessments,
+    list_pi_directory,
+    list_runs_overview,
+    load_user_detail,
 )
 from src.services.orcid import fetch_orcid_profile
 from src.services.validators import csv_safe_cell
@@ -86,60 +87,12 @@ async def admin_users(
     current_user: User = Depends(get_admin_user),
 ):
     """Admin users overview."""
-    query = select(User).options(selectinload(User.profile), selectinload(User.jobs), selectinload(User.agent))
-
-    result = await db.execute(query)
-    users = result.scalars().unique().all()
-
-    # Get publication counts
-    pub_counts_result = await db.execute(
-        select(Publication.user_id, func.count(Publication.id).label("count"))
-        .group_by(Publication.user_id)
+    user_data = await list_pi_directory(
+        db,
+        status_filter=status_filter,
+        institution_filter=institution_filter,
+        claimed_filter=claimed_filter,
     )
-    pub_counts = {str(r.user_id): r.count for r in pub_counts_result}
-
-    user_data = []
-    for user in users:
-        profile = user.profile
-        pub_count = pub_counts.get(str(user.id), 0)
-
-        # Profile status
-        if not profile:
-            profile_status = "no_profile"
-        elif profile.pending_profile:
-            profile_status = "pending_update"
-        elif profile.research_summary:
-            profile_status = "complete"
-        else:
-            # Check if there's a running job
-            active_jobs = [j for j in user.jobs if j.status in ("pending", "processing")]
-            profile_status = "generating" if active_jobs else "no_profile"
-
-        # Apply filters
-        if status_filter and profile_status != status_filter:
-            continue
-        if institution_filter and (not user.institution or institution_filter.lower() not in user.institution.lower()):
-            continue
-        if claimed_filter == "claimed" and not user.claimed_at:
-            continue
-        if claimed_filter == "unclaimed" and user.claimed_at:
-            continue
-
-        # Agent status
-        if not user.agent:
-            agent_status = "not_requested"
-        elif user.agent.status == "pending":
-            agent_status = "awaiting_token"
-        else:
-            agent_status = user.agent.status  # "active" or "suspended"
-
-        user_data.append({
-            "user": user,
-            "profile": profile,
-            "profile_status": profile_status,
-            "pub_count": pub_count,
-            "agent_status": agent_status,
-        })
 
     return templates.TemplateResponse(
         request,
@@ -164,21 +117,9 @@ async def admin_user_detail(
     current_user: User = Depends(get_admin_user),
 ):
     """Admin user detail page."""
-    result = await db.execute(
-        select(User)
-        .where(User.id == user_id)
-        .options(selectinload(User.profile), selectinload(User.jobs))
-    )
-    user = result.scalar_one_or_none()
-    if not user:
+    detail = await load_user_detail(db, user_id)
+    if detail is None:
         raise HTTPException(status_code=404, detail="User not found")
-
-    pub_result = await db.execute(
-        select(Publication)
-        .where(Publication.user_id == user_id)
-        .order_by(Publication.year.desc())
-    )
-    publications = pub_result.scalars().all()
 
     return templates.TemplateResponse(
         request,
@@ -187,10 +128,10 @@ async def admin_user_detail(
             request,
             current_user,
             active_admin="users",
-            target_user=user,
-            profile=user.profile,
-            publications=publications,
-            jobs=sorted(user.jobs, key=lambda j: j.enqueued_at, reverse=True),
+            target_user=detail["user"],
+            profile=detail["profile"],
+            publications=detail["publications"],
+            jobs=detail["jobs"],
         ),
     )
 
@@ -266,30 +207,7 @@ async def admin_activity(
     current_user: User = Depends(get_admin_user),
 ):
     """Agent activity overview."""
-    runs_result = await db.execute(
-        select(SimulationRun).order_by(SimulationRun.started_at.desc())
-    )
-    runs = runs_result.scalars().all()
-
-    # Summary stats
-    total_messages_result = await db.execute(
-        select(func.sum(SimulationRun.total_messages))
-    )
-    total_messages = total_messages_result.scalar() or 0
-
-    total_channels_result = await db.execute(
-        select(func.count(AgentChannel.id))
-    )
-    total_channels = total_channels_result.scalar() or 0
-
-    # Most active agent
-    agent_count_result = await db.execute(
-        select(AgentMessage.agent_id, func.count(AgentMessage.id).label("count"))
-        .group_by(AgentMessage.agent_id)
-        .order_by(func.count(AgentMessage.id).desc())
-        .limit(1)
-    )
-    most_active = agent_count_result.first()
+    overview = await list_runs_overview(db)
 
     return templates.TemplateResponse(
         request,
@@ -298,12 +216,12 @@ async def admin_activity(
             request,
             current_user,
             active_admin="activity",
-            runs=runs,
-            total_runs=len(runs),
-            total_messages=total_messages,
-            total_channels=total_channels,
-            most_active_agent=most_active.agent_id if most_active else None,
-            most_active_count=most_active.count if most_active else 0,
+            runs=overview["runs"],
+            total_runs=overview["total_runs"],
+            total_messages=overview["total_messages"],
+            total_channels=overview["total_channels"],
+            most_active_agent=overview["most_active_agent"],
+            most_active_count=overview["most_active_count"],
         ),
     )
 
@@ -316,57 +234,9 @@ async def admin_activity_detail(
     current_user: User = Depends(get_admin_user),
 ):
     """Simulation run detail."""
-    run_result = await db.execute(
-        select(SimulationRun).where(SimulationRun.id == run_id)
-    )
-    run = run_result.scalar_one_or_none()
-    if not run:
+    detail = await build_run_detail(db, run_id)
+    if detail is None:
         raise HTTPException(status_code=404, detail="Run not found")
-
-    # Messages for this run
-    messages_result = await db.execute(
-        select(AgentMessage)
-        .where(AgentMessage.simulation_run_id == run_id)
-        .order_by(AgentMessage.created_at)
-    )
-    messages = messages_result.scalars().all()
-
-    # Channels for this run
-    channels_result = await db.execute(
-        select(AgentChannel).where(AgentChannel.simulation_run_id == run_id)
-    )
-    channels = channels_result.scalars().all()
-
-    # Aggregate by agent
-    agent_stats: dict[str, dict] = {}
-    for msg in messages:
-        if msg.agent_id not in agent_stats:
-            agent_stats[msg.agent_id] = {"count": 0, "total_length": 0}
-        agent_stats[msg.agent_id]["count"] += 1
-        agent_stats[msg.agent_id]["total_length"] += msg.message_length
-
-    for agent_id, stats in agent_stats.items():
-        stats["avg_length"] = (
-            stats["total_length"] // stats["count"] if stats["count"] > 0 else 0
-        )
-
-    # Aggregate by channel
-    #
-    # The agent add is None-guarded: `agent_id` is nullable on agent_messages
-    # and really is NULL in production — _rebuild_state_from_slack records a
-    # real Slack message whose sender maps to no known bot as
-    # `is_bot=True, agent_id=NULL`. This set is sorted() in the template
-    # (activity_detail.html), so an unguarded add of a single None took the
-    # whole page down with "'<' not supported between instances of
-    # 'NoneType' and 'str'" — the same bug class fixed for /admin/discussions
-    # in 73a78c3.
-    channel_stats: dict[str, dict] = {}
-    for msg in messages:
-        if msg.channel_name not in channel_stats:
-            channel_stats[msg.channel_name] = {"count": 0, "agents": set()}
-        channel_stats[msg.channel_name]["count"] += 1
-        if msg.agent_id:
-            channel_stats[msg.channel_name]["agents"].add(msg.agent_id)
 
     return templates.TemplateResponse(
         request,
@@ -375,11 +245,11 @@ async def admin_activity_detail(
             request,
             current_user,
             active_admin="activity",
-            run=run,
-            messages=messages,
-            channels=channels,
-            agent_stats=agent_stats,
-            channel_stats=channel_stats,
+            run=detail["run"],
+            messages=detail["messages"],
+            channels=detail["channels"],
+            agent_stats=detail["agent_stats"],
+            channel_stats=detail["channel_stats"],
         ),
     )
 
@@ -501,214 +371,17 @@ async def admin_discussions(
     current_user: User = Depends(get_admin_user),
 ):
     """Discussion summary: threads grouped by status."""
-
-    # Pick which simulation run to show
-    runs_result = await db.execute(
-        select(SimulationRun).order_by(SimulationRun.started_at.desc())
+    view = await build_discussions_view(
+        db,
+        run_id=run_id,
+        channel_filter=channel_filter,
+        status_filter=status_filter,
+        agent_filter=agent_filter,
     )
-    runs = runs_result.scalars().all()
-
-    show_all_runs = run_id == "all"
-    selected_run_id = "all" if show_all_runs else None
-    if not show_all_runs and run_id:
-        try:
-            selected_run_id = uuid.UUID(run_id)
-        except ValueError:
-            pass
-    if not selected_run_id and runs:
-        selected_run_id = runs[0].id
-
-    if not selected_run_id:
-        return templates.TemplateResponse(
-            request,
-            "admin/discussions.html",
-            _template_context(
-                request,
-                current_user,
-                active_admin="discussions",
-                runs=runs,
-                selected_run_id=None,
-                threads=[],
-                counts={},
-                channels=[],
-                channel_filter=channel_filter,
-                status_filter=status_filter,
-            ),
-        )
-
-    # Get all root posts (new_post phase, no thread_ts)
-    roots_query = select(AgentMessage).where(
-        AgentMessage.phase == "new_post",
-        AgentMessage.thread_ts.is_(None),
-    )
-    if not show_all_runs:
-        roots_query = roots_query.where(AgentMessage.simulation_run_id == selected_run_id)
-    roots_result = await db.execute(roots_query.order_by(AgentMessage.created_at)
-    )
-    root_posts = roots_result.scalars().all()
-
-    # Get reply counts and replier agent IDs per thread
-    reply_query = select(
-        AgentMessage.thread_ts,
-        func.count(AgentMessage.id).label("reply_count"),
-    ).where(AgentMessage.phase == "thread_reply")
-    if not show_all_runs:
-        reply_query = reply_query.where(AgentMessage.simulation_run_id == selected_run_id)
-    reply_counts_result = await db.execute(reply_query.group_by(AgentMessage.thread_ts))
-    reply_count_map = {r.thread_ts: r.reply_count for r in reply_counts_result}
-
-    # Get distinct replier agent IDs per thread
-    replier_query = select(AgentMessage.thread_ts, AgentMessage.agent_id).where(
-        AgentMessage.phase == "thread_reply",
-    )
-    if not show_all_runs:
-        replier_query = replier_query.where(AgentMessage.simulation_run_id == selected_run_id)
-    repliers_result = await db.execute(replier_query.distinct())
-    replier_map: dict[str, set[str]] = {}
-    for r in repliers_result:
-        replier_map.setdefault(r.thread_ts, set()).add(r.agent_id)
-
-    # Get thread decisions
-    decisions_query = select(ThreadDecision)
-    if not show_all_runs:
-        decisions_query = decisions_query.where(ThreadDecision.simulation_run_id == selected_run_id)
-    decisions_result = await db.execute(decisions_query.order_by(ThreadDecision.decided_at))
-    all_decisions = decisions_result.scalars().all()
-
-    # Build a map: thread_id -> final outcome (last decision wins)
-    decision_map: dict[str, ThreadDecision] = {}
-    for d in all_decisions:
-        decision_map[d.thread_id] = d
-
-    # Build thread list
-    threads = []
-    available_channels = set()
-    for post in root_posts:
-        ts = post.message_ts
-        available_channels.add(post.channel_name)
-        reply_count = reply_count_map.get(ts, 0)
-        repliers = replier_map.get(ts, set())
-        decision = decision_map.get(ts)
-
-        # Find the other agent (replier who isn't the poster)
-        other_agents = repliers - {post.agent_id}
-        replier = next(iter(other_agents), None) if other_agents else None
-
-        if decision:
-            if decision.outcome == "proposal":
-                thread_status = "proposal"
-            elif decision.outcome == "no_proposal":
-                thread_status = "no_proposal"
-            elif decision.outcome == "timeout":
-                thread_status = "timeout"
-            else:
-                thread_status = decision.outcome
-        elif reply_count > 0:
-            thread_status = "active"
-        else:
-            thread_status = "no_replies"
-
-        threads.append({
-            "message_ts": ts,
-            "channel_name": post.channel_name,
-            "agent_id": post.agent_id,
-            "created_at": post.created_at,
-            "reply_count": reply_count,
-            "replier": replier,
-            "status": thread_status,
-            "decision": decision,
-        })
-
-    # Apply filters
-    if channel_filter:
-        threads = [t for t in threads if t["channel_name"] == channel_filter]
-    if status_filter:
-        threads = [t for t in threads if t["status"] == status_filter]
-
-    # Get proposal reviews
-    from src.models import ProposalReview as PR
-    reviews_query = select(PR).join(ThreadDecision, PR.thread_decision_id == ThreadDecision.id)
-    if not show_all_runs:
-        reviews_query = reviews_query.where(ThreadDecision.simulation_run_id == selected_run_id)
-    reviews_result = await db.execute(reviews_query.order_by(PR.reviewed_at))
-    all_reviews = reviews_result.scalars().all()
-    reviews_by_decision: dict[str, list] = {}
-    for rev in all_reviews:
-        reviews_by_decision.setdefault(str(rev.thread_decision_id), []).append(rev)
-
-    # Attach reviews to threads
-    for t in threads:
-        if t["decision"]:
-            t["reviews"] = reviews_by_decision.get(str(t["decision"].id), [])
-        else:
-            t["reviews"] = []
-
-    # Add orphaned decisions (thread_decisions with no matching root post in agent_messages)
-    known_thread_ids = {t["message_ts"] for t in threads}
-    for td in all_decisions:
-        if td.thread_id not in known_thread_ids:
-            other_agents = replier_map.get(td.thread_id, set())
-            poster_id = td.agent_a
-            replier = td.agent_b if td.agent_a == poster_id else td.agent_a
-            threads.append({
-                "message_ts": td.thread_id,
-                "channel_name": td.channel,
-                "agent_id": poster_id,
-                "created_at": td.decided_at,
-                "reply_count": reply_count_map.get(td.thread_id, 0),
-                "replier": replier,
-                "status": td.outcome,
-                "decision": td,
-                "reviews": reviews_by_decision.get(str(td.id), []),
-            })
-            known_thread_ids.add(td.thread_id)
-            available_channels.add(td.channel)
-
-    # Count by status (before filtering)
-    counts: dict[str, int] = {}
-    for t in threads:
-        s = t["status"]
-        counts[s] = counts.get(s, 0) + 1
-
-    # Collect available agents from threads.
-    #
-    # Every add is None-guarded, including the poster's. `agent_id` is nullable
-    # on agent_messages and really is NULL in production: _rebuild_state_from_slack
-    # records a real Slack message whose sender maps to no known bot as
-    # `is_bot=True, agent_id=NULL` (measured: 7 rows, all from one raw Slack user
-    # id). This set is sorted() below, so a single None took the whole page down
-    # with "'<' not supported between instances of 'NoneType' and 'str'". The
-    # replier and decision adds were already guarded; the poster's was not.
-    available_agents = set()
-    for t in threads:
-        for candidate in (
-            t["agent_id"],
-            t.get("replier"),
-            t["decision"].agent_a if t.get("decision") else None,
-            t["decision"].agent_b if t.get("decision") else None,
-        ):
-            if candidate:
-                available_agents.add(candidate)
-
-    # Apply filters
-    if channel_filter:
-        threads = [t for t in threads if t["channel_name"] == channel_filter]
-    if status_filter:
-        threads = [t for t in threads if t["status"] == status_filter]
-    if agent_filter:
-        agent_set = set(agent_filter)
-        threads = [
-            t for t in threads
-            if t["agent_id"] in agent_set
-            or (t.get("replier") and t["replier"] in agent_set)
-            or (t.get("decision") and (
-                t["decision"].agent_a in agent_set or t["decision"].agent_b in agent_set
-            ))
-        ]
 
     if export:
         proposals = []
-        for t in threads:
+        for t in view["threads"]:
             d = t.get("decision")
             if not d or not d.summary_text:
                 continue
@@ -755,15 +428,15 @@ async def admin_discussions(
             request,
             current_user,
             active_admin="discussions",
-            runs=runs,
-            selected_run_id=selected_run_id,
-            threads=threads,
-            counts=counts,
-            channels=sorted(available_channels),
-            agents=sorted(available_agents),
-            channel_filter=channel_filter,
-            status_filter=status_filter,
-            agent_filter=agent_filter or [],
+            runs=view["runs"],
+            selected_run_id=view["selected_run_id"],
+            threads=view["threads"],
+            counts=view["counts"],
+            channels=view["channels"],
+            agents=view["agents"],
+            channel_filter=view["channel_filter"],
+            status_filter=view["status_filter"],
+            agent_filter=view["agent_filter"],
         ),
     )
 
@@ -844,17 +517,6 @@ async def admin_agents(
     )
 
 
-# Hard cap on rows fetched for one render of the triage queue (B1). Scoped to
-# the current run this is rarely close to binding — a single run's worth of
-# :mag: assessments — but "All Runs" accumulates across every run this
-# instance has ever done, and the table has no other bound. Capped rather
-# than paginated because this is a triage queue: the highest-scoring rows
-# (the ones that matter) are always first under the existing ORDER BY, so a
-# cap only ever drops the least-actionable tail, and the "N of TOTAL" note
-# below says so rather than hiding the truncation.
-_ASSESSMENTS_LIMIT = 500
-
-
 @router.get("/assessments", response_class=HTMLResponse)
 async def admin_assessments(
     request: Request,
@@ -864,76 +526,10 @@ async def admin_assessments(
 ):
     """BlackbirdBot's screening verdicts against the Blackbird investment rubric.
 
-    Ordered by weighted score descending (NULLs last), then most-recent-first,
-    so the advance/conditional candidates are what a human sees on arrival —
-    this page is a triage queue, not a log.
-
-    Defaults to the CURRENT simulation run (the most recently started
-    ``SimulationRun``) — ``?run_id=all`` or picking an older run from the
-    dropdown reaches everything else; nothing is ever deleted from this view,
-    only filtered. This is deliberate, not incidental: ``--fresh``
-    (``src/agent/main.py``) wipes ``agent_messages``/``agent_channels`` but
-    NEVER ``opportunity_assessments`` — a screening verdict is a durable
-    record and losing one is worse than keeping a stale one — so after a
-    fresh restart, old assessments whose Slack messages no longer exist would
-    otherwise sit on this page with nothing to distinguish them from current
-    ones. Scoping to the latest run excludes those by construction (their
-    ``simulation_run_id`` is the run that got wiped), while the "All Runs"
-    escape hatch and the per-run dropdown keep every row reachable. Mirrors
-    the run-selector pattern already used by ``admin_discussions``.
+    See ``src.services.directory.list_assessments`` for the run-scoping and
+    truncation semantics.
     """
-    runs_result = await db.execute(
-        select(SimulationRun).order_by(SimulationRun.started_at.desc())
-    )
-    runs = runs_result.scalars().all()
-
-    show_all_runs = run_id == "all"
-    selected_run_id: uuid.UUID | str | None = "all" if show_all_runs else None
-    if not show_all_runs and run_id:
-        try:
-            selected_run_id = uuid.UUID(run_id)
-        except ValueError:
-            pass
-    if not selected_run_id and runs:
-        selected_run_id = runs[0].id
-
-    query = select(OpportunityAssessment)
-    if not show_all_runs and selected_run_id:
-        query = query.where(OpportunityAssessment.simulation_run_id == selected_run_id)
-
-    total_count = (
-        await db.execute(select(func.count()).select_from(query.subquery()))
-    ).scalar() or 0
-
-    # NULLS LAST needs saying: a bare .desc() puts NULLs FIRST in Postgres,
-    # which would float every not-yet-scored assessment to the top of a
-    # triage queue instead of to the bottom.
-    query = query.order_by(
-        OpportunityAssessment.weighted_score.desc().nullslast(),
-        OpportunityAssessment.created_at.desc(),
-    ).limit(_ASSESSMENTS_LIMIT)
-
-    result = await db.execute(query)
-    assessments = result.scalars().all()
-
-    # Verdicts that were generated and then lost, scoped exactly like the rows
-    # above. Without this an empty page is ambiguous: "nothing screened yet" and
-    # "everything screened and every verdict discarded" look identical, and the
-    # latter is only visible as a WARNING in a container log. Grouped by reason
-    # so the banner can say WHICH failure is happening — they have different
-    # fixes (panel never convened / sidecar truncated / no sidecar emitted).
-    drops_result = await db.execute(
-        select(AssessmentDrop.reason, func.count())
-        .where(
-            AssessmentDrop.simulation_run_id == selected_run_id
-            if not show_all_runs and selected_run_id
-            else sa_true()
-        )
-        .group_by(AssessmentDrop.reason)
-        .order_by(func.count().desc())
-    )
-    drop_counts = list(drops_result.all())
-    drops_total = sum(n for _, n in drop_counts)
+    view = await list_assessments(db, run_id)
 
     return templates.TemplateResponse(
         request,
@@ -942,21 +538,16 @@ async def admin_assessments(
             request,
             current_user,
             active_admin="assessments",
-            assessments=assessments,
-            # Passed so the detail row can render the nine dimensions in
-            # descending rubric weight rather than dict order, and can show an
-            # unscored dimension as a gap. An unscored dimension counts as zero
-            # in the weighted score (src/services/blackbird_rubric.py), so a
-            # reader needs to see which ones were never answered.
-            rubric_weights=RUBRIC_WEIGHTS,
-            runs=runs,
-            runs_by_id={r.id: r for r in runs},
-            selected_run_id=selected_run_id,
-            show_all_runs=show_all_runs,
-            total_count=total_count,
-            assessments_limit=_ASSESSMENTS_LIMIT,
-            drop_counts=drop_counts,
-            drops_total=drops_total,
+            assessments=view["assessments"],
+            rubric_weights=view["rubric_weights"],
+            runs=view["runs"],
+            runs_by_id=view["runs_by_id"],
+            selected_run_id=view["selected_run_id"],
+            show_all_runs=view["show_all_runs"],
+            total_count=view["total_count"],
+            assessments_limit=view["assessments_limit"],
+            drop_counts=view["drop_counts"],
+            drops_total=view["drops_total"],
         ),
     )
 
