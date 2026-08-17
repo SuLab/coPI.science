@@ -88,7 +88,73 @@ That fix was load-bearing for this deploy.
   (Exited 137, 2 days ago) deliberately left in place — `--remove-orphans` was refused
   even though compose suggested it.
 
-## Rollback
+## Rollback — SUPERSEDED, WAS WRONG (kept for the record)
+
+> The procedure below inverts the safe order and was corrected after an independent
+> audit. Do not follow it. See "Rollback — CORRECTED" at the end of this file.
+
 `docker run --rm --network copi-blackbird_default --env-file .env \
   copi-blackbird-blackbird-app:latest alembic downgrade 0027` then redeploy the prior
 image. Data-preserving: 0028's downgrade restores is_admin from user_role. Full dump above.
+
+---
+
+## Independent post-deploy audit — response
+
+An independent auditor re-verified this deployment read-only. It reproduced every data and
+schema claim exactly (counts 65/64/65/50/0, **0 backfill mismatches across all 65 rows**,
+both defaults + CHECK, current==heads==0028, 0029 absent from the image, image byte-identical
+to HEAD across 148 files, org1 untouched at 0024, backup valid with 189 TOC entries).
+
+**It falsified two claims I made. Both are corrected here.**
+
+1. **"`/manager/**/llm-calls` returns 404" was stated too broadly.** `/manager/pis/llm-calls`
+   actually returns **302**, because `/manager/pis/{user_id}` swallows `llm-calls` as a path
+   parameter. My specific probe (`/manager/activity/<uuid>/llm-calls` -> 404) was valid, but
+   the general claim was not.
+2. **"404 is the unregistered response, so those 302s are meaningful" was unsound reasoning.**
+   `/manager/pis/export` is unregistered yet returns 302, for the same path-param reason.
+   The conclusion still holds — the auditor proved it properly by enumerating
+   `manager.router.routes`: exactly **7 GET routes, all gated by `get_staff_user`**, and no
+   llm-calls route among them. Route enumeration, not status-code probing, is the sound test.
+
+**Actions taken in response**
+- Rollback images **tagged** so a `docker image prune` cannot destroy the rollback path
+  (they were dangling/untagged): `copi-blackbird-blackbird-app:rollback-pre0028`
+  (sha256:0c1b4c7079819bef0913a90bfbd6c94f1e425928ce8349fa3427f46c4d22532b) and
+  `copi-blackbird-worker:rollback-pre0028` (sha256:0574ca5723807e6ea22f37c9dffeacd5510d80b18b7c8a5bba4b9dc21a01f588).
+  New images also tagged `:post0028` so re-tagging `:latest` cannot orphan them.
+- **Agent image rebuilt.** It was stale (no manager router, chain ended at 0027, still mapped
+  `is_admin` as a column) and would have hard-broken once 0029 drops that column. Now current:
+  `is_admin` unmapped, `user_role` mapped, 0029 absent. **Not started** — `agent` sits behind a
+  compose profile, so it cannot start without `--profile agent`.
+
+## Rollback — CORRECTED
+
+The original order was backwards in exactly the way the deploy order had been: it downgraded
+the schema while the running image still mapped `user_role`, which would raise
+`UndefinedColumn` on every request, login included.
+
+There is also a non-obvious constraint: **the pre-0028 image's migration chain stops at 0027**
+(verified), so it cannot execute the 0028->0027 downgrade. The downgrade script exists only in
+the new image. So old code must SERVE while alembic runs FROM the new image.
+
+    DC="docker compose -f docker-compose.prod.yml"
+    # 1. Put the OLD code in front first (it does not map user_role, so the extra
+    #    column is harmless while it serves).
+    docker tag copi-blackbird-blackbird-app:rollback-pre0028 copi-blackbird-blackbird-app:latest
+    docker tag copi-blackbird-worker:rollback-pre0028 copi-blackbird-worker:latest
+    $DC up -d --no-build blackbird-app worker
+
+    # 2. THEN downgrade, running alembic from the POST image (the only one with 0028).
+    #    Isolated network so it never joins copi-edge and never takes production traffic.
+    docker run --rm --network copi-blackbird_default --env-file .env \
+      copi-blackbird-blackbird-app:post0028 alembic downgrade 0027
+
+    # 3. Verify: revision back to 0027, and is_admin repopulated from user_role.
+    docker exec -e PGPASSWORD=<POSTGRES_PASSWORD> copi-blackbird-postgres-1 \
+      psql -U copi -d copi -t -A -c \
+      "SELECT version_num FROM alembic_version; SELECT count(*) FROM users WHERE is_admin;"
+
+Last resort, if the schema is damaged rather than merely ahead: restore the pre-0028 dump in
+`backups/` (pg_restore into a clean database). That dump predates all DDL from this deploy.
