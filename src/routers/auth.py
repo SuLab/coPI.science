@@ -15,7 +15,7 @@ from fastapi.templating import Jinja2Templates
 
 from src.config import get_settings
 from src.database import get_db
-from src.models import AccessAllowlist, Job, User
+from src.models import USER_ROLE_PI, AccessAllowlist, Job, User
 from src.services.orcid import fetch_orcid_profile
 
 templates = Jinja2Templates(directory="templates")
@@ -290,14 +290,22 @@ async def auth_callback(
         request.session.pop(POST_LOGIN_KEY, None)
         return RedirectResponse(url=f"/invite/{pending_token}", status_code=302)
 
-    # New users go through onboarding first; the saved destination is left in
-    # the session and consumed when onboarding completes.
-    if not user.onboarding_complete:
+    # New PIs go through onboarding first; the saved destination is left in the
+    # session and consumed when onboarding completes. Managers and admins are
+    # not PIs (D7) and have no research profile to review, so they skip it —
+    # without this a manager is sent to a page whose only exit is saving a
+    # research profile (onboarding.py:193 is the sole write of
+    # onboarding_complete in src/).
+    if not user.onboarding_complete and user.user_role == USER_ROLE_PI:
         return RedirectResponse(url="/onboarding", status_code=302)
 
     # Resume the page the user originally requested, if any.
     next_url = pop_post_login_redirect(request)
-    return RedirectResponse(url=next_url or "/profile", status_code=302)
+    if next_url:
+        return RedirectResponse(url=next_url, status_code=302)
+    if user.is_manager:
+        return RedirectResponse(url="/manager/pis", status_code=302)
+    return RedirectResponse(url="/profile", status_code=302)
 
 
 @router.post("/logout")

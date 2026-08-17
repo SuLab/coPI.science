@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.database import get_db
 from src.dependencies import get_current_user
-from src.models import AgentRegistry, Job, ResearcherProfile, User
+from src.models import USER_ROLE_PI, AgentRegistry, Job, ResearcherProfile, User
 from src.routers.auth import pop_post_login_redirect
 from src.services.validators import is_valid_email
 
@@ -54,6 +54,10 @@ async def onboarding_start(
     """Main onboarding page — shows profile review."""
     if current_user.onboarding_complete:
         return RedirectResponse(url="/profile", status_code=302)
+    # Managers and admins have no research profile to review (D7). Bounce them
+    # rather than render a PI page they can never complete.
+    if current_user.user_role != USER_ROLE_PI:
+        return RedirectResponse(url="/manager/pis", status_code=302)
 
     # Get latest job for this user
     result = await db.execute(
@@ -72,7 +76,12 @@ async def onboarding_start(
     # Self-heal: an allowed user with no job and no profile would otherwise
     # spin on "Building Your Profile" forever (the template treats job_status
     # 'none' the same as pending/processing and offers no retry).
-    if job is None and profile is None and current_user.access_status == "allowed":
+    if (
+        job is None
+        and profile is None
+        and current_user.access_status == "allowed"
+        and current_user.user_role == USER_ROLE_PI
+    ):
         job = Job(
             type="generate_profile",
             user_id=current_user.id,

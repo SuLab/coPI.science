@@ -49,14 +49,17 @@
                 </a>
                 {% if current_user %}
                 <div class="ml-8 flex space-x-4">
+                    {% if current_user.user_role == 'pi' or current_user.is_admin %}
                     <a href="/profile" class="text-gray-600 hover:text-indigo-600 px-3 py-2 rounded-md text-sm font-medium
                         {% if active_page == 'profile' %}text-indigo-600 font-semibold{% endif %}">
                         My Profile
                     </a>
+                    {% endif %}
                     <a href="/settings" class="text-gray-600 hover:text-indigo-600 px-3 py-2 rounded-md text-sm font-medium
                         {% if active_page == 'settings' %}text-indigo-600 font-semibold{% endif %}">
                         Settings
                     </a>
+                    {% if current_user.user_role == 'pi' or current_user.is_admin %}
                     <a href="/agent" class="text-gray-600 hover:text-indigo-600 px-3 py-2 rounded-md text-sm font-medium relative
                         {% if active_page == 'agent' %}text-indigo-600 font-semibold{% endif %}">
                         My Agent
@@ -66,6 +69,7 @@
                         </span>
                         {% endif %}
                     </a>
+                    {% endif %}
                     {% if current_user.is_admin and not impersonation_banner %}
                     <a href="/admin/users" class="text-gray-600 hover:text-indigo-600 px-3 py-2 rounded-md text-sm font-medium
                         {% if active_page == 'admin' %}text-indigo-600 font-semibold{% endif %}">
@@ -114,8 +118,8 @@
 </div>
 {% endif %}
 
-<!-- Manager sub-navigation -->
 {% if active_page == 'manager' and current_user and current_user.is_staff %}
+<!-- Manager sub-navigation -->
 <div class="bg-gray-50 border-b border-gray-200">
     <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <div class="flex space-x-6 h-10 items-center text-sm">
