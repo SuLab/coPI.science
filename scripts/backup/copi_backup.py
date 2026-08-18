@@ -16,6 +16,7 @@ import argparse
 import fcntl
 import hashlib
 import json
+import logging
 import os
 import re
 import secrets
@@ -29,6 +30,10 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
+# Configured only inside main() — see the comment there. Importing this module (as
+# the unit tests do) must never install a stdout handler on the root logger.
+logger = logging.getLogger("copi_backup")
+
 DEFAULTS = {
     "BACKUP_ROOT": "/var/backups/copi",
     "RETENTION_COUNT": "5",
@@ -36,7 +41,15 @@ DEFAULTS = {
     "VERIFY_IMAGE": "postgres:15",
     "VERIFY_MEM": "768m",
     "VERIFY_TIMEOUT_SEC": "1800",
-    "FREE_SPACE_FACTOR": "3",
+    # Peak concurrent usage for ONE stack is roughly 2x the dump (container-side
+    # temp file plus the host .partial) PLUS the restored verify volume (~2.3 GB
+    # measured for copi-python), and prune runs last so a 6th copy can briefly
+    # coexist with 5 retained ones. Measured need ~= 3.74 GB against a 2.16 GB
+    # demand at the old factor of 3 — audit finding F3, 2026-08-18. Raised to 7.
+    # NOTE: scripts/backup/backup.env.example still documents 3; it is out of
+    # scope for this fix (not in the editable file list) and should be updated
+    # separately.
+    "FREE_SPACE_FACTOR": "7",
     "OFFSITE_CMD": "",
     "AWS_REGION": "us-east-2",
     "SES_SENDER_EMAIL": "",
@@ -511,7 +524,11 @@ class SnapshotSession:
             pass
         try:
             proc.wait(timeout=10)   # reap, or the killed child lingers as a zombie
-        except subprocess.TimeoutExpired:
+        except (subprocess.TimeoutExpired, OSError):
+            # OSError (e.g. ChildProcessError from a watchdog/__exit__ race) must not
+            # escape a function documented "never raises" — on the __enter__ path it
+            # would mask the original error being propagated. ChildProcessError is a
+            # subclass of OSError.
             pass
 
     def __enter__(self) -> SnapshotSession:
@@ -596,6 +613,20 @@ class DumpResult:
     sha256: str
 
 
+def _ensure_dir(path: Path) -> None:
+    """Create a directory at 0700 and enforce that mode even if it already existed.
+
+    ``mkdir(mode=...)`` is filtered through the process umask, so a default umask
+    of 022 would still leave the directory at 0755 — the ``mode=`` kwarg alone is
+    not load-bearing. The explicit ``chmod`` afterwards is: it also re-closes the
+    directory if BACKUP_ROOT is ever removed and recreated at the default mode,
+    which is exactly how F5 exposed the full production database to any local
+    account despite install.sh having set 0700 once.
+    """
+    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(path, 0o700)
+
+
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -613,7 +644,7 @@ def dump_stack(
     session_factory: type[SnapshotSession] = SnapshotSession,
 ) -> DumpResult:
     """Dump one stack against an exported snapshot; return the archive and its counts."""
-    dest_dir.mkdir(parents=True, exist_ok=True)
+    _ensure_dir(dest_dir)
     final = dest_dir / dump_name(stack.name, stack.db, now)
     partial = final.with_suffix(final.suffix + ".partial")
     ctmp = f"/tmp/copi_backup_{os.getpid()}_{stack.name}.dump"
@@ -624,6 +655,7 @@ def dump_stack(
             # TOC readable inside the container, on a real seekable path.
             runner.run(docker_exec(stack.container, ["pg_restore", "-l", ctmp]))
             runner.run(["docker", "cp", f"{stack.container}:{ctmp}", str(partial)])
+            os.chmod(partial, 0o600)
             counts = session.counts()
             snapshot_id = session.snapshot_id
     except Exception:
@@ -634,6 +666,7 @@ def dump_stack(
 
     with partial.open("rb") as handle:
         os.fsync(handle.fileno())
+    # rename preserves the mode bits set above, so `final` is 0600 too.
     partial.replace(final)
     return DumpResult(
         path=final,
@@ -818,11 +851,26 @@ def sidecar_document(result: StackResult, started: datetime) -> dict:
     }
 
 
-def build_status(results: list[StackResult], now: datetime) -> dict:
+def build_status(
+    results: list[StackResult],
+    now: datetime,
+    previous: dict | None = None,
+    reason: str | None = None,
+) -> dict:
+    """Build the status.json document.
+
+    ``last_success_utc`` is what lets a reader distinguish "ran and failed" from
+    "did not run" (spec §7.2). On a failed run it is carried forward from
+    ``previous`` (yesterday's status.json, if any) rather than dropped; on a
+    successful run it is stamped to ``now``.
+    """
     stamp = now.strftime("%Y-%m-%dT%H:%M:%SZ")
-    return {
+    ok = all(r.ok for r in results) and bool(results)
+    last_success = stamp if ok else (previous or {}).get("last_success_utc")
+    status = {
         "last_run_utc": stamp,
-        "ok": all(r.ok for r in results) and bool(results),
+        "last_success_utc": last_success,
+        "ok": ok,
         "stacks": {
             r.stack: {
                 "verified": r.ok,
@@ -833,11 +881,24 @@ def build_status(results: list[StackResult], now: datetime) -> dict:
             for r in results
         },
     }
+    if reason is not None:
+        status["reason"] = reason
+    return status
 
 
-def render_failure_mail(results: list[StackResult], now: datetime) -> tuple[str, str]:
+def render_failure_mail(
+    results: list[StackResult], now: datetime, offsite_failed: list[str] | None = None
+) -> tuple[str, str]:
+    """Render the failure mail.
+
+    ``offsite_failed`` lists stacks whose OFFSITE_CMD hook exited non-zero. Spec §9
+    requires this to be mailed even when every stack otherwise verified — it is
+    NOT folded into StackResult.ok (which means "a verified backup exists" and
+    must stay true), so it is threaded through as a separate argument instead.
+    """
+    offsite_failed = offsite_failed or []
     failed = [r for r in results if not r.ok]
-    names = ",".join(r.stack for r in failed) or "no-results"
+    names = ",".join(r.stack for r in failed) or ",".join(offsite_failed) or "no-results"
     subject = f"[copi-backup] FAILED {names} {now:%Y-%m-%d}"
     lines = [f"Backup run {now:%Y-%m-%d %H:%M:%S} UTC", ""]
     if not results:
@@ -845,6 +906,12 @@ def render_failure_mail(results: list[StackResult], now: datetime) -> tuple[str,
             "The run produced NO results at all — it aborted before any stack was "
             "processed.",
             "Check: systemctl status copi-backup.service",
+            "",
+        ]
+    if offsite_failed:
+        lines += [
+            f"OFFSITE UPLOAD FAILED for: {', '.join(offsite_failed)}",
+            "The local verified backup is unaffected; only the offsite copy is missing.",
             "",
         ]
     for r in results:
@@ -907,6 +974,17 @@ LOCK_PATH = "/run/copi-backup.lock"
 
 
 def enough_free_space(free_bytes: int, last_dump_bytes: int, factor: int) -> bool:
+    """True iff ``free_bytes`` covers ``factor`` times the expected backup demand.
+
+    A ``last_dump_bytes`` of zero must never read as "no constraint": that is
+    exactly the no-verified-dump-yet gap (audit F3) that let this guard pass on a
+    full disk, because ``free_bytes >= factor * 0`` is trivially true for any
+    ``free_bytes``, including 0. Zero demand means the caller could not measure
+    what it needs (no dump on disk AND the live-DB-size fallback failed) — a guard
+    that cannot measure must not pass.
+    """
+    if last_dump_bytes <= 0:
+        return False
     return free_bytes >= factor * last_dump_bytes
 
 
@@ -982,21 +1060,116 @@ def _last_dump_bytes(cfg: Config) -> int:
     return max(sizes) if sizes else 0
 
 
-def cmd_run(cfg: Config, runner: Runner, now: datetime, skip_prune: bool) -> int:
-    Path(cfg.backup_root).mkdir(parents=True, exist_ok=True)
+def _live_db_bytes(runner: Runner, cfg: Config) -> int:
+    """Sum of live database sizes across every configured stack.
+
+    Used only as a fallback by the free-space guard when no verified dump exists
+    yet (audit F3): on a brand-new host ``_last_dump_bytes`` is legitimately 0, and
+    the guard must size itself against the real database rather than pass
+    unconditionally. If this also fails to produce a number, the caller must
+    treat it as a hard preflight failure — see ``enough_free_space``.
+    """
+    total = 0
+    for stack in cfg.stacks:
+        sql = f"SELECT pg_database_size('{stack.db}')"
+        result = runner.run(psql_argv(stack, sql))
+        raw = result.stdout.strip()
+        if not raw.isdigit():
+            raise BackupError(f"{stack.name}: could not read live database size: {raw!r}")
+        total += int(raw)
+    return total
+
+
+def _run_ok(status: dict, offsite_failed: list[str]) -> bool:
+    """The run's overall verdict: verified backups AND no attempted-and-failed offsite.
+
+    Kept separate from StackResult.ok (which means "a verified backup exists" and
+    must stay true even when its offsite copy failed to upload) so cmd_run has one
+    place that decides the exit code and whether to mail — see audit F7.
+    """
+    return bool(status["ok"]) and not offsite_failed
+
+
+def _write_status(
+    cfg: Config, results: list[StackResult], now: datetime, reason: str | None = None
+) -> dict:
+    """Build and persist status.json, carrying last_success_utc forward on failure.
+
+    Reads whatever status.json is already on disk (if any and if parseable) purely
+    to seed ``previous`` for build_status — a corrupt or missing prior file just
+    means last_success_utc comes back None, which is itself an honest answer.
+    """
+    status_path = Path(cfg.backup_root, "status.json")
+    previous: dict | None = None
+    if status_path.exists():
+        try:
+            previous = json.loads(status_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            previous = None
+    status = build_status(results, now, previous=previous, reason=reason)
+    status_path.write_text(json.dumps(status, indent=2))
+    return status
+
+
+def _mail_failure(cfg: Config, subject: str, body: str) -> None:
+    """Send a failure mail and log loudly if SES did not actually accept it.
+
+    A failed run with an undeliverable mail must still leave a trace — see audit
+    F1. The full body (which embeds every problem collected so far) is logged at
+    ERROR unconditionally, not only when the send itself fails, so the journal
+    always has the complete picture even if mail silently succeeds but nobody
+    reads their inbox that day.
+    """
+    logger.error("%s", body)
+    if not send_mail(cfg, subject, body):
+        logger.error("failure mail was NOT accepted by SES: %s", subject)
+
+
+def _cmd_run_inner(cfg: Config, runner: Runner, now: datetime, skip_prune: bool) -> int:
+    logger.info("run start: stacks=%s", [s.name for s in cfg.stacks])
+    _ensure_dir(Path(cfg.backup_root))
     sweep(runner, cfg, now)
+
     free = shutil.disk_usage(cfg.backup_root).free
-    if not enough_free_space(free, _last_dump_bytes(cfg), cfg.free_space_factor):
-        subject = f"[copi-backup] FAILED preflight {now:%Y-%m-%d}"
-        send_mail(cfg, subject, f"Insufficient free space: {free:,} bytes available.")
+    demand = _last_dump_bytes(cfg)
+    if demand == 0:
+        # No verified dump on disk yet (first run, or verification has been
+        # failing) — fall back to the live DB size rather than let a 0 demand
+        # pass the guard unconditionally (audit F3).
+        try:
+            demand = _live_db_bytes(runner, cfg)
+            logger.info("no dump on disk yet; sized the guard against the live DB: %d bytes", demand)
+        except (CommandError, BackupError) as exc:
+            reason = f"free-space guard could not measure demand: {exc}"
+            logger.error(reason)
+            _write_status(cfg, [], now, reason=reason)
+            _mail_failure(cfg, f"[copi-backup] FAILED preflight {now:%Y-%m-%d}", reason)
+            return 1
+    if not enough_free_space(free, demand, cfg.free_space_factor):
+        reason = (
+            f"insufficient free space: {free:,} bytes available, "
+            f"need >= {cfg.free_space_factor * demand:,} "
+            f"({cfg.free_space_factor}x{demand:,})"
+        )
+        logger.error(reason)
+        _write_status(cfg, [], now, reason=reason)
+        _mail_failure(cfg, f"[copi-backup] FAILED preflight {now:%Y-%m-%d}", reason)
         return 1
 
     results: list[StackResult] = []
+    offsite_failed: list[str] = []
     for stack in cfg.stacks:
         dest = Path(cfg.backup_root) / stack.name
         try:
             dump = dump_stack(runner, cfg, stack, dest, now)
+            logger.info("%s: dump written: %s (%d bytes)", stack.name, dump.path, dump.size_bytes)
             verify = verify_dump(runner, cfg, stack, dump.path, dump.counts)
+            logger.info(
+                "%s: verify %s in %.1fs",
+                stack.name, "OK" if verify.ok else "FAILED", verify.duration_sec,
+            )
+            if not verify.ok:
+                logger.error("%s: verify problems: %s", stack.name, verify.problems)
             final = dump.path
             if not verify.ok:
                 final = dump.path.with_name(dump.path.name + ".unverified")
@@ -1009,26 +1182,62 @@ def cmd_run(cfg: Config, runner: Runner, now: datetime, skip_prune: bool) -> int
             sidecar = final.with_name(final.name + ".json")
             result = StackResult(stack.name, dump, verify, False, None)
             sidecar.write_text(json.dumps(sidecar_document(result, now), indent=2))
+            os.chmod(sidecar, 0o600)
 
             if cfg.offsite_cmd and verify.ok:
                 offsite_ok = runner.run(
                     [cfg.offsite_cmd, str(final), str(sidecar)], check=False
                 ).returncode == 0
+                if not offsite_ok:
+                    offsite_failed.append(stack.name)
+                    logger.error("%s: OFFSITE_CMD exited non-zero", stack.name)
                 result = StackResult(stack.name, dump, verify, offsite_ok, None)
                 sidecar.write_text(json.dumps(sidecar_document(result, now), indent=2))
+                os.chmod(sidecar, 0o600)
         except Exception as exc:  # one stack must not abort the other
+            logger.error("%s: run failed: %s", stack.name, exc)
             result = StackResult(stack.name, None, None, False, str(exc))
         results.append(result)
 
-    status = build_status(results, now)
-    Path(cfg.backup_root, "status.json").write_text(json.dumps(status, indent=2))
+    status = _write_status(cfg, results, now)
+    overall_ok = _run_ok(status, offsite_failed)
+    logger.info("run complete: overall=%s", "OK" if overall_ok else "FAILED")
+
+    # Mail BEFORE prune (audit F2): an exception from prune must never suppress the
+    # failure mail for an already-failing run.
+    if not overall_ok:
+        subject, body = render_failure_mail(results, now, offsite_failed=offsite_failed)
+        _mail_failure(cfg, subject, body)
+
     if not skip_prune:
-        prune(cfg, dry_run=False)
-    if not status["ok"]:
-        subject, body = render_failure_mail(results, now)
-        send_mail(cfg, subject, body)
+        try:
+            deleted = prune(cfg, dry_run=False)
+            logger.info("prune deleted %d file(s): %s", len(deleted), [str(p) for p in deleted])
+        except Exception as exc:
+            # Must not mask the run's verdict computed above.
+            logger.error("prune failed: %s", exc)
+
+    return 0 if overall_ok else 1
+
+
+def cmd_run(cfg: Config, runner: Runner, now: datetime, skip_prune: bool) -> int:
+    """Entry point for `copi-backup run`.
+
+    Wraps _cmd_run_inner so that a truly unexpected exception can never leave
+    status.json and mail silent — audit F4 required a status.json write (and a
+    best-effort mail) on EVERY exit path, including one nobody anticipated.
+    """
+    try:
+        return _cmd_run_inner(cfg, runner, now, skip_prune)
+    except Exception as exc:
+        reason = f"unexpected exception: {exc}"
+        logger.error("run aborted by an unexpected exception: %s", exc)
+        try:
+            _write_status(cfg, [], now, reason=reason)
+        except Exception as write_exc:
+            logger.error("could not write status.json after an unexpected exception: %s", write_exc)
+        _mail_failure(cfg, f"[copi-backup] FAILED unexpected-exception {now:%Y-%m-%d}", reason)
         return 1
-    return 0
 
 
 def cmd_report(cfg: Config, now: datetime) -> int:
@@ -1042,7 +1251,10 @@ def cmd_report(cfg: Config, now: datetime) -> int:
         except json.JSONDecodeError:
             continue
     subject, body = render_heartbeat_mail(history, now)
-    return 0 if send_mail(cfg, subject, body) else 1
+    mailed = send_mail(cfg, subject, body)
+    if not mailed:
+        logger.error("weekly heartbeat mail was NOT accepted by SES: %s", subject)
+    return 0 if mailed else 1
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1069,6 +1281,12 @@ def main(argv: list[str] | None = None) -> int:
         )
     if args.command != "run" and args.no_prune:
         parser.error("--no-prune applies to `run`; use `prune --dry-run` to preview.")
+
+    # Configured here, not at module import time: systemd captures a unit's stdout
+    # into the journal, so writing there is what makes a failed run visible at all
+    # (audit F1) — but this must not reconfigure logging for anything that merely
+    # imports this module (e.g. the unit tests, which load it via importlib).
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s", stream=sys.stdout)
 
     cfg = load_config(read_env_file(Path(args.config).read_text()))
     now = datetime.now(UTC)

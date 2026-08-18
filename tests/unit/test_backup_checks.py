@@ -14,10 +14,12 @@ rather than tidiness: ``@dataclass`` resolves its annotations through
 """
 
 import importlib.util
+import json
 import subprocess
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -73,7 +75,7 @@ def test_load_config_applies_documented_defaults():
     assert cfg.retention_count == 5
     assert cfg.retention_unverified == 2
     assert cfg.verify_image == "postgres:15"
-    assert cfg.free_space_factor == 3
+    assert cfg.free_space_factor == 7
     assert cfg.offsite_cmd == ""
 
 
@@ -474,12 +476,19 @@ def test_sha256_file_matches_hashlib(tmp_path):
     assert cb.sha256_file(p) == hashlib.sha256(b"hello copi").hexdigest()
 
 
-def _verify_fake(counts_out="public.users|3\n", **kw):
+def _verify_fake(counts_out="public.users|3\n", tables_out="public.users\n", **kw):
+    # "-tAc" alone would match BOTH the table-listing psql call (COUNT_TABLES_SQL)
+    # and the count-fetch call (built from that listing) — the two needles below
+    # are chosen from text that appears in exactly one of the two generated SQL
+    # strings, so a test overriding only one of tables_out/counts_out actually
+    # exercises the listing -> build-query -> count flow instead of coincidentally
+    # passing because both calls return the same canned string (audit F8).
     fake = cb.FakeRunner({
         "pg_isready": "",
         "State.Running": "true",
         "State.OOMKilled": "false",
-        "-tAc": counts_out,
+        "pg_class": tables_out,   # only COUNT_TABLES_SQL mentions pg_class
+        "count(*)": counts_out,   # only the generated counts_sql() mentions count(*)
     })
     for k, v in kw.items():
         fake.failures[k] = v
@@ -514,6 +523,21 @@ def test_verify_dump_reports_count_mismatch_with_problems(tmp_path):
     result = cb.verify_dump(fake, CFG, STACK, dump, {"public.users": 3})
     assert result.ok is False
     assert any("public.users" in p for p in result.problems)
+
+
+def test_verify_dump_builds_the_count_query_from_the_table_listing(tmp_path):
+    # Demonstrates the listing -> counting wiring the old vacuous "-tAc" needle
+    # could not distinguish: changing ONLY the listed table name must change what
+    # the generated count query asks for. Before F8 this passed regardless of
+    # whether the two calls were actually related.
+    dump = tmp_path / "d.dump"
+    dump.write_bytes(b"x")
+    fake = _verify_fake(tables_out="public.jobs\n", counts_out="public.jobs|3\n")
+    result = cb.verify_dump(fake, CFG, STACK, dump, {"public.jobs": 3})
+    assert result.ok is True
+    joined = [" ".join(c) for c in fake.calls]
+    counts_call = next(j for j in joined if "count(*)" in j)
+    assert "public.jobs" in counts_call
 
 
 def test_verify_dump_distinguishes_oom_from_restore_failure(tmp_path):
@@ -651,6 +675,35 @@ def test_build_status_is_not_ok_for_an_empty_result_list():
     assert cb.build_status([], now)["stacks"] == {}
 
 
+def test_build_status_stamps_last_success_utc_to_now_on_a_successful_run():
+    now = datetime(2026, 8, 19, 8, 0, tzinfo=UTC)
+    status = cb.build_status([_ok_result()], now, previous={"last_success_utc": "2026-08-01T00:00:00Z"})
+    assert status["last_success_utc"] == "2026-08-19T08:00:00Z"
+
+
+def test_build_status_carries_last_success_utc_forward_on_a_failed_run():
+    # This is what lets a reader distinguish "ran and failed" from "did not run"
+    # (spec §7.2) — a failed run must not clobber the last known-good timestamp.
+    now = datetime(2026, 8, 19, 8, 0, tzinfo=UTC)
+    previous = {"last_success_utc": "2026-08-18T08:00:00Z"}
+    status = cb.build_status([_bad_result()], now, previous=previous)
+    assert status["ok"] is False
+    assert status["last_success_utc"] == "2026-08-18T08:00:00Z"
+
+
+def test_build_status_last_success_utc_is_none_with_no_history():
+    now = datetime(2026, 8, 19, 8, 0, tzinfo=UTC)
+    assert cb.build_status([_bad_result()], now)["last_success_utc"] is None
+
+
+def test_build_status_includes_reason_only_when_given():
+    now = datetime(2026, 8, 19, 8, 0, tzinfo=UTC)
+    assert "reason" not in cb.build_status([_ok_result()], now)
+    assert cb.build_status([], now, reason="insufficient free space")["reason"] == (
+        "insufficient free space"
+    )
+
+
 def test_stack_result_is_not_ok_without_a_dump():
     v = cb.VerifyResult(True, [], False, 1.0)
     assert cb.StackResult("s", None, v, True, None).ok is False
@@ -685,6 +738,33 @@ def test_failure_mail_is_one_message_for_multiple_failures():
     now = datetime(2026, 8, 18, 3, 15, tzinfo=UTC)
     subject, _ = cb.render_failure_mail([_bad_result("a"), _bad_result("b")], now)
     assert "a" in subject and "b" in subject
+
+
+def test_failure_mail_reports_offsite_failures_even_when_every_stack_verified():
+    # Spec §9: OFFSITE_CMD non-zero must be mailed even though StackResult.ok stays
+    # True (a verified local backup still exists) — the mail is the only place this
+    # surfaces, since it is deliberately kept out of StackResult.ok (audit F7).
+    now = datetime(2026, 8, 18, 3, 15, tzinfo=UTC)
+    subject, body = cb.render_failure_mail(
+        [_ok_result()], now, offsite_failed=["copi-python"]
+    )
+    assert "copi-python" in subject
+    assert "OFFSITE" in body
+    assert "copi-python" in body
+
+
+def test_run_ok_is_false_when_offsite_failed_even_though_stacks_verified():
+    # The overall verdict must account for an attempted-and-failed offsite without
+    # folding it into StackResult.ok, whose meaning ("a verified backup exists")
+    # must stay true.
+    status = {"ok": True}
+    assert cb._run_ok(status, offsite_failed=["copi-python"]) is False
+    assert cb._run_ok(status, offsite_failed=[]) is True
+
+
+def test_run_ok_is_false_when_stacks_failed_regardless_of_offsite():
+    status = {"ok": False}
+    assert cb._run_ok(status, offsite_failed=[]) is False
 
 
 def test_failure_mail_with_no_results_says_the_run_produced_none():
@@ -729,8 +809,35 @@ def test_enough_free_space_requires_factor_multiple():
     assert cb.enough_free_space(free_bytes=299, last_dump_bytes=100, factor=3) is False
 
 
-def test_enough_free_space_handles_first_run_with_no_previous_dump():
-    assert cb.enough_free_space(free_bytes=10, last_dump_bytes=0, factor=3) is True
+def test_enough_free_space_refuses_when_demand_is_unmeasured():
+    # last_dump_bytes=0 must NOT read as "no constraint" — that is exactly the
+    # no-verified-dump-yet gap (audit F3) that let this guard pass on a full disk,
+    # since free_bytes >= factor * 0 is trivially true for any free_bytes. cmd_run
+    # now falls back to the live DB size before ever calling this with a real 0;
+    # if that fallback itself fails, the guard must refuse, not silently pass.
+    assert cb.enough_free_space(free_bytes=10, last_dump_bytes=0, factor=3) is False
+
+
+def test_enough_free_space_is_false_when_free_and_demand_are_both_zero():
+    # The exact case named by the audit: a full disk with an unmeasured demand.
+    # 0 >= factor * 0 is mathematically True, which is precisely the no-op this
+    # guard must not be.
+    assert cb.enough_free_space(free_bytes=0, last_dump_bytes=0, factor=3) is False
+
+
+def test_live_db_bytes_sums_pg_database_size_across_every_stack():
+    fake = cb.FakeRunner({"pg_database_size": "12345"})
+    cfg = cb.load_config({
+        "STACKS": "copi-python:c1:copi:copi\ncopi-blackbird:c2:copi:copi",
+    })
+    assert cb._live_db_bytes(fake, cfg) == 12345 * 2
+
+
+def test_live_db_bytes_raises_when_the_output_is_unparseable():
+    fake = cb.FakeRunner({"pg_database_size": "ERROR: relation does not exist"})
+    cfg = cb.load_config({"STACKS": "copi-python:c1:copi:copi"})
+    with pytest.raises(cb.BackupError, match="could not read live database size"):
+        cb._live_db_bytes(fake, cfg)
 
 
 def test_sweep_never_calls_bare_volume_prune():
@@ -858,3 +965,87 @@ def test_load_config_rejects_a_relative_backup_root():
 def test_load_config_accepts_the_real_backup_root():
     cfg = cb.load_config({"STACKS": "a:c:d:u", "BACKUP_ROOT": "/var/backups/copi"})
     assert cfg.backup_root == "/var/backups/copi"
+
+
+# --- F5: directory and file modes ------------------------------------------------
+
+
+def test_ensure_dir_creates_at_mode_0700_and_reasserts_it(tmp_path):
+    target = tmp_path / "sub"
+    cb._ensure_dir(target)
+    assert (target.stat().st_mode & 0o777) == 0o700
+    # Simulate BACKUP_ROOT having been removed and recreated at the default
+    # (umask-filtered) mode — _ensure_dir must re-close it every run, not skip
+    # the chmod just because the directory already existed.
+    target.chmod(0o755)
+    cb._ensure_dir(target)
+    assert (target.stat().st_mode & 0o777) == 0o700
+
+
+class _SucceedingPartialWritingRunner(cb.FakeRunner):
+    """`docker cp` really writes bytes and succeeds — exercises dump_stack's full
+    happy path, which nothing else in this suite does (every other dump_stack test
+    is a failure-path test)."""
+
+    def run(self, argv, *, timeout=None, check=True):
+        self.calls.append(list(argv))
+        if argv[:2] == ["docker", "cp"]:
+            Path(argv[-1]).write_bytes(b"FAKE-DUMP-CONTENT")
+        return cb.Completed(argv, 0, "", "")
+
+
+def test_dump_stack_writes_the_dump_at_mode_0600(tmp_path):
+    fake = _SucceedingPartialWritingRunner()
+    result = cb.dump_stack(
+        fake, CFG, STACK, tmp_path,
+        datetime(2026, 8, 18, 3, 15, tzinfo=UTC),
+        session_factory=_FakeSession,
+    )
+    assert (result.path.stat().st_mode & 0o777) == 0o600
+
+
+def test_dump_stack_creates_the_stack_directory_at_mode_0700(tmp_path):
+    dest = tmp_path / "copi-python"  # must not exist yet to exercise the mkdir path
+    fake = _SucceedingPartialWritingRunner()
+    cb.dump_stack(
+        fake, CFG, STACK, dest,
+        datetime(2026, 8, 18, 3, 15, tzinfo=UTC),
+        session_factory=_FakeSession,
+    )
+    assert (dest.stat().st_mode & 0o777) == 0o700
+
+
+# --- F4: status.json is written on every exit path from cmd_run ------------------
+
+
+def test_cmd_run_preflight_abort_writes_status_json_with_a_reason(tmp_path, monkeypatch):
+    # Yesterday's "ok": true must not survive an aborted run untouched.
+    backup_root = tmp_path / "backups"
+    cfg = cb.load_config({"STACKS": "copi-python:c:copi:copi", "BACKUP_ROOT": str(backup_root)})
+    fake = cb.FakeRunner({"pg_database_size": "1"})
+    monkeypatch.setattr(
+        cb.shutil, "disk_usage", lambda _p: SimpleNamespace(total=0, used=0, free=0)
+    )
+    now = datetime(2026, 8, 18, 3, 15, tzinfo=UTC)
+    rc = cb.cmd_run(cfg, fake, now, skip_prune=True)
+    assert rc == 1
+    status = json.loads((backup_root / "status.json").read_text())
+    assert status["ok"] is False
+    assert status.get("reason")
+
+
+def test_cmd_run_writes_status_json_on_an_unexpected_exception(tmp_path, monkeypatch):
+    backup_root = tmp_path / "backups"
+    cfg = cb.load_config({"STACKS": "copi-python:c:copi:copi", "BACKUP_ROOT": str(backup_root)})
+    fake = cb.FakeRunner()
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("sweep exploded")
+
+    monkeypatch.setattr(cb, "sweep", _boom)
+    now = datetime(2026, 8, 18, 3, 15, tzinfo=UTC)
+    rc = cb.cmd_run(cfg, fake, now, skip_prune=True)
+    assert rc == 1
+    status = json.loads((backup_root / "status.json").read_text())
+    assert status["ok"] is False
+    assert "sweep exploded" in status["reason"]
