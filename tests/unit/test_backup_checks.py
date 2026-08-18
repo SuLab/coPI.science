@@ -204,3 +204,58 @@ def test_compare_counts_reports_every_problem_sorted():
 def test_compare_counts_both_empty_is_parity():
     # A database with no user tables is odd but not a backup failure.
     assert cb.compare_counts({}, {}) == (True, [])
+
+
+STACK = cb.Stack(name="copi-python", container="copi-python-postgres-1", db="copi", user="copi")
+CFG = cb.load_config({"STACKS": "copi-python:copi-python-postgres-1:copi:copi"})
+
+
+def test_pg_dump_argv_writes_to_a_container_path_not_stdout():
+    # A custom-format archive needs random access for its TOC; a pipe is not
+    # seekable. scripts/migrate/run_migration.sh:176 documents the failure this
+    # avoids. -f, never stdout redirection.
+    argv = cb.pg_dump_argv(STACK, "00000009-00008D07-1", "/tmp/copi_backup_1.dump")
+    assert "-f" in argv
+    assert "/tmp/copi_backup_1.dump" in argv
+    assert "-Fc" in argv
+    assert "--snapshot=00000009-00008D07-1" in argv
+    assert argv[0] == "docker"
+    assert "-t" not in argv  # a TTY would corrupt binary output
+
+
+def test_pg_dump_argv_is_niced():
+    argv = cb.pg_dump_argv(STACK, "s", "/tmp/x.dump")
+    joined = " ".join(argv)
+    assert "nice" in joined
+    assert "ionice" in joined
+
+
+def test_psql_argv_uses_tuples_only_unaligned_output():
+    argv = cb.psql_argv(STACK, "SELECT 1")
+    assert "-tAc" in argv
+    assert "SELECT 1" in argv
+
+
+def test_verify_run_argv_is_isolated_and_capped():
+    argv = cb.verify_run_argv(CFG, STACK, "vol-1", "/host/x.dump", "copi-verify-1", "pw")
+    joined = " ".join(argv)
+    assert "--network" in argv and "none" in argv
+    assert f"--memory={CFG.verify_mem}" in joined or "--memory" in argv
+    # swap disabled: equal to --memory, so a runaway restore fails instead of thrashing
+    assert f"--memory-swap={CFG.verify_mem}" in joined or "--memory-swap" in argv
+    assert "copi.backup.ephemeral=true" in joined
+    assert ":ro" in joined  # dump mounted read-only
+    assert "-p" not in argv  # never publish a port
+
+
+def test_verify_run_argv_uses_stack_credentials_not_hardcoded():
+    stack = cb.Stack(name="s", container="c", db="otherdb", user="otheruser")
+    joined = " ".join(cb.verify_run_argv(CFG, stack, "v", "/h.dump", "n", "pw"))
+    assert "POSTGRES_DB=otherdb" in joined
+    assert "POSTGRES_USER=otheruser" in joined
+
+
+def test_fake_runner_records_calls():
+    fake = cb.FakeRunner({"docker version": "ok"})
+    fake.run(["docker", "version"])
+    assert fake.calls == [["docker", "version"]]

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import re
 import shlex
+import subprocess
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
@@ -229,3 +230,112 @@ def compare_counts(
                 f"{table}: {want:,} rows in snapshot, {got:,} restored ({got - want:+,})"
             )
     return (not problems), problems
+
+
+@dataclass
+class Completed:
+    argv: list[str]
+    returncode: int
+    stdout: str
+    stderr: str
+
+
+class Runner:
+    """The single seam through which every external command is issued."""
+
+    def run(
+        self, argv: list[str], *, timeout: int | None = None, check: bool = True
+    ) -> Completed:
+        proc = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+        result = Completed(argv, proc.returncode, proc.stdout, proc.stderr)
+        if check and proc.returncode != 0:
+            raise CommandError(result)
+        return result
+
+
+class CommandError(Exception):
+    def __init__(self, result: Completed) -> None:
+        self.result = result
+        super().__init__(
+            f"command failed ({result.returncode}): {' '.join(result.argv)}\n"
+            f"{result.stderr.strip()[:2000]}"
+        )
+
+
+class FakeRunner(Runner):
+    """Test double. Matches a SUBSTRING of the joined argv to canned stdout.
+
+    Substring, not argv prefix. Every in-container call is
+    ``docker exec <random-container-name> ...``, so a prefix cannot distinguish
+    ``pg_isready`` from ``pg_restore`` — and that indistinguishability is exactly
+    what hid an infinite readiness loop during the plan audit.
+    """
+
+    def __init__(self, responses: dict[str, str] | None = None) -> None:
+        self.responses = responses or {}
+        self.calls: list[list[str]] = []
+        self.failures: dict[str, int] = {}
+
+    def run(
+        self, argv: list[str], *, timeout: int | None = None, check: bool = True
+    ) -> Completed:
+        self.calls.append(list(argv))
+        joined = " ".join(argv)
+        for needle, rc in self.failures.items():
+            if needle in joined:
+                result = Completed(argv, rc, "", "fake failure")
+                if check:
+                    raise CommandError(result)
+                return result
+        for needle, out in self.responses.items():
+            if needle in joined:
+                return Completed(argv, 0, out, "")
+        return Completed(argv, 0, "", "")
+
+
+def docker_exec(container: str, argv: list[str]) -> list[str]:
+    """docker exec WITHOUT -t: a TTY would translate newlines and corrupt binary."""
+    return ["docker", "exec", container, *argv]
+
+
+def psql_argv(stack: Stack, sql: str) -> list[str]:
+    return docker_exec(stack.container, ["psql", "-U", stack.user, "-d", stack.db, "-tAc", sql])
+
+
+def pg_dump_argv(stack: Stack, snapshot_id: str, container_path: str) -> list[str]:
+    """Dump to a file INSIDE the container. Never to stdout — see run_migration.sh:176."""
+    return docker_exec(
+        stack.container,
+        [
+            "nice", "-n", "10", "ionice", "-c", "3",
+            "pg_dump", "-U", stack.user, "-Fc",
+            f"--snapshot={snapshot_id}",
+            "-f", container_path,
+            stack.db,
+        ],
+    )
+
+
+def verify_run_argv(
+    cfg: Config, stack: Stack, volume: str, host_dump: str, name: str, password: str
+) -> list[str]:
+    return [
+        "docker", "run", "-d",
+        "--name", name,
+        "--label", "copi.backup.ephemeral=true",
+        "--network", "none",
+        f"--memory={cfg.verify_mem}",
+        f"--memory-swap={cfg.verify_mem}",
+        "-e", f"POSTGRES_PASSWORD={password}",
+        "-e", f"POSTGRES_USER={stack.user}",
+        "-e", f"POSTGRES_DB={stack.db}",
+        "-v", f"{volume}:/var/lib/postgresql/data",
+        "-v", f"{host_dump}:/dump.bin:ro",
+        cfg.verify_image,
+    ]
