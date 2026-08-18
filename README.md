@@ -59,34 +59,64 @@ All tests must pass before committing.
 
 ## Running the agent simulation
 
+> ### ⚠️ This host runs TWO deployments. Read this before any `docker` command.
+>
+> A second, unrelated CoPI stack (**org1**, project `copi-python`, serving
+> copi.science) shares this host, and **its** simulation container is named
+> `agent-run` — the *unprefixed* name. `docker stop agent-run` / `docker rm
+> agent-run` / `docker logs agent-run` all target **org1's production run**.
+> This repo's container is **`blackbird-agent-run`**.
+>
+> Always pass **`-f docker-compose.prod.yml`**: a bare `docker compose` resolves
+> to `docker-compose.yml`, a different (dev) stack whose web service is `app`,
+> while the deployed prod service is `blackbird-app`. Never pass
+> `--remove-orphans` — it has killed org1's nginx and certbot.
+>
+> Confirm ownership before touching any container:
+> `docker inspect <name> --format '{{index .Config.Labels "com.docker.compose.project"}}'`
+> — `copi-blackbird` is this repo, `copi-python` is org1.
+
 ```bash
-# Resume an existing run (no budget limit):
-docker compose --profile agent run -d --name agent-run agent \
-  python -m src.agent.main --budget 0
+DC="docker compose -f docker-compose.prod.yml"
 
-# Resume with a budget cap (e.g. 50 LLM calls per agent):
-docker compose --profile agent run -d --name agent-run agent \
-  python -m src.agent.main --budget 50
+# Resume an existing run:
+$DC --profile agent run -d --name blackbird-agent-run agent python -m src.agent.main
 
-# Fresh run (wipes agent_messages/channels, keeps proposals):
-docker compose --profile agent run -d --name agent-run agent \
-  python -m src.agent.main --fresh --budget 0
+# Fresh run (wipes agent_messages/agent_channels/pi_dm_messages; keeps
+# proposals, reviews and opportunity_assessments):
+$DC --profile agent run -d --name blackbird-agent-run agent python -m src.agent.main --fresh
 ```
+
+`--budget` is **deprecated**: it is a cumulative cap rebuilt from `llm_call_logs`
+on restart, so once crossed it benches an agent permanently. It defaults to 0
+(off) and should stay there — pacing is handled by the sliding-window rate
+limiter.
 
 Before restarting, save logs and rebuild:
 
 ```bash
-docker logs agent-run > logs/run_$(date +%s).log 2>&1
-ls -t logs/run_*.log | tail -n +11 | xargs rm -f
-docker stop -t 30 agent-run   # SIGTERM: lets the engine flush before exit
-docker rm agent-run
-docker compose up -d --build app worker
-docker compose --profile agent run -d --name agent-run agent \
-  python -m src.agent.main --budget 0
+docker logs blackbird-agent-run > logs/blackbird_run_$(date +%s).log 2>&1
+ls -t logs/blackbird_run_*.log | tail -n +11 | xargs -r rm -f
+
+# SIGTERM so the engine flushes. NOTE: -t 30 is often NOT enough — an in-flight
+# LLM call plus a max_tokens retry can exceed it, and Docker then SIGKILLs
+# (exit 137), skipping the shutdown handler. Give it real headroom.
+docker stop -t 120 blackbird-agent-run
+docker rm blackbird-agent-run
+
+# Rebuild BOTH: src/ is baked into the images, not mounted.
+$DC up -d --build blackbird-app worker
+$DC --profile agent build agent
+
+# Apply migrations — nothing else does. Must equal `alembic heads`.
+$DC exec -T blackbird-app alembic upgrade head
+
+$DC --profile agent run -d --name blackbird-agent-run agent python -m src.agent.main
 ```
 
-The `agent-run` container mounts source code but only loads modules at
-startup — code changes affecting the running agent require a restart.
+The agent service mounts only `./profiles`, `./prompts` and `./data` — **`src/`
+is baked into the image at build time**, so any code change needs
+`$DC --profile agent build agent` before the next run, or you launch stale code.
 
 ## Adding new PIs
 
