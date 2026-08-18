@@ -842,3 +842,19 @@ def test_prune_dry_run_deletes_nothing(tmp_path):
     planned = cb.prune(cfg, dry_run=True)
     assert len(planned) == 2
     assert len(list(stack_dir.glob("*.dump"))) == 7
+
+
+def test_load_config_rejects_shallow_or_system_backup_roots():
+    for bad in ("/", "/etc", "/var", "/home", "/tmp"):
+        with pytest.raises(cb.ConfigError, match="forbidden|shallow"):
+            cb.load_config({"STACKS": "a:c:d:u", "BACKUP_ROOT": bad})
+
+
+def test_load_config_rejects_a_relative_backup_root():
+    with pytest.raises(cb.ConfigError, match="must be absolute"):
+        cb.load_config({"STACKS": "a:c:d:u", "BACKUP_ROOT": "relative/path"})
+
+
+def test_load_config_accepts_the_real_backup_root():
+    cfg = cb.load_config({"STACKS": "a:c:d:u", "BACKUP_ROOT": "/var/backups/copi"})
+    assert cfg.backup_root == "/var/backups/copi"

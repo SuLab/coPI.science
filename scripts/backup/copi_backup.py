@@ -107,6 +107,26 @@ def parse_stacks(raw: str) -> list[Stack]:
     return stacks
 
 
+_FORBIDDEN_ROOTS = frozenset({
+    "/", "/etc", "/var", "/var/log", "/home", "/root", "/tmp", "/usr", "/sys",
+    "/proc", "/boot", "/dev", "/opt", "/srv", "/lib", "/bin", "/sbin",
+})
+
+
+def _validate_backup_root(raw: str) -> str:
+    """Validate BACKUP_ROOT: must be absolute, have depth >= 2, not in forbidden list."""
+    raw = raw.strip()
+    normalised = os.path.normpath(raw)
+    if not os.path.isabs(normalised):
+        raise ConfigError(f"BACKUP_ROOT must be absolute: {raw!r}")
+    if normalised in _FORBIDDEN_ROOTS:
+        raise ConfigError(f"BACKUP_ROOT in forbidden system directory: {normalised!r}")
+    depth = normalised.count("/")
+    if depth < 2:
+        raise ConfigError(f"BACKUP_ROOT too shallow (must have >= 2 path segments): {normalised!r}")
+    return normalised
+
+
 def _as_int(env: dict[str, str], key: str, minimum: int) -> int:
     raw = env.get(key, DEFAULTS[key])
     try:
@@ -120,7 +140,7 @@ def load_config(env: dict[str, str]) -> Config:
     """Build a Config from an environment mapping, applying documented defaults."""
     return Config(
         stacks=parse_stacks(env.get("STACKS", "")),
-        backup_root=env.get("BACKUP_ROOT", DEFAULTS["BACKUP_ROOT"]).strip(),
+        backup_root=_validate_backup_root(env.get("BACKUP_ROOT", DEFAULTS["BACKUP_ROOT"])),
         # Clamped to >=1: a configured 0 would let the pruner empty the directory.
         retention_count=_as_int(env, "RETENTION_COUNT", 1),
         retention_unverified=_as_int(env, "RETENTION_UNVERIFIED", 0),
