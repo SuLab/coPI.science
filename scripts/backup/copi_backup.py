@@ -12,12 +12,17 @@ the exact counts of the snapshot the dump was taken from.
 
 from __future__ import annotations
 
+import argparse
+import fcntl
 import hashlib
+import json
 import os
 import re
 import secrets
 import shlex
+import shutil
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
@@ -862,3 +867,169 @@ def send_mail(cfg: Config, subject: str, body: str, client_factory=None) -> bool
         return True
     except Exception:  # mail failure must not abort the run
         return False
+
+
+LOCK_PATH = "/run/copi-backup.lock"
+
+
+def enough_free_space(free_bytes: int, last_dump_bytes: int, factor: int) -> bool:
+    return free_bytes >= factor * last_dump_bytes
+
+
+def sweep(runner: Runner, cfg: Config, now: datetime) -> None:
+    """Clear leftovers from a previously crashed run. Label-filtered, never a prune."""
+    stale = runner.run(
+        ["docker", "ps", "-aq", "--filter", "label=copi.backup.ephemeral=true"], check=False
+    )
+    for cid in stale.stdout.split():
+        runner.run(["docker", "rm", "-f", "-v", cid], check=False)
+
+    vols = runner.run(
+        ["docker", "volume", "ls", "-q", "--filter", "label=copi.backup.ephemeral=true"],
+        check=False,
+    )
+    for vol in vols.stdout.split():
+        runner.run(["docker", "volume", "rm", vol], check=False)
+
+    for stack in cfg.stacks:
+        runner.run(
+            docker_exec(stack.container, ["sh", "-c", "rm -f /tmp/copi_backup_*.dump"]),
+            check=False,
+        )
+
+    root = Path(cfg.backup_root)
+    cutoff = now.timestamp() - 24 * 3600
+    for partial in root.glob("*/*.dump.partial"):
+        if partial.stat().st_mtime < cutoff:
+            partial.unlink(missing_ok=True)
+    for sidecar in root.glob("*/*.dump.json"):
+        if not Path(str(sidecar)[: -len(".json")]).exists():
+            sidecar.unlink(missing_ok=True)
+
+
+def prune(cfg: Config, dry_run: bool) -> list[Path]:
+    """Apply retention. Returns the paths deleted (or that would be)."""
+    deleted: list[Path] = []
+    for stack in cfg.stacks:
+        stack_dir = Path(cfg.backup_root) / stack.name
+        if not stack_dir.is_dir():
+            continue
+        found: list[DumpFile] = []
+        for entry in stack_dir.iterdir():
+            if entry.is_symlink() or not entry.is_file():
+                continue
+            parsed = parse_dump_name(entry.name)
+            if parsed is not None:
+                found.append(parsed)
+        for doomed in select_for_deletion(
+            found, cfg.retention_count, cfg.retention_unverified
+        ):
+            target = stack_dir / doomed.name
+            sidecar = stack_dir / f"{doomed.name}.json"
+            deleted.append(target)
+            if not dry_run:
+                target.unlink(missing_ok=True)
+                sidecar.unlink(missing_ok=True)
+    return deleted
+
+
+def _last_dump_bytes(cfg: Config) -> int:
+    sizes = [p.stat().st_size for p in Path(cfg.backup_root).glob("*/*.dump") if p.is_file()]
+    return max(sizes) if sizes else 0
+
+
+def cmd_run(cfg: Config, runner: Runner, now: datetime, skip_prune: bool) -> int:
+    Path(cfg.backup_root).mkdir(parents=True, exist_ok=True)
+    sweep(runner, cfg, now)
+    free = shutil.disk_usage(cfg.backup_root).free
+    if not enough_free_space(free, _last_dump_bytes(cfg), cfg.free_space_factor):
+        subject = f"[copi-backup] FAILED preflight {now:%Y-%m-%d}"
+        send_mail(cfg, subject, f"Insufficient free space: {free:,} bytes available.")
+        return 1
+
+    results: list[StackResult] = []
+    for stack in cfg.stacks:
+        dest = Path(cfg.backup_root) / stack.name
+        try:
+            dump = dump_stack(runner, cfg, stack, dest, now)
+            verify = verify_dump(runner, cfg, stack, dump.path, dump.counts)
+            final = dump.path
+            if not verify.ok:
+                final = dump.path.with_name(dump.path.name + ".unverified")
+                dump.path.replace(final)
+
+            # The sidecar must exist BEFORE OFFSITE_CMD runs. Spec §6 invokes the
+            # hook as `$OFFSITE_CMD <dump> <sidecar>`, and a hook handed a path that
+            # does not exist yet cannot upload it. Written once with offsite=False,
+            # then rewritten with the real result if the hook actually ran.
+            sidecar = final.with_name(final.name + ".json")
+            result = StackResult(stack.name, dump, verify, False, None)
+            sidecar.write_text(json.dumps(sidecar_document(result, now), indent=2))
+
+            if cfg.offsite_cmd and verify.ok:
+                offsite_ok = runner.run(
+                    [cfg.offsite_cmd, str(final), str(sidecar)], check=False
+                ).returncode == 0
+                result = StackResult(stack.name, dump, verify, offsite_ok, None)
+                sidecar.write_text(json.dumps(sidecar_document(result, now), indent=2))
+        except Exception as exc:  # one stack must not abort the other
+            result = StackResult(stack.name, None, None, False, str(exc))
+        results.append(result)
+
+    status = build_status(results, now)
+    Path(cfg.backup_root, "status.json").write_text(json.dumps(status, indent=2))
+    if not skip_prune:
+        prune(cfg, dry_run=False)
+    if not status["ok"]:
+        subject, body = render_failure_mail(results, now)
+        send_mail(cfg, subject, body)
+        return 1
+    return 0
+
+
+def cmd_report(cfg: Config, now: datetime) -> int:
+    history: list[dict] = []
+    cutoff = now.timestamp() - 7 * 86400
+    for sidecar in sorted(Path(cfg.backup_root).glob("*/*.dump*.json")):
+        if sidecar.stat().st_mtime < cutoff:
+            continue
+        try:
+            history.append(json.loads(sidecar.read_text()))
+        except json.JSONDecodeError:
+            continue
+    subject, body = render_heartbeat_mail(history, now)
+    return 0 if send_mail(cfg, subject, body) else 1
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="copi-backup")
+    parser.add_argument("command", choices=["run", "report", "prune"])
+    parser.add_argument("--config", default="/etc/copi-backup/backup.env")
+    # Two distinct flags on purpose. `prune --dry-run` is a true dry run: it lists what
+    # it would delete and deletes nothing. `run` has no dry mode — it always dumps and
+    # verifies — so its flag says exactly what it does. Calling that one --dry-run would
+    # invite an operator to "safely" trigger a 721MB dump and two containers on a
+    # production host.
+    parser.add_argument("--dry-run", action="store_true", help="prune only: list, do not delete")
+    parser.add_argument("--no-prune", action="store_true", help="run only: skip retention")
+    args = parser.parse_args(argv)
+
+    cfg = load_config(read_env_file(Path(args.config).read_text()))
+    now = datetime.now(UTC)
+
+    with open(LOCK_PATH, "w") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return 0
+        if args.command == "run":
+            return cmd_run(cfg, Runner(), now, args.no_prune)
+        if args.command == "report":
+            return cmd_report(cfg, now)
+        for path in prune(cfg, dry_run=args.dry_run):
+            sys.stdout.write(f"{path}\n")
+        return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

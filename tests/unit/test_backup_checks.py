@@ -722,3 +722,61 @@ def test_send_mail_returns_false_and_does_not_raise_on_ses_error():
 
     cfg = cb.load_config({"STACKS": "a:c:d:u", "SES_SENDER_EMAIL": "s@e.com", "MAIL_TO": "x@e.com"})
     assert cb.send_mail(cfg, "S", "B", client_factory=lambda region: _Client()) is False
+
+
+def test_enough_free_space_requires_factor_multiple():
+    assert cb.enough_free_space(free_bytes=300, last_dump_bytes=100, factor=3) is True
+    assert cb.enough_free_space(free_bytes=299, last_dump_bytes=100, factor=3) is False
+
+
+def test_enough_free_space_handles_first_run_with_no_previous_dump():
+    assert cb.enough_free_space(free_bytes=10, last_dump_bytes=0, factor=3) is True
+
+
+def test_sweep_never_calls_bare_volume_prune():
+    # A bare prune would destroy copi_pgdata, copi-prod_pgdata,
+    # copi-python_grantbot_data and collab-platform_mongodb_data.
+    fake = cb.FakeRunner()
+    cb.sweep(fake, CFG, datetime(2026, 8, 18, tzinfo=UTC))
+    for call in fake.calls:
+        assert call[:3] != ["docker", "volume", "prune"], call
+        if call[:3] == ["docker", "volume", "ls"]:
+            assert "--filter" in call and "label=copi.backup.ephemeral=true" in " ".join(call)
+
+
+def test_prune_deletes_dump_and_its_sidecar(tmp_path):
+    stack_dir = tmp_path / "copi-python"
+    stack_dir.mkdir()
+    for day in range(1, 8):
+        name = f"copi-python_copi_202608{day:02d}T031500Z.dump"
+        (stack_dir / name).write_bytes(b"x")
+        (stack_dir / f"{name}.json").write_text("{}")
+    cfg = cb.load_config({"STACKS": "copi-python:c:copi:copi", "BACKUP_ROOT": str(tmp_path)})
+    deleted = cb.prune(cfg, dry_run=False)
+    assert len(deleted) == 2
+    assert len(list(stack_dir.glob("*.dump"))) == 5
+    assert len(list(stack_dir.glob("*.json"))) == 5
+
+
+def test_prune_ignores_foreign_files(tmp_path):
+    stack_dir = tmp_path / "copi-python"
+    stack_dir.mkdir()
+    (stack_dir / "copi_pre0028_20260817_203346.dump").write_bytes(b"x")
+    (stack_dir / "dump.err").write_text("")
+    for day in range(1, 8):
+        (stack_dir / f"copi-python_copi_202608{day:02d}T031500Z.dump").write_bytes(b"x")
+    cfg = cb.load_config({"STACKS": "copi-python:c:copi:copi", "BACKUP_ROOT": str(tmp_path)})
+    cb.prune(cfg, dry_run=False)
+    assert (stack_dir / "copi_pre0028_20260817_203346.dump").exists()
+    assert (stack_dir / "dump.err").exists()
+
+
+def test_prune_dry_run_deletes_nothing(tmp_path):
+    stack_dir = tmp_path / "copi-python"
+    stack_dir.mkdir()
+    for day in range(1, 8):
+        (stack_dir / f"copi-python_copi_202608{day:02d}T031500Z.dump").write_bytes(b"x")
+    cfg = cb.load_config({"STACKS": "copi-python:c:copi:copi", "BACKUP_ROOT": str(tmp_path)})
+    planned = cb.prune(cfg, dry_run=True)
+    assert len(planned) == 2
+    assert len(list(stack_dir.glob("*.dump"))) == 7
