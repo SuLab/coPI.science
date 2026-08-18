@@ -11,7 +11,9 @@ import pytest
 
 from src.services.cohort_seed import (
     COHORT_NAME_RE,
+    SeedPlan,
     load_manifest,
+    plan_seed,
     validate_manifest,
 )
 
@@ -129,3 +131,68 @@ class TestValidateManifest:
         })
         errors = validate_manifest(m, set())
         assert len(errors) == 2
+
+
+class TestPlanSeed:
+    def test_empty_database_creates_everything(self):
+        plan = plan_seed(_manifest(), set(), set())
+        assert plan.cohorts_to_create == ("alpha",)
+        assert plan.memberships_to_add == (("alpha", "su"), ("alpha", "wiseman"))
+        assert plan.extra_memberships == ()
+        assert plan.is_noop is False
+
+    def test_fully_seeded_database_is_a_noop(self):
+        plan = plan_seed(
+            _manifest(), {"alpha"}, {("alpha", "su"), ("alpha", "wiseman")}
+        )
+        assert plan.cohorts_to_create == ()
+        assert plan.memberships_to_add == ()
+        assert plan.is_noop is True
+
+    def test_existing_cohort_missing_one_member(self):
+        plan = plan_seed(_manifest(), {"alpha"}, {("alpha", "su")})
+        assert plan.cohorts_to_create == ()
+        assert plan.memberships_to_add == (("alpha", "wiseman"),)
+
+    def test_db_only_membership_is_reported_as_extra_not_added(self):
+        plan = plan_seed(
+            _manifest(),
+            {"alpha"},
+            {("alpha", "su"), ("alpha", "wiseman"), ("alpha", "cravatt")},
+        )
+        assert plan.memberships_to_add == ()
+        assert plan.extra_memberships == (("alpha", "cravatt"),)
+        assert plan.is_noop is True  # extras alone are not work
+
+    def test_unmanaged_cohort_is_left_entirely_alone(self):
+        """A cohort the manifest does not name is none of the manifest's business."""
+        plan = plan_seed(
+            _manifest(),
+            {"alpha", "hub-someone"},
+            {("alpha", "su"), ("alpha", "wiseman"), ("hub-someone", "cravatt")},
+        )
+        assert plan.cohorts_to_create == ()
+        assert plan.memberships_to_add == ()
+        assert plan.extra_memberships == ()
+
+    def test_results_are_sorted_and_deterministic(self):
+        m = _manifest(cohorts={
+            "zeta": {"description": "d", "source": "s", "members": ["wiseman", "su"]},
+            "alpha": {"description": "d", "source": "s", "members": ["cravatt"]},
+        })
+        plan = plan_seed(m, set(), set())
+        assert plan.cohorts_to_create == ("alpha", "zeta")
+        assert plan.memberships_to_add == (
+            ("alpha", "cravatt"), ("zeta", "su"), ("zeta", "wiseman"),
+        )
+
+    def test_plan_is_immutable(self):
+        plan = plan_seed(_manifest(), set(), set())
+        with pytest.raises(AttributeError):
+            plan.cohorts_to_create = ()
+
+    def test_repo_manifest_against_empty_db(self):
+        plan = plan_seed(load_manifest(REPO_MANIFEST), set(), set())
+        assert len(plan.cohorts_to_create) == 3
+        assert len(plan.memberships_to_add) == 148
+        assert isinstance(plan, SeedPlan)

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -77,3 +78,56 @@ def validate_manifest(
                 f"{', '.join(unknown)}"
             )
     return errors
+
+
+@dataclass(frozen=True)
+class SeedPlan:
+    """What seeding would change. Membership pairs are (cohort_name, agent_id).
+
+    Frozen so a caller cannot print one plan and apply another.
+    """
+
+    cohorts_to_create: tuple[str, ...]
+    memberships_to_add: tuple[tuple[str, str], ...]
+    extra_memberships: tuple[tuple[str, str], ...]
+
+    @property
+    def is_noop(self) -> bool:
+        """True when applying without --prune would write nothing.
+
+        Extras are deliberately excluded: they are a report, not work.
+        """
+        return not self.cohorts_to_create and not self.memberships_to_add
+
+
+def plan_seed(
+    manifest: dict[str, Any],
+    existing_cohorts: set[str],
+    existing_memberships: set[tuple[str, str]],
+) -> SeedPlan:
+    """Diff the manifest against the database. Additive by default.
+
+    `extra_memberships` is scoped to cohorts the manifest names. The copi
+    database is expected to hold only these three, but the same code must be
+    safe on an instance that also runs unrelated cohorts — blackbird carries 62
+    `hub-<pi>` cohorts — so a cohort the manifest does not mention is never
+    reported and never touched.
+
+    Everything is sorted so a dry-run plan is reviewable and byte-stable across
+    runs.
+    """
+    cohorts = manifest["cohorts"]
+    to_create = tuple(sorted(n for n in cohorts if n not in existing_cohorts))
+
+    wanted = {
+        (name, agent_id)
+        for name, body in cohorts.items()
+        for agent_id in body["members"]
+    }
+    to_add = tuple(sorted(wanted - existing_memberships))
+
+    managed = set(cohorts)
+    extra = tuple(sorted(
+        pair for pair in existing_memberships - wanted if pair[0] in managed
+    ))
+    return SeedPlan(to_create, to_add, extra)
