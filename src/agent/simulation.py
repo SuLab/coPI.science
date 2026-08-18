@@ -218,13 +218,18 @@ class SimulationEngine:
         # above: load_role() hits the disk on every call.
         self._role_post_types_cache: dict[str, tuple[PostTypeSpec, ...]] = {}
 
-        # thread_id -> the specialist domains consulted during that interview.
+        # (pi_agent_id, thread_id) -> the specialist domains consulted during
+        # that interview. Keyed per INTERVIEW, not per PI: a PI's second
+        # interview must convene its own panel rather than inherit the first
+        # one's. `huganir` was assessed 4 times in run 1787010946 and every
+        # assessment after the first rode on the first interview's consults.
+        # `thread_id` is None for direct callers that have no interview.
         # In-memory on purpose: it is read by _persist_assessment one LLM call
         # later, in the SAME process. A restart clears it, and the floor then
         # fails OPEN for threads that predate the restart — see
         # _persist_assessment. Blocking every assessment on every resumed thread
         # would be worse than one unvetted verdict.
-        self._specialist_consults: dict[str, set[str]] = {}
+        self._specialist_consults: dict[tuple[str, str | None], set[str]] = {}
 
         self._start_time: datetime | None = None
         self._running = False
@@ -1624,8 +1629,8 @@ class SimulationEngine:
         async def tool_executor(tool_name: str, tool_input: dict) -> str:
             return await execute_tool(
                 tool_name, tool_input, agent.agent_id, thread, role=agent.role,
-                on_consult=lambda domain, _pi=thread.other_agent_id: self._record_consult(
-                    _pi, domain
+                on_consult=lambda domain, _pi=thread.other_agent_id, _t=thread.thread_id: (
+                    self._record_consult(_pi, domain, _t)
                 ),
                 # A specialist consult is a real Opus call. Without this it was
                 # invisible to the sliding-window limiter and to
@@ -2669,22 +2674,22 @@ class SimulationEngine:
         a fallback only in the sense that callers without a thread omit it.
 
         ``thread``, when given, is passed straight through to
-        ``_specialist_floor_gap`` so the fail-open decision is read from
-        ``thread.floor_armed`` (latched once per turn, at the top of
-        ``_reply_to_thread``, before this same turn's own consult calls or any
-        other task's writes can reach it) instead of a live, process-global
-        ``_specialist_consults`` read at this later point in the same turn —
-        see that method's docstring, and ``ThreadState.floor_armed``'s own
-        comment, for why a plain live read here is unsafe under concurrency.
-        It is NOT used to key the join itself (that stays ``subject_agent_id``
-        — see the ``thread_id`` paragraph below); it exists purely to carry
-        the latched snapshot.
-
-        There is no ``thread_id`` parameter here, despite the verdict coming
-        from a specific Phase-4 interview thread today (Option A relocation)
-        — the specialist floor below (``_specialist_floor_gap``) is keyed on
-        the subject agent instead, not on a thread; see that method's
-        docstring for why an earlier thread-keyed version always failed open.
+        ``_specialist_floor_gap`` for two things now. First, the fail-open
+        decision, read from ``thread.floor_armed`` (latched once per turn, at
+        the top of ``_reply_to_thread``, before this same turn's own consult
+        calls or any other task's writes can reach it) instead of a live,
+        process-global ``_specialist_consults`` read at this later point in
+        the same turn — see that method's docstring, and
+        ``ThreadState.floor_armed``'s own comment, for why a plain live read
+        here is unsafe under concurrency. Second, ``thread.thread_id``, which
+        now joins the consult record together with ``subject_agent_id`` — see
+        ``_specialist_floor_gap``'s docstring for why a PI-only join let a
+        PI's second interview inherit the first one's panel. There is no
+        separate ``thread_id`` parameter here because ``thread`` already
+        carries it: every caller with a real interview (Option A's
+        ``_capture_hub_assessment``, above) passes ``thread`` for exactly this
+        reason, and a caller with none — direct callers, all pre-existing
+        tests — omits it and joins against the ``None``-keyed slot instead.
 
         The weighted score and band are computed here from the verdict's own
         dimension scores, never taken from the model's ``weighted_score`` field
@@ -2977,29 +2982,26 @@ class SimulationEngine:
             self._role_post_types_cache[role] = cached
         return cached
 
-    def _record_consult(self, pi_agent_id: str, domain: str) -> None:
-        """Note a successful consult, keyed on the PI the interview is about.
+    def _record_consult(
+        self, pi_agent_id: str, domain: str, thread_id: str | None = None,
+    ) -> None:
+        """Note a successful consult, keyed on the interview it happened in.
 
-        Keyed on the PI rather than the interview thread. The verdict names
-        the PI as ``subject_agent_id`` (not a thread id), and that is what
-        ``_specialist_floor_gap`` joins consults against when
-        ``_persist_assessment`` runs — keying on the PI directly avoids that
-        join needing a thread id at all. (Historically this was also the
-        ONLY identifier available: the hub's assessment used to be a
-        standalone Phase-5 post with no interview thread behind it at all.
-        Option A relocated the artifact into the Phase-4 CONCLUDE reply
-        itself, so a real thread now exists at persist time too — see
-        ``_specialist_floor_gap``'s docstring — but the PI-keyed record
-        stays, since it is simpler and the tool-call site here only ever
-        knows the PI, not which specific verdict will eventually cite it.)
+        Keyed on ``(pi, thread)`` rather than the PI alone. One PI's consults
+        are NOT cumulative across interviews: a second interview is a second
+        idea and owes its own panel. ``thread_id`` is None for direct callers
+        that have no interview to name.
         """
         if not pi_agent_id:
             return
-        self._specialist_consults.setdefault(pi_agent_id, set()).add(domain)
+        self._specialist_consults.setdefault((pi_agent_id, thread_id), set()).add(domain)
 
-    def _consulted_domains(self, pi_agent_id: str) -> frozenset[str]:
-        """Domains consulted about this PI; empty for a PI we have no record of."""
-        return frozenset(self._specialist_consults.get(pi_agent_id, ()))
+    def _consulted_domains(
+        self, pi_agent_id: str, thread_id: str | None = None,
+    ) -> frozenset[str]:
+        """Domains consulted about this PI in this interview; empty for an
+        interview we have no record of."""
+        return frozenset(self._specialist_consults.get((pi_agent_id, thread_id), ()))
 
     _PANEL_REQUIRED_FOR = frozenset({"advance", "conditional"})
 
@@ -3029,17 +3031,21 @@ class SimulationEngine:
         to a live global read, matching this method's behavior before
         ``floor_armed`` existed at all.
 
-        The record is keyed on the PI (``subject_agent_id``), not on a thread.
-        An earlier version keyed on ``thread_id`` instead, back when the
-        artifact was a standalone Phase-5 post with no interview thread of
-        its own — ``thread_id`` was always None there, so the floor read an
-        empty set every time and failed open on every verdict, enforcing
-        nothing while looking enforced. Option A now relocates the artifact
-        into the Phase-4 CONCLUDE reply itself, so a real thread does exist
-        at persist time — but the PI-keyed record is kept rather than
-        switched to thread-keyed, since ``_record_consult`` above only ever
-        learns the PI, and one PI's specialist consults are naturally
-        cumulative across however many interview threads that PI has open.
+        The record is keyed on ``(subject, thread)``, not on the PI alone. An
+        earlier version keyed on the PI (``subject_agent_id``) only, back when
+        the artifact was a standalone Phase-5 post with no interview thread of
+        its own, and that keying survived Option A's move into the Phase-4
+        CONCLUDE reply even though a real thread existed at persist time by
+        then — one PI's specialist consults were treated as cumulative across
+        however many interview threads that PI had open. That let a PI's
+        SECOND interview inherit the FIRST interview's consults and never
+        convene its own panel: ``huganir`` was assessed 4 times in one run and
+        ``hart`` 4, and only the first of each ever faced a panel. Keying on
+        the thread as well as the PI gives each interview its own empty slot
+        to start from. ``thread=None`` (every direct caller with no thread to
+        offer, and all pre-existing tests) reads the ``None``-keyed slot for
+        that PI — the same slot ``_record_consult`` writes to when it, too, is
+        called with no ``thread_id``.
 
         FAILS OPEN in two cases, both of which mean "we have no record", never
         "the panel approved":
@@ -3089,7 +3095,9 @@ class SimulationEngine:
             )
             return set()
 
-        consulted = self._consulted_domains(subject)
+        consulted = self._consulted_domains(
+            subject, thread.thread_id if thread is not None else None
+        )
         return set(required_domains_for(verdict) - consulted)
 
     def _available_post_types(self, agent: "Agent") -> tuple[PostTypeSpec, ...]:

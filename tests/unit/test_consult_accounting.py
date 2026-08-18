@@ -65,8 +65,10 @@ async def test_a_consult_is_booked_against_the_rate_limiter(monkeypatch):
     assert hub.api_call_count == 2, (
         f"expected the reply + 1 consult to be booked, got {hub.api_call_count}"
     )
-    # And the consult must still be recorded for the specialist floor.
-    assert engine._consulted_domains("wang") == frozenset({"chemistry"})
+    # And the consult must still be recorded for the specialist floor, keyed
+    # under this interview's own thread — not the PI alone (see task 6:
+    # a PI's second interview must not inherit a first interview's consults).
+    assert engine._consulted_domains("wang", thread.thread_id) == frozenset({"chemistry"})
 
 
 @pytest.mark.asyncio

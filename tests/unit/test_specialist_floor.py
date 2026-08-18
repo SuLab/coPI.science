@@ -60,15 +60,16 @@ def test_recording_a_consult_is_keyed_by_thread():
     eng._record_consult("gill", "chemistry")
     eng._record_consult("gill", "legal")
     eng._record_consult("pearce", "scientific")
-    assert eng._specialist_consults["gill"] == {"chemistry", "legal"}
-    assert eng._specialist_consults["pearce"] == {"scientific"}
+    # No thread_id given -> keyed under the None-keyed slot for each PI.
+    assert eng._specialist_consults[("gill", None)] == {"chemistry", "legal"}
+    assert eng._specialist_consults[("pearce", None)] == {"scientific"}
 
 
 def test_recording_the_same_domain_twice_is_idempotent():
     eng = _engine(_hub())
     eng._record_consult("gill", "chemistry")
     eng._record_consult("gill", "chemistry")
-    assert eng._specialist_consults["gill"] == {"chemistry"}
+    assert eng._specialist_consults[("gill", None)] == {"chemistry"}
 
 
 def test_consults_for_an_unknown_thread_read_as_empty():
@@ -157,15 +158,18 @@ def test_fail_open_applies_only_to_a_thread_with_NO_consults():
     }
 
 
-# --- the join key: PI, not thread --------------------------------------------
-#
-# An assessment is a NEW TOP-LEVEL POST, never a reply in the interview thread,
-# so `_persist_assessment` has no thread_id to offer. Keying the consult record
-# on thread_id therefore made the floor read an empty set every single time and
-# fail open on every verdict — enforcing nothing, while looking enforced.
+# --- the join key: the PI half -----------------------------------------------
 #
 # The interview thread knows the PI as `other_agent_id`; the verdict names the
-# same PI as `subject_agent_id`. The PI is the join key; the thread never was.
+# same PI as `subject_agent_id`. That identity is still half of the join key
+# today. (The other half is the thread — see
+# test_a_second_interview_does_not_inherit_the_first_ones_consults and
+# test_the_floor_reads_the_consults_of_this_interview_only below, and
+# `_specialist_floor_gap`'s docstring: keying on the PI alone let a PI's
+# second interview inherit the first interview's consults and skip its own
+# panel.) None of the tests in this section pass a `thread_id`, so they all
+# read and write the same `(pi, None)` slot and still exercise the PI-name
+# half of the join on its own.
 
 
 def test_consults_are_recorded_against_the_pi_not_the_thread():
@@ -268,3 +272,46 @@ def test_specialist_floor_gap_thread_none_falls_back_to_live_global():
     # Empty map overall -> fails open, exactly as before this change.
     assert eng._specialist_floor_gap(verdict) == set()
     assert eng._specialist_floor_gap(verdict, thread=None) == set()
+
+
+def test_a_second_interview_does_not_inherit_the_first_ones_consults():
+    """One PI, two interviews: the second must convene its own panel.
+
+    `huganir` was assessed 4 times in run 1787010946 and `hart` 4 times. Under
+    PI-only keying every assessment after the first rode on the first
+    interview's consults.
+    """
+    eng = _engine(_hub())
+    eng._record_consult("huganir", "chemistry", thread_id="t1")
+
+    assert eng._consulted_domains("huganir", "t1") == frozenset({"chemistry"})
+    assert eng._consulted_domains("huganir", "t2") == frozenset(), (
+        "a different interview with the same PI starts with no panel"
+    )
+
+
+def test_the_floor_reads_the_consults_of_this_interview_only():
+    eng = _engine(_hub())
+    thread_one = _activated_thread(eng, "t1", other_agent_id="huganir")
+    for domain in ("scientific", "talent"):
+        eng._record_consult("huganir", domain, thread_id="t1")
+    thread_two = _activated_thread(eng, "t2", other_agent_id="huganir")
+    thread_two.floor_armed = True
+
+    verdict = {
+        "subject_agent_id": "huganir",
+        "recommendation": "advance",
+        "rationale": "No cues here.",
+    }
+    assert eng._specialist_floor_gap(verdict, thread=thread_one) == set()
+    assert eng._specialist_floor_gap(verdict, thread=thread_two) == {
+        "scientific", "talent",
+    }
+
+
+def test_a_consult_without_a_thread_is_still_recorded():
+    """Direct callers and pre-existing tests pass no thread; they must keep
+    working, keyed under a None interview."""
+    eng = _engine(_hub())
+    eng._record_consult("huganir", "scientific")
+    assert eng._consulted_domains("huganir") == frozenset({"scientific"})

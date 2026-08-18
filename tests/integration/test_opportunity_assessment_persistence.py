@@ -734,10 +734,15 @@ async def _drive_reply_to_thread(
     restores after a restart).
 
     ``pre_consults``, an iterable of ``(pi_agent_id, domain)`` pairs, is
-    recorded on the engine's live ``_specialist_consults`` map BEFORE
-    `_reply_to_thread` runs — simulating consults recorded on earlier turns of
-    this same interview (or any other), i.e. before this turn's own
-    top-of-turn latch reads the map.
+    recorded on the engine's live ``_specialist_consults`` map, keyed under
+    THIS thread's own id (``"t1"``), BEFORE `_reply_to_thread` runs —
+    simulating consults recorded on an earlier turn of this same interview,
+    i.e. before this turn's own top-of-turn latch reads the map. A pair naming
+    a different PI than the thread's subject still works as "some other
+    interview's consult" for tests that only care about the global map's
+    emptiness (``floor_armed``), since the join key's PI half will not match
+    this thread's subject regardless of which thread id the pair is keyed
+    under.
 
     ``on_generate``, if given, is called (with the engine) from INSIDE the
     faked ``generate_with_tools`` — i.e. AFTER `_reply_to_thread`'s
@@ -772,7 +777,7 @@ async def _drive_reply_to_thread(
         session_factory=factory, simulation_run_id=run_id,
     )
     for pi, domain in pre_consults:
-        sim._record_consult(pi, domain)
+        sim._record_consult(pi, domain, thread.thread_id)
     # Bypass real prompt construction (profile files on disk, etc.) — this
     # class tests what happens AFTER the LLM responds, not prompt building.
     monkeypatch.setattr(agent, "build_phase4_prompt", lambda **kw: ("sys", []))
