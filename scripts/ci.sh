@@ -77,6 +77,10 @@ LINT_TARGETS=(
   # against a live database during an outage window, so it gets held to the same bar.
   # Verified at zero findings when added 2026-08-04.
   scripts/migrate
+  # The backup tooling, same reasoning: it runs as root on the host against both
+  # production databases and decides what gets deleted. Added 2026-08-18 at zero
+  # findings. See docs/specs/2026-08-18-postgres-backup-verification-design.md.
+  scripts/backup
 )
 
 if [ ! -x "$VENV_PY" ]; then
