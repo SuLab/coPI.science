@@ -131,3 +131,82 @@ def plan_seed(
         pair for pair in existing_memberships - wanted if pair[0] in managed
     ))
     return SeedPlan(to_create, to_add, extra)
+
+
+async def apply_plan(
+    db: Any,
+    manifest: dict[str, Any],
+    plan: SeedPlan,
+    *,
+    actor: Any | None = None,
+    prune: bool = False,
+) -> None:
+    """Write the plan. Flushes but does NOT commit — the caller owns the transaction.
+
+    Every mutation is audited. blackbird's 62 cohorts were inserted by direct SQL
+    and carry no `created`/`agent_added` rows, so there is no record of who added
+    whom or when; that is the specific failure this function exists to avoid.
+
+    `actor` is None for script runs. That leaves `actor_id`/`actor_email` null,
+    which is honest — a cron-style seed has no human actor, and inventing one
+    would attribute the change to somebody who did not make it.
+    """
+    from sqlalchemy import delete, select
+
+    from src.models import Cohort, CohortMembership
+    from src.models.cohort import (
+        COHORT_ACTION_AGENT_ADDED,
+        COHORT_ACTION_AGENT_REMOVED,
+        COHORT_ACTION_CREATED,
+    )
+    from src.services.cohorts import record_cohort_audit_event
+
+    ids_by_name: dict[str, Any] = {
+        name: cid for cid, name in await db.execute(select(Cohort.id, Cohort.name))
+    }
+
+    for name in plan.cohorts_to_create:
+        body = manifest["cohorts"][name]
+        cohort = Cohort(name=name, description=body["description"])
+        db.add(cohort)
+        await db.flush()
+        ids_by_name[name] = cohort.id
+        await record_cohort_audit_event(
+            db,
+            action=COHORT_ACTION_CREATED,
+            cohort_name=name,
+            cohort_id=cohort.id,
+            actor=actor,
+        )
+
+    for name, agent_id in plan.memberships_to_add:
+        cohort_id = ids_by_name[name]
+        db.add(CohortMembership(cohort_id=cohort_id, agent_id=agent_id))
+        await record_cohort_audit_event(
+            db,
+            action=COHORT_ACTION_AGENT_ADDED,
+            cohort_name=name,
+            cohort_id=cohort_id,
+            agent_id=agent_id,
+            actor=actor,
+        )
+
+    if prune:
+        for name, agent_id in plan.extra_memberships:
+            cohort_id = ids_by_name[name]
+            await db.execute(
+                delete(CohortMembership).where(
+                    CohortMembership.cohort_id == cohort_id,
+                    CohortMembership.agent_id == agent_id,
+                )
+            )
+            await record_cohort_audit_event(
+                db,
+                action=COHORT_ACTION_AGENT_REMOVED,
+                cohort_name=name,
+                cohort_id=cohort_id,
+                agent_id=agent_id,
+                actor=actor,
+            )
+
+    await db.flush()
