@@ -71,7 +71,7 @@ EXIT_OK = 0
 EXIT_BLOCKED = 1
 EXIT_WARN = 2
 
-DEFAULT_TARGET = "0028"
+DEFAULT_TARGET = "0029"
 #: Revisions this migration path has been exercised from.
 #:
 #: 0020 and 0021 are here because origin/main's own alembic head is 0021 (PR19). A
@@ -80,26 +80,28 @@ DEFAULT_TARGET = "0028"
 #: it ("migrate from 0018 or 0019") described where production was at the time, not where
 #: main is.
 #:
-#: 0023, 0024, 0025, 0026 and 0027 were each added here for the same reason: production's
-#: stamp at the time its target moved past them (0023 -> 0024, then 0024 -> 0025, then
-#: 0025 -> 0026, then 0026 -> 0027, then 0027 -> 0028 — see git history on this constant).
-#: Each stays supported afterward; nothing here narrows. An earlier version of this
-#: comment claimed 0026 was "already done" and handled by the current == target branch of
-#: revision_status() instead of by membership in this tuple — that stopped being true the
-#: moment DEFAULT_TARGET moved past 0026 (first to 0027, then to 0028 here), and the same
-#: went stale for 0027 the moment DEFAULT_TARGET moved past IT. Concretely: with
-#: DEFAULT_TARGET at 0028 and 0026/0027 absent from this tuple, a database stamped 0027 is
-#: neither current == target nor a supported start, so revision_status() BLOCKS the very
-#: migration (0028) this task adds. Adding both here is the fix.
+#: 0023, 0024, 0025, 0026, 0027 and 0028 were each added here for the same reason:
+#: production's stamp at the time its target moved past them (0023 -> 0024, then
+#: 0024 -> 0025, then 0025 -> 0026, then 0026 -> 0027, then 0027 -> 0028, then
+#: 0028 -> 0029 — see git history on this constant). Each stays supported afterward;
+#: nothing here narrows. An earlier version of this comment claimed 0026 was "already
+#: done" and handled by the current == target branch of revision_status() instead of by
+#: membership in this tuple — that stopped being true the moment DEFAULT_TARGET moved
+#: past 0026 (first to 0027, then to 0028, then to 0029 here), and the same went stale
+#: for 0027 the moment DEFAULT_TARGET moved past IT. Concretely: with DEFAULT_TARGET at
+#: 0029 and 0026/0027/0028 absent from this tuple, a database stamped 0028 is neither
+#: current == target nor a supported start, so revision_status() BLOCKS the very
+#: migration (0029) this task adds. Adding all three here is the fix.
 #:
 #: Starting at 0020/0021 is strictly safer than starting at 0018: uq_agent_messages_run_ts
 #: already exists, so duplicates cannot be present and there is no 0019 index build to
 #: wait on. All that remains is 0022 (three empty tables), 0023 (three columns on the small
 #: researcher_profiles), 0024 (one column on agents), 0025 (one new table,
-#: opportunity_assessments), 0026 (drop grantbot_posted_foas) and 0027 (one new table,
-#: assessment_drops).
+#: opportunity_assessments), 0026 (drop grantbot_posted_foas), 0027 (one new table,
+#: assessment_drops), 0028 (one column + one constraint on users) and 0029 (two columns
+#: on opportunity_assessments).
 SUPPORTED_START_REVISIONS = (
-    "0018", "0019", "0020", "0021", "0023", "0024", "0025", "0026", "0027",
+    "0018", "0019", "0020", "0021", "0023", "0024", "0025", "0026", "0027", "0028",
 )
 
 #: Start revisions at which migration 0019 has already run, so the expensive
@@ -240,10 +242,14 @@ PLANNED_OBJECTS: tuple[PlannedObject, ...] = (
     # 0028_add_user_role
     PlannedObject("0028", "column", "user_role", "users"),
     PlannedObject("0028", "constraint", "ck_users_user_role", "users"),
+    # 0029_add_panel_incomplete
+    PlannedObject("0029", "column", "panel_incomplete", "opportunity_assessments"),
+    PlannedObject("0029", "column", "missing_domains", "opportunity_assessments"),
 )
 
 REVISION_ORDER = (
     "0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027", "0028",
+    "0029",
 )
 
 

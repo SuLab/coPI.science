@@ -239,7 +239,7 @@ authoritative.)
 `hybrid_property` over `user_role`, so it still works in both SQL
 (`select(User.is_admin)`) and Python, but **cannot be assigned**. Set the role
 instead. The physical `users.is_admin` column stays in the database, unmapped and
-defaulted. Dropping it is deferred to a separate later migration, `0029`, which **has
+defaulted. Dropping it is deferred to a separate later migration, `0030`, which **has
 not been written, let alone applied** — see the design doc's §8.
 
 > **Deploy order for `0028_add_user_role` — migrate BEFORE the new code serves.**

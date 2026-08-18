@@ -15,7 +15,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Float, ForeignKey, String, Text, func
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, String, Text, func, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -56,6 +56,20 @@ class OpportunityAssessment(Base):
     rationale: Mapped[str | None] = mapped_column(Text, nullable=True)
     # The verdict exactly as emitted, so a schema change never loses the original.
     raw_verdict: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+
+    # The specialist floor's finding, recorded rather than enforced by
+    # discarding. `_specialist_floor_gap` used to REFUSE an advance/conditional
+    # verdict whose panel was never convened — but it runs after the concluding
+    # reply is already in Slack, so refusing meant the PI had been told and
+    # Blackbird kept nothing. Both production refusals (gordy, 2026-08-17) lost
+    # a real conditional verdict that way. Storing it flagged keeps the record
+    # and keeps the warning; it does not mean the gap is acceptable.
+    panel_incomplete: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    # Which domains were missing. NULL when there was no gap — distinct from
+    # [] which would mean a gap whose domains we failed to name.
+    missing_domains: Mapped[list | None] = mapped_column(JSONB, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
