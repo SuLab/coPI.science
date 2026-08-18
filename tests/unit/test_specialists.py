@@ -298,11 +298,29 @@ def test_also_and_signals_do_not_summon_the_clinical_specialist():
         ), f"{word!r} must not read as ALS"
 
 
+def test_compounding_reasons_does_not_summon_the_chemistry_specialist():
+    """'compound' must not match 'compounding'.
+
+    On the real `coller` production verdict, "several compounding reasons"
+    was the ONLY chemistry cue present, so it alone decided the requirement.
+    Fix round 1: moved "compound" from the prefix tier into
+    `_WORD_ONLY_CUES` because the false-positive class this task exists to
+    close survived there via a prefix cue.
+    """
+    assert "chemistry" not in required_domains_for(
+        _verdict(
+            "This does not clear the bar for several compounding reasons."
+        )
+    )
+
+
 def test_genuine_cues_still_match():
     """Narrowing must not become blindness."""
     assert "chemistry" in required_domains_for(_verdict("We have ASOs in hand."))
     assert "chemistry" in required_domains_for(_verdict("An aso-based approach."))
     assert "chemistry" in required_domains_for(_verdict("A known-compound series."))
+    assert "chemistry" in required_domains_for(_verdict("We have a lead compound."))
+    assert "chemistry" in required_domains_for(_verdict("Several compounds in hand."))
     assert "chemistry" in required_domains_for(
         _verdict("Medicinal chemistry is tractable.")
     )

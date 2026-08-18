@@ -22,7 +22,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass
-from functools import lru_cache
+from functools import cache
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -184,8 +184,9 @@ def parse_opinion(raw: str, *, domain: str) -> SpecialistOpinion:
     )
 
 
-# Substrings that make a domain required. Deliberately broad: a false positive
-# costs one consult, a false negative costs the whole point of the floor.
+# Cues that make a domain required. Matched via `_cue_matches` below, not raw
+# substring containment — see `_WORD_ONLY_CUES` and `_cue_pattern` for how a
+# cue like "compound" is kept from firing on "compounding".
 _CHEMISTRY_CUES = (
     "small molecule", "compound", "inhibitor", "activator", "antagonist",
     "agonist", "chemical matter", "medicinal chem", "antibody", "adc",
@@ -202,19 +203,20 @@ _PLATFORM_CUES = ("platform", "pipeline", "multiple shots", "reusable")
 _ALWAYS: frozenset[str] = frozenset({"scientific", "talent"})
 
 
-# Cues short enough to appear inside unrelated English. These match as WHOLE
-# WORDS (plus a simple plural); every other cue stays prefix-anchored so stems
-# like "medicinal chem" -> "medicinal chemistry" and "neurodegener" ->
-# "neurodegeneration" keep working.
+# Cues with a DEMONSTRATED false-positive risk in the corpus — not simply the
+# short ones. These match as WHOLE WORDS (plus a simple plural); every other
+# cue stays prefix-anchored so stems like "medicinal chem" -> "medicinal
+# chemistry" and "neurodegener" -> "neurodegeneration" keep working.
 #
 # Measured on the 18 production verdicts of run 1787010946: "aso" matched
-# "reasons" on 7, "hit" matched "architecture" on 6, and "als" matched
-# "also"/"signals"/"animals"/"journals" on 9. Three verdicts had a specialist
-# required by one of these ALONE.
-_WORD_ONLY_CUES: frozenset[str] = frozenset({"als", "aso", "hit", "adc"})
+# "reasons" on 7, "hit" matched "architecture" on 6, "als" matched
+# "also"/"signals"/"animals"/"journals" on 9, and "compound" matched
+# "compounding" (as in "several compounding reasons") on at least one. Four
+# verdicts had a specialist required by one of these ALONE.
+_WORD_ONLY_CUES: frozenset[str] = frozenset({"als", "aso", "hit", "adc", "compound"})
 
 
-@lru_cache(maxsize=None)
+@cache
 def _cue_pattern(cue: str) -> re.Pattern[str]:
     escaped = re.escape(cue)
     if cue in _WORD_ONLY_CUES:
