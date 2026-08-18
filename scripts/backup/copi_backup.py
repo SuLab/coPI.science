@@ -339,3 +339,131 @@ def verify_run_argv(
         "-v", f"{host_dump}:/dump.bin:ro",
         cfg.verify_image,
     ]
+
+
+class BackupError(Exception):
+    """A failure that should mark the run failed and be reported by mail."""
+
+
+def terminate_sql(sql: str) -> str:
+    """Ensure a statement ends in a semicolon before it is fed to psql's stdin.
+
+    Load-bearing, not cosmetic. psql buffers an unterminated statement and executes
+    the following ``\\echo`` backslash command IMMEDIATELY, so the sentinel arrives
+    before the rows do and the reader sees an empty result. Verified against the live
+    server 2026-08-18: the same multi-line query returns 30 rows with a trailing
+    semicolon and 0 rows without one, printing the sentinel first.
+
+    With COUNT_TABLES_SQL unterminated, the source snapshot counts come back ``{}``
+    while the restored counts are real, so every dump fails verification with one
+    spurious problem per table, is renamed ``.unverified``, is never pruned, and mails
+    three people every night until they stop reading the mail.
+    """
+    stripped = sql.strip()
+    if not stripped:
+        return ""
+    return stripped if stripped.endswith(";") else stripped + ";"
+
+
+SNAPSHOT_OPEN_SQL = (
+    "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ; "
+    "SET LOCAL idle_in_transaction_session_timeout = 0; "
+    "SELECT pg_export_snapshot();"
+)
+
+
+def counts_sql(tables: list[str]) -> str:
+    """One statement returning ``schema.table|count`` per row, exact counts."""
+    if not tables:
+        return ""
+    parts = []
+    for qualified in tables:
+        schema, _, table = qualified.partition(".")
+        literal = qualified.replace("'", "''")
+        parts.append(
+            f"SELECT '{literal}' AS t, count(*) AS n FROM \"{schema}\".\"{table}\""
+        )
+    return " UNION ALL ".join(parts) + " ORDER BY 1"
+
+
+def parse_counts_output(stdout: str) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for line in stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        table, sep, raw = line.partition("|")
+        if not sep or not raw.strip().lstrip("-").isdigit():
+            raise BackupError(f"unparseable count row: {line!r}")
+        counts[table.strip()] = int(raw.strip())
+    return counts
+
+
+class SnapshotSession:
+    """Holds one REPEATABLE READ transaction open across the pg_dump.
+
+    Implemented as a long-lived ``docker exec -i psql`` process rather than repeated
+    one-shot execs: the exported snapshot is only valid while its exporting
+    transaction is open, so the connection must survive the dump.
+    """
+
+    def __init__(self, stack: Stack) -> None:
+        self.stack = stack
+        self.snapshot_id = ""
+        self._proc: subprocess.Popen[str] | None = None
+
+    def __enter__(self) -> SnapshotSession:
+        argv = docker_exec(
+            self.stack.container,
+            ["psql", "-U", self.stack.user, "-d", self.stack.db, "-tA", "-q"],
+        )
+        # stderr to DEVNULL, not PIPE: nothing reads it during the dump, and a psql
+        # NOTICE storm filling the 64K pipe buffer would deadlock the session that is
+        # holding the snapshot open.
+        self._proc = subprocess.Popen(
+            argv,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+        self.snapshot_id = self._send(SNAPSHOT_OPEN_SQL).strip().splitlines()[-1].strip()
+        if not self.snapshot_id:
+            raise BackupError(f"{self.stack.name}: pg_export_snapshot() returned nothing")
+        return self
+
+    def _send(self, sql: str) -> str:
+        if self._proc is None or self._proc.stdin is None or self._proc.stdout is None:
+            raise BackupError("snapshot session is not open")
+        sentinel = "__COPI_BACKUP_EOS__"
+        self._proc.stdin.write(f"{terminate_sql(sql)}\n\\echo {sentinel}\n")
+        self._proc.stdin.flush()
+        lines: list[str] = []
+        for line in self._proc.stdout:
+            if line.strip() == sentinel:
+                break
+            lines.append(line)
+        else:
+            raise BackupError(f"{self.stack.name}: psql session closed unexpectedly")
+        return "".join(lines)
+
+    def counts(self) -> dict[str, int]:
+        """Exact per-table counts, read in the SAME snapshot the dump used."""
+        listing = self._send(COUNT_TABLES_SQL)
+        tables = [line.strip() for line in listing.splitlines() if line.strip()]
+        sql = counts_sql(tables)
+        if not sql:
+            return {}
+        return parse_counts_output(self._send(sql))
+
+    def __exit__(self, *exc: object) -> None:
+        if self._proc is None:
+            return
+        try:
+            if self._proc.stdin is not None:
+                self._proc.stdin.write("COMMIT;\n\\q\n")
+                self._proc.stdin.flush()
+                self._proc.stdin.close()
+            self._proc.wait(timeout=30)
+        except Exception:  # teardown must never mask the original error
+            self._proc.kill()

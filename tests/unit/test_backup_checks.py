@@ -259,3 +259,62 @@ def test_fake_runner_records_calls():
     fake = cb.FakeRunner({"docker version": "ok"})
     fake.run(["docker", "version"])
     assert fake.calls == [["docker", "version"]]
+
+
+def test_snapshot_sql_disables_idle_timeout_before_exporting():
+    # If idle_in_transaction_session_timeout were non-zero the server would kill the
+    # session while pg_dump runs, invalidating the snapshot. Both servers are at 0
+    # today; setting it explicitly means a future server-config change cannot
+    # silently break backups.
+    sql = cb.SNAPSHOT_OPEN_SQL
+    assert "REPEATABLE READ" in sql
+    assert "idle_in_transaction_session_timeout" in sql
+    assert sql.index("idle_in_transaction_session_timeout") < sql.index("pg_export_snapshot")
+
+
+def test_count_sql_for_tables_builds_one_union_per_table():
+    sql = cb.counts_sql(["public.users", "public.jobs"])
+    assert sql.count("UNION ALL") == 1
+    assert "public.users" in sql and "public.jobs" in sql
+    assert "count(*)" in sql
+
+
+def test_terminate_sql_appends_missing_semicolon():
+    # psql executes a following \echo immediately when the statement is still
+    # buffered, so the sentinel would arrive before the rows. Verified live: same
+    # query returns 30 rows terminated, 0 rows unterminated.
+    assert cb.terminate_sql("SELECT 1") == "SELECT 1;"
+    assert cb.terminate_sql("  SELECT 1  \n") == "SELECT 1;"
+
+
+def test_terminate_sql_leaves_an_already_terminated_statement_alone():
+    assert cb.terminate_sql("SELECT 1;") == "SELECT 1;"
+    assert cb.terminate_sql("\nSELECT 1;\n") == "SELECT 1;"
+
+
+def test_terminate_sql_on_empty_input_is_empty():
+    assert cb.terminate_sql("   \n ") == ""
+
+
+def test_plan_sql_constants_survive_termination():
+    # The two constants that are fed through _send are both unterminated as written.
+    assert cb.terminate_sql(cb.COUNT_TABLES_SQL).endswith(";")
+    assert cb.terminate_sql(cb.counts_sql(["public.a"])).endswith(";")
+
+
+def test_count_sql_for_no_tables_is_a_no_op_select():
+    assert cb.counts_sql([]) == ""
+
+
+def test_parse_counts_output_reads_pipe_separated_pairs():
+    out = "public.users|412\npublic.jobs|0\n"
+    assert cb.parse_counts_output(out) == {"public.users": 412, "public.jobs": 0}
+
+
+def test_parse_counts_output_ignores_blank_lines():
+    assert cb.parse_counts_output("public.a|1\n\n  \n") == {"public.a": 1}
+
+
+def test_parse_counts_output_rejects_malformed_rows():
+    with pytest.raises(cb.BackupError, match="unparseable count row"):
+        cb.parse_counts_output("public.a|not-a-number\n")
