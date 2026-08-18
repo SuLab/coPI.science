@@ -140,6 +140,33 @@ def _pairs(response) -> set[frozenset]:
     return {frozenset((link["source"], link["target"])) for link in _payload(response)["links"]}
 
 
+async def _two_agents_with_a_proposal(db_session, agent_a: str, agent_b: str):
+    """Two agents joined by one in-window public proposal. Returns their ids.
+
+    Dates are chosen to sit inside /scripps-graph's default window, which starts
+    at CABO_WINDOW_START (2026-03-01) and is unbounded above.
+    """
+    run = await factories.make_simulation_run(db_session)
+    for aid in (agent_a, agent_b):
+        user = await factories.make_user(db_session, email=f"{aid}@example.org")
+        await factories.make_agent(
+            db_session, user=user, agent_id=aid, bot_name=f"{aid.title()}Bot",
+            pi_name=f"PI {aid}", status="active",
+        )
+    ts = "1780000000.000100"
+    await factories.make_agent_message(
+        db_session, run=run, agent_id=agent_a, phase="new_post", message_ts=ts,
+        created_at=datetime(2026, 4, 1, tzinfo=UTC),
+    )
+    await factories.make_thread_decision(
+        db_session, run=run, agent_a=agent_a, agent_b=agent_b, thread_id=ts,
+        outcome="proposal", origin_visibility="public",
+        decided_at=datetime(2026, 4, 2, tzinfo=UTC),
+    )
+    await db_session.flush()
+    return agent_a, agent_b
+
+
 def test_the_payload_extractor_distinguishes_populated_from_empty():
     """Control for the helper every assertion below leans on. An extractor that
     returned ``{}`` on every page would make the link assertions vacuous."""
@@ -761,3 +788,87 @@ def test_the_declared_windows_do_not_overlap_or_invert():
     assert JUNE_POST_START <= SCHULTZ_PILOT_START
     assert JUNE_POST_START <= SCHULTZ_GROUP_START
     assert CABO_END <= SCHULTZ_PILOT_START, "the Cabo and June windows overlap"
+
+
+class TestScrippsGraphUsesTheCohort:
+    """/scripps-graph selects nodes from the scripps-investigators cohort.
+
+    The hardcoded _SCRIPPS set it used before is stale by nine Scripps/Calibr PIs
+    (bollong, chatterjee, diercks, droujinine, good, hogenesch, mcnamara, yliu,
+    alanjary), every one of them invisible on the page. The cohort is now the
+    roster of record; _SCRIPPS survives only as a fallback and as the Cabo-window
+    institution map, which must NOT move.
+    """
+
+    async def test_cohort_member_outside_the_hardcoded_set_is_selected(
+        self, client, db_session
+    ):
+        from src.models import Cohort, CohortMembership
+        from src.routers import public as public_mod
+
+        assert "droujinine" not in public_mod._SCRIPPS  # the premise
+
+        a, b = await _two_agents_with_a_proposal(db_session, "droujinine", "good")
+        cohort = Cohort(name="scripps-investigators", description="d")
+        db_session.add(cohort)
+        await db_session.flush()
+        for aid in (a, b):
+            db_session.add(CohortMembership(cohort_id=cohort.id, agent_id=aid))
+        await db_session.commit()
+
+        payload = _payload(await _get(client, "/scripps-graph"))
+
+        assert {n["id"] for n in payload["nodes"]} == {"droujinine", "good"}
+
+    async def test_falls_back_to_hardcoded_set_when_cohort_absent(
+        self, client, db_session
+    ):
+        """The route must not break before Task 5 runs in production."""
+        from src.routers import public as public_mod
+
+        assert "cravatt" in public_mod._SCRIPPS  # the premise
+
+        await _two_agents_with_a_proposal(db_session, "cravatt", "petrascheck")
+        await db_session.commit()
+
+        response = await _get(client, "/scripps-graph")
+
+        assert response.status_code == 200
+        assert {n["id"] for n in _payload(response)["nodes"]} == {
+            "cravatt", "petrascheck"
+        }
+
+    async def test_every_node_colors_as_scripps(self, client, db_session):
+        """On a Scripps-only view nothing may fall through to 'Other'."""
+        from src.models import Cohort, CohortMembership
+
+        a, b = await _two_agents_with_a_proposal(db_session, "droujinine", "good")
+        cohort = Cohort(name="scripps-investigators", description="d")
+        db_session.add(cohort)
+        await db_session.flush()
+        for aid in (a, b):
+            db_session.add(CohortMembership(cohort_id=cohort.id, agent_id=aid))
+        await db_session.commit()
+
+        payload = _payload(await _get(client, "/scripps-graph"))
+
+        assert {n["institution"] for n in payload["nodes"]} == {"Scripps"}
+
+    async def test_cabo_graph_coloring_is_untouched_by_the_cohort(
+        self, client, db_session
+    ):
+        """_institution_for is a historical Apr-May map. Seeding must not redraw it."""
+        from src.models import Cohort, CohortMembership
+        from src.routers import public as public_mod
+
+        assert public_mod._institution_for("sali") == "UCSF"
+        assert public_mod._institution_for("droujinine") == "Other"
+
+        cohort = Cohort(name="scripps-investigators", description="d")
+        db_session.add(cohort)
+        await db_session.flush()
+        db_session.add(CohortMembership(cohort_id=cohort.id, agent_id="droujinine"))
+        await db_session.commit()
+
+        assert public_mod._institution_for("sali") == "UCSF"
+        assert public_mod._institution_for("droujinine") == "Other"

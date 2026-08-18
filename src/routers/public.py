@@ -88,9 +88,16 @@ def _render_graph(request: Request, context: dict) -> HTMLResponse:
     response.headers["Content-Security-Policy"] = _graph_csp(nonce)
     return response
 
-# Institution mapping for the Cabo collaboration graph. This is an independent
-# hardcoded grouping of agent_ids by institution (the agent roster itself now
-# lives in the AgentRegistry table).
+# Institution map for the **Cabo run window** (Apr 27 - May 7 2026), used by
+# _institution_for to colour /cabo-graph's legacy Scripps/UCSF/Other legend. It is
+# a historical snapshot and is correct for that window — do not "refresh" it, or a
+# published graph silently redraws.
+#
+# It is NOT the current Scripps roster: as of 2026-08-18 it omits nine
+# Scripps/Calibr PIs (alanjary, bollong, chatterjee, diercks, droujinine, good,
+# hogenesch, mcnamara, yliu). /scripps-graph therefore selects its nodes from the
+# `scripps-investigators` cohort and only falls back here when that cohort is
+# missing. See docs/specs/2026-08-18-cohort-seeding-design.md §5.
 _SCRIPPS = {
     # Active Cabo run window
     "su", "wiseman", "grotjahn", "ward", "briney", "forli", "lairson",
@@ -111,6 +118,30 @@ _OTHER_INST = {
     "azumaya": "Genentech",
     "nomura": "UC Berkeley",
 }
+
+# /scripps-graph selects its nodes from this cohort, not from _SCRIPPS. See
+# docs/specs/2026-08-18-cohort-seeding-design.md §5 and
+# docs/plans/2026-08-18-cohort-seeding.md.
+SCRIPPS_COHORT_NAME = "scripps-investigators"
+
+
+async def _scripps_agent_ids(db: AsyncSession) -> set[str] | None:
+    """Agent IDs in the scripps-investigators cohort, or None if there are none.
+
+    None means "cohort absent or empty" and tells the caller to fall back to
+    _SCRIPPS. Returning the empty set instead would render an empty graph, which
+    looks like a data problem rather than an un-seeded database.
+    """
+    rows = await db.execute(
+        text(
+            "SELECT m.agent_id FROM cohort_memberships m "
+            "JOIN cohorts c ON c.id = m.cohort_id "
+            "WHERE c.name = :name"
+        ),
+        {"name": SCRIPPS_COHORT_NAME},
+    )
+    return {r.agent_id for r in rows} or None
+
 
 # Run-window cutover for the Cabo retreat graph: matches commit 0ef4741
 # (the Cabo retreat roster reshape). All proposals to date share a single
@@ -629,7 +660,16 @@ async def _build_graph_payload(
         nodes_result = await db.execute(
             text("SELECT agent_id, pi_name, bot_name FROM agents ORDER BY pi_name")
         )
-        active_rows = [r for r in nodes_result.fetchall() if r.agent_id in _SCRIPPS]
+        selector = await _scripps_agent_ids(db)
+        if selector is None:
+            logger.warning(
+                "[graph] cohort %r is absent or empty; falling back to the "
+                "hardcoded _SCRIPPS set, which is stale — run "
+                "scripts/seed_cohorts.py",
+                SCRIPPS_COHORT_NAME,
+            )
+            selector = _SCRIPPS
+        active_rows = [r for r in nodes_result.fetchall() if r.agent_id in selector]
     elif all_agents:
         nodes_result = await db.execute(
             text(
@@ -653,6 +693,10 @@ async def _build_graph_payload(
     if use_profile_institution:
         inst_map = _group_institutions([row.institution for row in active_rows])
         institution_of = lambda row: inst_map[row.institution]  # noqa: E731
+    elif scripps_only:
+        # Every node on this view is Scripps by construction. Without this branch
+        # the nine cohort members absent from _SCRIPPS would colour as "Other".
+        institution_of = lambda row: "Scripps"  # noqa: E731
     else:
         institution_of = lambda row: _institution_for(row.agent_id)  # noqa: E731
 
