@@ -18,11 +18,15 @@
 - Cohort names must match `^[a-z0-9-]{1,48}$` — the same rule `src/routers/admin.py:1389` enforces.
 - Unit tests take no marker. Integration tests set `pytestmark = pytest.mark.integration`.
 - Full gate is `./scripts/ci.sh` (alembic sanity, ruff on tests, pytest with a branch-coverage floor of `COV_MIN`, default 60).
-- Per `CLAUDE.md`, run pytest inside the container with an explicit `TEST_DATABASE_URL` pointing at a scratch database — **never** at `copi`:
-  ```bash
-  docker compose exec -T -e TEST_DATABASE_URL=postgresql+asyncpg://copi:copi@postgres:5432/copi_a3 \
-      app python -m pytest tests/ -v
-  ```
+- **This command is WRONG — do not use it. See "## Operational notes" at the end of
+  this document.** As originally written this section said to run pytest inside the
+  container with an explicit `TEST_DATABASE_URL` pointing at a scratch database, via
+  `docker compose exec -T -e TEST_DATABASE_URL=postgresql+asyncpg://copi:copi@postgres:5432/copi_a3
+  app python -m pytest tests/ -v`. That container has no pytest installed and bakes
+  `src/`/`tests/` rather than bind-mounting them, so it would run stale code even if
+  it had one; `copi_a3` also does not exist. Use
+  `.superpowers/sdd/2026-08-18-cohort-seeding/run-tests.sh <paths> -v` instead, which
+  runs the host `.venv-test` against working-tree code with a real scratch DB.
 
 ---
 
@@ -231,7 +235,7 @@ class TestValidateManifest:
 
 - [ ] **Step 3: Run the tests to verify they fail**
 
-Run: `docker compose exec -T -e TEST_DATABASE_URL=postgresql+asyncpg://copi:copi@postgres:5432/copi_a3 app python -m pytest tests/unit/test_cohort_seed.py -v`
+Run: `./.superpowers/sdd/2026-08-18-cohort-seeding/run-tests.sh tests/unit/test_cohort_seed.py -v`
 
 Expected: FAIL — `ModuleNotFoundError: No module named 'src.services.cohort_seed'`
 
@@ -321,7 +325,7 @@ def validate_manifest(
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
-Run: `docker compose exec -T -e TEST_DATABASE_URL=postgresql+asyncpg://copi:copi@postgres:5432/copi_a3 app python -m pytest tests/unit/test_cohort_seed.py -v`
+Run: `./.superpowers/sdd/2026-08-18-cohort-seeding/run-tests.sh tests/unit/test_cohort_seed.py -v`
 
 Expected: PASS, 16 tests.
 
@@ -426,7 +430,7 @@ class TestPlanSeed:
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `docker compose exec -T -e TEST_DATABASE_URL=postgresql+asyncpg://copi:copi@postgres:5432/copi_a3 app python -m pytest tests/unit/test_cohort_seed.py::TestPlanSeed -v`
+Run: `./.superpowers/sdd/2026-08-18-cohort-seeding/run-tests.sh tests/unit/test_cohort_seed.py::TestPlanSeed -v`
 
 Expected: FAIL — `ImportError: cannot import name 'SeedPlan'`
 
@@ -490,7 +494,7 @@ def plan_seed(
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `docker compose exec -T -e TEST_DATABASE_URL=postgresql+asyncpg://copi:copi@postgres:5432/copi_a3 app python -m pytest tests/unit/test_cohort_seed.py -v`
+Run: `./.superpowers/sdd/2026-08-18-cohort-seeding/run-tests.sh tests/unit/test_cohort_seed.py -v`
 
 Expected: PASS, 24 tests.
 
@@ -699,7 +703,7 @@ class TestGateStaysInert:
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `docker compose exec -T -e TEST_DATABASE_URL=postgresql+asyncpg://copi:copi@postgres:5432/copi_a3 app python -m pytest tests/integration/test_cohort_seed_apply.py -v`
+Run: `./.superpowers/sdd/2026-08-18-cohort-seeding/run-tests.sh tests/integration/test_cohort_seed_apply.py -v`
 
 Expected: FAIL — `ImportError: cannot import name 'apply_plan'`
 
@@ -789,7 +793,7 @@ async def apply_plan(
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `docker compose exec -T -e TEST_DATABASE_URL=postgresql+asyncpg://copi:copi@postgres:5432/copi_a3 app python -m pytest tests/integration/test_cohort_seed_apply.py -v`
+Run: `./.superpowers/sdd/2026-08-18-cohort-seeding/run-tests.sh tests/integration/test_cohort_seed_apply.py -v`
 
 Expected: PASS, 10 tests.
 
@@ -1075,7 +1079,7 @@ async def _two_agents_with_a_proposal(db_session, agent_a: str, agent_b: str):
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `docker compose exec -T -e TEST_DATABASE_URL=postgresql+asyncpg://copi:copi@postgres:5432/copi_a3 app python -m pytest tests/integration/test_public_graph.py::TestScrippsGraphUsesTheCohort -v`
+Run: `./.superpowers/sdd/2026-08-18-cohort-seeding/run-tests.sh tests/integration/test_public_graph.py::TestScrippsGraphUsesTheCohort -v`
 
 Expected: FAIL — `test_cohort_member_outside_the_hardcoded_set_is_selected` returns no nodes, because `droujinine` is filtered out by `_SCRIPPS`.
 
@@ -1162,7 +1166,7 @@ Replace the comment above `_SCRIPPS` (currently `src/routers/public.py:91-93`):
 
 - [ ] **Step 6: Run the tests to verify they pass**
 
-Run: `docker compose exec -T -e TEST_DATABASE_URL=postgresql+asyncpg://copi:copi@postgres:5432/copi_a3 app python -m pytest tests/integration/test_public_graph.py -v`
+Run: `./.superpowers/sdd/2026-08-18-cohort-seeding/run-tests.sh tests/integration/test_public_graph.py -v`
 
 Expected: PASS, including the four new tests and every pre-existing one — the Cabo, pilot and group-alumni windows must be unchanged.
 
@@ -1200,20 +1204,29 @@ snapshot and is deliberately untouched; a test pins that seeding cannot move it.
 - Consumes: `cohorts.json` and `scripts/seed_cohorts.py` from Tasks 1-3.
 - Produces: 3 cohorts and 148 membership rows in the `copi` database.
 
-- [ ] **Step 1: Copy the script and manifest into the running app container**
+- [ ] **Step 1: ~~Copy the script and manifest into the running app container~~ — WRONG, see "## Operational notes"**
 
-`docker-compose.prod.yml` bind-mounts only `./profiles` and `./prompts`, so new files are not visible to the container until copied or rebuilt.
+`docker cp` alone does not work: `docker-compose.prod.yml` bind-mounts only
+`./profiles` and `./prompts`, so a copied-in script is invisible to the running
+container, AND the app image `pip install`s a second copy of `src/` into
+site-packages, so even after a rebuild `python scripts/seed_cohorts.py` (run as a
+bare script, not a module) resolves `import src.services.cohort_seed` against
+that stale site-packages copy rather than the working tree. Run it from the host
+instead, against the running compose network, with the working tree mounted and
+invoked with `-m` so `src` resolves under the mount instead of site-packages:
 
 ```bash
-docker cp scripts/seed_cohorts.py copi-python-app-1:/app/scripts/
-docker cp cohorts.json copi-python-app-1:/app/
+docker run --rm --network copi-python_default \
+  -v /home/ubuntu/copi-python:/work -w /work \
+  copi-python-app python -m scripts.seed_cohorts --dry-run
 ```
 
 - [ ] **Step 2: Dry run and review the plan**
 
 ```bash
-export COMPOSE_FILE=docker-compose.prod.yml:docker-compose.override.yml
-docker compose exec -T app python scripts/seed_cohorts.py --dry-run
+docker run --rm --network copi-python_default \
+  -v /home/ubuntu/copi-python:/work -w /work \
+  copi-python-app python -m scripts.seed_cohorts --dry-run
 ```
 
 Expected on a first run:
@@ -1232,7 +1245,9 @@ in DB, not in manifest : 0
 - [ ] **Step 3: Apply**
 
 ```bash
-docker compose exec -T app python scripts/seed_cohorts.py
+docker run --rm --network copi-python_default \
+  -v /home/ubuntu/copi-python:/work -w /work \
+  copi-python-app python -m scripts.seed_cohorts
 ```
 
 Expected: `Applied: 3 cohort(s) created, 148 membership(s) added.`
@@ -1269,9 +1284,16 @@ Expected: `created | 3` and `agent_added | 148`.
 docker compose exec -T postgres psql -U copi -d copi -c \
   "SELECT topology->>'cohort_isolation_enabled' AS enabled,
           topology->>'gate_active' AS active
-   FROM cohort_audit_events WHERE topology IS NOT NULL
+   FROM cohort_audit_events WHERE action = 'topology_snapshot'
    ORDER BY created_at DESC LIMIT 1;"
 ```
+
+**This query was originally written as `WHERE topology IS NOT NULL`, which is
+wrong and is broken by this very seed** — see "## Operational notes". SQLAlchemy
+stores a Python `None` in a JSON column as JSON `null`, not SQL `NULL`, so every
+`created`/`agent_added` row this task writes (151 of them) also has
+`topology IS NOT NULL` true. The query above, filtered on
+`action = 'topology_snapshot'`, is the corrected form.
 
 The newest topology snapshot predates this task (the running `agent-run` only writes one at start and on membership change through the admin UI), so this reads `false | false`. Also confirm nothing changed for the agents:
 
@@ -1306,3 +1328,62 @@ DELETE FROM cohorts WHERE name IN
 ## Out of scope
 
 Enabling `cohort_isolation_enabled`, restarting `agent-run`, reactivating any agent, and the data defects in spec §2.2 (`hogenesch`'s institution conflict, the two seeded attendees with no agent row, `eppinger`'s missing token, the eight cabo members with empty institutions).
+
+## Operational notes
+
+Three recipes in this plan, as originally written, do not work. They have been
+corrected in place above; this section records why, so the knowledge survives a
+re-read of the plan rather than living only in `.superpowers/` (which is
+gitignored and not part of the repo's durable record).
+
+1. **The test command.** Every "Run: ..." step in Tasks 1-4 and the Global
+   Constraints section originally read
+   `docker compose exec -T -e TEST_DATABASE_URL=postgresql+asyncpg://copi:copi@postgres:5432/copi_a3
+   app python -m pytest ... -v`. This is broken on two independent counts: the
+   `app` container has no `pytest` installed at all, and it bakes `src/`/`tests/`
+   rather than bind-mounting them, so even if pytest were present it would test
+   stale code, not the working tree; separately, the database `copi_a3` does not
+   exist. The corrected form used throughout this document,
+   `.superpowers/sdd/2026-08-18-cohort-seeding/run-tests.sh <paths> -v`, runs the
+   host's `.venv-test` against working-tree code with a real scratch database.
+
+2. **Deploying a script or manifest change.** The original Task 5 Steps 1-3 (and
+   Task 3 Step 6's `--help` check) used `docker cp scripts/seed_cohorts.py
+   copi-python-app-1:/app/scripts/` followed by `docker compose exec -T app python
+   scripts/seed_cohorts.py`. Two problems: `docker-compose.prod.yml` bind-mounts
+   only `./profiles` and `./prompts`, so a copied-in file is invisible to the
+   running container unless the image is rebuilt; and even after a rebuild,
+   invoking the script as a bare file (`python scripts/seed_cohorts.py` rather
+   than `python -m scripts.seed_cohorts`) puts `scripts/` first on `sys.path`, so
+   `import src.services.cohort_seed` resolves against the second, STALE copy of
+   `src/` that the image's `pip install .` put in site-packages — an ImportError
+   today, silent version skew after the next rebuild. The corrected form runs from
+   the host against the running compose network, with the working tree mounted so
+   `src` resolves under the mount instead of site-packages, and invoked with `-m`
+   so `src` is importable as a package at all:
+   ```bash
+   docker run --rm --network copi-python_default \
+     -v /home/ubuntu/copi-python:/work -w /work \
+     copi-python-app python -m scripts.seed_cohorts --dry-run
+   ```
+   This is also documented in `scripts/seed_cohorts.py`'s own module docstring, so
+   it cannot drift from the running code the way this plan's copy did.
+
+3. **The gate-state verification query.** Task 5 Step 5 originally read
+   `... FROM cohort_audit_events WHERE topology IS NOT NULL ORDER BY created_at
+   DESC LIMIT 1`, intending to find the most recent `topology_snapshot` row. This
+   seed is exactly what breaks that query: SQLAlchemy stores a Python `None` in a
+   JSON column as the JSON scalar `null`, not SQL `NULL` (the `topology` column on
+   `CohortAuditEvent` has no `none_as_null=True`), so every `created` and
+   `agent_added` row this task writes — 151 of them in production — also has
+   `topology IS NOT NULL`. The corrected filter is `WHERE action =
+   'topology_snapshot'`.
+
+Production was seeded using the corrected Task 5 recipe above (measured before/
+after: `cohorts`/`cohort_memberships` went from 0/0 to 3/148, `agents.status`
+counts and `alembic_version` unchanged). The `/scripps-graph` code fix from Task 4
+is committed but **not yet deployed** — the app image still bakes the pre-fix
+`public.py`, so the running site continues to serve node selection from the stale
+`_SCRIPPS` set until someone rebuilds and redeploys the `app` image. See
+`docs/specs/2026-08-18-cohort-seeding-design.md` §5 for the node-count and
+membership consequences of that eventual deploy.

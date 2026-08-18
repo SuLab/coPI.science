@@ -69,6 +69,21 @@ class TestLoadManifest:
         with pytest.raises(ValueError, match="broken.json"):
             load_manifest(p)
 
+    def test_missing_file_raises_value_error_naming_the_path(self, tmp_path):
+        """A bare FileNotFoundError names errno/strerror, not the manifest -- the
+        CLI's user needs 'which file', same as the malformed-JSON case above."""
+        p = tmp_path / "does-not-exist.json"
+        with pytest.raises(ValueError, match="does-not-exist.json"):
+            load_manifest(p)
+
+    def test_directory_raises_value_error_naming_the_path(self, tmp_path):
+        """A directory raises IsADirectoryError, a different OSError subclass
+        than the missing-file case; both must be caught the same way."""
+        d = tmp_path / "a-directory"
+        d.mkdir()
+        with pytest.raises(ValueError, match="a-directory"):
+            load_manifest(d)
+
 
 class TestValidateManifest:
     def test_valid_manifest_has_no_errors(self):
@@ -77,6 +92,41 @@ class TestValidateManifest:
     def test_repo_manifest_name_rule_matches_the_admin_form(self):
         for name in load_manifest(REPO_MANIFEST)["cohorts"]:
             assert COHORT_NAME_RE.match(name), name
+
+    def test_non_dict_manifest_root_is_reported_not_raised(self):
+        assert validate_manifest([], set()) == [
+            "manifest root must be a JSON object"
+        ]
+        assert validate_manifest("cabo-retreat", set()) == [
+            "manifest root must be a JSON object"
+        ]
+        assert validate_manifest(None, set()) == [
+            "manifest root must be a JSON object"
+        ]
+
+    def test_unhashable_member_is_reported_not_raised(self):
+        """A dict or list member would raise TypeError at `set(members)` if it
+        reached that line; it must be reported as an error string instead."""
+        m = _manifest(cohorts={"alpha": {"description": "d", "source": "s",
+                                          "members": ["su", {"bad": "shape"}]}})
+        errors = validate_manifest(m, {"su"})
+        assert any("must contain only strings" in e for e in errors)
+
+    def test_non_string_member_is_reported_not_raised(self):
+        """int/bool/None members are hashable (set() would not raise on them)
+        but crash the later `', '.join(...)` calls; must be reported, not raised."""
+        m = _manifest(cohorts={"alpha": {"description": "d", "source": "s",
+                                          "members": ["su", 1, True, None]}})
+        errors = validate_manifest(m, {"su"})
+        assert any("must contain only strings" in e for e in errors)
+
+    def test_trailing_newline_name_is_rejected(self):
+        """re.match + '$' allows a trailing newline; that would let
+        'cabo-retreat\\n' pass validation and create a second, duplicate cohort."""
+        m = _manifest(cohorts={"cabo-retreat\n": {"description": "d", "source": "s",
+                                                   "members": ["su"]}})
+        errors = validate_manifest(m, {"su"})
+        assert any("must match" in e for e in errors)
 
     def test_unknown_agent_id_is_an_error(self):
         errors = validate_manifest(_manifest(), {"su"})
@@ -196,3 +246,48 @@ class TestPlanSeed:
         assert len(plan.cohorts_to_create) == 3
         assert len(plan.memberships_to_add) == 148
         assert isinstance(plan, SeedPlan)
+
+    def test_description_drift_is_detected(self):
+        plan = plan_seed(
+            _manifest(),
+            {"alpha"},
+            {("alpha", "su"), ("alpha", "wiseman")},
+            {"alpha": "old description"},
+        )
+        assert plan.description_drift == (("alpha", "old description", "d"),)
+        assert plan.is_noop is True  # drift alone is a report, not a write
+
+    def test_no_drift_when_descriptions_match(self):
+        plan = plan_seed(
+            _manifest(),
+            {"alpha"},
+            {("alpha", "su"), ("alpha", "wiseman")},
+            {"alpha": "d"},
+        )
+        assert plan.description_drift == ()
+
+    def test_no_drift_reported_when_descriptions_not_supplied(self):
+        """existing_descriptions is optional -- omitting it must not raise, and
+        must not manufacture drift out of nothing."""
+        plan = plan_seed(
+            _manifest(), {"alpha"}, {("alpha", "su"), ("alpha", "wiseman")}
+        )
+        assert plan.description_drift == ()
+
+    def test_unmanaged_cohorts_are_reported_informationally(self):
+        """A cohort the manifest doesn't name (e.g. blackbird's hub-<pi> ones)
+        is reported so an operator can see it, but stays out of extra_memberships
+        -- it is informational only, never a prune target."""
+        plan = plan_seed(
+            _manifest(),
+            {"alpha", "hub-someone"},
+            {("alpha", "su"), ("alpha", "wiseman"), ("hub-someone", "cravatt")},
+        )
+        assert plan.unmanaged_cohorts == ("hub-someone",)
+        assert plan.extra_memberships == ()
+
+    def test_no_unmanaged_cohorts_when_db_matches_manifest(self):
+        plan = plan_seed(
+            _manifest(), {"alpha"}, {("alpha", "su"), ("alpha", "wiseman")}
+        )
+        assert plan.unmanaged_cohorts == ()

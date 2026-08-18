@@ -147,6 +147,63 @@ class TestApplyPlan:
         _, memberships = await _state(db_session)
         assert ("alpha", "cravatt") in memberships
 
+    async def test_existing_cohort_gains_a_new_member(self, db_session, roster):
+        """An amendment that adds a member to an ALREADY-SEEDED cohort. This is
+        distinct from a from-scratch create: the cohort's id must come from the
+        lookup at the top of apply_plan, not from the cohorts_to_create loop,
+        because the cohort is not in this run's cohorts_to_create at all."""
+        manifest_v1 = {
+            "cohorts": {
+                "alpha": {"description": "A", "source": "src-a", "members": ["su"]},
+            }
+        }
+        plan = await _seed(db_session, manifest=manifest_v1)
+        assert plan.cohorts_to_create == ("alpha",)
+        _, memberships = await _state(db_session)
+        assert memberships == {("alpha", "su")}
+
+        manifest_v2 = {
+            "cohorts": {
+                "alpha": {
+                    "description": "A", "source": "src-a",
+                    "members": ["su", "wiseman"],
+                },
+            }
+        }
+        plan = await _seed(db_session, manifest=manifest_v2)
+
+        assert plan.cohorts_to_create == ()
+        assert plan.memberships_to_add == (("alpha", "wiseman"),)
+        _, memberships = await _state(db_session)
+        assert memberships == {("alpha", "su"), ("alpha", "wiseman")}
+        added = (await db_session.execute(
+            select(CohortAuditEvent).where(CohortAuditEvent.action == "agent_added")
+        )).scalars().all()
+        assert {(e.cohort_name, e.agent_id) for e in added} == {
+            ("alpha", "su"), ("alpha", "wiseman"),
+        }
+
+    async def test_apply_plan_never_commits(self, db_session, roster, monkeypatch):
+        """apply_plan's docstring promises flush-but-never-commit. The default
+        fixture (conftest.py join_transaction_mode='create_savepoint') makes a
+        stray commit indistinguishable from a flush, so this pins the property
+        directly: a commit call is made to blow up, and apply_plan must never
+        reach it."""
+        async def _boom(*args, **kwargs):
+            raise AssertionError(
+                "apply_plan must not commit -- the caller owns the transaction"
+            )
+
+        monkeypatch.setattr(db_session, "commit", _boom)
+
+        await _seed(db_session)  # must not raise
+
+        _, memberships = await _state(db_session)
+        assert memberships == {
+            ("alpha", "su"), ("alpha", "wiseman"),
+            ("beta", "wiseman"), ("beta", "cravatt"),
+        }
+
 
 class TestGateStaysInert:
     async def test_seeded_topology_gates_nothing_while_isolation_is_off(

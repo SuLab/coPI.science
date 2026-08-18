@@ -196,6 +196,46 @@ Consequences to handle:
 - Add a comment at `_SCRIPPS` recording that it is a Cabo-window historical map, not
   the current Scripps roster, so the two jobs cannot be re-conflated.
 
+### 5.1 Not a superset swap — deploying this drops four PIs
+
+Repointing node selection at `scripps-investigators` is **not** a strict superset of
+`_SCRIPPS`. It also **drops four PIs who are in `_SCRIPPS` today**: `forli`,
+`grotjahn`, `seiple`, `ward`. All four are genuine Scripps/UCSF-window Cabo
+attendees, but none of them is in the `scripps-investigators` cohort, because that
+cohort was derived from `users.institution ~ 'scripps|calibr'` (§2's derivation
+rule) and all four have an **empty** `users.institution` — the same defect §2.2
+already records for eight cabo members, connected here for the first time to its
+consequence on this specific route.
+
+Measured against the current data: **29 nodes / 105 edges today → 33 nodes / 132
+edges after this fix is deployed.** The delta is not a clean "+9 selector
+additions, -4 selector drops" arithmetic, because `_build_graph_payload` only
+keeps a row in `nodes` when its computed `degree` is `> 0` (`public.py:794`) —
+selection into the cohort or into `_SCRIPPS` is necessary but not sufficient to
+appear on the rendered graph; a PI must also have at least one in-window edge.
+The PI comparing this graph to last week's screenshot will see some familiar
+names gone alongside the new ones, not a purely additive change.
+
+Of the nine agents the cohort newly makes eligible for selection, only **seven**
+actually gain a rendered node: `bollong chatterjee diercks good hogenesch
+mcnamara yliu`. The other two do not render despite being selected, because the
+`degree > 0` filter drops them: `alanjary` has zero `thread_decisions` rows at
+all, and `droujinine`'s only `thread_decisions` row has `outcome='no_proposal'`
+— neither has a qualifying proposal for the edges query to draw a link from, so
+neither appears in `nodes`, not even as an isolated dot.
+
+**This membership question — whether `forli grotjahn seiple ward` should be added
+back to `scripps-investigators`, or whether their empty `users.institution` should
+be fixed instead (§2.2) — is unresolved and pending a decision.** It is not
+resolved by this document and `cohorts.json`'s membership lists are not to be
+edited to pre-empt it.
+
+**Deployment status:** this fix is committed but **not yet deployed**. The running
+`app` container bakes `src/` into the image at build time (§8) rather than
+bind-mounting it, so `/scripps-graph` continues to serve node selection from the
+stale `_SCRIPPS` set — the pre-fix 29/105 numbers above, not the post-fix 33/132
+ones — until the image is rebuilt and the container recreated.
+
 ## 6. What does not change
 
 No roster edits. No `.env` change. No `agent-run` restart. With

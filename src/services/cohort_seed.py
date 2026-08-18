@@ -18,30 +18,41 @@ from typing import Any
 
 # The rule the admin create form enforces (src/routers/admin.py:1389). Kept in
 # sync deliberately: a cohort name the UI would reject must not be creatable
-# through the back door.
+# through the back door. The admin form additionally normalises with
+# `name = name.strip().lower()` before matching; `validate_manifest` below
+# reproduces that by using fullmatch (not match, whose trailing `$` admits a
+# final newline) and by rejecting any name that differs from its own strip().
 COHORT_NAME_RE = re.compile(r"^[a-z0-9-]{1,48}$")
 
 
 def load_manifest(path: str | Path) -> dict[str, Any]:
     """Parse the manifest file.
 
-    Raises ValueError naming the path on malformed JSON, because the caller is a
+    Raises ValueError naming the path on malformed JSON or on any filesystem
+    problem (missing file, path is a directory, ...), because the caller is a
     CLI whose user needs to know *which* file is broken.
     """
     p = Path(path)
     try:
-        return json.loads(p.read_text())
+        raw = p.read_text()
+    except OSError as exc:
+        raise ValueError(f"{p}: {exc}") from exc
+    try:
+        return json.loads(raw)
     except json.JSONDecodeError as exc:
         raise ValueError(f"{p}: invalid JSON: {exc}") from exc
 
 
-def validate_manifest(
-    manifest: dict[str, Any], known_agent_ids: set[str]
-) -> list[str]:
+def validate_manifest(manifest: Any, known_agent_ids: set[str]) -> list[str]:
     """Return every problem with the manifest; an empty list means it is safe.
 
-    All errors are collected rather than raising on the first, so one run tells
-    the operator everything to fix.
+    Never raises. Every malformed shape -- a non-object root, a non-string
+    cohort name, a non-string or unhashable member -- is turned into an error
+    string before it can reach code that would raise on it: `set(members)`
+    raises TypeError on an unhashable member (a dict or list), and
+    `', '.join(...)` raises TypeError on a non-string one (int, bool, None).
+    All errors are collected rather than raising or stopping on the first, so
+    one run tells the operator everything to fix.
 
     The unknown-agent check is the important one. `compute_gates` builds
     `members_by_cohort` from raw membership rows without filtering against the
@@ -49,13 +60,23 @@ def validate_manifest(
     cohort-mate's allowed-sender set and is invisible on every admin screen. A
     typo here is a phantom sender, not a no-op.
     """
+    if not isinstance(manifest, dict):
+        return ["manifest root must be a JSON object"]
+
     errors: list[str] = []
     cohorts = manifest.get("cohorts")
     if not isinstance(cohorts, dict) or not cohorts:
         return ["manifest has no non-empty 'cohorts' object"]
 
     for name, body in cohorts.items():
-        if not COHORT_NAME_RE.match(name):
+        # re.match + '$' matches just before a trailing newline, so
+        # fullmatch (not match) plus an explicit strip comparison is required --
+        # "cabo-retreat\n" must not pass and quietly create a second cohort.
+        if (
+            not isinstance(name, str)
+            or not COHORT_NAME_RE.fullmatch(name)
+            or name != name.strip()
+        ):
             errors.append(f"{name!r}: name must match {COHORT_NAME_RE.pattern}")
         if not isinstance(body, dict):
             errors.append(f"{name!r}: value must be an object")
@@ -67,6 +88,13 @@ def validate_manifest(
         members = body.get("members")
         if not isinstance(members, list) or not members:
             errors.append(f"{name!r}: 'members' must be a non-empty list")
+            continue
+        non_str = [m for m in members if not isinstance(m, str)]
+        if non_str:
+            errors.append(
+                f"{name!r}: 'members' must contain only strings, found: "
+                f"{', '.join(repr(m) for m in non_str)}"
+            )
             continue
         if len(set(members)) != len(members):
             dupes = sorted({m for m in members if members.count(m) > 1})
@@ -90,12 +118,23 @@ class SeedPlan:
     cohorts_to_create: tuple[str, ...]
     memberships_to_add: tuple[tuple[str, str], ...]
     extra_memberships: tuple[tuple[str, str], ...]
+    # (cohort_name, db_description, manifest_description) for every existing
+    # cohort whose description differs from the manifest. Reported, never
+    # written -- apply_plan does not update descriptions.
+    description_drift: tuple[tuple[str, str, str], ...] = ()
+    # Cohorts present in the DB but not named in the manifest at all (as
+    # opposed to `extra_memberships`, which is scoped to managed cohorts).
+    # Informational only -- never a prune target, regardless of --prune.
+    unmanaged_cohorts: tuple[str, ...] = ()
 
     @property
     def is_noop(self) -> bool:
         """True when applying without --prune would write nothing.
 
-        Extras are deliberately excluded: they are a report, not work.
+        Extras, description drift and unmanaged cohorts are deliberately
+        excluded: they are reports, not work. Drift in particular is *reported*
+        (the caller's job) but never auto-applied, so its presence alone must
+        not make a run look like it wrote something.
         """
         return not self.cohorts_to_create and not self.memberships_to_add
 
@@ -104,6 +143,7 @@ def plan_seed(
     manifest: dict[str, Any],
     existing_cohorts: set[str],
     existing_memberships: set[tuple[str, str]],
+    existing_descriptions: dict[str, str] | None = None,
 ) -> SeedPlan:
     """Diff the manifest against the database. Additive by default.
 
@@ -111,7 +151,14 @@ def plan_seed(
     database is expected to hold only these three, but the same code must be
     safe on an instance that also runs unrelated cohorts — blackbird carries 62
     `hub-<pi>` cohorts — so a cohort the manifest does not mention is never
-    reported and never touched.
+    reported and never touched there. `unmanaged_cohorts` is the deliberate
+    exception: it surfaces those names for visibility (derived from
+    `existing_cohorts`, which already carries every cohort name in the DB, not
+    just the manifest's) without adding them to any actionable set.
+
+    `existing_descriptions` is optional and defaults to no drift detection: a
+    caller that does not supply it (e.g. an older test) gets
+    `description_drift == ()`, not a crash.
 
     Everything is sorted so a dry-run plan is reviewable and byte-stable across
     runs.
@@ -130,7 +177,18 @@ def plan_seed(
     extra = tuple(sorted(
         pair for pair in existing_memberships - wanted if pair[0] in managed
     ))
-    return SeedPlan(to_create, to_add, extra)
+
+    existing_descriptions = existing_descriptions or {}
+    drift = tuple(sorted(
+        (name, existing_descriptions[name], cohorts[name]["description"])
+        for name in cohorts
+        if name in existing_descriptions
+        and existing_descriptions[name] != cohorts[name]["description"]
+    ))
+
+    unmanaged = tuple(sorted(existing_cohorts - managed))
+
+    return SeedPlan(to_create, to_add, extra, drift, unmanaged)
 
 
 async def apply_plan(
