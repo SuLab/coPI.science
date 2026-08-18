@@ -188,6 +188,17 @@ async def list_assessments(db: AsyncSession, run_id: str | None) -> dict[str, An
         await db.execute(select(func.count()).select_from(query.subquery()))
     ).scalar() or 0
 
+    # Surfaced because Task 3 stops the floor discarding a gapped verdict.
+    # Storing it is only safe if the page distinguishes it from a vetted one.
+    incomplete_query = select(func.count()).select_from(OpportunityAssessment).where(
+        OpportunityAssessment.panel_incomplete.is_(True)
+    )
+    if not show_all_runs and selected_run_id:
+        incomplete_query = incomplete_query.where(
+            OpportunityAssessment.simulation_run_id == selected_run_id
+        )
+    incomplete_panel_count = (await db.execute(incomplete_query)).scalar_one()
+
     # NULLS LAST needs saying: a bare .desc() puts NULLs FIRST in Postgres,
     # which would float every not-yet-scored assessment to the top of a
     # triage queue instead of to the bottom.
@@ -234,6 +245,7 @@ async def list_assessments(db: AsyncSession, run_id: str | None) -> dict[str, An
         "assessments_limit": ASSESSMENTS_LIMIT,
         "drop_counts": drop_counts,
         "drops_total": drops_total,
+        "incomplete_panel_count": incomplete_panel_count,
     }
 
 

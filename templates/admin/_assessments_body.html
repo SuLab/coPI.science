@@ -56,6 +56,27 @@
 </div>
 {% endif %}
 
+{# Verdicts stored despite a gap in the specialist panel. Distinct from the
+   dropped-verdict banner above: nothing was lost here, but nothing was fully
+   vetted either, and a triage queue that renders the two identically is how
+   an unvetted verdict gets acted on. #}
+{% if incomplete_panel_count %}
+<div class="rounded-xl border border-orange-300 bg-orange-50 p-4 mb-6">
+    <div class="flex items-start gap-3">
+        <span class="text-orange-600 text-xl leading-none">&#9873;</span>
+        <div class="text-sm text-orange-900">
+            <span class="font-semibold">
+                {{ incomplete_panel_count }} verdict{{ '' if incomplete_panel_count == 1 else 's' }}
+                stored with an incomplete specialist panel.
+            </span>
+            The required domains were never consulted during the interview, so
+            the verdict is recorded but not fully vetted. Treat the score as
+            provisional.
+        </div>
+    </div>
+</div>
+{% endif %}
+
 {# These four cards summarize the rows actually rendered below (bounded by
    assessments_limit), not total_count (the true count of the current
    filter, which may exceed what's shown) — so "Total" here always equals
@@ -141,7 +162,12 @@
                         <span class="band-label ml-1.5 text-xs text-gray-400 align-middle">—</span>
                     {% endif %}
                 </td>
-                <td class="px-4 py-3 text-sm text-gray-900">{{ a.recommendation or "—" }}</td>
+                <td class="px-4 py-3 text-sm text-gray-900">{{ a.recommendation or "—" }}
+                    {% if a.panel_incomplete %}
+                    <span class="ml-1 text-xs font-medium text-orange-700"
+                          title="Missing: {{ (a.missing_domains or [])|join(', ') }}">&#9873; panel</span>
+                    {% endif %}
+                </td>
                 <td class="px-4 py-3 text-xs text-gray-600">
                     {% if a.gating %}
                         {% for key, gate_state in a.gating.items() %}
