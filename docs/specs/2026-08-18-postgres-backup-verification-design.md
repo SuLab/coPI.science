@@ -1,8 +1,11 @@
 # Verified Postgres Backups — Design
 
 **Date:** 2026-08-18
-**Status:** Approved, not implemented. Adversarially audited 2026-08-18 (16 findings
-applied). SES prerequisite resolved — see §7.1.
+**Status:** IMPLEMENTED AND LIVE as of 2026-08-18. Timers armed for 01:00
+America/Los_Angeles. Five verified backups per stack on disk; failure-injection harness
+12/12; SES alert path confirmed received by a human. Three audit rounds; final
+whole-branch audit found no Critical. Parked residuals are recorded in the commit
+history and summarised at the end of this document.
 **Scope:** Nightly, self-verifying logical backups for the two production Postgres
 instances on the `copi` EC2 host (`copi-python`, `copi-blackbird`). Local storage
 only, with a drop-in hook for offsite. Adds no long-lived process and does not
@@ -220,13 +223,35 @@ absolute numbers.
 
 ### 4.4 Verify
 
-**Cheap integrity precheck first.** `pg_restore -l` is run twice, both times against
-a real seekable path: once container-side immediately after the dump (§4.2), and once
-host-side on the copied `.dump` before any verify container is started. It reads only
-the archive TOC, costs milliseconds, and catches a corrupt or truncated file without
-paying for a container start and a full restore. The second run also proves the
-`docker cp` itself did not truncate. Failure at either point short-circuits to
-`.unverified`.
+**Cheap integrity precheck first — and be precise about what it can see.**
+`pg_restore -l` is run twice against a real seekable path: once inside the source
+container immediately after the dump (§4.2), and once on the copied `.dump` before the
+verify container starts. **Both runs happen inside a throwaway container of
+`VERIFY_IMAGE`, never on the host** — the host has no postgres client tools installed at
+all (verified 2026-08-18). The second run also proves the `docker cp` did not truncate.
+
+It reads only the archive's table of contents, which on a 75,571,751-byte custom-format
+archive occupies roughly the **first 755 KB**. Measured on this host:
+
+| Damage | `pg_restore -l` |
+|---|---|
+| corrupt bytes in the header | fails (exit 1) |
+| truncated to 64 KB / 16 KB / 4 KB | fails (exit 1) |
+| truncated to 50% / 25% / 10% / 5% / **1%** | **passes (exit 0)** |
+| corrupt data block at offset 40,000,000 | **passes (exit 0)** |
+
+So the precheck catches header-region damage cheaply and is **blind to everything
+past the TOC**. A dump missing half its data blocks, or corrupted deep inside one, sails
+through it. Those cases are caught only by the full restore in §4.4 — verified: a dump
+corrupted at offset 40,000,000 passes the precheck and is then rejected by
+`pg_restore --exit-on-error` during the real restore.
+
+Calling this check "catches a corrupt file" — as an earlier draft of this document did —
+overstates it, and overstating a cheap check is the same false-confidence failure this
+whole design exists to prevent. It is a fast filter that saves a container start on
+grossly damaged archives, not a substitute for restoring. `failure_injection.sh` tests
+both halves of that layering (2a/3a and 2b/3b). Failure at either point short-circuits
+to `.unverified`.
 
 This mirrors `scripts/migrate/run_migration.sh:189`, which already gates its
 pre-migration dump the same way: "A dump whose table of contents cannot be read
@@ -600,3 +625,41 @@ required today; that changes the moment a second role is added.
 - The host has no memory headroom (3.7 GB, ~1.2 GB swapped, prior global OOM kills
   traced to Claude Code sessions). Adding a nightly 768 MB verify container is
   budgeted for, but the underlying pressure is a separate issue.
+
+## 14. Known residuals at go-live (2026-08-18)
+
+Recorded deliberately rather than left implicit. None blocks operation; all were
+adjudicated during the final audit.
+
+1. **A random verify password can reach the logs.** If `docker run` for the verify
+   container fails, `CommandError` embeds the full argv, including
+   `-e POSTGRES_PASSWORD=<token>`, which then appears in journald and in the failure
+   mail. Unexploitable — the token is `secrets.token_urlsafe(24)`, generated per verify,
+   for a `--network none` container that is unreachable and destroyed in the `finally`
+   block — but worth redacting when this code is next touched.
+2. **If `BACKUP_ROOT` itself cannot be created, `status.json` cannot be written.** The
+   run still logs an ERROR, attempts mail, and exits non-zero. Strictly better than the
+   pre-audit behaviour (an unhandled crash with no trace), but the second channel is
+   unavailable in exactly that case.
+3. **Sidecars are `chmod 0600` immediately after write**, leaving a sub-millisecond
+   window at the default mode. The `0700` parent contains it throughout.
+4. **No `OnFailure=` on the units.** A failure surfaces via a non-zero exit
+   (`systemctl --failed`), the journal, `status.json`, and SES. A dedicated
+   `OnFailure=` handler would add a fifth, independent path.
+5. **`failure_injection.sh` is expensive.** Its sweep check invokes a real
+   `copi-backup run`, dumping both stacks (~800 MB, ~4 minutes). Retention bounds the
+   accumulation at five per stack, but do not run it casually.
+6. **The offsite hook has never been exercised.** `OFFSITE_CMD` ships empty. Its failure
+   path now mails and exits non-zero (audit F7), but no real hook has ever run.
+
+### Not yet confirmed
+
+The first **scheduled** run had not occurred when this was written. Every piece of
+evidence above comes from manual invocations, including two full runs under systemd
+(`Result=success`). Confirm the 01:00 run with:
+
+```bash
+systemctl status copi-backup.service
+journalctl -u copi-backup.service --since yesterday
+sudo jq '{last_run_utc,last_success_utc,ok}' /var/backups/copi/status.json
+```
