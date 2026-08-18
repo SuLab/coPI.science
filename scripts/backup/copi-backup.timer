@@ -1,0 +1,9 @@
+[Unit]
+Description=Nightly verified Postgres backups
+
+[Timer]
+OnCalendar=*-*-* 01:00:00 America/Los_Angeles
+Persistent=true
+
+[Install]
+WantedBy=timers.target
