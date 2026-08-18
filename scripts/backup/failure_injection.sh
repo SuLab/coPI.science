@@ -6,6 +6,12 @@
 #
 # Happy path proves nothing. Every check here deliberately breaks something and
 # asserts the system notices.
+#
+# SAFETY: This harness operates on a DISPOSABLE COPY of the latest backup, never
+# the original. copi-python and copi-blackbird are entirely independent databases
+# with unrelated data; neither can substitute for the other. Loss of either would
+# be unrecoverable. A regression guard at the end asserts the production backup was
+# never modified.
 set -uo pipefail
 
 CFG=/etc/copi-backup/backup.env
@@ -30,15 +36,23 @@ toc_ok() {
 echo "== test 2: corrupt dump is rejected =="
 D=$(newest)
 if [ -z "$D" ]; then echo "no dump present; run 'copi-backup run --no-prune' first" >&2; exit 1; fi
-cp "$D" /tmp/good.dump
-printf 'GARBAGE' | dd of="$D" bs=1 seek=1000 conv=notrunc status=none
-if toc_ok "$D"; then bad "corrupt dump still reads its TOC"; else ok "corrupt dump rejected by pg_restore -l"; fi
-cp /tmp/good.dump "$D"
+
+# Create a disposable working copy; trap ensures cleanup even on script exit/interrupt
+WORKDIR="$(mktemp -d)"
+WORK="$WORKDIR/work.dump"
+cp "$D" "$WORK"
+trap 'rm -rf "$WORKDIR"' EXIT INT TERM
+
+# Capture original backup hash for regression guard at the end
+BACKUP_SHA256=$(sha256sum "$D" | cut -d' ' -f1)
+
+printf 'GARBAGE' | dd of="$WORK" bs=1 seek=1000 conv=notrunc status=none
+if toc_ok "$WORK"; then bad "corrupt dump still reads its TOC"; else ok "corrupt dump rejected by pg_restore -l"; fi
 
 echo "== test 3: truncated dump is rejected =="
-truncate -s 50% "$D"
-toc_ok "$D" && bad "truncated dump accepted" || ok "truncated dump rejected"
-cp /tmp/good.dump "$D"
+cp "$D" "$WORK"  # restore from original for this test
+truncate -s 50% "$WORK"
+toc_ok "$WORK" && bad "truncated dump accepted" || ok "truncated dump rejected"
 
 echo "== test 4: teardown after a killed verify container =="
 docker run -d --name copi-verify-manual-probe --label copi.backup.ephemeral=true \
@@ -119,11 +133,19 @@ docker rm -f copi-verify-oom-test >/dev/null 2>&1 || true
 docker volume rm "$VOLNAME" >/dev/null 2>&1 || true
 
 echo "== test 15: checksum detects bit-rot =="
-S1=$(sha256sum "$D" | cut -d' ' -f1)
-printf 'X' | dd of="$D" bs=1 seek=2000 conv=notrunc status=none
-S2=$(sha256sum "$D" | cut -d' ' -f1)
+cp "$D" "$WORK"  # restore from original for this test
+S1=$(sha256sum "$WORK" | cut -d' ' -f1)
+printf 'X' | dd of="$WORK" bs=1 seek=2000 conv=notrunc status=none
+S2=$(sha256sum "$WORK" | cut -d' ' -f1)
 [ "$S1" != "$S2" ] && ok "checksum changes on a flipped byte" || bad "checksum insensitive"
-cp /tmp/good.dump "$D"; rm -f /tmp/good.dump
+
+echo "== regression guard: production backup unmodified =="
+BACKUP_SHA256_END=$(sha256sum "$D" | cut -d' ' -f1)
+if [ "$BACKUP_SHA256" = "$BACKUP_SHA256_END" ]; then
+  ok "production backup unmodified by harness"
+else
+  bad "HARNESS MODIFIED PRODUCTION BACKUP"
+fi
 
 echo
 echo "PASS=$PASS FAIL=$FAIL"
