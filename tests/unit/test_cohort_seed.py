@@ -47,10 +47,10 @@ class TestLoadManifest:
         m = load_manifest(REPO_MANIFEST)["cohorts"]
         assert len(m["cabo-retreat"]["members"]) == 34
         assert len(m["schultz-reunion"]["members"]) == 77
-        assert len(m["scripps-investigators"]["members"]) == 37
+        assert len(m["scripps-investigators"]["members"]) == 41
         rows = sum(len(c["members"]) for c in m.values())
         distinct = {a for c in m.values() for a in c["members"]}
-        assert rows == 148
+        assert rows == 152
         assert len(distinct) == 122
 
     def test_repo_manifest_carries_no_personal_data(self):
@@ -244,7 +244,7 @@ class TestPlanSeed:
     def test_repo_manifest_against_empty_db(self):
         plan = plan_seed(load_manifest(REPO_MANIFEST), set(), set())
         assert len(plan.cohorts_to_create) == 3
-        assert len(plan.memberships_to_add) == 148
+        assert len(plan.memberships_to_add) == 152
         assert isinstance(plan, SeedPlan)
 
     def test_description_drift_is_detected(self):

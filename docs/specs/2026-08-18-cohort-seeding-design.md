@@ -196,7 +196,7 @@ Consequences to handle:
 - Add a comment at `_SCRIPPS` recording that it is a Cabo-window historical map, not
   the current Scripps roster, so the two jobs cannot be re-conflated.
 
-### 5.1 Not a superset swap — deploying this drops four PIs
+### 5.1 Not a superset swap — RESOLVED by adding the four dropped PIs
 
 Repointing node selection at `scripps-investigators` is **not** a strict superset of
 `_SCRIPPS`. It also **drops four PIs who are in `_SCRIPPS` today**: `forli`,
@@ -215,6 +215,27 @@ selection into the cohort or into `_SCRIPPS` is necessary but not sufficient to
 appear on the rendered graph; a PI must also have at least one in-window edge.
 The PI comparing this graph to last week's screenshot will see some familiar
 names gone alongside the new ones, not a purely additive change.
+
+> **RESOLUTION (2026-08-18).** The four were **added to the
+> `scripps-investigators` cohort by hand** and the manifest re-seeded, so the
+> repoint is now purely additive and no PI loses their node. The cohort is 41
+> members, not 37; total membership rows 152, not 148; distinct agents stays 122
+> because all four were already in `cabo-retreat`.
+>
+> This makes the cohort no longer a pure product of its stated derivation rule —
+> `cohorts.json`'s `source` string for this cohort records the manual addition, and
+> the rule alone would not reproduce it. That is the intended trade: the rule's
+> proxy (`users.institution`) has a known hole (§2.2) and the roster is the thing
+> that must be right.
+>
+> **One member is worth revisiting: `seiple`.** `forli`, `grotjahn` and `ward` are
+> backed by human-curated `Pilot lab:` entries in `access_allowlist` with
+> `@scripps.edu` addresses. `seiple`'s entry comes from the LLM/Europe-PMC-derived
+> pool, which §7-adjacent analysis found is contaminated by *historical*
+> affiliation — Ian Seiple is plausibly UCSF. He was added because he is already
+> rendered on `/scripps-graph` today via `_SCRIPPS`, so including him preserves the
+> status quo while excluding him would itself be a change. All four are `inactive`,
+> so none of this affects the interaction gate, which only ever sees active agents.
 
 Of the nine agents the cohort newly makes eligible for selection, only **seven**
 actually gain a rendered node: `bollong chatterjee diercks good hogenesch

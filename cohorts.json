@@ -1,5 +1,5 @@
 {
-  "_comment": "Cohort membership of record for the copi instance. Seeded by scripts/seed_cohorts.py. cohort_isolation_enabled is False: these memberships are RECORDED, not enforced. On the current 33-agent active roster the gate would block 0% of ordered pairs, because scripps-investigators contains every active agent. Isolation becomes meaningful (46.0% blocked) only if the 122-agent union is activated. Agent IDs only -- this repo is public; see .gitignore:101.",
+  "_comment": "Cohort membership of record for the copi instance. Seeded by scripts/seed_cohorts.py. cohort_isolation_enabled is False: these memberships are RECORDED, not enforced. On the current 33-agent active roster the gate would block 0% of ordered pairs, because scripps-investigators contains every active agent. Isolation becomes meaningful (46.0% blocked) only if the 122-agent union is activated. Four members were added by hand; see 'source'. Agent IDs only -- this repo is public; see .gitignore:101.",
   "cohorts": {
     "cabo-retreat": {
       "description": "Cabo retreat attendees, Apr 27 - May 7 2026",
@@ -31,14 +31,15 @@
     },
     "scripps-investigators": {
       "description": "Scripps Research and Calibr investigators",
-      "source": "users.institution ~ 'scripps|calibr', frozen 2026-08-18",
+      "source": "users.institution ~ 'scripps|calibr' frozen 2026-08-18, PLUS four Scripps PIs added by hand 2026-08-18 whose users.institution is empty (forli, grotjahn, seiple, ward) - see design doc 5.1",
       "members": [
         "alanjary", "badran", "bollong", "briney", "chatterjee", "cravatt",
-        "deniz", "diercks", "droujinine", "good", "hogenesch", "ken", "kern",
-        "lairson", "lasker", "lippi", "lotz", "macrae", "maillie", "mcnamara",
-        "millar", "miller", "mravic", "paulson", "petrascheck", "pwu", "racki",
-        "saez", "schultz", "su", "williams", "williamson", "wilson", "wiseman",
-        "wu", "yliu", "young"
+        "deniz", "diercks", "droujinine", "forli", "good", "grotjahn",
+        "hogenesch", "ken", "kern", "lairson", "lasker", "lippi", "lotz",
+        "macrae", "maillie", "mcnamara", "millar", "miller", "mravic",
+        "paulson", "petrascheck", "pwu", "racki", "saez", "schultz", "seiple",
+        "su", "ward", "williams", "williamson", "wilson", "wiseman", "wu",
+        "yliu", "young"
       ]
     }
   }
