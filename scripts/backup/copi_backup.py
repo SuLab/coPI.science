@@ -748,7 +748,17 @@ class StackResult:
 
     @property
     def ok(self) -> bool:
-        return self.error is None and self.verify is not None and self.verify.ok
+        """True only for a stack that produced a dump AND verified it.
+
+        `dump is not None` is part of the invariant, not decoration: without it a
+        StackResult(dump=None, verify=ok) reports "verified" with no archive on record.
+        """
+        return (
+            self.error is None
+            and self.dump is not None
+            and self.verify is not None
+            and self.verify.ok
+        )
 
 
 def sidecar_document(result: StackResult, started: datetime) -> dict:
@@ -788,9 +798,16 @@ def build_status(results: list[StackResult], now: datetime) -> dict:
 
 def render_failure_mail(results: list[StackResult], now: datetime) -> tuple[str, str]:
     failed = [r for r in results if not r.ok]
-    names = ",".join(r.stack for r in failed)
+    names = ",".join(r.stack for r in failed) or "no-results"
     subject = f"[copi-backup] FAILED {names} {now:%Y-%m-%d}"
     lines = [f"Backup run {now:%Y-%m-%d %H:%M:%S} UTC", ""]
+    if not results:
+        lines += [
+            "The run produced NO results at all — it aborted before any stack was "
+            "processed.",
+            "Check: systemctl status copi-backup.service",
+            "",
+        ]
     for r in results:
         lines.append(f"{r.stack}: {'OK' if r.ok else 'FAILED'}")
         if r.error:
@@ -818,7 +835,12 @@ def render_heartbeat_mail(history: list[dict], now: datetime) -> tuple[str, str]
 
 
 def send_mail(cfg: Config, subject: str, body: str, client_factory=None) -> bool:
-    """Send via SES v1, matching src/services/email.py. Never raises."""
+    """Send via SES v1, matching src/services/email.py.
+
+    Swallows every ``Exception`` — including a failed lazy ``boto3`` import — so mail
+    trouble can never abort a backup run. It does NOT swallow ``BaseException``
+    (KeyboardInterrupt, SystemExit); those should still terminate the process.
+    """
     if not cfg.mail_to or not cfg.ses_sender_email:
         return False
     try:

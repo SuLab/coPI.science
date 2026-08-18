@@ -642,6 +642,36 @@ def test_build_status_ok_when_all_pass():
     assert cb.build_status([_ok_result()], now)["ok"] is True
 
 
+def test_build_status_is_not_ok_for_an_empty_result_list():
+    # all([]) is True in Python, so without the explicit `and bool(results)` guard a run
+    # that processed NOTHING would write "ok": true into the very file whose job is to
+    # distinguish "healthy" from "not running". This test is that guard's only defence.
+    now = datetime(2026, 8, 19, 8, 0, tzinfo=UTC)
+    assert cb.build_status([], now)["ok"] is False
+    assert cb.build_status([], now)["stacks"] == {}
+
+
+def test_stack_result_is_not_ok_without_a_dump():
+    v = cb.VerifyResult(True, [], False, 1.0)
+    assert cb.StackResult("s", None, v, True, None).ok is False
+
+
+def test_stack_result_is_not_ok_when_an_error_is_set():
+    d = cb.DumpResult(Path("/v/x.dump"), {"public.a": 1}, "snap", 10, "abc")
+    v = cb.VerifyResult(True, [], False, 1.0)
+    assert cb.StackResult("s", d, v, True, "boom").ok is False
+
+
+def test_sidecar_document_survives_a_result_with_no_dump_or_verify():
+    now = datetime(2026, 8, 19, 8, 0, tzinfo=UTC)
+    doc = cb.sidecar_document(cb.StackResult("s", None, None, False, "boom"), now)
+    assert doc["verified"] is False
+    assert doc["dump_bytes"] == 0
+    assert doc["dump_sha256"] == ""
+    assert doc["row_counts"] == {}
+    assert doc["error"] == "boom"
+
+
 def test_failure_mail_names_only_failing_stacks_in_subject():
     now = datetime(2026, 8, 18, 3, 15, tzinfo=UTC)
     subject, body = cb.render_failure_mail([_ok_result(), _bad_result()], now)
@@ -655,6 +685,14 @@ def test_failure_mail_is_one_message_for_multiple_failures():
     now = datetime(2026, 8, 18, 3, 15, tzinfo=UTC)
     subject, _ = cb.render_failure_mail([_bad_result("a"), _bad_result("b")], now)
     assert "a" in subject and "b" in subject
+
+
+def test_failure_mail_with_no_results_says_the_run_produced_none():
+    now = datetime(2026, 8, 19, 8, 0, tzinfo=UTC)
+    subject, body = cb.render_failure_mail([], now)
+    assert "no-results" in subject
+    assert "NO results at all" in body
+    assert "systemctl status copi-backup.service" in body
 
 
 def test_send_mail_uses_ses_v1_client_and_all_recipients():
