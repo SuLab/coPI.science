@@ -279,6 +279,22 @@ def test_count_sql_for_tables_builds_one_union_per_table():
     assert "count(*)" in sql
 
 
+def test_docker_exec_omits_i_by_default_and_never_adds_t():
+    argv = cb.docker_exec("c", ["pg_dump"])
+    assert "-i" not in argv
+    assert "-t" not in argv
+
+
+def test_snapshot_session_argv_sets_dash_i():
+    # Without -i, Docker does not attach stdin, psql sees EOF and exits before it can
+    # be sent anything — the session dies with "closed unexpectedly". Verified live.
+    argv = cb.snapshot_session_argv(STACK)
+    assert "-i" in argv
+    assert "-t" not in argv
+    assert argv.index("-i") < argv.index(STACK.container)
+    assert "psql" in argv and "-tA" in argv
+
+
 def test_terminate_sql_appends_missing_semicolon():
     # psql executes a following \echo immediately when the statement is still
     # buffered, so the sentinel would arrive before the rows. Verified live: same

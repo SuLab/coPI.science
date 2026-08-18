@@ -299,8 +299,15 @@ class FakeRunner(Runner):
         return Completed(argv, 0, "", "")
 
 
-def docker_exec(container: str, argv: list[str]) -> list[str]:
-    """docker exec WITHOUT -t: a TTY would translate newlines and corrupt binary."""
+def docker_exec(container: str, argv: list[str], *, interactive: bool = False) -> list[str]:
+    """docker exec WITHOUT -t: a TTY would translate newlines and corrupt binary.
+
+    Pass ``interactive=True`` to attach stdin for long-lived processes like the
+    snapshot session. Without it, Docker closes stdin immediately and the process
+    exits before anything can be written to it.
+    """
+    if interactive:
+        return ["docker", "exec", "-i", container, *argv]
     return ["docker", "exec", container, *argv]
 
 
@@ -399,6 +406,19 @@ def parse_counts_output(stdout: str) -> dict[str, int]:
     return counts
 
 
+def snapshot_session_argv(stack: Stack) -> list[str]:
+    """Build the argv for a long-lived snapshot session psql process.
+
+    Returns a docker exec command with stdin attached (-i flag) so the psql
+    process stays open for the duration of the dump.
+    """
+    return docker_exec(
+        stack.container,
+        ["psql", "-U", stack.user, "-d", stack.db, "-tA", "-q"],
+        interactive=True,
+    )
+
+
 class SnapshotSession:
     """Holds one REPEATABLE READ transaction open across the pg_dump.
 
@@ -413,10 +433,7 @@ class SnapshotSession:
         self._proc: subprocess.Popen[str] | None = None
 
     def __enter__(self) -> SnapshotSession:
-        argv = docker_exec(
-            self.stack.container,
-            ["psql", "-U", self.stack.user, "-d", self.stack.db, "-tA", "-q"],
-        )
+        argv = snapshot_session_argv(self.stack)
         # stderr to DEVNULL, not PIPE: nothing reads it during the dump, and a psql
         # NOTICE storm filling the 64K pipe buffer would deadlock the session that is
         # holding the snapshot open.
