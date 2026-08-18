@@ -102,3 +102,6 @@ scripts/_*
 # profile synthesis, profile QA reviews, decks) lives under the ignored `data/`
 # tree above — see data/cohorts/README.md. This repo is public; the roster of
 # record is Postgres, not git.
+
+# Subagent-driven-development scratch (ledger, briefs, review packages)
+.superpowers/
