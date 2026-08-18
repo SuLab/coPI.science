@@ -736,3 +736,107 @@ def verify_dump(
     return VerifyResult(
         ok=ok, problems=problems, oom=oom, duration_sec=round(time.monotonic() - started, 1)
     )
+
+
+@dataclass(frozen=True)
+class StackResult:
+    stack: str
+    dump: DumpResult | None
+    verify: VerifyResult | None
+    offsite_ok: bool
+    error: str | None
+
+    @property
+    def ok(self) -> bool:
+        return self.error is None and self.verify is not None and self.verify.ok
+
+
+def sidecar_document(result: StackResult, started: datetime) -> dict:
+    dump = result.dump
+    verify = result.verify
+    return {
+        "stack": result.stack,
+        "started_utc": started.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "dump_bytes": dump.size_bytes if dump else 0,
+        "dump_sha256": dump.sha256 if dump else "",
+        "snapshot_id": dump.snapshot_id if dump else "",
+        "row_counts": dict(dump.counts) if dump else {},
+        "verified": bool(verify and verify.ok),
+        "verify_duration_sec": verify.duration_sec if verify else 0.0,
+        "verify_problems": list(verify.problems) if verify else [],
+        "offsite": result.offsite_ok,
+        "error": result.error,
+    }
+
+
+def build_status(results: list[StackResult], now: datetime) -> dict:
+    stamp = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    return {
+        "last_run_utc": stamp,
+        "ok": all(r.ok for r in results) and bool(results),
+        "stacks": {
+            r.stack: {
+                "verified": r.ok,
+                "dump_bytes": r.dump.size_bytes if r.dump else 0,
+                "problems": list(r.verify.problems) if r.verify else [],
+                "error": r.error,
+            }
+            for r in results
+        },
+    }
+
+
+def render_failure_mail(results: list[StackResult], now: datetime) -> tuple[str, str]:
+    failed = [r for r in results if not r.ok]
+    names = ",".join(r.stack for r in failed)
+    subject = f"[copi-backup] FAILED {names} {now:%Y-%m-%d}"
+    lines = [f"Backup run {now:%Y-%m-%d %H:%M:%S} UTC", ""]
+    for r in results:
+        lines.append(f"{r.stack}: {'OK' if r.ok else 'FAILED'}")
+        if r.error:
+            lines.append(f"  error: {r.error}")
+        if r.verify:
+            lines.extend(f"  {p}" for p in r.verify.problems)
+        if r.dump:
+            lines.append(f"  dump: {r.dump.path} ({r.dump.size_bytes:,} bytes)")
+        lines.append("")
+    return subject, "\n".join(lines)
+
+
+def render_heartbeat_mail(history: list[dict], now: datetime) -> tuple[str, str]:
+    subject = f"[copi-backup] weekly summary {now:%Y-%m-%d}"
+    lines = [f"Weekly backup summary, {now:%Y-%m-%d} UTC", ""]
+    if not history:
+        lines.append("NO RUNS RECORDED IN THE LAST 7 DAYS — the timer may not be firing.")
+    for entry in history:
+        lines.append(
+            f"{entry['stack']:<18} {entry['started_utc']}  "
+            f"{entry['dump_bytes']:>12,} B  "
+            f"{'verified' if entry['verified'] else 'UNVERIFIED'}"
+        )
+    return subject, "\n".join(lines)
+
+
+def send_mail(cfg: Config, subject: str, body: str, client_factory=None) -> bool:
+    """Send via SES v1, matching src/services/email.py. Never raises."""
+    if not cfg.mail_to or not cfg.ses_sender_email:
+        return False
+    try:
+        if client_factory is None:
+            import boto3
+
+            def client_factory(region):
+                return boto3.client("ses", region_name=region)
+
+        client = client_factory(cfg.aws_region)
+        client.send_email(
+            Source=cfg.ses_sender_email,
+            Destination={"ToAddresses": list(cfg.mail_to)},
+            Message={
+                "Subject": {"Data": subject, "Charset": "UTF-8"},
+                "Body": {"Text": {"Data": body, "Charset": "UTF-8"}},
+            },
+        )
+        return True
+    except Exception:  # mail failure must not abort the run
+        return False

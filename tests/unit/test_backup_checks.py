@@ -596,3 +596,91 @@ def test_verify_dump_error_does_not_double_the_stack_name(tmp_path):
     result = cb.verify_dump(fake, CFG, STACK, dump, {})
     assert result.problems
     assert not result.problems[0].startswith(f"{STACK.name}: {STACK.name}:")
+
+
+def _ok_result(stack="copi-python"):
+    return cb.StackResult(
+        stack=stack,
+        dump=cb.DumpResult(Path(f"/v/{stack}.dump"), {"public.users": 3}, "snap", 1024, "abc"),
+        verify=cb.VerifyResult(True, [], False, 9.5),
+        offsite_ok=True,
+        error=None,
+    )
+
+
+def _bad_result(stack="copi-blackbird"):
+    return cb.StackResult(
+        stack=stack,
+        dump=cb.DumpResult(Path(f"/v/{stack}.dump"), {"public.users": 3}, "snap", 1024, "abc"),
+        verify=cb.VerifyResult(False, ["public.users: 3 rows in snapshot, 2 restored (-1)"],
+                               False, 4.0),
+        offsite_ok=True,
+        error=None,
+    )
+
+
+def test_sidecar_document_records_verification_and_checksum():
+    now = datetime(2026, 8, 18, 3, 15, tzinfo=UTC)
+    doc = cb.sidecar_document(_ok_result(), started=now)
+    assert doc["verified"] is True
+    assert doc["dump_sha256"] == "abc"
+    assert doc["snapshot_id"] == "snap"
+    assert doc["offsite"] is True
+    assert doc["row_counts"] == {"public.users": 3}
+
+
+def test_build_status_marks_overall_failure_if_any_stack_failed():
+    now = datetime(2026, 8, 18, 3, 15, tzinfo=UTC)
+    status = cb.build_status([_ok_result(), _bad_result()], now)
+    assert status["ok"] is False
+    assert status["stacks"]["copi-python"]["verified"] is True
+    assert status["stacks"]["copi-blackbird"]["verified"] is False
+
+
+def test_build_status_ok_when_all_pass():
+    now = datetime(2026, 8, 18, 3, 15, tzinfo=UTC)
+    assert cb.build_status([_ok_result()], now)["ok"] is True
+
+
+def test_failure_mail_names_only_failing_stacks_in_subject():
+    now = datetime(2026, 8, 18, 3, 15, tzinfo=UTC)
+    subject, body = cb.render_failure_mail([_ok_result(), _bad_result()], now)
+    assert "copi-blackbird" in subject
+    assert "copi-python" not in subject
+    assert "FAILED" in subject
+    assert "public.users" in body
+
+
+def test_failure_mail_is_one_message_for_multiple_failures():
+    now = datetime(2026, 8, 18, 3, 15, tzinfo=UTC)
+    subject, _ = cb.render_failure_mail([_bad_result("a"), _bad_result("b")], now)
+    assert "a" in subject and "b" in subject
+
+
+def test_send_mail_uses_ses_v1_client_and_all_recipients():
+    sent = {}
+
+    class _Client:
+        def send_email(self, **kw):
+            sent.update(kw)
+            return {"MessageId": "1"}
+
+    cfg = cb.load_config({
+        "STACKS": "a:c:d:u",
+        "SES_SENDER_EMAIL": "noreply@copi.science",
+        "MAIL_TO": "x@e.com y@e.com",
+    })
+    assert cb.send_mail(cfg, "S", "B", client_factory=lambda region: _Client()) is True
+    assert sent["Source"] == "noreply@copi.science"
+    assert sent["Destination"]["ToAddresses"] == ["x@e.com", "y@e.com"]
+    assert sent["Message"]["Subject"]["Data"] == "S"
+
+
+def test_send_mail_returns_false_and_does_not_raise_on_ses_error():
+    # SES failing must not abort the run; the exit code still reports the failure.
+    class _Client:
+        def send_email(self, **kw):
+            raise RuntimeError("ses is down")
+
+    cfg = cb.load_config({"STACKS": "a:c:d:u", "SES_SENDER_EMAIL": "s@e.com", "MAIL_TO": "x@e.com"})
+    assert cb.send_mail(cfg, "S", "B", client_factory=lambda region: _Client()) is False
