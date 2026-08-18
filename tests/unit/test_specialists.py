@@ -4,6 +4,7 @@ derives which domains a given verdict was obliged to consult.
 Pure functions over plain data — no DB, no engine, no LLM. See
 docs/specs/2026-08-07-nine-evaluator-panel-design.md §2, §4.
 """
+import itertools
 import json
 from pathlib import Path
 
@@ -258,3 +259,96 @@ def test_the_cue_driven_domains_are_stated():
     block = _mandatory_block()
     assert "chemistry" in block
     assert "clinical" in block
+
+
+def _verdict(text, **over):
+    v = {
+        "recommendation": "advance", "subject_agent_id": "x",
+        "rationale": text, "company_or_project": "", "funnel_stage": "",
+        "red_flags": [], "suggested_derisking_milestones": [],
+    }
+    v.update(over)
+    return v
+
+
+def test_reasons_does_not_summon_the_chemistry_specialist():
+    """'aso' (antisense oligonucleotide) must not match 'reasons'.
+
+    Fired on 7 of 18 production verdicts. On `hart` it was the ONLY chemistry
+    cue present, so it alone decided the requirement.
+    """
+    assert "chemistry" not in required_domains_for(
+        _verdict("We passed for several reasons, none of them chemical.")
+    )
+
+
+def test_architecture_does_not_summon_the_chemistry_specialist():
+    """'hit' (a screening hit) must not match 'architecture'. Fired on 6/18."""
+    assert "chemistry" not in required_domains_for(
+        _verdict("The granuloma architecture is not recapitulated in this model.")
+    )
+
+
+def test_also_and_signals_do_not_summon_the_clinical_specialist():
+    """'als' (the disease) must not match 'also', 'signals', 'animals',
+    'journals'. Fired on 9/18; on `mcmeniman` it was the only clinical cue."""
+    for word in ("also", "signals", "animals", "journals"):
+        assert "clinical" not in required_domains_for(
+            _verdict(f"There are {word} to consider here.")
+        ), f"{word!r} must not read as ALS"
+
+
+def test_genuine_cues_still_match():
+    """Narrowing must not become blindness."""
+    assert "chemistry" in required_domains_for(_verdict("We have ASOs in hand."))
+    assert "chemistry" in required_domains_for(_verdict("An aso-based approach."))
+    assert "chemistry" in required_domains_for(_verdict("A known-compound series."))
+    assert "chemistry" in required_domains_for(
+        _verdict("Medicinal chemistry is tractable.")
+    )
+    assert "clinical" in required_domains_for(_verdict("An ALS indication."))
+    assert "clinical" in required_domains_for(_verdict("A clinical-stage asset."))
+    assert "clinical" in required_domains_for(_verdict("Patient-derived organoids."))
+    assert "clinical" in required_domains_for(_verdict("Neurodegeneration broadly."))
+
+
+def test_only_the_documented_domains_are_reachable():
+    """Which domains the floor can EVER require, asserted rather than assumed.
+
+    `commercial` and `budget` cannot be required by any input — proven
+    exhaustively here rather than trusted. That is finding F5, and this test is
+    what would have caught it. F5 and F6a are deferred by D6 (the fixes need a
+    hub prompt change), so this pins the deferred state honestly instead of
+    leaving five-of-eight as a fact remembered only in a design doc.
+    """
+    reachable: set[str] = set()
+    cue_texts = [
+        "small molecule compound inhibitor antibody peptide modality scaffold",
+        "disease patient indication clinical therapeutic cancer tumor",
+        "platform pipeline reusable multiple shots",
+        "commercial competitor landscape deal comps investor budget cost timeline",
+        "",
+    ]
+    for r in range(len(cue_texts) + 1):
+        for combo in itertools.combinations(cue_texts, r):
+            text = " ".join(combo)
+            for fto in ("met", "not_met", "unconfirmed", None):
+                for platform in (1, 3, 4, 5, None):
+                    reachable |= required_domains_for(
+                        _verdict(
+                            text,
+                            company_or_project=text,
+                            red_flags=[text],
+                            suggested_derisking_milestones=[text],
+                            gating={"fto_achievable": fto},
+                            scores={"platform": platform},
+                        )
+                    )
+
+    assert reachable == {
+        "scientific", "talent", "chemistry", "clinical", "technologic", "legal",
+    }
+    assert {"commercial", "budget"}.isdisjoint(reachable), (
+        "commercial maps to `differentiation`, the heaviest dimension at 15%, "
+        "and the floor still cannot demand it — F5, deferred by D6"
+    )

@@ -22,6 +22,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -201,6 +202,41 @@ _PLATFORM_CUES = ("platform", "pipeline", "multiple shots", "reusable")
 _ALWAYS: frozenset[str] = frozenset({"scientific", "talent"})
 
 
+# Cues short enough to appear inside unrelated English. These match as WHOLE
+# WORDS (plus a simple plural); every other cue stays prefix-anchored so stems
+# like "medicinal chem" -> "medicinal chemistry" and "neurodegener" ->
+# "neurodegeneration" keep working.
+#
+# Measured on the 18 production verdicts of run 1787010946: "aso" matched
+# "reasons" on 7, "hit" matched "architecture" on 6, and "als" matched
+# "also"/"signals"/"animals"/"journals" on 9. Three verdicts had a specialist
+# required by one of these ALONE.
+_WORD_ONLY_CUES: frozenset[str] = frozenset({"als", "aso", "hit", "adc"})
+
+
+@lru_cache(maxsize=None)
+def _cue_pattern(cue: str) -> re.Pattern[str]:
+    escaped = re.escape(cue)
+    if cue in _WORD_ONLY_CUES:
+        return re.compile(rf"(?<![a-z0-9]){escaped}(?:s|es)?(?![a-z0-9])")
+    return re.compile(rf"(?<![a-z0-9]){escaped}")
+
+
+def _cue_matches(cue: str, text: str) -> bool:
+    """Whether ``cue`` occurs in ``text`` as a word rather than as a fragment.
+
+    The lookbehind is what kills the false positives: "reasons" contains "aso"
+    but not at a word boundary. Hyphens count as boundaries, so "aso-based" and
+    "known-compound" still match.
+
+    The old comment here claimed "a false positive costs one consult, a false
+    negative costs the whole point of the floor." That cost model was inverted:
+    this runs AFTER the interview is over, so a false positive cost the whole
+    verdict.
+    """
+    return _cue_pattern(cue).search(text) is not None
+
+
 def _haystack(verdict: dict) -> str:
     """Every free-text field of a verdict, lowercased, for cue matching."""
     parts: list[str] = []
@@ -232,9 +268,9 @@ def required_domains_for(verdict: object) -> frozenset[str]:
     required = set(_ALWAYS)
     text = _haystack(verdict)
 
-    if any(cue in text for cue in _CHEMISTRY_CUES):
+    if any(_cue_matches(cue, text) for cue in _CHEMISTRY_CUES):
         required.add("chemistry")
-    if any(cue in text for cue in _CLINICAL_CUES):
+    if any(_cue_matches(cue, text) for cue in _CLINICAL_CUES):
         required.add("clinical")
 
     gating = verdict.get("gating")
@@ -245,7 +281,7 @@ def required_domains_for(verdict: object) -> frozenset[str]:
     platform_scored = isinstance(scores, dict) and isinstance(
         scores.get("platform"), (int, float)
     ) and scores.get("platform", 0) >= 4
-    if platform_scored or any(cue in text for cue in _PLATFORM_CUES):
+    if platform_scored or any(_cue_matches(cue, text) for cue in _PLATFORM_CUES):
         required.add("technologic")
 
     return frozenset(required)
