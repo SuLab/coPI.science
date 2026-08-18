@@ -2717,26 +2717,16 @@ class SimulationEngine:
 
         gap = self._specialist_floor_gap(subject_view, thread=thread)
         if gap:
-            subject_hint = subject_view.get("subject_agent_id")
             logger.warning(
-                "[%s] Assessment REFUSED for %s — recommendation %r requires the "
-                "%s specialist(s), which were never consulted during the "
-                "interview. Nothing persisted. The concluding reply that "
-                "carries the verdict is the last chance to consult them — "
-                "there is no later turn to add them in.",
-                agent_id, subject_hint or "?",
+                "[%s] Assessment for %s stored with an INCOMPLETE PANEL — "
+                "recommendation %r required the %s specialist(s), never "
+                "consulted during the interview. The verdict is flagged, not "
+                "discarded: this check runs after the concluding reply is "
+                "already in Slack, so refusing it left the PI told and "
+                "Blackbird holding nothing.",
+                agent_id, subject_view.get("subject_agent_id") or "?",
                 verdict.get("recommendation"), ", ".join(sorted(gap)),
             )
-            await self._record_assessment_drop(
-                agent_id,
-                "specialist_floor",
-                subject_agent_id=subject_hint if isinstance(subject_hint, str) else None,
-                detail=(
-                    f"recommendation {verdict.get('recommendation')!r} required the "
-                    f"{', '.join(sorted(gap))} specialist(s), never consulted"
-                ),
-            )
-            return
 
         # The engine can run without a database (see __init__) — in that mode
         # this is a silent no-op, matching every other run-scoped write in
@@ -2798,6 +2788,9 @@ class SimulationEngine:
             ),
             rationale=_str_or_none(verdict.get("rationale")),
             raw_verdict=verdict,
+            panel_incomplete=bool(gap),
+            # NULL, not [], when there is no gap — see the column comment.
+            missing_domains=sorted(gap) if gap else None,
         )
         try:
             async with self.session_factory() as db:

@@ -27,6 +27,35 @@ async def admin(db_session):
     )
 
 
+@pytest.fixture(autouse=True)
+async def _reset_assessment_tables(engine):
+    """Start every test in this module with these three tables empty.
+
+    `db_session`-based tests are already isolated (rolled back per test), but
+    the many tests here that take `engine` directly commit for real, and two
+    of them — test_a_gapped_verdict_is_stored_and_flagged_not_discarded and
+    test_a_complete_panel_stores_an_unflagged_row — intentionally query the
+    WHOLE table with no `simulation_run_id` filter (that is the point: a
+    gapped verdict must be the only row, not merely present among others).
+    A row left behind by an earlier `engine`-based test that forgot its own
+    cleanup would silently corrupt exactly those two. Wiping here, before each
+    test runs, makes that guarantee independent of every other test's
+    bookkeeping.
+    """
+    from sqlalchemy import delete
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from src.models import AssessmentDrop
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as db:
+        await db.execute(delete(OpportunityAssessment))
+        await db.execute(delete(AssessmentDrop))
+        await db.execute(delete(SimulationRun))
+        await db.commit()
+    yield
+
+
 @pytest.mark.asyncio
 async def test_assessment_row_round_trips(db_session):
     run = SimulationRun()
@@ -1571,49 +1600,63 @@ async def test_engine_known_subject_overrides_the_models_guess(engine):
     for domain in ("scientific", "talent"):
         stub._record_consult("wang", domain)
 
-    await SimulationEngine._persist_assessment(
-        stub, "blackbird", "general",
-        {
-            # The bot_name form: the only identifier the prompt ever showed it.
-            "subject_agent_id": "WangBot",
-            "company_or_project": "DBT / BCAA-autophagy axis",
-            "funnel_stage": "incubation",
-            "recommendation": "advance",
-            "confidence": "Speculative",
-            "scores": {"differentiation": 4, "platform": 2},
-            "gating": {"life_sciences_domain": "met", "credible_tech_source": "met",
-                       "fto_achievable": "unconfirmed"},
-        },
-        subject_agent_id_fallback="wang",
-    )
+    try:
+        await SimulationEngine._persist_assessment(
+            stub, "blackbird", "general",
+            {
+                # The bot_name form: the only identifier the prompt ever showed it.
+                "subject_agent_id": "WangBot",
+                "company_or_project": "DBT / BCAA-autophagy axis",
+                "funnel_stage": "incubation",
+                "recommendation": "advance",
+                "confidence": "Speculative",
+                "scores": {"differentiation": 4, "platform": 2},
+                "gating": {"life_sciences_domain": "met", "credible_tech_source": "met",
+                           "fto_achievable": "unconfirmed"},
+            },
+            subject_agent_id_fallback="wang",
+        )
 
-    async with factory() as check:
-        rows = (await check.execute(
-            select(OpportunityAssessment).where(
-                OpportunityAssessment.simulation_run_id == run_id
-            )
-        )).scalars().all()
+        async with factory() as check:
+            rows = (await check.execute(
+                select(OpportunityAssessment).where(
+                    OpportunityAssessment.simulation_run_id == run_id
+                )
+            )).scalars().all()
 
-    assert len(rows) == 1, (
-        "verdict was refused: the floor joined consults against the model's "
-        "'WangBot' instead of the engine's known 'wang'"
-    )
-    # Stored under the real agent_id, so /admin/assessments and every join
-    # against `agents` resolves.
-    assert rows[0].subject_agent_id == "wang"
-    # raw_verdict stays byte-for-byte what the model sent.
-    assert rows[0].raw_verdict["subject_agent_id"] == "WangBot"
+        assert len(rows) == 1, (
+            "verdict was refused: the floor joined consults against the model's "
+            "'WangBot' instead of the engine's known 'wang'"
+        )
+        # Stored under the real agent_id, so /admin/assessments and every join
+        # against `agents` resolves.
+        assert rows[0].subject_agent_id == "wang"
+        # raw_verdict stays byte-for-byte what the model sent.
+        assert rows[0].raw_verdict["subject_agent_id"] == "WangBot"
+    finally:
+        async with factory() as cleanup:
+            stale = (await cleanup.execute(
+                select(SimulationRun).where(SimulationRun.id == run_id)
+            )).scalar_one_or_none()
+            if stale is not None:
+                await cleanup.delete(stale)  # cascades to the assessment
+                await cleanup.commit()
 
 
 @pytest.mark.asyncio
-async def test_a_refused_verdict_is_recorded_as_a_drop(engine):
-    """A refused verdict must leave a durable trace, not just a log line.
+async def test_a_gapped_verdict_persists_with_no_drop_row(engine):
+    """A gapped verdict is stored flagged, never routed through the drop table.
 
-    Every way an assessment is lost is silent: the concluding reply is already
-    in Slack, the thread closes normally, and the only evidence is a WARNING in
-    a container log. That makes an empty /admin/assessments page
-    indistinguishable from "nothing screened yet" — the exact state this
-    deployment sat in, with zero rows across four runs.
+    This used to be `test_a_refused_verdict_is_recorded_as_a_drop`: until the
+    fix in test_a_gapped_verdict_is_stored_and_flagged_not_discarded (above),
+    an incomplete panel meant `_persist_assessment` recorded an
+    `AssessmentDrop` with reason "specialist_floor" and returned early,
+    discarding the verdict — after the concluding reply was already in Slack.
+    That call site is gone; the three "specialist_floor" rows already in the
+    database (see src/models/opportunity.py, _assessments_body.html) are
+    historical, from before this fix, and no new ones can be produced by this
+    path. What is left to check here is that a gap still creates no drop row
+    of any kind — only the flagged assessment row.
     """
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -1634,35 +1677,40 @@ async def test_a_refused_verdict_is_recorded_as_a_drop(engine):
     # none exists for THIS subject — the "hub never convened the panel" case.
     stub._record_consult("someone-else", "scientific")
 
-    await SimulationEngine._persist_assessment(
-        stub, "blackbird", "general",
-        {
-            "subject_agent_id": "wang",
-            "company_or_project": "Refused thing",
-            "recommendation": "advance",
-            "scores": {"differentiation": 4},
-        },
-        subject_agent_id_fallback="wang",
-    )
+    try:
+        await SimulationEngine._persist_assessment(
+            stub, "blackbird", "general",
+            {
+                "subject_agent_id": "wang",
+                "company_or_project": "Refused thing",
+                "recommendation": "advance",
+                "scores": {"differentiation": 4},
+            },
+            subject_agent_id_fallback="wang",
+        )
 
-    async with factory() as check:
-        assessments = (await check.execute(
-            select(OpportunityAssessment).where(
-                OpportunityAssessment.simulation_run_id == run_id
-            )
-        )).scalars().all()
-        drops = (await check.execute(
-            select(AssessmentDrop).where(AssessmentDrop.simulation_run_id == run_id)
-        )).scalars().all()
+        async with factory() as check:
+            assessments = (await check.execute(
+                select(OpportunityAssessment).where(
+                    OpportunityAssessment.simulation_run_id == run_id
+                )
+            )).scalars().all()
+            drops = (await check.execute(
+                select(AssessmentDrop).where(AssessmentDrop.simulation_run_id == run_id)
+            )).scalars().all()
 
-    # The refusal itself is unchanged — this is about visibility, not policy.
-    assert assessments == []
-    assert len(drops) == 1
-    assert drops[0].reason == "specialist_floor"
-    assert drops[0].subject_agent_id == "wang"
-    assert drops[0].agent_id == "blackbird"
-    # The detail must name what was missing, so the banner can be acted on.
-    assert "scientific" in (drops[0].detail or "")
+        assert len(assessments) == 1, "the verdict must be stored, not discarded"
+        assert assessments[0].panel_incomplete is True
+        assert "scientific" in (assessments[0].missing_domains or [])
+        assert drops == [], "an incomplete panel is a flag on the row now, not a drop"
+    finally:
+        async with factory() as cleanup:
+            stale = (await cleanup.execute(
+                select(SimulationRun).where(SimulationRun.id == run_id)
+            )).scalar_one_or_none()
+            if stale is not None:
+                await cleanup.delete(stale)  # cascades to the assessment
+                await cleanup.commit()
 
 
 @pytest.mark.asyncio
@@ -1687,30 +1735,39 @@ async def test_a_persisted_verdict_records_no_drop(engine):
     for domain in ("scientific", "talent"):
         stub._record_consult("wang", domain)
 
-    await SimulationEngine._persist_assessment(
-        stub, "blackbird", "general",
-        {
-            "subject_agent_id": "wang",
-            "company_or_project": "Good thing",
-            "recommendation": "advance",
-            "scores": {"differentiation": 4, "platform": 2},
-            "gating": {"fto_achievable": "unconfirmed"},
-        },
-        subject_agent_id_fallback="wang",
-    )
+    try:
+        await SimulationEngine._persist_assessment(
+            stub, "blackbird", "general",
+            {
+                "subject_agent_id": "wang",
+                "company_or_project": "Good thing",
+                "recommendation": "advance",
+                "scores": {"differentiation": 4, "platform": 2},
+                "gating": {"fto_achievable": "unconfirmed"},
+            },
+            subject_agent_id_fallback="wang",
+        )
 
-    async with factory() as check:
-        assessments = (await check.execute(
-            select(OpportunityAssessment).where(
-                OpportunityAssessment.simulation_run_id == run_id
-            )
-        )).scalars().all()
-        drops = (await check.execute(
-            select(AssessmentDrop).where(AssessmentDrop.simulation_run_id == run_id)
-        )).scalars().all()
+        async with factory() as check:
+            assessments = (await check.execute(
+                select(OpportunityAssessment).where(
+                    OpportunityAssessment.simulation_run_id == run_id
+                )
+            )).scalars().all()
+            drops = (await check.execute(
+                select(AssessmentDrop).where(AssessmentDrop.simulation_run_id == run_id)
+            )).scalars().all()
 
-    assert len(assessments) == 1
-    assert drops == []
+        assert len(assessments) == 1
+        assert drops == []
+    finally:
+        async with factory() as cleanup:
+            stale = (await cleanup.execute(
+                select(SimulationRun).where(SimulationRun.id == run_id)
+            )).scalar_one_or_none()
+            if stale is not None:
+                await cleanup.delete(stale)  # cascades to the assessment
+                await cleanup.commit()
 
 
 @pytest.mark.asyncio
@@ -1808,8 +1865,12 @@ async def test_floor_arms_from_this_threads_own_later_consult(engine, monkeypatc
     Before the per-turn latch, `floor_armed` stayed frozen at its
     activation-time False forever, so this incomplete panel would have been
     silently persisted as if fully vetted — the bug reported empirically:
-    "with an incomplete panel, the frozen snapshot returned set() (no
-    refusal) where the live global correctly returned {'talent'}".
+    "with an incomplete panel, the frozen snapshot returned set() (no gap)
+    where the live global correctly returned {'talent'}". The panel gap is no
+    longer a refusal (see test_a_gapped_verdict_is_stored_and_flagged_not_discarded)
+    — the row is always stored — so what distinguishes the fixed latch from
+    the frozen one is now `panel_incomplete`/`missing_domains` on that row,
+    not whether a row exists at all.
     """
     from src.models import AssessmentDrop
 
@@ -1832,18 +1893,18 @@ async def test_floor_arms_from_this_threads_own_later_consult(engine, monkeypatc
         )
         assert len(client.posted) == 1  # the reply still went out to Slack
         rows = await _assessment_rows(factory, run_id)
-        assert rows == [], (
-            "an incomplete panel (missing 'talent') must be refused, not "
-            "silently persisted because floor_armed was frozen False at "
-            "activation and never re-checked"
+        assert len(rows) == 1, "the verdict must be stored, not discarded"
+        assert rows[0].panel_incomplete is True, (
+            "an incomplete panel (missing 'talent') must be flagged — the "
+            "frozen snapshot bug would have computed an empty gap here "
+            "(set()) instead of the live global's {'talent'}"
         )
+        assert rows[0].missing_domains == ["talent"]
         async with factory() as check:
             drops = (await check.execute(
                 select(AssessmentDrop).where(AssessmentDrop.simulation_run_id == run_id)
             )).scalars().all()
-        assert len(drops) == 1
-        assert drops[0].reason == "specialist_floor"
-        assert "talent" in (drops[0].detail or "")
+        assert drops == [], "an incomplete panel is a flag on the row now, not a drop"
     finally:
         await _delete_run(factory, run_id)
 
@@ -1866,7 +1927,11 @@ async def test_floor_arms_for_a_restart_rebuilt_thread_once_any_consult_is_recor
     arms off the GLOBAL map, never off this thread's own subject: keying it
     on the subject would walk back into the exact hole
     `_specialist_floor_gap`'s docstring already warns about — "a hub that
-    simply never convenes a panel" for THIS PI must still be caught.
+    simply never convenes a panel" for THIS PI must still be caught. Being
+    caught now means stored and flagged, not refused (see
+    test_a_gapped_verdict_is_stored_and_flagged_not_discarded) — the row
+    always exists, so `panel_incomplete` is the assertion that carries this
+    test's finding.
     """
     response = (
         _SLACK_BODY + "\n\n"
@@ -1883,10 +1948,11 @@ async def test_floor_arms_for_a_restart_rebuilt_thread_once_any_consult_is_recor
     try:
         assert thread.floor_armed is True
         rows = await _assessment_rows(factory, run_id)
-        assert rows == [], (
+        assert len(rows) == 1, "the verdict must be stored, not discarded"
+        assert rows[0].panel_incomplete is True, (
             "wang's own panel was never convened at all — the floor must "
-            "bite, not fail open forever just because this thread survived "
-            "a restart"
+            "still catch that, not fail open forever just because this "
+            "thread survived a restart"
         )
     finally:
         await _delete_run(factory, run_id)
@@ -1935,3 +2001,95 @@ async def test_a_concurrent_consult_landing_mid_turn_does_not_flip_this_verdict(
         )
     finally:
         await _delete_run(factory, run_id)
+
+
+@pytest.mark.asyncio
+async def test_a_gapped_verdict_is_stored_and_flagged_not_discarded(engine):
+    """The floor's finding must not cost the verdict.
+
+    _persist_assessment runs AFTER the concluding reply is already in Slack, so
+    refusing meant the PI had been told and Blackbird kept nothing. Both
+    production refusals (gordy, 2026-08-17) lost a real conditional verdict
+    exactly this way.
+    """
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from src.agent.simulation import SimulationEngine
+    from src.services.blackbird_rubric import RUBRIC_WEIGHTS
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as setup:
+        run = SimulationRun()
+        setup.add(run)
+        await setup.commit()
+        run_id = run.id
+
+    stub = SimulationEngine(
+        agents=[], slack_clients={}, session_factory=factory, simulation_run_id=run_id,
+    )
+    # Arm the floor: a consult for SOME OTHER PI proves this process records
+    # consults, so an absent record for `gordy` means the panel was skipped
+    # rather than that we restarted mid-interview.
+    stub._record_consult("someone_else", "scientific")
+
+    await SimulationEngine._persist_assessment(
+        stub, "blackbird", "general",
+        {
+            "subject_agent_id": "gordy",
+            "recommendation": "conditional",
+            "rationale": "A peptide-based vaccine platform for tuberculosis.",
+            "scores": {k: 3 for k in RUBRIC_WEIGHTS},
+        },
+        slack_ts="1.1",
+        subject_agent_id_fallback="gordy",
+    )
+
+    async with factory() as db:
+        rows = (await db.execute(select(OpportunityAssessment))).scalars().all()
+
+    assert len(rows) == 1, "the verdict must be stored, not discarded"
+    row = rows[0]
+    assert row.panel_incomplete is True
+    assert "chemistry" in row.missing_domains
+    assert row.recommendation == "conditional", "the verdict itself is unchanged"
+    assert row.weighted_score is not None, "scoring still runs on a flagged row"
+
+
+@pytest.mark.asyncio
+async def test_a_complete_panel_stores_an_unflagged_row(engine):
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from src.agent.simulation import SimulationEngine
+    from src.services.blackbird_rubric import RUBRIC_WEIGHTS
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as setup:
+        run = SimulationRun()
+        setup.add(run)
+        await setup.commit()
+        run_id = run.id
+
+    stub = SimulationEngine(
+        agents=[], slack_clients={}, session_factory=factory, simulation_run_id=run_id,
+    )
+    for domain in ("scientific", "talent", "chemistry", "clinical", "technologic"):
+        stub._record_consult("gordy", domain)
+
+    await SimulationEngine._persist_assessment(
+        stub, "blackbird", "general",
+        {
+            "subject_agent_id": "gordy",
+            "recommendation": "conditional",
+            "rationale": "A peptide-based platform for a tuberculosis indication.",
+            "scores": {k: 3 for k in RUBRIC_WEIGHTS},
+        },
+        slack_ts="1.1",
+        subject_agent_id_fallback="gordy",
+    )
+
+    async with factory() as db:
+        row = (await db.execute(select(OpportunityAssessment))).scalars().one()
+    assert row.panel_incomplete is False
+    assert row.missing_domains is None, (
+        "NULL means no gap; [] would mean a gap we could not name"
+    )
