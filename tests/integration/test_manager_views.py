@@ -437,6 +437,48 @@ async def test_manager_assessments_renders_a_populated_verdict_row(client, db_se
     assert _score_cell(html, "external_signals") == "external signals — /8%"
 
 
+async def test_manager_assessments_renders_the_incomplete_panel_marker(client, db_session):
+    """``incomplete_panel_count`` and ``a.panel_incomplete``/``a.missing_domains``
+    reach ``/manager/assessments`` only via ``manager_assessments``'s ``**view``
+    splat (``src/routers/manager.py``) — there is no per-key allowlist the way
+    ``admin.py`` has one. Jinja's ``Undefined`` is falsy in ``{% if %}`` and
+    never raises, so if a future change stopped forwarding that key (or
+    dropped it from ``list_assessments``'s return dict), the banner and the
+    per-row marker would both silently stop rendering, the page would still
+    200 with a clean-looking table, and every other manager assessments test
+    would keep passing — exactly the silent regression managers, the
+    read-only audience this warning exists for, would never see. This seeds a
+    ``panel_incomplete=True`` row and asserts on both the banner text and the
+    per-row marker, neither of which appears anywhere else on the page.
+    """
+    mgr = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
+    run = SimulationRun()
+    db_session.add(run)
+    await db_session.flush()
+    db_session.add(
+        OpportunityAssessment(
+            simulation_run_id=run.id,
+            agent_id="blackbird",
+            subject_agent_id="gordy",
+            channel_name="general",
+            company_or_project="Gapped Panel Fixture Co",
+            recommendation="conditional",
+            panel_incomplete=True,
+            missing_domains=["chemistry"],
+        )
+    )
+    await db_session.flush()
+
+    resp = await client.get("/manager/assessments", headers=auth_headers(mgr.id))
+    assert resp.status_code == 200
+    html = resp.text
+
+    assert "stored with an incomplete specialist panel" in html
+    assert "Gapped Panel Fixture Co" in html
+    assert "panel</span>" in html
+    assert "Missing: chemistry" in html
+
+
 async def test_manager_can_read_discussions_and_activity(client, db_session):
     mgr = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
     for path in ("/manager/discussions", "/manager/activity"):
