@@ -366,7 +366,7 @@ class _FakeSession:
 
 def test_dump_stack_removes_container_temp_even_when_dump_fails(tmp_path):
     fake = cb.FakeRunner()
-    fake.failures["pg_dump"] = 1
+    fake.failures["pg_dump -U"] = 1
     with pytest.raises(cb.CommandError):
         cb.dump_stack(
             fake, CFG, STACK, tmp_path,
@@ -379,7 +379,7 @@ def test_dump_stack_removes_container_temp_even_when_dump_fails(tmp_path):
 
 def test_dump_stack_leaves_no_partial_file_when_dump_fails(tmp_path):
     fake = cb.FakeRunner()
-    fake.failures["pg_dump"] = 1
+    fake.failures["pg_dump -U"] = 1
     with pytest.raises(cb.CommandError):
         cb.dump_stack(
             fake, CFG, STACK, tmp_path,
@@ -401,6 +401,69 @@ def test_dump_stack_verifies_toc_inside_container_before_copying(tmp_path):
     order = [" ".join(c) for c in fake.calls]
     toc = next(i for i, j in enumerate(order) if "pg_restore -l" in j)
     assert not any("docker cp" in j for j in order[:toc])
+
+
+class _FailingSession:
+    """A snapshot session that fails in __enter__, like a dead database."""
+
+    def __init__(self, stack):
+        self.stack = stack
+        self.snapshot_id = ""
+
+    def __enter__(self):
+        raise cb.BackupError("snapshot export failed")
+
+    def __exit__(self, *exc):
+        return None
+
+    def counts(self):
+        return {}
+
+
+class _PartialWritingRunner(cb.FakeRunner):
+    """docker cp really writes a truncated file, then fails.
+
+    Needed because a plain FakeRunner never touches the disk, so the earlier
+    "leaves no partial" tests were vacuous — no .partial ever existed and removing
+    the unlink() would not have failed them.
+    """
+
+    def run(self, argv, *, timeout=None, check=True):
+        self.calls.append(list(argv))
+        if argv[:2] == ["docker", "cp"]:
+            Path(argv[-1]).write_bytes(b"TRUNCATED-ARCHIVE")
+            result = cb.Completed(argv, 1, "", "cp failed midway")
+            if check:
+                raise cb.CommandError(result)
+            return result
+        return cb.Completed(argv, 0, "", "")
+
+
+def test_dump_stack_unlinks_a_real_partial_when_docker_cp_fails(tmp_path):
+    fake = _PartialWritingRunner()
+    with pytest.raises(cb.CommandError):
+        cb.dump_stack(
+            fake, CFG, STACK, tmp_path,
+            datetime(2026, 8, 18, 3, 15, tzinfo=UTC),
+            session_factory=_FakeSession,
+        )
+    assert list(tmp_path.glob("*.partial")) == [], "a truncated .partial survived"
+    assert list(tmp_path.glob("*.dump")) == [], "a truncated file took the final name"
+
+
+def test_dump_stack_cleans_container_temp_when_the_session_itself_fails(tmp_path):
+    # The brief calls out "an exception from the snapshot session" as a path the temp
+    # cleanup must survive; _FakeSession never fails, so it was never exercised.
+    fake = cb.FakeRunner()
+    with pytest.raises(cb.BackupError):
+        cb.dump_stack(
+            fake, CFG, STACK, tmp_path,
+            datetime(2026, 8, 18, 3, 15, tzinfo=UTC),
+            session_factory=_FailingSession,
+        )
+    joined = [" ".join(c) for c in fake.calls]
+    assert any("rm -f /tmp/copi_backup_" in j for j in joined), joined
+    assert list(tmp_path.glob("*.partial")) == []
 
 
 def test_sha256_file_matches_hashlib(tmp_path):
