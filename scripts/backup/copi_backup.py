@@ -12,8 +12,10 @@ the exact counts of the snapshot the dump was taken from.
 
 from __future__ import annotations
 
+import re
 import shlex
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 
 DEFAULTS = {
     "BACKUP_ROOT": "/var/backups/copi",
@@ -119,3 +121,71 @@ def read_env_file(text: str) -> dict[str, str]:
         key, _, value = token.partition("=")
         env[key.strip()] = value
     return env
+
+
+TS_FORMAT = "%Y%m%dT%H%M%SZ"
+
+# Anchored on both ends. The pruner only ever deletes paths this matches, which is
+# what keeps the hand-made dumps in blackbird-copi-science/backups/ structurally out
+# of reach (they are named copi_pre0028_20260817_203346.dump — no 'T', no 'Z').
+DUMP_RE = re.compile(
+    r"^(?P<stack>[A-Za-z0-9][A-Za-z0-9_-]*)"
+    r"_(?P<db>[A-Za-z0-9][A-Za-z0-9_-]*)"
+    r"_(?P<ts>\d{8}T\d{6}Z)"
+    r"\.dump(?P<unverified>\.unverified)?$"
+)
+
+
+@dataclass(frozen=True)
+class DumpFile:
+    name: str
+    stack: str
+    db: str
+    taken: datetime
+    verified: bool
+
+
+def dump_name(stack: str, db: str, when: datetime) -> str:
+    """Canonical dump filename. ``when`` must be timezone-aware UTC."""
+    return f"{stack}_{db}_{when.strftime(TS_FORMAT)}.dump"
+
+
+def parse_dump_name(filename: str) -> DumpFile | None:
+    """Parse a managed dump filename, or None if this file is not ours."""
+    match = DUMP_RE.match(filename)
+    if match is None:
+        return None
+    taken = datetime.strptime(match.group("ts"), TS_FORMAT).replace(tzinfo=UTC)
+    return DumpFile(
+        name=filename,
+        stack=match.group("stack"),
+        db=match.group("db"),
+        taken=taken,
+        verified=match.group("unverified") is None,
+    )
+
+
+def select_for_deletion(
+    dumps: list[DumpFile], keep_verified: int, keep_unverified: int
+) -> list[DumpFile]:
+    """Count-based retention, applied per stack.
+
+    Keeps the ``keep_verified`` newest verified dumps and the ``keep_unverified``
+    newest unverified ones. Deletes nothing for a stack that has no verified dump at
+    all: when verification has been failing, the unverified copies may be the only
+    copies in existence, and a pruner that outlives the producer must degrade to
+    "stale but present" rather than to an empty directory.
+    """
+    doomed: list[DumpFile] = []
+    stacks = {d.stack for d in dumps}
+    for stack in sorted(stacks):
+        mine = [d for d in dumps if d.stack == stack]
+        verified = sorted((d for d in mine if d.verified), key=lambda d: d.taken, reverse=True)
+        unverified = sorted(
+            (d for d in mine if not d.verified), key=lambda d: d.taken, reverse=True
+        )
+        if not verified:
+            continue
+        doomed.extend(verified[keep_verified:])
+        doomed.extend(unverified[keep_unverified:])
+    return doomed
