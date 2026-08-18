@@ -156,3 +156,51 @@ def test_select_for_deletion_is_per_stack():
 
 def test_select_for_deletion_empty_input():
     assert cb.select_for_deletion([], keep_verified=5, keep_unverified=2) == []
+
+
+def test_compare_counts_accepts_exact_parity():
+    ok, problems = cb.compare_counts({"public.users": 5}, {"public.users": 5})
+    assert ok is True
+    assert problems == []
+
+
+def test_compare_counts_flags_shortfall_with_table_and_delta():
+    ok, problems = cb.compare_counts({"public.users": 100}, {"public.users": 97})
+    assert ok is False
+    assert len(problems) == 1
+    assert "public.users" in problems[0]
+    assert "-3" in problems[0]
+
+
+def test_compare_counts_flags_surplus():
+    ok, problems = cb.compare_counts({"public.users": 100}, {"public.users": 104})
+    assert ok is False
+    assert "+4" in problems[0]
+
+
+def test_compare_counts_flags_table_missing_from_restore():
+    ok, problems = cb.compare_counts({"public.users": 5, "public.jobs": 2}, {"public.users": 5})
+    assert ok is False
+    assert "MISSING" in problems[0]
+    assert "public.jobs" in problems[0]
+
+
+def test_compare_counts_flags_unexpected_table_in_restore():
+    ok, problems = cb.compare_counts({}, {"public.ghost": 1})
+    assert ok is False
+    assert "not in the source snapshot" in problems[0]
+
+
+def test_compare_counts_reports_every_problem_sorted():
+    ok, problems = cb.compare_counts(
+        {"public.b": 1, "public.a": 1}, {"public.b": 0, "public.a": 0}
+    )
+    assert ok is False
+    assert len(problems) == 2
+    assert problems[0].startswith("public.a")
+    assert problems[1].startswith("public.b")
+
+
+def test_compare_counts_both_empty_is_parity():
+    # A database with no user tables is odd but not a backup failure.
+    assert cb.compare_counts({}, {}) == (True, [])

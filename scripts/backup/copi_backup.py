@@ -189,3 +189,43 @@ def select_for_deletion(
         doomed.extend(verified[keep_verified:])
         doomed.extend(unverified[keep_unverified:])
     return doomed
+
+
+# Ordinary tables only. Correct for both databases today: 30 relkind='r', zero
+# partitioned tables and zero materialised views (verified 2026-08-18). If a
+# partitioned table is ever added, a parent ('p') plus its leaf partitions ('r')
+# would need explicit handling — see spec §4.3 and §12.8.
+COUNT_TABLES_SQL = """
+SELECT n.nspname || '.' || c.relname
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relkind = 'r'
+  AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+ORDER BY 1
+"""
+
+
+def compare_counts(
+    source: dict[str, int], restored: dict[str, int]
+) -> tuple[bool, list[str]]:
+    """Compare snapshot counts against the restored copy. Any difference fails.
+
+    Unlike scripts/migrate/preflight.py's compare_row_counts, there is no
+    ``allow_growth`` here and no notion of expected-new tables: both sides are reads
+    of the *same* snapshot, so the only correct outcome is exact equality. A surplus
+    is as much a defect as a shortfall — it means the restore did not come from the
+    snapshot the counts describe.
+    """
+    problems: list[str] = []
+    for table in sorted(set(source) | set(restored)):
+        want = source.get(table)
+        got = restored.get(table)
+        if want is None:
+            problems.append(f"{table}: not in the source snapshot, {got:,} rows restored")
+        elif got is None:
+            problems.append(f"{table}: {want:,} rows in snapshot, MISSING from restore")
+        elif want != got:
+            problems.append(
+                f"{table}: {want:,} rows in snapshot, {got:,} restored ({got - want:+,})"
+            )
+    return (not problems), problems
