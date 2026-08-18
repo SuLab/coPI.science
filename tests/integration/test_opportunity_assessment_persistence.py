@@ -1624,15 +1624,21 @@ async def test_engine_known_subject_overrides_the_models_guess(engine):
                 )
             )).scalars().all()
 
-        assert len(rows) == 1, (
-            "verdict was refused: the floor joined consults against the model's "
-            "'WangBot' instead of the engine's known 'wang'"
-        )
+        assert len(rows) == 1, "a row must be stored regardless of which id it lands under"
         # Stored under the real agent_id, so /admin/assessments and every join
         # against `agents` resolves.
         assert rows[0].subject_agent_id == "wang"
         # raw_verdict stays byte-for-byte what the model sent.
         assert rows[0].raw_verdict["subject_agent_id"] == "WangBot"
+        # The override must reach the floor's own consult join, not just the
+        # column: if _specialist_floor_gap joined consults against "WangBot"
+        # instead of the engine's known "wang", it would find none recorded
+        # and report a gap even though the panel really was convened above.
+        assert rows[0].panel_incomplete is False, (
+            "the floor joined consults against the model's 'WangBot' instead of "
+            "the engine's known 'wang' — the override reached the column but not "
+            "the floor"
+        )
     finally:
         async with factory() as cleanup:
             stale = (await cleanup.execute(

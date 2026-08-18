@@ -95,8 +95,12 @@ class AssessmentDrop(Base):
     already went out, exactly like the assessment write itself.
 
     ``reason`` is one of:
-      * ``specialist_floor``     — an advance/conditional verdict whose required
-        panel was never convened (``_specialist_floor_gap``). Nothing persisted.
+      * ``specialist_floor``     — HISTORICAL ONLY: an advance/conditional verdict
+        whose required panel was never convened (``_specialist_floor_gap``), back
+        when that gap meant refusing the verdict outright. As of the fix recorded
+        on ``OpportunityAssessment.panel_incomplete`` above, that gap is stored
+        flagged instead of discarded, so this path can no longer produce a new
+        row — the three that already carry this reason predate the change.
       * ``unparseable_sidecar``  — an ``<assessment_json>`` tag was present but
         yielded no usable verdict (commonly a max_tokens truncation that ate the
         closing tag).
