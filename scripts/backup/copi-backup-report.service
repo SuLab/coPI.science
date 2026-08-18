@@ -1,0 +1,11 @@
+[Unit]
+Description=Weekly copi-backup heartbeat summary
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/copi-backup report
+TimeoutStartSec=300
+Nice=10
+ProtectSystem=strict
+ReadWritePaths=/var/backups /run

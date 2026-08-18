@@ -1,0 +1,15 @@
+[Unit]
+Description=Verified Postgres backups for the copi production stacks
+Documentation=file:///home/ubuntu/copi-python/docs/specs/2026-08-18-postgres-backup-verification-design.md
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/copi-backup run
+TimeoutStartSec=3600
+Nice=10
+IOSchedulingClass=idle
+ProtectSystem=strict
+ReadWritePaths=/var/backups /run
+PrivateTmp=no

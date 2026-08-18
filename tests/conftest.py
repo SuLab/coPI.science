@@ -34,7 +34,14 @@ def _pg_container():
     if os.environ.get("TEST_DATABASE_URL"):
         yield None
         return
-    with PostgresContainer("postgres:15", dbname="copi_test") as pg:
+    pg = PostgresContainer("postgres:15", dbname="copi_test")
+    # Publish on loopback only. testcontainers' default binds 0.0.0.0, which on the
+    # production host means the throwaway test database is reachable from the public
+    # internet for the whole run (verified: 0.0.0.0:33602 during a real ci.sh run).
+    # docker-py accepts a (host_ip, host_port) tuple; host_port=None keeps the port
+    # random, so concurrent suites still cannot collide on a fixed port.
+    pg.ports["5432"] = ("127.0.0.1", None)
+    with pg:
         yield pg
 
 

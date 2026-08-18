@@ -1,0 +1,9 @@
+[Unit]
+Description=Weekly copi-backup heartbeat
+
+[Timer]
+OnCalendar=Mon *-*-* 08:00:00 America/Los_Angeles
+Persistent=true
+
+[Install]
+WantedBy=timers.target
