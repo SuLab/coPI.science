@@ -14,6 +14,7 @@ rather than tidiness: ``@dataclass`` resolves its annotations through
 """
 
 import importlib.util
+import subprocess
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -546,3 +547,52 @@ def test_verify_dump_never_publishes_a_port(tmp_path):
     cb.verify_dump(fake, CFG, STACK, dump, {"public.users": 3})
     run_call = next(c for c in fake.calls if c[:3] == ["docker", "run", "-d"])
     assert "-p" not in run_call and "--publish" not in run_call
+
+
+def test_runner_converts_a_timeout_into_commanderror(monkeypatch):
+    # verify_dump promises never to raise. A bare subprocess.TimeoutExpired is not in
+    # its except tuple, so it would escape, abort the nightly run and skip the other
+    # stack. Normalising at the Runner seam fixes every call site at once.
+    def _boom(*_a, **_k):
+        raise subprocess.TimeoutExpired(cmd=["x"], timeout=1, output="o", stderr="e")
+
+    monkeypatch.setattr(cb.subprocess, "run", _boom)
+    with pytest.raises(cb.CommandError) as caught:
+        cb.Runner().run(["x"], timeout=1)
+    assert caught.value.result.returncode == 124
+    assert "timed out" in caught.value.result.stderr
+
+
+def test_verify_dump_does_not_raise_when_the_restore_times_out(tmp_path, monkeypatch):
+    monkeypatch.setattr(cb.time, "sleep", lambda _s: None)
+    dump = tmp_path / "d.dump"
+    dump.write_bytes(b"x")
+    fake = _verify_fake()
+    fake.failures["pg_restore --no-owner"] = 124
+    result = cb.verify_dump(fake, CFG, STACK, dump, {"public.users": 3})
+    assert result.ok is False          # returned, not raised
+    assert result.problems
+
+
+def test_verify_dump_bails_fast_when_the_container_exits(tmp_path, monkeypatch):
+    # Without the .State.Running check the loop spins to VERIFY_TIMEOUT_SEC (1800s)
+    # holding the flock. Assert it gives up after very few attempts — asserting only
+    # "it failed" would still pass with the check deleted.
+    monkeypatch.setattr(cb.time, "sleep", lambda _s: None)
+    dump = tmp_path / "d.dump"
+    dump.write_bytes(b"x")
+    fake = cb.FakeRunner({"State.Running": "false", "State.OOMKilled": "false"})
+    fake.failures["pg_isready"] = 1
+    result = cb.verify_dump(fake, CFG, STACK, dump, {"public.users": 3})
+    attempts = sum(1 for c in fake.calls if "pg_isready" in " ".join(c))
+    assert result.ok is False
+    assert attempts <= 2, f"readiness loop did not bail fast: {attempts} attempts"
+
+
+def test_verify_dump_error_does_not_double_the_stack_name(tmp_path):
+    dump = tmp_path / "d.dump"
+    dump.write_bytes(b"x")
+    fake = _verify_fake(counts_out="")
+    result = cb.verify_dump(fake, CFG, STACK, dump, {})
+    assert result.problems
+    assert not result.problems[0].startswith(f"{STACK.name}: {STACK.name}:")

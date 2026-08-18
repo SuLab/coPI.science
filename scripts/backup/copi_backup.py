@@ -252,15 +252,28 @@ class Runner:
     def run(
         self, argv: list[str], *, timeout: int | None = None, check: bool = True
     ) -> Completed:
-        proc = subprocess.run(
-            argv,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
-        )
-        result = Completed(argv, proc.returncode, proc.stdout, proc.stderr)
-        if check and proc.returncode != 0:
+        try:
+            proc = subprocess.run(
+                argv,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
+            result = Completed(argv, proc.returncode, proc.stdout, proc.stderr)
+        except subprocess.TimeoutExpired as exc:
+            # Normalise timeouts to CommandError at the seam so they are caught
+            # everywhere: both dump_stack's pg_dump and verify_dump's pg_restore.
+            result = Completed(
+                argv,
+                returncode=124,
+                stdout=exc.stdout or "",
+                stderr=f"timed out after {exc.timeout}s",
+            )
+            if check:
+                raise CommandError(result) from exc
+            return result
+        if check and result.returncode != 0:
             raise CommandError(result)
         return result
 
@@ -708,7 +721,13 @@ def verify_dump(
                 "raise VERIFY_MEM (spec §10 test 16) and re-verify."
             ]
         else:
-            problems = [f"{stack.name}: {exc}"]
+            # Every BackupError raised inside this function already embeds stack.name;
+            # CommandError does not. Prepend only when it is actually missing, or the
+            # failure mail reads "copi-blackbird: copi-blackbird: ...".
+            message = str(exc)
+            if not message.startswith(f"{stack.name}:"):
+                message = f"{stack.name}: {message}"
+            problems = [message]
         ok = False
     finally:
         runner.run(["docker", "rm", "-f", "-v", name], check=False)
