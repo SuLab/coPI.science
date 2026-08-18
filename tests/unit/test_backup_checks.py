@@ -471,3 +471,78 @@ def test_sha256_file_matches_hashlib(tmp_path):
     p = tmp_path / "x.bin"
     p.write_bytes(b"hello copi")
     assert cb.sha256_file(p) == hashlib.sha256(b"hello copi").hexdigest()
+
+
+def _verify_fake(counts_out="public.users|3\n", **kw):
+    fake = cb.FakeRunner({
+        "pg_isready": "",
+        "State.Running": "true",
+        "State.OOMKilled": "false",
+        "-tAc": counts_out,
+    })
+    for k, v in kw.items():
+        fake.failures[k] = v
+    return fake
+
+
+def test_verify_dump_tears_down_container_and_volume_on_success(tmp_path):
+    dump = tmp_path / "d.dump"
+    dump.write_bytes(b"x")
+    fake = _verify_fake()
+    cb.verify_dump(fake, CFG, STACK, dump, {"public.users": 3})
+    joined = [" ".join(c) for c in fake.calls]
+    assert any(j.startswith("docker rm -f -v") for j in joined), joined
+    assert any(j.startswith("docker volume rm") for j in joined), joined
+
+
+def test_verify_dump_tears_down_even_when_restore_fails(tmp_path):
+    dump = tmp_path / "d.dump"
+    dump.write_bytes(b"x")
+    fake = _verify_fake()
+    fake.failures["pg_restore --no-owner"] = 1
+    result = cb.verify_dump(fake, CFG, STACK, dump, {"public.users": 3})
+    assert result.ok is False
+    joined = [" ".join(c) for c in fake.calls]
+    assert any(j.startswith("docker rm -f -v") for j in joined)
+
+
+def test_verify_dump_reports_count_mismatch_with_problems(tmp_path):
+    dump = tmp_path / "d.dump"
+    dump.write_bytes(b"x")
+    fake = _verify_fake(counts_out="public.users|2\n")
+    result = cb.verify_dump(fake, CFG, STACK, dump, {"public.users": 3})
+    assert result.ok is False
+    assert any("public.users" in p for p in result.problems)
+
+
+def test_verify_dump_distinguishes_oom_from_restore_failure(tmp_path):
+    # A container OOM is a harness failure, not a bad backup. Mail must say so, or
+    # VERIFY_MEM tuning produces nightly false alarms that train people to ignore it.
+    dump = tmp_path / "d.dump"
+    dump.write_bytes(b"x")
+    fake = cb.FakeRunner({"State.Running": "false", "State.OOMKilled": "true"})
+    fake.failures["pg_isready"] = 13737
+    result = cb.verify_dump(fake, CFG, STACK, dump, {"public.users": 3})
+    assert result.ok is False
+    assert result.oom is True
+    assert any("OOM" in p for p in result.problems)
+
+
+def test_verify_dump_refuses_to_pass_when_the_snapshot_reported_zero_tables(tmp_path):
+    # compare_counts({}, {}) is legitimately (True, []), so verify_dump must refuse
+    # empty source counts itself or an upstream collection bug reads as "verified".
+    dump = tmp_path / "d.dump"
+    dump.write_bytes(b"x")
+    fake = _verify_fake(counts_out="")
+    result = cb.verify_dump(fake, CFG, STACK, dump, {})
+    assert result.ok is False
+    assert any("ZERO tables" in p for p in result.problems)
+
+
+def test_verify_dump_never_publishes_a_port(tmp_path):
+    dump = tmp_path / "d.dump"
+    dump.write_bytes(b"x")
+    fake = _verify_fake()
+    cb.verify_dump(fake, CFG, STACK, dump, {"public.users": 3})
+    run_call = next(c for c in fake.calls if c[:3] == ["docker", "run", "-d"])
+    assert "-p" not in run_call and "--publish" not in run_call

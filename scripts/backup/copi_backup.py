@@ -15,9 +15,11 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import secrets
 import shlex
 import subprocess
 import threading
+import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -587,4 +589,131 @@ def dump_stack(
         snapshot_id=snapshot_id,
         size_bytes=final.stat().st_size,
         sha256=sha256_file(final),
+    )
+
+
+@dataclass(frozen=True)
+class VerifyResult:
+    ok: bool
+    problems: list[str]
+    oom: bool
+    duration_sec: float
+
+
+def _container_oom_killed(runner: Runner, name: str) -> bool:
+    probe = runner.run(
+        ["docker", "inspect", "-f", "{{.State.OOMKilled}}", name], check=False
+    )
+    return probe.stdout.strip().lower() == "true"
+
+
+def verify_dump(
+    runner: Runner,
+    cfg: Config,
+    stack: Stack,
+    dump_path: Path,
+    expected_counts: dict[str, int],
+) -> VerifyResult:
+    """Restore into a throwaway container and compare counts. Never raises."""
+    started = time.monotonic()
+    token = f"{os.getpid()}-{secrets.token_hex(4)}"
+    name = f"copi-verify-{stack.name}-{token}"
+    volume = f"copi-verify-{stack.name}-{token}"
+    problems: list[str] = []
+    oom = False
+
+    try:
+        # TOC check on the copied archive: proves the docker cp did not truncate.
+        # Run in a throwaway container of the SAME image, not on the host — the
+        # host has no postgres client tools installed (verified 2026-08-18), and
+        # installing them would introduce a third pg_restore version alongside the
+        # source server and the verify container.
+        runner.run([
+            "docker", "run", "--rm", "--network", "none",
+            "-v", f"{dump_path}:/d.bin:ro", cfg.verify_image,
+            "pg_restore", "-l", "/d.bin",
+        ])
+        runner.run(
+            ["docker", "volume", "create", "--label", "copi.backup.ephemeral=true", volume]
+        )
+        runner.run(
+            verify_run_argv(cfg, stack, volume, str(dump_path), name, secrets.token_urlsafe(24))
+        )
+        deadline = time.monotonic() + cfg.verify_timeout_sec
+        while True:
+            ready = runner.run(
+                docker_exec(name, ["pg_isready", "-U", stack.user, "-q"]), check=False
+            )
+            if ready.returncode == 0:
+                break
+            # Bail the moment the container is gone. Without this, a container
+            # OOM-killed at startup spins here for the full VERIFY_TIMEOUT_SEC
+            # (30 min), delaying the alert and holding the flock the whole time.
+            # Found by running this plan's own tests during the audit: two of them
+            # hung rather than failed.
+            alive = runner.run(
+                ["docker", "inspect", "-f", "{{.State.Running}}", name], check=False
+            )
+            if alive.stdout.strip().lower() != "true":
+                raise BackupError(
+                    f"{stack.name}: verify container exited before becoming ready"
+                )
+            if time.monotonic() > deadline:
+                raise BackupError(f"{stack.name}: verify container never became ready")
+            time.sleep(2)
+
+        runner.run(
+            docker_exec(
+                name,
+                [
+                    "pg_restore", "--no-owner", "--no-privileges", "--exit-on-error",
+                    "-U", stack.user, "-d", stack.db, "/dump.bin",
+                ],
+            ),
+            timeout=cfg.verify_timeout_sec,
+        )
+        listing = runner.run(docker_exec(name, [
+            "psql", "-U", stack.user, "-d", stack.db, "-tAc", COUNT_TABLES_SQL,
+        ]))
+        tables = [line.strip() for line in listing.stdout.splitlines() if line.strip()]
+        sql = counts_sql(tables)
+        restored = (
+            parse_counts_output(
+                runner.run(
+                    docker_exec(name, ["psql", "-U", stack.user, "-d", stack.db, "-tAc", sql])
+                ).stdout
+            )
+            if sql
+            else {}
+        )
+        # Defence in depth against the both-empty hazard: compare_counts({}, {})
+        # is legitimately (True, []), so an upstream bug that silently produced no
+        # counts on BOTH sides would report a verified backup having verified
+        # nothing. That is not hypothetical — an unterminated statement fed to the
+        # snapshot session did exactly this during plan development. Both production
+        # databases have 30 user tables; zero means the collection step broke, not
+        # that the database is empty.
+        if not expected_counts:
+            raise BackupError(
+                f"{stack.name}: snapshot reported ZERO tables — the count step failed. "
+                "Refusing to call this dump verified."
+            )
+        ok, problems = compare_counts(expected_counts, restored)
+    except (CommandError, BackupError) as exc:
+        oom = _container_oom_killed(runner, name)
+        if oom:
+            problems = [
+                f"{stack.name}: verify container was OOM-killed at VERIFY_MEM="
+                f"{cfg.verify_mem}. This is a harness failure, not a bad dump — "
+                "raise VERIFY_MEM (spec §10 test 16) and re-verify."
+            ]
+        else:
+            problems = [f"{stack.name}: {exc}"]
+        ok = False
+    finally:
+        runner.run(["docker", "rm", "-f", "-v", name], check=False)
+        runner.run(["docker", "volume", "rm", volume], check=False)
+
+    return VerifyResult(
+        ok=ok, problems=problems, oom=oom, duration_sec=round(time.monotonic() - started, 1)
     )
