@@ -197,6 +197,44 @@ Output is a written finding appended to this document. A persona change follows 
 if the diagnosis earns it — `prompts/specialists/*.md` are exempt from D6's freeze,
 but "exempt" is permission to fix a proven defect, not licence to rewrite on a hunch.
 
+### Diagnosis result (2026-08-18)
+
+Ran `scripts/diagnose_specialist_calibration.py` against the three synthetic strong
+cases (scientific, chemistry, commercial), each written to pre-empt the specific
+objection its persona is built to raise. Three real API calls, zero parse failures.
+
+Observed signals:
+
+- `scientific` -> `clear` (moderate confidence)
+- `chemistry` -> `caution` (moderate confidence)
+- `commercial` -> `caution` (moderate confidence)
+
+`clear` fired on at least one of the three deliberately-clean cases. That is enough
+to answer the question Phase 0 was built to ask: `clear` is not structurally
+unreachable. The `chemistry` and `commercial` personas still returned `caution` on
+their strong cases, but with concerns that are substantive rather than reflexive
+hedges — e.g. chemistry pressed on family-panel coverage behind "two nearest family
+members," commercial pressed on discontinuation-cause attribution behind "our
+chemotype does not share." Those are the kind of domain-specific pushback the
+personas are supposed to produce, not evidence of a floor that cannot lift.
+
+**Reading supported: (a)-adjacent, but not miscalibration.** The evidence does not
+support "the eight personas are miscalibrated and cannot say `clear`" — one of them
+said it, unprompted, on the first synthetic case tried. It also does not cleanly
+support "the 18 assessed ideas really were all weak" as the *complete* explanation,
+since two of three strong synthetic cases still drew `caution`. The single sample
+per domain is too small to distinguish "these two personas are stricter than
+`scientific`" from "these two synthetic cases were not as airtight in their domain
+as the scientific one was in its."
+
+**Decision taken:** `clear` is reachable, so the miscalibration hypothesis that would
+license rewriting all eight personas is not supported by this evidence. Step 4 (the
+worked-`clear`-exemplar addition to all eight `prompts/specialists/*.md` files) is
+skipped per the brief's condition. No persona file is modified in this task. Whether
+`chemistry` and `commercial` specifically warrant a narrower, evidence-driven look is
+left to a later phase — this diagnosis was scoped to answer reachability, not to
+tune two personas off a sample size of one each.
+
 ## 6. Phase 1 — the flag (F3, mitigated)
 
 ### Migration
