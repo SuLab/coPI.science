@@ -31,6 +31,10 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
+# Volume baseline for the reclaim in reclaim_test_volumes() below. Captured before any
+# step can create one, so the reclaim can only ever consider volumes THIS run produced.
+CI_VOLS_BEFORE="$(docker volume ls -q 2>/dev/null | sort)"
+
 VENV_PY="${VENV_PY:-$REPO_ROOT/.venv-test/bin/python}"
 # Coverage floor. Re-baselined 35 -> 60 on 2026-08-04. The old 35 was not a judgement
 # about this suite; it was measured at 35.66% against a broken tracer. bd68fae added
@@ -153,6 +157,38 @@ echo "    single head: $(printf '%s\n' "$heads_out" | tr -d '\n')"
 # database with data you want.
 migcheck_cleanup() { docker rm -f "$MIGCHECK_CONTAINER" >/dev/null 2>&1 || true; }
 
+# The pytest suite spins throwaway Postgres containers via testcontainers. The library
+# removes the CONTAINERS but leaves their anonymous data volumes behind — roughly 50MB
+# per run, forever, on a host that also serves production. Ryuk (the testcontainers
+# reaper) is not running here, so nothing else collects them.
+#
+# This is deliberately NOT `docker volume prune`, and not a label filter either:
+#   * A bare prune would delete copi_pgdata, copi-prod_pgdata, copi-python_grantbot_data
+#     and collab-platform_mongodb_data — real, unreferenced, un-backed-up production data.
+#   * `--filter label=org.testcontainers=true` matches ZERO volumes: testcontainers labels
+#     the container, not its anonymous volume. (Verified 2026-08-18.)
+#   * Anonymity alone is not enough either: copi-python-certbot-1's live volume is also
+#     anonymous. (Verified 2026-08-18.)
+#
+# So the reclaim is triple-guarded. A volume is removed only if it (a) did not exist when
+# this script started, (b) is referenced by no container at all, and (c) is anonymous.
+# A volume failing any one of those is left alone.
+reclaim_test_volumes() {
+  local after new anon
+  after="$(docker volume ls -q 2>/dev/null | sort)" || return 0
+  new="$(comm -13 <(printf '%s\n' "$CI_VOLS_BEFORE") <(printf '%s\n' "$after"))"
+  [ -n "$new" ] || return 0
+  while IFS= read -r v; do
+    [ -n "$v" ] || continue
+    [ -z "$(docker ps -aq --filter volume="$v" 2>/dev/null)" ] || continue
+    anon="$(docker volume inspect "$v" --format '{{json .Labels}}' 2>/dev/null || echo '{}')"
+    case "$anon" in *com.docker.volume.anonymous*) ;; *) continue ;; esac
+    if docker volume rm "$v" >/dev/null 2>&1; then
+      echo "    reclaimed leaked test volume ${v:0:12}"
+    fi
+  done <<< "$new"
+}
+
 if [ "${CI_MIGRATION_DB:-}" = "none" ]; then
   echo "==> alembic round trip SKIPPED (CI_MIGRATION_DB=none)"
 else
@@ -169,7 +205,7 @@ else
     # partway through is the likely case, and a leaked container keeps
     # MIGCHECK_PORT bound — the next run would then fail its readiness wait and
     # look like a broken migration rather than a stale container.
-    trap migcheck_cleanup EXIT INT TERM
+    trap 'migcheck_cleanup; reclaim_test_volumes' EXIT INT TERM
     migcheck_cleanup
     docker run -d --name "$MIGCHECK_CONTAINER" \
       -e POSTGRES_USER=copi -e POSTGRES_PASSWORD=copi -e POSTGRES_DB=copi_migcheck \
@@ -257,5 +293,9 @@ echo "==> pytest (full suite + branch coverage, fail-under=${COV_MIN}%)"
 "$VENV_PY" -m pytest tests/ \
   --cov=src --cov-report=term-missing \
   --cov-fail-under="${COV_MIN}"
+
+echo "==> reclaiming leaked testcontainers volumes"
+reclaim_test_volumes
+echo "    done"
 
 echo "==> CI passed."
