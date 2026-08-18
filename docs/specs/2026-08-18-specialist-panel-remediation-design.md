@@ -64,18 +64,70 @@ Five decisions were resolved with the stakeholder before this design was written
 
 | # | Question | Decision |
 |---|---|---|
-| D1 | What happens on a floor gap? | **Flag now, gate later.** Phase 1 persists with a `panel_incomplete` flag; Phase 4 adds a pre-post gate that auto-convenes. The flag remains as a backstop. |
+| D1 | What happens on a floor gap? | **Flag now, gate later.** Phase 1 persists with a `panel_incomplete` flag; a pre-post gate then auto-convenes. *(Gate half since deferred by D6 — see §3.)* |
 | D2 | Is F1 a prompt bug? | **Diagnose first.** Build a replay harness before rewriting eight personas on a hypothesis. |
 | D3 | Consult record unit and lifetime? | **Per-interview, domains only.** Key by `(pi, thread_id)`. Fixes F10; **deliberately leaves F7 open.** |
-| D4 | Trigger table redesign? | **Add `commercial`, retarget `legal`, leave `budget` advisory.** Word boundaries assumed throughout. |
+| D4 | Trigger table redesign? | **Add `commercial`, retarget `legal`, leave `budget` advisory.** Word boundaries throughout. *(`commercial` and `legal` halves since deferred by D6 — only the word-boundary fix survives; see §7.)* |
 | D5 | How far on the rubric? | **FTO interlock + instrumentation only.** No `RUBRIC_WEIGHTS` change, so the 18 existing scores stay comparable. |
+| D6 | May the fixes touch prompts? | **No.** PI bot prompts and hub bot prompts are byte-frozen, including new hub-facing prompt text. Specialist personas are exempt. |
+
+### D6 — the prompt freeze, and what it costs
+
+Added after the design was first approved. The frozen surface is:
+
+- **PI bot prompts** — `prompts/agent-system.md`, `prompts/phase4-thread-reply.md`,
+  `prompts/phase5-new-post.md`, `prompts/identity.md`
+- **Hub bot prompts** — `prompts/roles/scout_hub/{agent-system,identity,phase4-thread-reply}.md`
+- **Injected guidance** — the `pi_lab` *and* `scout_hub` strings in
+  `src/agent/thread_guidance.py`
+- **New hub-facing prompt text is also forbidden**, not just edits to existing files.
+
+**Exempt:** `prompts/specialists/*.md`. These are the panel's own prompts, not the PI
+or hub bot's, and Phase 0 may change them if it proves miscalibration.
+
+This is not a free constraint, and the cost is concentrated in one place: **any floor
+change that makes the code require more than the prompt tells the hub to consult is
+now forbidden.** `prompts/roles/scout_hub/phase4-thread-reply.md:65-82` documents the
+mandatory-consult list, and the audit's own finding was that this list matches the
+code exactly. Tightening the code against a frozen prompt would punish the hub for a
+rule it was never given, and would introduce precisely the drift that is currently
+absent. Three fixes are blocked by this and are moved to §3's deferred list: F5, F6a
+and F6b, plus the whole of the former Phase 4.
+
+**F4 is unaffected**, because word boundaries only ever *remove* spurious
+requirements. The frozen prompt says `chemistry` is required "whenever the idea
+involves a small molecule, a compound series..." — word-bounded matching is a closer
+implementation of that sentence than substring matching is. F4 makes the code agree
+with the frozen prompt *better*, which is why it is the one trigger fix that survives.
 
 ## 3. Scope
 
 ### Fixing
 
-F1 (diagnose), F2, F3, F4, F5, F6, F9, F10, F11, F12, the F8 FTO-interlock slice, and
-instrumentation.
+F1 (diagnose, and fix the personas if diagnosis warrants), F3 (mitigated), F4, F9,
+F10, F11, F12, and instrumentation.
+
+### Deferred by the prompt freeze (D6)
+
+These are blocked by the constraint, not by their difficulty. Each needs a hub prompt
+change to land safely, and each should be revisited as a single follow-up that ships
+code and prompt together:
+
+- **The pre-post gate (former Phase 4), and with it the full fix for F3 and F2.**
+  It requires a new hub-facing prompt asking the hub to revise its sidecar after late
+  consults. Consequence to state plainly: **the panel still never gets convened when
+  it was skipped.** Phase 1's flag means no verdict is destroyed, but a gap remains a
+  gap. F2 — that the floor has never once let a gated verdict through — is
+  *recorded*, not resolved.
+- **F5 (`commercial` requirable).** The heaviest dimension at 15% keeps a specialist
+  the floor never demands.
+- **F6a (retarget `legal`).** The `legal` trigger stays structurally unreachable, so
+  in practice only five domains are ever required: `scientific`, `talent`,
+  `chemistry`, `clinical`, `technologic`.
+- **F6b (the FTO interlock).** `ip_fto` is scored by the model, so the fix is hub
+  prompt guidance. The only code-side alternative — special-casing `ip_fto` inside
+  `weighted_score` — would break the row comparability D5 exists to protect, so it is
+  rejected rather than substituted.
 
 ### Deferred, deliberately
 
@@ -104,17 +156,24 @@ fixing it. This is the single ordering constraint in the plan.
 
 | Phase | Fixes | Deliverable |
 |---|---|---|
-| 0 — Diagnosis | F1 | Replay harness. No production change. |
-| 1 — Stop the bleeding | F3, F2 | Migration + `panel_incomplete`. Verdicts stop being destroyed. |
-| 2 — Trigger accuracy | F4, F5, F6a | Word boundaries, `commercial` added, `legal` retargeted. |
+| 0 — Diagnosis | F1 | Replay harness, then personas only if it proves miscalibration. |
+| 1 — Stop the bleeding | F3 (mitigated) | Migration + `panel_incomplete`. Verdicts stop being destroyed. |
+| 2 — Trigger accuracy | F4 | Word boundaries only. F5/F6a deferred by D6. |
 | 3 — Record scoping | F10 | `(pi, thread_id)` keying. **Requires Phase 1.** |
-| 4 — Pre-post gate | F3, F2 | Gate before `_post_message`, auto-convene. |
-| 5 — Hardening | F9, F11, F12 | Degenerate responses, dead data, drop provenance. |
-| 6 — Interlock + instrumentation | F6b, F8 | FTO scoring guidance, admin surfaces. |
+| 4 — Hardening | F9, F11, F12 | Degenerate responses, dead data, drop provenance. |
+| 5 — Instrumentation | F8 (partial), F1 | Admin surfaces and the clear-rate monitor. |
 
-Phases 1–3 are independently shippable and each leaves the system in a better state
-than it found it. Phase 4 is the only one that changes control flow in
-`_reply_to_thread`.
+Every phase is independently shippable and each leaves the system better than it
+found it. **No phase changes control flow in `_reply_to_thread`** — the pre-post gate
+that would have done so is deferred by D6 — so the blast radius of this work is
+confined to the floor's decision, the consult record's key, and read-only admin
+surfaces.
+
+Net effect on how often the floor bites: F4 *narrows* requirements (fewer spurious
+gaps), Phase 3 *tightens* the record (no inherited consults). These pull in opposite
+directions and the net is not predictable from first principles — which is exactly
+why Phase 1's flag lands first and why Phase 5's instrumentation exists to measure
+it.
 
 ## 5. Phase 0 — diagnosis (F1)
 
@@ -134,9 +193,11 @@ If `clear` never fires even then, it is a prompt defect, and Phase 0 gains a ste
 add a worked `clear` exemplar and a "what would move this to clear" field to all
 eight personas.
 
-Output is a written finding appended to this document, not a code change.
+Output is a written finding appended to this document. A persona change follows only
+if the diagnosis earns it — `prompts/specialists/*.md` are exempt from D6's freeze,
+but "exempt" is permission to fix a proven defect, not licence to rewrite on a hunch.
 
-## 6. Phase 1 — the flag (F3, F2)
+## 6. Phase 1 — the flag (F3, mitigated)
 
 ### Migration
 
@@ -167,7 +228,7 @@ retained, not removed, so the three historical drop rows still read correctly.
 incomplete-panel verdict must never be mistaken for a vetted one, which is the exact
 failure the original floor existed to prevent.
 
-## 7. Phase 2 — triggers (F4, F5, F6a)
+## 7. Phase 2 — triggers (F4 only)
 
 ### Word boundaries
 
@@ -183,29 +244,34 @@ handle three cases the current cue list already contains:
   keep matching `medicinal chemistry` / `neurodegeneration`, so the rule is
   "boundary at the start, stem-permissive at the end", not `\b...\b` on both sides.
 
-### The trigger table
+### The trigger table — unchanged in shape, corrected in matching
+
+D6 freezes the hub prompt that documents this table, so the table itself does not
+move. Only the matching underneath it is corrected:
 
 ```
 always      : scientific, talent
-commercial  : differentiation / first-in-class / competitive claim   [NEW]
-legal       : any IP or third-party-materials claim                  [RETARGETED]
-chemistry   : chemical matter                       (word-bounded)
-clinical    : disease / indication                  (word-bounded)
+chemistry   : chemical matter                       (word-bounded)  [FIXED]
+clinical    : disease / indication                  (word-bounded)  [FIXED]
 technologic : platform claim, or scores.platform >= 4
-budget      : advisory only — never required
+legal       : gating.fto_achievable == "met"    (still unreachable — F6a deferred)
+commercial  : never required                    (F5 deferred)
+budget      : never required                    (advisory by decision D4)
 ```
 
-`legal` moves off `gating.fto_achievable == "met"` (unreachable, F6) and onto an IP /
-third-party-materials claim in the verdict text, which is what the Legal Specialist
-actually owns.
+The consequence is worth naming so nobody reads this phase as more than it is: after
+Phase 2, **five domains are reachable in practice** — `scientific`, `talent`,
+`chemistry`, `clinical`, `technologic` — because `legal`'s trigger is unreachable and
+`commercial`/`budget` are not wired. That is a truthful floor, not a complete one.
 
 ### Tests
 
 Three regression tests pinning the verified false positives — `reasons` must not
 match `aso`, `architecture` must not match `hit`, and `also`/`signals`/`animals`/
 `journals` must not match `als`. Plus a **reachability test** asserting exactly which
-domains the floor can ever require, so F5 cannot silently return. That test is the
-one that would have caught F5 originally.
+domains the floor can ever require. That test is the one that would have caught F5
+originally, and here it does double duty: it pins the deferred state honestly, so the
+five-of-eight reality is asserted in code rather than remembered in a doc.
 
 ## 8. Phase 3 — record scoping (F10)
 
@@ -223,71 +289,55 @@ The PI-keyed rationale in `_record_consult`'s docstring — that one PI's consul
 the behaviour being removed, and that docstring must be rewritten rather than left
 contradicting the code.
 
-## 9. Phase 4 — the pre-post gate (F3, F2)
-
-Sidecar extraction moves ahead of `_post_message`. New order in `_reply_to_thread`:
-
-```
-compose reply
-  -> extract sidecar
-  -> compute gap
-  -> gap? -> run the missing consults inline
-          -> one targeted call: revise ONLY the sidecar, given the new opinions
-          -> recompute gap
-  -> POST to Slack
-  -> persist
-```
-
-**Bounded to one repair attempt.** If a gap survives the repair, the reply posts and
-the verdict persists with Phase 1's flag. The bound is what guarantees termination
-and caps worst-case cost at one extra generation plus at most 7 consults (the
-maximum requirable set once Phase 2 adds `commercial`; `budget` is never required).
-
-Two constraints this must respect:
-
-- **Consults are billed.** The repair path books each consult through
-  `agent.record_api_call`, exactly as the tool executor does today, or the limiter
-  and `SimulationRun.total_api_calls` lose sight of them.
-- **The reply must still be posted if the repair fails.** The existing invariant —
-  a persistence problem must never cost the reply — is preserved in the new order by
-  making every repair failure fall through to post-then-flag.
-
-## 10. Phases 5 and 6
+## 9. Phase 4 — hardening (F9, F11, F12)
 
 ### F9 — degenerate responses
 
 `parse_opinion` keeps treating prose as a valid opinion; that was a deliberate and
-correct design decision. What changes is the narrower case the design's §7 already
-intended to exclude: a response with **no usable content at all** (empty, whitespace,
-or a JSON `null`/`[]` that yields no fields) must not fire `on_consult`. "The
-specialist was unreachable" must not become "the specialist approved."
+correct design decision, and it stays. What changes is the narrower case the
+2026-08-07 design's §7 already intended to exclude: a response with **no usable
+content at all** — empty, whitespace-only, or a JSON `null`/`[]` that yields no
+fields — must not fire `on_consult`.
+
+The distinction being drawn is between *"the specialist said something I could not
+parse"* (an opinion, counts) and *"the specialist said nothing"* (not an opinion,
+must not count). Only the second is being excluded. Verified reachable today: `""`,
+`"   "`, `"null"` and `"[]"` all currently parse to `caution`/`low` and satisfy the
+floor. Zero occurrences in production so far, which is why this is Phase 4 and not
+Phase 1.
 
 ### F11 — dead data
 
-`maps_to_dimension` is put to work in the Phase 6 admin view, tying each specialist
-to the dimension its concerns belong in. A test pins the `tools.py` tool-description
-domain list against `SPECIALIST_DOMAINS` so the two sources of truth cannot drift.
+`maps_to_dimension` is put to work in Phase 5's admin view, tying each specialist to
+the dimension its concerns belong in — the first runtime read it has ever had. A test
+pins the `tools.py:113-131` tool-description domain list against `SPECIALIST_DOMAINS`
+so the two sources of truth cannot drift.
+
+Note the tool description itself is **not** edited: it is hub-facing text and
+therefore frozen by D6. The test pins the existing agreement rather than changing
+either side.
 
 ### F12 — drop provenance
 
-`_persist_assessment` passes `thread_id` through to `_record_assessment_drop`.
+`_persist_assessment` passes `thread_id` through to `_record_assessment_drop`, so a
+dropped verdict can be traced back to the interview that produced it. The three
+historical rows keep their `NULL`.
 
-### F6b — the FTO interlock
+## 10. Phase 5 — instrumentation (F8 partial, F1)
 
-Worth stating precisely, because it determines *where* the fix goes: `ip_fto` is
-scored by the **model**, not by rubric code. So the fix is prompt guidance in
-`prompts/roles/scout_hub/` — an `unconfirmed` FTO reflects a tooling limitation
-(`search_prior_art` is title-only and US-only and can never confirm FTO), not a
-defect in the idea, and should score neutral rather than punitive.
+Read-only admin surfaces. No scoring logic changes, so the 18 existing rows stay
+comparable and D5 is honoured.
 
-**No `RUBRIC_WEIGHTS` change**, which is what keeps the 18 existing rows comparable
-and honours D5.
-
-### F8 — instrumentation
-
-`/admin` gains a per-dimension score distribution, a band histogram, and a panel
-clear-rate monitor that warns when the clear-rate stays at 0 across ≥50 consults —
-the check that would have surfaced F1 on its own.
+- **Per-dimension score distribution** — the view that makes F8 visible: four
+  dimensions (`external_signals`, `ip_fto`, `exit_thesis`, `chemistry_dc_path`) are
+  effectively constant at max 2, pinning 23 of 100 weight points near minimum.
+- **Band histogram** — currently a single bar. That is the point.
+- **Panel clear-rate monitor** — warns when the clear-rate stays at 0 across ≥50
+  consults. This is the check that would have surfaced F1 on its own, without an
+  audit.
+- **Panel-gap surface** — how often `panel_incomplete` is set, and which domains are
+  missing. This is how the deferred F5/F6a/gate work gets prioritised later: it turns
+  "the floor is incomplete" from an argument into a number.
 
 ## 11. Testing and deployment
 
@@ -324,14 +374,20 @@ host OOM profile). Restarting it is an operator decision, not part of this chang
 
 | Risk | Mitigation |
 |---|---|
-| Phase 3 shipped before Phase 1 refuses most verdicts | The ordering constraint in §4 is explicit and Phase 3's plan step depends on Phase 1's |
-| Phase 4 adds cost on gapped verdicts | Bounded to one repair attempt; consults booked through the limiter |
+| Phase 3 shipped before Phase 1 refuses most verdicts | The ordering constraint in §4 is explicit; Phase 3's plan steps depend on Phase 1's |
 | Word-boundary rewrite silently loses a legitimate cue | The stem-permissive rule in §7 is specified, and the reachability test pins the outcome |
-| Phase 0 concludes the personas are fine and F1 is real | That is a valid outcome — it converts F1 from a bug into a recorded calibration fact |
-| F7 stays open and the panel keeps not reaching the score | Recorded in §3 rather than left implicit; `panel_incomplete = false` is documented as "asked", not "weighed" |
+| Phase 0 concludes the personas are fine and F1 is real | A valid outcome — it converts F1 from a bug into a recorded calibration fact |
+| D6 leaves the floor enforcing only 5 of 8 domains | Asserted in code by the reachability test, surfaced by Phase 5's panel-gap view, and listed in §3 rather than left implicit |
+| The deferred gate means a skipped panel stays skipped | Phase 1 guarantees no verdict is lost; Phase 5 measures how often it happens so the follow-up can be justified |
+| F7 stays open and the panel keeps not reaching the score | Recorded in §3; `panel_incomplete = false` is documented as "asked", not "weighed" |
 
 ## 13. What this does not change
 
 `pi_lab` behaviour, the cohort gate, the post-type allow-list, the roster, the Slack
-topology, `RUBRIC_WEIGHTS`, the band thresholds, and the eight persona files (unless
-Phase 0's diagnosis says otherwise).
+topology, `RUBRIC_WEIGHTS`, the band thresholds, and — per D6 — **every PI bot prompt,
+every hub bot prompt, both roles' strings in `src/agent/thread_guidance.py`, and the
+`consult_specialist` tool description**. The eight persona files change only if Phase
+0's diagnosis proves they must.
+
+Control flow in `_reply_to_thread` is untouched: the reply is composed, posted, and
+captured in exactly the order it is today.
