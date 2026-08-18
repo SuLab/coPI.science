@@ -88,7 +88,7 @@ BACKUP_ROOT=/var/backups/copi
 RETENTION_COUNT=5          # verified dumps kept per stack
 RETENTION_UNVERIFIED=2     # failed-verify dumps kept for diagnosis
 VERIFY_IMAGE=postgres:15   # MUST match the source server image
-VERIFY_MEM=768m            # PROVISIONAL — set from measured peak, test 16 (§10)
+VERIFY_MEM=768m            # measured: peak 195.4MiB restoring the 1333MB db
 VERIFY_TIMEOUT_SEC=1800
 FREE_SPACE_FACTOR=3        # require 3x last dump size before starting
 OFFSITE_CMD=""             # empty = local only
