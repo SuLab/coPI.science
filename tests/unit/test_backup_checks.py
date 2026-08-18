@@ -334,3 +334,16 @@ def test_parse_counts_output_ignores_blank_lines():
 def test_parse_counts_output_rejects_malformed_rows():
     with pytest.raises(cb.BackupError, match="unparseable count row"):
         cb.parse_counts_output("public.a|not-a-number\n")
+
+
+def test_snapshot_session_terminate_is_idempotent_and_safe():
+    # _terminate() must be safe to call on a session that was never opened (no proc)
+    # and safe to call twice (idempotent). Python does NOT call __exit__ when __enter__
+    # raises, so _terminate() must not raise and must clean up even if called before
+    # the session is fully initialized.
+    session = cb.SnapshotSession(STACK)
+    # Call on unopened session - no proc yet
+    session._terminate()
+    # Call again - should be no-op
+    session._terminate()
+    assert session._proc is None

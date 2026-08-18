@@ -15,6 +15,7 @@ from __future__ import annotations
 import re
 import shlex
 import subprocess
+import threading
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
@@ -372,6 +373,8 @@ def terminate_sql(sql: str) -> str:
     return stripped if stripped.endswith(";") else stripped + ";"
 
 
+READ_TIMEOUT_SEC = 300
+
 SNAPSHOT_OPEN_SQL = (
     "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ; "
     "SET LOCAL idle_in_transaction_session_timeout = 0; "
@@ -432,6 +435,28 @@ class SnapshotSession:
         self.snapshot_id = ""
         self._proc: subprocess.Popen[str] | None = None
 
+    def _terminate(self) -> None:
+        """Kill and reap the psql child. Idempotent; never raises.
+
+        Separate from __exit__ because Python does NOT call __exit__ when __enter__
+        raises. Without this, a failure between Popen() and a successful snapshot
+        export orphans a psql holding a REPEATABLE READ transaction with
+        idle_in_transaction_session_timeout disabled — indefinitely, on production,
+        blocking vacuum. Verified: `with M()` where __enter__ raises never reaches
+        __exit__.
+        """
+        proc, self._proc = self._proc, None
+        if proc is None:
+            return
+        try:
+            proc.kill()
+        except OSError:
+            pass
+        try:
+            proc.wait(timeout=10)   # reap, or the killed child lingers as a zombie
+        except subprocess.TimeoutExpired:
+            pass
+
     def __enter__(self) -> SnapshotSession:
         argv = snapshot_session_argv(self.stack)
         # stderr to DEVNULL, not PIPE: nothing reads it during the dump, and a psql
@@ -444,24 +469,42 @@ class SnapshotSession:
             stderr=subprocess.DEVNULL,
             text=True,
         )
-        self.snapshot_id = self._send(SNAPSHOT_OPEN_SQL).strip().splitlines()[-1].strip()
-        if not self.snapshot_id:
-            raise BackupError(f"{self.stack.name}: pg_export_snapshot() returned nothing")
+        try:
+            # `[-1]` on an empty list is an IndexError, not the BackupError below, so
+            # the empty case is handled explicitly rather than left to the guard.
+            lines = self._send(SNAPSHOT_OPEN_SQL).strip().splitlines()
+            self.snapshot_id = lines[-1].strip() if lines else ""
+            if not self.snapshot_id:
+                raise BackupError(
+                    f"{self.stack.name}: pg_export_snapshot() returned nothing"
+                )
+        except BaseException:
+            self._terminate()
+            raise
         return self
 
     def _send(self, sql: str) -> str:
         if self._proc is None or self._proc.stdin is None or self._proc.stdout is None:
             raise BackupError("snapshot session is not open")
         sentinel = "__COPI_BACKUP_EOS__"
+        stdout = self._proc.stdout
         self._proc.stdin.write(f"{terminate_sql(sql)}\n\\echo {sentinel}\n")
         self._proc.stdin.flush()
-        lines: list[str] = []
-        for line in self._proc.stdout:
-            if line.strip() == sentinel:
-                break
-            lines.append(line)
-        else:
-            raise BackupError(f"{self.stack.name}: psql session closed unexpectedly")
+        # A psql that HANGS rather than dies would otherwise block this read forever,
+        # holding the snapshot open until systemd's TimeoutStartSec fires an hour
+        # later. The watchdog kills it; the read then hits EOF and raises below.
+        watchdog = threading.Timer(READ_TIMEOUT_SEC, self._terminate)
+        watchdog.start()
+        try:
+            lines: list[str] = []
+            for line in stdout:
+                if line.strip() == sentinel:
+                    break
+                lines.append(line)
+            else:
+                raise BackupError(f"{self.stack.name}: psql session closed unexpectedly")
+        finally:
+            watchdog.cancel()
         return "".join(lines)
 
     def counts(self) -> dict[str, int]:
@@ -482,5 +525,6 @@ class SnapshotSession:
                 self._proc.stdin.flush()
                 self._proc.stdin.close()
             self._proc.wait(timeout=30)
+            self._proc = None
         except Exception:  # teardown must never mask the original error
-            self._proc.kill()
+            self._terminate()
