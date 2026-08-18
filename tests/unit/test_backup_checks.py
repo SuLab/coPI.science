@@ -736,12 +736,74 @@ def test_enough_free_space_handles_first_run_with_no_previous_dump():
 def test_sweep_never_calls_bare_volume_prune():
     # A bare prune would destroy copi_pgdata, copi-prod_pgdata,
     # copi-python_grantbot_data and collab-platform_mongodb_data.
-    fake = cb.FakeRunner()
+    #
+    # The fake MUST return volume ids, or the deletion loop never runs and this test is
+    # vacuous: with an empty FakeRunner, mutating `docker volume rm` to
+    # `docker volume prune -f` still passed.
+    fake = cb.FakeRunner({"docker volume ls": "vol-a\nvol-b\n", "docker ps -aq": "cid-1\n"})
     cb.sweep(fake, CFG, datetime(2026, 8, 18, tzinfo=UTC))
+    joined = [" ".join(c) for c in fake.calls]
+    assert any("docker volume rm vol-a" in j for j in joined), joined
+    assert any("docker rm -f -v cid-1" in j for j in joined), joined
     for call in fake.calls:
         assert call[:3] != ["docker", "volume", "prune"], call
         if call[:3] == ["docker", "volume", "ls"]:
             assert "--filter" in call and "label=copi.backup.ephemeral=true" in " ".join(call)
+
+
+def test_parse_stacks_rejects_a_traversing_stack_name():
+    # "..": prune() would resolve to BACKUP_ROOT's parent and delete files it never
+    # created. Demonstrated during review — 5 unrelated files destroyed.
+    for bad in ("..", ".", "../evil", "foo/bar", ".hidden"):
+        with pytest.raises(cb.ConfigError, match="unsafe stack name"):
+            cb.parse_stacks(f"{bad}:c:copi:copi")
+
+
+def test_parse_stacks_rejects_unsafe_db_and_user():
+    with pytest.raises(cb.ConfigError, match="unsafe database"):
+        cb.parse_stacks("s:c:../evil:copi")
+    with pytest.raises(cb.ConfigError, match="unsafe user"):
+        cb.parse_stacks("s:c:copi:../evil")
+
+
+def test_parse_stacks_still_accepts_the_real_production_names():
+    stacks = cb.parse_stacks(
+        "copi-python:copi-python-postgres-1:copi:copi\n"
+        "copi-blackbird:copi-blackbird-postgres-1:copi:copi"
+    )
+    assert [s.name for s in stacks] == ["copi-python", "copi-blackbird"]
+
+
+def test_prune_refuses_a_stack_dir_outside_backup_root(tmp_path):
+    # Defence in depth: even if a bad name reached Config, prune must refuse.
+    root = tmp_path / "backups"
+    (root / "sub").mkdir(parents=True)
+    cfg = cb.load_config({"STACKS": "sub:c:copi:copi", "BACKUP_ROOT": str(root)})
+    escaped = cb.Config(
+        stacks=[cb.Stack("..", "c", "copi", "copi")],
+        backup_root=cfg.backup_root,
+        retention_count=cfg.retention_count,
+        retention_unverified=cfg.retention_unverified,
+        verify_image=cfg.verify_image,
+        verify_mem=cfg.verify_mem,
+        verify_timeout_sec=cfg.verify_timeout_sec,
+        free_space_factor=cfg.free_space_factor,
+        offsite_cmd=cfg.offsite_cmd,
+        aws_region=cfg.aws_region,
+        ses_sender_email=cfg.ses_sender_email,
+        mail_to=cfg.mail_to,
+    )
+    with pytest.raises(cb.ConfigError, match="not a direct child"):
+        cb.prune(escaped, dry_run=False)
+
+
+def test_run_rejects_dry_run_instead_of_silently_ignoring_it():
+    # `run` has no dry mode. Accepting the flag and ignoring it hands the operator a
+    # full 721MB dump from a command they believed was a no-op.
+    with pytest.raises(SystemExit):
+        cb.main(["run", "--dry-run"])
+    with pytest.raises(SystemExit):
+        cb.main(["prune", "--no-prune"])
 
 
 def test_prune_deletes_dump_and_its_sidecar(tmp_path):

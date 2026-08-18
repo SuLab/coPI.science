@@ -48,6 +48,12 @@ class ConfigError(Exception):
     """Raised for any malformed value in /etc/copi-backup/backup.env."""
 
 
+# Stack names, databases, and users: alphanumerics and hyphens only, no dots or slashes.
+_SAFE_NAME = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]*$")
+# Container names: allow dots (Docker does), but still reject traversal vectors.
+_SAFE_CONTAINER = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
+
+
 @dataclass(frozen=True)
 class Stack:
     name: str
@@ -84,6 +90,14 @@ def parse_stacks(raw: str) -> list[Stack]:
         if len(parts) != 4 or not all(p.strip() for p in parts):
             raise ConfigError(f"expected 4 colon-separated fields, got: {line!r}")
         name, container, db, user = (p.strip() for p in parts)
+        if not _SAFE_NAME.match(name):
+            raise ConfigError(f"unsafe stack name: {name!r}")
+        if not _SAFE_CONTAINER.match(container):
+            raise ConfigError(f"unsafe container: {container!r}")
+        if not _SAFE_NAME.match(db):
+            raise ConfigError(f"unsafe database: {db!r}")
+        if not _SAFE_NAME.match(user):
+            raise ConfigError(f"unsafe user: {user!r}")
         if name in seen:
             raise ConfigError(f"duplicate stack name: {name!r}")
         seen.add(name)
@@ -910,10 +924,20 @@ def sweep(runner: Runner, cfg: Config, now: datetime) -> None:
 def prune(cfg: Config, dry_run: bool) -> list[Path]:
     """Apply retention. Returns the paths deleted (or that would be)."""
     deleted: list[Path] = []
+    root = Path(cfg.backup_root).resolve()
     for stack in cfg.stacks:
         stack_dir = Path(cfg.backup_root) / stack.name
         if not stack_dir.is_dir():
             continue
+        # Defence in depth behind parse_stacks' validation. This function is the last
+        # thing that runs before unlink(), so it re-establishes the invariant itself
+        # rather than trusting a caller: the directory it is about to delete inside
+        # must be a direct child of BACKUP_ROOT.
+        resolved = stack_dir.resolve()
+        if resolved.parent != root:
+            raise ConfigError(
+                f"refusing to prune {resolved}: not a direct child of {root}"
+            )
         found: list[DumpFile] = []
         for entry in stack_dir.iterdir():
             if entry.is_symlink() or not entry.is_file():
@@ -1013,6 +1037,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dry-run", action="store_true", help="prune only: list, do not delete")
     parser.add_argument("--no-prune", action="store_true", help="run only: skip retention")
     args = parser.parse_args(argv)
+    # argparse accepts both flags for every subcommand because they are global, so the
+    # mismatched combinations are rejected explicitly. Without this, `run --dry-run`
+    # parses cleanly and is silently IGNORED — the operator gets a full 721MB dump from
+    # a command they believed was a no-op, which is precisely the footgun the two
+    # separate flags exist to prevent.
+    if args.command == "run" and args.dry_run:
+        parser.error(
+            "run has no dry mode: it always dumps and verifies. "
+            "Use `run --no-prune` to skip retention."
+        )
+    if args.command != "run" and args.no_prune:
+        parser.error("--no-prune applies to `run`; use `prune --dry-run` to preview.")
 
     cfg = load_config(read_env_file(Path(args.config).read_text()))
     now = datetime.now(UTC)
