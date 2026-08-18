@@ -12,12 +12,15 @@ the exact counts of the snapshot the dump was taken from.
 
 from __future__ import annotations
 
+import hashlib
+import os
 import re
 import shlex
 import subprocess
 import threading
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from pathlib import Path
 
 DEFAULTS = {
     "BACKUP_ROOT": "/var/backups/copi",
@@ -528,3 +531,60 @@ class SnapshotSession:
             self._proc = None
         except Exception:  # teardown must never mask the original error
             self._terminate()
+
+
+@dataclass(frozen=True)
+class DumpResult:
+    path: Path
+    counts: dict[str, int]
+    snapshot_id: str
+    size_bytes: int
+    sha256: str
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def dump_stack(
+    runner: Runner,
+    cfg: Config,
+    stack: Stack,
+    dest_dir: Path,
+    now: datetime,
+    session_factory: type[SnapshotSession] = SnapshotSession,
+) -> DumpResult:
+    """Dump one stack against an exported snapshot; return the archive and its counts."""
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    final = dest_dir / dump_name(stack.name, stack.db, now)
+    partial = final.with_suffix(final.suffix + ".partial")
+    ctmp = f"/tmp/copi_backup_{os.getpid()}_{stack.name}.dump"
+
+    try:
+        with session_factory(stack) as session:
+            runner.run(pg_dump_argv(stack, session.snapshot_id, ctmp), timeout=cfg.verify_timeout_sec)
+            # TOC readable inside the container, on a real seekable path.
+            runner.run(docker_exec(stack.container, ["pg_restore", "-l", ctmp]))
+            runner.run(["docker", "cp", f"{stack.container}:{ctmp}", str(partial)])
+            counts = session.counts()
+            snapshot_id = session.snapshot_id
+    except Exception:
+        partial.unlink(missing_ok=True)
+        raise
+    finally:
+        runner.run(docker_exec(stack.container, ["rm", "-f", ctmp]), check=False)
+
+    with partial.open("rb") as handle:
+        os.fsync(handle.fileno())
+    partial.replace(final)
+    return DumpResult(
+        path=final,
+        counts=counts,
+        snapshot_id=snapshot_id,
+        size_bytes=final.stat().st_size,
+        sha256=sha256_file(final),
+    )

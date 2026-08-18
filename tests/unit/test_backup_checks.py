@@ -347,3 +347,64 @@ def test_snapshot_session_terminate_is_idempotent_and_safe():
     # Call again - should be no-op
     session._terminate()
     assert session._proc is None
+
+
+class _FakeSession:
+    def __init__(self, stack):
+        self.stack = stack
+        self.snapshot_id = "00000009-00008D07-1"
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return None
+
+    def counts(self):
+        return {"public.users": 3}
+
+
+def test_dump_stack_removes_container_temp_even_when_dump_fails(tmp_path):
+    fake = cb.FakeRunner()
+    fake.failures["pg_dump"] = 1
+    with pytest.raises(cb.CommandError):
+        cb.dump_stack(
+            fake, CFG, STACK, tmp_path,
+            datetime(2026, 8, 18, 3, 15, tzinfo=UTC),
+            session_factory=_FakeSession,
+        )
+    joined = [" ".join(c) for c in fake.calls]
+    assert any("rm -f /tmp/copi_backup_" in j for j in joined), joined
+
+
+def test_dump_stack_leaves_no_partial_file_when_dump_fails(tmp_path):
+    fake = cb.FakeRunner()
+    fake.failures["pg_dump"] = 1
+    with pytest.raises(cb.CommandError):
+        cb.dump_stack(
+            fake, CFG, STACK, tmp_path,
+            datetime(2026, 8, 18, 3, 15, tzinfo=UTC),
+            session_factory=_FakeSession,
+        )
+    assert list(tmp_path.glob("*.partial")) == []
+
+
+def test_dump_stack_verifies_toc_inside_container_before_copying(tmp_path):
+    fake = cb.FakeRunner()
+    fake.failures["pg_restore -l"] = 1
+    with pytest.raises(cb.CommandError):
+        cb.dump_stack(
+            fake, CFG, STACK, tmp_path,
+            datetime(2026, 8, 18, 3, 15, tzinfo=UTC),
+            session_factory=_FakeSession,
+        )
+    order = [" ".join(c) for c in fake.calls]
+    toc = next(i for i, j in enumerate(order) if "pg_restore -l" in j)
+    assert not any("docker cp" in j for j in order[:toc])
+
+
+def test_sha256_file_matches_hashlib(tmp_path):
+    import hashlib
+    p = tmp_path / "x.bin"
+    p.write_bytes(b"hello copi")
+    assert cb.sha256_file(p) == hashlib.sha256(b"hello copi").hexdigest()
