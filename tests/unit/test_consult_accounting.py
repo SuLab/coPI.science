@@ -73,6 +73,39 @@ async def test_a_consult_is_booked_against_the_rate_limiter(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_the_on_consult_closure_forwards_the_signal_into_the_run_tally(monkeypatch):
+    """The `on_consult` closure built inside `_reply_to_thread` (Task 9) takes
+    TWO arguments now — domain and the parsed verdict_signal — and must land
+    both in `_note_consult`: the domain into the per-interview floor map, and
+    the signal into the per-run `_consult_signal_counts` tally the clear-rate
+    monitor in `stop()` reads. A one-argument closure (the pre-Task-9 shape)
+    would TypeError the moment `execute_tool` calls it with two arguments."""
+    engine, hub, thread = _hub_engine()
+
+    async def _fake_opinion(**kwargs):
+        return (
+            '{"verdict_signal": "clear", "concerns": [], '
+            '"questions_to_ask": [], "confidence": "high"}'
+        )
+
+    async def _fake_reply(**kwargs):
+        await kwargs["tool_executor"](
+            "consult_specialist",
+            {"domain": "legal", "question": "q", "context": "c"},
+        )
+        return "<slack_message>Thanks — that clears it up.</slack_message>"
+
+    monkeypatch.setattr(hub, "build_phase4_prompt", lambda **kw: ("sys", []))
+    monkeypatch.setattr("src.agent.simulation.generate_with_tools", _fake_reply)
+    monkeypatch.setattr("src.agent.tools.generate_agent_response", _fake_opinion)
+
+    await engine._reply_to_thread(hub, thread)
+
+    assert engine._consulted_domains("wang", thread.thread_id) == frozenset({"legal"})
+    assert engine._consult_signal_counts == {"clear": 1}
+
+
+@pytest.mark.asyncio
 async def test_a_consult_appends_to_the_sliding_window_ledger(monkeypatch):
     """Fix round 1 (Ruling R5): booking a consult against api_call_count is
     not enough — it must also land in call_times, or the limiter's coverage

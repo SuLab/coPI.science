@@ -4,6 +4,8 @@ whole enforcement floor rests on.
 
 See docs/specs/2026-08-07-nine-evaluator-panel-design.md §4.
 """
+import logging
+
 import pytest
 
 from src.agent.agent import Agent
@@ -316,3 +318,83 @@ def test_a_consult_without_a_thread_is_still_recorded():
     eng = _engine(_hub())
     eng._record_consult("huganir", "scientific")
     assert eng._consulted_domains("huganir") == frozenset({"scientific"})
+
+
+# --- clear-rate monitor (Task 9) --------------------------------------------
+#
+# The monitor is the ONLY thing that surfaces "142/142 consults returned
+# caution/blocking, never once clear" without a human running an audit — so an
+# untested monitor is exactly the failure class this whole plan exists to fix.
+# These pin the tally, the threshold, and the "at least one clear" escape
+# hatch directly, rather than relying on the branch merely executing (as the
+# pre-existing `total == 0` coverage in test_simulation_logic.py's
+# TestGracefulShutdown did).
+
+_CLEAR_RATE_WARNING = "NOT ONE returned"
+
+
+def test_note_consult_records_the_domain_and_tallies_the_signal():
+    """`_note_consult` is a thin wrapper: it must do BOTH things `_record_consult`
+    and the tally each do alone, not just one of them."""
+    eng = _engine(_hub())
+    eng._note_consult("wang", "legal", "caution", thread_id="t1")
+
+    assert eng._consulted_domains("wang", "t1") == frozenset({"legal"}), (
+        "_note_consult must still satisfy the specialist floor, exactly like "
+        "_record_consult"
+    )
+    assert eng._consult_signal_counts == {"caution": 1}
+
+    # A second call, same signal, different domain: the floor gains a domain,
+    # the tally accumulates rather than overwrites.
+    eng._note_consult("wang", "scientific", "caution", thread_id="t1")
+    assert eng._consulted_domains("wang", "t1") == frozenset({"legal", "scientific"})
+    assert eng._consult_signal_counts == {"caution": 2}
+
+
+@pytest.mark.asyncio
+async def test_stop_warns_when_fifty_or_more_consults_never_clear(caplog):
+    eng = _engine(_hub())
+    eng._consult_signal_counts = {"caution": 30, "blocking": 20}  # 50 total, no clear
+
+    with caplog.at_level(logging.WARNING, logger="src.agent.simulation"):
+        await eng.stop()
+
+    assert _CLEAR_RATE_WARNING in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_stop_does_not_warn_when_at_least_one_clear_is_present(caplog):
+    eng = _engine(_hub())
+    # Still >= 50 total, but one of them cleared — the monitor exists to catch
+    # a signal with NO variance, not merely a low clear rate.
+    eng._consult_signal_counts = {"caution": 29, "blocking": 20, "clear": 1}
+
+    with caplog.at_level(logging.WARNING, logger="src.agent.simulation"):
+        await eng.stop()
+
+    assert _CLEAR_RATE_WARNING not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_stop_does_not_warn_below_the_threshold(caplog):
+    eng = _engine(_hub())
+    eng._consult_signal_counts = {"caution": 49}  # one short of 50, still no clear
+
+    with caplog.at_level(logging.WARNING, logger="src.agent.simulation"):
+        await eng.stop()
+
+    assert _CLEAR_RATE_WARNING not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_stop_is_safe_with_an_empty_tally(caplog):
+    """No consults happened at all this run (e.g. a run with no interviews) —
+    stop() must still complete cleanly and must not warn."""
+    eng = _engine(_hub())
+    assert eng._consult_signal_counts == {}
+
+    with caplog.at_level(logging.WARNING, logger="src.agent.simulation"):
+        await eng.stop()
+
+    assert _CLEAR_RATE_WARNING not in caplog.text
