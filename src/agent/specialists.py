@@ -184,6 +184,33 @@ def parse_opinion(raw: str, *, domain: str) -> SpecialistOpinion:
     )
 
 
+_OPINION_FIELDS = ("verdict_signal", "concerns", "questions_to_ask", "confidence")
+
+
+def has_usable_content(raw: str) -> bool:
+    """Whether a specialist's reply carries an opinion at all.
+
+    Narrower than "did it parse". Prose IS an opinion — a specialist answering
+    in sentences has answered, and ``parse_opinion`` keeps treating it that way
+    on purpose. This excludes only what the design's error table meant by a
+    failed call: a reply with nothing in it.
+
+    The distinction matters because ``on_consult`` is what satisfies the
+    enforcement floor. If an empty reply counted, "the specialist was
+    unreachable" would silently become "the specialist approved".
+    """
+    text = _strip_fence(raw or "").strip()
+    if not text:
+        return False
+    try:
+        data = json.loads(text)
+    except (ValueError, TypeError):
+        return True  # unparseable prose is still an answer
+    if not isinstance(data, dict):
+        return False  # null, [], a bare number or string say nothing
+    return any(field in data for field in _OPINION_FIELDS)
+
+
 # Cues that make a domain required. Matched via `_cue_matches` below, not raw
 # substring containment — see `_WORD_ONLY_CUES` and `_cue_pattern` for how a
 # cue like "compound" is kept from firing on "compounding".

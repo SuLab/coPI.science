@@ -11,6 +11,7 @@ from pathlib import Path
 from src.agent.specialists import (
     SPECIALIST_DOMAINS,
     VERDICT_SIGNALS,
+    has_usable_content,
     parse_opinion,
     persona_path,
     required_domains_for,
@@ -370,3 +371,22 @@ def test_only_the_documented_domains_are_reachable():
         "commercial maps to `differentiation`, the heaviest dimension at 15%, "
         "and the floor still cannot demand it — F5, deferred by D6"
     )
+
+
+def test_an_empty_reply_is_not_an_opinion():
+    """A call that returned nothing must not satisfy the floor."""
+    for raw in ("", "   ", "\n\n", "null", "[]", "{}", "3", '"x"'):
+        assert has_usable_content(raw) is False, f"{raw!r} carries no opinion"
+
+
+def test_prose_is_still_an_opinion():
+    """Deliberate: a specialist answering in sentences has still answered.
+    Only a call that returned NOTHING is excluded."""
+    assert has_usable_content("The controls here are inadequate.") is True
+    assert has_usable_content("I cannot assess this without the assay.") is True
+
+
+def test_a_partial_json_opinion_counts():
+    assert has_usable_content('{"verdict_signal": "clear"}') is True
+    assert has_usable_content('{"concerns": ["off-target risk"]}') is True
+    assert has_usable_content('```json\n{"confidence": "high"}\n```') is True

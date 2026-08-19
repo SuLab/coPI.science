@@ -11,6 +11,7 @@ from src.agent.prompt_safety import delimit
 from src.agent.roles import load_role
 from src.agent.specialists import (
     SPECIALIST_DOMAINS,
+    has_usable_content,
     parse_opinion,
     persona_path,
 )
@@ -487,6 +488,18 @@ async def _execute_consult_specialist(
         return f"Error consulting the {domain} specialist: {exc}"
 
     opinion = parse_opinion(raw, domain=domain)
+    # A billed call that came back empty is not an opinion. `on_api_call`
+    # already fired above (it answers "was this billed?"); `on_consult` answers
+    # "does this satisfy the floor?" and the two must disagree here.
+    if not has_usable_content(raw):
+        logger.error(
+            "[specialists] %s returned no usable content — NOT counted as "
+            "consulted", domain,
+        )
+        return (
+            f"The {domain} specialist returned an empty response. Proceed "
+            "without this opinion; it will not count as consulted."
+        )
     if on_consult is not None:
         on_consult(domain)
     logger.info(

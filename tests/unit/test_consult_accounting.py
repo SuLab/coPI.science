@@ -17,6 +17,7 @@ import pytest
 from src.agent.agent import Agent
 from src.agent.simulation import SimulationEngine
 from src.agent.state import ThreadState
+from src.agent.tools import _execute_consult_specialist
 from tests.fakes import FakeSlackClient
 
 _OPINION = """VERDICT SIGNAL: proceed
@@ -174,3 +175,26 @@ async def test_a_failed_consult_is_not_booked(monkeypatch):
 
     assert hub.api_call_count == 1, "an unknown domain made no API call to charge"
     assert engine._consulted_domains("wang", thread.thread_id) == frozenset()
+
+
+@pytest.mark.asyncio
+async def test_an_empty_specialist_reply_is_billed_but_not_counted(monkeypatch):
+    """The two callbacks must disagree: the call happened and is billed, but
+    it produced no opinion and must not satisfy the floor."""
+    consulted, billed = [], []
+
+    async def _empty(*args, **kwargs):
+        return "   "
+
+    monkeypatch.setattr("src.agent.tools.generate_agent_response", _empty)
+
+    result = await _execute_consult_specialist(
+        "chemistry", "Is the series tractable?", "The PI said little.",
+        agent_id="blackbird",
+        on_consult=consulted.append,
+        on_api_call=lambda: billed.append(1),
+    )
+
+    assert billed, "a call that was issued is billed whatever it returned"
+    assert consulted == [], "an empty reply must not satisfy the floor"
+    assert "empty response" in result
