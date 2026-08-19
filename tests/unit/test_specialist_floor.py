@@ -55,7 +55,7 @@ def test_the_consult_map_starts_empty():
     assert eng._specialist_consults == {}
 
 
-def test_recording_a_consult_is_keyed_by_thread():
+def test_recording_a_consult_with_no_thread_is_keyed_by_pi_alone():
     eng = _engine(_hub())
     eng._record_consult("gill", "chemistry")
     eng._record_consult("gill", "legal")
@@ -172,7 +172,7 @@ def test_fail_open_applies_only_to_a_thread_with_NO_consults():
 # half of the join on its own.
 
 
-def test_consults_are_recorded_against_the_pi_not_the_thread():
+def test_a_consult_with_no_thread_round_trips_under_the_pis_none_slot():
     eng = _engine(_hub())
     eng._record_consult("gill", "chemistry")
     assert eng._consulted_domains("gill") == {"chemistry"}
@@ -293,6 +293,7 @@ def test_a_second_interview_does_not_inherit_the_first_ones_consults():
 def test_the_floor_reads_the_consults_of_this_interview_only():
     eng = _engine(_hub())
     thread_one = _activated_thread(eng, "t1", other_agent_id="huganir")
+    thread_one.floor_armed = True
     for domain in ("scientific", "talent"):
         eng._record_consult("huganir", domain, thread_id="t1")
     thread_two = _activated_thread(eng, "t2", other_agent_id="huganir")

@@ -173,4 +173,4 @@ async def test_a_failed_consult_is_not_booked(monkeypatch):
     await engine._reply_to_thread(hub, thread)
 
     assert hub.api_call_count == 1, "an unknown domain made no API call to charge"
-    assert engine._consulted_domains("wang") == frozenset()
+    assert engine._consulted_domains("wang", thread.thread_id) == frozenset()
