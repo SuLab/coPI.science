@@ -321,6 +321,7 @@ async def generate_with_tools(
     max_tool_rounds: int = 5,
     log_meta: dict[str, str] | None = None,
     on_retry: Callable[[], None] | None = None,
+    should_continue: Callable[[], bool] | None = None,
 ) -> str:
     """
     Generate a response with Anthropic tool-use API.
@@ -339,6 +340,22 @@ async def generate_with_tools(
     should pass that callable here so a retried turn is booked as the two
     real API calls it made, not one. Optional and additive: omitting it
     changes nothing about behavior or the return contract.
+
+    ``should_continue``, if given, is polled before each tool round AFTER the
+    first. Returning False stops the loop from opening a NEW round; it does not
+    abort anything in flight, so no issued call is wasted and the turn still
+    falls through to the forced final call below and returns a usable reply.
+
+    This exists for cooperative shutdown. ``SimulationEngine.request_stop()``
+    only flips a flag, and the durable flush runs in main.py's finally — which
+    needs the main loop to RETURN. One thread_reply turn measured up to 134
+    seconds here (5 rounds x a real API call each), so `docker stop` expired
+    mid-turn and SIGKILLed the process before the flush, losing the in-flight
+    turn's buffered rows. Polling the engine's own `_running` flag bounds a
+    stopping turn to the round already underway plus one final call.
+
+    Omitting it is exactly the pre-existing behaviour: the loop runs to
+    max_tool_rounds as before.
     """
     settings = get_settings()
     model = model or settings.llm_agent_model
@@ -350,6 +367,18 @@ async def generate_with_tools(
     total_output_tokens = 0
 
     for round_num in range(max_tool_rounds + 1):
+        # Round 0 always runs — without it this returns nothing at all. From
+        # round 1 on, a stop request ends the loop rather than opening another
+        # round. `break` (not `return`) so control reaches the forced-final call
+        # below and the caller still gets a reply to post.
+        if round_num > 0 and should_continue is not None and not should_continue():
+            logger.info(
+                "Stop requested — ending the tool loop after %d round(s) "
+                "instead of %d, so shutdown is not blocked by further calls",
+                round_num, max_tool_rounds,
+            )
+            break
+
         t0 = time.monotonic()
         message = await _acreate(
             client,

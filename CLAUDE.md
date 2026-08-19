@@ -107,15 +107,28 @@ spoke does. See `docs/specs/2026-08-06-hub-budget-scheduler-design.md`.
 ```bash
 DC="docker compose -f docker-compose.prod.yml"
 
-# 1. Save logs
+# 1. Stop the old container FIRST — GRACEFULLY — then save logs. `docker rm -f`
+#    sends SIGKILL, which skips the shutdown flush and permanently loses the
+#    in-flight turn's messages (the DB, not Slack, is the durable store).
+#
+#    -t 180, NOT -t 30. Measured 2026-08-19: a single `thread_reply` turn runs up
+#    to 134s (up to max_tool_rounds real API calls, each consult 25-40s), and
+#    `request_stop()` is cooperative — it flips a flag, and the flush in
+#    src/agent/main.py's finally-block only runs once the main loop RETURNS. At
+#    -t 30 and even -t 90, SIGKILL landed mid-turn and the flush never ran; 6
+#    buffered llm_call_logs rows were lost. `generate_with_tools` now polls the
+#    flag and stops opening new tool rounds (`should_continue`), which bounds a
+#    stopping turn to the round already underway plus one final call — but the
+#    grace period must still exceed that.
+#
+#    Verify it worked: exit code 0, and "Simulation stopping..." in the logs.
+#    Exit 137 means SIGKILL and a lost flush, NOT necessarily an OOM.
+docker stop -t 180 blackbird-agent-run
+docker inspect blackbird-agent-run --format 'exit={{.State.ExitCode}}'
+
+# 2. Save logs — AFTER the stop, so the shutdown lines are captured.
 docker logs blackbird-agent-run > logs/blackbird_run_$(date +%s).log 2>&1
 ls -t logs/blackbird_run_*.log | tail -n +11 | xargs -r rm -f
-
-# 2. Stop the old container — GRACEFULLY. `docker rm -f` sends SIGKILL, which
-#    skips the shutdown flush and permanently loses the in-flight turn's
-#    messages (the DB, not Slack, is the durable store). `docker stop` sends
-#    SIGTERM; -t 30 leaves room for an in-flight LLM call to finish.
-docker stop -t 30 blackbird-agent-run
 docker rm blackbird-agent-run
 
 # 3. Rebuild the web tier AND the agent image (both bake src/ into the image)

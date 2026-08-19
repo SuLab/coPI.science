@@ -1718,6 +1718,15 @@ class SimulationEngine:
                     "channel": thread.channel,
                 },
                 on_retry=agent.record_api_call,
+                # Cooperative shutdown. `request_stop()` only flips `_running`,
+                # and the durable flush runs in main.py's finally — which needs
+                # the main loop to RETURN. This is the longest await in the whole
+                # engine (measured max 134s: up to max_tool_rounds real API
+                # calls), so without this a `docker stop` expired mid-turn and
+                # SIGKILLed before the flush, losing the in-flight turn's
+                # buffered log rows. Polling the flag here lets a stopping turn
+                # finish the round it already started and skip the rest.
+                should_continue=lambda: self._running,
             )
 
             # Extract message from <slack_message> tags, fall back to preamble

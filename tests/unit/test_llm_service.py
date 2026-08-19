@@ -415,3 +415,164 @@ def test_a_reply_with_only_thinking_yields_empty_string():
 
     msg = _Message(content=[_ThinkingBlock(thinking="thought hard, said nothing")])
     assert llm._first_text(msg) == ""
+
+
+# ---------------------------------------------------------------------------
+# Cooperative shutdown (2026-08-19).
+#
+# `request_stop()` only flips a flag; the final DB flush runs in main.py's
+# finally, which needs the main loop to RETURN. But one thread_reply turn
+# measured up to 134s — generate_with_tools runs up to max_tool_rounds=5, each
+# round a real API call. So `docker stop` expired mid-turn and SIGKILLed before
+# the flush, losing the in-flight turn's buffered log rows.
+#
+# The fix bounds the unit of work: once stop is requested, no NEW tool round
+# starts. Nothing in flight is aborted, so no call is wasted.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_stop_request_prevents_further_tool_rounds(monkeypatch):
+    """A stop mid-turn must end the tool loop instead of running all 5 rounds."""
+    from tests.fakes import _Message, _ToolUseBlock
+
+    keep_going = True
+
+    def _tool_turn():
+        return _Message(
+            content=[_ToolUseBlock(id="t1", name="consult_specialist", input={})],
+            stop_reason="tool_use",
+        )
+
+    # Model the real API: a call WITH tools may ask for another tool round; the
+    # forced-final call passes NO tools, so it can only return text. Scripting a
+    # flat list instead would let the forced-final call consume a tool turn,
+    # which cannot happen in production.
+    def _respond(kwargs):
+        return _tool_turn() if kwargs.get("tools") else text_response("final answer")
+
+    fake = FakeAnthropic(responses=[_respond] * 12)
+    monkeypatch.setattr("src.services.llm.get_anthropic_client", lambda: fake)
+
+    executed = []
+
+    async def _executor(name, params):
+        nonlocal keep_going
+        executed.append(name)
+        keep_going = False  # stop requested while the first round's tools run
+        return "opinion"
+
+    out = await llm.generate_with_tools(
+        system_prompt="s",
+        messages=[{"role": "user", "content": "u"}],
+        tools=[{"name": "consult_specialist", "description": "d",
+                "input_schema": {"type": "object"}}],
+        tool_executor=_executor,
+        should_continue=lambda: keep_going,
+    )
+
+    assert len(executed) == 1, "the in-flight round's tools still run — nothing is aborted"
+    assert len(fake.calls) == 2, (
+        f"expected round 1 + the forced final call, got {len(fake.calls)} API calls — "
+        "a stopped turn must not keep opening new tool rounds"
+    )
+    assert out == "final answer", "the turn must still produce a usable reply"
+
+
+@pytest.mark.asyncio
+async def test_without_a_stop_request_all_rounds_still_run(monkeypatch):
+    """The guard must be inert when nothing has asked the engine to stop."""
+    from tests.fakes import _Message, _ToolUseBlock
+
+    def _tool_turn():
+        return _Message(
+            content=[_ToolUseBlock(id="t1", name="consult_specialist", input={})],
+            stop_reason="tool_use",
+        )
+
+    fake = FakeAnthropic(responses=[_tool_turn(), _tool_turn(), text_response("done")])
+    monkeypatch.setattr("src.services.llm.get_anthropic_client", lambda: fake)
+
+    async def _executor(name, params):
+        return "opinion"
+
+    out = await llm.generate_with_tools(
+        system_prompt="s",
+        messages=[{"role": "user", "content": "u"}],
+        tools=[{"name": "consult_specialist", "description": "d",
+                "input_schema": {"type": "object"}}],
+        tool_executor=_executor,
+        should_continue=lambda: True,
+    )
+    assert out == "done"
+    assert len(fake.calls) == 3, "two tool rounds then the final text turn"
+
+
+@pytest.mark.asyncio
+async def test_should_continue_defaults_to_never_interrupting(monkeypatch):
+    """Omitting the predicate must behave exactly as before it existed."""
+    from tests.fakes import _Message, _ToolUseBlock
+
+    fake = FakeAnthropic(responses=[
+        _Message(content=[_ToolUseBlock(id="t1", name="x", input={})], stop_reason="tool_use"),
+        text_response("done"),
+    ])
+    monkeypatch.setattr("src.services.llm.get_anthropic_client", lambda: fake)
+
+    async def _executor(name, params):
+        return "r"
+
+    out = await llm.generate_with_tools(
+        system_prompt="s",
+        messages=[{"role": "user", "content": "u"}],
+        tools=[{"name": "x", "description": "d", "input_schema": {"type": "object"}}],
+        tool_executor=_executor,
+    )
+    assert out == "done"
+
+
+@pytest.mark.asyncio
+async def test_round_zero_runs_even_if_stop_was_already_requested(monkeypatch):
+    """Round 0 is unconditional — the `round_num > 0` half of the guard.
+
+    If the predicate is already False when the turn starts (a stop requested
+    between the engine's own eligibility check and this call), firing the guard
+    at round 0 would skip tool use ENTIRELY: the hub would compose its reply
+    having consulted nobody, and for a CONCLUDE reply that means a verdict whose
+    panel was never convened. Better to run the round that was already committed
+    to and stop after it.
+
+    Caught by mutation: dropping `round_num > 0` passed every other test here.
+    """
+    from tests.fakes import _Message, _ToolUseBlock
+
+    def _respond(kwargs):
+        return (
+            _Message(content=[_ToolUseBlock(id="t1", name="x", input={})],
+                     stop_reason="tool_use")
+            if kwargs.get("tools") else text_response("answer")
+        )
+
+    fake = FakeAnthropic(responses=[_respond] * 8)
+    monkeypatch.setattr("src.services.llm.get_anthropic_client", lambda: fake)
+
+    executed = []
+
+    async def _executor(name, params):
+        executed.append(name)
+        return "r"
+
+    out = await llm.generate_with_tools(
+        system_prompt="s",
+        messages=[{"role": "user", "content": "u"}],
+        tools=[{"name": "x", "description": "d", "input_schema": {"type": "object"}}],
+        tool_executor=_executor,
+        should_continue=lambda: False,  # already stopping before round 0
+    )
+
+    assert executed == ["x"], (
+        "round 0 must still run its tools — skipping them would let a CONCLUDE "
+        "reply be composed with no panel consulted at all"
+    )
+    assert len(fake.calls) == 2, "round 0 with tools, then the forced final call"
+    assert out == "answer"

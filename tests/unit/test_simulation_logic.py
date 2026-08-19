@@ -794,6 +794,56 @@ class TestGracefulShutdown:
         assert time.monotonic() - started < 1.0
 
     @pytest.mark.asyncio
+    async def test_the_reply_turn_polls_running_so_a_stop_bounds_it(self, monkeypatch):
+        """The engine must hand `generate_with_tools` a live view of `_running`.
+
+        This is the longest await in the engine — measured max 134s, up to
+        max_tool_rounds real API calls. `request_stop()` only flips a flag, and
+        the durable flush runs in main.py's finally, which needs the main loop to
+        RETURN. So if this call cannot see the flag, `docker stop` expires
+        mid-turn and SIGKILL lands before the flush: the in-flight turn's
+        buffered log rows are lost (6 measured on 2026-08-19).
+
+        Asserts the predicate is passed AND that it tracks the flag, rather than
+        being a frozen snapshot taken at dispatch time.
+        """
+        from src.agent.agent import Agent
+        from src.agent.state import ThreadState
+        from tests.fakes import FakeSlackClient
+
+        agent = Agent("blackbird", "BlackbirdBot", "Blackbird", role="scout_hub")
+        thread = ThreadState(
+            thread_id="t1", channel="general", other_agent_id="wang",
+            message_count=3, has_pending_reply=True,
+        )
+        agent.state.active_threads["t1"] = thread
+        engine = SimulationEngine(
+            agents=[agent], slack_clients={"blackbird": FakeSlackClient(agent_id="blackbird")}
+        )
+        engine._running = True
+        monkeypatch.setattr(agent, "build_phase4_prompt", lambda **kw: ("sys", []))
+
+        captured = {}
+
+        async def _fake(**kwargs):
+            captured.update(kwargs)
+            return "<slack_message>hi</slack_message>"
+
+        monkeypatch.setattr("src.agent.simulation.generate_with_tools", _fake)
+        await engine._reply_to_thread(agent, thread)
+
+        assert "should_continue" in captured, (
+            "the reply turn must pass should_continue, or a stop cannot bound it"
+        )
+        predicate = captured["should_continue"]
+        assert predicate() is True, "must report True while the engine runs"
+        engine.request_stop()
+        assert predicate() is False, (
+            "must track the live flag — a snapshot taken at dispatch would keep "
+            "returning True and the turn would run all its rounds anyway"
+        )
+
+    @pytest.mark.asyncio
     async def test_sleep_is_a_no_op_after_stop(self):
         import time
 
