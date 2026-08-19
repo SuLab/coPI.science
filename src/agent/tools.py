@@ -491,12 +491,17 @@ async def _execute_consult_specialist(
             # model behind it is a deliberate choice and belongs at the call
             # site where it can be seen.
             model=get_settings().llm_agent_model_opus,
-            # 1500, up from 900. The 4.7-generation tokenizer (Opus 5 / Sonnet 5)
-            # yields ~30% more tokens for the same text, and 900 was ALREADY
-            # truncating on Sonnet 4.6 — 11 truncation retries in one 19-minute
-            # production run, several of them consults. Each retry is a second
-            # billed call, so headroom here is cheaper than the retries it saves.
-            max_tokens=1500,
+            # 2500, measured — not guessed. History: 900 (Sonnet 4.6 era, already
+            # truncating), then 1500 for the Opus 5 migration on a ~30% tokenizer
+            # estimate, which turned out to be BELOW the observed minimum.
+            # Opus 5 writes ~2.2x longer specialist opinions than Sonnet 4.6 did:
+            # measured over run 2026-08-19 14:45, consults returned 1687-1731
+            # output tokens (avg 1697) against a Sonnet 4.6 average of 789.
+            # At 1500 essentially EVERY consult truncated and retried, doubling
+            # the cost of the most numerous call in the system for no benefit.
+            # 2500 clears the observed ceiling with headroom, and max_tokens is a
+            # ceiling rather than a spend — a short opinion still bills short.
+            max_tokens=2500,
             log_meta={"agent_id": agent_id, "phase": f"consult_{domain}"},
             # A truncation retry is a second billed call — book it too, same
             # contract every other generate_agent_response caller uses.

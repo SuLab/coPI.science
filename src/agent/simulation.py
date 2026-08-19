@@ -5341,9 +5341,12 @@ Keep it concise — under 300 words.""",
             response = await generate_agent_response(
                 system_prompt=system_prompt,
                 messages=messages,
-                # 1100, up from 800 — tokenizer inflation only, same as
-                # _phase5_new_post's ceiling. Thinking is disabled here.
-                max_tokens=1100,
+                # 1800. Was 800, then 1100 on a tokenizer estimate for the
+                # Sonnet 5 migration — but measured output on Sonnet 5 is
+                # 715-1295 tokens (run 2026-08-19 14:45), so 1100 truncated.
+                # Thinking is disabled here, so this is tokenizer growth plus
+                # a more verbose model, not thinking sharing the budget.
+                max_tokens=1800,
                 log_meta={"agent_id": agent.agent_id, "phase": "memory"},
                 on_retry=agent.record_api_call,
             )
