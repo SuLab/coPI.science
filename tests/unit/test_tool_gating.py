@@ -138,3 +138,25 @@ async def test_a_pi_lab_agent_cannot_consult(monkeypatch):
     )
     assert "not available" in out
     assert called is False
+
+
+def test_the_tool_description_names_every_specialist_domain():
+    """Two sources of truth for the panel's domains: SPECIALIST_DOMAINS and the
+    hardcoded prose in the consult_specialist tool description. Nothing pinned
+    them together, so adding a ninth domain could leave the hub never told.
+
+    The description is hub-facing text and frozen by D6 — this test pins the
+    agreement that already exists, it does not license changing either side.
+    """
+    from src.agent.specialists import SPECIALIST_DOMAINS
+    from src.agent.tools import TOOL_DEFINITIONS
+
+    tool = next(t for t in TOOL_DEFINITIONS if t["name"] == "consult_specialist")
+    description = tool["description"]
+    enum = tool["input_schema"]["properties"]["domain"]["enum"]
+
+    assert set(enum) == set(SPECIALIST_DOMAINS)
+    for domain in SPECIALIST_DOMAINS:
+        assert f"'{domain}'" in description, (
+            f"{domain} is dispatchable but the hub is never told it exists"
+        )
