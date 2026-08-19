@@ -25,8 +25,13 @@ fi
 
 install -d -m 0700 /var/backups/copi
 
+# copi-backup-failure@.service is the OnFailure= target. copi-backup.service
+# references it, so installing one without the other leaves systemd unable to run
+# the failure handler — the independent alert path that exists precisely for runs
+# that die without executing their own error handling.
 for unit in copi-backup.service copi-backup.timer \
-            copi-backup-report.service copi-backup-report.timer; do
+            copi-backup-report.service copi-backup-report.timer \
+            copi-backup-failure@.service; do
   install -m 0644 "$HERE/$unit" "/etc/systemd/system/$unit"
 done
 systemctl daemon-reload
