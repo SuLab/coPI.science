@@ -163,3 +163,103 @@ def test_the_tool_description_names_every_specialist_domain():
         assert f"'{domain}'" in description, (
             f"{domain} is dispatchable but the hub is never told it exists"
         )
+
+
+# ---------------------------------------------------------------------------
+# Missing tool arguments. A schema marking a field `required` constrains the
+# model; it does not guarantee the field. Observed in production 2026-08-19
+# 15:12 — the hub called consult_specialist with `domain` and `question` but no
+# `context`, and `tool_input["context"]` raised a bare KeyError that reached the
+# model as `Error executing consult_specialist: 'context'`. Zero occurrences
+# across four preceding Sonnet 4.6 runs; one within ten minutes of Opus 5.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_consult_without_context_still_runs(monkeypatch):
+    """`context` is grounding, not the ask — it must degrade, not lose the consult.
+
+    Losing it costs the panel a domain, and on an advance/conditional verdict
+    that flags the whole assessment. An opinion from a bare question is worth
+    more than no opinion.
+    """
+    from src.agent import tools as tools_mod
+
+    seen: list[str] = []
+
+    async def _fake(**kwargs):
+        seen.append(kwargs["messages"][0]["content"])
+        return '{"verdict_signal": "caution", "confidence": "moderate"}'
+
+    monkeypatch.setattr(tools_mod, "generate_agent_response", _fake)
+    out = await tools_mod.execute_tool(
+        "consult_specialist",
+        {"domain": "chemistry", "question": "Is the series tractable?"},  # no context
+        "blackbird", None, role="scout_hub",
+    )
+
+    assert seen, "the consult must still reach the model"
+    assert "Is the series tractable?" in seen[0]
+    assert "caution" in out
+    assert "missing required" not in out
+
+
+@pytest.mark.asyncio
+async def test_a_consult_without_a_question_says_what_is_missing(monkeypatch):
+    """A genuinely un-defaultable argument must produce a message the model can act on.
+
+    A bare KeyError surfaced as `'question'`, which names no tool, no parameter
+    and no remedy — so the model could not correct the call.
+    """
+    from src.agent import tools as tools_mod
+
+    called = False
+
+    async def _boom(**kwargs):
+        nonlocal called
+        called = True
+        return ""
+
+    monkeypatch.setattr(tools_mod, "generate_agent_response", _boom)
+    out = await tools_mod.execute_tool(
+        "consult_specialist",
+        {"domain": "chemistry"},  # no question
+        "blackbird", None, role="scout_hub",
+    )
+
+    assert "question" in out
+    assert "missing required argument" in out
+    assert "again" in out.lower(), "must tell the model to retry with the argument"
+    assert called is False, "no API call should be billed for a malformed call"
+
+
+@pytest.mark.asyncio
+async def test_a_blank_required_argument_is_treated_as_missing(monkeypatch):
+    """An empty string is not a question. Whitespace-only must fail the same way."""
+    from src.agent import tools as tools_mod
+
+    async def _boom(**kwargs):  # pragma: no cover - must not be reached
+        raise AssertionError("should not call the model")
+
+    monkeypatch.setattr(tools_mod, "generate_agent_response", _boom)
+    out = await tools_mod.execute_tool(
+        "consult_specialist",
+        {"domain": "chemistry", "question": "   "},
+        "blackbird", None, role="scout_hub",
+    )
+    assert "missing required argument" in out
+
+
+@pytest.mark.asyncio
+async def test_other_tools_also_name_their_missing_argument():
+    """The same fragility existed on every tool that read tool_input[...] directly."""
+    from src.agent import tools as tools_mod
+
+    for tool, arg in (
+        ("retrieve_profile", "agent_id"),
+        ("retrieve_abstract", "pmid_or_doi"),
+        ("search_prior_art", "query"),
+    ):
+        out = await tools_mod.execute_tool(tool, {}, "blackbird", None, role="scout_hub")
+        assert arg in out, f"{tool} must name the missing {arg}"
+        assert "missing required argument" in out

@@ -172,6 +172,31 @@ _PATENT_CAVEAT = (
 )
 
 
+def _require_arg(tool_input: dict[str, Any], name: str, tool_name: str) -> str:
+    """Read a required tool argument, or raise with a message the MODEL can act on.
+
+    Reading `tool_input["name"]` directly raises a bare KeyError, which the
+    dispatcher below turns into `Error executing consult_specialist: 'context'`.
+    That tells the model nothing — not which parameter, not that it was omitted,
+    not what to do — so it cannot correct the call, and the tool is simply lost.
+
+    Observed in production on 2026-08-19 15:12: the hub called
+    consult_specialist with `domain` and `question` but no `context`, and the
+    chemistry opinion was dropped. Zero occurrences across the four preceding
+    runs on Sonnet 4.6, one within ten minutes of moving to Opus 5 — consistent
+    with the documented change in how the 5-series models emit tool inputs.
+    A schema marking a field `required` constrains the model, it does not
+    guarantee the field.
+    """
+    value = tool_input.get(name)
+    if value is None or (isinstance(value, str) and not value.strip()):
+        raise ValueError(
+            f"missing required argument {name!r}. Call {tool_name} again with "
+            f"{name!r} supplied."
+        )
+    return str(value)
+
+
 def tools_for_role(role: str) -> list[dict[str, Any]]:
     """``TOOL_DEFINITIONS`` filtered down to what ``role`` is allowed to call."""
     allowed = load_role(role).tools
@@ -213,7 +238,9 @@ async def execute_tool(
         return f"Tool '{tool_name}' is not available to this agent."
     try:
         if tool_name == "retrieve_profile":
-            return await _execute_retrieve_profile(tool_input["agent_id"])
+            return await _execute_retrieve_profile(
+                _require_arg(tool_input, "agent_id", tool_name)
+            )
 
         elif tool_name == "retrieve_abstract":
             ref = str(tool_input.get("pmid_or_doi", ""))
@@ -224,7 +251,9 @@ async def execute_tool(
                 if thread_state.abstracts_other >= settings.max_abstracts_other_per_thread:
                     return "Rate limit: you have used all your abstract retrievals for other labs in this thread."
                 thread_state.abstracts_other += 1
-            return await _execute_retrieve_abstract(tool_input["pmid_or_doi"])
+            return await _execute_retrieve_abstract(
+                _require_arg(tool_input, "pmid_or_doi", tool_name)
+            )
 
         elif tool_name == "retrieve_full_text":
             if thread_state:
@@ -233,16 +262,26 @@ async def execute_tool(
                 if thread_state.full_text >= settings.max_full_text_per_thread:
                     return "Rate limit: you have used all your full-text retrievals in this thread."
                 thread_state.full_text += 1
-            return await _execute_retrieve_full_text(tool_input["pmid_or_doi"])
+            return await _execute_retrieve_full_text(
+                _require_arg(tool_input, "pmid_or_doi", tool_name)
+            )
 
         elif tool_name == "search_prior_art":
-            return await _execute_search_prior_art(tool_input["query"])
+            return await _execute_search_prior_art(
+                _require_arg(tool_input, "query", tool_name)
+            )
 
         elif tool_name == "consult_specialist":
             return await _execute_consult_specialist(
-                tool_input["domain"],
-                tool_input["question"],
-                tool_input["context"],
+                _require_arg(tool_input, "domain", tool_name),
+                _require_arg(tool_input, "question", tool_name),
+                # `context` DEGRADES rather than failing: it is grounding, not
+                # the ask. A specialist handed a question with no transcript
+                # excerpt still gives a usable domain opinion; losing the
+                # consult entirely costs the panel a domain and, on an
+                # advance/conditional verdict, flags the whole assessment.
+                # `domain` and `question` genuinely cannot be defaulted.
+                tool_input.get("context") or "",
                 agent_id=agent_id,
                 on_consult=on_consult,
                 on_api_call=on_api_call,
