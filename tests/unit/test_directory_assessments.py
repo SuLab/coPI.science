@@ -74,3 +74,31 @@ async def test_list_assessments_incomplete_panel_count_is_scoped_to_the_selected
 
     all_view = await list_assessments(db_session, "all")
     assert all_view["incomplete_panel_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_dimension_stats_expose_the_constant_dimensions(db_session):
+    """Four dimensions never exceeded 2 across all 18 production assessments,
+    pinning 23 of 100 weight points near minimum. That is invisible on a page
+    that only shows totals."""
+    run = await factories.make_simulation_run(db_session)
+    for score in (1, 2, 2):
+        db_session.add(
+            OpportunityAssessment(
+                simulation_run_id=run.id, agent_id="blackbird",
+                subject_agent_id="wu", channel_name="general",
+                band="pass",
+                scores={"ip_fto": score, "differentiation": 5},
+            )
+        )
+    await db_session.commit()
+
+    view = await list_assessments(db_session, str(run.id))
+    stats = {d["dimension"]: d for d in view["dimension_stats"]}
+
+    assert stats["ip_fto"]["max"] == 2
+    assert stats["differentiation"]["max"] == 5
+    assert stats["ip_fto"]["specialist"] == "legal", (
+        "maps_to_dimension has never had a runtime read; this is it"
+    )
+    assert view["band_counts"] == [("pass", 3)]

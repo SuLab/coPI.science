@@ -231,6 +231,12 @@ class SimulationEngine:
         # would be worse than one unvetted verdict.
         self._specialist_consults: dict[tuple[str, str | None], set[str]] = {}
 
+        # verdict_signal -> count, for the whole run. The panel returned caution
+        # or blocking on 142/142 consults in run 1787010946 and never once
+        # cleared anything; a signal with no variance carries no information,
+        # and it took an audit to notice. Tallied so the run says so itself.
+        self._consult_signal_counts: dict[str, int] = {}
+
         self._start_time: datetime | None = None
         self._running = False
         self.message_log = MessageLog()
@@ -825,6 +831,16 @@ class SimulationEngine:
         await self._flush_persisted(force_stats=True)
         await self._flush_llm_logs()
         await self._flush_pending_assessments()
+
+        total = sum(self._consult_signal_counts.values())
+        if total >= 50 and not self._consult_signal_counts.get("clear"):
+            logger.warning(
+                "[specialists] %d consults this run and NOT ONE returned "
+                "'clear'. A panel that never clears anything cannot "
+                "discriminate — check persona calibration.",
+                total,
+            )
+
         logger.info("Simulation stopping...")
 
     # ------------------------------------------------------------------
@@ -1629,8 +1645,8 @@ class SimulationEngine:
         async def tool_executor(tool_name: str, tool_input: dict) -> str:
             return await execute_tool(
                 tool_name, tool_input, agent.agent_id, thread, role=agent.role,
-                on_consult=lambda domain, _pi=thread.other_agent_id, _t=thread.thread_id: (
-                    self._record_consult(_pi, domain, _t)
+                on_consult=lambda domain, signal, _pi=thread.other_agent_id, _t=thread.thread_id: (
+                    self._note_consult(_pi, domain, signal, _t)
                 ),
                 # A specialist consult is a real Opus call. Without this it was
                 # invisible to the sliding-window limiter and to
@@ -2995,6 +3011,20 @@ class SimulationEngine:
         if not pi_agent_id:
             return
         self._specialist_consults.setdefault((pi_agent_id, thread_id), set()).add(domain)
+
+    def _note_consult(
+        self, pi_agent_id: str, domain: str, signal: str, thread_id: str | None = None,
+    ) -> None:
+        """Record a consult AND tally its signal.
+
+        Two concerns, deliberately kept apart: `_record_consult` answers "does
+        the floor consider this domain covered", which is per-interview; the
+        tally answers "is this panel discriminating at all", which is per-run.
+        """
+        self._record_consult(pi_agent_id, domain, thread_id)
+        self._consult_signal_counts[signal] = (
+            self._consult_signal_counts.get(signal, 0) + 1
+        )
 
     def _consulted_domains(
         self, pi_agent_id: str, thread_id: str | None = None,

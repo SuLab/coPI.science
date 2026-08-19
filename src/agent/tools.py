@@ -185,7 +185,7 @@ async def execute_tool(
     thread_state: Any | None = None,
     role: str = "pi_lab",
     *,
-    on_consult: Callable[[str], None] | None = None,
+    on_consult: Callable[[str, str], None] | None = None,
     on_api_call: Callable[[], None] | None = None,
     own_dois: set[str] | None = None,
 ) -> str:
@@ -196,8 +196,9 @@ async def execute_tool(
     retrieve_full_text. Refuses (without raising) any tool not allowed for
     ``role``.
 
-    ``on_consult`` is forwarded to ``consult_specialist`` and fires only on a
-    fully successful consult — see ``_execute_consult_specialist``.
+    ``on_consult`` is forwarded to ``consult_specialist`` and is called with
+    the domain AND the parsed verdict signal, and fires only on a fully
+    successful consult — see ``_execute_consult_specialist``.
 
     ``own_dois``: the calling agent's own-lab publication DOIs (see
     ``Agent.own_publication_dois``, GitHub issue #7). A ``retrieve_abstract``
@@ -429,15 +430,16 @@ async def _execute_consult_specialist(
     context: str,
     *,
     agent_id: str,
-    on_consult: Callable[[str], None] | None = None,
+    on_consult: Callable[[str, str], None] | None = None,
     on_api_call: Callable[[], None] | None = None,
 ) -> str:
     """Ask one specialist persona for an opinion.
 
-    ``on_consult`` is invoked with the domain ONLY on a successful call. A
-    refused domain, a missing persona file, or a failed LLM call must not
-    satisfy the enforcement floor — otherwise "the specialist was unreachable"
-    would silently become "the specialist approved".
+    ``on_consult`` is invoked with the domain and the parsed verdict signal
+    ONLY on a successful call. A refused domain, a missing persona file, or a
+    failed LLM call must not satisfy the enforcement floor — otherwise "the
+    specialist was unreachable" would silently become "the specialist
+    approved".
 
     ``on_api_call`` is a DIFFERENT question — "was an Opus call billed?", not
     "does this count as consulted?" — so it fires on a different schedule: once
@@ -501,7 +503,7 @@ async def _execute_consult_specialist(
             "without this opinion; it will not count as consulted."
         )
     if on_consult is not None:
-        on_consult(domain)
+        on_consult(domain, opinion.verdict_signal)
     logger.info(
         "[specialists] %s consulted %s -> %s (%s)",
         agent_id, domain, opinion.verdict_signal, opinion.confidence,

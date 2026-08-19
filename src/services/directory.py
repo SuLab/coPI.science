@@ -13,6 +13,7 @@ already-parsed values.
 from __future__ import annotations
 
 import uuid
+from collections import Counter
 from typing import Any
 
 from sqlalchemy import func, select
@@ -20,6 +21,7 @@ from sqlalchemy import true as sa_true
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from src.agent.specialists import SPECIALIST_DOMAINS
 from src.models import (
     AgentChannel,
     AgentMessage,
@@ -210,6 +212,41 @@ async def list_assessments(db: AsyncSession, run_id: str | None) -> dict[str, An
     result = await db.execute(query)
     assessments = result.scalars().all()
 
+    # Per-dimension distribution. Four dimensions (external_signals, ip_fto,
+    # exit_thesis, chemistry_dc_path) never exceeded 2 across the 18
+    # assessments of run 1787010946 — 23 of 100 weight points pinned near
+    # minimum, invisible on a page that shows only totals.
+    #
+    # `specialist` is the first runtime read maps_to_dimension has ever had:
+    # it names who to ask when a dimension is scoring badly.
+    specialist_for = {
+        spec.maps_to_dimension: domain
+        for domain, spec in SPECIALIST_DOMAINS.items()
+        if spec.maps_to_dimension
+    }
+    dimension_stats = []
+    for dimension, weight in RUBRIC_WEIGHTS.items():
+        values = [
+            row.scores[dimension]
+            for row in assessments
+            if isinstance(row.scores, dict)
+            and isinstance(row.scores.get(dimension), (int, float))
+            and not isinstance(row.scores.get(dimension), bool)
+        ]
+        dimension_stats.append({
+            "dimension": dimension,
+            "weight": weight,
+            "specialist": specialist_for.get(dimension),
+            "n": len(values),
+            "mean": round(sum(values) / len(values), 2) if values else None,
+            "min": min(values) if values else None,
+            "max": max(values) if values else None,
+        })
+
+    band_counts = sorted(Counter(
+        row.band for row in assessments if row.band
+    ).items())
+
     # Verdicts that were generated and then lost, scoped exactly like the rows
     # above. Without this an empty page is ambiguous: "nothing screened yet" and
     # "everything screened and every verdict discarded" look identical, and the
@@ -246,6 +283,8 @@ async def list_assessments(db: AsyncSession, run_id: str | None) -> dict[str, An
         "drop_counts": drop_counts,
         "drops_total": drops_total,
         "incomplete_panel_count": incomplete_panel_count,
+        "dimension_stats": dimension_stats,
+        "band_counts": band_counts,
     }
 
 

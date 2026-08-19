@@ -191,7 +191,7 @@ async def test_an_empty_specialist_reply_is_billed_but_not_counted(monkeypatch):
     result = await _execute_consult_specialist(
         "chemistry", "Is the series tractable?", "The PI said little.",
         agent_id="blackbird",
-        on_consult=consulted.append,
+        on_consult=lambda domain, signal: consulted.append(domain),
         on_api_call=lambda: billed.append(1),
     )
 

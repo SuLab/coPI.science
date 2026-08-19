@@ -79,7 +79,8 @@ async def test_a_missing_persona_file_does_not_report_a_consult(monkeypatch, tmp
     out = await tools_mod.execute_tool(
         "consult_specialist",
         {"domain": "legal", "question": "FTO?", "context": ""},
-        "blackbird", None, role="scout_hub", on_consult=seen.append,
+        "blackbird", None, role="scout_hub",
+        on_consult=lambda domain, signal: seen.append(domain),
     )
     assert "legal" in out.lower()
     assert seen == []
@@ -97,7 +98,8 @@ async def test_a_successful_consult_reports_the_domain(monkeypatch):
     out = await tools_mod.execute_tool(
         "consult_specialist",
         {"domain": "legal", "question": "FTO?", "context": "..."},
-        "blackbird", None, role="scout_hub", on_consult=seen.append,
+        "blackbird", None, role="scout_hub",
+        on_consult=lambda domain, signal: seen.append(domain),
     )
     assert seen == ["legal"]
     assert "clear" in out
@@ -114,7 +116,8 @@ async def test_a_failed_llm_call_does_not_report_a_consult(monkeypatch):
     out = await tools_mod.execute_tool(
         "consult_specialist",
         {"domain": "legal", "question": "FTO?", "context": ""},
-        "blackbird", None, role="scout_hub", on_consult=seen.append,
+        "blackbird", None, role="scout_hub",
+        on_consult=lambda domain, signal: seen.append(domain),
     )
     assert seen == []
     assert "error" in out.lower()

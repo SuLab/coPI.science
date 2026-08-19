@@ -654,6 +654,8 @@ async def admin_assessments(
             drop_counts=view["drop_counts"],
             drops_total=view["drops_total"],
             incomplete_panel_count=view["incomplete_panel_count"],
+            dimension_stats=view["dimension_stats"],
+            band_counts=view["band_counts"],
         ),
     )
 
