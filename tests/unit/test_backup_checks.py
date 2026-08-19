@@ -77,6 +77,7 @@ def test_load_config_applies_documented_defaults():
     assert cfg.verify_image == "postgres:15"
     assert cfg.free_space_factor == 7
     assert cfg.offsite_cmd == ""
+    assert cfg.regression_tolerance_pct == 20
 
 
 def test_load_config_clamps_retention_count_to_at_least_one():
@@ -207,6 +208,60 @@ def test_compare_counts_reports_every_problem_sorted():
 def test_compare_counts_both_empty_is_parity():
     # A database with no user tables is odd but not a backup failure.
     assert cb.compare_counts({}, {}) == (True, [])
+
+
+# --- C1 layer 2: detect_regression (pure) ----------------------------------------
+
+
+def test_detect_regression_within_tolerance_is_none():
+    prev = {"row_counts": {"public.a": 1000}, "dump_bytes": 10_000}
+    cur = {"row_counts": {"public.a": 850}, "dump_bytes": 8_500}  # -15%, tolerance 20
+    assert cb.detect_regression(prev, cur, tolerance_pct=20) is None
+
+
+def test_detect_regression_beyond_tolerance_on_row_count():
+    prev = {"row_counts": {"public.a": 72709}, "dump_bytes": 1_000_000}
+    cur = {"row_counts": {"public.a": 0}, "dump_bytes": 1_000_000}
+    reason = cb.detect_regression(prev, cur, tolerance_pct=20)
+    assert reason is not None
+    assert "72,709" in reason
+    assert "row count" in reason
+
+
+def test_detect_regression_beyond_tolerance_on_dump_bytes():
+    prev = {"row_counts": {"public.a": 100}, "dump_bytes": 1_000_000}
+    cur = {"row_counts": {"public.a": 100}, "dump_bytes": 100_000}  # -90%
+    reason = cb.detect_regression(prev, cur, tolerance_pct=20)
+    assert reason is not None
+    assert "dump size" in reason
+    assert "1,000,000" in reason and "100,000" in reason
+
+
+def test_detect_regression_flags_both_dimensions_at_once():
+    prev = {"row_counts": {"public.a": 1000}, "dump_bytes": 1_000_000}
+    cur = {"row_counts": {"public.a": 1}, "dump_bytes": 1}
+    reason = cb.detect_regression(prev, cur, tolerance_pct=20)
+    assert "row count" in reason and "dump size" in reason
+
+
+def test_detect_regression_missing_previous_keys_does_not_raise():
+    # A malformed or ancient sidecar missing expected keys must not crash the run.
+    assert cb.detect_regression({}, {"row_counts": {"public.a": 5}, "dump_bytes": 5}, 20) is None
+
+
+def test_detect_regression_zero_previous_guards_divide_by_zero():
+    # A previous total of zero would already have been refused by verify_dump's
+    # absolute floor, so it is treated as "nothing to compare against" rather than
+    # raising ZeroDivisionError.
+    prev = {"row_counts": {"public.a": 0}, "dump_bytes": 0}
+    cur = {"row_counts": {"public.a": 5}, "dump_bytes": 500}
+    assert cb.detect_regression(prev, cur, tolerance_pct=20) is None
+
+
+def test_detect_regression_growth_is_not_a_regression():
+    prev = {"row_counts": {"public.a": 100}, "dump_bytes": 1000}
+    cur = {"row_counts": {"public.a": 500}, "dump_bytes": 5000}
+    assert cb.detect_regression(prev, cur, tolerance_pct=20) is None
 
 
 STACK = cb.Stack(name="copi-python", container="copi-python-postgres-1", db="copi", user="copi")
@@ -564,6 +619,39 @@ def test_verify_dump_refuses_to_pass_when_the_snapshot_reported_zero_tables(tmp_
     assert any("ZERO tables" in p for p in result.problems)
 
 
+def test_verify_dump_refuses_to_pass_when_the_snapshot_is_all_zero_rows(tmp_path):
+    # C1 absolute floor: a mass-TRUNCATEd database still reports N tables, each
+    # with a real (zero) count, so `expected_counts` is truthy and the ZERO-tables
+    # guard above never fires. compare_counts({30 tables: 0}, {same}) is (True, [])
+    # — legitimately equal, but a total of zero across every table means the count
+    # step or the database itself is broken, not that the DB is empty. Both
+    # production databases hold tens of thousands of rows.
+    dump = tmp_path / "d.dump"
+    dump.write_bytes(b"x")
+    fake = _verify_fake(
+        tables_out="public.a\npublic.b\n", counts_out="public.a|0\npublic.b|0\n"
+    )
+    result = cb.verify_dump(fake, CFG, STACK, dump, {"public.a": 0, "public.b": 0})
+    assert result.ok is False
+    assert any("ZERO total rows" in p for p in result.problems), result.problems
+
+
+def test_verify_dump_pg_isready_probes_tcp_not_the_bootstrap_unix_socket(tmp_path):
+    # I3: postgres:15's entrypoint runs a temporary bootstrap server on the UNIX
+    # SOCKET ONLY (listen_addresses='') before restarting the real one. pg_isready
+    # with no host checks that socket and can report ready during that window
+    # (measured 266ms against a 2s poll), so pg_restore then races a server about
+    # to shut down. -h 127.0.0.1 forces the probe onto TCP, which the bootstrap
+    # server never listens on.
+    dump = tmp_path / "d.dump"
+    dump.write_bytes(b"x")
+    fake = _verify_fake()
+    cb.verify_dump(fake, CFG, STACK, dump, {"public.users": 3})
+    ready_call = next(c for c in fake.calls if "pg_isready" in c)
+    assert "-h" in ready_call
+    assert ready_call[ready_call.index("-h") + 1] == "127.0.0.1"
+
+
 def test_verify_dump_never_publishes_a_port(tmp_path):
     dump = tmp_path / "d.dump"
     dump.write_bytes(b"x")
@@ -775,6 +863,75 @@ def test_failure_mail_with_no_results_says_the_run_produced_none():
     assert "systemctl status copi-backup.service" in body
 
 
+def test_failure_mail_reports_regression_even_when_the_stack_verified(tmp_path):
+    # C1 layer 2: the dump genuinely verified (StackResult.ok is True), so it must
+    # not appear as a plain "FAILED" stack line, but the regression must still be
+    # named in the subject and body with both figures.
+    now = datetime(2026, 8, 18, 3, 15, tzinfo=UTC)
+    subject, body = cb.render_failure_mail(
+        [_ok_result()], now, regressed={"copi-python": "row count fell 90.0% (...)"}
+    )
+    assert "copi-python" in subject
+    assert "REGRESSION" in body
+    assert "row count fell 90.0%" in body
+
+
+def test_run_ok_is_false_when_a_stack_regressed_even_though_it_verified():
+    status = {"ok": True}
+    assert cb._run_ok(status, offsite_failed=[], regressed={"copi-python": "reason"}) is False
+    assert cb._run_ok(status, offsite_failed=[], regressed={}) is True
+    assert cb._run_ok(status, offsite_failed=[]) is True
+
+
+# --- C2: heartbeat staleness -------------------------------------------------------
+
+
+def test_heartbeat_mail_warns_when_the_newest_entry_is_stale():
+    # Six-day-old sidecars must not render as a clean "verified" weekly summary —
+    # the old guard warned only when `history` was empty, so this passed silently.
+    now = datetime(2026, 8, 19, 8, 0, tzinfo=UTC)
+    history = [{
+        "stack": "copi-python",
+        "started_utc": "2026-08-12T03:15:00Z",
+        "dump_bytes": 1000,
+        "verified": True,
+    }]
+    subject, body = cb.render_heartbeat_mail(history, now)
+    assert "WARNING" in body
+    assert "hours old" in body
+
+
+def test_heartbeat_mail_does_not_warn_when_the_newest_entry_is_fresh():
+    now = datetime(2026, 8, 19, 8, 0, tzinfo=UTC)
+    history = [{
+        "stack": "copi-python",
+        "started_utc": "2026-08-19T03:15:00Z",  # ~5h old, well under the 26h floor
+        "dump_bytes": 1000,
+        "verified": True,
+    }]
+    subject, body = cb.render_heartbeat_mail(history, now)
+    assert "WARNING" not in body
+
+
+def test_heartbeat_mail_still_warns_on_empty_history():
+    now = datetime(2026, 8, 19, 8, 0, tzinfo=UTC)
+    subject, body = cb.render_heartbeat_mail([], now)
+    assert "NO RUNS RECORDED" in body
+
+
+def test_heartbeat_mail_uses_the_newest_of_several_entries_for_staleness():
+    # A stale entry for one stack must not be masked by a fresh entry for another.
+    now = datetime(2026, 8, 19, 8, 0, tzinfo=UTC)
+    history = [
+        {"stack": "copi-python", "started_utc": "2026-08-19T03:15:00Z",
+         "dump_bytes": 1000, "verified": True},
+        {"stack": "copi-blackbird", "started_utc": "2026-08-10T03:15:00Z",
+         "dump_bytes": 1000, "verified": True},
+    ]
+    subject, body = cb.render_heartbeat_mail(history, now)
+    assert "WARNING" not in body  # the newest entry (copi-python) is fresh
+
+
 def test_send_mail_uses_ses_v1_client_and_all_recipients():
     sent = {}
 
@@ -951,6 +1108,26 @@ def test_prune_dry_run_deletes_nothing(tmp_path):
     assert len(list(stack_dir.glob("*.dump"))) == 7
 
 
+def test_prune_excludes_named_stacks(tmp_path):
+    # C1 layer 2: a stack flagged for a row-count/size regression must not be
+    # pruned this run — its older copies are the only remaining evidence pending
+    # human review.
+    for stack_name in ("copi-python", "copi-blackbird"):
+        stack_dir = tmp_path / stack_name
+        stack_dir.mkdir()
+        for day in range(1, 8):
+            name = f"{stack_name}_copi_202608{day:02d}T031500Z.dump"
+            (stack_dir / name).write_bytes(b"x")
+    cfg = cb.load_config({
+        "STACKS": "copi-python:c:copi:copi\ncopi-blackbird:c:copi:copi",
+        "BACKUP_ROOT": str(tmp_path),
+    })
+    deleted = cb.prune(cfg, dry_run=False, exclude_stacks={"copi-python"})
+    assert len(list((tmp_path / "copi-python").glob("*.dump"))) == 7, "excluded stack was pruned"
+    assert len(list((tmp_path / "copi-blackbird").glob("*.dump"))) == 5
+    assert all("copi-python" not in str(p) for p in deleted)
+
+
 def test_load_config_rejects_shallow_or_system_backup_roots():
     for bad in ("/", "/etc", "/var", "/home", "/tmp"):
         with pytest.raises(cb.ConfigError, match="forbidden|shallow"):
@@ -1032,6 +1209,18 @@ def test_cmd_run_preflight_abort_writes_status_json_with_a_reason(tmp_path, monk
     status = json.loads((backup_root / "status.json").read_text())
     assert status["ok"] is False
     assert status.get("reason")
+
+
+def test_write_signal_status_records_which_signal_killed_the_run(tmp_path):
+    # C2: a SIGTERM from TimeoutStartSec skips cmd_run's own except entirely, so
+    # this is the only place status.json gets written on that path. Exercises the
+    # file-IO half of the signal handler directly, without delivering a real signal.
+    backup_root = tmp_path / "backups"
+    cfg = cb.load_config({"STACKS": "copi-python:c:copi:copi", "BACKUP_ROOT": str(backup_root)})
+    cb._write_signal_status(cfg, cb.signal.SIGTERM)
+    status = json.loads((backup_root / "status.json").read_text())
+    assert status["ok"] is False
+    assert "SIGTERM" in status["reason"]
 
 
 def test_cmd_run_writes_status_json_on_an_unexpected_exception(tmp_path, monkeypatch):

@@ -3,6 +3,11 @@ Description=Verified Postgres backups for the copi production stacks
 Documentation=file:///home/ubuntu/copi-python/docs/specs/2026-08-18-postgres-backup-verification-design.md
 After=docker.service
 Requires=docker.service
+# Independent path that fires even when the main process dies without running its
+# own error handling — e.g. SIGTERM from TimeoutStartSec landing outside a Python
+# try/except entirely (audit C2). Runs `copi-backup report`, which mails whatever
+# status.json/sidecars are on disk regardless of why this unit failed.
+OnFailure=copi-backup-failure@%n.service
 
 [Service]
 Type=oneshot

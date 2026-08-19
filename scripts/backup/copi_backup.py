@@ -22,6 +22,7 @@ import re
 import secrets
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -54,6 +55,9 @@ DEFAULTS = {
     "AWS_REGION": "us-east-2",
     "SES_SENDER_EMAIL": "",
     "MAIL_TO": "",
+    # A legitimate bulk deletion trips this on purpose (audit C1) — it should
+    # require a human to look, not silently rotate the last good copy away.
+    "REGRESSION_TOLERANCE_PCT": "20",
 }
 
 
@@ -88,6 +92,7 @@ class Config:
     offsite_cmd: str
     aws_region: str
     ses_sender_email: str
+    regression_tolerance_pct: int = 20
     mail_to: list[str] = field(default_factory=list)
 
 
@@ -164,6 +169,8 @@ def load_config(env: dict[str, str]) -> Config:
         offsite_cmd=env.get("OFFSITE_CMD", DEFAULTS["OFFSITE_CMD"]).strip(),
         aws_region=env.get("AWS_REGION", DEFAULTS["AWS_REGION"]).strip(),
         ses_sender_email=env.get("SES_SENDER_EMAIL", DEFAULTS["SES_SENDER_EMAIL"]).strip(),
+        # Clamped to >=0: a negative tolerance would make every run "regress".
+        regression_tolerance_pct=_as_int(env, "REGRESSION_TOLERANCE_PCT", 0),
         mail_to=env.get("MAIL_TO", DEFAULTS["MAIL_TO"]).split(),
     )
 
@@ -288,6 +295,42 @@ def compare_counts(
                 f"{table}: {want:,} rows in snapshot, {got:,} restored ({got - want:+,})"
             )
     return (not problems), problems
+
+
+def detect_regression(prev: dict, cur: dict, tolerance_pct: int) -> str | None:
+    """Compare this run's totals against the most recent PREVIOUS verified sidecar.
+
+    Pure and unit-testable on its own (audit C1 layer 2): ``prev``/``cur`` are
+    sidecar documents (see ``sidecar_document``). Returns a human-readable reason
+    naming both figures and the percentage if total row count OR ``dump_bytes`` has
+    fallen by more than ``tolerance_pct``, else None.
+
+    A previous total of zero is treated as "nothing to compare against" rather than
+    triggering a divide-by-zero: verify_dump's absolute floor already refuses to
+    call a zero-row snapshot verified, so a genuine zero would never have produced
+    the sidecar this function is comparing against in the first place.
+    """
+    prev_rows = sum((prev or {}).get("row_counts", {}).values())
+    cur_rows = sum((cur or {}).get("row_counts", {}).values())
+    prev_bytes = (prev or {}).get("dump_bytes", 0) or 0
+    cur_bytes = (cur or {}).get("dump_bytes", 0) or 0
+
+    reasons: list[str] = []
+    if prev_rows > 0:
+        drop_pct = (prev_rows - cur_rows) / prev_rows * 100
+        if drop_pct > tolerance_pct:
+            reasons.append(
+                f"row count fell {drop_pct:.1f}% (previous {prev_rows:,}, now "
+                f"{cur_rows:,}, tolerance {tolerance_pct}%)"
+            )
+    if prev_bytes > 0:
+        drop_pct = (prev_bytes - cur_bytes) / prev_bytes * 100
+        if drop_pct > tolerance_pct:
+            reasons.append(
+                f"dump size fell {drop_pct:.1f}% (previous {prev_bytes:,} bytes, now "
+                f"{cur_bytes:,} bytes, tolerance {tolerance_pct}%)"
+            )
+    return "; ".join(reasons) if reasons else None
 
 
 @dataclass
@@ -726,8 +769,17 @@ def verify_dump(
         )
         deadline = time.monotonic() + cfg.verify_timeout_sec
         while True:
+            # -h 127.0.0.1 is load-bearing (audit I3): postgres:15's entrypoint runs a
+            # temporary bootstrap server on the UNIX SOCKET ONLY
+            # (listen_addresses='') before restarting the real one. pg_isready with
+            # no host checks that socket and can report ready during that window
+            # (measured 266ms against this 2s poll) — pg_restore then races a server
+            # about to shut down. The bootstrap server never listens on TCP, so
+            # forcing the probe onto 127.0.0.1 is a pure win: the only failure mode
+            # this removes is a spurious one.
             ready = runner.run(
-                docker_exec(name, ["pg_isready", "-U", stack.user, "-q"]), check=False
+                docker_exec(name, ["pg_isready", "-h", "127.0.0.1", "-U", stack.user, "-q"]),
+                check=False,
             )
             if ready.returncode == 0:
                 break
@@ -782,6 +834,18 @@ def verify_dump(
             raise BackupError(
                 f"{stack.name}: snapshot reported ZERO tables — the count step failed. "
                 "Refusing to call this dump verified."
+            )
+        # Absolute floor, distinct from the empty-dict case above (audit C1): a
+        # mass-TRUNCATEd production database still reports N tables, each with a
+        # real (zero) count, so `expected_counts` is truthy and the guard above
+        # never fires. Both production databases hold tens of thousands of rows;
+        # a total of zero across every table means the count step or the database
+        # itself is broken, not that the database is legitimately empty.
+        if sum(expected_counts.values()) == 0:
+            raise BackupError(
+                f"{stack.name}: snapshot reported {len(expected_counts)} table(s) but "
+                "ZERO total rows across all of them — the count step or the database "
+                "is broken. Refusing to call this dump verified."
             )
         ok, problems = compare_counts(expected_counts, restored)
     except (CommandError, BackupError) as exc:
@@ -887,7 +951,10 @@ def build_status(
 
 
 def render_failure_mail(
-    results: list[StackResult], now: datetime, offsite_failed: list[str] | None = None
+    results: list[StackResult],
+    now: datetime,
+    offsite_failed: list[str] | None = None,
+    regressed: dict[str, str] | None = None,
 ) -> tuple[str, str]:
     """Render the failure mail.
 
@@ -895,10 +962,22 @@ def render_failure_mail(
     requires this to be mailed even when every stack otherwise verified — it is
     NOT folded into StackResult.ok (which means "a verified backup exists" and
     must stay true), so it is threaded through as a separate argument instead.
+
+    ``regressed`` maps stack name -> reason for stacks whose row count or dump size
+    fell more than REGRESSION_TOLERANCE_PCT versus the previous verified sidecar
+    (audit C1 layer 2). Kept out of StackResult.ok for the same reason as
+    ``offsite_failed``: the backup genuinely verified against the snapshot it was
+    taken from, so "verified" must stay true even though the run is reported FAILED.
     """
     offsite_failed = offsite_failed or []
+    regressed = regressed or {}
     failed = [r for r in results if not r.ok]
-    names = ",".join(r.stack for r in failed) or ",".join(offsite_failed) or "no-results"
+    names = (
+        ",".join(r.stack for r in failed)
+        or ",".join(offsite_failed)
+        or ",".join(regressed)
+        or "no-results"
+    )
     subject = f"[copi-backup] FAILED {names} {now:%Y-%m-%d}"
     lines = [f"Backup run {now:%Y-%m-%d %H:%M:%S} UTC", ""]
     if not results:
@@ -914,6 +993,14 @@ def render_failure_mail(
             "The local verified backup is unaffected; only the offsite copy is missing.",
             "",
         ]
+    if regressed:
+        lines += [
+            "ROW-COUNT / SIZE REGRESSION DETECTED — dump kept (it verified correctly), "
+            "but the run is marked FAILED and NOT pruned. A human must confirm this was "
+            "an intentional bulk deletion:",
+        ]
+        lines += [f"  {stack}: {reason}" for stack, reason in regressed.items()]
+        lines.append("")
     for r in results:
         lines.append(f"{r.stack}: {'OK' if r.ok else 'FAILED'}")
         if r.error:
@@ -926,11 +1013,34 @@ def render_failure_mail(
     return subject, "\n".join(lines)
 
 
+# A normal nightly gap is 24h; 26h leaves slack for the run's own duration and
+# scheduling jitter without masking real multi-day silence (audit C2). Six
+# consecutive nights of total failure otherwise pass behind a green weekly mail:
+# render_heartbeat_mail used to warn only when `history` was EMPTY, but six-day-old
+# sidecars are non-empty and render as a clean "verified" summary.
+HEARTBEAT_STALE_HOURS = 26
+
+SIDECAR_TS_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+
+
 def render_heartbeat_mail(history: list[dict], now: datetime) -> tuple[str, str]:
     subject = f"[copi-backup] weekly summary {now:%Y-%m-%d}"
     lines = [f"Weekly backup summary, {now:%Y-%m-%d} UTC", ""]
     if not history:
         lines.append("NO RUNS RECORDED IN THE LAST 7 DAYS — the timer may not be firing.")
+    else:
+        newest = max(
+            datetime.strptime(e["started_utc"], SIDECAR_TS_FORMAT).replace(tzinfo=UTC)
+            for e in history
+        )
+        age_hours = (now - newest).total_seconds() / 3600
+        if age_hours > HEARTBEAT_STALE_HOURS:
+            lines.append(
+                f"WARNING: the newest recorded run is {age_hours:.1f} hours old "
+                f"(threshold {HEARTBEAT_STALE_HOURS}h) — the nightly job may be "
+                "failing silently, or the timer may not be firing."
+            )
+            lines.append("")
     for entry in history:
         lines.append(
             f"{entry['stack']:<18} {entry['started_utc']}  "
@@ -1019,11 +1129,20 @@ def sweep(runner: Runner, cfg: Config, now: datetime) -> None:
             sidecar.unlink(missing_ok=True)
 
 
-def prune(cfg: Config, dry_run: bool) -> list[Path]:
-    """Apply retention. Returns the paths deleted (or that would be)."""
+def prune(cfg: Config, dry_run: bool, exclude_stacks: set[str] | None = None) -> list[Path]:
+    """Apply retention. Returns the paths deleted (or that would be).
+
+    ``exclude_stacks`` skips retention entirely for named stacks (audit C1 layer 2):
+    when this run detected a row-count/size regression for a stack, its older
+    copies are the only remaining evidence and must survive this run's prune pass
+    even though the regressed dump itself verified correctly.
+    """
+    exclude_stacks = exclude_stacks or set()
     deleted: list[Path] = []
     root = Path(cfg.backup_root).resolve()
     for stack in cfg.stacks:
+        if stack.name in exclude_stacks:
+            continue
         stack_dir = Path(cfg.backup_root) / stack.name
         if not stack_dir.is_dir():
             continue
@@ -1080,14 +1199,19 @@ def _live_db_bytes(runner: Runner, cfg: Config) -> int:
     return total
 
 
-def _run_ok(status: dict, offsite_failed: list[str]) -> bool:
-    """The run's overall verdict: verified backups AND no attempted-and-failed offsite.
+def _run_ok(
+    status: dict, offsite_failed: list[str], regressed: dict[str, str] | None = None
+) -> bool:
+    """The run's overall verdict: verified backups AND no attempted-and-failed offsite
+    AND no undetected row-count/size regression.
 
     Kept separate from StackResult.ok (which means "a verified backup exists" and
-    must stay true even when its offsite copy failed to upload) so cmd_run has one
-    place that decides the exit code and whether to mail — see audit F7.
+    must stay true even when its offsite copy failed to upload, or when a dump that
+    verified correctly nonetheless regressed against its predecessor) so cmd_run has
+    one place that decides the exit code and whether to mail — see audit F7 (offsite)
+    and audit C1 (regression).
     """
-    return bool(status["ok"]) and not offsite_failed
+    return bool(status["ok"]) and not offsite_failed and not (regressed or {})
 
 
 def _write_status(
@@ -1123,6 +1247,41 @@ def _mail_failure(cfg: Config, subject: str, body: str) -> None:
     logger.error("%s", body)
     if not send_mail(cfg, subject, body):
         logger.error("failure mail was NOT accepted by SES: %s", subject)
+
+
+def _detect_regressions(
+    cfg: Config, results: list[StackResult], now: datetime
+) -> dict[str, str]:
+    """Compare each successfully verified stack's totals against its most recent
+    PREVIOUS sidecar (audit C1 layer 2). Evaluated BEFORE pruning.
+
+    Only stacks that produced a verified dump this run are eligible: a stack that
+    already failed dump/verify is reported through the ordinary failure path, and
+    comparing a non-existent dump would be meaningless. A stack with no previous
+    sidecar (first run) is skipped silently — there is nothing to regress against.
+    """
+    regressed: dict[str, str] = {}
+    for result in results:
+        if not result.ok or result.dump is None:
+            continue
+        stack_dir = Path(cfg.backup_root) / result.stack
+        cur_sidecar = Path(f"{result.dump.path}.json")
+        candidates = sorted(
+            (p for p in stack_dir.glob("*.dump.json") if p != cur_sidecar),
+            key=lambda p: p.name,
+        )
+        if not candidates:
+            continue
+        try:
+            prev_doc = json.loads(candidates[-1].read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        cur_doc = sidecar_document(result, now)
+        reason = detect_regression(prev_doc, cur_doc, cfg.regression_tolerance_pct)
+        if reason is not None:
+            logger.error("%s: regression detected: %s", result.stack, reason)
+            regressed[result.stack] = reason
+    return regressed
 
 
 def _cmd_run_inner(cfg: Config, runner: Runner, now: datetime, skip_prune: bool) -> int:
@@ -1199,19 +1358,27 @@ def _cmd_run_inner(cfg: Config, runner: Runner, now: datetime, skip_prune: bool)
             result = StackResult(stack.name, None, None, False, str(exc))
         results.append(result)
 
+    # Evaluated BEFORE pruning (audit C1 layer 2): a legitimate bulk deletion trips
+    # this on purpose — the dump is kept (it verified correctly against its own
+    # snapshot) but the run is reported FAILED and this stack is excluded from the
+    # prune pass below, since its older copies are the only remaining evidence.
+    regressed = _detect_regressions(cfg, results, now)
+
     status = _write_status(cfg, results, now)
-    overall_ok = _run_ok(status, offsite_failed)
+    overall_ok = _run_ok(status, offsite_failed, regressed)
     logger.info("run complete: overall=%s", "OK" if overall_ok else "FAILED")
 
     # Mail BEFORE prune (audit F2): an exception from prune must never suppress the
     # failure mail for an already-failing run.
     if not overall_ok:
-        subject, body = render_failure_mail(results, now, offsite_failed=offsite_failed)
+        subject, body = render_failure_mail(
+            results, now, offsite_failed=offsite_failed, regressed=regressed
+        )
         _mail_failure(cfg, subject, body)
 
     if not skip_prune:
         try:
-            deleted = prune(cfg, dry_run=False)
+            deleted = prune(cfg, dry_run=False, exclude_stacks=set(regressed))
             logger.info("prune deleted %d file(s): %s", len(deleted), [str(p) for p in deleted])
         except Exception as exc:
             # Must not mask the run's verdict computed above.
@@ -1257,6 +1424,64 @@ def cmd_report(cfg: Config, now: datetime) -> int:
     return 0 if mailed else 1
 
 
+def _write_signal_status(cfg: Config, signum: int) -> None:
+    """Persist status.json marking the run killed by a signal. Never raises.
+
+    Split out of the handler itself so the file-IO/logging logic is unit-testable
+    without actually delivering a signal (forbidden here: no real subprocess/signal
+    plumbing in this suite). Every exception is swallowed after being logged: a
+    handler invoked mid-syscall must not itself raise into arbitrary interrupted
+    code.
+    """
+    try:
+        name = signal.Signals(signum).name
+    except ValueError:
+        name = str(signum)
+    try:
+        logger.error("received %s — writing status.json before exit", name)
+    except Exception:
+        pass
+    try:
+        # Belt-and-braces: normally _cmd_run_inner has already called this before
+        # any subprocess (and therefore before any signal-prone wait) runs, but a
+        # signal landing in the narrow window before that must still succeed in
+        # writing status.json rather than silently no-op on a missing directory.
+        _ensure_dir(Path(cfg.backup_root))
+        _write_status(cfg, [], datetime.now(UTC), reason=f"killed by {name}")
+    except Exception as exc:
+        try:
+            logger.error("signal handler failed to write status.json: %s", exc)
+        except Exception:
+            pass
+
+
+def _install_signal_handlers(cfg: Config) -> None:
+    """Install SIGTERM/SIGINT handlers so a kill mid-run cannot leave status.json
+    reporting yesterday's success (audit C2).
+
+    ``TimeoutStartSec=3600`` sends SIGTERM to a run that overruns; the default
+    disposition tears the interpreter down immediately, so cmd_run's own
+    ``except Exception`` — and therefore ``_write_status`` — never runs at all, and
+    status.json still says ``ok: true`` from the night before. Installed inside
+    main(), not at import: importing this module (as the unit tests do) must never
+    change the importing process's signal disposition.
+    """
+
+    def _handle(signum: int, _frame: object) -> None:
+        _write_signal_status(cfg, signum)
+        # os._exit(), not sys.exit(): this must not itself raise. sys.exit() raises
+        # SystemExit into whatever arbitrary code the signal interrupted, which
+        # could be caught by a surrounding `except Exception` — no, SystemExit is
+        # not Exception, but it could still be caught by `except BaseException`
+        # somewhere on the interrupted stack, or trigger unexpected `finally`
+        # cleanup mid-teardown. os._exit() terminates unconditionally and
+        # immediately: exactly and only what a kill signal's handler should do.
+        os._exit(1)
+
+    signal.signal(signal.SIGTERM, _handle)
+    signal.signal(signal.SIGINT, _handle)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="copi-backup")
     parser.add_argument("command", choices=["run", "report", "prune"])
@@ -1290,6 +1515,7 @@ def main(argv: list[str] | None = None) -> int:
 
     cfg = load_config(read_env_file(Path(args.config).read_text()))
     now = datetime.now(UTC)
+    _install_signal_handlers(cfg)
 
     with open(LOCK_PATH, "w") as lock:
         try:
