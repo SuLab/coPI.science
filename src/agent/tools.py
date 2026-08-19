@@ -489,10 +489,12 @@ async def _execute_consult_specialist(
         logger.error("[specialists] %s consult failed: %s", domain, exc)
         return f"Error consulting the {domain} specialist: {exc}"
 
-    opinion = parse_opinion(raw, domain=domain)
     # A billed call that came back empty is not an opinion. `on_api_call`
     # already fired above (it answers "was this billed?"); `on_consult` answers
-    # "does this satisfy the floor?" and the two must disagree here.
+    # "does this satisfy the floor?" and the two must disagree here. Checked
+    # BEFORE parsing: this branch returns a fixed string and reads nothing off
+    # the opinion, so parsing first was work whose only possible consumer was
+    # the branch that never runs.
     if not has_usable_content(raw):
         logger.error(
             "[specialists] %s returned no usable content — NOT counted as "
@@ -502,6 +504,7 @@ async def _execute_consult_specialist(
             f"The {domain} specialist returned an empty response. Proceed "
             "without this opinion; it will not count as consulted."
         )
+    opinion = parse_opinion(raw, domain=domain)
     if on_consult is not None:
         on_consult(domain, opinion.verdict_signal)
     logger.info(

@@ -198,6 +198,13 @@
                     {% endif %}
                 </td>
                 <td class="px-4 py-3 text-sm text-gray-900">{{ a.recommendation or "—" }}
+                    {# `missing_domains` is three-state (see the column comment in
+                       src/models/opportunity.py): a list of names = the gap this badge
+                       reports, NULL = panel verified complete, [] = the floor could not
+                       be checked at all (post-restart). Only the first sets
+                       `panel_incomplete`, so the [] rows never reach the join below —
+                       and if one ever did it would render as an empty "Missing:", not
+                       as an error. #}
                     {% if a.panel_incomplete %}
                     <span class="ml-1 text-xs font-medium text-orange-700"
                           title="Missing: {{ (a.missing_domains or [])|join(', ') }}">&#9873; panel</span>

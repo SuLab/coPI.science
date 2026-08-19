@@ -320,6 +320,83 @@ def test_a_consult_without_a_thread_is_still_recorded():
     assert eng._consulted_domains("huganir") == frozenset({"scientific"})
 
 
+# --- "no gap" vs "no way to tell" --------------------------------------------
+#
+# `_specialist_floor_gap` returns an empty set in both cases and cannot tell
+# them apart by design (its signature is pinned by every test above).
+# `_floor_verifiable` is the sibling that answers the other half, and
+# `_persist_assessment` needs both to write the column's three states.
+
+
+def test_a_complete_panel_is_verifiable():
+    eng = _engine(_hub())
+    thread = _activated_thread(eng, "t1", other_agent_id="gill")
+    for domain in ("scientific", "talent"):
+        eng._record_consult("gill", domain, thread_id="t1")
+    thread.floor_armed = True
+
+    verdict = {
+        "recommendation": "advance", "subject_agent_id": "gill",
+        "rationale": "No cues here.",
+    }
+    assert eng._specialist_floor_gap(verdict, thread=thread) == set()
+    assert eng._floor_verifiable(verdict, thread=thread) is True
+
+
+def test_a_real_gap_is_verifiable_by_definition():
+    """A named gap can only come from the path that could check. If this ever
+    returned False the row would carry both a gap AND the unverified sentinel,
+    which is incoherent."""
+    eng = _engine(_hub())
+    eng._record_consult("pearce", "scientific")
+    verdict = {"recommendation": "advance", "subject_agent_id": "gill"}
+    assert eng._specialist_floor_gap(verdict) == {"scientific", "talent"}
+    assert eng._floor_verifiable(verdict) is True
+
+
+def test_an_unarmed_floor_is_not_verifiable():
+    """The post-restart case: no consult recorded for anyone, so an absent
+    record for this PI proves nothing either way."""
+    eng = _engine(_hub())
+    verdict = {"recommendation": "advance", "subject_agent_id": "gill"}
+    assert eng._specialist_floor_gap(verdict) == set()
+    assert eng._floor_verifiable(verdict) is False
+
+
+def test_an_unarmed_thread_is_not_verifiable_even_when_the_map_is_not_empty():
+    """`floor_armed` is the authority for a thread, not the live map — the
+    same read `_specialist_floor_gap` makes, so the two cannot disagree about
+    one verdict."""
+    eng = _engine(_hub())
+    thread = _activated_thread(eng, "t1", other_agent_id="gill")
+    assert thread.floor_armed is False
+    eng._record_consult("someone-else", "scientific")  # lands after activation
+
+    verdict = {"recommendation": "advance", "subject_agent_id": "gill"}
+    assert eng._specialist_floor_gap(verdict, thread=thread) == set()
+    assert eng._floor_verifiable(verdict, thread=thread) is False
+
+
+def test_a_verdict_with_no_subject_is_not_verifiable():
+    eng = _engine(_hub())
+    eng._record_consult("gill", "scientific")          # armed
+    verdict = {"recommendation": "advance"}
+    assert eng._specialist_floor_gap(verdict) == set()
+    assert eng._floor_verifiable(verdict) is False
+
+
+def test_a_verdict_that_owes_no_panel_is_verifiable():
+    """A `pass` is exempt from the panel entirely, so nothing about it failed
+    to verify — otherwise the unverified sentinel would land on the commonest
+    verdict there is and mean nothing."""
+    eng = _engine(_hub())
+    assert eng._specialist_consults == {}              # unarmed, as after a restart
+    for recommendation in ("pass", "route-to-incubation", None):
+        verdict = {"recommendation": recommendation, "subject_agent_id": "gill"}
+        assert eng._specialist_floor_gap(verdict) == set()
+        assert eng._floor_verifiable(verdict) is True, recommendation
+
+
 # --- clear-rate monitor (Task 9) --------------------------------------------
 #
 # The monitor is the ONLY thing that surfaces "142/142 consults returned

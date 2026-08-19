@@ -47,8 +47,12 @@ class ThreadState:
     #   - A pure live read at persist time (the original bug) lets a
     #     DIFFERENT interview's consult, landing mid-await in some other
     #     task's turn, retroactively arm the floor for an in-flight verdict
-    #     that began under fail-open — refusing it after the concluding reply
-    #     is already posted to Slack, with no later turn to recover it.
+    #     that began under fail-open. When that bug was found this refused the
+    #     verdict after the concluding reply was already posted to Slack, with
+    #     no later turn to recover it; the floor no longer refuses anything, so
+    #     what it costs today is a `panel_incomplete=True` flag pinned on an
+    #     interview whose panel may well have been convened — a wrong number in
+    #     the one metric this instrumentation exists to report.
     #   - Freezing forever at activation (this field's first shape) instead
     #     made a thread that activated while the map was empty permanently
     #     unable to arm even once ITS OWN later specialist consults made the
@@ -67,6 +71,13 @@ class ThreadState:
     # consults, which quietly excused the commonest failure of all — a hub
     # that simply never convenes a panel. See _specialist_floor_gap's
     # docstring for that history and the full fail-open rationale.
+    #
+    # False here is NOT "the panel was skipped" — it is "this process cannot
+    # tell", which is the ordinary state of every thread rebuilt after a
+    # restart (production's last exit was a SIGKILL). That is why the row
+    # written under an unarmed floor records `missing_domains=[]`, unverified,
+    # rather than the NULL that means verified-complete — see
+    # SimulationEngine._floor_verifiable and the column's own comment.
     floor_armed: bool = False
 
 

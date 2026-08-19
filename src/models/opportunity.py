@@ -64,11 +64,28 @@ class OpportunityAssessment(Base):
     # Blackbird kept nothing. Both production refusals (gordy, 2026-08-17) lost
     # a real conditional verdict that way. Storing it flagged keeps the record
     # and keeps the warning; it does not mean the gap is acceptable.
+    #
+    # True means "we looked and found a gap". False does NOT mean "the panel
+    # was fine" on its own — read it together with `missing_domains` below.
     panel_incomplete: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("false")
     )
-    # Which domains were missing. NULL when there was no gap — distinct from
-    # [] which would mean a gap whose domains we failed to name.
+    # Which domains were missing. THREE states, written by
+    # `SimulationEngine._persist_assessment`:
+    #   [names] — `panel_incomplete=True`. These domains were owed by the
+    #             verdict's own content and never consulted in this interview.
+    #   NULL    — `panel_incomplete=False`, panel VERIFIED complete: the floor
+    #             was able to check, and found nothing owed and unconsulted
+    #             (including the `pass` verdicts no panel is owed for at all).
+    #   []      — `panel_incomplete=False`, panel UNVERIFIED: the floor could
+    #             not check at all. Either the verdict named no
+    #             `subject_agent_id`, or the process had recorded no consult
+    #             for anyone (`_floor_verifiable`) — the ordinary state after a
+    #             restart, and production's last exit was a SIGKILL. Not
+    #             evidence of a gap, so it is not flagged; not evidence of a
+    #             complete panel either, so it must never be counted as one.
+    # Rows written before 2026-08-19 have NULL for both the verified and the
+    # unverified case — that conflation is exactly what [] exists to end.
     missing_domains: Mapped[list | None] = mapped_column(JSONB, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(

@@ -2102,5 +2102,160 @@ async def test_a_complete_panel_stores_an_unflagged_row(engine):
         row = (await db.execute(select(OpportunityAssessment))).scalars().one()
     assert row.panel_incomplete is False
     assert row.missing_domains is None, (
-        "NULL means no gap; [] would mean a gap we could not name"
+        "NULL is reserved for a VERIFIED-complete panel. [] is the third state "
+        "— the floor could not be checked at all — and this row was checked"
     )
+
+
+@pytest.mark.asyncio
+async def test_an_unverifiable_floor_stores_the_empty_sentinel_not_null(engine):
+    """The post-restart verdict must not read as a verified-complete panel.
+
+    `_specialist_floor_gap` returns an empty set for two different reasons:
+    the panel really was complete, or there was nothing to check it against.
+    The second is the ORDINARY state after a restart — `_specialist_consults`
+    is in-memory, every `_rebuild_agent_state` thread starts `floor_armed=False`,
+    and production's last exit was a SIGKILL — so it is not a corner case.
+
+    Both used to store `panel_incomplete=False, missing_domains=NULL`, which
+    counted every unverifiable verdict as a vetted one and silently
+    under-reported the exact number spec §10's panel-gap surface exists to
+    produce. The third state the column already reserved says which is which.
+    """
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from src.agent.simulation import SimulationEngine
+    from src.services.blackbird_rubric import RUBRIC_WEIGHTS
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as setup:
+        run = SimulationRun()
+        setup.add(run)
+        await setup.commit()
+        run_id = run.id
+
+    stub = SimulationEngine(
+        agents=[], slack_clients={}, session_factory=factory, simulation_run_id=run_id,
+    )
+    # No consult recorded for ANYONE: the floor is unarmed, exactly as it is in
+    # the first turns after a restart. Note this is NOT the same as the gapped
+    # case above, which records a consult for some other PI to prove the
+    # process does record them.
+    assert stub._specialist_consults == {}
+
+    try:
+        await SimulationEngine._persist_assessment(
+            stub, "blackbird", "general",
+            {
+                "subject_agent_id": "gordy",
+                "recommendation": "conditional",
+                "rationale": "A peptide-based vaccine platform for tuberculosis.",
+                "scores": {k: 3 for k in RUBRIC_WEIGHTS},
+            },
+            slack_ts="1.1",
+            subject_agent_id_fallback="gordy",
+        )
+
+        rows = await _assessment_rows(factory, run_id)
+        assert len(rows) == 1, "failing open must still store the verdict"
+        row = rows[0]
+        assert row.panel_incomplete is False, (
+            "we have no evidence of a gap — only an inability to look — so the "
+            "flag must not fire and false-accuse a panel that may have been "
+            "convened before the restart"
+        )
+        assert row.missing_domains == [], (
+            "the floor could not be checked, so this row is UNVERIFIED. NULL "
+            "here would be indistinguishable from the verified-complete row in "
+            "test_a_complete_panel_stores_an_unflagged_row"
+        )
+        assert row.recommendation == "conditional", "the verdict itself is unchanged"
+    finally:
+        await _delete_run(factory, run_id)
+
+
+@pytest.mark.asyncio
+async def test_a_verdict_with_no_subject_is_unverifiable_too(engine):
+    """The floor's OTHER fail-open case reaches the same third state.
+
+    Nothing to join a consult record to is "we could not check", not "the
+    panel was fine" — even though this engine demonstrably records consults.
+    """
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from src.agent.simulation import SimulationEngine
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as setup:
+        run = SimulationRun()
+        setup.add(run)
+        await setup.commit()
+        run_id = run.id
+
+    stub = SimulationEngine(
+        agents=[], slack_clients={}, session_factory=factory, simulation_run_id=run_id,
+    )
+    stub._record_consult("someone-else", "scientific")  # the floor IS armed
+
+    try:
+        await SimulationEngine._persist_assessment(
+            stub, "blackbird", "general",
+            {"recommendation": "advance", "company_or_project": "Unattributed"},
+        )
+
+        rows = await _assessment_rows(factory, run_id)
+        assert len(rows) == 1
+        assert rows[0].subject_agent_id is None
+        assert rows[0].panel_incomplete is False
+        assert rows[0].missing_domains == [], (
+            "no subject_agent_id means the floor had nothing to join on, which "
+            "is unverified — not verified complete"
+        )
+    finally:
+        await _delete_run(factory, run_id)
+
+
+@pytest.mark.asyncio
+async def test_a_pass_verdict_owes_no_panel_and_is_not_marked_unverified(engine):
+    """`[]` must mean "we could not check", not "we did not need to".
+
+    A `pass` is not held to the panel at all (`_PANEL_REQUIRED_FOR`), so there
+    is nothing about it that failed to verify. If the sentinel leaked onto
+    every declined idea it would drown the signal it exists to carry — and
+    `pass` is the commonest verdict there is.
+    """
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from src.agent.simulation import SimulationEngine
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as setup:
+        run = SimulationRun()
+        setup.add(run)
+        await setup.commit()
+        run_id = run.id
+
+    stub = SimulationEngine(
+        agents=[], slack_clients={}, session_factory=factory, simulation_run_id=run_id,
+    )
+    assert stub._specialist_consults == {}  # unarmed, as after a restart
+
+    try:
+        await SimulationEngine._persist_assessment(
+            stub, "blackbird", "general",
+            {
+                "subject_agent_id": "gordy",
+                "recommendation": "pass",
+                "rationale": "A peptide-based vaccine platform for tuberculosis.",
+            },
+            subject_agent_id_fallback="gordy",
+        )
+
+        rows = await _assessment_rows(factory, run_id)
+        assert len(rows) == 1
+        assert rows[0].panel_incomplete is False
+        assert rows[0].missing_domains is None, (
+            "no panel was owed, so nothing failed to verify — NULL, not []"
+        )
+    finally:
+        await _delete_run(factory, run_id)

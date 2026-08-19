@@ -315,6 +315,55 @@ def test_compounding_reasons_does_not_summon_the_chemistry_specialist():
     )
 
 
+def test_the_prefix_tier_is_anchored_at_a_word_boundary():
+    """The ~30 cues OUTSIDE `_WORD_ONLY_CUES` are anchored too, on the left.
+
+    Every other false-positive test above exercises a cue in
+    `_WORD_ONLY_CUES` ("aso", "hit", "als", "compound"), which is matched by
+    the OTHER branch of `_cue_pattern`. So deleting the `(?<![a-z0-9])`
+    lookbehind from the prefix branch reverted every remaining cue to raw
+    substring containment and shipped green. Verified by mutation: remove that
+    lookbehind and this test fails, while the four tests above still pass.
+
+    The prefix tier deliberately has no RIGHT-hand anchor — that is what lets
+    "medicinal chem" reach "medicinal chemistry" and "neurodegener" reach
+    "neurodegeneration" — so the left-hand one is the only thing standing
+    between it and substring matching.
+    """
+    # "clinical" inside "nonclinical": the whole point of the tier is that a
+    # cue must START a word.
+    assert "clinical" not in required_domains_for(
+        _verdict("A nonclinical readout in a rodent model.")
+    ), "'nonclinical' must not summon the clinical specialist"
+    # "peptide" inside "polypeptide" — same tier, a different domain, so this
+    # cannot pass by accident of one cue's spelling.
+    assert "chemistry" not in required_domains_for(
+        _verdict("A polypeptide fold prediction benchmark.")
+    ), "'polypeptide' must not summon the chemistry specialist"
+    # And the tier still does its job: a prefix cue matches its own stems.
+    assert "clinical" in required_domains_for(_verdict("Neurodegenerative decline."))
+    assert "chemistry" in required_domains_for(_verdict("A peptide binder."))
+
+
+def test_an_unrecognised_but_populated_json_object_is_an_opinion():
+    """A specialist that answered in a shape we did not name still answered.
+
+    `has_usable_content` used to require one of four known keys, so
+    {"signal": ..., "analysis": "<500 words>"} was reported to the hub as "the
+    specialist returned an empty response" — a false statement that threw the
+    analysis away and denied the domain its credit, while the SAME words sent
+    as bare prose were kept. Only `{}` says nothing.
+    """
+    assert has_usable_content(
+        '{"signal": "blocking", "analysis": "The assay has no orthogonal control, '
+        'and the effect size is within run-to-run variance."}'
+    ) is True
+    assert has_usable_content('{"opinion": "proceed"}') is True
+    assert has_usable_content('```json\n{"unexpected_key": ["a", "b"]}\n```') is True
+    # The line the change does not cross: an object with no keys at all.
+    assert has_usable_content("{}") is False
+
+
 def test_genuine_cues_still_match():
     """Narrowing must not become blindness."""
     assert "chemistry" in required_domains_for(_verdict("We have ASOs in hand."))

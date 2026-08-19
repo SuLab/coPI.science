@@ -227,8 +227,18 @@ class SimulationEngine:
         # In-memory on purpose: it is read by _persist_assessment one LLM call
         # later, in the SAME process. A restart clears it, and the floor then
         # fails OPEN for threads that predate the restart — see
-        # _persist_assessment. Blocking every assessment on every resumed thread
-        # would be worse than one unvetted verdict.
+        # _persist_assessment.
+        #
+        # Why fail open, now that a gap no longer costs the verdict: flagging
+        # instead would mark every thread that survived a restart as
+        # panel_incomplete, including the ones whose panel genuinely WAS
+        # convened before the restart cleared this map. That is a false
+        # accusation on a real number. What failing open costs is subtler and
+        # is what `_floor_verifiable` exists to stop: an unverifiable verdict
+        # used to be stored as `panel_incomplete=False, missing_domains=NULL`,
+        # indistinguishable from a verified-complete panel, so every
+        # post-restart verdict silently inflated the clean-panel count. It is
+        # now recorded as the third state, `missing_domains=[]` — unverified.
         self._specialist_consults: dict[tuple[str, str | None], set[str]] = {}
 
         # verdict_signal -> count, for the whole run. The panel returned caution
@@ -1561,11 +1571,14 @@ class SimulationEngine:
         # Accepted residual: if the process's very first-ever consult happens
         # DURING this thread's own concluding turn (recorded by a tool call
         # inside this same call, after this latch already ran), this turn
-        # still reads fail-open. That is deliberate — a false positive here
-        # (wrongly enforcing) loses an already-Slack-posted verdict for good;
-        # a false negative (failing open) just persists an under-vetted
-        # verdict a human can still review at /admin/assessments. Bias to
-        # fail-open.
+        # still reads fail-open. That is deliberate, though the reason has
+        # changed: enforcement no longer discards anything, so a false
+        # positive here costs a wrong `panel_incomplete=True` on a verdict
+        # whose panel really was convened — a false accusation in the one
+        # number spec §10 exists to report. A false negative costs a verdict
+        # recorded as UNVERIFIED (`missing_domains=[]`, see
+        # `_floor_verifiable`), which is visible for what it is and which a
+        # human can still review at /admin/assessments. Bias to fail-open.
         thread.floor_armed = thread.floor_armed or bool(self._specialist_consults)
 
         settings = get_settings()
@@ -2737,6 +2750,12 @@ class SimulationEngine:
             subject_view = {**verdict, "subject_agent_id": subject_agent_id_fallback}
 
         gap = self._specialist_floor_gap(subject_view, thread=thread)
+        # An empty `gap` is two different findings, and the row has to say
+        # which: the panel really was complete, or the floor had nothing to
+        # check it against (no subject to join on, or a process that has
+        # recorded no consult for anyone — the ordinary post-restart state,
+        # and production's last exit was a SIGKILL). See `_floor_verifiable`.
+        floor_verifiable = self._floor_verifiable(subject_view, thread=thread)
         if gap:
             logger.warning(
                 "[%s] Assessment for %s stored with an INCOMPLETE PANEL — "
@@ -2810,8 +2829,16 @@ class SimulationEngine:
             rationale=_str_or_none(verdict.get("rationale")),
             raw_verdict=verdict,
             panel_incomplete=bool(gap),
-            # NULL, not [], when there is no gap — see the column comment.
-            missing_domains=sorted(gap) if gap else None,
+            # Three states, one column — see OpportunityAssessment.missing_domains:
+            #   [names] a real gap, these domains were owed and never consulted
+            #   NULL    the panel was VERIFIED complete (or none was owed at all)
+            #   []      the floor could not be checked at all; this row is
+            #           UNVERIFIED, and must not be counted as a clean panel
+            # `panel_incomplete` stays False for [] on purpose: we have no
+            # evidence of a gap, only an inability to look. The distinction is
+            # what keeps spec §10's panel-gap surface from reading every
+            # post-restart verdict as a vetted one.
+            missing_domains=sorted(gap) if gap else (None if floor_verifiable else []),
         )
         try:
             async with self.session_factory() as db:
@@ -3077,26 +3104,20 @@ class SimulationEngine:
         that PI — the same slot ``_record_consult`` writes to when it, too, is
         called with no ``thread_id``.
 
-        FAILS OPEN in two cases, both of which mean "we have no record", never
-        "the panel approved":
-        - the verdict names no ``subject_agent_id``, so there is nothing to
-          join on;
-        - the consult map has never been seen non-empty at the top of any turn
-          on this thread so far (``thread.floor_armed`` is False), which means
-          this process had not recorded a consult for anyone as of that last
-          check — the post-restart case, where the in-memory map was cleared
-          and the interview genuinely happened, is exactly this with every
-          check so far having seen an empty map. When ``thread`` is ``None``
-          this reads the LIVE map instead (``bool(self._specialist_consults)``),
-          matching the pre-``floor_armed`` behavior exactly — every direct
-          caller that has no thread to offer.
+        FAILS OPEN in the two cases ``_floor_verifiable`` names, both of which
+        mean "we have no record", never "the panel approved". An empty return
+        is therefore ambiguous ON ITS OWN — "no gap" and "no way to tell" look
+        identical here — which is why ``_persist_assessment`` asks
+        ``_floor_verifiable`` as well and records the difference on the row
+        (``missing_domains`` NULL vs ``[]``). Do not read an empty set as a
+        clean bill of health without asking that question too.
 
-        Note the second condition is about the whole map, not this PI's slot.
-        An earlier version failed open whenever the SUBJECT had no consults,
-        which quietly excused the commonest failure of all: a hub that simply
-        never convenes a panel. If the map holds entries for other PIs, this
-        process demonstrably records consults, so an absent PI means the panel
-        really was skipped for them — and the floor bites.
+        Note the second fail-open condition is about the whole map, not this
+        PI's slot. An earlier version failed open whenever the SUBJECT had no
+        consults, which quietly excused the commonest failure of all: a hub
+        that simply never convenes a panel. If the map holds entries for other
+        PIs, this process demonstrably records consults, so an absent PI means
+        the panel really was skipped for them — and the floor bites.
 
         It does not fail open once any consult exists for that PI either: a hub
         that consulted one cheap specialist must not thereby buy an exemption
@@ -3106,29 +3127,74 @@ class SimulationEngine:
         if recommendation not in self._PANEL_REQUIRED_FOR:
             return set()
 
+        unverifiable = self._floor_unverifiable_reason(verdict, thread)
+        if unverifiable is not None:
+            # Both fail-open branches log the same way, at INFO, naming the
+            # reason and the consequence — an operator reading this line needs
+            # to know the row it produced says "unverified", not "clean".
+            logger.info(
+                "[specialists] floor fails open for subject %r: %s. The verdict "
+                "is stored with missing_domains=[] — panel UNVERIFIED, which is "
+                "not the same as verified complete (NULL).",
+                verdict.get("subject_agent_id") or "?", unverifiable,
+            )
+            return set()
+
+        # Guaranteed a non-empty str by the check above.
         subject = verdict.get("subject_agent_id")
-        if not isinstance(subject, str) or not subject:
-            logger.info(
-                "[specialists] verdict names no subject_agent_id — floor fails "
-                "open, nothing to join a consult record to",
-            )
-            return set()
-
-        if thread is not None:
-            armed = thread.floor_armed
-        else:
-            armed = bool(self._specialist_consults)
-        if not armed:
-            logger.info(
-                "[specialists] no consult record for ANY PI — floor fails open "
-                "(process restarted mid-interview?)",
-            )
-            return set()
-
         consulted = self._consulted_domains(
             subject, thread.thread_id if thread is not None else None
         )
         return set(required_domains_for(verdict) - consulted)
+
+    def _floor_unverifiable_reason(
+        self, verdict: dict, thread: ThreadState | None,
+    ) -> str | None:
+        """Why this verdict's panel cannot be checked at all, or ``None``.
+
+        The single definition of ``_specialist_floor_gap``'s two fail-open
+        conditions, so the gap computation and the "was this even checkable"
+        question asked by ``_persist_assessment`` can never drift apart. The
+        string is human-facing: it is logged, and it is the reason the row is
+        written with ``missing_domains=[]``.
+        """
+        if verdict.get("recommendation") not in self._PANEL_REQUIRED_FOR:
+            # No panel was owed, so there is nothing to be unable to verify.
+            return None
+        subject = verdict.get("subject_agent_id")
+        if not isinstance(subject, str) or not subject:
+            return "it names no subject_agent_id, so there is no consult record to join to"
+        armed = thread.floor_armed if thread is not None else bool(self._specialist_consults)
+        if not armed:
+            return (
+                "this process has recorded no consult for ANY PI (restarted "
+                "mid-interview?), so an absent record proves nothing"
+            )
+        return None
+
+    def _floor_verifiable(
+        self, verdict: dict, *, thread: ThreadState | None = None,
+    ) -> bool:
+        """Whether an empty ``_specialist_floor_gap`` means anything.
+
+        ``_specialist_floor_gap`` returns an empty set both when the panel was
+        genuinely complete and when there was no record to check it against —
+        and the second case is the NORMAL state right after a restart, which
+        production reaches by SIGKILL. Storing both as
+        ``panel_incomplete=False, missing_domains=NULL`` counted every
+        unverifiable verdict as a verified-complete panel and silently
+        under-reported the one number the whole instrumentation exists to
+        produce (spec §10's panel-gap surface).
+
+        False here means "we could not check", never "the panel failed" — the
+        row still stores ``panel_incomplete=False``, because we have no
+        evidence of a gap either. It is recorded as the third state the column
+        already anticipated: ``missing_domains=[]``.
+
+        True for a verdict no panel was owed for (a ``pass``): nothing to
+        verify is not the same as failing to verify.
+        """
+        return self._floor_unverifiable_reason(verdict, thread) is None
 
     def _available_post_types(self, agent: "Agent") -> tuple[PostTypeSpec, ...]:
         """Layer 1 ∩ layer 2: what this agent may post as a NEW top-level post.

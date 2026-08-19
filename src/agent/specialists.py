@@ -184,9 +184,6 @@ def parse_opinion(raw: str, *, domain: str) -> SpecialistOpinion:
     )
 
 
-_OPINION_FIELDS = ("verdict_signal", "concerns", "questions_to_ask", "confidence")
-
-
 def has_usable_content(raw: str) -> bool:
     """Whether a specialist's reply carries an opinion at all.
 
@@ -208,7 +205,17 @@ def has_usable_content(raw: str) -> bool:
         return True  # unparseable prose is still an answer
     if not isinstance(data, dict):
         return False  # null, [], a bare number or string say nothing
-    return any(field in data for field in _OPINION_FIELDS)
+    # A populated object is an answer even when none of its keys is one WE
+    # named. This used to require one of ("verdict_signal", "concerns",
+    # "questions_to_ask", "confidence"), which reported
+    # {"signal": "blocking", "analysis": "<500 words of real analysis>"} to the
+    # hub as "returned an empty response" — a false statement that discarded
+    # the analysis and denied the domain its credit, while the SAME words sent
+    # as bare prose were kept by the branch above. Only `{}` says nothing.
+    # `parse_opinion` still reads the four known keys and degrades gracefully
+    # when they are absent, so an unrecognised shape costs a default signal,
+    # not the reply.
+    return bool(data)
 
 
 # Cues that make a domain required. Matched via `_cue_matches` below, not raw
@@ -248,6 +255,16 @@ def _cue_pattern(cue: str) -> re.Pattern[str]:
     escaped = re.escape(cue)
     if cue in _WORD_ONLY_CUES:
         return re.compile(rf"(?<![a-z0-9]){escaped}(?:s|es)?(?![a-z0-9])")
+    # The prefix tier. The leading lookbehind is load-bearing and is NOT
+    # decoration shared with the branch above: drop it here and ~30 cues
+    # revert to raw substring containment ("nonclinical" would summon the
+    # clinical specialist, "polypeptide" the chemistry one). Every
+    # false-positive test used to exercise only `_WORD_ONLY_CUES`, so that
+    # deletion shipped green; `test_the_prefix_tier_is_anchored_at_a_word_
+    # boundary` in tests/unit/test_specialists.py now fails if it is removed.
+    # No trailing anchor on purpose — that is the whole point of this tier:
+    # "medicinal chem" must reach "medicinal chemistry" and "neurodegener"
+    # must reach "neurodegeneration".
     return re.compile(rf"(?<![a-z0-9]){escaped}")
 
 

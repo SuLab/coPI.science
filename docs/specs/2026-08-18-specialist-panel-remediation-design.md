@@ -138,7 +138,8 @@ code and prompt together:
   `questions_to_ask` was for — but its findings still will not reach the *score*
   except through whatever the hub chose to restate in its public reply. Anyone
   reading a `panel_incomplete = false` row should understand it as "the required
-  domains were asked", not "the panel's findings were weighed."
+  domains were asked", not "the panel's findings were weighed" — and, if
+  `missing_domains` is `[]` rather than `NULL`, not even that: see §6's third state.
 - **F8 full reweighting.** Weights and the 3.0/4.0 thresholds are untouched. n=18
   from a single run is too thin a base, and changing weights silently reorders the
   triage queue and makes historical `weighted_score` values incomparable.
@@ -262,6 +263,30 @@ the gap, then continues down the existing path unchanged.
 The `specialist_floor` `AssessmentDrop` reason becomes unused for new rows. It is
 retained, not removed, so the three historical drop rows still read correctly.
 
+**`missing_domains` is three-state, and the third state is load-bearing.**
+`_specialist_floor_gap` returns an empty set for two different reasons: the panel was
+complete, or there was nothing to check it against (the verdict names no
+`subject_agent_id`, or this process has recorded no consult for anyone — the ordinary
+state after a restart, and production's last exit was a `SIGKILL`). Storing both as
+`missing_domains = NULL` would count every unverifiable verdict as a verified-complete
+panel and under-report §10's panel-gap number. So:
+
+| `panel_incomplete` | `missing_domains` | meaning |
+|---|---|---|
+| `true` | `["chemistry", …]` | owed and never consulted — a demonstrated gap |
+| `false` | `NULL` | panel **verified** complete (or none owed, e.g. a `pass`) |
+| `false` | `[]` | panel **unverified** — the floor could not check at all |
+
+`_floor_verifiable` is what distinguishes the last two; it returns `false` in exactly
+the two fail-open cases above. The flag stays `false` for `[]` on purpose: there is no
+evidence of a gap, only an inability to look. **No migration is needed** — the column
+was already nullable JSONB and the `[]` sentinel was already reserved for it.
+
+Fail-open itself is unchanged and still correct. Flagging instead would mark every
+restart-resumed thread `panel_incomplete` including the ones whose panel genuinely was
+convened, which is a false accusation in the one number this work exists to produce.
+What changed is that failing open is now *visible* instead of silent.
+
 `/admin/assessments` renders the flag prominently. This is not cosmetic: an
 incomplete-panel verdict must never be mistaken for a vetted one, which is the exact
 failure the original floor existed to prevent.
@@ -357,9 +382,17 @@ either side.
 
 ### F12 — drop provenance
 
-`_persist_assessment` passes `thread_id` through to `_record_assessment_drop`, so a
-dropped verdict can be traced back to the interview that produced it. The three
-historical rows keep their `NULL`.
+**Closed by deletion, not by adding provenance.** F12 was that `specialist_floor`
+drop rows carried a `NULL thread_id`, so a refused verdict could not be traced to its
+interview. The *only* `_record_assessment_drop` call site that lacked `thread_id` was
+the floor's refusal path — and Phase 1 removed that call site entirely, because a gap
+is now a flag on a stored row rather than a discarded verdict. Both surviving call
+sites (`unparseable_sidecar`, `missing_sidecar`) already passed `thread_id` before
+this branch began, so nothing was added here.
+
+What the reader should take from this section: no new code was written for F12, and
+none is owed. The three historical `specialist_floor` rows keep their `NULL`, and no
+new row can be created with that reason.
 
 ## 10. Phase 5 — instrumentation (F8 partial, F1)
 
@@ -370,12 +403,34 @@ comparable and D5 is honoured.
   dimensions (`external_signals`, `ip_fto`, `exit_thesis`, `chemistry_dc_path`) are
   effectively constant at max 2, pinning 23 of 100 weight points near minimum.
 - **Band histogram** — currently a single bar. That is the point.
-- **Panel clear-rate monitor** — warns when the clear-rate stays at 0 across ≥50
-  consults. This is the check that would have surfaced F1 on its own, without an
-  audit.
+- **Panel clear-rate monitor — shipped as a shutdown-time log warning, not an admin
+  surface.** What exists is a `logger.warning` in `SimulationEngine.stop()`: if the
+  run tallied ≥50 consults and not one returned `clear`, it says so. State the limits
+  plainly rather than let this bullet's placement under "admin surfaces" imply more
+  than shipped:
+  - it fires only on a **graceful** stop, and production's last exit was a
+    `SIGKILL` (137), so on the evidence it may never fire at all;
+  - the tally (`_consult_signal_counts`) is in-memory and per-process, so a restart
+    resets it and a long run's evidence is split across log files;
+  - a log line is not a surface. Nobody is tailing it, which is the same failure mode
+    that let F1 survive until an audit.
+
+  **Follow-up (tracked, not built here): a DB-backed panel clear-rate card on
+  `/admin/assessments`.** The source data is already durable — `llm_call_logs` holds
+  one row per consult with `phase LIKE 'consult%'` — so this is a query plus a card,
+  not new instrumentation, and it is per-run rather than per-process. Deliberately
+  deferred rather than rushed in at the end of this plan; the log warning stays
+  either way as the cheap in-run tell.
 - **Panel-gap surface** — how often `panel_incomplete` is set, and which domains are
   missing. This is how the deferred F5/F6a/gate work gets prioritised later: it turns
   "the floor is incomplete" from an argument into a number.
+
+  Read it with the third state in mind (§6): `panel_incomplete = true` counts
+  **demonstrated** gaps only. A verdict the floor could not check at all — no
+  `subject_agent_id`, or a process that has recorded no consult for anyone, which is
+  the ordinary state after a restart — is stored `panel_incomplete = false` with
+  `missing_domains = []`. So this count is a **lower bound** on the problem, and the
+  `[]` rows are the measure of how much of the run was unverifiable.
 
 ## 11. Testing and deployment
 

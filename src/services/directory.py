@@ -192,6 +192,15 @@ async def list_assessments(db: AsyncSession, run_id: str | None) -> dict[str, An
 
     # Surfaced because Task 3 stops the floor discarding a gapped verdict.
     # Storing it is only safe if the page distinguishes it from a vetted one.
+    #
+    # Counts DEMONSTRATED gaps only. A row with `panel_incomplete=False` and
+    # `missing_domains=[]` is the third state (see
+    # OpportunityAssessment.missing_domains and
+    # SimulationEngine._floor_verifiable): the floor could not be checked at
+    # all, typically because the process restarted mid-interview. It is
+    # correctly NOT counted here — we have no evidence of a gap — but it is
+    # not evidence of a complete panel either, so this number is a floor on
+    # the problem, not a measure of it.
     incomplete_query = select(func.count()).select_from(OpportunityAssessment).where(
         OpportunityAssessment.panel_incomplete.is_(True)
     )
