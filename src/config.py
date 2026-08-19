@@ -300,10 +300,26 @@ class Settings(BaseSettings):
     posthog_api_key: str = ""
 
     # LLM models
-    llm_profile_model: str = "claude-opus-4-6"
-    llm_agent_model: str = "claude-sonnet-4-6"
-    llm_agent_model_opus: str = "claude-opus-4-6"
-    llm_agent_model_sonnet: str = "claude-sonnet-4-6"
+    #
+    # Opus 4.6 -> Opus 5 and Sonnet 4.6 -> Sonnet 5 (2026-08-19). Two silent
+    # default changes came with that swap and are handled in src/services/llm.py
+    # rather than here, because they are request-shape concerns, not model names:
+    #
+    #  1. Adaptive thinking is ON when `thinking` is omitted on both Opus 5 and
+    #     Sonnet 5; on the 4.6 pair, omitting it meant thinking-off. `max_tokens`
+    #     is a hard cap on thinking + text TOGETHER, and this codebase already
+    #     truncated 11 times in a 19-minute run at the old budgets, so an
+    #     implicit switch to thinking-on would have made truncation routine.
+    #     `llm.py` therefore sets `thinking` explicitly at every call site.
+    #  2. The 4.7-generation tokenizer produces ~30% more tokens for the same
+    #     text, so max_tokens tuned against 4.6 truncates sooner. The tight
+    #     budgets were raised to compensate (see the call sites).
+    #
+    # Do NOT append date suffixes to these IDs — the bare strings are complete.
+    llm_profile_model: str = "claude-opus-5"
+    llm_agent_model: str = "claude-sonnet-5"
+    llm_agent_model_opus: str = "claude-opus-5"
+    llm_agent_model_sonnet: str = "claude-sonnet-5"
 
     # Worker
     worker_poll_interval: int = 5  # seconds

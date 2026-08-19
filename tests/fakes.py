@@ -38,6 +38,25 @@ class _TextBlock:
 
 
 @dataclass
+class _ThinkingBlock:
+    """A thinking block, which leads the content list when thinking is enabled.
+
+    Deliberately has NO ``.text`` attribute — real thinking blocks carry
+    ``.thinking`` instead. That is the whole point: code that reaches for
+    ``content[0].text`` raises AttributeError against a thinking-enabled reply,
+    which is exactly the trap Opus 5 / Sonnet 5 set by running adaptive thinking
+    when ``thinking`` is omitted. A fake that exposed ``.text`` here would let
+    that bug pass.
+    """
+
+    thinking: str = ""
+    type: str = "thinking"
+
+    def model_dump(self) -> dict:
+        return {"type": "thinking", "thinking": self.thinking}
+
+
+@dataclass
 class _ToolUseBlock:
     id: str
     name: str
@@ -58,6 +77,21 @@ class _Message:
 def text_response(text: str, *, stop_reason: str = "end_turn") -> _Message:
     """A plain-text assistant message (the common case)."""
     return _Message(content=[_TextBlock(text=text)], stop_reason=stop_reason)
+
+
+def thinking_then_text_response(
+    text: str, *, thinking: str = "reasoning...", stop_reason: str = "end_turn"
+) -> _Message:
+    """What a thinking-enabled reply actually looks like: thinking block FIRST.
+
+    This is the shape Opus 5 and Sonnet 5 return whenever ``thinking`` is
+    omitted, because both run adaptive thinking by default. Use it to prove that
+    text extraction filters by block type rather than indexing ``content[0]``.
+    """
+    return _Message(
+        content=[_ThinkingBlock(thinking=thinking), _TextBlock(text=text)],
+        stop_reason=stop_reason,
+    )
 
 
 def tool_use_response(

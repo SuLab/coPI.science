@@ -471,6 +471,9 @@ async def _execute_consult_specialist(
     # on success would let a flapping specialist run free.
     if on_api_call is not None:
         on_api_call()
+    # Local import, matching the two other get_settings uses in this module.
+    from src.config import get_settings
+
     try:
         raw = await generate_agent_response(
             system_prompt=persona,
@@ -479,7 +482,21 @@ async def _execute_consult_specialist(
                 "content": f"## Question from the hub\n\n{question}\n\n"
                            f"## What the PI has said\n\n{context}",
             }],
-            max_tokens=900,
+            # PINNED, not inherited. This call used to pass no `model` at all,
+            # so it silently fell through to `llm_agent_model` — the Sonnet
+            # setting — while comments elsewhere described a consult as "a real
+            # Opus call". Verified against production llm_call_logs: every
+            # consult in run 2026-08-19 13:35 ran on claude-sonnet-4-6. A
+            # specialist opinion gates whether a verdict may be recorded, so the
+            # model behind it is a deliberate choice and belongs at the call
+            # site where it can be seen.
+            model=get_settings().llm_agent_model_opus,
+            # 1500, up from 900. The 4.7-generation tokenizer (Opus 5 / Sonnet 5)
+            # yields ~30% more tokens for the same text, and 900 was ALREADY
+            # truncating on Sonnet 4.6 — 11 truncation retries in one 19-minute
+            # production run, several of them consults. Each retry is a second
+            # billed call, so headroom here is cheaper than the retries it saves.
+            max_tokens=1500,
             log_meta={"agent_id": agent_id, "phase": f"consult_{domain}"},
             # A truncation retry is a second billed call — book it too, same
             # contract every other generate_agent_response caller uses.

@@ -6,7 +6,13 @@ scripts the model responses; get_anthropic_client is the monkeypatch seam.
 import pytest
 
 from src.services import llm
-from tests.fakes import FakeAnthropic, empty_response, text_response, tool_use_response
+from tests.fakes import (
+    FakeAnthropic,
+    empty_response,
+    text_response,
+    thinking_then_text_response,
+    tool_use_response,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -325,3 +331,87 @@ async def test_make_decision_parses_json_from_response(monkeypatch):
 
     decision = await llm.make_decision("sys", [{"role": "user", "content": "decide"}])
     assert decision == {"action": "skip", "reasoning": "no fit"}
+
+
+# ---------------------------------------------------------------------------
+# Opus 5 / Sonnet 5 migration (2026-08-19).
+#
+# Both models run ADAPTIVE thinking when `thinking` is omitted; the 4.6 pair this
+# module was written against ran thinking-OFF on omission. Two consequences, both
+# of which ship green without these tests:
+#   - `max_tokens` caps thinking + text together, so an implicit switch to
+#     thinking-on makes truncation routine (11 retries in one 19-minute run at
+#     the old budgets, with thinking already off).
+#   - a thinking-enabled reply leads with a ThinkingBlock, which has no `.text`,
+#     so `content[0].text` raises AttributeError instead of returning the answer.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_thinking_is_disabled_by_default_on_every_call(monkeypatch):
+    """A call site that passes no `thinking` must NOT inherit adaptive thinking.
+
+    Defaulted centrally in `_acreate` so a NEW call site cannot acquire
+    thinking-on by forgetting the parameter.
+    """
+    fake = FakeAnthropic(responses=["ok"])
+    monkeypatch.setattr("src.services.llm.get_anthropic_client", lambda: fake)
+
+    await llm.generate_agent_response(system_prompt="s", messages=[{"role": "user", "content": "u"}])
+
+    assert fake.calls[0]["thinking"] == {"type": "disabled"}, (
+        "omitting `thinking` on Opus 5 / Sonnet 5 runs adaptive thinking, which "
+        "shares the max_tokens budget with the answer"
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_tools_path_enables_adaptive_thinking(monkeypatch):
+    """`generate_with_tools` is the one path that must run thinking ON.
+
+    On Opus 5 a thinking-DISABLED turn can write a tool call into its visible
+    text instead of emitting a tool_use block — the turn succeeds, the tool never
+    runs, nothing errors. For the hub that silently skips consult_specialist.
+    """
+    fake = FakeAnthropic(responses=[text_response("done")])
+    monkeypatch.setattr("src.services.llm.get_anthropic_client", lambda: fake)
+
+    async def _executor(name, params):  # pragma: no cover - not reached
+        return "unused"
+
+    await llm.generate_with_tools(
+        system_prompt="s",
+        messages=[{"role": "user", "content": "u"}],
+        tools=[{"name": "t", "description": "d", "input_schema": {"type": "object"}}],
+        tool_executor=_executor,
+    )
+
+    assert fake.calls[0]["thinking"] == {"type": "adaptive"}, (
+        "the tools path must keep thinking on, or Opus 5 may emit tool calls as text"
+    )
+
+
+@pytest.mark.asyncio
+async def test_text_is_extracted_past_a_leading_thinking_block(monkeypatch):
+    """The answer must survive a thinking-enabled reply.
+
+    `content[0]` is a ThinkingBlock here. Indexing it for `.text` raises
+    AttributeError; filtering by block type returns the answer.
+    """
+    fake = FakeAnthropic(responses=[thinking_then_text_response("the answer")])
+    monkeypatch.setattr("src.services.llm.get_anthropic_client", lambda: fake)
+
+    out = await llm.generate_agent_response(
+        system_prompt="s", messages=[{"role": "user", "content": "u"}]
+    )
+
+    assert out == "the answer"
+
+
+def test_a_reply_with_only_thinking_yields_empty_string():
+    """No text block is 'no answer', not a crash — matching how callers already
+    treat an empty response (and what has_usable_content then rejects)."""
+    from tests.fakes import _Message, _ThinkingBlock
+
+    msg = _Message(content=[_ThinkingBlock(thinking="thought hard, said nothing")])
+    assert llm._first_text(msg) == ""

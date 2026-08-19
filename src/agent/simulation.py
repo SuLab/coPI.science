@@ -1661,10 +1661,15 @@ class SimulationEngine:
                 on_consult=lambda domain, signal, _pi=thread.other_agent_id, _t=thread.thread_id: (
                     self._note_consult(_pi, domain, signal, _t)
                 ),
-                # A specialist consult is a real Opus call. Without this it was
-                # invisible to the sliding-window limiter and to
-                # SimulationRun.total_api_calls, so a concluding reply that
+                # A specialist consult is a real, separately billed API call.
+                # Without this it was invisible to the sliding-window limiter and
+                # to SimulationRun.total_api_calls, so a concluding reply that
                 # convened the panel booked 1 call while making up to 9.
+                # (This comment used to say "a real Opus call". That was wrong
+                # for as long as it existed: the consult passed no `model` and
+                # inherited the Sonnet default. It is pinned to the Opus setting
+                # at its call site as of the Opus 5 / Sonnet 5 migration —
+                # src/agent/tools.py::_execute_consult_specialist.)
                 on_api_call=agent.record_api_call,
                 own_dois=agent.own_publication_dois,
             )
@@ -1696,7 +1701,17 @@ class SimulationEngine:
                 # looking complete") and sits at 2500; when Option A moved the
                 # sidecar here, this call was not raised to match. A ceiling is
                 # not a spend — a short pi_lab reply costs the same as before.
-                max_tokens=2500,
+                #
+                # 4000, up from 2500, for the Opus 5 / Sonnet 5 migration. Two
+                # compounding reasons, both of which attack the sidecar this
+                # ceiling exists to protect: this is the one call site running
+                # ADAPTIVE thinking (see llm.py's tools call), and max_tokens
+                # caps thinking + text TOGETHER; and the 4.7-generation tokenizer
+                # yields ~30% more tokens for the same text. 2500 was already
+                # truncating here on Sonnet 4.6 (observed in run 2026-08-19
+                # 13:35), and a truncated CONCLUDE reply is exactly how a verdict
+                # gets lost.
+                max_tokens=4000,
                 log_meta={
                     "agent_id": agent.agent_id,
                     "phase": "thread_reply",
@@ -2338,7 +2353,12 @@ class SimulationEngine:
                     # buys nothing but risk here. NOTE: src/services/llm.py's
                     # retry-at-2x path logs loudly (logger.error) if the retry
                     # ALSO truncates, but it does not retry again.
-                    max_tokens=2500,
+                    # 3300, up from 2500: the 4.7-generation tokenizer (Opus 5 /
+                    # Sonnet 5) yields ~30% more tokens for the same text, so a
+                    # ceiling tuned on Sonnet 4.6 truncates sooner. Thinking is
+                    # disabled on this path (llm.py's default), so only the
+                    # tokenizer change is being compensated for here.
+                    max_tokens=3300,
                     log_meta={
                         "agent_id": agent.agent_id,
                         "phase": "new_post",
@@ -5321,7 +5341,9 @@ Keep it concise — under 300 words.""",
             response = await generate_agent_response(
                 system_prompt=system_prompt,
                 messages=messages,
-                max_tokens=800,
+                # 1100, up from 800 — tokenizer inflation only, same as
+                # _phase5_new_post's ceiling. Thinking is disabled here.
+                max_tokens=1100,
                 log_meta={"agent_id": agent.agent_id, "phase": "memory"},
                 on_retry=agent.record_api_call,
             )

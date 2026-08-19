@@ -43,8 +43,40 @@ async def _acreate(client: anthropic.Anthropic, **kwargs: Any):
 
     ``to_thread`` keeps the sync client (no SDK swap, no behaviour change per
     call) while giving the loop back. See tests/unit/test_llm_event_loop.py.
+
+    Also the single place ``thinking`` is defaulted, deliberately. On Opus 5 and
+    Sonnet 5, OMITTING ``thinking`` runs ADAPTIVE thinking; on the 4.6 pair this
+    module was written against, omitting it meant thinking-off. Since
+    ``max_tokens`` caps thinking + text TOGETHER, inheriting that default would
+    have turned truncation from occasional into routine — a 19-minute production
+    run at the old budgets already truncated 11 times with thinking off.
+    Defaulting here rather than at each call site means a NEW call site cannot
+    silently acquire thinking-on by forgetting the parameter; a site that wants
+    it (``generate_with_tools``) passes it explicitly and overrides this.
     """
+    kwargs.setdefault("thinking", {"type": "disabled"})
     return await asyncio.to_thread(client.messages.create, **kwargs)
+
+
+def _first_text(message: Any) -> str:
+    """The first ``text`` block's text, or ``""`` when the reply has none.
+
+    Replaces ``message.content[0].text``, which assumed block 0 is always text.
+    That held while thinking was off, but a thinking-enabled reply leads with a
+    ``ThinkingBlock`` — which carries ``.thinking``, not ``.text`` — so indexing
+    block 0 raises ``AttributeError`` instead of returning the answer. Filtering
+    by type is correct under every ``thinking`` setting, so this stays right even
+    if a call site later turns thinking on.
+
+    Returning "" for a reply with no text block matches what the callers already
+    do with an empty response (log it loudly, treat it as no answer) — see
+    ``generate_agent_response``'s empty-content branch and
+    ``src/agent/specialists.has_usable_content``.
+    """
+    for block in message.content:
+        if getattr(block, "type", None) == "text":
+            return block.text
+    return ""
 
 
 async def synthesize_profile(context_text: str, researcher_name: str) -> dict[str, Any]:
@@ -75,7 +107,7 @@ Return your response as valid JSON matching the specified schema."""
             system=system_prompt,
             messages=[{"role": "user", "content": user_message}],
         )
-        response_text = message.content[0].text
+        response_text = _first_text(message)
 
         try:
             return _extract_json(response_text)
@@ -187,7 +219,7 @@ async def generate_agent_response(
                 user_tail,
             )
             return ""
-        response_text = message.content[0].text
+        response_text = _first_text(message)
 
         # Retry once with higher max_tokens if response was truncated
         if message.stop_reason == "max_tokens":
@@ -216,7 +248,7 @@ async def generate_agent_response(
             retry_latency = (time.monotonic() - t0) * 1000
             latency_ms += retry_latency
             if retry_msg.content:
-                response_text = retry_msg.content[0].text
+                response_text = _first_text(retry_msg)
             message = retry_msg  # use retry stats for logging
 
             if message.stop_reason == "max_tokens":
@@ -326,6 +358,19 @@ async def generate_with_tools(
             system=system_prompt,
             messages=conversation,
             tools=tools,
+            # ADAPTIVE here, unlike every other call site in this module (which
+            # take _acreate's thinking-disabled default). This is the only call
+            # that passes `tools`, and on Opus 5 a thinking-DISABLED turn can
+            # write a tool call into its visible TEXT instead of emitting a
+            # tool_use block: the turn succeeds, the call never runs, and no
+            # error is raised. For the hub that would mean silently skipping
+            # consult_specialist — the panel would look convened and never be.
+            # Thinking shares the max_tokens budget, so this path's budget was
+            # raised alongside this change (src/agent/simulation.py).
+            # The truncation retry below deliberately does NOT set this: it
+            # passes no `tools`, so it carries no tool-in-text risk and is
+            # better off spending its whole budget on the answer.
+            thinking={"type": "adaptive"},
         )
         latency_ms = (time.monotonic() - t0) * 1000
         total_input_tokens += message.usage.input_tokens
@@ -437,7 +482,7 @@ async def generate_with_tools(
     latency_ms = (time.monotonic() - t0) * 1000
     total_input_tokens += message.usage.input_tokens
     total_output_tokens += message.usage.output_tokens
-    response_text = message.content[0].text if message.content else ""
+    response_text = _first_text(message)
 
     # Retry once with higher max_tokens if response was truncated
     if message.stop_reason == "max_tokens":

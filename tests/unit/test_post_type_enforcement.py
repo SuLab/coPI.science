@@ -371,7 +371,7 @@ async def test_repeated_rejections_accumulate_instead_of_pinning_at_one(monkeypa
     no matter how many times in a row this agent got rejected. That pins the
     proactive-selection damping (`skips >= 3` in _select_next_agent) off
     forever for an agent that keeps reaching for an unavailable type — it gets
-    rejected at full weight and full cadence, burning a max_tokens=2500 Opus
+    rejected at full weight and full cadence, burning a max_tokens=4000 Opus
     call every time. Three consecutive rejections of the same agent must climb
     1, 2, 3 — not sit at 1."""
     gill = _spoke("gill")
