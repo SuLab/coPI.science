@@ -38,9 +38,11 @@ from src.models import (
     OpportunityAssessment,
     ProposalReview,
     SimulationRun,
+    SpecialistConsult,
     ThreadDecision,
 )
 from src.models.agent_activity import VISIBILITY_COLLAB_PRIVATE, VISIBILITY_PUBLIC
+from src.services.blackbird_rubric import RUBRIC_CONTENT_HASH, RUBRIC_VERSION
 from src.services.blackbird_rubric import band as rubric_band
 from src.services.blackbird_rubric import weighted_score as rubric_weighted_score
 from src.services.cohorts import compute_gates, summarise_gates
@@ -1661,6 +1663,22 @@ class SimulationEngine:
                 on_consult=lambda domain, signal, _pi=thread.other_agent_id, _t=thread.thread_id: (
                     self._note_consult(_pi, domain, signal, _t)
                 ),
+                # The durable twin of `on_consult` above. In-memory stays
+                # authoritative in-process (the floor reads it, and a failed
+                # write must never un-count a consult that happened) — this row
+                # is what survives the restart that clears the map, and is the
+                # only place a human can see WHO was consulted about an
+                # interview and what they said. Same `_pi`/`_t` default binding
+                # as `on_consult`, for the same reason.
+                on_consult_record=lambda _pi=thread.other_agent_id, _t=thread.thread_id, _ch=thread.channel, **fields: (
+                    self._record_specialist_consult(
+                        agent.agent_id,
+                        subject_agent_id=_pi,
+                        thread_id=_t,
+                        channel_name=_ch,
+                        **fields,
+                    )
+                ),
                 # A specialist consult is a real, separately billed API call.
                 # Without this it was invisible to the sliding-window limiter and
                 # to SimulationRun.total_api_calls, so a concluding reply that
@@ -2778,6 +2796,14 @@ class SimulationEngine:
         if subject_agent_id_fallback:
             subject_view = {**verdict, "subject_agent_id": subject_agent_id_fallback}
 
+        # Before the two floor questions below, give the in-memory record a
+        # chance to be rehydrated from `specialist_consults` — otherwise a
+        # restart mid-interview makes every verdict that follows it permanently
+        # UNVERIFIABLE, whatever the panel actually did. Additive, narrow and
+        # non-raising; see `_seed_consults_from_db` for why it cannot launder an
+        # unconsulted domain into a consulted one.
+        await self._seed_consults_from_db(subject_view, thread)
+
         gap = self._specialist_floor_gap(subject_view, thread=thread)
         # An empty `gap` is two different findings, and the row has to say
         # which: the panel really was complete, or the floor had nothing to
@@ -2857,6 +2883,16 @@ class SimulationEngine:
             ),
             rationale=_str_or_none(verdict.get("rationale")),
             raw_verdict=verdict,
+            # WHICH rubric produced this row. The weights, thresholds and
+            # prompt text all come from one document now
+            # (prompts/rubric/blackbird-rubric.toml, loaded once per process),
+            # so a score is only comparable to another score written under the
+            # same version — and the content hash catches an edit that shipped
+            # without a version bump. Stamped from the module-level constants:
+            # the rubric cannot change under a running process, so these are
+            # the same values the startup banner reported.
+            rubric_version=RUBRIC_VERSION,
+            rubric_content_hash=RUBRIC_CONTENT_HASH,
             panel_incomplete=bool(gap),
             # Three states, one column — see OpportunityAssessment.missing_domains:
             #   [names] a real gap, these domains were owed and never consulted
@@ -2941,6 +2977,160 @@ class SimulationEngine:
                 "verdict AND its drop record are both gone now",
                 agent_id, reason, exc, exc_info=True,
             )
+
+    async def _record_specialist_consult(
+        self,
+        agent_id: str,
+        *,
+        subject_agent_id: str | None,
+        thread_id: str | None,
+        channel_name: str | None,
+        domain: str,
+        question: str,
+        context_excerpt: str | None,
+        verdict_signal: str,
+        confidence: str,
+        concerns: list | None,
+        questions_to_ask: list | None,
+        raw_opinion: str,
+    ) -> None:
+        """Write one successful consult to ``specialist_consults``.
+
+        Best-effort in exactly the same sense as ``_record_assessment_drop``:
+        never raises, a DB-less engine is a silent no-op, and a failure is an
+        ERROR with a traceback and nothing else. The consult itself has already
+        happened and has already been credited to the floor in memory
+        (``_note_consult``, fired first by ``_execute_consult_specialist``) —
+        losing this row costs visibility and post-restart verifiability, never
+        the opinion the hub is about to act on.
+
+        Called from the ``on_consult_record`` closure in ``_reply_to_thread``,
+        which is fired on the SAME success path as ``on_consult``: a refused
+        domain, a missing persona file, a failed call or an empty reply all
+        write nothing, so a row here always means the domain counts as
+        consulted. That is what makes the row safe to read back as evidence of
+        a convened panel (``_seed_consults_from_db``).
+
+        Awaited inline by the tool call rather than dispatched as a background
+        task: an orphaned task would outlive the turn, and the engine's
+        shutdown path flushes its own buffers only — a `docker stop` landing
+        between the consult and the write would lose the row it was created to
+        keep.
+        """
+        if not self.session_factory or not self.simulation_run_id:
+            return
+        try:
+            async with self.session_factory() as db:
+                db.add(SpecialistConsult(
+                    simulation_run_id=self.simulation_run_id,
+                    agent_id=agent_id,
+                    subject_agent_id=(subject_agent_id or None),
+                    thread_id=(thread_id or None),
+                    channel_name=(channel_name or None),
+                    domain=domain,
+                    question=question,
+                    context_excerpt=context_excerpt,
+                    verdict_signal=verdict_signal,
+                    confidence=confidence,
+                    concerns=concerns,
+                    questions_to_ask=questions_to_ask,
+                    raw_opinion=raw_opinion,
+                ))
+                await db.commit()
+        except Exception as exc:  # noqa: BLE001 — a record must not cost the opinion
+            logger.error(
+                "[%s] Failed to record the %s consult for %r (thread %s): %s — "
+                "the opinion still stands and still counts for the floor "
+                "in-process, but this run's panel is no longer reconstructable "
+                "after a restart",
+                agent_id, domain, subject_agent_id or "?", thread_id or "?", exc,
+                exc_info=True,
+            )
+
+    async def _seed_consults_from_db(
+        self, verdict: dict, thread: ThreadState | None,
+    ) -> None:
+        """Rehydrate this interview's consult record from ``specialist_consults``
+        when memory holds nothing for it.
+
+        The floor's in-memory map dies with the process, so before this every
+        verdict written after a restart was UNVERIFIABLE — stored with
+        ``missing_domains=[]`` no matter how thorough the panel had been (see
+        ``_floor_verifiable``). Production's normal exit is a SIGKILL, so that
+        was the ordinary case, not a corner one. The table now outlives the
+        process, so the record can be read back.
+
+        Deliberately ADDITIVE and narrow:
+
+        * Only when ``self._consulted_domains(subject, thread)`` is EMPTY. A
+          process that recorded anything for this interview stays authoritative
+          for it — memory is written on the success path itself and cannot be
+          behind a committed row that path also wrote.
+        * Only for a verdict that owes a panel at all; a ``pass`` is not held to
+          one, so querying for it would be a round trip whose answer nothing
+          reads.
+        * Keyed on ``(run, subject, thread)``, the same triple the in-memory map
+          uses. A different run's rows, or the same PI's OTHER interview, must
+          not satisfy this interview's panel — the exact hole
+          ``_specialist_floor_gap``'s docstring records.
+        * A row exists only for a SUCCESSFUL consult (see
+          ``_record_specialist_consult``), so this can only ever turn "we have
+          no record" into "here is the record". It cannot turn an unreachable
+          specialist into a consulted one.
+
+        Arming the floor off these rows does not weaken
+        ``ThreadState.floor_armed``'s latch. The latch exists to stop a
+        DIFFERENT interview's consult, landing mid-await in another task, from
+        retroactively arming this verdict; these rows are this interview's own,
+        already committed before this turn began, and the seed only ever moves
+        the latch False -> True. After the seed the global map really is
+        non-empty, which is precisely what ``floor_armed`` asserts.
+
+        Never raises: this runs inside ``_persist_assessment``, ahead of the
+        write, and a failed SELECT must cost the fallback, not the verdict.
+        """
+        if verdict.get("recommendation") not in self._PANEL_REQUIRED_FOR:
+            return
+        subject = verdict.get("subject_agent_id")
+        if not isinstance(subject, str) or not subject:
+            return
+        if not self.session_factory or not self.simulation_run_id:
+            return
+        thread_id = thread.thread_id if thread is not None else None
+        if self._consulted_domains(subject, thread_id):
+            return
+        from sqlalchemy import select as sa_select
+
+        try:
+            async with self.session_factory() as db:
+                domains = (await db.execute(
+                    sa_select(SpecialistConsult.domain).where(
+                        SpecialistConsult.simulation_run_id == self.simulation_run_id,
+                        SpecialistConsult.subject_agent_id == subject,
+                        SpecialistConsult.thread_id == thread_id,
+                    )
+                )).scalars().all()
+        except Exception as exc:  # noqa: BLE001 — never lose a verdict over a lookup
+            logger.error(
+                "Failed to read back the consult record for %r (thread %s): %s "
+                "— this verdict's panel will be stored as UNVERIFIED",
+                subject, thread_id or "?", exc, exc_info=True,
+            )
+            return
+        if not domains:
+            return
+        self._specialist_consults.setdefault((subject, thread_id), set()).update(domains)
+        if thread is not None:
+            # The latch's own rule (`floor_armed or bool(_specialist_consults)`)
+            # re-applied to the map as the seed above just left it — not a live
+            # read of anything another task may be doing. See the docstring.
+            thread.floor_armed = True
+        logger.info(
+            "[specialists] floor rehydrated %d recorded consult(s) for %r "
+            "(thread %s) from specialist_consults — this verdict is checkable "
+            "even though the map was empty (restarted mid-interview?)",
+            len(set(domains)), subject, thread_id or "?",
+        )
 
     def _strip_disallowed_tags(
         self, message_text: str | None, agent: Agent

@@ -2,7 +2,7 @@
 
 import logging
 import re
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
@@ -172,6 +172,15 @@ _PATENT_CAVEAT = (
 )
 
 
+# How much of the interview excerpt a consult record keeps. The context the hub
+# passes is a quotation from the thread, so it is bounded in practice, but it is
+# model-generated text on a Text column that is read back by a page — 2000
+# characters is enough to show what the specialist was actually asked about
+# without turning the consult table into a second copy of the transcript
+# (`llm_call_logs` already keeps the full prompt verbatim).
+_CONSULT_CONTEXT_EXCERPT_CHARS = 2000
+
+
 def _require_arg(tool_input: dict[str, Any], name: str, tool_name: str) -> str:
     """Read a required tool argument, or raise with a message the MODEL can act on.
 
@@ -211,6 +220,7 @@ async def execute_tool(
     role: str = "pi_lab",
     *,
     on_consult: Callable[[str, str], None] | None = None,
+    on_consult_record: Callable[..., Awaitable[None]] | None = None,
     on_api_call: Callable[[], None] | None = None,
     own_dois: set[str] | None = None,
 ) -> str:
@@ -224,6 +234,12 @@ async def execute_tool(
     ``on_consult`` is forwarded to ``consult_specialist`` and is called with
     the domain AND the parsed verdict signal, and fires only on a fully
     successful consult — see ``_execute_consult_specialist``.
+
+    ``on_consult_record`` is the DURABLE half of the same event: an awaitable
+    the engine supplies to write the consult to ``specialist_consults``, fired
+    on exactly the same successful path as ``on_consult`` and defaulting to
+    None so every caller without one (a pi_lab reply, a direct test call)
+    behaves exactly as before.
 
     ``own_dois``: the calling agent's own-lab publication DOIs (see
     ``Agent.own_publication_dois``, GitHub issue #7). A ``retrieve_abstract``
@@ -283,7 +299,14 @@ async def execute_tool(
                 # `domain` and `question` genuinely cannot be defaulted.
                 tool_input.get("context") or "",
                 agent_id=agent_id,
+                # The interview's channel, for the consult's own llm_call_logs
+                # row (which carried a NULL channel until now, so a consult
+                # could not be joined to the discussion it came from) and for
+                # the durable consult record. `getattr` because thread_state is
+                # untyped here and legitimately None for a direct caller.
+                channel=getattr(thread_state, "channel", None),
                 on_consult=on_consult,
+                on_consult_record=on_consult_record,
                 on_api_call=on_api_call,
             )
 
@@ -469,7 +492,9 @@ async def _execute_consult_specialist(
     context: str,
     *,
     agent_id: str,
+    channel: str | None = None,
     on_consult: Callable[[str, str], None] | None = None,
+    on_consult_record: Callable[..., Awaitable[None]] | None = None,
     on_api_call: Callable[[], None] | None = None,
 ) -> str:
     """Ask one specialist persona for an opinion.
@@ -479,6 +504,20 @@ async def _execute_consult_specialist(
     failed LLM call must not satisfy the enforcement floor — otherwise "the
     specialist was unreachable" would silently become "the specialist
     approved".
+
+    ``on_consult_record`` fires on that same success path, and is the durable
+    record of it (``specialist_consults``). It carries only what this function
+    knows — the ask and the parsed opinion; the engine's own closure supplies
+    who asked, about whom, and in which thread and channel. Deliberately
+    SECOND: the in-memory ``on_consult`` is what the floor reads in-process and
+    stays authoritative there, so a write that fails must not un-count a
+    consult that really happened. It is awaited rather than
+    fired-and-forgotten (a bare task would outlive the turn and race the
+    engine's shutdown flush), but it can neither raise into nor change the
+    string this returns — see the guard at the call.
+
+    ``channel`` is the interview's channel, used only for this call's own
+    ``llm_call_logs`` metadata. None for a direct caller with no thread.
 
     ``on_api_call`` is a DIFFERENT question — "was an Opus call billed?", not
     "does this count as consulted?" — so it fires on a different schedule: once
@@ -541,7 +580,19 @@ async def _execute_consult_specialist(
             # 2500 clears the observed ceiling with headroom, and max_tokens is a
             # ceiling rather than a spend — a short opinion still bills short.
             max_tokens=2500,
-            log_meta={"agent_id": agent_id, "phase": f"consult_{domain}"},
+            # `channel` joins this consult's log row to the interview it was
+            # made during. Without it every `consult_*` row landed with
+            # channel NULL — the phase name gave the domain but nothing tied
+            # the call to a discussion, so the panel behind a verdict could
+            # not be reconstructed from the logs at all. Same key
+            # `thread_reply` uses (see _reply_to_thread's log_meta); the
+            # column is nullable, so None from a caller with no thread is the
+            # honest value rather than a hole.
+            log_meta={
+                "agent_id": agent_id,
+                "phase": f"consult_{domain}",
+                "channel": channel,
+            },
             # A truncation retry is a second billed call — book it too, same
             # contract every other generate_agent_response caller uses.
             on_retry=on_api_call,
@@ -572,4 +623,29 @@ async def _execute_consult_specialist(
         "[specialists] %s consulted %s -> %s (%s)",
         agent_id, domain, opinion.verdict_signal, opinion.confidence,
     )
+    if on_consult_record is not None:
+        try:
+            await on_consult_record(
+                domain=domain,
+                question=question,
+                context_excerpt=context[:_CONSULT_CONTEXT_EXCERPT_CHARS] or None,
+                verdict_signal=opinion.verdict_signal,
+                confidence=opinion.confidence,
+                # Lists, not the dataclass's tuples: these land in JSONB.
+                concerns=list(opinion.concerns),
+                questions_to_ask=list(opinion.questions_to_ask),
+                raw_opinion=opinion.raw,
+            )
+        except Exception as exc:  # noqa: BLE001 — a record must not cost the opinion
+            # The engine's writer is itself best-effort and already logs its own
+            # failures, so reaching here means something outside it broke (a
+            # callback with the wrong shape, say). Caught HERE rather than left
+            # to execute_tool's outer handler, which would replace this
+            # function's return value with "Error executing consult_specialist:
+            # ..." — telling the model its consult failed when the opinion is
+            # right there, parsed, and already credited to the floor.
+            logger.error(
+                "[specialists] %s consult recorded in memory but NOT durably: %s",
+                domain, exc, exc_info=True,
+            )
     return f"{spec.title} — signal: {opinion.verdict_signal}\n\n{opinion.raw}"
