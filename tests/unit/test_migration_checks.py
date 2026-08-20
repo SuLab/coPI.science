@@ -231,7 +231,7 @@ def test_supported_start_revisions_are_exactly_the_documented_set():
     assert pf.SUPPORTED_START_REVISIONS == (
         "0018", "0019", "0020", "0021", "0023", "0024", "0025", "0026", "0027", "0028",
     )
-    assert pf.DEFAULT_TARGET == "0029"
+    assert pf.DEFAULT_TARGET == "0030"
 
 
 def test_a_database_stamped_one_migration_behind_target_is_not_blocked():
@@ -1159,7 +1159,7 @@ def test_postflight_status_aliases_are_the_same_tokens_preflight_uses():
 def test_preflight_parser_defaults():
     args = pf.build_parser().parse_args([])
     assert args.database_url is None
-    assert args.target == "0029"
+    assert args.target == "0030"
     assert args.json is False
     assert args.snapshot is None
     assert args.backup_path is None
@@ -1200,7 +1200,7 @@ def test_preflight_parser_accepts_the_documented_interface():
 def test_postflight_parser_defaults_and_shape():
     args = po.build_parser().parse_args([])
     assert args.database_url is None
-    assert args.target == "0029"
+    assert args.target == "0030"
     assert args.json is False
     assert args.snapshot is None
     assert args.allow_row_growth is False

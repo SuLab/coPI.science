@@ -124,7 +124,13 @@ async def test_assessment_rubric_version_stamp_round_trips(db_session):
     ))
     await db_session.flush()
 
-    row = (await db_session.execute(select(OpportunityAssessment))).scalar_one()
+    row = (
+        await db_session.execute(
+            select(OpportunityAssessment).where(
+                OpportunityAssessment.simulation_run_id == run.id
+            )
+        )
+    ).scalar_one()
     assert row.rubric_version == "1.0.0"
     assert row.rubric_content_hash == "a1b2c3d4e5f6"
 
@@ -140,6 +146,12 @@ async def test_assessment_rubric_stamp_is_nullable_for_preexisting_rows(db_sessi
         simulation_run_id=run.id, agent_id="blackbird", channel_name="general",
     ))
     await db_session.flush()
-    row = (await db_session.execute(select(OpportunityAssessment))).scalar_one()
+    row = (
+        await db_session.execute(
+            select(OpportunityAssessment).where(
+                OpportunityAssessment.simulation_run_id == run.id
+            )
+        )
+    ).scalar_one()
     assert row.rubric_version is None
     assert row.rubric_content_hash is None

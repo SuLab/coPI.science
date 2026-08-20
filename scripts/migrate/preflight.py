@@ -71,7 +71,7 @@ EXIT_OK = 0
 EXIT_BLOCKED = 1
 EXIT_WARN = 2
 
-DEFAULT_TARGET = "0029"
+DEFAULT_TARGET = "0030"
 #: Revisions this migration path has been exercised from.
 #:
 #: 0020 and 0021 are here because origin/main's own alembic head is 0021 (PR19). A
@@ -245,11 +245,24 @@ PLANNED_OBJECTS: tuple[PlannedObject, ...] = (
     # 0029_add_panel_incomplete
     PlannedObject("0029", "column", "panel_incomplete", "opportunity_assessments"),
     PlannedObject("0029", "column", "missing_domains", "opportunity_assessments"),
+    # 0030_specialist_consults_rubric_version
+    PlannedObject("0030", "table", "specialist_consults"),
+    PlannedObject(
+        "0030", "index", "ix_specialist_consults_simulation_run_id", "specialist_consults",
+    ),
+    PlannedObject(
+        "0030", "index", "ix_specialist_consults_thread_id", "specialist_consults",
+    ),
+    PlannedObject(
+        "0030", "index", "ix_specialist_consults_subject_agent_id", "specialist_consults",
+    ),
+    PlannedObject("0030", "column", "rubric_version", "opportunity_assessments"),
+    PlannedObject("0030", "column", "rubric_content_hash", "opportunity_assessments"),
 )
 
 REVISION_ORDER = (
     "0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027", "0028",
-    "0029",
+    "0029", "0030",
 )
 
 
