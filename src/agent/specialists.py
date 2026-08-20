@@ -124,6 +124,68 @@ class SpecialistOpinion:
     raw: str
 
 
+# --- panel notes ------------------------------------------------------------
+#
+# The one line the hub posts into the interview thread when a consult succeeds.
+# Lives here, with the signals it renders, because it is pure and because an
+# interview thread is workspace-visible: what may be published about a consult
+# is a property of the specialist contract, not of the engine.
+
+_PANEL_NOTE_SIGNAL_EMOJI: dict[str, str] = {
+    "blocking": "⛔",
+    "caution": "⚠️",
+    "clear": "✅",
+}
+
+# How much of the hub's question the note carries. The question is the only
+# free text in the note and is model-written, so it is clipped — long enough to
+# be recognisable in a thread, short enough not to become a second transcript.
+PANEL_NOTE_QUESTION_CHARS = 200
+
+
+def format_panel_note(*, domain: str, verdict_signal: str, question: str) -> str:
+    """The workspace-visible note for one successful consult.
+
+    SIGNAL-LEVEL ONLY, and the signature is the enforcement: this function is
+    handed the domain, the parsed verdict signal and the hub's question, and
+    there is no parameter through which ``concerns``, ``questions_to_ask``,
+    ``confidence`` or the opinion body could reach a Slack post. That is
+    deliberate — an interview thread is visible to every lab in the workspace,
+    and a specialist's opinion paraphrases both the PI's confidential
+    statements and Blackbird's internal rubric. The full opinion has two homes
+    already, both staff-only: ``specialist_consults.raw_opinion`` and the
+    consult's own ``llm_call_logs`` row.
+
+    An unrecognised signal renders as the bare word with no emoji rather than
+    being mapped to something reassuring — the same rule
+    ``parse_opinion``'s ``_DEFAULT_SIGNAL`` follows, for the same reason: a
+    signal we could not read has not cleared anything.
+    """
+    emoji = _PANEL_NOTE_SIGNAL_EMOJI.get(verdict_signal, "")
+    signal = f"{emoji} {verdict_signal}".strip()
+    return (
+        f"🧪 Panel · {domain} — {signal} — "
+        f'asked: "{clip_question(question)}"'
+    )
+
+
+def clip_question(question: str, limit: int = PANEL_NOTE_QUESTION_CHARS) -> str:
+    """Clip to ``limit`` characters on a word boundary, with an ellipsis.
+
+    Falls back to a hard cut when the first ``limit`` characters contain no
+    space at all (a single long token), so the bound always holds — a
+    word-boundary search that finds nothing must not return the whole string.
+    """
+    text = (question or "").strip()
+    if len(text) <= limit:
+        return text
+    head = text[:limit]
+    cut = head.rfind(" ")
+    if cut <= 0:
+        return head.rstrip() + "…"
+    return head[:cut].rstrip() + "…"
+
+
 def persona_path(domain: str) -> Path:
     """Where a domain's persona file lives. Not validated here — the caller
     checks existence, because a missing file must not satisfy the floor."""

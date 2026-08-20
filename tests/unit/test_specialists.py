@@ -9,8 +9,11 @@ import json
 from pathlib import Path
 
 from src.agent.specialists import (
+    PANEL_NOTE_QUESTION_CHARS,
     SPECIALIST_DOMAINS,
     VERDICT_SIGNALS,
+    clip_question,
+    format_panel_note,
     has_usable_content,
     parse_opinion,
     persona_path,
@@ -439,3 +442,74 @@ def test_a_partial_json_opinion_counts():
     assert has_usable_content('{"verdict_signal": "clear"}') is True
     assert has_usable_content('{"concerns": ["off-target risk"]}') is True
     assert has_usable_content('```json\n{"confidence": "high"}\n```') is True
+
+
+# ---------------------------------------------------------------
+# format_panel_note — the one line the hub posts into a workspace-
+# visible interview thread when a consult succeeds.
+# ---------------------------------------------------------------
+
+
+def test_the_note_carries_the_domain_the_signal_and_the_question():
+    assert format_panel_note(
+        domain="legal",
+        verdict_signal="blocking",
+        question="Who owns the mouse line?",
+    ) == '🧪 Panel · legal — ⛔ blocking — asked: "Who owns the mouse line?"'
+
+
+def test_every_signal_has_its_own_emoji():
+    seen = {}
+    for signal in sorted(VERDICT_SIGNALS):
+        note = format_panel_note(domain="legal", verdict_signal=signal, question="q?")
+        assert f" {signal} " in note, signal
+        emoji = note.split(" — ")[1].split(" ")[0]
+        assert emoji not in seen, f"{signal} and {seen.get(emoji)} share {emoji!r}"
+        seen[emoji] = signal
+    assert seen == {"⛔": "blocking", "⚠️": "caution", "✅": "clear"}
+
+
+def test_an_unknown_signal_renders_bare_rather_than_reassuringly():
+    """`parse_opinion` already degrades an unreadable signal to "caution", so
+    this is belt-and-braces — but if something ever reaches here off-contract,
+    the note must not dress it up with a ✅."""
+    note = format_panel_note(domain="legal", verdict_signal="probably fine", question="q?")
+    assert note == '🧪 Panel · legal — probably fine — asked: "q?"'
+    assert "✅" not in note
+
+
+def test_the_question_is_clipped_on_a_word_boundary():
+    question = "Is the animal model encumbered " * 20  # 600 chars
+    note = format_panel_note(domain="legal", verdict_signal="clear", question=question)
+    quoted = note.split('asked: "', 1)[1].rstrip('"')
+    assert quoted.endswith("…")
+    assert len(quoted) <= PANEL_NOTE_QUESTION_CHARS + 1  # + the ellipsis
+    assert not quoted[:-1].endswith(" "), "trailing space before the ellipsis"
+    assert question.startswith(quoted[:-1])
+
+
+def test_a_short_question_is_untouched():
+    assert clip_question("Who owns the mouse line?") == "Who owns the mouse line?"
+    assert clip_question("x" * PANEL_NOTE_QUESTION_CHARS) == "x" * PANEL_NOTE_QUESTION_CHARS
+
+
+def test_a_single_unbroken_token_is_still_bounded():
+    """A word-boundary search that finds nothing must not return the whole
+    string — the bound has to hold whatever the text looks like."""
+    clipped = clip_question("x" * 5000)
+    assert len(clipped) == PANEL_NOTE_QUESTION_CHARS + 1
+    assert clipped.endswith("…")
+
+
+def test_nothing_but_the_three_publishable_fields_can_reach_a_note():
+    """The privacy rule is enforced by the SIGNATURE, not by discipline at the
+    call site: an interview thread is visible to every lab in the workspace, so
+    there must be no parameter through which the opinion body, the concerns,
+    the questions_to_ask or the confidence could be published."""
+    import inspect
+
+    params = inspect.signature(format_panel_note).parameters
+    assert set(params) == {"domain", "verdict_signal", "question"}
+    assert all(p.kind is p.KEYWORD_ONLY for p in params.values()), (
+        "keyword-only, so a positional call cannot silently pass the wrong field"
+    )

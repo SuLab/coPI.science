@@ -1439,6 +1439,30 @@ class TestHubAssessmentRelocation:
 # tests/characterization/test_agent_turn_gm.py's _hermetic_profiles fixture).
 # ---------------------------------------------------------------
 
+def _seed_panel_notes(engine, thread_id: str, channel: str, count: int) -> None:
+    """Append ``count`` hub panel notes to ``thread_id`` — the in-thread trace
+    of ``count`` successful specialist consults.
+
+    Interleaved with the real messages ``_seed_thread_history`` writes (the .5
+    offsets), because that is how they arrive: a note is posted from inside the
+    turn's tool rounds, before the reply the consult informed.
+    """
+    from src.agent.message_log import PHASE_PANEL_NOTE, LogEntry
+
+    for i in range(count):
+        engine.message_log.append(LogEntry(
+            ts=f"{thread_id}-note{i}",
+            channel=channel,
+            sender_agent_id="blackbird",
+            sender_name="BlackbirdBot",
+            content=f'🧪 Panel · legal — ⛔ blocking — asked: "question {i}"',
+            thread_ts=thread_id,
+            posted_at=float(i) + 0.5,
+            is_bot=True,
+            phase=PHASE_PANEL_NOTE,
+        ))
+
+
 def _seed_thread_history(engine, thread_id: str, channel: str, count: int) -> None:
     """Append ``count`` plain replies to ``thread_id`` so `_reply_to_thread`'s
     own recompute (``len(get_thread_history(thread_id))``) lands on exactly
@@ -1532,6 +1556,184 @@ class TestPhase4OrdinalGuidance:
 
         assert client.posted == []
         assert thread.status == "closed"
+
+    @pytest.mark.asyncio
+    async def test_panel_notes_do_not_spend_the_interviews_turns(
+        self, monkeypatch, tmp_path,
+    ):
+        """A 6-consult interview must not lose 6 of its 12 messages.
+
+        Counted, these 6 notes would put the thread at 17 messages — past
+        `max_thread_messages`, so the check above this reply's generation would
+        have closed the interview as a TIMEOUT, with no verdict, before the LLM
+        was ever consulted. Excluded, this is still the 11-existing-messages
+        case: ordinal 12, MUST-CONCLUDE, and the reply posts.
+
+        Also drives the context exclusion through the real assembly path
+        (`get_thread_history` -> `thread_history` -> `build_phase4_prompt`):
+        the notes are in the log, in this thread, and none of them reaches the
+        prompt — which is why no prompt file had to change.
+        """
+        engine, hub, thread, client = self._engine_with_history(monkeypatch, tmp_path, 11)
+        _seed_panel_notes(engine, "t1", "general", 6)
+        assert len(engine.message_log) == 17, "the notes really are in the log"
+
+        captured = {}
+        real_build = hub.build_phase4_prompt
+
+        def _spy(**kwargs):
+            system, messages = real_build(**kwargs)
+            captured["messages"] = messages
+            captured["history"] = kwargs["thread_history"]
+            return system, messages
+
+        monkeypatch.setattr(hub, "build_phase4_prompt", _spy)
+
+        async def _fake_generate_with_tools(**kwargs):
+            return "<slack_message>⏸️ Not a fit — no credible IP path here.</slack_message>"
+
+        monkeypatch.setattr(
+            "src.agent.simulation.generate_with_tools", _fake_generate_with_tools
+        )
+
+        await engine._reply_to_thread(hub, thread)
+
+        assert len(client.posted) == 1, "not closed as a timeout"
+        assert thread.message_count == 11, "the notes are not turns"
+        prompt_text = captured["messages"][0]["content"]
+        assert "This is message 12 — you MUST conclude the interview now" in prompt_text
+        assert "**Message count:** 12 of 12 max" in prompt_text
+        assert len(captured["history"]) == 11
+        assert "🧪 Panel" not in prompt_text
+        assert "blocking" not in prompt_text
+
+    @pytest.mark.asyncio
+    async def test_panel_notes_do_not_delay_the_close_either(
+        self, monkeypatch, tmp_path,
+    ):
+        """The exclusion cuts both ways: a thread that is genuinely full still
+        closes at the same REAL message, notes or no notes."""
+        engine, hub, thread, client = self._engine_with_history(monkeypatch, tmp_path, 12)
+        _seed_panel_notes(engine, "t1", "general", 6)
+        monkeypatch.setattr(hub, "build_phase4_prompt", lambda **kw: ("sys", []))
+
+        async def _fail_if_called(**kwargs):
+            raise AssertionError("the LLM must not be reached once the thread is full")
+
+        monkeypatch.setattr("src.agent.simulation.generate_with_tools", _fail_if_called)
+
+        await engine._reply_to_thread(hub, thread)
+
+        assert client.posted == []
+        assert thread.status == "closed"
+
+
+# ---------------------------------------------------------------
+# Panel notes are inert for every OTHER agent: a note must not read
+# as "the hub replied to you". Each test flips the phase back to None
+# afterwards and re-asks, so a green result cannot be the fixture
+# quietly failing to set up the trigger at all.
+# ---------------------------------------------------------------
+
+class TestPanelNotesDriveNoBotBehaviour:
+    def _log_entry(self, engine, **kw):
+        from src.agent.message_log import LogEntry
+
+        entry = LogEntry(**kw)
+        engine.message_log.append(entry)
+        return entry
+
+    def _pair(self):
+        from src.agent.agent import Agent
+        from src.agent.message_log import PHASE_PANEL_NOTE
+
+        hub = Agent("blackbird", "BlackbirdBot", "Blackbird", role="scout_hub")
+        lab = Agent("wang", "WangBot", "Wang")
+        engine = SimulationEngine(agents=[hub, lab], slack_clients={})
+        # The lab's pitch, the hub's question about it, then the hub's note.
+        self._log_entry(
+            engine, ts="t1", channel="general", sender_agent_id="wang",
+            sender_name="WangBot", content="Here is our idea.", posted_at=1.0,
+        )
+        self._log_entry(
+            engine, ts="2.0", channel="general", sender_agent_id="blackbird",
+            sender_name="BlackbirdBot", content="Tell me about the mouse line.",
+            thread_ts="t1", posted_at=2.0,
+        )
+        note = self._log_entry(
+            engine, ts="3.0", channel="general", sender_agent_id="blackbird",
+            sender_name="BlackbirdBot",
+            content='🧪 Panel · legal — ⛔ blocking — asked: "who owns it?"',
+            thread_ts="t1", posted_at=3.0, phase=PHASE_PANEL_NOTE,
+        )
+        return engine, lab, note
+
+    def test_a_panel_note_is_not_a_reply_trigger(self):
+        """`has_new_reply_from_other` is the read that decides whether a bot is
+        pulled into the reply lane. A note is authored by the hub, so it passes
+        that method's own "not my own message" skip for the OTHER party — and
+        would tell the lab bot the hub had replied to it, mid-way through the
+        hub's own turn, about a message the lab bot cannot even see."""
+        from src.agent.state import ThreadState
+
+        engine, lab, note = self._pair()
+        lab.state.active_threads["t1"] = ThreadState(
+            thread_id="t1", channel="general", other_agent_id="blackbird",
+            message_count=2, has_pending_reply=False,
+        )
+        lab.state.last_seen_cursor = 2.0  # already answered the hub's question
+
+        assert engine._pending_reply_pairs() == []
+        assert engine._owes_reply(lab) is False
+
+        note.phase = None  # control: this is the only thing holding it back
+        assert [a.agent_id for a, _t in engine._pending_reply_pairs()] == ["wang"]
+        assert engine._owes_reply(lab) is True
+
+    @pytest.mark.asyncio
+    async def test_a_panel_note_never_enters_a_working_memory_synthesis(
+        self, monkeypatch, tmp_path,
+    ):
+        """The one path that could quietly re-derive panel opinion into text
+        every LATER prompt reads: the hub's own notes are its own messages, so
+        an unfiltered synthesis context would feed its consult log back into its
+        memory — and memory is injected into every system prompt afterwards."""
+        monkeypatch.setattr("src.agent.agent.PROFILES_DIR", tmp_path)
+        engine, _lab, _note = self._pair()
+        hub = engine.agents["blackbird"]
+        captured = {}
+
+        async def _fake_memory_call(**kwargs):
+            captured["messages"] = kwargs["messages"]
+            return ""  # stops before the working-memory file write
+
+        monkeypatch.setattr(
+            "src.agent.simulation.generate_agent_response", _fake_memory_call
+        )
+
+        await engine._update_agent_memory(hub, "thread t1 closed")
+
+        context = captured["messages"][0]["content"]
+        assert "Tell me about the mouse line." in context, "real messages still feed it"
+        assert "🧪 Panel" not in context
+        assert "blocking" not in context
+
+    def test_a_panel_note_does_not_activate_a_thread(self):
+        """Phase 3 opens a thread when someone replies to the agent's own
+        top-level post. The hub's note IS such a reply, structurally — so
+        without the exclusion the lab bot would open an interview thread (and
+        set `has_pending_reply=True`) off the hub's bookkeeping, before the hub
+        had asked it anything."""
+        engine, lab, note = self._pair()
+        lab.state.last_seen_cursor = 2.0
+        lab.state.subscribed_channels.add("general")
+
+        engine._phase3_activate_threads(lab)
+        assert lab.state.active_threads == {}
+
+        note.phase = None
+        engine._phase3_activate_threads(lab)
+        assert list(lab.state.active_threads) == ["t1"]
 
 
 # ---------------------------------------------------------------

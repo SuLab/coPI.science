@@ -11,6 +11,10 @@ docs/plans/2026-08-20-assessments-rca-ux-specialist-visibility.md §3.1-3.2):
    UNVERIFIABLE — ``missing_domains=[]`` however complete the panel had been.
    Production's normal exit is a SIGKILL, so that was the ordinary case.
 3. Nothing recorded WHICH rubric a stored score was computed under.
+4. Nothing in SLACK said a panel had been convened at all — §7 below. The
+   durable row fixed the audit trail; a human watching an interview still saw
+   the hub go quiet for 30-40 seconds per consult and then produce a verdict
+   shaped by opinions nobody in the workspace could see.
 
 These tests drive the real wiring: a real ``SimulationEngine`` + ``Agent`` +
 ``ThreadState`` through ``_reply_to_thread``, with only the two LLM seams faked,
@@ -27,9 +31,17 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from src.agent.agent import Agent
+from src.agent.message_log import PHASE_PANEL_NOTE, MessageLog
 from src.agent.simulation import SimulationEngine
 from src.agent.state import ThreadState
-from src.models import LlmCallLog, OpportunityAssessment, SimulationRun, SpecialistConsult
+from src.config import get_settings
+from src.models import (
+    AgentMessage,
+    LlmCallLog,
+    OpportunityAssessment,
+    SimulationRun,
+    SpecialistConsult,
+)
 from src.services.blackbird_rubric import (
     RUBRIC_CONTENT_HASH,
     RUBRIC_VERSION,
@@ -64,6 +76,7 @@ async def _new_run(factory):
 async def _drive_a_consult(
     engine, monkeypatch, *, opinion=_OPINION_JSON, domain="legal",
     question=_QUESTION, context=_CONTEXT, channel="general", fail_the_record=False,
+    fail_the_note=False,
 ):
     """Run one mid-interview hub turn whose single tool call is a consult.
 
@@ -75,6 +88,11 @@ async def _drive_a_consult(
     ``fail_the_record`` replaces the engine's writer with one that raises — the
     only way to prove ``_execute_consult_specialist``'s own guard, since the
     real writer never raises.
+
+    ``fail_the_note`` breaks the panel-note post and ONLY the panel-note post
+    (keyed on the phase, so the turn's real reply still goes out through the
+    real code path) — the same reason ``fail_the_record`` exists: the note post
+    is best-effort and its guard has to be driven to be proven.
     """
     factory = async_sessionmaker(engine, expire_on_commit=False)
     run_id = await _new_run(factory)
@@ -85,15 +103,32 @@ async def _drive_a_consult(
         message_count=5, has_pending_reply=True,
     )
     agent.state.active_threads["t1"] = thread
+    client = FakeSlackClient(agent_id="blackbird")
     sim = SimulationEngine(
-        agents=[agent], slack_clients={"blackbird": FakeSlackClient(agent_id="blackbird")},
+        agents=[agent], slack_clients={"blackbird": client},
         session_factory=factory, simulation_run_id=run_id,
     )
+    # What `SimulationEngine.run` does during setup: the log's persist callback
+    # is how an appended message ever becomes an `agent_messages` row. Registered
+    # here so a test can drive `_flush_persisted` and read the real rows back
+    # (nothing reaches the DB until it does, so this is inert for the tests that
+    # never flush).
+    sim.message_log.set_persist_callback(sim._enqueue_persist)
     if fail_the_record:
         async def _boom(*args, **kwargs):
             raise RuntimeError("the writer itself blew up")
 
         monkeypatch.setattr(sim, "_record_specialist_consult", _boom)
+
+    if fail_the_note:
+        real_post = sim._post_message
+
+        async def _boom_on_notes(*args, **kwargs):
+            if kwargs.get("phase") == PHASE_PANEL_NOTE:
+                raise RuntimeError("Slack said no")
+            return await real_post(*args, **kwargs)
+
+        monkeypatch.setattr(sim, "_post_message", _boom_on_notes)
 
     # Bypass real prompt construction (profile files on disk) — this tests what
     # happens once the model calls a tool, not prompt building.
@@ -121,8 +156,17 @@ async def _drive_a_consult(
     await sim._reply_to_thread(agent, thread)
     return SimpleNamespace(
         sim=sim, agent=agent, thread=thread, factory=factory, run_id=run_id,
-        results=results, log_metas=log_metas,
+        results=results, log_metas=log_metas, client=client,
     )
+
+
+async def _message_rows(factory, run_id):
+    async with factory() as db:
+        return (await db.execute(
+            select(AgentMessage)
+            .where(AgentMessage.simulation_run_id == run_id)
+            .order_by(AgentMessage.posted_at)
+        )).scalars().all()
 
 
 async def _consult_rows(factory, run_id):
@@ -669,3 +713,249 @@ async def test_a_verdict_that_owes_no_panel_does_not_query_the_table(engine):
         assert rows[0].missing_domains is None, "no panel owed is not a failure to verify"
     finally:
         await _delete_run(real_factory, run_id)
+
+
+# --- 7. the panel note in the interview thread -------------------------------
+#
+# The durable row above answers "what did the panel say?" for staff, after the
+# fact. It says nothing IN SLACK, where the interview is actually happening.
+# These tests pin the note that does, and — more importantly — pin that it
+# changes nothing any agent reads or does. The exclusions are the feature; the
+# post is the easy half.
+
+_EXPECTED_NOTE = (
+    '🧪 Panel · legal — ⛔ blocking — asked: '
+    '"Is the mouse line encumbered by a third-party research-tool licence?"'
+)
+
+
+def _notes(client):
+    return [p for p in client.posted if p["text"].startswith("🧪 Panel")]
+
+
+@pytest.mark.asyncio
+async def test_a_successful_consult_posts_one_thin_panel_note_in_the_thread(
+    engine, monkeypatch,
+):
+    """The mission pin: one successful consult, one note, in the interview
+    thread, under the hub's own identity, carrying the domain, the signal and
+    the question — and NOTHING else the specialist said."""
+    turn = await _drive_a_consult(engine, monkeypatch)
+    try:
+        notes = _notes(turn.client)
+        assert len(notes) == 1
+        note = notes[0]
+        assert note["text"] == _EXPECTED_NOTE
+        assert note["channel"] == "general"
+        assert note["thread_ts"] == "t1", "in the interview thread, not the channel"
+
+        # Chronologically honest: the note lands from inside the turn's tool
+        # rounds, so it precedes the reply the consult informed.
+        assert [p["text"] for p in turn.client.posted] == [
+            _EXPECTED_NOTE, "Thanks — one more question.",
+        ]
+
+        # Signal-level ONLY. An interview thread is visible to every lab in the
+        # workspace; the opinion paraphrases the PI's confidential statements
+        # and the internal rubric.
+        for withheld in (
+            "Baltimore",                       # a concern
+            "Who owns the mouse line?",        # a question_to_ask
+            "high",                            # the confidence
+            "verdict_signal",                  # any part of the raw opinion
+        ):
+            assert withheld not in note["text"], withheld
+    finally:
+        await _delete_run(turn.factory, turn.run_id)
+
+
+@pytest.mark.asyncio
+async def test_the_note_row_is_stamped_panel_note_not_thread_reply(
+    engine, monkeypatch,
+):
+    """`phase` is the whole exclusion mechanism — in the DB (the staff pages'
+    reply counts already key on 'thread_reply') and in memory (every
+    agent-facing MessageLog read). If this column is wrong, nothing else in
+    this section holds."""
+    turn = await _drive_a_consult(engine, monkeypatch)
+    try:
+        await turn.sim._flush_persisted()
+        rows = await _message_rows(turn.factory, turn.run_id)
+        by_phase = {r.phase: r for r in rows}
+        assert sorted(by_phase) == ["panel_note", "thread_reply"]
+        note = by_phase[PHASE_PANEL_NOTE]
+        assert note.content == _EXPECTED_NOTE
+        assert note.thread_ts == "t1"
+        assert note.channel_name == "general"
+        assert note.agent_id == "blackbird", "posted as the hub, not anonymously"
+        assert note.is_bot is True
+        # The reply is untouched by any of this.
+        assert by_phase["thread_reply"].content == "Thanks — one more question."
+    finally:
+        await _delete_run(turn.factory, turn.run_id)
+
+
+@pytest.mark.asyncio
+async def test_no_agent_can_see_the_note_it_just_posted(engine, monkeypatch):
+    """The load-bearing half. A note must not enter a thread history, must not
+    count toward the interview's turn budget, and must not read to the OTHER
+    party as "the hub replied to you" — which is what would pull a lab bot into
+    the reply lane mid-way through the hub's own turn."""
+    turn = await _drive_a_consult(engine, monkeypatch)
+    try:
+        log = turn.sim.message_log
+        # Both messages really are in the log — this is an exclusion at the
+        # read, not a decision not to record.
+        assert len(log) == 2
+
+        history = log.get_thread_history("t1")
+        assert [e.content for e in history] == ["Thanks — one more question."]
+        assert log.get_thread_message_count("t1") == 1
+
+        # The note came FIRST (from inside the tool rounds) and the reply
+        # second, which is the point of posting at consult time — but it also
+        # means the reply alone would satisfy every "is there something new
+        # here" question asked of this log. So take the note the engine really
+        # built and ask a log holding ONLY it: the PI's lab bot must not be told
+        # the hub has spoken to it. (`test_a_panel_note_is_not_a_reply_trigger`
+        # in tests/unit/test_simulation_logic.py drives the same claim through
+        # `_pending_reply_pairs`, where it actually decides a turn.)
+        note_entry = next(e for e in log._entries if e.phase == PHASE_PANEL_NOTE)
+        reply_entry = next(e for e in log._entries if e.phase is None)
+        assert note_entry.posted_at < reply_entry.posted_at
+        assert log.has_new_reply_from_other("t1", "wang", 0.0) is True, (
+            "the hub's actual reply still counts"
+        )
+        note_only = MessageLog()
+        note_only.load_entry(note_entry)
+        assert note_only.has_new_reply_from_other("t1", "wang", 0.0) is False
+        assert note_only.get_thread_history("t1") == []
+        assert note_only.get_thread_message_count("t1") == 0
+
+        # The note is not one of the hub's own messages either.
+        assert turn.agent.message_count == 1, "the reply, and only the reply"
+    finally:
+        await _delete_run(turn.factory, turn.run_id)
+
+
+@pytest.mark.asyncio
+async def test_the_flag_off_posts_no_note_and_costs_nothing_else(
+    engine, monkeypatch,
+):
+    """`panel_notes_in_thread` is read at post time, so an operator turns notes
+    off with a `.env` edit and a container recreate — no rebuild. Everything
+    else about the consult is unaffected."""
+    monkeypatch.setattr(get_settings(), "panel_notes_in_thread", False)
+    turn = await _drive_a_consult(engine, monkeypatch)
+    try:
+        assert _notes(turn.client) == []
+        assert [p["text"] for p in turn.client.posted] == ["Thanks — one more question."]
+        await turn.sim._flush_persisted()
+        rows = await _message_rows(turn.factory, turn.run_id)
+        assert [r.phase for r in rows] == ["thread_reply"]
+        # The consult itself is untouched: recorded, credited, answered.
+        assert len(await _consult_rows(turn.factory, turn.run_id)) == 1
+        assert turn.sim._consulted_domains("wang", "t1") == frozenset({"legal"})
+        assert turn.results[0].startswith("Legal Specialist — signal: blocking")
+    finally:
+        await _delete_run(turn.factory, turn.run_id)
+
+
+@pytest.mark.asyncio
+async def test_a_consult_that_did_not_happen_posts_no_note(engine, monkeypatch):
+    """Same contract as the durable row: the note fires on the SUCCESS path
+    only. A note for an unreachable specialist would tell the workspace a panel
+    was convened when it was not."""
+    for kwargs in (
+        {"opinion": "   "},                            # billed, but said nothing
+        {"opinion": RuntimeError("upstream 529")},      # never answered
+        {"domain": "astrology"},                        # refused before the call
+    ):
+        turn = await _drive_a_consult(engine, monkeypatch, **kwargs)
+        try:
+            assert _notes(turn.client) == [], kwargs
+            assert await _consult_rows(turn.factory, turn.run_id) == [], kwargs
+        finally:
+            await _delete_run(turn.factory, turn.run_id)
+
+
+@pytest.mark.asyncio
+async def test_a_failed_note_post_costs_the_note_and_nothing_else(
+    engine, monkeypatch, caplog,
+):
+    """Best-effort, in exactly the sense the durable write is: the consult
+    stands, the opinion reaches the model verbatim, the row is written, the
+    floor is credited and the turn's reply still posts. Only the trace is
+    missing, and it says so at ERROR."""
+    turn = await _drive_a_consult(engine, monkeypatch, fail_the_note=True)
+    try:
+        assert _notes(turn.client) == []
+        assert [p["text"] for p in turn.client.posted] == ["Thanks — one more question."]
+        # The opinion is unchanged — `execute_tool`'s outer handler would
+        # otherwise have replaced it with "Error executing consult_specialist".
+        assert turn.results[0].startswith("Legal Specialist — signal: blocking")
+        assert "Error executing" not in turn.results[0]
+        assert len(await _consult_rows(turn.factory, turn.run_id)) == 1
+        assert turn.sim._consulted_domains("wang", "t1") == frozenset({"legal"})
+        assert "Failed to post the legal panel note" in caplog.text
+        # NOT the durable writer's message: the record succeeded.
+        assert "NOT durably" not in caplog.text
+    finally:
+        await _delete_run(turn.factory, turn.run_id)
+
+
+@pytest.mark.asyncio
+async def test_a_restart_does_not_resurrect_a_note_as_conversation(engine):
+    """The exclusions are only as durable as `LogEntry.phase` surviving the
+    round trip through `agent_messages`. Rebuild a fresh engine from the rows a
+    previous process left and the note must still be invisible."""
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    run_id = await _new_run(factory)
+    # The note is LAST on purpose: it models the process dying after a consult
+    # in a turn whose reply never landed, which is the one arrangement where the
+    # note is the newest thing in the thread and could therefore, on its own,
+    # look like a reply owed an answer.
+    async with factory() as db:
+        for ts, phase, content in (
+            ("100.1", "new_post", "Here is our idea."),
+            ("100.2", "thread_reply", "Tell me about the mouse line."),
+            ("100.3", PHASE_PANEL_NOTE, _EXPECTED_NOTE),
+        ):
+            db.add(AgentMessage(
+                simulation_run_id=run_id,
+                agent_id="wang" if phase == "new_post" else "blackbird",
+                channel_id="local:general", channel_name="general",
+                message_ts=ts, message_length=len(content),
+                thread_ts=None if phase == "new_post" else "100.1",
+                phase=phase, content=content,
+                sender_name="WangBot" if phase == "new_post" else "BlackbirdBot",
+                is_bot=True, posted_at=float(ts),
+            ))
+        await db.commit()
+
+    hub = Agent("blackbird", "BlackbirdBot", "Blackbird", role="scout_hub")
+    sim = SimulationEngine(
+        agents=[hub], slack_clients={},
+        session_factory=factory, simulation_run_id=run_id,
+    )
+    try:
+        await sim._rebuild_state_from_db()
+        log = sim.message_log
+        assert len(log) == 3, "all three rows are loaded"
+        assert [e.content for e in log.get_thread_history("100.1")] == [
+            "Here is our idea.", "Tell me about the mouse line.",
+        ]
+        assert log.get_thread_message_count("100.1") == 2
+        assert log.has_new_reply_from_other("100.1", "wang", 100.15) is True, (
+            "the hub's real reply, at 100.2"
+        )
+        assert log.has_new_reply_from_other("100.1", "wang", 100.25) is False, (
+            "past the reply the only thing left in the thread is the note at "
+            "100.3 — and a restored note is still not a reply"
+        )
+        # And the same thread hydrated on demand (the reopen path) agrees.
+        sim.message_log = MessageLog()
+        await sim._hydrate_thread_from_db("100.1")
+        assert sim.message_log.get_thread_message_count("100.1") == 2
+    finally:
+        await _delete_run(factory, run_id)

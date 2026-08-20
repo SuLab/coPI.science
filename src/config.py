@@ -353,6 +353,23 @@ class Settings(BaseSettings):
     max_abstracts_other_per_thread: int = 10
     max_full_text_per_thread: int = 2
 
+    # Panel notes — a THIN one-line note the hub posts into the interview thread
+    # each time it successfully consults a specialist, so a human watching Slack
+    # can see the panel being engaged instead of only its silent effect on a
+    # verdict written hours later. Signal-level ONLY (domain, verdict signal, the
+    # question asked); the opinion body, concerns, questions_to_ask and
+    # confidence are never posted — an interview thread is visible to every lab
+    # in the workspace, and an opinion paraphrases the PI's confidential
+    # statements and the internal rubric. See
+    # `src/agent/specialists.py::format_panel_note`, which takes only the three
+    # publishable fields so the rest cannot leak through it by accident.
+    #
+    # Read at POST time, not at startup, so flipping it in `.env` + recreating
+    # the agent container turns notes off with no rebuild and no code change.
+    # Agents never read these rows regardless of this flag — every agent-facing
+    # MessageLog read excludes `phase='panel_note'` (see src/agent/message_log.py).
+    panel_notes_in_thread: bool = True
+
     # Cohort isolation — when True, an agent only acts on posts/threads/tags from
     # agents that share at least one cohort with it. When False (default), the
     # roster is all-vs-all as before. Humans, PI-created private channels and

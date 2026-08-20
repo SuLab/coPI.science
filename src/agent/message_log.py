@@ -9,6 +9,19 @@ from src.visibility import VISIBILITY_COLLAB_PRIVATE
 
 logger = logging.getLogger(__name__)
 
+# `AgentMessage.phase` for a hub panel note — the one-line, signal-level trace
+# the scout hub posts into an interview thread when a specialist consult
+# succeeds (src/agent/simulation.py::_post_panel_note). It is a real message on
+# the transport and a real `agent_messages` row, so it lives in this log like
+# any other post: that is what keeps the append idempotency, the Slack-mirror
+# dedup (`_known_slack_ts`) and the DB persist callback working for it.
+#
+# It is NOT conversation. Agents must never see it — not in a thread history,
+# not as a trigger to reply, not in a message count, not in a memory synthesis
+# — which is why every list-returning read below filters it out and why no
+# prompt file had to change to keep it out of a prompt. See `is_panel_note`.
+PHASE_PANEL_NOTE = "panel_note"
+
 
 @dataclass
 class LogEntry:
@@ -38,6 +51,27 @@ class LogEntry:
     # entry has no Slack parent — either it is not a reply, or its thread has no
     # Slack presence. See SimulationEngine._slack_parent_ts.
     slack_thread_ts: str | None = None
+    # What KIND of message this is, mirroring `agent_messages.phase`. None means
+    # "derive it from the shape" — `_flush_persisted` writes 'thread_reply' for
+    # an entry with a thread_ts and 'new_post' otherwise, which is what every
+    # pre-existing caller wants and gets by leaving this unset. It is set
+    # explicitly only for a message that is NOT conversation:
+    # PHASE_PANEL_NOTE. Restored from the row on every DB-origin ingest path
+    # (`_rebuild_state_from_db`, `_hydrate_thread_from_db`,
+    # `_poll_inbound_from_db`) so the exclusions below survive a restart.
+    phase: str | None = None
+
+
+def is_panel_note(entry: "LogEntry") -> bool:
+    """Whether this entry is a hub panel note — see PHASE_PANEL_NOTE.
+
+    Every list-returning read on ``MessageLog`` drops these, GATED and UNGATED
+    alike. The exclusion is not a cohort question and does not belong to
+    ``_entry_allowed``: a panel note is not conversation for ANY agent,
+    including the hub that wrote it, so there is no gate setting under which it
+    should be returned.
+    """
+    return entry.phase == PHASE_PANEL_NOTE
 
 
 def _entry_allowed(entry: "LogEntry", allowed_sender_ids: set[str] | None) -> bool:
@@ -120,6 +154,26 @@ class MessageLog:
     Writes (``append`` / ``load_entry`` / ``_record``) are NEVER gated: the log is
     shared by every agent in the process, so filtering at ingest would filter for
     all of them at once. The gate belongs at the per-agent read. See v2 §6.2.
+
+    **Panel notes are excluded from EVERY list-returning read**, GATED and
+    UNGATED alike (``is_panel_note`` / ``PHASE_PANEL_NOTE``). One invariant,
+    stated once: no read on this class ever hands an agent a panel note. The
+    two top-level readers (``get_new_top_level_posts``,
+    ``get_agent_top_level_posts``) would also exclude them structurally — a
+    panel note is always a threaded reply — but they filter explicitly anyway,
+    so the invariant is a property of the class rather than of a coincidence in
+    two of its methods.
+
+    The two deliberate exceptions are not agent reads:
+
+    * ``get_entry`` — a single-id lookup that must answer for ANY id in the
+      log. It backs the idempotency check in ``append``, the live Slack
+      poller's dedup and ``SimulationEngine._slack_parent_ts``; filtering it
+      would re-ingest a panel note from Slack as a brand-new inbound message,
+      i.e. would produce exactly the leak the exclusions exist to prevent.
+    * ``latest_timestamp`` — a cursor high-water mark. A panel note IS a real
+      message on the transport, and a cursor that stopped short of one would
+      make the poller re-fetch it forever.
     """
 
     def __init__(self) -> None:
@@ -225,6 +279,8 @@ class MessageLog:
         """
         results = []
         for entry in self._entries:
+            if is_panel_note(entry):
+                continue
             if entry.posted_at <= since:
                 continue
             if entry.thread_ts is not None:
@@ -251,16 +307,28 @@ class MessageLog:
         thread's parent by definition, even if a reply carries an earlier
         posted_at (a writer's clock can run behind — see PI_INBOX_LOOKBACK_S).
 
+        Panel notes are dropped (PHASE_PANEL_NOTE). This is THE read that
+        becomes an agent's prompt (``_reply_to_thread`` -> ``thread_history``
+        -> ``build_phase4_prompt``), so it is the reason no prompt file had to
+        change to keep panel notes out of a prompt.
+
         COHORT-GATE: UNGATED by design — once a thread is open its full history
         is context, including a partner who has since left the cohort (v2 §8).
         """
         root = self._by_ts.get(thread_ts)
         replies = sorted(
-            (e for e in self._entries if e.thread_ts == thread_ts),
+            (
+                e for e in self._entries
+                if e.thread_ts == thread_ts and not is_panel_note(e)
+            ),
             key=lambda e: e.posted_at,
         )
         result = []
-        if root:
+        # The root can never BE a panel note (a note is always posted with a
+        # thread_ts, so no thread is ever rooted at one), but the guard is
+        # written out anyway: the invariant is "this method never returns a
+        # panel note", not "it happens not to".
+        if root and not is_panel_note(root):
             result.append(root)
         result.extend(replies)
         return result
@@ -268,10 +336,20 @@ class MessageLog:
     def get_thread_message_count(self, thread_ts: str) -> int:
         """Count total messages in a thread (root + replies).
 
+        Panel notes do not count. This number is the interview's turn budget:
+        ``_reply_to_thread`` assigns it to ``thread.message_count``, which
+        drives both ``phase4_guidance``'s EXPLORE/DECIDE/CONCLUDE ordinal and
+        the ``max_thread_messages`` close — so counting notes would spend a
+        6-consult interview's turns on its own bookkeeping and conclude it six
+        messages early.
+
         COHORT-GATE: UNGATED by design — bookkeeping over one thread.
         """
         count = 1 if thread_ts in self._by_ts else 0
-        count += sum(1 for e in self._entries if e.thread_ts == thread_ts)
+        count += sum(
+            1 for e in self._entries
+            if e.thread_ts == thread_ts and not is_panel_note(e)
+        )
         return count
 
     def get_agent_top_level_posts(self, agent_id: str, limit: int = 10) -> list[LogEntry]:
@@ -287,6 +365,7 @@ class MessageLog:
             (
                 e for e in self._entries
                 if e.sender_agent_id == agent_id and e.thread_ts is None
+                and not is_panel_note(e)
             ),
             key=lambda e: e.posted_at,
         )
@@ -308,6 +387,11 @@ class MessageLog:
         """
         best: LogEntry | None = None
         for entry in self._entries:
+            if is_panel_note(entry):
+                # A note is not a turn: letting one answer as "the last poster"
+                # would hand the turn to the other bot in a flat private
+                # channel on the strength of the hub's own bookkeeping.
+                continue
             if entry.channel != channel_name:
                 continue
             if not entry.is_bot or not entry.sender_agent_id:
@@ -343,6 +427,8 @@ class MessageLog:
         }
         results = []
         for entry in self._entries:
+            if is_panel_note(entry):
+                continue
             if entry.posted_at <= since:
                 continue
             if entry.thread_ts not in agent_post_ts:
@@ -379,6 +465,11 @@ class MessageLog:
         tag = f"@{agent_bot_name}".lower()
         results = []
         for entry in self._entries:
+            if is_panel_note(entry):
+                # The note quotes the hub's own question back, so a bot name
+                # inside that question would otherwise read as an @-mention and
+                # activate a thread on the strength of the hub's bookkeeping.
+                continue
             if entry.posted_at <= since:
                 continue
             if not _entry_allowed(entry, allowed_sender_ids):
@@ -396,6 +487,11 @@ class MessageLog:
         - If no tag, falls back to generic 2-party rule: the first two distinct
           agents to post are the only allowed participants.
         - Returns None if the thread root is not found.
+
+        Panel notes are excluded transitively, via ``get_thread_history``: a
+        note is not participation, so a hub that has posted only a note into a
+        thread is not yet one of its two parties — exactly the answer this
+        returned before notes existed.
                 COHORT-GATE: UNGATED by design — thread participation rules, not cohort.
         """
         root = self._by_ts.get(thread_ts)
@@ -464,6 +560,15 @@ class MessageLog:
         """
         for entry in self._entries:
             if entry.thread_ts != thread_ts:
+                continue
+            if is_panel_note(entry):
+                # The load-bearing one for panel notes. A note is authored by
+                # the hub, so it passes the `sender_agent_id == agent_id` skip
+                # below only for the OTHER party — i.e. it would tell the PI's
+                # lab bot "the hub has replied to you" mid-way through the
+                # hub's own turn, and pull it into the reply lane to answer a
+                # message that is not addressed to it and that it cannot even
+                # see (`get_thread_history` drops it too).
                 continue
             if entry.posted_at <= since:
                 continue

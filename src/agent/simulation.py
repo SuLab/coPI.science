@@ -14,7 +14,7 @@ from src.agent.agent import PROFILES_DIR, Agent
 from src.agent.channels import SEEDED_CHANNELS
 from src.agent.ids import WRITER_ENGINE, TsMinter
 from src.agent.locks import LockRegistry
-from src.agent.message_log import LogEntry, MessageLog
+from src.agent.message_log import PHASE_PANEL_NOTE, LogEntry, MessageLog, is_panel_note
 from src.agent.post_types import (
     PostTypeSpec,
     available_for,
@@ -25,7 +25,7 @@ from src.agent.post_types import (
 from src.agent.prompt_safety import delimit
 from src.agent.roles import load_role
 from src.agent.slack_client import SlackListingIncomplete, ThreadNotFound
-from src.agent.specialists import required_domains_for
+from src.agent.specialists import format_panel_note, required_domains_for
 from src.agent.state import ProposalRef, ThreadState
 from src.agent.thread_guidance import CONCLUDE, phase4_guidance
 from src.agent.tools import execute_tool, tools_for_role
@@ -1656,6 +1656,39 @@ class SimulationEngine:
             channel_id=thread_channel_id,
         )
 
+        # The durable twin of `on_consult` below, plus the workspace-visible
+        # one. In-memory stays authoritative in-process (the floor reads it, and
+        # a failed write must never un-count a consult that happened) — the row
+        # is what survives the restart that clears the map, and is the only
+        # place a human can see WHO was consulted about an interview and what
+        # they said. Same `_pi`/`_t`/`_ch` default binding as `on_consult`, for
+        # the same reason.
+        #
+        # A nested `async def` rather than the lambda this used to be, because
+        # there are now two awaits and their ORDER matters: the durable record
+        # first, the Slack note second. The record is the artifact a verdict is
+        # later audited against; the note is a courtesy to whoever is watching
+        # the thread. If only one of them can happen, it must be the record.
+        # Both are individually best-effort and neither can raise into the tool
+        # (see `_record_specialist_consult` / `_post_panel_note`), so this
+        # cannot fail the consult, the turn or the reply.
+        async def record_consult(
+            _pi=thread.other_agent_id,
+            _t=thread.thread_id,
+            _ch=thread.channel,
+            **fields,
+        ) -> None:
+            await self._record_specialist_consult(
+                agent.agent_id,
+                subject_agent_id=_pi,
+                thread_id=_t,
+                channel_name=_ch,
+                **fields,
+            )
+            await self._post_panel_note(
+                agent.agent_id, channel=_ch, thread_ts=_t, **fields,
+            )
+
         # Create tool executor bound to this thread's state
         async def tool_executor(tool_name: str, tool_input: dict) -> str:
             return await execute_tool(
@@ -1663,22 +1696,7 @@ class SimulationEngine:
                 on_consult=lambda domain, signal, _pi=thread.other_agent_id, _t=thread.thread_id: (
                     self._note_consult(_pi, domain, signal, _t)
                 ),
-                # The durable twin of `on_consult` above. In-memory stays
-                # authoritative in-process (the floor reads it, and a failed
-                # write must never un-count a consult that happened) — this row
-                # is what survives the restart that clears the map, and is the
-                # only place a human can see WHO was consulted about an
-                # interview and what they said. Same `_pi`/`_t` default binding
-                # as `on_consult`, for the same reason.
-                on_consult_record=lambda _pi=thread.other_agent_id, _t=thread.thread_id, _ch=thread.channel, **fields: (
-                    self._record_specialist_consult(
-                        agent.agent_id,
-                        subject_agent_id=_pi,
-                        thread_id=_t,
-                        channel_name=_ch,
-                        **fields,
-                    )
-                ),
+                on_consult_record=record_consult,
                 # A specialist consult is a real, separately billed API call.
                 # Without this it was invisible to the sliding-window limiter and
                 # to SimulationRun.total_api_calls, so a concluding reply that
@@ -2153,6 +2171,13 @@ class SimulationEngine:
         # cid -> list of (posted_at, sender_agent_id) for target channels.
         msgs_by_cid: dict[str, list[tuple[float, str | None]]] = {}
         for entry in self.message_log._entries:
+            if is_panel_note(entry):
+                # A panel note is not traffic to catch up on. Counted here it
+                # would do both halves of the wrong thing at once: make the hub
+                # look "caught up" on a channel it has not answered in, and
+                # make the note itself an unacted message the OTHER member bot
+                # rewinds its cursor to go and read.
+                continue
             cid = self._channel_id_map.get(entry.channel)
             if not cid or cid not in target_ids:
                 continue
@@ -3047,6 +3072,78 @@ class SimulationEngine:
                 exc_info=True,
             )
 
+    async def _post_panel_note(
+        self,
+        agent_id: str,
+        *,
+        channel: str | None,
+        thread_ts: str | None,
+        domain: str,
+        question: str,
+        verdict_signal: str,
+        **_withheld,
+    ) -> None:
+        """Post the one-line, signal-level trace of a successful consult into
+        the interview thread.
+
+        Why at all: the evaluation panel was previously invisible in Slack. A
+        human watching an interview saw the hub go quiet for 30-40 seconds per
+        consult and then produce a verdict shaped by opinions nobody in the
+        workspace could see. The note makes the panel legible AT THE MOMENT it
+        is engaged — posted from inside the turn's tool rounds, so it lands
+        before the hub's eventual reply and the thread reads in the order things
+        actually happened.
+
+        Why so thin: an interview thread is visible to every lab in the
+        workspace. A specialist's opinion paraphrases the PI's confidential
+        statements back at them and quotes Blackbird's internal rubric, so
+        ``concerns``, ``questions_to_ask``, ``confidence`` and the opinion body
+        are NOT published. ``**_withheld`` is where they land — named for what
+        it does, and load-bearing in two directions: it lets this be called
+        with the same ``**fields`` the durable writer takes (one closure, one
+        contract), and it means a field added to that contract later is
+        withheld by DEFAULT rather than leaking the first time someone forgets.
+        ``format_panel_note`` then takes only the three publishable values, so
+        there is no parameter through which the rest could reach Slack.
+
+        Best-effort, in exactly the sense ``_record_specialist_consult`` is:
+        never raises, so it cannot cost the consult, the turn or the reply. It
+        runs SECOND, after the durable record — if only one of the two can
+        happen it must be the artifact a verdict is audited against, not the
+        courtesy note.
+
+        `phase=PHASE_PANEL_NOTE` is the whole reason no prompt file had to
+        change: the row exists, it is in the thread, and every agent-facing
+        read of the message log skips it (see src/agent/message_log.py). The
+        flag is read HERE rather than cached at startup so an operator can
+        disable notes with a `.env` edit + container recreate and no rebuild.
+        """
+        if not channel:
+            # No channel, nowhere to post. A consult made outside a thread
+            # (a direct tool call, a test) has no interview to annotate.
+            return
+        try:
+            if not get_settings().panel_notes_in_thread:
+                return
+            await self._post_message(
+                agent_id,
+                channel,
+                format_panel_note(
+                    domain=domain,
+                    verdict_signal=verdict_signal,
+                    question=question,
+                ),
+                thread_ts=thread_ts,
+                phase=PHASE_PANEL_NOTE,
+            )
+        except Exception as exc:  # noqa: BLE001 — a note must not cost the opinion
+            logger.error(
+                "[%s] Failed to post the %s panel note to #%s (thread %s): %s — "
+                "the consult itself stands, is recorded, and still counts for "
+                "the floor; only the in-thread trace of it is missing",
+                agent_id, domain, channel, thread_ts or "?", exc, exc_info=True,
+            )
+
     async def _seed_consults_from_db(
         self, verdict: dict, thread: ThreadState | None,
     ) -> None:
@@ -3816,6 +3913,12 @@ class SimulationEngine:
                 posted_at=r.posted_at or 0.0,
                 is_bot=r.is_bot,
                 visibility=r.visibility,
+                # Another process's panel note stays a panel note here too. The
+                # engine's own notes never reach this branch (the `get_entry`
+                # dedup above catches them), but a second writer's would, and
+                # ingesting one as an ordinary bot reply is precisely how a note
+                # would become "an external bot message" this roster acts on.
+                phase=r.phase,
             )
             self.message_log.append(entry)
             if r.is_bot:
@@ -3850,8 +3953,19 @@ class SimulationEngine:
         channel: str,
         text: str,
         thread_ts: str | None = None,
+        phase: str | None = None,
     ) -> str | None:
         """Post a message to Slack and record it in the message log + DB.
+
+        ``phase`` overrides the KIND stamped on the resulting rows. None (every
+        pre-existing caller) keeps the derived value ``_flush_persisted`` has
+        always written — 'thread_reply' with a thread_ts, 'new_post' without —
+        so this parameter changes nothing for a reply or a post. It is passed
+        only by ``_post_panel_note``, as PHASE_PANEL_NOTE, which is what makes
+        the resulting rows invisible to every agent-facing MessageLog read (see
+        src/agent/message_log.py). Carried on the LogEntry, not applied at
+        flush time, so it survives the round trip through the log and back out
+        of the DB on the next rebuild.
 
         Returns the canonical post id (the root chunk's ``ts`` — a real Slack
         ts when a connected client posted, else a locally-minted one; see
@@ -4000,6 +4114,11 @@ class SimulationEngine:
                 # The parent the transport reports, so the row always describes the
                 # message the transport actually made rather than the one we asked for.
                 slack_thread_ts=(message.get("thread_ts") if message and slack_ts else None),
+                # None for every caller but the panel note — see the docstring.
+                # Stamped on EVERY chunk: a split message is several rows for
+                # one logical post, and a continuation chunk that lost the
+                # phase would be readable by agents while its head was not.
+                phase=phase,
             )
             if index == 0:
                 root_ts = ts
@@ -4257,6 +4376,12 @@ class SimulationEngine:
                 slack_ts=_restored_slack_ts(r),
                 slack_channel_id=r.slack_channel_id,
                 slack_thread_ts=r.slack_thread_ts,
+                # Restore the KIND too, or a panel note comes back from the DB
+                # as an ordinary reply and re-enters every agent-facing read
+                # the moment the process restarts — thread histories, message
+                # counts, the other party's reply trigger. The exclusions are
+                # only as durable as this line.
+                phase=r.phase,
             )
             self.message_log.load_entry(entry)
             loaded += 1
@@ -4347,6 +4472,10 @@ class SimulationEngine:
                 slack_ts=_restored_slack_ts(r),
                 slack_channel_id=r.slack_channel_id,
                 slack_thread_ts=r.slack_thread_ts,
+                # As in _rebuild_state_from_db: a hydrated panel note must come
+                # back as a panel note, not as a reply the reopened thread's
+                # participants can suddenly read.
+                phase=r.phase,
             ))
 
     async def _flush_persisted(self, force_stats: bool = False) -> None:
@@ -4378,7 +4507,15 @@ class SimulationEngine:
                 "message_ts": e.ts,
                 "message_length": len(e.content or ""),
                 "thread_ts": e.thread_ts,
-                "phase": "thread_reply" if e.thread_ts else "new_post",
+                # The entry's own phase wins when it has one; otherwise the
+                # shape decides, exactly as it always has. Only a panel note
+                # sets it (PHASE_PANEL_NOTE — see _post_panel_note), and this is
+                # the write that makes the staff pages agree with the engine
+                # for free: src/services/directory.py's discussions listing
+                # already keys its roots on phase == 'new_post' and its reply
+                # counts on phase == 'thread_reply', so a third value is
+                # excluded from both with no query change.
+                "phase": e.phase or ("thread_reply" if e.thread_ts else "new_post"),
                 "visibility": e.visibility,
                 "content": e.content or "",
                 "sender_name": e.sender_name or "",
@@ -4686,6 +4823,14 @@ class SimulationEngine:
             for entry in self.message_log._entries:
                 if entry.sender_agent_id != aid:
                     continue
+                if is_panel_note(entry):
+                    # Posting a note is not participating. Restoring a thread
+                    # off one would resurrect, for the hub, an interview it had
+                    # not yet said anything in — and would do it from an entry
+                    # that `get_thread_history` (used three lines down for the
+                    # participant and pending-reply decisions) cannot see, so
+                    # the two halves of this reconstruction would disagree.
+                    continue
                 thread_id = entry.thread_ts or entry.ts
                 # Skip if already closed or already tracked
                 if thread_id in closed_thread_ids:
@@ -4907,6 +5052,12 @@ class SimulationEngine:
             for agent in self.agents.values():
                 agent.state.last_seen_cursor = 0
         elif self.message_log._entries:
+            # Panel notes are deliberately NOT excluded from this max. It is a
+            # "don't rescan what is already stored" high-water mark, not a
+            # per-entry decision, and a note is a real message on the transport
+            # — stopping the cursor short of one would leave every agent
+            # rescanning up to it forever, and the entries a note could hide
+            # behind it are older than it by construction.
             latest_ts = max(e.posted_at for e in self.message_log._entries)
             for agent in self.agents.values():
                 agent.state.last_seen_cursor = latest_ts
@@ -5504,6 +5655,11 @@ class SimulationEngine:
                 e for e in self.message_log._entries
                 if e.sender_agent_id == agent.agent_id
                 and e.visibility == visibility
+                # A panel note is the hub's own bookkeeping, not something it
+                # said. Left in, it would feed its own consult log back into
+                # its working memory — the one place a synthesis could quietly
+                # re-derive panel opinion into text every later prompt reads.
+                and not is_panel_note(e)
             ]
             messages_text = "\n".join(
                 f"[#{e.channel}] {e.content[:200]}"
