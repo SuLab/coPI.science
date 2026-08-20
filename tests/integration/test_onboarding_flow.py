@@ -533,10 +533,71 @@ async def test_the_start_page_enqueues_a_job_only_when_there_is_nothing_to_show(
     assert await _job_count(db_session, allowed.id) == 1
 
     # controls: the two guards the self-heal is written with.
-    assert (await client.get("/onboarding", headers=_auth(pending.id))).status_code == 200
+    #
+    # The pending leg is now answered before the handler runs: get_current_user
+    # re-checks access_status on every request and bounces a non-allowed session
+    # to /login (src/dependencies.py), so this used to be a 200 only because a
+    # revoked-mid-session user was still fully served. What this leg is actually
+    # asserting — no profile job for a non-allowed user — still holds, a fortiori,
+    # since the self-heal is never reached; so the job-count control is kept.
+    # NOTE: onboarding_start's own `access_status == "allowed"` guard is still
+    # LIVE, it just is not this leg that reaches it — get_current_user returns
+    # the IMPERSONATED user, so an admin debugging a pending account calls the
+    # handler with a non-allowed current_user. Covered by
+    # test_impersonating_a_pending_user_does_not_enqueue_a_profile_job below.
+    r_pending = await client.get("/onboarding", headers=_auth(pending.id))
+    assert r_pending.status_code == 302
+    assert "/login" in r_pending.headers["location"]
     assert await _job_count(db_session, pending.id) == 0, "self-heal ignored access_status"
     assert (await client.get("/onboarding", headers=_auth(has_profile.id))).status_code == 200
     assert await _job_count(db_session, has_profile.id) == 0, "self-heal ignored the profile"
+
+
+async def test_impersonating_a_pending_user_does_not_enqueue_a_profile_job(
+    client, db_session
+):
+    """The self-heal's access_status guard, reached the only way HTTP can reach it.
+
+    get_current_user bounces a non-allowed *session* before any handler runs
+    (see the pending leg above), but for an admin holding copi-impersonate it
+    returns the IMPERSONATED user — so an admin opening /onboarding on a pending
+    account is the live caller of onboarding_start with
+    ``current_user.access_status != "allowed"``. Without the guard, every such
+    debugging visit would queue a generate_profile job for an account nobody has
+    approved, and the worker would go on to build them a profile.
+    """
+    admin = await factories.make_user(
+        db_session, name="Onboarding Admin", email="oa@example.org", is_admin=True
+    )
+    pending = await factories.make_user(
+        db_session, name="Pending Newcomer", email="pn@example.org",
+        access_status="pending", onboarding_complete=False,
+    )
+    allowed = await factories.make_user(
+        db_session, name="Allowed Newcomer", email="an@example.org",
+        access_status="allowed", onboarding_complete=False,
+    )
+    await db_session.flush()
+
+    r = await client.get("/onboarding", headers=_auth_as(admin.id, pending.id))
+    assert r.status_code == 200, "impersonating a pending user no longer renders"
+    assert "Viewing as Pending Newcomer" in r.text, (
+        "the impersonate cookie was inert, so the handler ran as the (allowed) "
+        "admin and this test proves nothing"
+    )
+    assert await _job_count(db_session, pending.id) == 0, (
+        "the self-heal queued a profile job for an unapproved account"
+    )
+    assert await _job_count(db_session, admin.id) == 0, "...or for the admin"
+
+    # CONTROL — same admin, same cookie machinery, same empty state (no job, no
+    # profile); the only difference is the impersonated user's access_status.
+    r = await client.get("/onboarding", headers=_auth_as(admin.id, allowed.id))
+    assert r.status_code == 200
+    assert "Viewing as Allowed Newcomer" in r.text
+    assert await _job_count(db_session, allowed.id) == 1, (
+        "the self-heal fires for nobody, so the pending assertion above is vacuous"
+    )
 
 
 async def test_onboarding_save_profile_requires_a_valid_unused_email(client, db_session):

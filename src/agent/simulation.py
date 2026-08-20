@@ -44,7 +44,7 @@ from src.models import (
     ThreadDecision,
 )
 from src.models.agent_activity import VISIBILITY_COLLAB_PRIVATE, VISIBILITY_PUBLIC
-from src.services.cohorts import compute_gates, summarise_gates
+from src.services.cohorts import SERVICE_AGENT_IDS, compute_gates, summarise_gates
 from src.services.llm import (
     generate_agent_response,
     generate_with_tools,
@@ -279,7 +279,26 @@ class SimulationEngine:
         self._bot_name_to_id: dict[str, str] = {
             a.bot_name.lower(): a.agent_id for a in agents
         }
+        # GrantBot is a service bot: its own token, no AgentRegistry row, never a
+        # roster slot — so nothing else ever puts it in this map. It is seeded
+        # here because its :moneybag: posts come back in through the same inbound
+        # paths as roster bots, and _entry_allowed fails closed on a bot row with
+        # a NULL agent_id (unattributable ⇒ belongs to no cohort). Without the
+        # entry, every funding post is invisible to every gated agent.
+        # setdefault, not assignment: a roster PI actually named Grant would own
+        # bot_name "GrantBot", and the roster answer must win. Iterated from
+        # SERVICE_AGENT_IDS so a second service bot cannot be added to the
+        # manifest validator and admin UI while silently missing the engine.
+        for service_id in SERVICE_AGENT_IDS:
+            self._bot_name_to_id.setdefault(service_id, service_id)
         self.message_log.set_bot_name_map(self._bot_name_to_id)
+
+        # Slack bot_user_id -> agent_id for service bots. The name map above is
+        # not sufficient on its own: Slack omits `username` on most of grantbot's
+        # posts (all 315 in production landed with sender_name = its raw uid), so
+        # uid is the only key that reliably attributes them. Populated by
+        # _resolve_service_bot_uids during start(); stays empty when Slack is off.
+        self._service_bot_uids: dict[str, str] = {}
 
         # agent_id → LabPublicationRecord (publications-table ground truth for
         # the authorship emit guard). Populated by _load_publication_records at
@@ -548,6 +567,13 @@ class SimulationEngine:
         # from the combined log. This whole sequence runs with Slack fully off.
         self.message_log.set_persist_callback(self._enqueue_persist)
         await self._rebuild_state_from_db()
+        # Learn service-bot uids BEFORE the Slack reconcile, which attributes bot
+        # senders by uid. This only covers messages NEW to the log: rows already
+        # persisted with a NULL agent_id are skipped by the reconcile (their ts
+        # is in _known_slack_ts and MessageLog.append is ts-idempotent), so they
+        # stay NULL — the historical grantbot backlog was repaired by a one-shot
+        # UPDATE against agent_messages at rollout, not by this pass.
+        await self._resolve_service_bot_uids()
         await self._rebuild_state_from_slack()
         await self._rebuild_agent_state()
         await self._seed_pi_dm_cursor()
@@ -2713,10 +2739,15 @@ class SimulationEngine:
                     # but skip PI-specific handling for them
                     if is_bot:
                         bot_name = msg.get("username", "bot")
-                        # Resolve agent_id from bot name
+                        # Resolve agent_id by bot name, then by Slack uid. The uid
+                        # fallback is what actually attributes service bots: Slack
+                        # usually omits `username` on grantbot's posts, so the name
+                        # lookup misses and the row would persist with a NULL
+                        # agent_id — which _entry_allowed fails closed on, hiding
+                        # the funding post from every gated agent.
                         bot_agent_id = self.message_log._bot_name_to_id.get(
                             bot_name.lower()
-                        )
+                        ) or self._service_bot_uids.get(user_id)
                         entry = LogEntry(
                             ts=ts,
                             channel=ch_name,
@@ -3924,6 +3955,69 @@ class SimulationEngine:
         """MessageLog persist callback — buffer a new entry for the next flush."""
         self._pending_persist.append(entry)
 
+    async def _resolve_service_bot_uids(self) -> None:
+        """Learn the Slack uid of each service bot (grantbot today).
+
+        A service bot posts with its own token and has no AgentRegistry row, so no
+        roster client carries its uid and the inbound paths cannot attribute its
+        posts: production shows all 315 of grantbot's :moneybag: posts persisted
+        with agent_id NULL, which _entry_allowed fails closed on. One throwaway
+        auth.test is the only way to get the uid.
+
+        Deliberately NOT reusing grantbot.py's SuBot-token fallback: posts made on
+        su's token carry *su's* uid, so mapping that uid to "grantbot" would
+        mis-attribute SuBot's own traffic. Every failure mode here (no token, bad
+        token, Slack down) degrades to the pre-existing NULL attribution — it must
+        never abort start().
+        """
+        if not self.slack_enabled:
+            return
+        from src.agent.slack_client import AgentSlackClient
+        from src.services.slack_tokens import is_valid_token
+
+        token = getattr(get_settings(), "slack_bot_token_grantbot", "")
+        if not is_valid_token(token):
+            logger.info(
+                "No usable grantbot token — its funding posts stay unattributed "
+                "(invisible to gated agents)",
+            )
+            return
+        # Never enters self.slack_clients: this client exists for one auth.test.
+        # In the roster dict it would be polled through and posted through as if
+        # it were an agent.
+        probe = AgentSlackClient(agent_id="grantbot", bot_token=token)
+        try:
+            connected = probe.connect()
+        except Exception as exc:
+            # connect() only handles SlackApiError; DNS/SSL/socket errors escape it.
+            logger.warning("grantbot uid probe raised — continuing without it: %s", exc)
+            return
+        if not connected or not probe.bot_user_id:
+            logger.warning(
+                "grantbot auth.test yielded no bot_user_id — its funding posts stay "
+                "unattributed this run",
+            )
+            return
+        self._service_bot_uids[probe.bot_user_id] = "grantbot"
+        logger.info("Service bot grantbot resolved to Slack uid %s", probe.bot_user_id)
+
+    def _bot_uid_map(self) -> dict[str, str]:
+        """Slack bot_user_id -> agent_id for every bot whose posts we can attribute.
+
+        Roster clients first; service bots merged in with setdefault so they can
+        never override a roster entry. The collision is real, not theoretical:
+        grantbot falls back to SuBot's token when its own is missing, and posts
+        made that way are su's — the roster answer is the true one.
+        """
+        uid_map = {
+            c.bot_user_id: aid
+            for aid, c in self.slack_clients.items()
+            if c and c.bot_user_id
+        }
+        for uid, aid in self._service_bot_uids.items():
+            uid_map.setdefault(uid, aid)
+        return uid_map
+
     async def _rebuild_state_from_slack(self) -> None:
         """Reconcile the MessageLog with Slack history (Slack-on only).
 
@@ -3936,11 +4030,10 @@ class SimulationEngine:
             logger.info("No Slack client available — skipping Slack reconcile")
             return
 
-        # Build a mapping of bot_user_id -> agent_id
-        bot_uid_to_agent: dict[str, str] = {}
-        for aid, c in self.slack_clients.items():
-            if c.bot_user_id:
-                bot_uid_to_agent[c.bot_user_id] = aid
+        # bot_user_id -> agent_id, roster clients plus service bots. Covers both
+        # resolution sites below (channel history and thread replies), which is
+        # where grantbot's backlog is ingested on a resumed run.
+        bot_uid_to_agent = self._bot_uid_map()
 
         # 1. Poll full Slack history for seeded channels + any known
         # collab_private channels. Same filter as the live-poll loop.

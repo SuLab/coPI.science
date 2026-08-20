@@ -259,6 +259,87 @@ async def test_add_duplicate_member_is_refused(client, db_session, admin, roster
     assert "already+a+member" in r.headers["location"]
 
 
+async def test_service_agent_is_addable_without_a_registry_row(client, db_session, admin):
+    """grantbot is a code-defined participant (SERVICE_AGENT_IDS), so it has no PI
+    and therefore no AgentRegistry row — yet the cohort machinery treats it as a
+    legitimate member. The registry-existence check used to make it the one agent
+    an admin could never add through the UI.
+
+    The unknown-id leg runs in this same test as the control: without it, a handler
+    that had simply dropped the validation entirely would pass the first half.
+    """
+    from src.services.cohorts import SERVICE_AGENT_IDS
+
+    assert "grantbot" in SERVICE_AGENT_IDS, "premise of this test"
+    assert (await db_session.execute(
+        select(AgentRegistry).where(AgentRegistry.agent_id == "grantbot")
+    )).scalar_one_or_none() is None, "grantbot must have no registry row here"
+
+    c = await _cohort(db_session, "wave", admin)
+    r = await client.post(
+        f"/admin/cohorts/{c.id}/add-agent",
+        data={"agent_id": "grantbot"},
+        headers=_auth(admin.id),
+    )
+    assert r.status_code == 302
+    assert "error" not in r.headers["location"], r.headers["location"]
+
+    members = (await db_session.execute(
+        select(CohortMembership).where(CohortMembership.cohort_id == c.id)
+    )).scalars().all()
+    assert [m.agent_id for m in members] == ["grantbot"]
+    assert members[0].added_by == admin.id
+
+    # The bypass must not skip the audit write — that is the whole trail for §4.1.
+    events = (await db_session.execute(
+        select(CohortAuditEvent).where(CohortAuditEvent.cohort_id == c.id)
+    )).scalars().all()
+    assert [(e.action, e.agent_id) for e in events] == [("agent_added", "grantbot")]
+    assert events[0].actor_email == "admin@example.org"
+
+    # CONTROL: a non-service id with no registry row is still refused.
+    r2 = await client.post(
+        f"/admin/cohorts/{c.id}/add-agent",
+        data={"agent_id": "definitely-not-an-agent"},
+        headers=_auth(admin.id),
+    )
+    assert "error=Unknown+agent" in r2.headers["location"]
+    assert {m.agent_id for m in (await db_session.execute(
+        select(CohortMembership)
+    )).scalars().all()} == {"grantbot"}
+
+
+async def test_service_agent_still_cannot_be_added_twice(client, db_session, admin):
+    """The registry bypass must not also bypass the duplicate guard — two identical
+    memberships would double-count grantbot in every gate computation."""
+    c = await _cohort(db_session, "wave", admin, members=["grantbot"])
+    r = await client.post(
+        f"/admin/cohorts/{c.id}/add-agent",
+        data={"agent_id": "grantbot"},
+        headers=_auth(admin.id),
+    )
+    assert "already+a+member" in r.headers["location"]
+    assert len((await db_session.execute(select(CohortMembership))).scalars().all()) == 1
+    assert (await db_session.execute(select(CohortAuditEvent))).scalars().all() == [], (
+        "a refused add must not be audited"
+    )
+
+
+async def test_service_agent_id_is_normalised_before_the_bypass(client, db_session, admin):
+    """The bypass is checked after strip().lower(), so the padded/upper form of a
+    service id must take the same path rather than falling through to Unknown agent."""
+    c = await _cohort(db_session, "wave", admin)
+    r = await client.post(
+        f"/admin/cohorts/{c.id}/add-agent",
+        data={"agent_id": "  GrantBot  "},
+        headers=_auth(admin.id),
+    )
+    assert r.status_code == 302
+    assert "error" not in r.headers["location"], r.headers["location"]
+    rows = (await db_session.execute(select(CohortMembership))).scalars().all()
+    assert [m.agent_id for m in rows] == ["grantbot"]
+
+
 # --- delete guard ----------------------------------------------------------
 
 

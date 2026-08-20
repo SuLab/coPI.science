@@ -21,6 +21,14 @@ logger = logging.getLogger(__name__)
 POLICY_OPEN = "open"
 POLICY_ISOLATED = "isolated"
 
+# Service bots that may hold cohort memberships without an AgentRegistry row.
+# They are not roster agents — the engine never runs them — but their posts
+# must pass cohort-mates' gates, so membership rows naming them are legitimate
+# (see compute_gates: non-roster memberships land in every mate's allowed set).
+# The manifest validator and the admin add-agent endpoint both union this into
+# the known-agent set instead of special-casing at each call site.
+SERVICE_AGENT_IDS = frozenset({"grantbot"})
+
 
 def preflight_reason(
     *,

@@ -615,7 +615,14 @@ async def _run_grantbot_with_session(
             candidate = getattr(settings, "slack_bot_token_grantbot", "")
             if not candidate or candidate.startswith("xoxb-placeholder"):
                 candidate = settings.slack_bot_token_su
-                logger.info("No grantbot Slack token — using SuBot's token as fallback")
+                # WARNING, not INFO: posts made on this token carry SuBot's Slack
+                # uid, so the engine attributes them to `su` (the uid map resolves
+                # roster bots first, by design — see _bot_uid_map). The FOA still
+                # lands; its provenance is wrong until grantbot has its own token.
+                logger.warning(
+                    "No grantbot Slack token — using SuBot's token as fallback; "
+                    "these posts will be attributed to su, not grantbot",
+                )
             if candidate and not candidate.startswith("xoxb-placeholder"):
                 bot_token = candidate
                 # to_thread: the helper is sync and makes paginated Slack calls

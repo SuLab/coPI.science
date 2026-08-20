@@ -56,6 +56,11 @@ async def _seed_one_orcid(orcid: str, run_pipeline: bool = True) -> None:
                 email=profile_data.get("email"),
                 institution=profile_data.get("institution"),
                 department=profile_data.get("department"),
+                # Seeded PIs are pre-vetted by whoever curated the ORCID list, so
+                # grant access explicitly: the model default is "pending", which
+                # used to drop every seeded PI into /admin/access-requests as a
+                # phantom request (and forced scripts/promote_active_agent_users.py).
+                access_status="allowed",
             )
             db.add(user)
             await db.flush()

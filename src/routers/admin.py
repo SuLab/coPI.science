@@ -41,6 +41,7 @@ from src.models import (
     WaitlistSignup,
 )
 from src.services.cohorts import (
+    SERVICE_AGENT_IDS,
     compute_gates,
     record_cohort_audit_event,
     summarise_gates,
@@ -78,11 +79,25 @@ async def admin_users(
     status_filter: str | None = None,
     institution_filter: str | None = None,
     claimed_filter: str | None = None,
+    access_filter: str | None = None,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_admin_user),
 ):
-    """Admin users overview."""
-    query = select(User).options(selectinload(User.profile), selectinload(User.jobs), selectinload(User.agent))
+    """Admin users overview.
+
+    Rows exist for users who never passed the access gate — auth.py creates them
+    at ORCID sign-in so /admin/access-requests has something to show — so this
+    page surfaces ``access_status`` as its own column and filter rather than
+    hiding them. Without it a pending/denied user is indistinguishable from a
+    fully approved one here, which is how unapproved accounts went unnoticed.
+    """
+    query = (
+        select(User)
+        .options(selectinload(User.profile), selectinload(User.jobs), selectinload(User.agent))
+        # Newest first: the query had no ordering at all, so row order was
+        # whatever Postgres happened to return and shuffled between loads.
+        .order_by(User.created_at.desc())
+    )
 
     result = await db.execute(query)
     users = result.scalars().unique().all()
@@ -120,6 +135,8 @@ async def admin_users(
             continue
         if claimed_filter == "unclaimed" and user.claimed_at:
             continue
+        if access_filter and user.access_status != access_filter:
+            continue
 
         # Agent status
         if not user.agent:
@@ -133,6 +150,7 @@ async def admin_users(
             "user": user,
             "profile": profile,
             "profile_status": profile_status,
+            "access_status": user.access_status,
             "pub_count": pub_count,
             "agent_status": agent_status,
         })
@@ -148,6 +166,7 @@ async def admin_users(
             status_filter=status_filter,
             institution_filter=institution_filter,
             claimed_filter=claimed_filter,
+            access_filter=access_filter,
         ),
     )
 
@@ -1078,6 +1097,11 @@ async def impersonate_user(
                 email=profile_data.get("email"),
                 institution=profile_data.get("institution"),
                 department=profile_data.get("department"),
+                # An admin typing an ORCID here is creating this record on
+                # purpose, so it is already vetted. Leaving it on the model
+                # default ("pending") queued a phantom request in
+                # /admin/access-requests for a user nobody had asked to sign up.
+                access_status="allowed",
             )
             db.add(target)
             await db.flush()  # get target.id
@@ -1822,15 +1846,19 @@ async def admin_cohort_add_agent(
         raise HTTPException(status_code=404, detail="Cohort not found")
 
     agent_id = agent_id.strip().lower()
-    # Validate the agent exists in the registry.
-    agent_exists = await db.execute(
-        select(AgentRegistry.id).where(AgentRegistry.agent_id == agent_id)
-    )
-    if not agent_exists.scalar_one_or_none():
-        return RedirectResponse(
-            url=f"/admin/cohorts/{cohort_id}?error=Unknown+agent",
-            status_code=302,
+    # Validate the agent exists in the registry. Service agents (grantbot) are
+    # exempt: they are code-defined participants with no PI and therefore no
+    # AgentRegistry row, so the existence check would make them unaddable even
+    # though the cohort machinery treats them as legitimate members.
+    if agent_id not in SERVICE_AGENT_IDS:
+        agent_exists = await db.execute(
+            select(AgentRegistry.id).where(AgentRegistry.agent_id == agent_id)
         )
+        if not agent_exists.scalar_one_or_none():
+            return RedirectResponse(
+                url=f"/admin/cohorts/{cohort_id}?error=Unknown+agent",
+                status_code=302,
+            )
     # Reject duplicate membership.
     dup = await db.execute(
         select(CohortMembership.id).where(

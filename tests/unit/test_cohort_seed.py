@@ -5,6 +5,12 @@ member. `src.services.cohorts.compute_gates` treats a membership row naming an
 agent with no AgentRegistry row as a valid allowed sender for every one of its
 cohort-mates (its docstring records this was confirmed live with 56 such rows),
 so an unknown agent_id must abort the seed, not warn about it.
+
+The one deliberate exception is a service bot: grantbot has no AgentRegistry
+row by design, and is a member of all three shipped cohorts so its funding
+posts pass every gated agent's allowed-sender set. `validate_manifest` is NOT
+relaxed for it — callers union `SERVICE_AGENT_IDS` into the known set
+(scripts/seed_cohorts.py), which keeps a typo'd id a hard failure.
 """
 
 import pytest
@@ -16,6 +22,7 @@ from src.services.cohort_seed import (
     plan_seed,
     validate_manifest,
 )
+from src.services.cohorts import SERVICE_AGENT_IDS
 
 REPO_MANIFEST = "cohorts.json"
 
@@ -44,14 +51,24 @@ class TestLoadManifest:
         }
 
     def test_repo_manifest_has_the_expected_shape(self):
+        """Counts include grantbot, which is a member of all three cohorts (+1
+        row each, +1 distinct id over the 2026-08-18 122-PI union)."""
         m = load_manifest(REPO_MANIFEST)["cohorts"]
-        assert len(m["cabo-retreat"]["members"]) == 34
-        assert len(m["schultz-reunion"]["members"]) == 77
-        assert len(m["scripps-investigators"]["members"]) == 41
+        assert len(m["cabo-retreat"]["members"]) == 35
+        assert len(m["schultz-reunion"]["members"]) == 78
+        assert len(m["scripps-investigators"]["members"]) == 42
         rows = sum(len(c["members"]) for c in m.values())
         distinct = {a for c in m.values() for a in c["members"]}
-        assert rows == 152
-        assert len(distinct) == 122
+        assert rows == 155
+        assert len(distinct) == 123
+
+    def test_repo_manifest_puts_every_service_bot_in_every_cohort(self):
+        """A service bot posts into channels shared by all three cohorts, so a
+        partial membership would silently drop its posts for the agents in the
+        cohorts it was missing from once isolation is on."""
+        m = load_manifest(REPO_MANIFEST)["cohorts"]
+        for name, body in m.items():
+            assert SERVICE_AGENT_IDS <= set(body["members"]), name
 
     def test_repo_manifest_carries_no_personal_data(self):
         """This repo is public (.gitignore:101). Agent IDs only."""
@@ -133,6 +150,48 @@ class TestValidateManifest:
         assert len(errors) == 1
         assert "wiseman" in errors[0]
         assert "no AgentRegistry row" in errors[0]
+
+    def test_service_bot_is_not_special_cased_in_the_validator(self):
+        """The validator knows nothing about service bots: "grantbot" with no
+        AgentRegistry row and no union is an error like any other unknown id.
+        Keeping the rule here exact is what makes the call-site union safe."""
+        m = _manifest(cohorts={"alpha": {"description": "d", "source": "s",
+                                         "members": ["su", "grantbot"]}})
+        errors = validate_manifest(m, {"su"})
+        assert len(errors) == 1
+        assert "grantbot" in errors[0]
+        assert "no AgentRegistry row" in errors[0]
+
+    def test_union_with_service_agent_ids_accepts_the_service_bot(self):
+        """The pattern scripts/seed_cohorts.py uses: roster ids | SERVICE_AGENT_IDS."""
+        m = _manifest(cohorts={"alpha": {"description": "d", "source": "s",
+                                         "members": ["su", "grantbot"]}})
+        assert validate_manifest(m, {"su"} | SERVICE_AGENT_IDS) == []
+
+    def test_union_is_not_a_blanket_bypass_for_unknown_ids(self):
+        """A member that is neither on the roster nor a service id must still
+        fail under the union -- a typo'd "grantbo" is a phantom sender, and the
+        union must not be mistaken for "unknown ids are fine now"."""
+        m = _manifest(cohorts={"alpha": {"description": "d", "source": "s",
+                                         "members": ["su", "grantbo"]}})
+        errors = validate_manifest(m, {"su"} | SERVICE_AGENT_IDS)
+        assert len(errors) == 1
+        assert "grantbo" in errors[0]
+        assert "no AgentRegistry row" in errors[0]
+
+    def test_repo_manifest_validates_only_under_the_service_union(self):
+        """End to end on the shipped manifest: with a roster holding every PI it
+        names but no grantbot row (the production state -- grantbot is a
+        standalone service bot), the seed aborts without the union and passes
+        with it."""
+        manifest = load_manifest(REPO_MANIFEST)
+        members = {a for c in manifest["cohorts"].values() for a in c["members"]}
+        roster = members - SERVICE_AGENT_IDS
+
+        errors = validate_manifest(manifest, roster)
+        assert len(errors) == 3  # one per cohort, all naming grantbot
+        assert all("grantbot" in e for e in errors)
+        assert validate_manifest(manifest, roster | SERVICE_AGENT_IDS) == []
 
     def test_missing_cohorts_key(self):
         assert validate_manifest({}, set()) == [
@@ -244,8 +303,12 @@ class TestPlanSeed:
     def test_repo_manifest_against_empty_db(self):
         plan = plan_seed(load_manifest(REPO_MANIFEST), set(), set())
         assert len(plan.cohorts_to_create) == 3
-        assert len(plan.memberships_to_add) == 152
+        assert len(plan.memberships_to_add) == 155
         assert isinstance(plan, SeedPlan)
+        # One grantbot membership per cohort, planned like any other member --
+        # plan_seed has no service-bot special case either.
+        service_rows = [p for p in plan.memberships_to_add if p[1] == "grantbot"]
+        assert len(service_rows) == 3
 
     def test_description_drift_is_detected(self):
         plan = plan_seed(

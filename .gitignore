@@ -34,6 +34,9 @@ profiles/public/*.md
 profiles/private/*.md
 profiles/memory/*.md
 profiles/**/*.md
+# Sweep backups of agent memory (same prose as the .md files — never commit;
+# this repo is public and a blanket `git add -A` must not pick them up).
+profiles/**/*.pre-sweep
 profiles/*.log
 
 # Generated/scratch data and static asset bundles (not source)

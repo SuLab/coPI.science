@@ -3,6 +3,7 @@
 import pytest
 
 from src.agent.message_log import LogEntry, MessageLog
+from src.services.cohorts import SERVICE_AGENT_IDS
 
 
 @pytest.fixture
@@ -14,6 +15,12 @@ def log():
         "cravattbot": "cravatt",
         "grotjahnbot": "grotjahn",
         "kenbot": "ken",
+        # SimulationEngine's constructor seeds one entry per service bot, keyed
+        # by the agent_id (which is also the lowercased bot name), because their
+        # inbound posts have to be attributable. Mirrored here so the thread
+        # rules below are exercised against the map production installs — an
+        # unmapped @GrantBot would resolve to None for the boring reason.
+        **{service_id: service_id for service_id in SERVICE_AGENT_IDS},
     })
     return ml
 
@@ -86,6 +93,74 @@ class TestThreadAllowedAgents:
         allowed = log.get_thread_allowed_agents("1")
         # Unknown tag — no reservation, treated as open
         assert allowed is None
+
+
+# ---------------------------------------------------------------
+# Service-bot tags (_extract_tagged_agent's SERVICE_AGENT_IDS exemption)
+#
+# A service bot (grantbot) is in the bot-name map because ingestion must
+# attribute its :moneybag: posts, but it has no roster slot and never takes a
+# turn, so it can never reply. Letting it out of _extract_tagged_agent would
+# reserve a non-funding thread for {poster, grantbot} and leave it dead on
+# arrival: the only other agent entitled to speak there does not exist.
+# ---------------------------------------------------------------
+
+class TestServiceBotTagsDoNotReserveThreads:
+    @pytest.mark.parametrize("service_id", sorted(SERVICE_AGENT_IDS))
+    def test_a_service_tag_extracts_nothing(self, log, service_id):
+        # Control on the same call: the map does resolve the name, so None is
+        # the exemption firing and not a lookup miss.
+        assert log._bot_name_to_id[service_id] == service_id
+        assert log._extract_tagged_agent(f"nice find @{service_id.title()}") is None
+
+    def test_a_non_funding_root_tagging_a_service_bot_stays_open(self, log):
+        log.append(_post("1", "general", "su", "SuBot", "Following up on @GrantBot's R01"))
+        # NOT {"su", "grantbot"}: the tag branch is skipped, so the generic
+        # 2-party rule applies, and with one participant the thread is open.
+        assert log.get_thread_allowed_agents("1") is None
+
+    def test_the_thread_still_locks_to_the_first_two_real_participants(self, log):
+        """The exemption re-opens the thread; it does not disable the 2-party rule."""
+        log.append(_post("1", "general", "su", "SuBot", "Following up on @GrantBot's R01"))
+        log.append(_post("2", "general", "wiseman", "WisemanBot", "We'd apply", thread_ts="1"))
+        assert log.get_thread_allowed_agents("1") == {"su", "wiseman"}
+
+    def test_a_service_tag_shadows_a_later_roster_tag(self, log):
+        """First-match semantics: re.search stops at the first @...Bot.
+
+        Documented, not desired — the fallback is the open 2-party rule, so the
+        cost is a thread that anyone may join rather than one nobody can. If
+        _extract_tagged_agent is ever changed to scan past a service mention,
+        update this expectation deliberately.
+        """
+        log.append(
+            _post("1", "general", "su", "SuBot", "@GrantBot posted this — @WisemanBot?")
+        )
+        assert log.get_thread_allowed_agents("1") is None
+
+    def test_a_roster_tag_still_reserves_the_thread(self, log):
+        """Positive control: the exemption must not disarm the tag rule itself."""
+        log.append(_post("1", "general", "su", "SuBot", "Thoughts @WisemanBot?"))
+        assert log.get_thread_allowed_agents("1") == {"su", "wiseman"}
+
+    def test_a_funding_root_is_open_even_when_it_tags_a_roster_bot(self, log):
+        """The :moneybag: check precedes the tag branch, so funding stays open."""
+        log.append(
+            _post(
+                "1", "funding-opportunities", "grantbot", "GrantBot",
+                ":moneybag: *New FOA* — RM1, relevant to @WisemanBot",
+            )
+        )
+        assert log.get_thread_allowed_agents("1") is None
+        # And the same text without the marker would have locked it, so the
+        # assertion above is the funding exemption and not the service one.
+        log.append(
+            _post(
+                "2", "funding-opportunities", "grantbot", "GrantBot",
+                "*New FOA* — RM1, relevant to @WisemanBot",
+            )
+        )
+        assert log.get_thread_allowed_agents("2") == {"grantbot", "wiseman"}
 
 
 # ---------------------------------------------------------------

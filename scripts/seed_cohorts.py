@@ -46,6 +46,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from src.config import get_settings
 from src.models import AgentRegistry, Cohort, CohortMembership
 from src.services.cohort_seed import apply_plan, load_manifest, plan_seed, validate_manifest
+from src.services.cohorts import SERVICE_AGENT_IDS
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
@@ -65,7 +66,12 @@ async def _run_with_session(
     """
     manifest = load_manifest(manifest_path)
     known = {aid for (aid,) in await db.execute(select(AgentRegistry.agent_id))}
-    errors = validate_manifest(manifest, known)
+    # Service bots (grantbot) legitimately hold memberships with no
+    # AgentRegistry row — the engine never runs them, but their posts must pass
+    # every cohort-mate's gate, so they are members of all three cohorts. Union
+    # them into the known set rather than relaxing validate_manifest: the check
+    # stays exact, so a typo'd member id ("grantbo") still aborts the seed.
+    errors = validate_manifest(manifest, known | SERVICE_AGENT_IDS)
     if errors:
         logger.error("Manifest is invalid. NOTHING was written:")
         for err in errors:

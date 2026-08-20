@@ -5,6 +5,7 @@ import re
 from dataclasses import dataclass
 from typing import Callable
 
+from src.services.cohorts import SERVICE_AGENT_IDS
 from src.visibility import VISIBILITY_COLLAB_PRIVATE
 
 logger = logging.getLogger(__name__)
@@ -395,11 +396,19 @@ class MessageLog:
         return bool(root and is_funding_post(root.content))
 
     def _extract_tagged_agent(self, content: str) -> str | None:
-        """Extract a tagged agent_id from message content (e.g. @WisemanBot)."""
+        """Extract a tagged agent_id from message content (e.g. @WisemanBot).
+
+        Service bots resolve in the name map (ingestion must attribute their
+        posts) but must never come out of here: a non-funding root that leads
+        with @GrantBot would otherwise lock the thread to {poster, grantbot}
+        via get_thread_allowed_agents, and a service bot never replies — the
+        thread would be dead on arrival.
+        """
         match = re.search(r"@(\w+[Bb]ot)\b", content)
         if match:
             bot_name = match.group(1).lower()
-            return self._bot_name_to_id.get(bot_name)
+            agent_id = self._bot_name_to_id.get(bot_name)
+            return None if agent_id in SERVICE_AGENT_IDS else agent_id
         return None
 
     def has_new_reply_from_other(

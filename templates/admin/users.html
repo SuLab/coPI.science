@@ -33,6 +33,16 @@
         </select>
     </div>
     <div>
+        <label class="text-xs font-medium text-gray-600 block mb-1">Access</label>
+        <select onchange="applyFilter()" id="access-filter"
+                class="border border-gray-300 rounded px-2 py-1 text-sm">
+            <option value="">All</option>
+            <option value="allowed" {% if access_filter == 'allowed' %}selected{% endif %}>Allowed</option>
+            <option value="pending" {% if access_filter == 'pending' %}selected{% endif %}>Pending</option>
+            <option value="denied" {% if access_filter == 'denied' %}selected{% endif %}>Denied</option>
+        </select>
+    </div>
+    <div>
         <label class="text-xs font-medium text-gray-600 block mb-1">Claimed</label>
         <select onchange="applyFilter()" id="claimed-filter"
                 class="border border-gray-300 rounded px-2 py-1 text-sm">
@@ -51,6 +61,7 @@
                 <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Name</th>
                 <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase hidden md:table-cell">Institution</th>
                 <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase hidden lg:table-cell">ORCID</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Access</th>
                 <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
                 <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase hidden md:table-cell">Agent</th>
                 <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase hidden md:table-cell">Pubs</th>
@@ -77,6 +88,17 @@
                     <a href="https://orcid.org/{{ item.user.orcid }}" target="_blank"
                        onclick="event.stopPropagation()"
                        class="text-xs text-green-600 hover:underline">{{ item.user.orcid }}</a>
+                </td>
+                <td class="px-4 py-3">
+                    {% set access_colors = {
+                        'allowed': 'bg-green-100 text-green-700',
+                        'pending': 'bg-amber-100 text-amber-700',
+                        'denied': 'bg-red-100 text-red-700'
+                    } %}
+                    <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium
+                        {{ access_colors.get(item.access_status, 'bg-gray-100 text-gray-600') }}">
+                        {{ item.access_status | replace('_', ' ') | title }}
+                    </span>
                 </td>
                 <td class="px-4 py-3">
                     {% set status_colors = {
@@ -126,7 +148,7 @@
             </tr>
             {% else %}
             <tr>
-                <td colspan="10" class="px-4 py-8 text-center text-gray-400 text-sm">No users found</td>
+                <td colspan="11" class="px-4 py-8 text-center text-gray-400 text-sm">No users found</td>
             </tr>
             {% endfor %}
         </tbody>
@@ -137,9 +159,11 @@
 function applyFilter() {
     const status = document.getElementById('status-filter').value;
     const claimed = document.getElementById('claimed-filter').value;
+    const access = document.getElementById('access-filter').value;
     const params = new URLSearchParams();
     if (status) params.set('status_filter', status);
     if (claimed) params.set('claimed_filter', claimed);
+    if (access) params.set('access_filter', access);
     location.href = '/admin/users?' + params.toString();
 }
 </script>

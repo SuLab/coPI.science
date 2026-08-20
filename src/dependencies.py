@@ -69,6 +69,28 @@ async def get_current_user(
             headers={"Location": "/login"},
         )
 
+    # Re-check the access gate on every request, not only when the session is
+    # minted. auth.py gates at sign-in (it refuses to set session["user_id"] for
+    # a non-allowed user), so revoking access mid-session used to do nothing: a
+    # denied user kept a fully working session until the cookie expired. Clearing
+    # the session gets the same treatment as the stale-user_id paths above — the
+    # /login round-trip then lands them on /access-pending.
+    #
+    # Deliberately BEFORE the impersonation block: this guards the *signed-in*
+    # identity, and admins impersonating a pending/denied user to debug their
+    # account is a supported workflow that must keep working.
+    if session_user.access_status != "allowed":
+        logger.info(
+            "Bounced session for user %s with access_status=%s",
+            session_user.id,
+            session_user.access_status,
+        )
+        request.session.clear()
+        raise HTTPException(
+            status_code=status.HTTP_302_FOUND,
+            headers={"Location": "/login"},
+        )
+
     # Impersonation: admin can view as another user
     impersonate_id = request.cookies.get("copi-impersonate")
     if impersonate_id and session_user.is_admin:

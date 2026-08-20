@@ -244,6 +244,82 @@ def test_seed_profile_creates_user_and_enqueues_job(db, runner, orcid_stub):
     assert jobs[0].payload == {"user_id": str(user.id), "orcid": orcid}
 
 
+def test_seed_profile_grants_access_instead_of_leaving_the_user_pending(
+    db, runner, orcid_stub
+):
+    """T6.1: a seeded PI is pre-vetted, so the row must land ``access_status='allowed'``.
+
+    ``User.access_status`` defaults to ``"pending"`` in the model (migration 0010
+    dropped the server default), and the command used to omit the field entirely —
+    so every PI added the documented way (CLAUDE.md's `seed-profiles`) appeared in
+    /admin/access-requests as a phantom request nobody had made, and had to be
+    promoted afterwards by scripts/promote_active_agent_users.py.
+
+    The `--no-pipeline` variant is asserted too: the grant lives in the row-creation
+    branch, so it must not depend on the job being enqueued.
+    """
+    piped, quiet = _orcid("access-piped"), _orcid("access-quiet")
+    orcid_stub.set(piped, name="Vetted PI")
+    orcid_stub.set(quiet, name="Vetted Quiet PI")
+
+    _ok(runner.invoke(cli_app, ["seed-profile", "--orcid", piped]))
+    _ok(runner.invoke(cli_app, ["seed-profile", "--orcid", quiet, "--no-pipeline"]))
+
+    assert db(lambda s: _user_by_orcid(s, piped)).access_status == "allowed"
+    assert db(lambda s: _user_by_orcid(s, quiet)).access_status == "allowed"
+
+    # Control for the assertions above: "pending" really is what the model would
+    # have produced, so "allowed" is the command's doing and not the default.
+    assert User.__table__.c.access_status.default.arg == "pending"
+
+
+def test_seed_profiles_grants_access_to_every_user_in_the_file(
+    db, runner, orcid_stub, tmp_path
+):
+    """The bulk path is the documented one, so it gets its own assertion rather
+    than inheriting the single-ORCID test's coverage."""
+    a, b = _orcid("access-file-a"), _orcid("access-file-b")
+    orcid_stub.set(a, name="Bulk PI A")
+    orcid_stub.set(b, name="Bulk PI B")
+    listing = tmp_path / "orcids.txt"
+    listing.write_text(f"# Cohort 4\n{a}\n{b}\n")
+
+    _ok(runner.invoke(cli_app, ["seed-profiles", "--file", str(listing)]))
+
+    created = db(_mine)
+    assert {u.orcid for u in created} == {a, b}
+    assert [u.access_status for u in created] == ["allowed", "allowed"]
+
+
+def test_seed_profile_does_not_re_grant_access_to_an_existing_denied_user(
+    db, runner, orcid_stub
+):
+    """The grant is scoped to row creation, so re-seeding must not silently
+    resurrect somebody an admin deliberately denied.
+
+    Control in the same test: a fresh ORCID in the same run does get "allowed",
+    so this is not asserting that the command never grants anything.
+    """
+    denied = _orcid("access-denied")
+    fresh = _orcid("access-fresh")
+    orcid_stub.set(fresh, name="Fresh PI")
+
+    async def _seed(session):
+        await factories.make_user(
+            session, orcid=denied, name="Denied PI", access_status="denied"
+        )
+
+    db(_seed)
+
+    _ok(runner.invoke(cli_app, ["seed-profile", "--orcid", denied]))
+    assert db(lambda s: _user_by_orcid(s, denied)).access_status == "denied", (
+        "re-seeding must not overwrite an admin's denial"
+    )
+
+    _ok(runner.invoke(cli_app, ["seed-profile", "--orcid", fresh]))
+    assert db(lambda s: _user_by_orcid(s, fresh)).access_status == "allowed"
+
+
 def test_seed_profile_duplicate_orcid_does_not_create_a_second_user(db, runner, orcid_stub):
     """T6.1 control: re-seeding an ORCID is a no-op for `users`; a *new* ORCID is not."""
     dup = _orcid("dup")

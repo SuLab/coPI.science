@@ -1,15 +1,15 @@
 {
-  "_comment": "Cohort membership of record for the copi instance. Seeded by scripts/seed_cohorts.py. cohort_isolation_enabled is False: these memberships are RECORDED, not enforced. On the current 33-agent active roster the gate would block 0% of ordered pairs, because scripps-investigators contains every active agent. Isolation becomes meaningful (46.0% blocked) only if the 122-agent union is activated. Four members were added by hand; see 'source'. Agent IDs only -- this repo is public; see .gitignore:101.",
+  "_comment": "Cohort membership of record for the copi instance. Seeded by scripts/seed_cohorts.py. cohort_isolation_enabled is False: these memberships are RECORDED, not enforced. On the current 33-agent active roster the gate would block 0% of ordered pairs, because scripps-investigators contains every active agent. Isolation becomes meaningful (46.0% blocked) only if the 122-agent union is activated. Four members were added by hand; see 'source'. Agent IDs only -- this repo is public; see .gitignore:101. grantbot is a service bot with no AgentRegistry row and is deliberately a member of all three cohorts, so its funding posts pass every gated agent's allowed-sender set; the roster and percentage figures above are the 2026-08-18 measurement and predate it.",
   "cohorts": {
     "cabo-retreat": {
       "description": "Cabo retreat attendees, Apr 27 - May 7 2026",
       "source": "PILOT_LABS @ 0ef4741 (20 Scripps + 14 UCSF)",
       "members": [
         "badran", "briney", "capra", "craik", "echeverria", "forli", "fraser",
-        "grotjahn", "kern", "lairson", "larabell", "lasker", "lippi", "maillie",
-        "manglik", "millar", "miller", "minor", "mravic", "paulson", "pwu",
-        "roe", "sali", "santi", "seiple", "stroud", "su", "susa", "ward",
-        "wells", "williamson", "wilson", "wiseman", "zaro"
+        "grantbot", "grotjahn", "kern", "lairson", "larabell", "lasker",
+        "lippi", "maillie", "manglik", "millar", "miller", "minor", "mravic",
+        "paulson", "pwu", "roe", "sali", "santi", "seiple", "stroud", "su",
+        "susa", "ward", "wells", "williamson", "wilson", "wiseman", "zaro"
       ]
     },
     "schultz-reunion": {
@@ -19,14 +19,15 @@
         "achatterjee", "ai", "alfonta", "bollong", "brustad", "chang",
         "chatterjee", "chen", "cherry", "chin", "ckim", "cliu", "cochran",
         "corey", "cornish", "cropp", "diercks", "ding", "dyoung", "ellman",
-        "eppinger", "gan", "gildersleeve", "goto", "gray", "guo", "hogenesch",
-        "hsiehwilson", "johnsson", "jwang", "koh", "lairson", "larman", "lee",
-        "lemke", "liao", "lin", "liu", "luesch", "lyssiotis", "magliery",
-        "mcnamara", "mehl", "mehta", "meijler", "mills", "pei", "pezacki",
-        "rwang", "santoro", "scanlan", "schen", "schiller", "schultz", "shao",
-        "shokat", "su", "summerer", "ting", "ulrich", "vranken", "wang",
-        "watanabe", "wemmer", "winssinger", "wliu", "wurdak", "xchen", "xiao",
-        "xie", "xwu", "yang", "yliu", "young", "zhang", "zhou", "zuckermann"
+        "eppinger", "gan", "gildersleeve", "goto", "grantbot", "gray", "guo",
+        "hogenesch", "hsiehwilson", "johnsson", "jwang", "koh", "lairson",
+        "larman", "lee", "lemke", "liao", "lin", "liu", "luesch", "lyssiotis",
+        "magliery", "mcnamara", "mehl", "mehta", "meijler", "mills", "pei",
+        "pezacki", "rwang", "santoro", "scanlan", "schen", "schiller",
+        "schultz", "shao", "shokat", "su", "summerer", "ting", "ulrich",
+        "vranken", "wang", "watanabe", "wemmer", "winssinger", "wliu", "wurdak",
+        "xchen", "xiao", "xie", "xwu", "yang", "yliu", "young", "zhang", "zhou",
+        "zuckermann"
       ]
     },
     "scripps-investigators": {
@@ -34,9 +35,9 @@
       "source": "users.institution ~ 'scripps|calibr' frozen 2026-08-18, PLUS four Scripps PIs added by hand 2026-08-18 whose users.institution is empty (forli, grotjahn, seiple, ward) - see design doc 5.1",
       "members": [
         "alanjary", "badran", "bollong", "briney", "chatterjee", "cravatt",
-        "deniz", "diercks", "droujinine", "forli", "good", "grotjahn",
-        "hogenesch", "ken", "kern", "lairson", "lasker", "lippi", "lotz",
-        "macrae", "maillie", "mcnamara", "millar", "miller", "mravic",
+        "deniz", "diercks", "droujinine", "forli", "good", "grantbot",
+        "grotjahn", "hogenesch", "ken", "kern", "lairson", "lasker", "lippi",
+        "lotz", "macrae", "maillie", "mcnamara", "millar", "miller", "mravic",
         "paulson", "petrascheck", "pwu", "racki", "saez", "schultz", "seiple",
         "su", "ward", "williams", "williamson", "wilson", "wiseman", "wu",
         "yliu", "young"
