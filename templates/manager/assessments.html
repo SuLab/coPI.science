@@ -5,7 +5,12 @@
 <div class="flex items-center justify-between mb-2 gap-4">
     <h1 class="text-2xl font-bold text-gray-900">Opportunity Assessments</h1>
     {% if runs %}
-    <form method="GET" action="/manager/assessments" class="flex items-center gap-2">
+    {# The manager surface's own copy of the run/sort/lab form — same reason the
+       detail link below is duplicated rather than parameterised: the action
+       must be a literal /manager path. See the twin comment in
+       templates/admin/assessments.html for why one form carries all three
+       controls. #}
+    <form method="GET" action="/manager/assessments" class="flex flex-wrap items-center gap-2 justify-end">
         <label class="text-sm text-gray-500">Run:</label>
         <select name="run_id" onchange="this.form.submit()"
                 class="text-sm border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500">
@@ -16,6 +21,23 @@
             {% endfor %}
             <option value="all" {% if show_all_runs %}selected{% endif %}>All Runs</option>
         </select>
+        <label class="text-sm text-gray-500">Sort:</label>
+        <select name="sort" onchange="this.form.submit()"
+                class="assessment-sort-select text-sm border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500">
+            {% for value, label in sort_options %}
+            <option value="{{ value }}" {% if sort == value %}selected{% endif %}>{{ label }}</option>
+            {% endfor %}
+        </select>
+        {% if lab_options %}
+        <label class="text-sm text-gray-500">Lab:</label>
+        <select name="lab" onchange="this.form.submit()"
+                class="assessment-lab-select text-sm border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500">
+            <option value="">All labs</option>
+            {% for option in lab_options %}
+            <option value="{{ option }}" {% if lab_filter == option %}selected{% endif %}>{{ option }}</option>
+            {% endfor %}
+        </select>
+        {% endif %}
     </form>
     {% endif %}
 </div>

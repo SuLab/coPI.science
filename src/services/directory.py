@@ -16,7 +16,7 @@ import uuid
 from collections import Counter
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 from sqlalchemy import true as sa_true
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -43,6 +43,74 @@ from src.services.blackbird_rubric import BANDING, RUBRIC_VERSION, RUBRIC_WEIGHT
 # cap only ever drops the least-actionable tail, and the "N of TOTAL" note
 # below says so rather than hiding the truncation.
 ASSESSMENTS_LIMIT = 500
+
+# The sort orders the triage queue offers, as (query-param value, label). ONE
+# tuple, not a set of values here and a label map in each template: a sort the
+# UI offers but the validator rejects would silently render the default order
+# with the wrong option selected, and a sort the validator accepts but no
+# template lists is unreachable.
+#
+# `score` stays first because it is the default and this page is a triage
+# queue: the rows that need a decision are the ones that must be on top on
+# arrival.
+SORT_SCORE = "score"
+SORT_RECENT = "recent"
+SORT_RECOMMENDATION = "recommendation"
+SORT_LAB = "lab"
+ASSESSMENT_SORT_OPTIONS: tuple[tuple[str, str], ...] = (
+    (SORT_SCORE, "Score (triage)"),
+    (SORT_RECENT, "Most recent"),
+    (SORT_RECOMMENDATION, "Recommendation"),
+    (SORT_LAB, "Lab"),
+)
+ASSESSMENT_SORTS = tuple(value for value, _ in ASSESSMENT_SORT_OPTIONS)
+ASSESSMENT_SORT_DEFAULT = ASSESSMENT_SORTS[0]
+
+# Triage order for `sort=recommendation`: the model's own verdict, most
+# actionable first. NOT alphabetical and NOT band order — `route-to-incubation`
+# is the designed positive outcome for an incubation-stage population and sits
+# inside the <3.0 band, so ranking by band would bury it under declines.
+#
+# A recommendation this tuple does not name (a new verdict word, a typo from
+# the model) sorts WITH the NULLs, at the end: an unrecognized verdict is not
+# evidence of anything, and floating it to the top of a triage queue would be.
+RECOMMENDATION_TRIAGE_ORDER = ("advance", "conditional", "route-to-incubation", "pass")
+
+
+def _assessment_order_by(sort: str) -> list[Any]:
+    """The ORDER BY for one sort value. Ordering is done in SQL, not in Python:
+    the query is LIMITed, so a Python sort would order the arbitrary 500 rows
+    Postgres happened to return rather than the top 500 of the real order.
+
+    NULLS LAST needs saying on every score term: a bare ``.desc()`` puts NULLs
+    FIRST in Postgres, which would float every not-yet-scored assessment to the
+    top of a triage queue instead of to the bottom.
+
+    Branches on the SORT_* constants rather than on string literals: an option
+    renamed in ``ASSESSMENT_SORT_OPTIONS`` and not here would still validate,
+    still render as selected, and silently serve the default order.
+    """
+    score_desc = OpportunityAssessment.weighted_score.desc().nullslast()
+    created_desc = OpportunityAssessment.created_at.desc()
+    if sort == SORT_RECENT:
+        return [created_desc]
+    if sort == SORT_RECOMMENDATION:
+        # Compared case- and whitespace-insensitively: the value comes from the
+        # model's sidecar, and "Advance" must not fall through to the
+        # unrecognized bucket. NULL matches no WHEN and lands in `else_`.
+        rank = case(
+            {name: index for index, name in enumerate(RECOMMENDATION_TRIAGE_ORDER)},
+            value=func.lower(func.trim(OpportunityAssessment.recommendation)),
+            else_=len(RECOMMENDATION_TRIAGE_ORDER),
+        )
+        return [rank, score_desc, created_desc]
+    if sort == SORT_LAB:
+        return [
+            OpportunityAssessment.subject_agent_id.asc().nullslast(),
+            score_desc,
+            created_desc,
+        ]
+    return [score_desc, created_desc]
 
 
 async def list_pi_directory(
@@ -146,12 +214,27 @@ async def load_user_detail(db: AsyncSession, user_id: uuid.UUID) -> dict[str, An
     }
 
 
-async def list_assessments(db: AsyncSession, run_id: str | None) -> dict[str, Any]:
+async def list_assessments(
+    db: AsyncSession,
+    run_id: str | None,
+    *,
+    sort: str | None = None,
+    lab: str | None = None,
+) -> dict[str, Any]:
     """BlackbirdBot's screening verdicts against the Blackbird investment rubric.
 
     Ordered by weighted score descending (NULLs last), then most-recent-first,
     so the advance/conditional candidates are what a human sees on arrival —
-    this page is a triage queue, not a log.
+    this page is a triage queue, not a log. ``sort`` picks a different order
+    (see ``ASSESSMENT_SORT_OPTIONS``) and ``lab`` narrows to one
+    ``subject_agent_id``.
+
+    Both are UNVALIDATED user input off a query string, and both fall back to
+    the default SILENTLY rather than raising: a stale bookmark or a hand-typed
+    parameter must render the triage queue, not a 400 or an empty page. That
+    goes for a ``lab`` naming a subject with no rows in this run too — it is
+    dropped, so the reader gets the unfiltered queue instead of a blank table
+    with no explanation.
 
     Defaults to the CURRENT simulation run (the most recently started
     ``SimulationRun``) — ``?run_id=all`` or picking an older run from the
@@ -182,10 +265,34 @@ async def list_assessments(db: AsyncSession, run_id: str | None) -> dict[str, An
     if not selected_run_id and runs:
         selected_run_id = runs[0].id
 
+    sort_key = sort if sort in ASSESSMENT_SORTS else ASSESSMENT_SORT_DEFAULT
+
     query = select(OpportunityAssessment)
     if not show_all_runs and selected_run_id:
         query = query.where(OpportunityAssessment.simulation_run_id == selected_run_id)
 
+    # The lab dropdown's options, from the RUN scope — before the lab filter is
+    # applied and before the display LIMIT. Both matter: computing them after
+    # the filter would leave the select holding only the lab already chosen (no
+    # way back to any other one without editing the URL), and computing them
+    # from the fetched rows would silently drop every lab whose verdicts all
+    # scored below the 500-row cap.
+    lab_options_query = select(OpportunityAssessment.subject_agent_id).where(
+        OpportunityAssessment.subject_agent_id.is_not(None)
+    )
+    if not show_all_runs and selected_run_id:
+        lab_options_query = lab_options_query.where(
+            OpportunityAssessment.simulation_run_id == selected_run_id
+        )
+    lab_options = sorted(
+        {row[0] for row in await db.execute(lab_options_query.distinct())}
+    )
+    lab_filter = lab if lab in lab_options else None
+    if lab_filter:
+        query = query.where(OpportunityAssessment.subject_agent_id == lab_filter)
+
+    # Counts the current filter — run AND lab — so the "top N of TOTAL" note
+    # describes the table the reader is looking at.
     total_count = (
         await db.execute(select(func.count()).select_from(query.subquery()))
     ).scalar() or 0
@@ -201,6 +308,13 @@ async def list_assessments(db: AsyncSession, run_id: str | None) -> dict[str, An
     # correctly NOT counted here — we have no evidence of a gap — but it is
     # not evidence of a complete panel either, so this number is a floor on
     # the problem, not a measure of it.
+    #
+    # Deliberately NOT narrowed by `lab`, unlike total_count above. This and
+    # the dropped-verdict counts below are warnings, and the failure mode of a
+    # warning is under-warning: a reader who filtered to one lab must still be
+    # told that this run stored an unvetted verdict, because the fix is a run's
+    # problem, not a lab's. Over-reporting is visible and checkable; silently
+    # narrowing a warning to the current filter is neither.
     incomplete_query = select(func.count()).select_from(OpportunityAssessment).where(
         OpportunityAssessment.panel_incomplete.is_(True)
     )
@@ -210,13 +324,10 @@ async def list_assessments(db: AsyncSession, run_id: str | None) -> dict[str, An
         )
     incomplete_panel_count = (await db.execute(incomplete_query)).scalar_one()
 
-    # NULLS LAST needs saying: a bare .desc() puts NULLs FIRST in Postgres,
-    # which would float every not-yet-scored assessment to the top of a
-    # triage queue instead of to the bottom.
-    query = query.order_by(
-        OpportunityAssessment.weighted_score.desc().nullslast(),
-        OpportunityAssessment.created_at.desc(),
-    ).limit(ASSESSMENTS_LIMIT)
+    # Ordering (see _assessment_order_by, which documents the NULLS LAST
+    # discipline) is applied AFTER total_count: a count over an ordered
+    # subquery is the same number and more work.
+    query = query.order_by(*_assessment_order_by(sort_key)).limit(ASSESSMENTS_LIMIT)
 
     result = await db.execute(query)
     assessments = result.scalars().all()
@@ -299,6 +410,14 @@ async def list_assessments(db: AsyncSession, run_id: str | None) -> dict[str, An
         "runs_by_id": {r.id: r for r in runs},
         "selected_run_id": selected_run_id,
         "show_all_runs": show_all_runs,
+        # The controls' own state. `sort`/`lab_filter` are the values actually
+        # APPLIED (after the silent fallback above), not the raw parameters, so
+        # the select that renders from them can never show a filter the query
+        # did not use.
+        "sort": sort_key,
+        "sort_options": ASSESSMENT_SORT_OPTIONS,
+        "lab_filter": lab_filter,
+        "lab_options": lab_options,
         "total_count": total_count,
         "assessments_limit": ASSESSMENTS_LIMIT,
         "drop_counts": drop_counts,

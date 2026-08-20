@@ -40,10 +40,7 @@ from src.models import (
     User,
     WaitlistSignup,
 )
-from src.services.assessment_detail import (
-    build_assessment_detail,
-    panel_summary_by_thread,
-)
+from src.services.assessment_detail import build_assessment_detail
 from src.services.cohorts import (
     compute_gates,
     record_cohort_audit_event,
@@ -58,6 +55,7 @@ from src.services.directory import (
     load_user_detail,
 )
 from src.services.orcid import fetch_orcid_profile
+from src.services.thread_panel import panel_cards_by_thread
 from src.services.validators import csv_safe_cell
 
 logger = logging.getLogger(__name__)
@@ -353,11 +351,22 @@ async def admin_llm_calls(
     agent: str | None = None,
     phase: str | None = None,
     model: str | None = None,
+    channel: str | None = None,
     page: int = Query(1, ge=1),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_admin_user),
 ):
-    """View LLM call logs for a simulation run."""
+    """View LLM call logs for a simulation run.
+
+    ``channel`` is what groups ONE INTERVIEW's calls together: the hub's
+    ``thread_reply`` rows have always carried the channel, and consult rows
+    carry it as of the consult ``log_meta`` change, so filtering by channel is
+    the closest this page gets to "show me this conversation". Consult rows
+    written BEFORE that change have ``channel`` NULL and are therefore excluded
+    by any channel filter — they are still reachable with the filter cleared,
+    which is why the dropdown never offers a "(none)" option that would look
+    like a real grouping.
+    """
     # Verify run exists
     run_result = await db.execute(
         select(SimulationRun).where(SimulationRun.id == run_id)
@@ -374,6 +383,8 @@ async def admin_llm_calls(
         query = query.where(LlmCallLog.phase == phase)
     if model:
         query = query.where(LlmCallLog.model.contains(model))
+    if channel:
+        query = query.where(LlmCallLog.channel == channel)
 
     # Total count for pagination
     from sqlalchemy import func as sa_func
@@ -424,6 +435,19 @@ async def admin_llm_calls(
     )
     available_phases = sorted([r[0] for r in phases_result])
 
+    # Non-NULL only: `channel` is nullable and NULL on every non-channel call
+    # (memory, decide) as well as on pre-log_meta consults, so a NULL option
+    # would read as a grouping when it is really "unattributed".
+    channels_result = await db.execute(
+        select(LlmCallLog.channel)
+        .where(
+            LlmCallLog.simulation_run_id == run_id,
+            LlmCallLog.channel.is_not(None),
+        )
+        .distinct()
+    )
+    available_channels = sorted([r[0] for r in channels_result])
+
     # A consult's verdict signal — the one thing worth scanning a page of
     # consults for — was only readable by opening the row and reading the JSON.
     # Parsed server-side here, and ONLY for `consult_` rows: running
@@ -459,10 +483,12 @@ async def admin_llm_calls(
             model_breakdown=model_breakdown,
             available_agents=available_agents,
             available_phases=available_phases,
+            available_channels=available_channels,
             consult_signals=consult_signals,
             filter_agent=agent,
             filter_phase=phase,
             filter_model=model,
+            filter_channel=channel,
         ),
     )
 
@@ -511,9 +537,10 @@ async def admin_discussions(
                 status_filter=view["status_filter"],
                 agent_filter=view["agent_filter"],
                 # No run selected means no threads, so no panel to summarize —
-                # but the key must still be present: the shared threads body
-                # reads it on every render.
+                # but the keys must still be present: the shared threads body
+                # reads them on every render.
                 panel_by_thread={},
+                admin_view=True,
             ),
         )
 
@@ -559,10 +586,20 @@ async def admin_discussions(
             headers={"Content-Disposition": "attachment; filename=proposals.txt"},
         )
 
-    # Which domains the panel was asked about, per thread. Keyed on thread_id,
-    # which is the ROOT message's ts — the same value the threads list calls
-    # `message_ts` (src/services/directory.py::build_discussions_view).
-    panel_by_thread = await panel_summary_by_thread(db, view["selected_run_id"])
+    # What the panel was asked, and what it said, per thread. Keyed on
+    # thread_id, which is the ROOT message's ts — the same value the threads
+    # list calls `message_ts` (src/services/directory.py::build_discussions_view).
+    #
+    # ONE query serves both the compact per-row indicator and the cards in the
+    # expanded row: the cards carry domain and verdict_signal, which is all the
+    # indicator reads. It is scoped to the threads this render is actually
+    # showing, so the filters above narrow the consult read too.
+    panel_by_thread = await panel_cards_by_thread(
+        db,
+        view["selected_run_id"],
+        [t["message_ts"] for t in view["threads"]],
+        admin_view=True,
+    )
 
     return templates.TemplateResponse(
         request,
@@ -581,6 +618,11 @@ async def admin_discussions(
             status_filter=view["status_filter"],
             agent_filter=view["agent_filter"],
             panel_by_thread=panel_by_thread,
+            # Unlocks the verbatim specialist reply inside each panel card.
+            # /manager/discussions renders the same shared body with it False;
+            # the value is also withheld server-side (see
+            # src/services/thread_panel.py).
+            admin_view=True,
         ),
     )
 
@@ -665,15 +707,18 @@ async def admin_agents(
 async def admin_assessments(
     request: Request,
     run_id: str | None = None,
+    sort: str | None = None,
+    lab: str | None = None,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_admin_user),
 ):
     """BlackbirdBot's screening verdicts against the Blackbird investment rubric.
 
-    See ``src.services.directory.list_assessments`` for the run-scoping and
-    truncation semantics.
+    See ``src.services.directory.list_assessments`` for the run-scoping,
+    truncation and sort/filter semantics — including why an unrecognized
+    ``sort`` or ``lab`` renders the default view instead of an error.
     """
-    view = await list_assessments(db, run_id)
+    view = await list_assessments(db, run_id, sort=sort, lab=lab)
 
     return templates.TemplateResponse(
         request,
@@ -694,6 +739,16 @@ async def admin_assessments(
             runs_by_id=view["runs_by_id"],
             selected_run_id=view["selected_run_id"],
             show_all_runs=view["show_all_runs"],
+            # The sort/lab controls' own state. Forwarded explicitly because
+            # this handler allowlists every key it passes (unlike
+            # manager_assessments' `**view` splat) — a key added to
+            # list_assessments and not added here simply never reaches the
+            # page, and Jinja's Undefined would render the control as if no
+            # filter were applied.
+            sort=view["sort"],
+            sort_options=view["sort_options"],
+            lab_filter=view["lab_filter"],
+            lab_options=view["lab_options"],
             total_count=view["total_count"],
             assessments_limit=view["assessments_limit"],
             drop_counts=view["drop_counts"],

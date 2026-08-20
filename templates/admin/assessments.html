@@ -5,7 +5,11 @@
 <div class="flex items-center justify-between mb-2 gap-4">
     <h1 class="text-2xl font-bold text-gray-900">Opportunity Assessments</h1>
     {% if runs %}
-    <form method="GET" action="/admin/assessments" class="flex items-center gap-2">
+    {# ONE form for all three controls, so each select submits the others'
+       current values as ordinary form fields — that is what preserves run_id
+       when the sort changes, and the sort when the run changes, without a
+       single hidden input or a hand-assembled query string. #}
+    <form method="GET" action="/admin/assessments" class="flex flex-wrap items-center gap-2 justify-end">
         <label class="text-sm text-gray-500">Run:</label>
         <select name="run_id" onchange="this.form.submit()"
                 class="text-sm border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500">
@@ -16,6 +20,30 @@
             {% endfor %}
             <option value="all" {% if show_all_runs %}selected{% endif %}>All Runs</option>
         </select>
+        {# Values AND labels come from the service (ASSESSMENT_SORT_OPTIONS), not
+           from literals here: a sort this template offered but the service did
+           not accept would silently render the default order with the wrong
+           option showing as selected. #}
+        <label class="text-sm text-gray-500">Sort:</label>
+        <select name="sort" onchange="this.form.submit()"
+                class="assessment-sort-select text-sm border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500">
+            {% for value, label in sort_options %}
+            <option value="{{ value }}" {% if sort == value %}selected{% endif %}>{{ label }}</option>
+            {% endfor %}
+        </select>
+        {% if lab_options %}
+        {# The option text is the bare subject_agent_id, matching the table's
+           own Lab column — "WangBot" here against "wang" in the column it
+           filters would read as two different things. #}
+        <label class="text-sm text-gray-500">Lab:</label>
+        <select name="lab" onchange="this.form.submit()"
+                class="assessment-lab-select text-sm border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500">
+            <option value="">All labs</option>
+            {% for option in lab_options %}
+            <option value="{{ option }}" {% if lab_filter == option %}selected{% endif %}>{{ option }}</option>
+            {% endfor %}
+        </select>
+        {% endif %}
     </form>
     {% endif %}
 </div>

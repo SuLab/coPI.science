@@ -10,6 +10,30 @@
     <a href="/admin/assessments" class="text-sm text-gray-500 hover:text-gray-700">&larr; Opportunity Assessments</a>
     <h1 class="text-2xl font-bold text-gray-900 mt-1 mb-4">Assessment detail</h1>
 
+    {# Out to the raw calls behind this interview, prefiltered to the hub and
+       the channel the verdict came from — the same `agent`/`channel` parameters
+       admin_llm_calls takes. ADMIN ONLY: the manager wrapper deliberately has
+       no equivalent (the LLM drill-down is not a manager surface), which is why
+       this sits here and not in the shared body.
+
+       The literal path with a Jinja expression only in the {run_id} slot is
+       required, not stylistic: tests/unit/test_reachability.py's _link_credits
+       accepts a Jinja hole ONLY in a path-param position (the query string is
+       stripped before matching), so a templated base path would leave this
+       route uncredited. Same shape as the button on
+       templates/admin/activity_detail.html.
+
+       Channel-filtering finds the hub's thread_reply turns for this interview,
+       plus its consults from the runs after consults started carrying a
+       channel; an older consult row has channel NULL and needs the filter
+       cleared. #}
+    <div class="mb-4">
+        <a href="/admin/activity/{{ assessment.simulation_run_id }}/llm-calls?agent={{ assessment.agent_id | urlencode }}&amp;channel={{ assessment.channel_name | urlencode }}"
+           class="inline-flex items-center px-3 py-1.5 bg-indigo-600 text-white text-xs font-medium rounded-lg hover:bg-indigo-700">
+            LLM calls for this interview
+        </a>
+    </div>
+
     {% include "admin/_assessment_detail_body.html" %}
 
     {# The verdict exactly as the model emitted it, kept so a schema change

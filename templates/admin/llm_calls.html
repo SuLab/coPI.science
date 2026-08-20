@@ -69,8 +69,21 @@
                 <option value="sonnet" {% if filter_model == 'sonnet' %}selected{% endif %}>Sonnet</option>
             </select>
         </div>
+        {# The interview filter. A channel is the closest thing this table has to
+           a conversation id, so this is what groups one interview's calls —
+           the hub's thread_reply turns and (going forward) the consults it made
+           inside them. Only non-NULL channels are offered; see admin_llm_calls. #}
+        <div>
+            <label class="block text-xs font-medium text-gray-500 mb-1">Interview (channel)</label>
+            <select name="channel" class="llm-channel-select text-sm border-gray-300 rounded-md">
+                <option value="">All</option>
+                {% for c in available_channels %}
+                <option value="{{ c }}" {% if filter_channel == c %}selected{% endif %}>#{{ c }}</option>
+                {% endfor %}
+            </select>
+        </div>
         <button type="submit" class="px-4 py-2 bg-gray-800 text-white text-sm rounded-md hover:bg-gray-700">Filter</button>
-        {% if filter_agent or filter_phase or filter_model %}
+        {% if filter_agent or filter_phase or filter_model or filter_channel %}
         <a href="/admin/activity/{{ run.id }}/llm-calls" class="text-sm text-gray-500 hover:text-gray-700 self-center">Clear</a>
         {% endif %}
     </form>
@@ -154,12 +167,12 @@
     {% if total_pages > 1 %}
     <div class="flex justify-center gap-2 mt-6">
         {% if page > 1 %}
-        <a href="?page={{ page - 1 }}{% if filter_agent %}&agent={{ filter_agent }}{% endif %}{% if filter_phase %}&phase={{ filter_phase }}{% endif %}{% if filter_model %}&model={{ filter_model }}{% endif %}"
+        <a href="?page={{ page - 1 }}{% if filter_agent %}&agent={{ filter_agent }}{% endif %}{% if filter_phase %}&phase={{ filter_phase }}{% endif %}{% if filter_model %}&model={{ filter_model }}{% endif %}{% if filter_channel %}&channel={{ filter_channel | urlencode }}{% endif %}"
            class="px-3 py-1 text-sm border rounded hover:bg-gray-100">&larr; Prev</a>
         {% endif %}
         <span class="px-3 py-1 text-sm text-gray-500">Page {{ page }} of {{ total_pages }}</span>
         {% if page < total_pages %}
-        <a href="?page={{ page + 1 }}{% if filter_agent %}&agent={{ filter_agent }}{% endif %}{% if filter_phase %}&phase={{ filter_phase }}{% endif %}{% if filter_model %}&model={{ filter_model }}{% endif %}"
+        <a href="?page={{ page + 1 }}{% if filter_agent %}&agent={{ filter_agent }}{% endif %}{% if filter_phase %}&phase={{ filter_phase }}{% endif %}{% if filter_model %}&model={{ filter_model }}{% endif %}{% if filter_channel %}&channel={{ filter_channel | urlencode }}{% endif %}"
            class="px-3 py-1 text-sm border rounded hover:bg-gray-100">Next &rarr;</a>
         {% endif %}
     </div>

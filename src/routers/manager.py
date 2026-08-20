@@ -26,10 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.database import get_db
 from src.dependencies import get_staff_user
 from src.models import USER_ROLE_PI, User
-from src.services.assessment_detail import (
-    build_assessment_detail,
-    panel_summary_by_thread,
-)
+from src.services.assessment_detail import build_assessment_detail
 from src.services.directory import (
     build_discussions_view,
     build_run_detail,
@@ -38,6 +35,7 @@ from src.services.directory import (
     list_runs_overview,
     load_user_detail,
 )
+from src.services.thread_panel import panel_cards_by_thread
 
 logger = logging.getLogger(__name__)
 router = APIRouter(dependencies=[Depends(get_staff_user)])
@@ -149,12 +147,15 @@ async def manager_pi_detail(
 async def manager_assessments(
     request: Request,
     run_id: str | None = None,
+    sort: str | None = None,
+    lab: str | None = None,
     db: AsyncSession = _DB,
     current_user: User = _STAFF,
 ):
-    """BlackbirdBot's screening verdicts. Same data and same run-scoping as
-    /admin/assessments; read-only, and it has no export path."""
-    view = await list_assessments(db, run_id)
+    """BlackbirdBot's screening verdicts. Same data, same run-scoping and the
+    same sort/lab controls as /admin/assessments; read-only, and it has no
+    export path."""
+    view = await list_assessments(db, run_id, sort=sort, lab=lab)
     return templates.TemplateResponse(
         request,
         "manager/assessments.html",
@@ -214,10 +215,18 @@ async def manager_discussions(
         status_filter=status_filter,
         agent_filter=agent_filter,
     )
-    # Which domains the panel was asked about, per thread — the same summary
-    # /admin/discussions shows. A signal and a domain are verdict substance,
-    # not LLM drill-down, so it is not admin-only.
-    panel_by_thread = await panel_summary_by_thread(db, view["selected_run_id"])
+    # What the panel was asked, and what it said, per thread — the same cards
+    # /admin/discussions shows, minus the verbatim reply. A domain, a signal, a
+    # confidence, the concerns and the questions_to_ask are verdict substance,
+    # not LLM drill-down, so they are not admin-only (plan decision 2); the
+    # specialist's raw text is, and ``admin_view=False`` is what withholds it —
+    # in the service, so it never reaches the page source at all.
+    panel_by_thread = await panel_cards_by_thread(
+        db,
+        view["selected_run_id"],
+        [t["message_ts"] for t in view["threads"]],
+        admin_view=False,
+    )
     return templates.TemplateResponse(
         request,
         "manager/discussions.html",
@@ -226,6 +235,7 @@ async def manager_discussions(
             current_user,
             active_manager="discussions",
             panel_by_thread=panel_by_thread,
+            admin_view=False,
             **view,
         ),
     )
