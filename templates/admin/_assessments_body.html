@@ -72,11 +72,24 @@
         <div class="text-sm text-orange-900">
             <span class="font-semibold">
                 {{ incomplete_panel_count }} verdict{{ '' if incomplete_panel_count == 1 else 's' }}
-                stored with an incomplete specialist panel.
+                stored with an incomplete specialist panel{% if not show_all_runs %} in this run{% endif %}.
             </span>
             The required domains were never consulted during the interview, so
             the verdict is recorded but not fully vetted. Treat the score as
             provisional.
+            {# Scope, stated. This count follows the RUN, never the lab filter:
+               under-warning is the dangerous direction, and an unvetted verdict
+               is the run's problem to fix, not the filtered lab's — so with a
+               lab selected the number can legitimately exceed what the table
+               below shows (src/services/directory.py::list_assessments). #}
+            {% if lab_filter %}
+            <span class="block mt-1 text-xs">
+                Counted across every lab in this run, not just
+                <span class="font-mono">{{ lab_filter }}</span> — a warning is not
+                narrowed by a display filter, so the row it refers to may not be
+                in the table below.
+            </span>
+            {% endif %}
         </div>
     </div>
 </div>

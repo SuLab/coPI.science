@@ -89,11 +89,20 @@ def _assessment_order_by(sort: str) -> list[Any]:
     Branches on the SORT_* constants rather than on string literals: an option
     renamed in ``ASSESSMENT_SORT_OPTIONS`` and not here would still validate,
     still render as selected, and silently serve the default order.
+
+    EVERY order ends in a unique column. ``created_at`` is not one: Postgres'
+    ``now()`` is transaction-scoped, so verdicts written in a single transaction
+    share it to the microsecond, and a run's rows really can tie. Under a LIMIT,
+    an order that is not total lets the database pick which of the tied rows
+    falls off the end — so the same page can gain and lose a row between two
+    renders of identical data, and ``sort=recent`` (whose only term used to be
+    ``created_at``) could reorder its whole first page on a refresh.
     """
     score_desc = OpportunityAssessment.weighted_score.desc().nullslast()
     created_desc = OpportunityAssessment.created_at.desc()
+    id_desc = OpportunityAssessment.id.desc()
     if sort == SORT_RECENT:
-        return [created_desc]
+        return [created_desc, id_desc]
     if sort == SORT_RECOMMENDATION:
         # Compared case- and whitespace-insensitively: the value comes from the
         # model's sidecar, and "Advance" must not fall through to the
@@ -103,14 +112,15 @@ def _assessment_order_by(sort: str) -> list[Any]:
             value=func.lower(func.trim(OpportunityAssessment.recommendation)),
             else_=len(RECOMMENDATION_TRIAGE_ORDER),
         )
-        return [rank, score_desc, created_desc]
+        return [rank, score_desc, created_desc, id_desc]
     if sort == SORT_LAB:
         return [
             OpportunityAssessment.subject_agent_id.asc().nullslast(),
             score_desc,
             created_desc,
+            id_desc,
         ]
-    return [score_desc, created_desc]
+    return [score_desc, created_desc, id_desc]
 
 
 async def list_pi_directory(

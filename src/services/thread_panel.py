@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Iterable
-from typing import Any
+from typing import Any, NamedTuple
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -51,6 +51,22 @@ QUESTION_CHARS = 400
 ITEM_CHARS = 240
 ITEMS_MAX = 6
 RAW_OPINION_CHARS = 4000
+
+
+class PanelRead(NamedTuple):
+    """One page's panel read: the cards, and whether the row cap bit.
+
+    ``truncated`` exists because this cap is the one bound here whose effect a
+    reader CANNOT see in what is rendered. A clipped opinion says "…"; a missing
+    card says nothing at all, and the per-row indicator now feeds from this same
+    query — so a silent cap would turn "no consults recorded for this thread"
+    and "we stopped reading" into the same page. The callers pass it to the
+    template, which says so.
+    """
+
+    by_thread: dict[str, list[dict[str, Any]]]
+    truncated: bool
+    limit: int
 
 
 def _clip(text: object, limit: int) -> str:
@@ -76,8 +92,8 @@ async def panel_cards_by_thread(
     thread_ids: Iterable[str | None],
     *,
     admin_view: bool,
-) -> dict[str, list[dict[str, Any]]]:
-    """``{thread_id: [card, ...]}`` for the threads on one discussions page.
+) -> PanelRead:
+    """The panel cards for the threads on one discussions page, keyed by thread.
 
     ``run_id`` may be a UUID (one run), the string ``"all"`` (every run), or
     None (no run selected — nothing to show). ``thread_ids`` are the page's
@@ -86,21 +102,31 @@ async def panel_cards_by_thread(
     carries (``src/agent/simulation.py`` passes the root ts), and getting that
     join wrong renders nothing at all rather than failing loudly.
 
-    Cards are ordered by ``created_at`` within a thread, so a domain consulted
-    twice reads in the order it was asked and both entries are kept — "asked
-    twice" is itself a fact about the interview. Each card carries ``domain``
-    and ``verdict_signal``, which is all the compact per-row panel indicator in
-    ``templates/admin/_discussions_threads.html`` needs, so the indicator and
-    the expanded cards are one query and can never disagree.
+    **The cap keeps the NEWEST consults.** The query orders ``created_at``
+    DESC and the per-thread lists are reversed afterwards, so display order is
+    still oldest-first — a domain consulted twice reads in the order it was
+    asked, and both entries are kept, because "asked twice" is itself a fact
+    about the interview. Reading ASC and capping would have dropped the newest
+    consults on an overflowing page, which is precisely backwards: the
+    discussions table is sorted with the newest threads at the bottom but it is
+    the LIVE interviews whose panel a reader is looking for, and those rows
+    would have lost both their cards and — since the compact per-row indicator
+    now feeds from this same query — their indicator, reading as "no specialist
+    was ever consulted here". Overflow is also reported rather than swallowed;
+    see ``PanelRead.truncated``.
+
+    Each card carries ``domain`` and ``verdict_signal``, which is all the
+    indicator needs, so the indicator and the expanded cards are one query and
+    can never disagree.
 
     ``raw_opinion`` is present only when ``admin_view`` (Ruling R4) — it is not
     even SELECTed otherwise.
     """
     if run_id is None:
-        return {}
+        return PanelRead({}, False, CONSULT_ROW_LIMIT)
     keys = {key for key in thread_ids if key}
     if not keys:
-        return {}
+        return PanelRead({}, False, CONSULT_ROW_LIMIT)
 
     columns = [
         SpecialistConsult.thread_id,
@@ -118,11 +144,24 @@ async def panel_cards_by_thread(
     query = select(*columns).where(SpecialistConsult.thread_id.in_(keys))
     if run_id != "all":
         query = query.where(SpecialistConsult.simulation_run_id == run_id)
-    # Oldest first, then capped: a truncated read shows the beginning of the
-    # panel's work rather than an arbitrary slice of it.
-    rows = await db.execute(
-        query.order_by(SpecialistConsult.created_at).limit(CONSULT_ROW_LIMIT)
+    # NEWEST first, so the cap sheds the oldest consults (see the docstring).
+    # `id` breaks ties: `created_at` is not unique — consults written inside one
+    # transaction share Postgres' transaction-scoped now() — and without a
+    # unique final term the rows either side of the cap boundary are chosen
+    # arbitrarily, so the same page could gain and lose a card between renders.
+    #
+    # LIMIT is `+ 1`: fetching one row past the cap is how overflow is DETECTED.
+    # `len(rows) == limit` would also fire on an exact fit and cry wolf.
+    limit = CONSULT_ROW_LIMIT
+    rows = list(
+        await db.execute(
+            query.order_by(
+                SpecialistConsult.created_at.desc(), SpecialistConsult.id.desc()
+            ).limit(limit + 1)
+        )
     )
+    truncated = len(rows) > limit
+    rows = rows[:limit]
 
     cards: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
@@ -140,4 +179,10 @@ async def panel_cards_by_thread(
                 raw_opinion and len(raw_opinion) > RAW_OPINION_CHARS
             ),
         })
-    return cards
+    # Back to chronological within each thread. The rows arrived newest-first
+    # (that is what makes the cap shed the OLDEST consults), and each thread's
+    # sublist inherits that order, so one reverse per thread restores the
+    # asked-in-this-order reading the cards are meant to have.
+    for thread_cards in cards.values():
+        thread_cards.reverse()
+    return PanelRead(cards, truncated, limit)

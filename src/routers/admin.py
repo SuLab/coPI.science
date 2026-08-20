@@ -538,8 +538,12 @@ async def admin_discussions(
                 agent_filter=view["agent_filter"],
                 # No run selected means no threads, so no panel to summarize —
                 # but the keys must still be present: the shared threads body
-                # reads them on every render.
+                # reads them on every render. Nothing was read, so nothing was
+                # capped; `panel_row_limit` is only ever printed inside the
+                # truncation notice, which this cannot reach.
                 panel_by_thread={},
+                panel_truncated=False,
+                panel_row_limit=0,
                 admin_view=True,
             ),
         )
@@ -594,7 +598,7 @@ async def admin_discussions(
     # expanded row: the cards carry domain and verdict_signal, which is all the
     # indicator reads. It is scoped to the threads this render is actually
     # showing, so the filters above narrow the consult read too.
-    panel_by_thread = await panel_cards_by_thread(
+    panel = await panel_cards_by_thread(
         db,
         view["selected_run_id"],
         [t["message_ts"] for t in view["threads"]],
@@ -617,7 +621,10 @@ async def admin_discussions(
             channel_filter=view["channel_filter"],
             status_filter=view["status_filter"],
             agent_filter=view["agent_filter"],
-            panel_by_thread=panel_by_thread,
+            panel_by_thread=panel.by_thread,
+            # A capped panel read must not look like an unconsulted page.
+            panel_truncated=panel.truncated,
+            panel_row_limit=panel.limit,
             # Unlocks the verbatim specialist reply inside each panel card.
             # /manager/discussions renders the same shared body with it False;
             # the value is also withheld server-side (see

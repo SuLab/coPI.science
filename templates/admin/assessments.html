@@ -68,9 +68,16 @@
         <code>--fresh</code>-wiped) runs still exist and are never deleted;
         pick a run above or <a class="underline" href="/admin/assessments?run_id=all">view all runs</a>.
     {% endif %}
+    {# Worded for whichever sort is active. It used to say "by score; the rest
+       are lower-scoring", which became false the moment `sort` existed: under
+       sort=recent the dropped rows are the OLDEST, under sort=lab they are the
+       labs latest in the alphabet. The cap applies to the current order, so the
+       sentence describes the current order. #}
     {% if total_count > assessments_limit %}
         Displaying the top {{ assessments_limit }} of {{ total_count }} matching
-        assessments by score; the rest are lower-scoring, not hidden by run.
+        assessments in the current sort order; the rest sit further down that
+        order — not excluded by the run or lab filter. Re-sort, or narrow by
+        lab, to reach them.
     {% endif %}
 </p>
 {# The per-row link to the detail page. It lives HERE, in the wrapper, and not

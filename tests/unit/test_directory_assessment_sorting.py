@@ -150,6 +150,38 @@ async def test_recommendation_ranking_ignores_case_and_padding(db_session):
 
 
 @pytest.mark.asyncio
+async def test_recent_orders_deterministically_when_timestamps_tie(db_session):
+    """`created_at` is NOT unique — Postgres' now() is transaction-scoped, so a
+    batch of verdicts written together really does share one timestamp. With
+    `created_at DESC` as the only term, the database picks the order among the
+    tied rows, so under the LIMIT a page can gain and lose a row between two
+    renders of identical data. The tiebreak is `id DESC`; Postgres compares a
+    uuid as 16 big-endian bytes and `uuid.UUID.__lt__` compares `.int`, so the
+    expected order can be computed here rather than hardcoded.
+    """
+    run = await factories.make_simulation_run(db_session)
+    tied = datetime(2026, 8, 20, 12, 0, tzinfo=UTC)
+    rows = [
+        OpportunityAssessment(
+            simulation_run_id=run.id, agent_id="blackbird",
+            subject_agent_id="wang", channel_name="general",
+            company_or_project=f"Tie {n}", created_at=tied,
+        )
+        for n in range(5)
+    ]
+    for row in rows:
+        db_session.add(row)
+    await db_session.commit()
+
+    view = await list_assessments(db_session, str(run.id), sort="recent")
+
+    expected = [
+        row.company_or_project for row in sorted(rows, key=lambda r: r.id, reverse=True)
+    ]
+    assert _projects(view) == expected
+
+
+@pytest.mark.asyncio
 async def test_an_unknown_sort_falls_back_to_the_default_silently(db_session):
     run = await _seed(db_session)
 

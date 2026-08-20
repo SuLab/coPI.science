@@ -16,6 +16,7 @@ render — so the marker's absence below is not merely a template guard.
 from __future__ import annotations
 
 import time
+from datetime import UTC, datetime
 
 import pytest
 
@@ -44,6 +45,15 @@ QUESTION_MARKER = "PANEL-ASKED-ABOUT-COUNTER-SCREEN"
 CONCERN_MARKER = "PANEL-CONCERN-NO-ISOGENIC-CONTROL"
 ASK_MARKER = "PANEL-ASK-WHICH-CONTROL"
 RAW_OPINION_MARKER = "PANEL-RAW-OPINION-VERBATIM"
+LATER_QUESTION = "Is there a path to a development candidate?"
+
+# `created_at` is set explicitly on both consults. Postgres' `now()` is
+# transaction-scoped, so rows written in one test transaction share it to the
+# microsecond — and then "oldest first" and "newest first" are the same order,
+# which is exactly what the cap and the display-order assertions below have to
+# tell apart.
+CONSULT_EARLIER = datetime(2026, 8, 20, 11, 0, tzinfo=UTC)
+CONSULT_LATER = datetime(2026, 8, 20, 11, 30, tzinfo=UTC)
 
 
 @pytest.fixture
@@ -90,6 +100,7 @@ async def _thread_with_a_panel_and_no_decision(db_session):
             concerns=[CONCERN_MARKER],
             questions_to_ask=[ASK_MARKER],
             raw_opinion=RAW_OPINION_MARKER,
+            created_at=CONSULT_EARLIER,
         )
     )
     db_session.add(
@@ -100,10 +111,11 @@ async def _thread_with_a_panel_and_no_decision(db_session):
             thread_id=root_ts,
             channel_name=CHANNEL,
             domain="chemistry",
-            question="Is there a path to a development candidate?",
+            question=LATER_QUESTION,
             verdict_signal="clear",
             confidence="moderate",
             raw_opinion="a second opinion",
+            created_at=CONSULT_LATER,
         )
     )
     await db_session.flush()
@@ -135,6 +147,12 @@ async def test_admin_discussions_shows_the_panel_for_a_thread_with_no_decision(
     # to render with no detail <tr> and no cursor.
     assert 'id="detail-1"' in html
     assert "cursor-pointer" in html
+    # Chronological within the thread, even though the query reads newest-first
+    # so that the row cap sheds the OLDEST consults: "asked in this order" is
+    # the whole reading of a two-card panel.
+    assert html.index(QUESTION_MARKER) < html.index(LATER_QUESTION)
+    # Nothing was capped, so no notice (control for the cap tests below).
+    assert 'class="panel-truncated' not in html
 
 
 async def test_admin_discussions_shows_the_verbatim_specialist_reply(
@@ -282,6 +300,88 @@ async def test_the_panel_read_is_scoped_to_the_threads_on_the_page(
     assert QUESTION_MARKER in html
     assert "EXCLUDED-THREAD-QUESTION" not in html
     assert "EXCLUDED-THREAD-RAW-OPINION" not in html
+
+
+async def test_the_row_cap_keeps_the_newest_consults_and_says_so(
+    client, db_session, admin, monkeypatch
+):
+    """Two properties of the one bound on this page whose effect is invisible.
+
+    Reading oldest-first under the cap dropped the NEWEST consults, which is
+    backwards: the live interviews are the ones a reader is looking for, and
+    since the compact per-row indicator feeds from this same query those rows
+    lost their indicator too — rendering as "no specialist was ever consulted
+    here", a false negative with nothing on the page to suggest it.
+
+    So: the cap sheds the oldest, and hitting it is stated. The notice matters
+    precisely because the cards it silences cannot be missed any other way.
+    """
+    from src.services import thread_panel
+
+    monkeypatch.setattr(thread_panel, "CONSULT_ROW_LIMIT", 1)
+    run, _ = await _thread_with_a_panel_and_no_decision(db_session)
+
+    html = (
+        await client.get(
+            f"/admin/discussions?run_id={run.id}", headers=auth_headers(admin.id)
+        )
+    ).text
+
+    # The newest consult is the one that survives the cap.
+    assert LATER_QUESTION in html
+    assert QUESTION_MARKER not in html
+    assert html.count('class="panel-card') == 1
+
+    # ...and the page says it stopped reading, rather than looking complete.
+    assert 'class="panel-truncated' in html
+    assert "Specialist panel read was capped" in html
+    # The cap's actual value, singular-correct. (Not "at 1 …": the template
+    # wraps the line between "at" and the number.)
+    assert "1 consult for this page" in html
+
+
+async def test_an_exact_fit_is_not_reported_as_truncated(
+    client, db_session, admin, monkeypatch
+):
+    """A cap that cries wolf gets ignored. Overflow is detected by fetching one
+    row PAST the cap, so a page whose consults exactly fill it is not flagged —
+    `len(rows) == limit` would have been."""
+    from src.services import thread_panel
+
+    monkeypatch.setattr(thread_panel, "CONSULT_ROW_LIMIT", 2)
+    run, _ = await _thread_with_a_panel_and_no_decision(db_session)
+
+    html = (
+        await client.get(
+            f"/admin/discussions?run_id={run.id}", headers=auth_headers(admin.id)
+        )
+    ).text
+
+    assert html.count('class="panel-card') == 2
+    assert 'class="panel-truncated' not in html
+    assert "was capped" not in html
+
+
+async def test_the_truncation_notice_reaches_the_manager_page_too(
+    client, db_session, manager, monkeypatch
+):
+    """The manager render is the same shared body and the same capped read, so
+    a manager must not be the one reader who cannot tell a short panel from a
+    truncated one."""
+    from src.services import thread_panel
+
+    monkeypatch.setattr(thread_panel, "CONSULT_ROW_LIMIT", 1)
+    run, _ = await _thread_with_a_panel_and_no_decision(db_session)
+
+    html = (
+        await client.get(
+            f"/manager/discussions?run_id={run.id}", headers=auth_headers(manager.id)
+        )
+    ).text
+
+    assert 'class="panel-truncated' in html
+    assert LATER_QUESTION in html
+    assert RAW_OPINION_MARKER not in html
 
 
 async def test_a_pi_still_cannot_reach_either_discussions_page(client, db_session):

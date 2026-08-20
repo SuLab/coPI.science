@@ -347,43 +347,16 @@ def correlate_turns_to_messages(
 
 
 # ---------------------------------------------------------------------------
-# Panel summaries (also used by the discussions pages)
-# ---------------------------------------------------------------------------
-
-
-async def panel_summary_by_thread(
-    db: AsyncSession, run_id: uuid.UUID | str | None
-) -> dict[str, list[dict[str, str]]]:
-    """``{thread_id: [{"domain", "verdict_signal"}, ...]}`` for one run.
-
-    ``run_id`` may be a UUID (one run), the string ``"all"`` (every run), or
-    None (no run selected — nothing to show). Rows with a NULL ``thread_id``
-    cannot be attributed to a thread and are skipped.
-
-    Ordered by ``created_at`` so a domain consulted twice reads in the order it
-    was asked; both entries are kept, because "asked twice" is itself a fact
-    about the interview.
-    """
-    if run_id is None:
-        return {}
-    query = select(
-        SpecialistConsult.thread_id,
-        SpecialistConsult.domain,
-        SpecialistConsult.verdict_signal,
-    ).where(SpecialistConsult.thread_id.is_not(None))
-    if run_id != "all":
-        query = query.where(SpecialistConsult.simulation_run_id == run_id)
-    rows = await db.execute(query.order_by(SpecialistConsult.created_at))
-    summary: dict[str, list[dict[str, str]]] = {}
-    for thread_id, domain, signal in rows:
-        summary.setdefault(thread_id, []).append(
-            {"domain": domain, "verdict_signal": signal}
-        )
-    return summary
-
-
-# ---------------------------------------------------------------------------
 # The detail view
+#
+# `panel_summary_by_thread` used to live above this line and served the
+# discussions pages' per-thread indicator. It is gone: both callers now use
+# `src/services/thread_panel.py::panel_cards_by_thread`, which answers the same
+# question with the full cards those pages expanded to need, keyed on the
+# threads a render is actually showing rather than on the whole run — so the
+# indicator and the cards are one query and cannot disagree. This module's own
+# `panel_summary` (below) is built from the assessment's consults, and never
+# called that function.
 # ---------------------------------------------------------------------------
 
 

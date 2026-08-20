@@ -15,6 +15,21 @@
    templated base path would leave the manager routes unreferenced and fail
    the gate. Verify with a grep for absolute admin/manager paths against this
    file — it must print nothing. #}
+{# The one bound on this page whose effect is otherwise INVISIBLE. A clipped
+   opinion still shows a "…"; a card the row cap dropped shows nothing, and the
+   compact per-row indicator reads from the same query — so without this notice
+   "no specialist was consulted about this thread" and "we stopped reading" are
+   the same page. The cap keeps the newest consults, so what is missing is the
+   oldest (src/services/thread_panel.py). #}
+{% if panel_truncated %}
+<div class="panel-truncated rounded-lg border border-amber-300 bg-amber-50 p-3 mb-3 text-xs text-amber-900">
+    <span class="font-semibold">Specialist panel read was capped</span> at
+    {{ panel_row_limit }} consult{{ '' if panel_row_limit == 1 else 's' }} for this page, so the OLDEST threads below may
+    show no panel even though one was convened. Narrow the filters (channel,
+    status or agent) to bring their consults back inside the cap.
+</div>
+{% endif %}
+
 <!-- Threads table -->
 <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
     <table class="min-w-full divide-y divide-gray-200">
@@ -176,8 +191,14 @@
                             <details class="mt-2">
                                 <summary class="cursor-pointer text-xs text-gray-500">Specialist's reply, verbatim</summary>
                                 <pre class="raw-opinion mt-1 text-xs bg-gray-50 p-2 rounded overflow-x-auto max-h-64 overflow-y-auto whitespace-pre-wrap">{{ c.raw_opinion }}</pre>
+                                {# Says where the full text IS, not where to go
+                                   read it: most threads with a panel never
+                                   produced an assessment (that is why the panel
+                                   is shown here at all), so "see the assessment
+                                   detail page" pointed at a page that does not
+                                   exist for them. #}
                                 {% if c.raw_opinion_truncated %}
-                                <p class="text-xs text-gray-400">Clipped for this page — the full reply is on the assessment detail page.</p>
+                                <p class="text-xs text-gray-400">Clipped for display here; the reply is stored in full on the consult record (<span class="font-mono">specialist_consults.raw_opinion</span>).</p>
                                 {% endif %}
                             </details>
                             {% endif %}

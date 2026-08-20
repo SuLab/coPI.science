@@ -221,7 +221,7 @@ async def manager_discussions(
     # not LLM drill-down, so they are not admin-only (plan decision 2); the
     # specialist's raw text is, and ``admin_view=False`` is what withholds it —
     # in the service, so it never reaches the page source at all.
-    panel_by_thread = await panel_cards_by_thread(
+    panel = await panel_cards_by_thread(
         db,
         view["selected_run_id"],
         [t["message_ts"] for t in view["threads"]],
@@ -234,7 +234,10 @@ async def manager_discussions(
             request,
             current_user,
             active_manager="discussions",
-            panel_by_thread=panel_by_thread,
+            panel_by_thread=panel.by_thread,
+            # A capped panel read must not look like an unconsulted page.
+            panel_truncated=panel.truncated,
+            panel_row_limit=panel.limit,
             admin_view=False,
             **view,
         ),
