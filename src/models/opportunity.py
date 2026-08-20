@@ -88,6 +88,13 @@ class OpportunityAssessment(Base):
     # unverified case — that conflation is exactly what [] exists to end.
     missing_domains: Mapped[list | None] = mapped_column(JSONB, nullable=True)
 
+    # Which rubric document scored this row (prompts/rubric/blackbird-rubric.toml
+    # [meta].version, plus a short content hash of the file bytes). NULL means the
+    # row predates stamping. This is what keeps pre- and post-calibration verdicts
+    # comparable once the rubric starts being edited.
+    rubric_version: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    rubric_content_hash: Mapped[str | None] = mapped_column(String(20), nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
