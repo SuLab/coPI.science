@@ -32,7 +32,13 @@ from src.models import (
     ThreadDecision,
     User,
 )
-from src.services.blackbird_rubric import BANDING, RUBRIC_VERSION, RUBRIC_WEIGHTS
+from src.services.blackbird_rubric import (
+    BANDING,
+    BANDING_INCUBATION,
+    RUBRIC_VERSION,
+    RUBRIC_WEIGHTS,
+    RUBRIC_WEIGHTS_INCUBATION,
+)
 
 # Hard cap on rows fetched for one render of the triage queue (B1). Scoped to
 # the current run this is rarely close to binding — a single run's worth of
@@ -366,6 +372,12 @@ async def list_assessments(
         dimension_stats.append({
             "dimension": dimension,
             "weight": weight,
+            # The same dimension's weight on the OTHER scale. Both are shown
+            # because the population is incubation-stage but the table's mean
+            # is pooled over whatever stages the filter caught, so "is this
+            # dimension worth 1% or 8% of the rows I am looking at" is not
+            # answerable from one column.
+            "weight_incubation": RUBRIC_WEIGHTS_INCUBATION.get(dimension),
             "specialist": specialist_for.get(dimension),
             "n": len(values),
             "mean": round(sum(values) / len(values), 2) if values else None,
@@ -404,6 +416,12 @@ async def list_assessments(
         # in the weighted score (src/services/blackbird_rubric.py), so a
         # reader needs to see which ones were never answered.
         "rubric_weights": RUBRIC_WEIGHTS,
+        # The other scale, for the same reason plus one more: which weight set
+        # scored a row follows from that ROW's funnel_stage (rubric v2.0.0), so
+        # the template picks per row rather than per page. Same dict shape and
+        # same key order as `rubric_weights`, so the chips stay in one order
+        # whichever set a row uses.
+        "rubric_weights_incubation": RUBRIC_WEIGHTS_INCUBATION,
         # The band thresholds and the decline label the page's legend states,
         # read from the rubric document rather than typed into the template.
         # The legend used to hard-code "≥4.0 / 3.0–3.9 / <3.0"; the moment
@@ -411,6 +429,11 @@ async def list_assessments(
         # whole point of it being a document) those literals become a page
         # that confidently states the wrong thresholds.
         "banding": BANDING,
+        # Both scales are stated in the legend, and the incubation one is the
+        # one that matters here: the screened population is ~100%
+        # incubation-stage, so a legend quoting only the investment lines
+        # explains none of the bands actually in the table.
+        "banding_incubation": BANDING_INCUBATION,
         # Which rubric revision the reader is looking at. Per-row stamps live
         # on the assessment itself (rubric_version/rubric_content_hash); this
         # is the CURRENT document, which is what a row with no stamp is being

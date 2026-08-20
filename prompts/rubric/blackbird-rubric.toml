@@ -7,6 +7,17 @@
 # page reads its weights and banding from the same load. Nothing else defines
 # these numbers — edit them here, nowhere else.
 #
+# TWO SCALES, one document. Every dimension carries an investment weight/anchor
+# pair (`weight` / `anchors`) and an incubation-stage pair (`weight_incubation` /
+# `anchors_incubation`), and [banding] / [banding.incubation] carry a band-line
+# pair to match. Which pair scores a verdict is chosen from that verdict's
+# `funnel_stage`: anything starting "incubation" uses the incubation scale, every
+# other stage (and a missing one) uses the investment scale. The band NAMES are
+# shared — "advance" / "conditional" / "pass" — so only the numbers differ, and
+# no schema, sidecar or template change follows from re-cutting either scale.
+# Rationale, the 34-verdict back-test behind the incubation numbers, and the
+# calibration checkpoints: docs/specs/2026-08-20-rubric-v2-incubation-rebaseline-proposal.md.
+#
 # Editing workflow (docs/plans/2026-08-20-assessments-rca-ux-specialist-visibility.md §4.3):
 #   1. Edit this file. Bump [meta].version and note the change in [meta].changelog.
 #   2. Run ./scripts/ci.sh — the import-time validator and the characterization
@@ -15,18 +26,34 @@
 #   3. Restart blackbird-app and start a fresh agent run (prompts/ is bind-mounted
 #      into both, so no image rebuild) — the startup banner prints the rubric
 #      version and content hash; confirm they match this file.
+#      ⚠️ That "no image rebuild" holds for a pure DATA edit only. This file is
+#      bind-mounted but src/ is BAKED IN, so a restart onto an old image reads
+#      the new numbers with the old scoring code — e.g. an image predating the
+#      stage-aware scoring of v2.0.0 would score every verdict on the investment
+#      scale while stamping it rubric_version 2.0.0. If the change came with any
+#      src/ change, rebuild both images first.
 #   4. New assessments are stamped with [meta].version + content hash, so
 #      pre-/post-change rows stay comparable.
 #
 # Validation, enforced at import (RubricError on failure): exactly 13 dimensions,
-# unique keys, integer weights summing to 100, both thresholds on the 0.01 grid,
-# advance_min > conditional_min, non-empty titles/anchors/prose, version present.
+# unique keys, integer weights summing to 100 for EACH scale, all four thresholds
+# on the 0.01 grid with advance_min > conditional_min in BOTH bands, non-empty
+# titles/anchors/anchors_incubation/prose, version present.
 
 [meta]
-version = "1.0.0"
+version = "2.0.0"
 date = "2026-08-20"
-source = "data/Blackbird_initial_priorities-criteria_v1.pdf, Part C.3 (weighted screening rubric); weights re-cut 2026-08 from 100% commercial to 60% commercial / 40% scientific"
-changelog = "1.0.0 (2026-08-20): initial extraction — content transcribed unchanged from src/services/blackbird_rubric.py and prompts/roles/scout_hub/agent-system.md."
+source = "data/Blackbird_initial_priorities-criteria_v1.pdf, Part C.3 (weighted screening rubric); weights re-cut 2026-08 from 100% commercial to 60% commercial / 40% scientific; incubation scale added 2026-08-20 per docs/specs/2026-08-20-rubric-v2-incubation-rebaseline-proposal.md"
+changelog = """
+2.0.0 (2026-08-20): incubation re-baseline. Adds a second scale — per-dimension
+`weight_incubation` (the proposal's W-C set, §4) and `anchors_incubation` (§3),
+plus [banding.incubation] (advance ≥3.4, conditional ≥2.7, §5). The investment
+weights, anchors and band lines are UNCHANGED; scoring selects between the two
+by the verdict's funnel_stage. Rationale and back-test:
+docs/specs/2026-08-20-rubric-v2-incubation-rebaseline-proposal.md.
+1.0.0 (2026-08-20): initial extraction — content transcribed unchanged from
+src/services/blackbird_rubric.py and prompts/roles/scout_hub/agent-system.md.
+"""
 
 [scale]
 # Dimension scores. max = strongly meets Blackbird's bar.
@@ -34,10 +61,10 @@ min = 1
 max = 5
 
 [banding]
-# Part C.3 banding over the weighted mean of the thirteen dimensions. NOTE the
-# vocabulary: the computed band "pass" means pass ON the deal (decline) — it is
-# not "passed the screen". pass_label is the display label only; the stored
-# band value stays "pass".
+# Part C.3 banding over the weighted mean of the thirteen dimensions, on the
+# INVESTMENT scale (`weight`/`anchors`). NOTE the vocabulary: the computed band
+# "pass" means pass ON the deal (decline) — it is not "passed the screen".
+# pass_label is the display label only; the stored band value stays "pass".
 advance_min = 4.0
 conditional_min = 3.0
 pass_label = "pass (decline)"
@@ -46,6 +73,24 @@ vocabulary_note = "'pass' means pass ON the deal (decline), matching the PDF's v
 # Banding line.
 conditional_note = "define de-risking milestones, revisit"
 pass_note = "or route to a grant/incubation de-risking step if differentiation is high but data is thin"
+
+# Must stay below every [banding] key above it — a TOML sub-table closes the
+# parent table.
+[banding.incubation]
+# The incubation/grant-stage band lines (proposal §5). Same three stored band
+# NAMES as [banding]; only the lines move, so nothing downstream changes shape.
+# The investment lines are unusable for this population: 34 of 34 production
+# verdicts banded "pass" under them because the screened population is 100%
+# incubation-stage academic pitches (RCA §1).
+#
+# Provisional BY CONSTRUCTION: `anchors_incubation` lifts scores on the
+# re-anchored floor dimensions, so lines fitted to the pre-v2 corpus would sit
+# too low. These are placed at the top of today's distribution with headroom,
+# and are scheduled for re-check after >=20 v2-stamped verdicts (§7.3).
+advance_min = 3.4
+conditional_min = 2.7
+# What each band COMMITS someone to. Bands map to actions, not vibes (§5).
+semantics = "advance = staff opens grant diligence now; conditional = name the de-risking result that would move it and revisit on delivery; pass = decline, with the named condition for coming back"
 
 [intro]
 text = """
@@ -86,14 +131,43 @@ preamble = """
 Commercial dimensions carry 60% of the total; the four scientific dimensions below carry
 40% — BBL's actual rejections turn on mechanism, toxicity, and chemistry-to-DC far more
 often than on any single commercial factor, so the score must be able to move on science
-alone, not just on commerce.
+alone, not just on commerce. On the incubation scale that split is 66% / 34%: the
+commercial block gains, but it gains it in *capital efficiency* — whether a grant can buy
+a decisive result — not in external validation, which barely exists at this stage.
 """
 
 # ---------------------------------------------------------------------------
 # The thirteen weighted dimensions. Order here is display order (the prompt's
-# table numbers them 1-13 in this order). `specialist` names the consultable
-# evaluation-panel domain that owns the dimension (src/agent/specialists.py);
-# omitted where the dimension informs judgement without a single owner.
+# table numbers them 1-13 in this order) and is shared by BOTH scales, so a
+# reader comparing them is comparing rows, not hunting for keys. `specialist`
+# names the consultable evaluation-panel domain that owns the dimension
+# (src/agent/specialists.py); omitted where the dimension informs judgement
+# without a single owner.
+#
+# Each dimension carries two weights and two anchor texts:
+#   weight / anchors                      — the investment scale (Part C.3).
+#   weight_incubation / anchors_incubation — the incubation/grant scale
+#     (proposal §3/§4). Both weight sets sum to 100 independently; the anchors
+#     are what actually re-baselines the scoring, because they define what a 4
+#     MEANS at a stage that has not produced later-stage evidence yet. Under the
+#     investment anchors 1-2 was the *correct* score for any unformed academic
+#     idea, which is why every verdict banded "pass".
+#
+# Incubation weight rationale (proposal §4, from the 34-verdict back-test in §2;
+# W-C scored 96.5% concordance against the model's own recommendations vs 91.7%
+# for the investment weights on the same corpus):
+#   - workplan_capital_efficiency 1 -> 8: the single best discriminator in the
+#     whole rubric (+1.67 between route-to-incubation and pass) carried 1%.
+#     "Could a grant buy a decisive result?" IS the incubation question.
+#   - external_signals 8 -> 2: re-anchored to be achievable, but independent
+#     signals are scarce at this stage by nature (+0.35, near the floor).
+#   - experimental_rigor 10 -> 8: did not discriminate at all (-0.08) — declines
+#     are mostly shaped wrong for Blackbird, not sloppy science.
+#   - ip_fto 6 -> 4: re-anchored to "a path to ownable IP"; the hard failure is
+#     still carried by the FTO gating criterion.
+#   - differentiation/market_unmet_need/team up (16/14/12): the thesis, an
+#     actionable need, and the lab's ability to execute the de-risking plan are
+#     what an incubation grant is actually underwriting.
 #
 # Weight history (kept from the pre-extraction code comments):
 #   - Commercial block is 60 points; it was 100 before the 2026-08 re-cut.
@@ -110,87 +184,113 @@ alone, not just on commerce.
 [[dimension]]
 key = "differentiation"
 weight = 15
+weight_incubation = 16
 title = "Commercialization potential / differentiation"
 anchors = 'First/best-in-class thesis; clear "killer application"; not incremental'
+anchors_incubation = "First/best-in-class *thesis*; a clear killer application; not incremental. Judged on what the idea could become, not its current evidence."
 specialist = "commercial"
 
 [[dimension]]
 key = "market_unmet_need"
 weight = 12
+weight_incubation = 14
 title = "Market size & actionable unmet need"
 anchors = "Quantified TAM/prevalence; clear clinical decision point; standard-of-care gap"
+anchors_incubation = "A real clinical decision point with a downstream intervention. Order-of-magnitude prevalence/TAM suffices — actionability over precision."
 specialist = "clinical"
 
 [[dimension]]
 key = "team"
 weight = 10
+weight_incubation = 12
 title = "Team / founder quality"
 anchors = "Serial/credentialed founder or top PI; complementary expertise; collaborative"
+anchors_incubation = "PI credibility and lab capability to execute the de-risking plan in 12–24 months; complementary expertise identified, not necessarily hired."
 specialist = "talent"
 
 [[dimension]]
 key = "external_signals"
 weight = 8
+weight_incubation = 2
 title = "External signals"
 anchors = "≥2 VCs/funders interested; big-pharma interest or strong comps; ≥1 leading expert validates"
+anchors_incubation = "Any *independent* validation: a KOL endorsement, non-dilutive funder interest (MII/MSCRF), informal pharma-scientist interest, or competitive activity validating the space. 5 = multiple independent signals; 3 = one; 1 = none."
 
 [[dimension]]
 key = "ip_fto"
 weight = 6
+weight_incubation = 4
 title = "IP position & FTO"
 anchors = "Durable standalone IP; regulatory exclusivity; FTO secured or a clear strategy; encumbrances mapped"
+anchors_incubation = 'A clean *path* to ownable IP: disclosure filed or filable, no known encumbrance or hostile co-ownership, plausible university license path. "FTO secured" is not the bar; an unencumbered, disclosure-ready position scores 4–5.'
 specialist = "legal"
 
 [[dimension]]
 key = "platform"
 weight = 4
+weight_incubation = 5
 title = "Platform vs. single asset"
 anchors = "Reusable platform generating a pipeline / multiple shots on goal"
+anchors_incubation = "Reusable platform generating a pipeline vs one shot on goal. (Unchanged.)"
 specialist = "technologic"
 
 [[dimension]]
 key = "dev_regulatory_feasibility"
 weight = 3
+weight_incubation = 3
 title = "Development & regulatory feasibility"
 anchors = "Precedented modality; established endpoints/biomarkers; feasible timeline"
+anchors_incubation = "If de-risking succeeds, is there a precedented modality/endpoint path? A plausibility check, not a development plan."
 
 [[dimension]]
 key = "workplan_capital_efficiency"
 weight = 1
+weight_incubation = 8
 title = "Work-plan feasibility & capital efficiency"
 anchors = "Milestones practical in time/budget; non-dilutive leverage (MII, TEDCO, MSCRF, BIITC/QOF)"
+anchors_incubation = "Could a $300K–$847K grant over 12–24 months buy a *decisive* de-risking result? 5 = a crisp, quantified killer experiment within budget; 1 = no experiment articulable, or scope far beyond an incubation grant. Maryland non-dilutive leverage (TEDCO MII, MSCRF, BIITC/QOF) adds."
 specialist = "budget"
 
 [[dimension]]
 key = "exit_thesis"
 weight = 1
+weight_incubation = 2
 title = "Value-creation / exit thesis"
 anchors = "Credible staged exits with comps and valuation ranges; multiple value-inflection points"
+anchors_incubation = "Venture-scale potential in one sentence: if the science works, is there a company or license a VC or pharma would want? Comps optional. Grant-only science with no commercial endpoint = 1."
 
 [[dimension]]
 key = "mechanism_validation"
 weight = 12
+weight_incubation = 10
 title = "mechanism_validation"
 anchors = "Clinical genetic evidence, animal rescue, proof of mechanism, contradictory literature"
+anchors_incubation = "A credible, *testable* mechanism hypothesis with supporting data (genetic, functional, or published). Animal rescue is a 5, not the bar for a 4. Contradictory literature acknowledged."
 
 [[dimension]]
 key = "toxicity_selectivity"
 weight = 10
+weight_incubation = 8
 title = "toxicity_selectivity"
 anchors = "On-target liability, in-family off-targets, therapeutic index"
+anchors_incubation = "On-target liabilities and selectivity risks *identified, with a plan to test them early*. Ignorance of the risk scores low; absence of data at this stage does not."
 
 [[dimension]]
 key = "experimental_rigor"
 weight = 10
+weight_incubation = 8
 title = "experimental_rigor"
 anchors = "Controls, power, interpretability, translatability"
+anchors_incubation = "Are the key *existing* results believable (controls, replication, interpretation)? Judge the evidence they have, not evidence the stage hasn't produced."
 specialist = "scientific"
 
 [[dimension]]
 key = "chemistry_dc_path"
 weight = 8
+weight_incubation = 8
 title = "chemistry_dc_path"
 anchors = "Medchem tractability, path to a development candidate"
+anchors_incubation = "A plausible modality and starting point (tool compound, series, format) with an articulable route toward a development candidate — tractability, not progress."
 specialist = "chemistry"
 
 [checklist]

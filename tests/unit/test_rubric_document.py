@@ -6,6 +6,11 @@ order, and thresholds are written out literally here; a later edit to the
 document is a deliberate calibration change and updates this file in the same
 commit. (2) the import-time validator must reject every malformed-document
 class loudly (RubricError), never load a half-usable rubric.
+
+Since v2.0.0 the document carries TWO scales (docs/specs/2026-08-20-rubric-v2-
+incubation-rebaseline-proposal.md), so both are pinned. The investment pins are
+byte-identical to the v1 ones on purpose: that re-baseline added a scale, it did
+not touch the existing one, and this file is where that claim is checked.
 """
 
 import shutil
@@ -15,10 +20,12 @@ import pytest
 
 from src.services.blackbird_rubric import (
     BANDING,
+    BANDING_INCUBATION,
     RUBRIC_CONTENT_HASH,
     RUBRIC_PATH,
     RUBRIC_VERSION,
     RUBRIC_WEIGHTS,
+    RUBRIC_WEIGHTS_INCUBATION,
     RubricError,
     load_rubric,
     parse_rubric,
@@ -43,14 +50,36 @@ EXPECTED_WEIGHTS = {
     "chemistry_dc_path": 8,
 }
 
+# The incubation scale's W-C weights (proposal §4), literal for the same reason.
+# The four that moved most are the whole point of the re-baseline:
+# workplan_capital_efficiency 1 -> 8 (the best discriminator in the back-test),
+# external_signals 8 -> 2, experimental_rigor 10 -> 8, ip_fto 6 -> 4.
+EXPECTED_WEIGHTS_INCUBATION = {
+    "differentiation": 16,
+    "market_unmet_need": 14,
+    "team": 12,
+    "external_signals": 2,
+    "ip_fto": 4,
+    "platform": 5,
+    "dev_regulatory_feasibility": 3,
+    "workplan_capital_efficiency": 8,
+    "exit_thesis": 2,
+    "mechanism_validation": 10,
+    "toxicity_selectivity": 8,
+    "experimental_rigor": 8,
+    "chemistry_dc_path": 8,
+}
+
 # The exit_thesis dimension exactly as the document spells it, used by the
 # wrong-count mutation below. Asserted present before use, so a reworded
 # document fails loudly here instead of silently testing nothing.
 _EXIT_THESIS_BLOCK = """[[dimension]]
 key = "exit_thesis"
 weight = 1
+weight_incubation = 2
 title = "Value-creation / exit thesis"
 anchors = "Credible staged exits with comps and valuation ranges; multiple value-inflection points"
+anchors_incubation = "Venture-scale potential in one sentence: if the science works, is there a company or license a VC or pharma would want? Comps optional. Grant-only science with no commercial endpoint = 1."
 """
 
 
@@ -61,6 +90,16 @@ def test_characterization_weights_and_order_are_pinned():
     assert list(RUBRIC_WEIGHTS) == list(EXPECTED_WEIGHTS)
 
 
+def test_characterization_incubation_weights_and_order_are_pinned():
+    assert RUBRIC_WEIGHTS_INCUBATION == EXPECTED_WEIGHTS_INCUBATION
+    # Same KEY ORDER as the investment set, not merely the same keys: the
+    # assessments page renders one or the other per row and the prompt renders
+    # both as columns of one table, so a divergent order would silently reorder
+    # the chips on incubation rows and misalign the prompt's two anchor columns.
+    assert list(RUBRIC_WEIGHTS_INCUBATION) == list(EXPECTED_WEIGHTS_INCUBATION)
+    assert list(RUBRIC_WEIGHTS_INCUBATION) == list(RUBRIC_WEIGHTS)
+
+
 def test_characterization_banding_is_pinned():
     assert BANDING == {
         "advance_min": 4.0,
@@ -69,9 +108,28 @@ def test_characterization_banding_is_pinned():
     }
 
 
+def test_characterization_incubation_banding_is_pinned():
+    # Proposal §5. Same three keys as BANDING — the band NAMES are shared
+    # between the scales, so pass_label is too and nothing downstream branches.
+    assert BANDING_INCUBATION == {
+        "advance_min": 3.4,
+        "conditional_min": 2.7,
+        "pass_label": "pass (decline)",
+    }
+    assert BANDING_INCUBATION.keys() == BANDING.keys()
+    # And the incubation lines really are the lower pair — the re-baseline's
+    # whole purpose. A transcription that swapped the two scales would satisfy
+    # every "is it a float on the grid" check.
+    assert BANDING_INCUBATION["advance_min"] < BANDING["advance_min"]
+    assert BANDING_INCUBATION["conditional_min"] < BANDING["conditional_min"]
+
+
 def test_version_and_content_hash_are_exported():
     rubric = load_rubric()
-    assert RUBRIC_VERSION == rubric.version == "1.0.0"
+    # Bumped from "1.0.0" for the v2.0.0 incubation re-baseline. The stamp is
+    # what keeps pre-/post-calibration rows separable in
+    # opportunity_assessments.rubric_version, so it is pinned, not derived.
+    assert RUBRIC_VERSION == rubric.version == "2.0.0"
     assert RUBRIC_CONTENT_HASH == rubric.content_hash
     assert len(RUBRIC_CONTENT_HASH) == 12
     assert all(c in "0123456789abcdef" for c in RUBRIC_CONTENT_HASH)
@@ -107,6 +165,35 @@ def test_rejects_weights_not_summing_to_one_hundred(tmp_path):
         parse_rubric(path)
 
 
+def test_rejects_incubation_weights_not_summing_to_one_hundred(tmp_path):
+    # The second scale needs its own check: this mutation leaves the INVESTMENT
+    # weights summing to 100, so only a per-scale sum can catch it. A denominator
+    # that is not 100 still computes a number — it is just no longer on the 1-5
+    # scale the band lines are expressed in, so it would band against thresholds
+    # that no longer mean anything.
+    path = _mutated_copy(
+        tmp_path, "weight_incubation = 16", "weight_incubation = 17"
+    )
+    with pytest.raises(
+        RubricError, match="weight_incubation values must sum to 100"
+    ):
+        parse_rubric(path)
+
+
+def test_rejects_a_dimension_with_no_incubation_anchor(tmp_path):
+    # The anchors ARE the scale. A dimension carrying an incubation weight but
+    # no incubation anchor would be scored against the investment bar the
+    # re-baseline exists to move it off, at the incubation weight — the worst of
+    # both, and silent.
+    path = _mutated_copy(
+        tmp_path,
+        'anchors_incubation = "Reusable platform generating a pipeline vs one shot on goal. (Unchanged.)"',
+        'anchors_incubation = ""',
+    )
+    with pytest.raises(RubricError, match="anchors_incubation"):
+        parse_rubric(path)
+
+
 def test_rejects_off_grid_threshold(tmp_path):
     # An off-grid threshold silently breaks _round_for_band's up-only
     # correction — the validator owns the guarantee the old module-load
@@ -116,8 +203,35 @@ def test_rejects_off_grid_threshold(tmp_path):
         parse_rubric(path)
 
 
+def test_rejects_off_grid_incubation_threshold(tmp_path):
+    # weighted_score() rounds against whichever scale's lines its `stage`
+    # selected, so the grid guarantee has to hold on BOTH pairs. An off-grid
+    # incubation line would only misband incubation-stage verdicts — i.e. every
+    # verdict this instance actually produces.
+    path = _mutated_copy(tmp_path, "conditional_min = 2.7", "conditional_min = 2.705")
+    with pytest.raises(RubricError, match=r"banding\.incubation.*0.01 grid"):
+        parse_rubric(path)
+
+
+def test_rejects_inverted_incubation_band_lines(tmp_path):
+    path = _mutated_copy(tmp_path, "advance_min = 3.4", "advance_min = 2.5")
+    with pytest.raises(
+        RubricError, match=r"\[banding\.incubation\].advance_min must be >"
+    ):
+        parse_rubric(path)
+
+
+def test_rejects_a_missing_incubation_banding_table(tmp_path):
+    # Renamed, not deleted: the [banding] keys above it survive, so only the
+    # explicit sub-table check can catch it. Without that check the incubation
+    # lines would fall back to nothing at all.
+    path = _mutated_copy(tmp_path, "[banding.incubation]", "[banding.incubation_off]")
+    with pytest.raises(RubricError, match=r"missing \[banding.incubation\] table"):
+        parse_rubric(path)
+
+
 def test_rejects_missing_version(tmp_path):
-    path = _mutated_copy(tmp_path, 'version = "1.0.0"', 'version = ""')
+    path = _mutated_copy(tmp_path, 'version = "2.0.0"', 'version = ""')
     with pytest.raises(RubricError, match=r"\[meta\].version"):
         parse_rubric(path)
 
@@ -128,7 +242,7 @@ def test_rejects_version_longer_than_the_column_width(tmp_path):
     # fail loudly here, never truncate silently at the write site -- silent
     # truncation would let two distinct long versions stamp identically and
     # destroy pre/post-calibration comparability.
-    path = _mutated_copy(tmp_path, 'version = "1.0.0"', 'version = "1.0.0-twenty-one-chars"')
+    path = _mutated_copy(tmp_path, 'version = "2.0.0"', 'version = "2.0.0-twenty-one-chars"')
     with pytest.raises(RubricError, match=r"\[meta\].version.*20 char.*rubric_version"):
         parse_rubric(path)
 
@@ -166,6 +280,16 @@ def test_renderer_covers_the_whole_document():
     assert "Do not share this rubric verbatim" in out
 
     for i, dim in enumerate(rubric.dimensions, start=1):
+        # The whole row, both scales, on ONE line. Asserted as one string rather
+        # than four substring checks: a table that carried every title, anchor
+        # and weight but paired them up wrongly across the two scales would pass
+        # any set of independent checks and be actively misleading.
+        assert (
+            f"| {i} | {dim.title} | {dim.anchors} | {dim.weight}% | "
+            f"{dim.anchors_incubation} | {dim.weight_incubation}% |"
+        ) in out
+        # The investment prefix still holds on its own — the v1 pin, unchanged,
+        # so "we only added columns to the right" is checked rather than assumed.
         assert f"| {i} | {dim.title} | {dim.anchors} | {dim.weight}% |" in out
 
     for gate in rubric.gating.values():
@@ -178,6 +302,19 @@ def test_renderer_covers_the_whole_document():
     assert "<3.0" in out
     assert "3.0–3.9 → conditional" in out
     assert "route to a grant/incubation de-risking step" in out
+
+    # Both scales are stated, each labelled, and the incubation one carries the
+    # action each band commits someone to (proposal §5 — bands map to actions).
+    assert "**Banding (investment scale):**" in out
+    assert "**Banding (incubation scale):**" in out
+    assert "≥3.4" in out
+    assert "2.7–3.3 → conditional" in out
+    assert "<2.7" in out
+    assert "staff opens grant diligence now" in out
+
+    # And the model is told which anchor column to use, which is the only thing
+    # that makes a two-scale table usable rather than confusing.
+    assert "Score against the anchor column for the funnel stage you assigned" in out
 
     assert "score each 1–5; 5 = strongly meets the bar" in out
 

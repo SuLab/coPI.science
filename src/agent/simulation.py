@@ -2913,8 +2913,16 @@ class SimulationEngine:
         # weighted_score/band are both nullable for exactly this case; leave
         # them unset rather than record a verdict nobody rendered (F6).
         if scores:
-            computed_score = rubric_weighted_score(scores)
-            computed_band = rubric_band(computed_score)
+            # Stage-aware since rubric v2.0.0: an incubation-stage verdict is
+            # scored on the incubation weights and banded on the incubation
+            # lines, every other stage (and a missing one) on the investment
+            # scale. The RAW funnel_stage goes in — normalizing it is
+            # blackbird_rubric's job, and `_bounded_str` below has not run yet.
+            # Both calls take the same stage: a score computed on one scale and
+            # banded against the other's lines is meaningless.
+            stage = verdict.get("funnel_stage")
+            computed_score = rubric_weighted_score(scores, stage)
+            computed_band = rubric_band(computed_score, stage)
         else:
             computed_score = None
             computed_band = None

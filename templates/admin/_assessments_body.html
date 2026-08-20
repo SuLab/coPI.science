@@ -151,13 +151,20 @@
     </summary>
     <table class="mt-3 w-full text-xs">
         <thead class="text-gray-400 text-left">
-            <tr><th>Dimension</th><th>Wt</th><th>Specialist</th><th>n</th><th>Mean</th><th>Min</th><th>Max</th></tr>
+            {# Two weight columns: which one applied to a given verdict follows
+               from that verdict's funnel stage, and the rows summarised here are
+               pooled across stages. A dimension worth 1 point on the investment
+               scale and 8 on the incubation one (workplan_capital_efficiency) is
+               a completely different finding depending on which column you read,
+               so neither can be the only one shown. #}
+            <tr><th>Dimension</th><th>Wt (inv)</th><th>Wt (inc)</th><th>Specialist</th><th>n</th><th>Mean</th><th>Min</th><th>Max</th></tr>
         </thead>
         <tbody>
         {% for d in dimension_stats %}
             <tr class="border-t border-gray-100 {% if d.max is not none and d.max <= 2 %}bg-amber-50{% endif %}">
                 <td class="py-1 font-mono">{{ d.dimension }}</td>
                 <td>{{ d.weight }}</td>
+                <td class="{% if d.weight_incubation is not none and d.weight is not none and d.weight_incubation != d.weight %}font-semibold text-indigo-700{% else %}text-gray-500{% endif %}">{{ d.weight_incubation if d.weight_incubation is not none else "&mdash;"|safe }}</td>
                 <td class="text-gray-500">{{ d.specialist or "&mdash;"|safe }}</td>
                 <td>{{ d.n }}</td>
                 <td>{{ d.mean if d.mean is not none else "&mdash;"|safe }}</td>
@@ -389,13 +396,25 @@
                            thirteen is listed even when unscored: an unscored
                            dimension counts as ZERO in the weighted score
                            (src/services/blackbird_rubric.py), so a reader has to
-                           be able to tell "scored low" from "never answered". #}
+                           be able to tell "scored low" from "never answered".
+
+                           The "/N%" annotation must come from the weight set
+                           that actually scored THIS row, which follows from its
+                           own funnel_stage (rubric v2.0.0) — one page can hold
+                           rows from both scales, so this cannot be a per-page
+                           choice. The normalisation mirrors
+                           blackbird_rubric._is_incubation exactly: strip, lower,
+                           prefix-match "incubation" (which covers both
+                           "incubation" and the rubric's own "Incubation/Grant"),
+                           with a missing stage falling back to investment. #}
+                        {% set is_incubation_row = (a.funnel_stage or "").strip().lower().startswith("incubation") %}
+                        {% set row_weights = rubric_weights_incubation if is_incubation_row else rubric_weights %}
                         <div class="assessment-scores flex flex-wrap gap-x-3 gap-y-1">
                             <span class="font-medium text-gray-500">Scores:</span>
-                            {% for key, weight in rubric_weights.items() %}
+                            {% for key, weight in row_weights.items() %}
                                 {% set val = a.scores.get(key) %}
                                 <span class="score-{{ key }}{% if val is none %} text-gray-400{% endif %}"
-                                      title="{{ key.replace('_', ' ') }} — {{ weight }}% of the weighted score{% if val is none %} (not scored: counts as zero){% endif %}">
+                                      title="{{ key.replace('_', ' ') }} — {{ weight }}% of the weighted score on the {{ "incubation" if is_incubation_row else "investment" }} scale{% if val is none %} (not scored: counts as zero){% endif %}">
                                     {{ key.replace("_", " ") }}
                                     <span class="font-semibold">{% if val is none %}—{% else %}{{ val }}{% endif %}</span>
                                     <span class="text-gray-400">/{{ weight }}%</span>

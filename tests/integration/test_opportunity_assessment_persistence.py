@@ -217,8 +217,18 @@ async def test_persist_assessment_recomputes_the_score_it_is_handed(engine):
             # Hand-computed under the thirteen-dimension rubric (see
             # test_a_real_verdict_scores_as_hand_computed in
             # tests/unit/test_blackbird_rubric.py for the same fixture and math).
-            assert row.weighted_score == pytest.approx(3.28)  # computed, not 4.8
-            assert row.band == "conditional"
+            #
+            # Re-baselined for rubric v2.0.0 (docs/specs/2026-08-20-rubric-v2-
+            # incubation-rebaseline-proposal.md §4): this verdict's funnel_stage
+            # is "incubation", so it is scored on the incubation weight column
+            # (3.42, band "advance") where v1 scored every stage on the
+            # investment one (3.28, "conditional"). Same fixture, same
+            # arithmetic, different weights — the claim under test is unchanged,
+            # that the stored score is COMPUTED and not the model's flattering
+            # 4.8. The stage selection itself is covered end-to-end in
+            # tests/integration/test_stage_aware_scoring.py.
+            assert row.weighted_score == pytest.approx(3.42)  # computed, not 4.8
+            assert row.band == "advance"
             assert row.subject_agent_id == "wang"
             assert row.agent_id == "blackbird"
             assert row.channel_name == "general"

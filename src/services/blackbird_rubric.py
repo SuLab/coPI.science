@@ -29,6 +29,17 @@ The score is computed here rather than taken from the model's own
 precisely the arithmetic an LLM gets plausibly wrong, and the band it lands in
 decides whether a proposal advances.
 
+**Two scales, selected by funnel stage** (v2.0.0, docs/specs/2026-08-20-rubric-
+v2-incubation-rebaseline-proposal.md). The document carries an investment
+weight/anchor/band-line set and an incubation one. ``weighted_score`` and
+``band`` take an optional ``stage``; anything whose normalized form starts
+"incubation" scores on the incubation scale, and **None, an unknown value, or
+any other stage reproduces the v1 investment behaviour exactly** — that
+default is deliberate and is what keeps every pre-v2 caller and pin correct.
+The investment scale is not deprecated: it is the right scale for a later-stage
+opportunity, and the reason every 2026-08 verdict banded "pass" was that it was
+being applied to a 100% incubation-stage population, not that it was wrong.
+
 Two failure modes matter enough to call out explicitly:
 
 * NaN and +/-inf must never reach the same clamp as an ordinary out-of-range
@@ -82,13 +93,21 @@ class RubricError(RuntimeError):
 
 @dataclass(frozen=True)
 class RubricDimension:
-    """One weighted scoring dimension. ``specialist`` names the consultable
-    evaluation-panel domain that owns it (None where no single domain does)."""
+    """One weighted scoring dimension, on both scales.
+
+    ``weight``/``anchors`` are the investment scale; ``weight_incubation``/
+    ``anchors_incubation`` the incubation one. ``specialist`` names the
+    consultable evaluation-panel domain that owns the dimension (None where no
+    single domain does) and is stage-independent — who to ask does not change
+    with the funnel stage, only what a good answer looks like.
+    """
 
     key: str
     weight: int
     title: str
     anchors: str
+    weight_incubation: int
+    anchors_incubation: str
     specialist: str | None = None
 
 
@@ -104,6 +123,9 @@ class Rubric:
     scale_max: int
     advance_min: float
     conditional_min: float
+    advance_min_incubation: float
+    conditional_min_incubation: float
+    banding_incubation_semantics: str
     pass_label: str
     vocabulary_note: str
     banding_conditional_note: str
@@ -188,25 +210,44 @@ def parse_rubric(path: Path) -> Rubric:
     conditional_min = _require_number(
         banding.get("conditional_min"), "[banding].conditional_min"
     )
-    # band()'s decision lines. _round_for_band's up-only correction relies on
-    # every threshold sitting exactly on the 0.01 display grid: round(raw, 2)
-    # moves a value by less than half a grid step, which can never carry it
-    # past a grid-aligned point in the direction away from ``raw`` — only
-    # toward it. An off-grid threshold breaks that guarantee silently, so it
-    # is rejected here (this used to be a module-load assert).
+    banding_incubation = banding.get("incubation")
+    if not isinstance(banding_incubation, dict):
+        raise RubricError("rubric document: missing [banding.incubation] table")
+    advance_min_incubation = _require_number(
+        banding_incubation.get("advance_min"), "[banding.incubation].advance_min"
+    )
+    conditional_min_incubation = _require_number(
+        banding_incubation.get("conditional_min"),
+        "[banding.incubation].conditional_min",
+    )
+    # band()'s decision lines, on BOTH scales. _round_for_band's up-only
+    # correction relies on every threshold it is checked against sitting exactly
+    # on the 0.01 display grid: round(raw, 2) moves a value by less than half a
+    # grid step, which can never carry it past a grid-aligned point in the
+    # direction away from ``raw`` — only toward it. An off-grid threshold breaks
+    # that guarantee silently, so it is rejected here (this used to be a
+    # module-load assert). Both scales are checked because weighted_score()
+    # rounds against whichever pair its ``stage`` selected.
     for name, threshold in (
-        ("advance_min", advance_min), ("conditional_min", conditional_min),
+        ("[banding].advance_min", advance_min),
+        ("[banding].conditional_min", conditional_min),
+        ("[banding.incubation].advance_min", advance_min_incubation),
+        ("[banding.incubation].conditional_min", conditional_min_incubation),
     ):
         if round(threshold, 2) != threshold:
             raise RubricError(
-                f"rubric document: [banding].{name} = {threshold} is not on the "
+                f"rubric document: {name} = {threshold} is not on the "
                 "0.01 grid — _round_for_band's correction only handles rounding "
                 "crossing a threshold upward; see its docstring"
             )
-    if not advance_min > conditional_min:
-        raise RubricError(
-            "rubric document: [banding].advance_min must be > conditional_min"
-        )
+    for table, hi, lo in (
+        ("[banding]", advance_min, conditional_min),
+        ("[banding.incubation]", advance_min_incubation, conditional_min_incubation),
+    ):
+        if not hi > lo:
+            raise RubricError(
+                f"rubric document: {table}.advance_min must be > conditional_min"
+            )
 
     gating_raw = data.get("gating")
     if not isinstance(gating_raw, dict):
@@ -243,11 +284,17 @@ def parse_rubric(path: Path) -> Rubric:
         if not isinstance(entry, dict):
             raise RubricError(f"rubric document: [[dimension]] #{i + 1} is not a table")
         key = _require_str(entry.get("key"), f"[[dimension]] #{i + 1}.key")
-        weight = entry.get("weight")
-        if isinstance(weight, bool) or not isinstance(weight, int) or weight <= 0:
-            raise RubricError(
-                f"rubric document: [[dimension]] {key!r}.weight must be a positive integer"
-            )
+        # Both weight sets, same rule: a positive int (bool is an int subclass,
+        # so `weight = true` must not parse as 1).
+        weights: dict[str, int] = {}
+        for field in ("weight", "weight_incubation"):
+            value = entry.get(field)
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise RubricError(
+                    f"rubric document: [[dimension]] {key!r}.{field} must be a "
+                    "positive integer"
+                )
+            weights[field] = value
         specialist_raw = entry.get("specialist")
         specialist = (
             _require_str(specialist_raw, f"[[dimension]] {key!r}.specialist")
@@ -256,20 +303,37 @@ def parse_rubric(path: Path) -> Rubric:
         )
         dimensions.append(RubricDimension(
             key=key,
-            weight=weight,
+            weight=weights["weight"],
             title=_require_str(entry.get("title"), f"[[dimension]] {key!r}.title"),
             anchors=_require_str(entry.get("anchors"), f"[[dimension]] {key!r}.anchors"),
+            weight_incubation=weights["weight_incubation"],
+            # Non-empty for all thirteen, same as `anchors`: the anchors ARE the
+            # scale, so a dimension with an incubation weight and no incubation
+            # anchor would be scored against the investment bar it was
+            # re-baselined away from.
+            anchors_incubation=_require_str(
+                entry.get("anchors_incubation"),
+                f"[[dimension]] {key!r}.anchors_incubation",
+            ),
             specialist=specialist,
         ))
     keys = [d.key for d in dimensions]
     if len(set(keys)) != len(keys):
         duplicates = sorted({k for k in keys if keys.count(k) > 1})
         raise RubricError(f"rubric document: duplicate dimension key(s): {duplicates}")
-    total_weight = sum(d.weight for d in dimensions)
-    if total_weight != 100:
-        raise RubricError(
-            f"rubric document: dimension weights must sum to 100, found {total_weight}"
-        )
+    # Each scale sums to 100 INDEPENDENTLY — a weighted mean whose denominator
+    # is not 100 is still computable, but it is no longer on the 1-5 dimension
+    # scale the band lines are expressed in, so the two scales' scores would
+    # stop being comparable to each other or to their own thresholds.
+    for label, total_weight in (
+        ("", sum(d.weight for d in dimensions)),
+        ("_incubation", sum(d.weight_incubation for d in dimensions)),
+    ):
+        if total_weight != 100:
+            raise RubricError(
+                f"rubric document: dimension weight{label} values must sum to 100, "
+                f"found {total_weight}"
+            )
 
     def _section_text(table_name: str, field: str = "text") -> str:
         table = data.get(table_name)
@@ -293,6 +357,11 @@ def parse_rubric(path: Path) -> Rubric:
         scale_max=int(scale_max),
         advance_min=advance_min,
         conditional_min=conditional_min,
+        advance_min_incubation=advance_min_incubation,
+        conditional_min_incubation=conditional_min_incubation,
+        banding_incubation_semantics=_require_str(
+            banding_incubation.get("semantics"), "[banding.incubation].semantics"
+        ),
         pass_label=_require_str(banding.get("pass_label"), "[banding].pass_label"),
         vocabulary_note=_require_str(
             banding.get("vocabulary_note"), "[banding].vocabulary_note"
@@ -324,8 +393,14 @@ def load_rubric() -> Rubric:
     return _RUBRIC
 
 
-# Percentage weights, from the document. Sums to 100 (validated above).
+# Percentage weights, from the document. Each sums to 100 (validated above).
+# Both dicts iterate in the document's display order, which is deliberately the
+# SAME order for both scales: a page or prompt that renders one after the other
+# is then comparing rows, and a caller can swap dicts without reordering.
 RUBRIC_WEIGHTS: dict[str, int] = {d.key: d.weight for d in _RUBRIC.dimensions}
+RUBRIC_WEIGHTS_INCUBATION: dict[str, int] = {
+    d.key: d.weight_incubation for d in _RUBRIC.dimensions
+}
 
 # Display metadata for the pages that render scores: the thresholds and the
 # decline-vocabulary label. band()'s RETURN VALUE stays the stable stored
@@ -337,20 +412,56 @@ BANDING: dict[str, object] = {
     "pass_label": _RUBRIC.pass_label,
 }
 
+# The same three keys, on the incubation scale — same SHAPE on purpose, so a
+# template or view that renders one can render the other with no branching.
+# The band names (and so pass_label) are shared between the scales; only the
+# lines move.
+BANDING_INCUBATION: dict[str, object] = {
+    "advance_min": _RUBRIC.advance_min_incubation,
+    "conditional_min": _RUBRIC.conditional_min_incubation,
+    "pass_label": _RUBRIC.pass_label,
+}
+
 RUBRIC_VERSION: str = _RUBRIC.version
 RUBRIC_CONTENT_HASH: str = _RUBRIC.content_hash
 
 _MIN_SCORE = _RUBRIC.scale_min
 _MAX_SCORE = _RUBRIC.scale_max
 _TOTAL_WEIGHT = sum(RUBRIC_WEIGHTS.values())
+_TOTAL_WEIGHT_INCUBATION = sum(RUBRIC_WEIGHTS_INCUBATION.values())
 
 # band()'s decision lines, in ascending order, mirrored here so the display
 # rounding in weighted_score() can be checked against them. Grid-alignment is
 # validated by parse_rubric (it used to be asserted here at module load).
 _BAND_THRESHOLDS = (_RUBRIC.conditional_min, _RUBRIC.advance_min)
+_BAND_THRESHOLDS_INCUBATION = (
+    _RUBRIC.conditional_min_incubation, _RUBRIC.advance_min_incubation,
+)
+
+# The funnel-stage values that select the incubation scale. Matched as a PREFIX
+# of the normalized stage, because the value comes from an LLM through a free
+# text field: the sidecar skeleton offers "incubation", the rubric's own funnel
+# section says "Incubation/Grant", and production has emitted both. A prefix
+# match covers those and "Incubation (grant)" without enumerating spellings.
+_INCUBATION_STAGE_PREFIX = "incubation"
 
 
-def weighted_score(scores: dict[str, object] | None) -> float:
+def _is_incubation(stage: object) -> bool:
+    """Does ``stage`` name the incubation/grant funnel stage?
+
+    ``None``, an empty/whitespace value, an unknown stage, and every later
+    stage all answer False and therefore score on the investment scale. That
+    asymmetry is the safe default in both directions: an unrecognized stage
+    keeps the pre-v2 behaviour every existing caller and pin expects, and the
+    incubation scale — the more permissive one, with lower band lines — is only
+    ever applied when the verdict actually asked for it.
+    """
+    if stage is None:
+        return False
+    return str(stage).strip().lower().startswith(_INCUBATION_STAGE_PREFIX)
+
+
+def weighted_score(scores: dict[str, object] | None, stage: object = None) -> float:
     """Weighted mean of the thirteen dimensions, on the same 1-5 scale.
 
     A dimension that is missing, not a number, or not finite (NaN, +inf,
@@ -362,9 +473,18 @@ def weighted_score(scores: dict[str, object] | None) -> float:
     dimension ``"Differentiation"`` instead of ``"differentiation"`` must
     still hit its rubric weight rather than being silently treated as missing
     (and thus scored 0) purely because of casing (Finding A5).
+
+    ``stage`` is the verdict's raw ``funnel_stage``; normalization is this
+    module's job, not the caller's. An incubation stage selects the incubation
+    weights and rounds against the incubation band lines. Omitting it — or
+    passing any other stage — is exactly the v1 investment computation.
     """
     if not scores:
         return 0.0
+    incubation = _is_incubation(stage)
+    weights = RUBRIC_WEIGHTS_INCUBATION if incubation else RUBRIC_WEIGHTS
+    total_weight = _TOTAL_WEIGHT_INCUBATION if incubation else _TOTAL_WEIGHT
+    thresholds = _BAND_THRESHOLDS_INCUBATION if incubation else _BAND_THRESHOLDS
     # Normalize once. If two differently-cased keys collapse to the same
     # canonical name (e.g. both "team" and "Team" present), the later one in
     # iteration order wins — an unlikely input, but a deterministic pick beats
@@ -373,7 +493,7 @@ def weighted_score(scores: dict[str, object] | None) -> float:
         key.strip().lower(): value for key, value in scores.items() if isinstance(key, str)
     }
     total = 0.0
-    for key, weight in RUBRIC_WEIGHTS.items():
+    for key, weight in weights.items():
         raw = normalized.get(key)
         if isinstance(raw, bool) or not isinstance(raw, (int, float)):
             continue
@@ -387,7 +507,7 @@ def weighted_score(scores: dict[str, object] | None) -> float:
             continue
         total += max(_MIN_SCORE, min(_MAX_SCORE, value)) * weight
 
-    unmatched = sorted(set(normalized) - RUBRIC_WEIGHTS.keys())
+    unmatched = sorted(set(normalized) - weights.keys())
     if unmatched:
         # Diagnosable, not fatal: each unmatched key already counts as 0 via
         # the .get(key) miss above (or was never a rubric key to begin with).
@@ -397,12 +517,20 @@ def weighted_score(scores: dict[str, object] | None) -> float:
             "weighted_score: verdict has key(s) not in the thirteen rubric "
             "dimensions, scored as unset: %s", unmatched,
         )
-    return _round_for_band(total / _TOTAL_WEIGHT)
+    return _round_for_band(total / total_weight, thresholds)
 
 
-def _round_for_band(raw: float) -> float:
+def _round_for_band(
+    raw: float, thresholds: tuple[float, ...] = _BAND_THRESHOLDS
+) -> float:
     """Round ``raw`` to 2dp without letting the rounding cross a band()
     threshold.
+
+    ``thresholds`` must be the decision lines of the SAME scale the score was
+    computed on — rounding away from the investment lines while banding against
+    the incubation ones is how a 2.695 would display as 2.70 and then band
+    "conditional" off a value that is truly below the 2.7 line. It defaults to
+    the investment pair so the pre-v2 single-argument call is unchanged.
 
     round(3.995, 2) == 4.0: a true mean of 3.995 is < 4.0 and must band as
     "conditional", but the naively-rounded display value of 4.0 would band as
@@ -421,20 +549,35 @@ def _round_for_band(raw: float) -> float:
     to prove it correct.
     """
     rounded = round(raw, 2)
-    for threshold in _BAND_THRESHOLDS:
+    for threshold in thresholds:
         if raw < threshold <= rounded:
             return round(math.floor(raw * 100) / 100, 2)
     return rounded
 
 
-def band(score: float) -> str:
+def band(score: float, stage: object = None) -> str:
     """Part C.3 banding: >=advance_min advance, conditional_min-… conditional,
     below that pass.
 
     'pass' here means pass ON the deal (decline), matching the PDF's vocabulary —
     not 'passing' the screen. The returned value is the stable stored vocabulary;
     the display label for the decline band is ``BANDING["pass_label"]``.
+
+    The three band NAMES are shared by both scales — only the lines move — so
+    ``stage`` changes which thresholds are applied, never what can come back.
+    That is what makes the incubation re-baseline a data change rather than a
+    schema one: ``opportunity_assessments.band`` holds the same three values as
+    before, and a stored band stays interpretable against whichever scale the
+    row's ``rubric_version`` and ``funnel_stage`` say produced it. Pass the same
+    ``stage`` here as to ``weighted_score`` — banding a score computed on one
+    scale against the other's lines is meaningless.
     """
+    if _is_incubation(stage):
+        if score >= _RUBRIC.advance_min_incubation:
+            return "advance"
+        if score >= _RUBRIC.conditional_min_incubation:
+            return "conditional"
+        return "pass"
     if score >= _RUBRIC.advance_min:
         return "advance"
     if score >= _RUBRIC.conditional_min:
@@ -457,6 +600,14 @@ def render_rubric_markdown() -> str:
     output — weights, thresholds, the scale — comes from the document, so the
     prompt the hub reads and the score this module computes can never drift
     apart.
+
+    BOTH scales are rendered, side by side in one table rather than as two
+    stage-scoped blocks. Two reasons: the model is choosing a funnel stage in
+    the same turn it scores, so seeing "what a 4 means here vs there" on one
+    row is the comparison it actually has to make; and it keeps the investment
+    columns leftmost and byte-identical, so the existing row pins in
+    tests/unit/test_rubric_document.py and test_rubric_prompt_sync.py still
+    hold as prefixes of the wider row.
     """
     r = _RUBRIC
     lines: list[str] = [
@@ -477,18 +628,40 @@ def render_rubric_markdown() -> str:
         f"{r.scale_max} = strongly meets the bar)",
         r.scoring_preamble,
         "",
-        "| # | Dimension | What to look for | Weight |",
-        "|---|---|---|---|",
+        "**Score against the anchor column for the funnel stage you assigned in step "
+        "(2)** — the incubation columns for an Incubation/Grant idea, the investment "
+        "columns for pre-seed and later. The two are different bars, not a strict and "
+        "a lenient version of one bar: the investment anchors ask what has been "
+        "PROVEN, the incubation anchors ask whether a grant could prove it.",
+        "",
+        "| # | Dimension | What to look for (investment: pre-seed and later) | Wt "
+        "(inv) | What to look for (INCUBATION / grant stage) | Wt (inc) |",
+        "|---|---|---|---|---|---|",
     ]
     for i, dim in enumerate(r.dimensions, start=1):
-        lines.append(f"| {i} | {dim.title} | {dim.anchors} | {dim.weight}% |")
+        lines.append(
+            f"| {i} | {dim.title} | {dim.anchors} | {dim.weight}% | "
+            f"{dim.anchors_incubation} | {dim.weight_incubation}% |"
+        )
     conditional_upper = _format_threshold(r.advance_min - 0.1)
+    conditional_upper_incubation = _format_threshold(r.advance_min_incubation - 0.1)
     lines += [
         "",
-        f"**Banding:** ≥{_format_threshold(r.advance_min)} → advance/recommend; "
-        f"{_format_threshold(r.conditional_min)}–{conditional_upper} → conditional "
-        f"({r.banding_conditional_note}); <{_format_threshold(r.conditional_min)} → "
-        f"pass ({r.banding_pass_note}).",
+        f"**Banding (investment scale):** ≥{_format_threshold(r.advance_min)} → "
+        f"advance/recommend; {_format_threshold(r.conditional_min)}–"
+        f"{conditional_upper} → conditional ({r.banding_conditional_note}); "
+        f"<{_format_threshold(r.conditional_min)} → pass ({r.banding_pass_note}).",
+        "",
+        "**Banding (incubation scale):** "
+        f"≥{_format_threshold(r.advance_min_incubation)} → advance; "
+        f"{_format_threshold(r.conditional_min_incubation)}–"
+        f"{conditional_upper_incubation} → conditional; "
+        f"<{_format_threshold(r.conditional_min_incubation)} → pass. "
+        f"What each band commits someone to: {r.banding_incubation_semantics}.",
+        "",
+        "The score itself is computed for you from your dimension scores and the "
+        "weight column for the stage you assigned — do not compute it, and do not "
+        "pick a stage to reach a band.",
         "",
         "### 4. Target-level scientific checklist (for therapeutic/target proposals)",
         r.checklist_intro,

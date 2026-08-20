@@ -736,11 +736,19 @@ async def admin_assessments(
             active_admin="assessments",
             assessments=view["assessments"],
             rubric_weights=view["rubric_weights"],
+            # Both weight sets: rubric v2.0.0 scores an incubation-stage verdict
+            # on its own weights, so the detail row picks per ROW from its
+            # funnel_stage and needs both here (the allowlist below is why this
+            # is not automatic).
+            rubric_weights_incubation=view["rubric_weights_incubation"],
             # The band thresholds and the decline label the legend states, from
             # the rubric document rather than as template literals — the page
             # and the scorer must never be able to disagree about where the
-            # "advance" line sits.
+            # "advance" line sits. Both scales, for the same reason: the legend
+            # has to explain the bands the table actually contains, and this
+            # population's rows are banded on the incubation lines.
             banding=view["banding"],
+            banding_incubation=view["banding_incubation"],
             rubric_version=view["rubric_version"],
             runs=view["runs"],
             runs_by_id=view["runs_by_id"],

@@ -54,6 +54,15 @@
     model. Bands: &ge;{{ banding.advance_min }} advance,
     {{ banding.conditional_min }}&ndash;&lt;{{ banding.advance_min }} conditional,
     &lt;{{ banding.conditional_min }} {{ banding.pass_label }}.
+    {# Both scales, because which one scored a row follows from that row's funnel
+       stage — and the screened population is almost entirely incubation-stage,
+       so the investment lines alone explain none of the bands in the table. The
+       investment sentence above is kept first and unchanged: it is what
+       test_the_assessments_legend_states_the_rubric_thresholds pins. #}
+    On the <strong>incubation</strong> scale (rows whose funnel stage is incubation)
+    the weights and lines differ: &ge;{{ banding_incubation.advance_min }} advance,
+    {{ banding_incubation.conditional_min }}&ndash;&lt;{{ banding_incubation.advance_min }} conditional,
+    &lt;{{ banding_incubation.conditional_min }} {{ banding_incubation.pass_label }}.
     A band of "pass" means <em>pass on the deal</em> (decline) — the PDF's deal
     vocabulary, not "passed the screen".
     <strong>Recommendation</strong> is the model's own judgement (it can also say

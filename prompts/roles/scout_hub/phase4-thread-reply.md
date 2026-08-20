@@ -186,7 +186,10 @@ Score each dimension 1–5 (5 = strongly meets Blackbird's bar). Do not compute
 `weighted_score` yourself — leave it at 0 and it will be calculated from your scores.
 
 Every one of the thirteen keys is required. `weighted_score` is computed server-side from
-these; a key you omit scores zero, and the four scientific dimensions are 40% of the total.
+these; a key you omit scores zero. Which weights apply follows from the `funnel_stage` you
+set above: the four scientific dimensions are 40% of the total on the investment scale
+(pre-seed and later) and 34% on the incubation scale. Score each dimension against the
+anchor column for the stage you assigned — never pick a stage to reach a band.
 
 <assessment_json>
 {
