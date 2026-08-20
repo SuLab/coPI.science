@@ -123,7 +123,7 @@
                     'route-to-incubation': 'bg-teal-100 text-teal-700',
                     'pass': 'bg-gray-100 text-gray-600',
                 } %}
-                <span class="px-2 py-0.5 rounded-full text-xs font-medium whitespace-nowrap {{ rec_chip.get(a.recommendation, 'bg-gray-100 text-gray-500') }}">{{ 'pass (decline)' if a.recommendation == 'pass' else a.recommendation }}</span>
+                <span class="px-2 py-0.5 rounded-full text-xs font-medium whitespace-nowrap {{ rec_chip.get(a.recommendation, 'bg-gray-100 text-gray-500') }}">{{ banding.pass_label if a.recommendation == 'pass' else a.recommendation }}</span>
             {% else %}
                 <span class="text-sm text-gray-400">no recommendation</span>
             {% endif %}

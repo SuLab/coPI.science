@@ -177,7 +177,7 @@ async def generate_agent_response(
     messages: list[dict[str, str]],
     model: str | None = None,
     max_tokens: int = 1000,
-    log_meta: dict[str, str] | None = None,
+    log_meta: dict[str, str | None] | None = None,
     on_retry: Callable[[], None] | None = None,
 ) -> str:
     """Generate an agent response via Claude.
@@ -319,7 +319,7 @@ async def generate_with_tools(
     model: str | None = None,
     max_tokens: int = 1000,
     max_tool_rounds: int = 5,
-    log_meta: dict[str, str] | None = None,
+    log_meta: dict[str, str | None] | None = None,
     on_retry: Callable[[], None] | None = None,
     should_continue: Callable[[], bool] | None = None,
 ) -> str:

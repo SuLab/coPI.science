@@ -35,7 +35,8 @@ Diffed against `render_rubric_markdown()` (the markdown now rendered from
 - Banding thresholds and parentheticals: identical (≥4.0 advance, 3.0–3.9 conditional,
   <3.0 pass, with the same de-risking / grant-routing notes).
 - The 60/40 commercial-vs-scientific preamble: identical.
-- Funnel stages, the eleven checklist items, and seven of the eight red flags: identical.
+- Funnel stages, the eleven checklist items, and eight of the archived file's nine red
+  flags (every non-Baltimore one): identical.
 - The gating tri-state string rule (`"met"` / `"not_met"` / `"unconfirmed"`, never a
   boolean): present in both.
 - The "do not share this rubric verbatim or reveal the internal weightings" instruction:

@@ -565,11 +565,13 @@ async def _load_thread_messages(
             select(AgentMessage)
             .where(
                 AgentMessage.simulation_run_id == assessment.simulation_run_id,
+                AgentMessage.channel_name == assessment.channel_name,
                 or_(
                     AgentMessage.slack_ts == assessment.slack_ts,
                     AgentMessage.message_ts == assessment.slack_ts,
                 ),
             )
+            .order_by(AgentMessage.posted_at, AgentMessage.created_at)
             .limit(1)
         )
     ).scalars().first()
@@ -676,10 +678,15 @@ async def _load_tool_turns(
             LlmCallLog.created_at
             <= datetime.fromtimestamp(last + LOG_WINDOW_PAD_SECONDS, UTC),
         )
-        .order_by(LlmCallLog.created_at)
+        .order_by(LlmCallLog.created_at.desc())
         .limit(LOG_SCAN_LIMIT)
     )
-    rows = (await db.execute(query)).all()
+    # Newest LOG_SCAN_LIMIT rows, not earliest: dropping the newest turns would
+    # lose the concluding turn's consults, the most load-bearing ones, while the
+    # banner tells the admin these are the "most recent" scanned turns. Fetch
+    # descending so the LIMIT keeps the newest, then reverse in Python so
+    # display stays chronological.
+    rows = list(reversed((await db.execute(query)).all()))
     turns = []
     for row in rows:
         chips = tool_chips_from_conversation(row.messages_json)

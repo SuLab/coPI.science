@@ -339,6 +339,12 @@ action and this one is not.)
 
 ## 4. Host-file hygiene — ⚠️ archive-and-diff the stale rubric file BEFORE deploy
 
+**Superseded 2026-08-20: this archive-and-diff has already been done.** See
+`docs/audits/2026-08-20-rubric-extraction/blackbird-private-diff.md` — the file is
+archived as `profiles/private/blackbird.archived-2026-08-20.md` (untracked,
+git-ignored). The rest of this section is kept for its record of what was checked and
+why, not as an outstanding task.
+
 **Superseded by the 2026-08-12 removal cycle: do NOT just delete this file.**
 The private-instructions mechanism that used to load it —
 `Agent.private_profile`, `## Your Private Instructions` injection — is deleted

@@ -238,7 +238,7 @@
                         <span class="band-label ml-1.5 text-xs font-medium uppercase tracking-wide align-middle
                             {% if a.band == 'advance' %}text-green-600
                             {% elif a.band == 'conditional' %}text-amber-600
-                            {% else %}text-gray-400{% endif %}">{{ 'pass (decline)' if a.band == 'pass' else a.band }}</span>
+                            {% else %}text-gray-400{% endif %}">{{ banding.pass_label if a.band == 'pass' else a.band }}</span>
                     {% else %}
                         <span class="band-label ml-1.5 text-xs text-gray-400 align-middle">—</span>
                     {% endif %}
@@ -257,7 +257,7 @@
                             'route-to-incubation': 'bg-teal-100 text-teal-700',
                             'pass': 'bg-gray-100 text-gray-600',
                         } %}
-                        <span class="px-2 py-0.5 rounded-full text-xs font-medium whitespace-nowrap {{ rec_chip.get(a.recommendation, 'bg-gray-100 text-gray-500') }}">{{ 'pass (decline)' if a.recommendation == 'pass' else a.recommendation }}</span>
+                        <span class="px-2 py-0.5 rounded-full text-xs font-medium whitespace-nowrap {{ rec_chip.get(a.recommendation, 'bg-gray-100 text-gray-500') }}">{{ banding.pass_label if a.recommendation == 'pass' else a.recommendation }}</span>
                     {% else %}—{% endif %}
                     {# `missing_domains` is three-state (see the column comment in
                        src/models/opportunity.py): a list of names = the gap this badge
@@ -330,7 +330,7 @@
                attention"; this one answers "on what basis", which is the
                difference between a triage queue and a scoreboard. Kept as a
                spanning row rather than extra columns because the table is
-               already eight wide. Omitted entirely when there is nothing to
+               already nine wide. Omitted entirely when there is nothing to
                show, so a sparse verdict does not leave an empty band.
                Collapsed ("hidden") by default — the triage row toggles it;
                the id must match that row's onclick above. #}

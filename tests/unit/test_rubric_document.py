@@ -122,6 +122,17 @@ def test_rejects_missing_version(tmp_path):
         parse_rubric(path)
 
 
+def test_rejects_version_longer_than_the_column_width(tmp_path):
+    # opportunity_assessments.rubric_version is String(20) (alembic/versions/
+    # 0030_specialist_consults_rubric_version.py). A version over that width must
+    # fail loudly here, never truncate silently at the write site -- silent
+    # truncation would let two distinct long versions stamp identically and
+    # destroy pre/post-calibration comparability.
+    path = _mutated_copy(tmp_path, 'version = "1.0.0"', 'version = "1.0.0-twenty-one-chars"')
+    with pytest.raises(RubricError, match=r"\[meta\].version.*20 char.*rubric_version"):
+        parse_rubric(path)
+
+
 def test_rejects_unparseable_toml(tmp_path):
     path = tmp_path / "rubric.toml"
     path.write_text("[meta\nversion = ", encoding="utf-8")

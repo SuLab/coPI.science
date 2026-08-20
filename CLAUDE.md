@@ -328,9 +328,34 @@ bind-mounted into exactly the two services that read it, `blackbird-app` and `ag
 a document edit needs no image build (`worker` mounts only `./profiles` — it never
 imports the rubric). But the document is read ONCE at import, so a running process keeps
 the rubric it started with. Stop the run, start it again (see "Before restarting" above), and
-check the startup banner: it logs `Screening rubric: version X (content hash Y)`, which
-must match `[meta].version` in the file and its sha256. New assessments are stamped with
-both, so pre-/post-change rows stay comparable.
+check the startup banner: it logs `Screening rubric: version X (content hash Y)`. X must
+match `[meta].version` in the file; Y is the first 12 hex characters of the file's sha256
+(not the full digest). New assessments are stamped with both, so pre-/post-change rows
+stay comparable.
+
+> **Deploy order for `0030_specialist_consults_rubric_version` — migrate BEFORE the new
+> code serves.** `0030` is additive (a new `specialist_consults` table, plus nullable
+> `rubric_version`/`rubric_content_hash` columns on `opportunity_assessments`), so *old
+> code against the new schema* is safe. The reverse is not: the new code **maps
+> `opportunity_assessments.rubric_version`/`.rubric_content_hash`**, so EVERY
+> `select(OpportunityAssessment)` — the assessments pages, the detail pages — and the
+> discussions pages' `specialist_consults` query all raise
+> `UndefinedColumn`/`UndefinedTable` against a pre-`0030` database. Build, migrate from a
+> one-off container, then start — same ordering as `0028`:
+>
+>     DC="docker compose -f docker-compose.prod.yml"
+>     $DC build blackbird-app worker
+>     $DC run --rm blackbird-app alembic upgrade head
+>     $DC run --rm blackbird-app alembic current      # must equal `alembic heads`
+>     $DC up -d blackbird-app worker
+>
+> The agent image bakes `src/` in too and must be rebuilt separately
+> (`$DC --profile agent build agent`) — see the "agent image does NOT mount `src/`"
+> warning above. One caveat beyond the usual migrate-before-serve reasoning: an interview
+> already in flight across the deploy has no `specialist_consults` rows yet (they only
+> start being written once the new code is running), so a verdict that concludes without
+> a fresh consult can be stamped `panel_incomplete` with a full `missing_domains` list — a
+> false accusation, but only in that one-time window.
 
 As of the 2026-08-12 removal cycle (private instructions + reply-only hub), there is no
 runtime "private profile" mechanism — `Agent._compose_system_prompt` injects the rendered

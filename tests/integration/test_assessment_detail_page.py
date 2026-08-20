@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import time
 import uuid
+from datetime import UTC, datetime
 
 import pytest
 
@@ -300,6 +301,77 @@ async def test_admin_detail_page_files_an_uncorrelated_turn_as_unplaced(
     assert "Unplaced turns" in html
     assert "UNPLACED-PMID-30593499" in html
     assert "UNPLACED-TOOL-RESULT" in html
+
+
+async def test_admin_detail_page_tool_scan_keeps_the_newest_turns(
+    client, db_session, admin, monkeypatch
+):
+    """Regression: the log-scan query used to be order_by(created_at).limit(N),
+    which keeps the EARLIEST N rows in the window -- backwards, since the banner
+    says "most recent" and the concluding turn (whose consults matter most) is
+    always the newest. With the query fixed to newest-N (order desc, reversed for
+    display), a turn older than the newest N must be dropped, not one of the
+    newest."""
+    from src.services import assessment_detail as assessment_detail_module
+
+    monkeypatch.setattr(assessment_detail_module, "LOG_SCAN_LIMIT", 2)
+
+    run, assessment = await _seed(db_session)
+    backdated_now = time.time()
+    oldest_marker = "TOOL-QUERY-OLDEST-MUST-BE-DROPPED"
+    middle_marker = "TOOL-QUERY-MIDDLE-MUST-BE-DROPPED"
+    newest_marker = "TOOL-QUERY-NEWEST-MUST-SURVIVE"
+    # All three predate _seed's own logged turn (created_at defaults to real
+    # now()), so with LOG_SCAN_LIMIT=2 only the newest of these three plus
+    # _seed's turn fit -- oldest and middle must both be dropped.
+    for i, marker in enumerate([oldest_marker, middle_marker, newest_marker]):
+        db_session.add(
+            LlmCallLog(
+                simulation_run_id=run.id,
+                agent_id=HUB,
+                phase="thread_reply",
+                channel=CHANNEL,
+                model="claude-opus-test",
+                system_prompt="sys",
+                messages_json=[
+                    {
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "id": f"toolu_scan_{i}",
+                                "name": "search_prior_art",
+                                "input": {"query": marker},
+                            }
+                        ],
+                    },
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": f"toolu_scan_{i}",
+                                "content": f"RESULT-{marker}",
+                            }
+                        ],
+                    },
+                ],
+                response_text=f"<slack_message>Never stored reply {i}.</slack_message>",
+                created_at=datetime.fromtimestamp(
+                    backdated_now - 450 + i * 150, tz=UTC
+                ),
+            )
+        )
+    await db_session.flush()
+
+    html = (
+        await client.get(
+            f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+        )
+    ).text
+    assert newest_marker in html
+    assert middle_marker not in html
+    assert oldest_marker not in html
 
 
 async def test_admin_detail_page_survives_a_wiped_transcript(client, db_session, admin):

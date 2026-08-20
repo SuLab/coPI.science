@@ -15,6 +15,15 @@ and a half-saved edit can never become a mid-run scoring incident — applying
 an edit is a restart, verified by the version + content hash in the startup
 banner.
 
+The ``<assessment_json>`` sidecar's JSON contract is NOT here: it lives in
+prompts/roles/scout_hub/phase4-thread-reply.md, which is authoritative for the
+sidecar's shape (this module and that file are kept in sync by
+tests/unit/test_rubric_prompt_sync.py). Before the rubric was extracted into
+its own document, it lived in untracked profiles/private/blackbird.md; that
+file was retired in the 2026-08-12 removal cycle and has since been diffed
+against this document and archived — see
+docs/audits/2026-08-20-rubric-extraction/.
+
 The score is computed here rather than taken from the model's own
 ``weighted_score`` field: thirteen weights times thirteen 1-5 scores is
 precisely the arithmetic an LLM gets plausibly wrong, and the band it lands in
@@ -46,8 +55,9 @@ logger = logging.getLogger(__name__)
 
 # CWD-relative, the same convention src/agent/roles.py uses for PROMPTS_DIR:
 # every process (uvicorn, the agent run, pytest) starts at the repo root, and
-# prompts/ is bind-mounted into the deployed containers so a document edit
-# needs a restart, not an image rebuild.
+# prompts/ is bind-mounted into blackbird-app and agent (NOT worker, which
+# mounts only ./profiles and never imports this module) so a document edit
+# needs a restart of those two, not an image rebuild.
 RUBRIC_PATH = Path("prompts/rubric/blackbird-rubric.toml")
 
 # How many dimensions the document must define. Deliberate friction: adding or
@@ -149,6 +159,17 @@ def parse_rubric(path: Path) -> Rubric:
     if not isinstance(meta, dict):
         raise RubricError("rubric document: missing [meta] table")
     version = _require_str(meta.get("version"), "[meta].version")
+    if len(version) > 20:
+        # opportunity_assessments.rubric_version is String(20) (alembic/versions/
+        # 0030_specialist_consults_rubric_version.py). Never clip here or at the
+        # write site to fit: silent truncation would let two distinct long
+        # versions stamp identically, destroying pre/post-calibration
+        # comparability. Fail fast instead.
+        raise RubricError(
+            "rubric document: [meta].version must be at most 20 characters "
+            f"(opportunity_assessments.rubric_version is String(20)); got "
+            f"{len(version)}: {version!r}"
+        )
 
     scale = data.get("scale")
     if not isinstance(scale, dict):

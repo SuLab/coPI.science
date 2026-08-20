@@ -230,22 +230,44 @@ def test_revision_status_blocks_anywhere_else(rev):
 def test_supported_start_revisions_are_exactly_the_documented_set():
     assert pf.SUPPORTED_START_REVISIONS == (
         "0018", "0019", "0020", "0021", "0023", "0024", "0025", "0026", "0027", "0028",
+        "0029",
     )
     assert pf.DEFAULT_TARGET == "0030"
 
 
-def test_a_database_stamped_one_migration_behind_target_is_not_blocked():
-    """Regression: DEFAULT_TARGET moved to 0028 without 0026/0027 joining
-    SUPPORTED_START_REVISIONS, so a database stamped 0027 (the previous head,
-    and the most likely real-world starting point for this very migration) was
-    neither `current == target` nor a supported start, and revision_status()
-    BLOCKED the migration this task adds. Never let that regress silently."""
-    status, _reason = pf.revision_status("0028", pf.DEFAULT_TARGET)
-    assert status == pf.PASS
-    status, _reason = pf.revision_status("0027", pf.DEFAULT_TARGET)
-    assert status == pf.PASS
-    status, _reason = pf.revision_status("0026", pf.DEFAULT_TARGET)
-    assert status == pf.PASS
+def test_every_post_branch_revision_is_a_supported_start():
+    """Regression: DEFAULT_TARGET moved to 0028, then 0029, then 0030, each time
+    without the revision immediately behind the new target joining
+    SUPPORTED_START_REVISIONS -- 0026/0027 went stale for the 0028 move, and left
+    unguarded the same mistake would recur for every later move too. A database
+    stamped one migration behind DEFAULT_TARGET (the most likely real-world starting
+    point for whatever migration is newest) was neither `current == target` nor a
+    supported start, and revision_status() BLOCKED the very migration each move added.
+
+    Rather than re-pin the specific revisions that bit us historically, derive the
+    check from REVISION_ORDER/DEFAULT_TARGET: every revision this branch has actually
+    produced a deployment against (i.e. at or after its own original head, 0023) must
+    be a supported start and must PASS up to DEFAULT_TARGET. This way a fourth
+    occurrence of the same mistake fails this test instead of slipping through.
+
+    0022 is the one documented, deliberate exception (see
+    test_0021_is_supported_because_that_is_origin_mains_own_alembic_head): no
+    deployment ever reaches it, so it is intentionally absent from
+    SUPPORTED_START_REVISIONS and excluded here too.
+    """
+    branch_floor = "0023"
+    documented_exceptions = {"0022"}
+    checked = []
+    for rev in pf.REVISION_ORDER[:-1]:
+        if rev < branch_floor or rev in documented_exceptions:
+            continue
+        checked.append(rev)
+        assert rev in pf.SUPPORTED_START_REVISIONS, rev
+        status, _reason = pf.revision_status(rev, pf.DEFAULT_TARGET)
+        assert status == pf.PASS, (rev, status)
+    # Sanity check that this loop actually exercised something, so a future
+    # REVISION_ORDER/DEFAULT_TARGET refactor can't silently turn it into a no-op.
+    assert checked
 
 
 def test_0021_is_supported_because_that_is_origin_mains_own_alembic_head():

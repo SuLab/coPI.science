@@ -12,7 +12,7 @@
 #   2. Run ./scripts/ci.sh — the import-time validator and the characterization
 #      pin in tests/unit/test_rubric_document.py are the review gate. A
 #      deliberate calibration change updates that test in the same commit.
-#   3. Restart the web tier and start a fresh agent run (prompts/ is bind-mounted
+#   3. Restart blackbird-app and start a fresh agent run (prompts/ is bind-mounted
 #      into both, so no image rebuild) — the startup banner prints the rubric
 #      version and content hash; confirm they match this file.
 #   4. New assessments are stamped with [meta].version + content hash, so
