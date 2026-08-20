@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}Manager — Assessment — CoPI{% endblock %}
+
+{% block content %}
+{# Wrapper for the manager surface: the same shared body, rendered with
+   `admin_view` false. Two things the admin wrapper has are deliberately absent
+   here rather than merely hidden — the raw verdict JSON and the LLM/tool
+   drill-down (D10, plan decision 2). A live-looking control that 403s on click
+   is worse than no control (F6), so every link on this page stays inside
+   /manager. #}
+<div class="max-w-5xl mx-auto">
+    <a href="/manager/assessments" class="text-sm text-gray-500 hover:text-gray-700">&larr; Opportunity Assessments</a>
+    <h1 class="text-2xl font-bold text-gray-900 mt-1 mb-4">Assessment detail</h1>
+
+    {% include "admin/_assessment_detail_body.html" %}
+
+    <p class="text-xs text-gray-400 mb-6">
+        Read-only view. The raw model output and the hub's per-call LLM record are
+        admin-only; the panel's findings above (domain, signal, confidence,
+        concerns, questions) are the substance of what each specialist said.
+    </p>
+</div>
+{% endblock %}

@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block title %}Admin — Assessment — CoPI{% endblock %}
+
+{% block content %}
+{# Wrapper for the admin surface. The shared body carries no absolute URLs (see
+   its header comment), so the back link lives here — and so does the raw
+   verdict block, which is ADMIN ONLY and therefore must not sit anywhere the
+   manager wrapper can reach. #}
+<div class="max-w-5xl mx-auto">
+    <a href="/admin/assessments" class="text-sm text-gray-500 hover:text-gray-700">&larr; Opportunity Assessments</a>
+    <h1 class="text-2xl font-bold text-gray-900 mt-1 mb-4">Assessment detail</h1>
+
+    {% include "admin/_assessment_detail_body.html" %}
+
+    {# The verdict exactly as the model emitted it, kept so a schema change
+       never loses the original. Collapsed: it is the raw record, not the
+       reading view, and it duplicates every field above. #}
+    <details class="bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6">
+        <summary class="cursor-pointer text-sm font-semibold text-gray-700 uppercase">
+            Raw verdict JSON
+        </summary>
+        {% if assessment.raw_verdict %}
+        <pre class="raw-verdict mt-3 text-xs bg-gray-50 p-3 rounded-lg overflow-x-auto max-h-96 overflow-y-auto whitespace-pre-wrap">{{ assessment.raw_verdict | tojson(indent=2) }}</pre>
+        <p class="text-xs text-gray-400 mt-2">
+            As emitted. <span class="font-mono">weighted_score</span> here is the
+            model's own arithmetic and is deliberately NOT what the page shows —
+            that number is recomputed from the dimension scores and the rubric
+            weights (src/services/blackbird_rubric.py).
+        </p>
+        {% else %}
+        <p class="text-sm text-gray-400 mt-3">
+            No raw verdict stored for this assessment.
+        </p>
+        {% endif %}
+    </details>
+</div>
+{% endblock %}

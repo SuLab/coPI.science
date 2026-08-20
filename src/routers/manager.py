@@ -26,6 +26,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.database import get_db
 from src.dependencies import get_staff_user
 from src.models import USER_ROLE_PI, User
+from src.services.assessment_detail import (
+    build_assessment_detail,
+    panel_summary_by_thread,
+)
 from src.services.directory import (
     build_discussions_view,
     build_run_detail,
@@ -158,6 +162,32 @@ async def manager_assessments(
     )
 
 
+@router.get("/assessments/{assessment_id}", response_class=HTMLResponse)
+async def manager_assessment_detail(
+    assessment_id: uuid.UUID,
+    request: Request,
+    db: AsyncSession = _DB,
+    current_user: User = _STAFF,
+):
+    """One verdict in full, plus the interview that produced it.
+
+    Same page as /admin/assessments/{id} with ``admin_view=False``, which is
+    what keeps the LLM drill-down admin-only (D10): no tool activity, and no
+    specialist's verbatim opinion text. The panel's substance — domain, signal,
+    confidence, concerns, questions_to_ask — IS shown; that split is plan
+    decision 2, and the redaction happens in the service, not just in the
+    template (see ``src.services.assessment_detail``).
+    """
+    detail = await build_assessment_detail(db, assessment_id, admin_view=False)
+    if detail is None:
+        raise HTTPException(status_code=404, detail="Assessment not found")
+    return templates.TemplateResponse(
+        request,
+        "manager/assessment_detail.html",
+        _template_context(request, current_user, active_manager="assessments", **detail),
+    )
+
+
 @router.get("/discussions", response_class=HTMLResponse)
 async def manager_discussions(
     request: Request,
@@ -184,10 +214,20 @@ async def manager_discussions(
         status_filter=status_filter,
         agent_filter=agent_filter,
     )
+    # Which domains the panel was asked about, per thread — the same summary
+    # /admin/discussions shows. A signal and a domain are verdict substance,
+    # not LLM drill-down, so it is not admin-only.
+    panel_by_thread = await panel_summary_by_thread(db, view["selected_run_id"])
     return templates.TemplateResponse(
         request,
         "manager/discussions.html",
-        _template_context(request, current_user, active_manager="discussions", **view),
+        _template_context(
+            request,
+            current_user,
+            active_manager="discussions",
+            panel_by_thread=panel_by_thread,
+            **view,
+        ),
     )
 
 

@@ -20,9 +20,12 @@
     {% endif %}
 </div>
 <p class="text-sm text-gray-500 mb-2">
-    BlackbirdBot's screening verdicts against the Blackbird investment rubric.
+    BlackbirdBot's screening verdicts against the Blackbird investment rubric
+    {% if rubric_version %}(<span class="font-mono text-xs">{{ rubric_version }}</span>){% endif %}.
     Weighted score is computed from the thirteen dimension scores — not taken from the
-    model. Bands: &ge;4.0 advance, 3.0&ndash;3.9 conditional, &lt;3.0 pass.
+    model. Bands: &ge;{{ banding.advance_min }} advance,
+    {{ banding.conditional_min }}&ndash;&lt;{{ banding.advance_min }} conditional,
+    &lt;{{ banding.conditional_min }} {{ banding.pass_label }}.
     A band of "pass" means <em>pass on the deal</em> (decline) — the PDF's deal
     vocabulary, not "passed the screen".
     <strong>Recommendation</strong> is the model's own judgement (it can also say
@@ -42,5 +45,18 @@
         assessments by score; the rest are lower-scoring, not hidden by run.
     {% endif %}
 </p>
+{# The per-row link to the detail page. It lives HERE, in the wrapper, and not
+   in the shared body, for the reason that file's header comment gives: a link
+   assembled from a templated base path ("{{ base }}/{{ a.id }}") credits no
+   route under tests/unit/test_reachability.py's strict _link_credits matcher,
+   which only accepts a Jinja expression in a {path_param} slot. Defining it as
+   a macro before the include keeps the URL literal on both surfaces while the
+   table markup stays shared (Jinja passes the including template's context,
+   macros included, into an {% include %}).
+
+   The class name deliberately avoids the substring "assessment-detail":
+   test_admin_assessments_page_omits_detail_row_when_empty asserts a page of
+   sparse verdicts contains no such string anywhere. #}
+{% macro assessment_link(a) %}<a class="assessment-open-link underline text-indigo-600 hover:text-indigo-800 whitespace-nowrap" href="/admin/assessments/{{ a.id }}" onclick="event.stopPropagation()" title="Full verdict and interview timeline">detail &rarr;</a>{% endmacro %}
 {% include "admin/_assessments_body.html" %}
 {% endblock %}

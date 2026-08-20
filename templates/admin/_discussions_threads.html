@@ -32,7 +32,28 @@
                         {{ meta.label }}
                     </span>
                 </td>
-                <td class="px-4 py-3 text-sm">#{{ t.channel_name }}</td>
+                <td class="px-4 py-3 text-sm">
+                    #{{ t.channel_name }}
+                    {# Per-thread specialist-panel indicator. `panel_by_thread` is
+                       keyed on specialist_consults.thread_id, which is the ROOT
+                       message's ts — the same value this row calls `message_ts`
+                       (src/services/directory.py::build_discussions_view). The
+                       `or {}` is deliberate: a route that forgot the key would
+                       otherwise 500 the whole page, and Jinja's Undefined raises
+                       on .get(). Threads with no consults render unchanged. #}
+                    {% set panel = (panel_by_thread or {}).get(t.message_ts) %}
+                    {% if panel %}
+                    {% set panel_glyph = {'blocking': '&#9940;', 'caution': '&#9888;', 'clear': '&#10003;'} %}
+                    {% set panel_color = {'blocking': 'text-red-600', 'caution': 'text-amber-600', 'clear': 'text-green-600'} %}
+                    <div class="thread-panel text-xs text-gray-500 mt-0.5 whitespace-nowrap"
+                         title="{{ panel | length }} specialist consult{{ '' if panel | length == 1 else 's' }} recorded for this thread">
+                        panel:
+                        {%- for entry in panel %}
+                        <span class="{{ panel_color.get(entry.verdict_signal, 'text-gray-400') }}">{{ entry.domain }}{{ panel_glyph.get(entry.verdict_signal, '&bull;') | safe }}</span>{{ "" if loop.last else " " }}
+                        {%- endfor %}
+                    </div>
+                    {% endif %}
+                </td>
                 <td class="px-4 py-3 text-sm font-medium">{% if t.agent_id %}{{ t.agent_id | capitalize }}Bot{% else %}(unknown sender){% endif %}</td>
                 <td class="px-4 py-3 text-sm">{{ t.reply_count }}</td>
                 <td class="px-4 py-3 text-sm">

@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from src.agent.roles import available_roles
+from src.agent.specialists import parse_opinion
 from src.config import get_settings
 from src.database import get_db
 from src.dependencies import get_admin_user, get_current_user
@@ -38,6 +39,10 @@ from src.models import (
     ThreadDecision,
     User,
     WaitlistSignup,
+)
+from src.services.assessment_detail import (
+    build_assessment_detail,
+    panel_summary_by_thread,
 )
 from src.services.cohorts import (
     compute_gates,
@@ -63,6 +68,14 @@ templates = Jinja2Templates(directory="templates")
 # can move an already-approved agent between these from the edit page; the sim
 # runs status=='active' agents (others are parked/excluded, reversibly).
 VALID_AGENT_STATUSES = ("active", "inactive", "suspended", "pending")
+
+# Module-level dependency singletons, the pattern src/routers/manager.py
+# documents: ruff's B008 flags a `Depends(...)` call sitting in an argument
+# default, and the src/ lint ratchet (scripts/ci.sh's SRC_LINT_MAX) has ~3
+# findings of headroom against 140 existing B008s in this file alone. New
+# handlers here take these instead of adding to that debt.
+_DB = Depends(get_db)
+_ADMIN = Depends(get_admin_user)
 
 
 def _template_context(
@@ -411,6 +424,21 @@ async def admin_llm_calls(
     )
     available_phases = sorted([r[0] for r in phases_result])
 
+    # A consult's verdict signal — the one thing worth scanning a page of
+    # consults for — was only readable by opening the row and reading the JSON.
+    # Parsed server-side here, and ONLY for `consult_` rows: running
+    # parse_opinion over 50 arbitrary responses would be 50 wasted json.loads.
+    # `parse_opinion` never raises and degrades an unreadable reply to
+    # "caution", exactly as the engine does — a specialist we could not read has
+    # not cleared anything.
+    consult_signals = {
+        str(log.id): parse_opinion(
+            log.response_text, domain=log.phase.removeprefix("consult_")
+        ).verdict_signal
+        for log in logs
+        if log.phase.startswith("consult_")
+    }
+
     return templates.TemplateResponse(
         request,
         "admin/llm_calls.html",
@@ -431,6 +459,7 @@ async def admin_llm_calls(
             model_breakdown=model_breakdown,
             available_agents=available_agents,
             available_phases=available_phases,
+            consult_signals=consult_signals,
             filter_agent=agent,
             filter_phase=phase,
             filter_model=model,
@@ -481,6 +510,10 @@ async def admin_discussions(
                 channel_filter=view["channel_filter"],
                 status_filter=view["status_filter"],
                 agent_filter=view["agent_filter"],
+                # No run selected means no threads, so no panel to summarize —
+                # but the key must still be present: the shared threads body
+                # reads it on every render.
+                panel_by_thread={},
             ),
         )
 
@@ -526,6 +559,11 @@ async def admin_discussions(
             headers={"Content-Disposition": "attachment; filename=proposals.txt"},
         )
 
+    # Which domains the panel was asked about, per thread. Keyed on thread_id,
+    # which is the ROOT message's ts — the same value the threads list calls
+    # `message_ts` (src/services/directory.py::build_discussions_view).
+    panel_by_thread = await panel_summary_by_thread(db, view["selected_run_id"])
+
     return templates.TemplateResponse(
         request,
         "admin/discussions.html",
@@ -542,6 +580,7 @@ async def admin_discussions(
             channel_filter=view["channel_filter"],
             status_filter=view["status_filter"],
             agent_filter=view["agent_filter"],
+            panel_by_thread=panel_by_thread,
         ),
     )
 
@@ -645,6 +684,12 @@ async def admin_assessments(
             active_admin="assessments",
             assessments=view["assessments"],
             rubric_weights=view["rubric_weights"],
+            # The band thresholds and the decline label the legend states, from
+            # the rubric document rather than as template literals — the page
+            # and the scorer must never be able to disagree about where the
+            # "advance" line sits.
+            banding=view["banding"],
+            rubric_version=view["rubric_version"],
             runs=view["runs"],
             runs_by_id=view["runs_by_id"],
             selected_run_id=view["selected_run_id"],
@@ -657,6 +702,30 @@ async def admin_assessments(
             dimension_stats=view["dimension_stats"],
             band_counts=view["band_counts"],
         ),
+    )
+
+
+@router.get("/assessments/{assessment_id}", response_class=HTMLResponse)
+async def admin_assessment_detail(
+    assessment_id: uuid.UUID,
+    request: Request,
+    db: AsyncSession = _DB,
+    current_user: User = _ADMIN,
+):
+    """One verdict in full, plus the interview that produced it.
+
+    ``admin_view=True`` is what unlocks the two admin-only strands of this page
+    — the hub's tool activity (parsed out of ``llm_call_logs``) and each
+    specialist's verbatim opinion. /manager/assessments/{id} renders the same
+    shared body with it False; see ``src.services.assessment_detail``.
+    """
+    detail = await build_assessment_detail(db, assessment_id, admin_view=True)
+    if detail is None:
+        raise HTTPException(status_code=404, detail="Assessment not found")
+    return templates.TemplateResponse(
+        request,
+        "admin/assessment_detail.html",
+        _template_context(request, current_user, active_admin="assessments", **detail),
     )
 
 

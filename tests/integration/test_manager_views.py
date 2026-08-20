@@ -84,11 +84,22 @@ async def test_staff_can_reach_every_manager_route(client, db_session):
     A real SimulationRun backs the {run_id} slot: /manager/activity/{run_id}
     correctly 404s on a random UUID, and a 404 does not count as "reached" per
     the assertion above, so this sweep needs a run that actually exists rather
-    than a syntactically-valid-but-absent one."""
+    than a syntactically-valid-but-absent one. The same is true of the
+    {assessment_id} slot that /manager/assessments/{id} added, so a real
+    OpportunityAssessment backs that one."""
     mgr = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
     pi = await factories.make_user(db_session, user_role=USER_ROLE_PI)
     run = await factories.make_simulation_run(db_session)
-    paths = _manager_get_paths({"user_id": str(pi.id), "run_id": str(run.id)})
+    assessment = OpportunityAssessment(
+        simulation_run_id=run.id, agent_id="blackbird", channel_name="general",
+    )
+    db_session.add(assessment)
+    await db_session.flush()
+    paths = _manager_get_paths({
+        "user_id": str(pi.id),
+        "run_id": str(run.id),
+        "assessment_id": str(assessment.id),
+    })
     for path in paths:
         r = await client.get(path, headers=auth_headers(mgr.id), follow_redirects=False)
         assert r.status_code in (200, 302), f"{path} was unreachable by a manager: {r.status_code}"

@@ -1,0 +1,428 @@
+{# Shared assessment-detail body: the verdict in full, plus the interview
+   timeline behind it. Rendered by both templates/admin/assessment_detail.html
+   and templates/manager/assessment_detail.html.
+
+   MUST stay free of absolute admin or manager URLs — same rule, and the same
+   reason, as admin/_assessments_body.html: tests/unit/test_reachability.py's
+   _link_credits only accepts a Jinja expression in a {path_param} slot, so a
+   templated base path would leave one surface's routes unreferenced. The one
+   link this page needs (back to the list) lives in each wrapper, and so does
+   the admin-only raw-verdict block. Grep this file for absolute admin/manager
+   paths — it must print nothing.
+
+   `admin_view` gates the two admin-only strands (plan decision 2): the hub's
+   tool activity, and each specialist's verbatim opinion. Those values are
+   already ABSENT from a manager render's context (the service omits them), so
+   these conditionals are the second of two locks, not the only one. #}
+
+{% set a = assessment %}
+{% set signal_chip = {
+    'blocking': 'bg-red-100 text-red-700',
+    'caution': 'bg-amber-100 text-amber-700',
+    'clear': 'bg-green-100 text-green-700',
+} %}
+
+{# One logged hub turn's tool calls. A macro rather than a fourth partial, and
+   it takes the signal colour map as an ARGUMENT rather than resolving it from
+   the context, so it is self-contained wherever it is called from.
+
+   `is_consult` chips are the retro panel: for every interview that predates the
+   specialist_consults table, the consult IS a tool call in this log and nothing
+   else records it. Rendering it as a panel card rather than as a generic tool
+   chip is what makes the old corpus read like the new one. #}
+{% macro tool_turn(turn, signal_chip) %}
+<div class="mb-2">
+    <div class="text-xs text-gray-400 mb-1">
+        tool round &middot; <span data-utc="{{ turn.created_at.isoformat() }}" data-utc-fmt="time">{{ turn.created_at.strftime('%H:%M:%S') }}</span>
+        &middot; {{ turn.chips | length }} call{{ '' if turn.chips | length == 1 else 's' }}
+    </div>
+    <div class="space-y-1.5">
+        {% for chip in turn.chips %}
+        <details class="tool-chip rounded border {% if chip.is_consult %}border-indigo-200 bg-indigo-50{% else %}border-gray-200 bg-gray-50{% endif %} px-2 py-1">
+            <summary class="cursor-pointer text-xs flex items-center gap-2 flex-wrap">
+                <span class="font-mono font-medium {% if chip.is_consult %}text-indigo-800{% else %}text-gray-700{% endif %}">{{ chip.tool }}</span>
+                {% if chip.is_consult %}
+                    <span class="px-1.5 rounded bg-indigo-100 text-indigo-700">panel consult</span>
+                    {% if chip.opinion %}
+                        <span class="px-2 py-0.5 rounded-full font-medium {{ signal_chip.get(chip.opinion.verdict_signal, 'bg-gray-100 text-gray-600') }}">{{ chip.opinion.verdict_signal }}</span>
+                        {% if chip.opinion.confidence %}<span class="text-gray-400">confidence: {{ chip.opinion.confidence }}</span>{% endif %}
+                    {% else %}
+                        {# No signal line in the result: the consult FAILED
+                           (unknown domain, missing persona, API error, empty
+                           reply). It must never read as a clear. #}
+                        <span class="px-2 py-0.5 rounded-full bg-gray-200 text-gray-600">no opinion returned</span>
+                    {% endif %}
+                {% endif %}
+                <span class="text-gray-500">{{ chip.summary or "(no input)" }}</span>
+            </summary>
+            <div class="mt-1 text-xs text-gray-600">
+                {% if chip.is_consult and chip.opinion %}
+                    {% if chip.opinion.concerns %}
+                    <div><span class="font-medium text-gray-500">Concerns:</span>
+                        <ul class="list-disc list-inside">
+                            {% for concern in chip.opinion.concerns %}<li>{{ concern }}</li>{% endfor %}
+                        </ul>
+                    </div>
+                    {% endif %}
+                    {% if chip.opinion.questions_to_ask %}
+                    <div class="mt-1"><span class="font-medium text-gray-500">Questions to ask the PI:</span>
+                        <ul class="list-disc list-inside">
+                            {% for q in chip.opinion.questions_to_ask %}<li>{{ q }}</li>{% endfor %}
+                        </ul>
+                    </div>
+                    {% endif %}
+                {% endif %}
+                <div class="mt-1">
+                    <span class="font-medium text-gray-500">Result:</span>
+                    {% if chip.no_result %}
+                        <span class="text-gray-400">(no result recorded — the turn ended before the tool returned)</span>
+                    {% else %}
+                        <span class="tool-chip-excerpt">{{ chip.result_excerpt }}</span>
+                        {# The full text only when it says something the excerpt
+                           does not — a short single-line result is otherwise
+                           printed twice, one line apart. #}
+                        {% if chip.result_full | trim != chip.result_excerpt %}
+                        <pre class="mt-1 bg-white border border-gray-200 p-2 rounded overflow-x-auto max-h-64 overflow-y-auto whitespace-pre-wrap">{{ chip.result_full }}{% if chip.result_truncated %}
+
+[truncated for display]{% endif %}</pre>
+                        {% endif %}
+                    {% endif %}
+                </div>
+            </div>
+        </details>
+        {% endfor %}
+    </div>
+</div>
+{% endmacro %}
+
+<div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
+    <div class="flex items-start justify-between gap-4 flex-wrap">
+        <div>
+            <h2 class="text-xl font-semibold text-gray-900">
+                {{ a.company_or_project or "—" }}
+                {% if a.confidence %}
+                    {# Brackets stripped before re-wrapping, the same way the
+                       list page does it: the sidecar's value is sometimes
+                       already bracketed and "[[High]]" is nobody's label. #}
+                    <span class="text-sm font-normal text-gray-400">[{{ a.confidence.strip("[]") }}]</span>
+                {% endif %}
+            </h2>
+            <div class="text-sm text-gray-500 mt-1">
+                Lab: <span class="font-medium text-gray-700">{{ a.subject_agent_id or "—" }}</span>
+                &middot; Stage: {{ a.funnel_stage or "—" }}
+                &middot; Screened by {{ a.agent_id }}
+                &middot; <span data-utc="{{ a.created_at.isoformat() }}" data-utc-fmt="short">{{ a.created_at.strftime('%Y-%m-%d %H:%M') }}</span>
+                &middot; #{{ a.channel_name }}
+            </div>
+        </div>
+        <div class="text-right">
+            {% if a.recommendation %}
+                {% set rec_chip = {
+                    'advance': 'bg-green-100 text-green-700',
+                    'conditional': 'bg-amber-100 text-amber-700',
+                    'route-to-incubation': 'bg-teal-100 text-teal-700',
+                    'pass': 'bg-gray-100 text-gray-600',
+                } %}
+                <span class="px-2 py-0.5 rounded-full text-xs font-medium whitespace-nowrap {{ rec_chip.get(a.recommendation, 'bg-gray-100 text-gray-500') }}">{{ 'pass (decline)' if a.recommendation == 'pass' else a.recommendation }}</span>
+            {% else %}
+                <span class="text-sm text-gray-400">no recommendation</span>
+            {% endif %}
+            <div class="mt-2">
+                <span class="text-2xl font-bold
+                    {% if a.band == 'advance' %}text-green-600
+                    {% elif a.band == 'conditional' %}text-amber-600
+                    {% else %}text-gray-400{% endif %}">
+                    {% if a.weighted_score is not none %}{{ "%.2f"|format(a.weighted_score) }}{% else %}—{% endif %}
+                </span>
+                {# Same vocabulary as the list page: the stored band value is
+                   "pass", and unlabelled it reads as the opposite of the
+                   decline it records. #}
+                <span class="band-label ml-1.5 text-xs font-medium uppercase tracking-wide align-middle
+                    {% if a.band == 'advance' %}text-green-600
+                    {% elif a.band == 'conditional' %}text-amber-600
+                    {% else %}text-gray-400{% endif %}">{{ (banding.pass_label if a.band == 'pass' else a.band) or '—' }}</span>
+            </div>
+            <div class="text-xs text-gray-400 mt-1">
+                computed, not taken from the model &middot;
+                &ge;{{ banding.advance_min }} advance,
+                &lt;{{ banding.conditional_min }} {{ banding.pass_label }}
+            </div>
+        </div>
+    </div>
+
+    {# Which rubric revision scored THIS row. NULL means the row predates
+       stamping, which is not the same as "scored by the current document" —
+       so the two cases read differently. #}
+    <div class="mt-4 text-xs text-gray-400 border-t border-gray-100 pt-3">
+        {% if a.rubric_version %}
+            Scored against rubric <span class="font-mono">{{ a.rubric_version }}</span>{% if a.rubric_content_hash %} (<span class="font-mono">{{ a.rubric_content_hash }}</span>){% endif %}.
+            {% if rubric_version and a.rubric_version != rubric_version %}
+                <span class="text-amber-700">The current document is
+                <span class="font-mono">{{ rubric_version }}</span> — scores are not
+                directly comparable across revisions.</span>
+            {% endif %}
+        {% else %}
+            This verdict predates rubric stamping, so which revision scored it is
+            not recorded. The current document is
+            <span class="font-mono">{{ rubric_version }}</span>.
+        {% endif %}
+    </div>
+</div>
+
+{# Panel status. Three states, not two — see OpportunityAssessment.missing_domains:
+   named domains = a demonstrated gap, NULL = the floor checked and found none,
+   [] = the floor could not check at all (typically a mid-interview restart).
+   Rendering "unverified" as "fine" is how an unvetted verdict gets acted on. #}
+<div class="mb-6 rounded-xl border p-4 text-sm
+    {% if panel_state == 'gap' %}border-orange-300 bg-orange-50 text-orange-900
+    {% elif panel_state == 'unverified' %}border-gray-300 bg-gray-50 text-gray-700
+    {% else %}border-green-200 bg-green-50 text-green-900{% endif %}">
+    <div class="font-semibold mb-1">
+        {% if panel_state == 'gap' %}
+            &#9873; Specialist panel incomplete
+        {% elif panel_state == 'unverified' %}
+            Specialist panel unverified
+        {% else %}
+            Specialist panel: no gap recorded
+        {% endif %}
+    </div>
+    {% if panel_state == 'gap' %}
+        Never consulted: <span class="font-mono">{{ (a.missing_domains or [])|join(', ') or '(unnamed)' }}</span>.
+        The verdict is recorded but not fully vetted — treat the score as provisional.
+    {% elif panel_state == 'unverified' %}
+        The floor could not be checked for this verdict (no consult was recorded for
+        anyone, or the verdict named no lab). Not evidence of a gap, and not evidence
+        of a complete panel either.
+    {% else %}
+        Nothing the verdict's own content owed a specialist was left unconsulted.
+        On rows written before 2026-08-19 this state also covers "not recorded".
+    {% endif %}
+    {% if panel_summary %}
+        <div class="mt-2 flex flex-wrap gap-2">
+            {% for entry in panel_summary %}
+            <span class="px-2 py-0.5 rounded-full text-xs font-medium {{ signal_chip.get(entry.verdict_signal, 'bg-gray-100 text-gray-600') }}">
+                {{ entry.domain }} &middot; {{ entry.verdict_signal }}
+            </span>
+            {% endfor %}
+        </div>
+    {% endif %}
+</div>
+
+<div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
+    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
+        <h3 class="text-sm font-semibold text-gray-700 uppercase mb-3">Gating criteria</h3>
+        {% if a.gating %}
+            {% for key, gate_state in a.gating.items() %}
+            <div class="gating-row gating-{{ gate_state if gate_state in ('met', 'not_met', 'unconfirmed') else 'unknown' }} text-sm py-0.5">
+                {% if gate_state == 'met' %}
+                    <span class="text-green-600" title="Met">&#9989;</span>
+                {% elif gate_state == 'not_met' %}
+                    <span class="text-red-600" title="Not met">&#10060;</span>
+                {% elif gate_state == 'unconfirmed' %}
+                    <span class="text-blue-500" title="Unconfirmed — never asked">&#10067;</span>
+                {% else %}
+                    <span class="text-gray-400" title="Unrecognized gating value: {{ gate_state }}">&bull;</span>
+                {% endif %}
+                {{ key.replace("_", " ") }}
+            </div>
+            {% endfor %}
+            <p class="text-xs text-gray-400 mt-2">
+                "not met" (asked and failed) and "unconfirmed" (never asked) are
+                different answers; only the first can license discounting an idea.
+            </p>
+        {% else %}
+            <p class="text-sm text-gray-400">No gating recorded.</p>
+        {% endif %}
+    </div>
+
+    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
+        <h3 class="text-sm font-semibold text-gray-700 uppercase mb-3">
+            Red flags
+            {% if a.red_flags %}<span class="text-amber-700">({{ a.red_flags | length }})</span>{% endif %}
+        </h3>
+        {% if a.red_flags %}
+            <ul class="assessment-red-flags list-disc list-inside text-sm text-gray-700 space-y-1">
+                {% for flag in a.red_flags %}<li>{{ flag }}</li>{% endfor %}
+            </ul>
+        {% else %}
+            <p class="text-sm text-gray-400">None recorded.</p>
+        {% endif %}
+    </div>
+</div>
+
+{% if a.rationale %}
+<div class="bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6">
+    <h3 class="text-sm font-semibold text-gray-700 uppercase mb-2">Rationale</h3>
+    <p class="assessment-rationale text-sm text-gray-700 whitespace-pre-line">{{ a.rationale }}</p>
+</div>
+{% endif %}
+
+{% if a.derisking_milestones %}
+<div class="bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6">
+    <h3 class="text-sm font-semibold text-gray-700 uppercase mb-2">De-risking milestones</h3>
+    <ul class="assessment-derisking list-disc list-inside text-sm text-gray-700 space-y-1">
+        {% for milestone in a.derisking_milestones %}<li>{{ milestone }}</li>{% endfor %}
+    </ul>
+</div>
+{% endif %}
+
+{# The thirteen dimensions as weighted bars, in RUBRIC_WEIGHTS order (heaviest
+   first) so what actually moved the score reads first. Bar length is the score
+   on the 1-{{ scale_max }} scale; the weight is printed beside it, because a 5
+   at 3% and a 2 at 15% look identical as bars and are not remotely the same
+   fact. An unscored dimension shows an empty track and "not scored", never a
+   zero-length bar that reads as a scored zero — it counts as ZERO in the
+   weighted score, which is a different statement from "scored 0". #}
+<div class="bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6">
+    <h3 class="text-sm font-semibold text-gray-700 uppercase mb-3">Dimension scores</h3>
+    <div class="space-y-1.5">
+        {% for d in dimensions %}
+        <div class="score-{{ d.key }} flex items-center gap-3 text-xs">
+            <span class="w-56 shrink-0 {% if d.score is none %}text-gray-400{% else %}text-gray-700{% endif %}">
+                {{ d.key.replace("_", " ") }}
+            </span>
+            <span class="w-10 shrink-0 text-right font-semibold {% if d.score is none %}text-gray-400{% else %}text-gray-800{% endif %}">
+                {% if d.score is none %}—{% else %}{{ "%g"|format(d.score) }}{% endif %}
+            </span>
+            <span class="flex-1 h-2 bg-gray-100 rounded-full overflow-hidden" title="{{ d.key.replace('_', ' ') }} — {{ d.weight }}% of the weighted score{% if d.score is none %} (not scored: counts as zero){% endif %}">
+                <span class="block h-2 rounded-full {% if d.weight >= 10 %}bg-indigo-500{% else %}bg-indigo-300{% endif %}" style="width: {{ "%.0f"|format(d.pct) }}%"></span>
+            </span>
+            <span class="w-24 shrink-0 text-gray-400">
+                {{ d.weight }}% weight{% if d.score is none %} &middot; not scored{% endif %}
+            </span>
+        </div>
+        {% endfor %}
+    </div>
+    <p class="text-xs text-gray-400 mt-3">
+        Bars are the score on the 1&ndash;{{ scale_max }} scale. The weighted score
+        above is computed from these thirteen values and their weights
+        (src/services/blackbird_rubric.py) — an unscored dimension drags it down.
+    </p>
+</div>
+
+{# ---------------------------------------------------------------------------
+   Interview timeline
+   --------------------------------------------------------------------------- #}
+<div class="bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6">
+    <h3 class="text-sm font-semibold text-gray-700 uppercase mb-1">Interview timeline</h3>
+    <p class="text-xs text-gray-400 mb-4">
+        The thread this verdict came out of, interleaved with the specialist panel
+        {% if admin_view %}and the hub's tool calls{% endif %}.
+        {% if admin_view and retro_consult_count and not consult_count %}
+            No <span class="font-mono">specialist_consults</span> rows exist for this
+            interview — that table only records consults from runs after it shipped —
+            so the {{ retro_consult_count }} consult{{ '' if retro_consult_count == 1 else 's' }}
+            below were recovered from the hub's own tool log.
+        {% endif %}
+    </p>
+
+    {% if not messages_available %}
+        {# Not an error. `--fresh` wipes agent_messages and never wipes
+           opportunity_assessments, so a verdict legitimately outlives its own
+           transcript; the verdict above is the durable record. #}
+        <div class="rounded-lg border border-gray-200 bg-gray-50 p-4 text-sm text-gray-600">
+            Interview messages unavailable. The thread this verdict came from is not in
+            <span class="font-mono">agent_messages</span> — a <code>--fresh</code> run
+            wipes messages and channels but never assessments, so an older verdict
+            outlives its transcript. Everything above is unaffected.
+        </div>
+    {% else %}
+        <div class="space-y-3">
+        {% for entry in timeline %}
+            {% if entry.kind == 'message' %}
+                {% set m = entry.message %}
+                <div class="rounded-lg border {% if m.is_verdict_message %}border-indigo-300 bg-indigo-50{% elif m.is_hub %}border-gray-200 bg-white{% else %}border-gray-200 bg-gray-50{% endif %} p-3">
+                    <div class="flex items-center gap-2 text-xs text-gray-500 mb-1">
+                        <span class="font-semibold text-gray-700">
+                            {% if m.agent_id %}{{ m.agent_id | capitalize }}Bot{% else %}{{ m.sender_name or "(unknown sender)" }}{% endif %}
+                        </span>
+                        <span>{{ m.phase }}</span>
+                        {% if m.is_verdict_message %}
+                        <span class="px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-700 font-medium">
+                            carried this verdict
+                        </span>
+                        {% endif %}
+                    </div>
+                    <div class="text-sm text-gray-800 whitespace-pre-line max-h-64 overflow-y-auto">{{ m.content }}</div>
+
+                    {% if admin_view and entry.tool_turns %}
+                    <div class="mt-2 pt-2 border-t border-gray-200">
+                        {% for turn in entry.tool_turns %}
+                            {{ tool_turn(turn, signal_chip) }}
+                        {% endfor %}
+                    </div>
+                    {% endif %}
+                </div>
+            {% else %}
+                {% set c = entry.consult %}
+                {# Panel card. Recorded consults only (specialist_consults);
+                   the retro ones ride along as tool chips under the hub
+                   message that made them. #}
+                <div class="rounded-lg border border-dashed border-gray-300 bg-white p-3 ml-6">
+                    <div class="flex items-center gap-2 text-xs mb-1">
+                        <span class="font-semibold text-gray-700">panel &middot; {{ c.domain }}</span>
+                        <span class="px-2 py-0.5 rounded-full font-medium {{ signal_chip.get(c.verdict_signal, 'bg-gray-100 text-gray-600') }}">
+                            {{ c.verdict_signal }}
+                        </span>
+                        {% if c.confidence %}<span class="text-gray-400">confidence: {{ c.confidence }}</span>{% endif %}
+                    </div>
+                    {% if c.question %}
+                    <div class="text-xs text-gray-600 mb-1">
+                        <span class="font-medium text-gray-500">Asked:</span> {{ c.question }}
+                    </div>
+                    {% endif %}
+                    {% if c.concerns %}
+                    <div class="text-xs text-gray-700">
+                        <span class="font-medium text-gray-500">Concerns:</span>
+                        <ul class="list-disc list-inside">
+                            {% for concern in c.concerns %}<li>{{ concern }}</li>{% endfor %}
+                        </ul>
+                    </div>
+                    {% endif %}
+                    {% if c.questions_to_ask %}
+                    <div class="text-xs text-gray-700 mt-1">
+                        <span class="font-medium text-gray-500">Questions to ask the PI:</span>
+                        <ul class="list-disc list-inside">
+                            {% for q in c.questions_to_ask %}<li>{{ q }}</li>{% endfor %}
+                        </ul>
+                    </div>
+                    {% endif %}
+                    {% if admin_view and c.raw_opinion %}
+                    <details class="mt-2">
+                        <summary class="text-xs text-gray-400 cursor-pointer">Full opinion (raw)</summary>
+                        <pre class="mt-1 text-xs bg-gray-50 p-2 rounded overflow-x-auto max-h-64 overflow-y-auto whitespace-pre-wrap">{{ c.raw_opinion }}</pre>
+                    </details>
+                    {% endif %}
+                </div>
+            {% endif %}
+        {% endfor %}
+        </div>
+
+        {% if admin_view and unplaced_turns %}
+        {# Turns whose posted text could not be matched to any message in the
+           thread (an edited reply, a stripped mention, a truncation). Shown
+           rather than dropped: a turn we cannot place is still evidence of
+           what the hub did, and silently discarding it would make this page
+           look complete when it is not. #}
+        <div class="mt-5 pt-4 border-t border-gray-200">
+            <h4 class="text-xs font-semibold text-gray-500 uppercase mb-2">
+                Unplaced turns ({{ unplaced_turns | length }})
+            </h4>
+            <p class="text-xs text-gray-400 mb-2">
+                Tool activity from this thread's time window whose reply text could not
+                be matched to a message above — not dropped, just unattributed.
+            </p>
+            {% for turn in unplaced_turns %}
+                {{ tool_turn(turn, signal_chip) }}
+            {% endfor %}
+        </div>
+        {% endif %}
+
+        {% if admin_view and logs_scanned >= log_scan_limit %}
+        <p class="text-xs text-amber-700 mt-3">
+            Tool activity is capped at the {{ log_scan_limit }} most recent hub calls in
+            this thread's time window; older calls in the window are not shown.
+        </p>
+        {% endif %}
+    {% endif %}
+</div>

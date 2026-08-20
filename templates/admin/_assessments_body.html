@@ -7,7 +7,12 @@
    _link_credits only accepts a Jinja expression in a {path_param} slot — a
    templated base path would leave the manager routes unreferenced and fail
    the gate. Verify with a grep for absolute admin/manager paths against this
-   file — it must print nothing. #}
+   file — it must print nothing.
+
+   CONTRACT: an including template must define an `assessment_link(a)` macro
+   BEFORE the include (see either wrapper). That is how the per-row link to
+   /admin|/manager/assessments/{id} gets a literal URL without one appearing
+   here. #}
 <p class="text-xs text-gray-400 mb-6">
     Gating: <span class="text-green-600 font-medium">&#9989; met</span> &middot;
     <span class="text-red-600 font-medium">&#10060; not met</span> &middot;
@@ -188,6 +193,7 @@
                 <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Gating</th>
                 <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Red flags</th>
                 <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">When</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase"></th>
             </tr>
         </thead>
         <tbody class="divide-y divide-gray-100">
@@ -309,6 +315,16 @@
                         </div>
                     {% endif %}
                 </td>
+                <td class="px-4 py-3 text-xs">
+                    {# A dedicated link cell, NOT a row click: the row's own
+                       onclick toggles the inline detail row, so one control
+                       would shadow the other. stopPropagation on the anchor
+                       (see the macro) keeps a click here from also toggling.
+                       The href is built by the `assessment_link` macro each
+                       wrapper defines — this file must stay free of absolute
+                       /admin and /manager URLs; see the header comment. #}
+                    {{ assessment_link(a) }}
+                </td>
             </tr>
             {# Detail row. The triage row above answers "which of these deserves
                attention"; this one answers "on what basis", which is the
@@ -320,7 +336,7 @@
                the id must match that row's onclick above. #}
             {% if has_detail %}
             <tr id="assessment-detail-{{ loop.index }}" class="assessment-detail hidden">
-                <td colspan="8" class="px-4 py-3 text-xs text-gray-600 bg-gray-50">
+                <td colspan="9" class="px-4 py-3 text-xs text-gray-600 bg-gray-50">
                     {% if a.rationale %}
                         <div class="assessment-rationale mb-1">
                             <span class="font-medium text-gray-500">Rationale:</span>
@@ -357,7 +373,7 @@
                     {% if a.scores %}
                         {# Weight order, not dict order, so the dimensions that
                            actually move the score read first. Every one of the
-                           nine is listed even when unscored: an unscored
+                           thirteen is listed even when unscored: an unscored
                            dimension counts as ZERO in the weighted score
                            (src/services/blackbird_rubric.py), so a reader has to
                            be able to tell "scored low" from "never answered". #}

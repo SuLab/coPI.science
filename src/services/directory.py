@@ -32,7 +32,7 @@ from src.models import (
     ThreadDecision,
     User,
 )
-from src.services.blackbird_rubric import RUBRIC_WEIGHTS
+from src.services.blackbird_rubric import BANDING, RUBRIC_VERSION, RUBRIC_WEIGHTS
 
 # Hard cap on rows fetched for one render of the triage queue (B1). Scoped to
 # the current run this is rarely close to binding — a single run's worth of
@@ -277,12 +277,24 @@ async def list_assessments(db: AsyncSession, run_id: str | None) -> dict[str, An
 
     return {
         "assessments": assessments,
-        # Passed so the detail row can render the nine dimensions in
+        # Passed so the detail row can render the thirteen dimensions in
         # descending rubric weight rather than dict order, and can show an
         # unscored dimension as a gap. An unscored dimension counts as zero
         # in the weighted score (src/services/blackbird_rubric.py), so a
         # reader needs to see which ones were never answered.
         "rubric_weights": RUBRIC_WEIGHTS,
+        # The band thresholds and the decline label the page's legend states,
+        # read from the rubric document rather than typed into the template.
+        # The legend used to hard-code "≥4.0 / 3.0–3.9 / <3.0"; the moment
+        # prompts/rubric/blackbird-rubric.toml is recalibrated (which is the
+        # whole point of it being a document) those literals become a page
+        # that confidently states the wrong thresholds.
+        "banding": BANDING,
+        # Which rubric revision the reader is looking at. Per-row stamps live
+        # on the assessment itself (rubric_version/rubric_content_hash); this
+        # is the CURRENT document, which is what a row with no stamp is being
+        # read against.
+        "rubric_version": RUBRIC_VERSION,
         "runs": runs,
         "runs_by_id": {r.id: r for r in runs},
         "selected_run_id": selected_run_id,
