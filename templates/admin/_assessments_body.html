@@ -77,33 +77,43 @@
 </div>
 {% endif %}
 
-{# These four cards summarize the rows actually rendered below (bounded by
+{# These five cards summarize the rows actually rendered below (bounded by
    assessments_limit), not total_count (the true count of the current
-   filter, which may exceed what's shown) — so "Total" here always equals
-   Advance + Conditional + Pass + unscored, and the "top N of TOTAL" note
-   above is the one place a wider count appears. #}
-<div class="grid grid-cols-4 gap-4 mb-8">
+   filter, which may exceed what's shown). They count by RECOMMENDATION —
+   the model's own verdict — not by computed band: for an incubation-stage
+   population route-to-incubation is the designed positive outcome and it
+   lives inside the <3.0 band, so band-only cards read "everything failed"
+   even when half the verdicts are positive routings. The band distribution
+   still renders inside the "Dimension distribution" panel below. "Total"
+   equals the four cards + rows with no/unknown recommendation. #}
+<div class="grid grid-cols-5 gap-4 mb-8">
     <div class="bg-white rounded-xl border border-gray-200 p-4 text-center">
         <div class="text-3xl font-bold text-gray-900">{{ assessments | length }}</div>
         <div class="text-sm text-gray-500 mt-1">Total</div>
     </div>
     <div class="bg-white rounded-xl border border-gray-200 p-4 text-center">
         <div class="text-3xl font-bold text-green-600">
-            {{ assessments | selectattr("band", "equalto", "advance") | list | length }}
+            {{ assessments | selectattr("recommendation", "equalto", "advance") | list | length }}
         </div>
         <div class="text-sm text-gray-500 mt-1">Advance</div>
     </div>
     <div class="bg-white rounded-xl border border-gray-200 p-4 text-center">
         <div class="text-3xl font-bold text-amber-600">
-            {{ assessments | selectattr("band", "equalto", "conditional") | list | length }}
+            {{ assessments | selectattr("recommendation", "equalto", "conditional") | list | length }}
         </div>
         <div class="text-sm text-gray-500 mt-1">Conditional</div>
     </div>
     <div class="bg-white rounded-xl border border-gray-200 p-4 text-center">
-        <div class="text-3xl font-bold text-gray-400">
-            {{ assessments | selectattr("band", "equalto", "pass") | list | length }}
+        <div class="text-3xl font-bold text-teal-600">
+            {{ assessments | selectattr("recommendation", "equalto", "route-to-incubation") | list | length }}
         </div>
-        <div class="text-sm text-gray-500 mt-1">Pass</div>
+        <div class="text-sm text-gray-500 mt-1">Route-to-incubation</div>
+    </div>
+    <div class="bg-white rounded-xl border border-gray-200 p-4 text-center">
+        <div class="text-3xl font-bold text-gray-400">
+            {{ assessments | selectattr("recommendation", "equalto", "pass") | list | length }}
+        </div>
+        <div class="text-sm text-gray-500 mt-1">Pass (decline)</div>
     </div>
 </div>
 
@@ -143,6 +153,29 @@
 {% endif %}
 
 {% if assessments %}
+{# Detail rows render collapsed (class "hidden") and toggle per row — the
+   rationale + 13 scores under every row made the page an unreadable wall of
+   text. Inline onclick handlers, matching _discussions_threads.html; this
+   repo has no JS framework. The controls only render when at least one row
+   actually has a detail row: dead buttons aside, a page of sparse verdicts
+   must stay free of the "assessment-detail" selector entirely (pinned by
+   test_admin_assessments_page_omits_detail_row_when_empty). #}
+{% set any_detail = (assessments | selectattr("rationale") | list | length)
+    + (assessments | selectattr("scores") | list | length)
+    + (assessments | selectattr("derisking_milestones") | list | length)
+    + (assessments | selectattr("red_flags") | list | length) > 0 %}
+{% if any_detail %}
+<div class="flex justify-end mb-2 gap-3 text-xs text-gray-500">
+    <button type="button" class="underline hover:text-gray-700"
+            onclick="document.querySelectorAll('.assessment-detail').forEach(function(r){r.classList.remove('hidden')})">
+        Expand all
+    </button>
+    <button type="button" class="underline hover:text-gray-700"
+            onclick="document.querySelectorAll('.assessment-detail').forEach(function(r){r.classList.add('hidden')})">
+        Collapse all
+    </button>
+</div>
+{% endif %}
 <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
     <table class="min-w-full divide-y divide-gray-200">
         <thead class="bg-gray-50">
@@ -159,7 +192,11 @@
         </thead>
         <tbody class="divide-y divide-gray-100">
         {% for a in assessments %}
-            <tr>
+            {# red_flags included: a verdict whose only detail is its flags still
+               needs a detail row, or the count badge would point at nothing. #}
+            {% set has_detail = a.rationale or a.scores or a.derisking_milestones or a.red_flags %}
+            <tr {% if has_detail %}class="hover:bg-gray-50 cursor-pointer" title="Click for rationale, scores and red flags"
+                onclick="document.getElementById('assessment-detail-{{ loop.index }}').classList.toggle('hidden')"{% endif %}>
                 <td class="px-4 py-3 text-sm text-gray-900">
                     {{ a.company_or_project or "—" }}
                     {% if a.confidence %}
@@ -188,16 +225,34 @@
                            that just repeats it word-for-word is pure noise
                            for a screen reader. The band/weighted-score
                            relationship it used to gesture at is spelled out
-                           once in the page intro instead. #}
+                           once in the page intro instead. "pass" renders as
+                           "pass (decline)": it is the PDF's deal vocabulary
+                           (pass ON the deal), and unlabelled it reads as the
+                           opposite of what it means. #}
                         <span class="band-label ml-1.5 text-xs font-medium uppercase tracking-wide align-middle
                             {% if a.band == 'advance' %}text-green-600
                             {% elif a.band == 'conditional' %}text-amber-600
-                            {% else %}text-gray-400{% endif %}">{{ a.band }}</span>
+                            {% else %}text-gray-400{% endif %}">{{ 'pass (decline)' if a.band == 'pass' else a.band }}</span>
                     {% else %}
                         <span class="band-label ml-1.5 text-xs text-gray-400 align-middle">—</span>
                     {% endif %}
                 </td>
-                <td class="px-4 py-3 text-sm text-gray-900">{{ a.recommendation or "—" }}
+                <td class="px-4 py-3 text-sm text-gray-900">
+                    {# The model's own verdict, as a chip — this is the page's
+                       primary verdict column. Colors follow the headline
+                       cards; an unrecognized value (bounded-VARCHAR clipping
+                       can produce one) gets the neutral style, never an
+                       error. "pass" is labelled "pass (decline)" for the same
+                       vocabulary reason as the band label above. #}
+                    {% if a.recommendation %}
+                        {% set rec_chip = {
+                            'advance': 'bg-green-100 text-green-700',
+                            'conditional': 'bg-amber-100 text-amber-700',
+                            'route-to-incubation': 'bg-teal-100 text-teal-700',
+                            'pass': 'bg-gray-100 text-gray-600',
+                        } %}
+                        <span class="px-2 py-0.5 rounded-full text-xs font-medium whitespace-nowrap {{ rec_chip.get(a.recommendation, 'bg-gray-100 text-gray-500') }}">{{ 'pass (decline)' if a.recommendation == 'pass' else a.recommendation }}</span>
+                    {% else %}—{% endif %}
                     {# `missing_domains` is three-state (see the column comment in
                        src/models/opportunity.py): a list of names = the gap this badge
                        reports, NULL = panel verified complete, [] = the floor could not
@@ -230,10 +285,13 @@
                         <span class="text-gray-400">—</span>
                     {% endif %}
                 </td>
-                <td class="px-4 py-3 text-xs text-gray-600">
+                <td class="px-4 py-3 text-xs">
+                    {# Count only — the full list lives in the detail row. A
+                       column of multi-line flag prose was a third of the
+                       page's text wall. #}
                     {% if a.red_flags %}
-                        {% for flag in a.red_flags %}<div>• {{ flag }}</div>{% endfor %}
-                    {% else %}none{% endif %}
+                        <span class="text-amber-700 font-medium whitespace-nowrap">{{ a.red_flags | length }} flag{{ '' if a.red_flags | length == 1 else 's' }}</span>
+                    {% else %}<span class="text-gray-400">none</span>{% endif %}
                 </td>
                 <td class="px-4 py-3 text-xs text-gray-500">
                     {{ a.created_at.strftime("%Y-%m-%d %H:%M") }}
@@ -257,14 +315,27 @@
                difference between a triage queue and a scoreboard. Kept as a
                spanning row rather than extra columns because the table is
                already eight wide. Omitted entirely when there is nothing to
-               show, so a sparse verdict does not leave an empty band. #}
-            {% if a.rationale or a.scores or a.derisking_milestones %}
-            <tr class="assessment-detail">
-                <td colspan="8" class="px-4 pb-3 pt-0 text-xs text-gray-600 bg-gray-50">
+               show, so a sparse verdict does not leave an empty band.
+               Collapsed ("hidden") by default — the triage row toggles it;
+               the id must match that row's onclick above. #}
+            {% if has_detail %}
+            <tr id="assessment-detail-{{ loop.index }}" class="assessment-detail hidden">
+                <td colspan="8" class="px-4 py-3 text-xs text-gray-600 bg-gray-50">
                     {% if a.rationale %}
                         <div class="assessment-rationale mb-1">
                             <span class="font-medium text-gray-500">Rationale:</span>
                             {{ a.rationale }}
+                        </div>
+                    {% endif %}
+                    {% if a.red_flags %}
+                        {# The full list backing the triage row's count badge. #}
+                        <div class="assessment-red-flags mb-1">
+                            <span class="font-medium text-gray-500">Red flags:</span>
+                            <ul class="list-disc list-inside">
+                                {% for flag in a.red_flags %}
+                                    <li>{{ flag }}</li>
+                                {% endfor %}
+                            </ul>
                         </div>
                     {% endif %}
                     {% if a.derisking_milestones %}

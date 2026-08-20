@@ -1193,7 +1193,10 @@ async def test_admin_assessments_page_renders_band_as_text_not_just_colour(
     assert resp.status_code == 200
     html = resp.text
     assert "route-to-incubation" in html  # the model's own call, unchanged
-    assert _band_label(html) == "pass"  # the computed band, legible as text
+    # The computed band, legible as text. "pass" renders with its meaning
+    # spelled out — it is the PDF's deal vocabulary (pass ON the deal), and a
+    # bare "pass" reads as the opposite of the decline it records.
+    assert _band_label(html) == "pass (decline)"
     # band and recommendation must never be presented as each other.
     assert _band_label(html) != "route-to-incubation"
 
@@ -2259,3 +2262,108 @@ async def test_a_pass_verdict_owes_no_panel_and_is_not_marked_unverified(engine)
         )
     finally:
         await _delete_run(factory, run_id)
+
+
+@pytest.mark.asyncio
+async def test_admin_assessments_page_triage_restructure(client, db_session, admin):
+    """The 2026-08-20 triage restructure, pinned end to end:
+
+    * detail rows render COLLAPSED (class ``hidden``) with a per-row toggle
+      and an Expand all / Collapse all control — the always-expanded
+      rationale + 13 scores under every row was the page's text wall;
+    * the recommendation renders as a chip whose ``pass`` value is labelled
+      "pass (decline)" — the PDF's deal vocabulary means the decline, and a
+      bare "pass" reads as its opposite;
+    * red flags collapse to a count badge in the triage row, with the full
+      list inside the detail row;
+    * the headline cards count by RECOMMENDATION (route-to-incubation is the
+      designed positive outcome for incubation-stage ideas and lives inside
+      the <3.0 band, so band-only cards read "everything failed").
+    """
+    run = SimulationRun()
+    db_session.add(run)
+    await db_session.flush()
+    db_session.add(OpportunityAssessment(
+        simulation_run_id=run.id, agent_id="blackbird", subject_agent_id="wang",
+        channel_name="general", company_or_project="Triage fixture Co",
+        recommendation="pass", weighted_score=2.10, band="pass",
+        rationale="Single-asset, no external validation.",
+        red_flags=["No external validation", "Single-shot asset"],
+    ))
+    db_session.add(OpportunityAssessment(
+        simulation_run_id=run.id, agent_id="blackbird", subject_agent_id="fu",
+        channel_name="general", company_or_project="Routed fixture Co",
+        recommendation="route-to-incubation", weighted_score=2.66, band="pass",
+    ))
+    await db_session.flush()
+
+    resp = await client.get("/admin/assessments", headers=_auth(admin.id))
+    assert resp.status_code == 200
+    html = resp.text
+
+    # Detail row: present, collapsed, and toggled by its own triage row.
+    detail = re.search(
+        r'<tr id="(assessment-detail-\d+)" class="assessment-detail hidden">', html
+    )
+    assert detail, "detail row must render collapsed by default"
+    assert f"getElementById('{detail.group(1)}')" in html, (
+        "the triage row's onclick must target its own detail row"
+    )
+    assert "Expand all" in html and "Collapse all" in html
+
+    # Recommendation chip: pass is labelled with its meaning; the routed row
+    # keeps its verbatim value.
+    assert "pass (decline)" in html
+    assert "route-to-incubation" in html
+
+    # Red flags: count badge in the triage row, full list in the detail row.
+    assert "2 flags" in html
+    assert "No external validation" in html
+    assert "Single-shot asset" in html
+
+    # Headline cards count recommendations, not bands: both fixtures band
+    # "pass", but one is a positive routing and must be counted as one.
+    assert "Route-to-incubation" in html
+    assert "Pass (decline)" in html
+
+
+@pytest.mark.asyncio
+async def test_admin_assessments_cards_count_recommendation_not_band(
+    client, db_session, admin
+):
+    """Both rows band "pass" (the all-pass production shape) while the
+    recommendations split 1/1 — the cards must follow the split, not the
+    band. A card layout that still counted ``band`` would render
+    Route-to-incubation as 0 here."""
+    run = SimulationRun()
+    db_session.add(run)
+    await db_session.flush()
+    for subject, rec in (("wang", "route-to-incubation"), ("fu", "pass")):
+        db_session.add(OpportunityAssessment(
+            simulation_run_id=run.id, agent_id="blackbird",
+            subject_agent_id=subject, channel_name="general",
+            company_or_project=f"{subject} cards fixture",
+            recommendation=rec, weighted_score=2.5, band="pass",
+        ))
+    await db_session.flush()
+
+    resp = await client.get("/admin/assessments", headers=_auth(admin.id))
+    assert resp.status_code == 200
+    html = resp.text
+
+    cards = re.search(r'<div class="grid grid-cols-5[^"]*">(.*?)\n</div>', html, re.S)
+    assert cards, "five headline cards must render"
+    block = cards.group(1)
+    counts = {
+        label: int(count)
+        for count, label in re.findall(
+            r'>\s*(\d+)\s*</div>\s*<div class="text-sm text-gray-500 mt-1">'
+            r'([^<]+)</div>',
+            block,
+        )
+    }
+    assert counts["Total"] == 2
+    assert counts["Route-to-incubation"] == 1
+    assert counts["Pass (decline)"] == 1
+    assert counts["Advance"] == 0
+    assert counts["Conditional"] == 0
