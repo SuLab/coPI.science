@@ -720,6 +720,7 @@ async def test_persist_assessment_drops_non_string_text_fields_instead_of_dying(
 async def _drive_reply_to_thread(
     engine, monkeypatch, raw_response, *, other_agent_id="wang",
     initial_floor_armed=False, pre_consults=(), on_generate=None,
+    prior_messages=11,
 ):
     """Build a real engine wired to the test DB and run `_reply_to_thread`
     for a scout_hub agent against ``raw_response`` as if it were the LLM's
@@ -744,6 +745,17 @@ async def _drive_reply_to_thread(
     this thread's subject regardless of which thread id the pair is keyed
     under.
 
+    ``prior_messages`` is how many messages the thread ALREADY holds, seeded
+    into the engine's real ``MessageLog``. It defaults to 11, which makes this
+    turn's reply the 12th — the interview's CONCLUDE turn, the only turn whose
+    guidance asks for an ``<assessment_json>`` sidecar and therefore the only
+    one `_capture_hub_assessment` will persist one from.
+    ``ThreadState.message_count`` cannot carry this on its own: `_reply_to_thread`
+    overwrites it with ``len(get_thread_history(thread_id))`` before computing the
+    phase, so a ThreadState built with ``message_count=11`` over an EMPTY log was
+    silently an ordinal-1 EXPLORE turn. Every test in this class was written
+    against that, and none of them was exercising the concluding turn it named.
+
     ``on_generate``, if given, is called (with the engine) from INSIDE the
     faked ``generate_with_tools`` — i.e. AFTER `_reply_to_thread`'s
     top-of-turn latch has already run and captured `thread.floor_armed`, but
@@ -754,6 +766,7 @@ async def _drive_reply_to_thread(
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
     from src.agent.agent import Agent
+    from src.agent.message_log import LogEntry
     from src.agent.simulation import SimulationEngine
     from src.agent.state import ThreadState
     from tests.fakes import FakeSlackClient
@@ -768,7 +781,8 @@ async def _drive_reply_to_thread(
     agent = Agent("blackbird", "BlackbirdBot", "Blackbird", role="scout_hub")
     thread = ThreadState(
         thread_id="t1", channel="general", other_agent_id=other_agent_id,
-        message_count=11, has_pending_reply=True, floor_armed=initial_floor_armed,
+        message_count=prior_messages, has_pending_reply=True,
+        floor_armed=initial_floor_armed,
     )
     agent.state.active_threads["t1"] = thread
     client = FakeSlackClient(agent_id="blackbird")
@@ -776,6 +790,26 @@ async def _drive_reply_to_thread(
         agents=[agent], slack_clients={"blackbird": client},
         session_factory=factory, simulation_run_id=run_id,
     )
+    # The thread's existing messages, in the real log `_reply_to_thread` reads
+    # the phase ordinal from. The root is "t1" itself so `get_thread_history`
+    # pins it first; the rest alternate PI and hub the way an interview does.
+    for i in range(prior_messages):
+        ts = "t1" if i == 0 else f"t1.{i}"
+        sim.message_log.append(LogEntry(
+            ts=ts,
+            channel="general",
+            sender_agent_id=other_agent_id if i % 2 == 0 else "blackbird",
+            sender_name="WangBot" if i % 2 == 0 else "BlackbirdBot",
+            content=f"prior interview message {i}",
+            thread_ts=None if i == 0 else "t1",
+            posted_at=float(i),
+            # slack_ts == ts is pure-Slack-on mode. Without it the seeded root has
+            # no Slack presence, `_slack_parent_ts` returns None, and the reply is
+            # kept DB-only instead of mirrored — which would silently stop these
+            # tests asserting on `client.posted` from seeing anything at all.
+            slack_ts=ts,
+            slack_channel_id="C_GENERAL",
+        ))
     for pi, domain in pre_consults:
         sim._record_consult(pi, domain, thread.thread_id)
     # Bypass real prompt construction (profile files on disk, etc.) — this
@@ -960,11 +994,20 @@ async def test_reply_no_sidecar_persists_nothing_and_is_silent_about_it(
     interview's concluding turn, and a sidecar is the exception (at most 1
     of ~12 messages), not the rule — logging "no sidecar" on every ordinary
     interview turn would be pure noise. See `_capture_hub_assessment`'s
-    docstring for the full rationale."""
+    docstring for the full rationale.
+
+    `prior_messages=5` makes this an ordinary DECIDE turn (ordinal 6), which is
+    what "every ordinary interview turn" means and what this test always meant to
+    cover. It used to get there by accident: the harness left the message log
+    empty, so every test in this class ran at ordinal 1 whatever its ThreadState
+    said. At a real CONCLUDE turn a missing sidecar IS an anomaly and
+    `_warn_if_hub_conclude_missing_assessment` says so — covered by the
+    "absent-sidecar detection gap" section of tests/unit/test_simulation_logic.py,
+    not here."""
     response = _SLACK_BODY  # no <assessment_json> at all — the ordinary case
     with caplog.at_level("WARNING"):
         agent, thread, client, factory, run_id = await _drive_reply_to_thread(
-            engine, monkeypatch, response,
+            engine, monkeypatch, response, prior_messages=5,
         )
     try:
         assert len(client.posted) == 1  # the reply itself still went out

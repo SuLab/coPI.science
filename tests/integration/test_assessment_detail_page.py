@@ -618,3 +618,148 @@ async def test_llm_calls_page_badges_a_consult_signal(client, db_session, admin)
     assert "blocking" in html
     # Exactly one badge: the thread_reply row must not get one.
     assert html.count('class="consult-signal') == 1
+
+
+# ---------------------------------------------------------------------------
+# The panel banner's fourth state: no panel was OWED
+#
+# `pass` and `route-to-incubation` are exempt from the specialist floor
+# (src/agent/specialists.py::PANEL_REQUIRED_FOR, and the same exemption is
+# stated to the model in phase4-thread-reply.md), so `_specialist_floor_gap`
+# returns an empty set for them without consulting anything. That stored the
+# same `missing_domains=NULL` a genuine verification stores, and the page then
+# told the reader nothing owed had been skipped — a claim about an audit that
+# never ran. Production run 60c53424 rendered it on a route-to-incubation
+# verdict whose own content required a `clinical` consult that never happened.
+# ---------------------------------------------------------------------------
+
+
+async def _seed_exempt(db_session, recommendation: str):
+    """One verdict the floor never evaluated: no gap, no consults, exempt
+    recommendation — the exact shape production stored."""
+    run = await factories.make_simulation_run(db_session)
+    assessment = OpportunityAssessment(
+        simulation_run_id=run.id,
+        agent_id=HUB,
+        subject_agent_id=SUBJECT,
+        channel_name=CHANNEL,
+        slack_ts=f"{time.time():.6f}",
+        company_or_project="Exempt Verdict Fixture Co",
+        recommendation=recommendation,
+        weighted_score=2.51,
+        band="pass",
+        scores={"differentiation": 3},
+        panel_incomplete=False,
+        missing_domains=None,
+    )
+    db_session.add(assessment)
+    await db_session.flush()
+    return assessment
+
+
+@pytest.mark.parametrize("recommendation", ["pass", "route-to-incubation"])
+async def test_an_exempt_verdict_does_not_claim_a_verified_panel(
+    client, db_session, admin, recommendation
+):
+    assessment = await _seed_exempt(db_session, recommendation)
+    resp = await client.get(
+        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+    )
+    assert resp.status_code == 200
+    html = resp.text
+
+    assert "Specialist panel: not required" in html
+    # The two claims that must NOT appear: this row was never checked, so it is
+    # neither a verified panel nor a demonstrated gap.
+    assert "Specialist panel: no gap recorded" not in html
+    assert "Nothing the verdict's own content owed a specialist" not in html
+    assert "Specialist panel incomplete" not in html
+
+
+async def test_a_conditional_verdict_still_reports_a_verified_panel(
+    client, db_session, admin
+):
+    """The guard on the other side: `conditional` IS held to the floor, so an
+    empty gap there is a real verification and must keep saying so."""
+    assessment = await _seed_exempt(db_session, "conditional")
+    resp = await client.get(
+        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+    )
+    assert resp.status_code == 200
+    assert "Specialist panel: no gap recorded" in resp.text
+    assert "Specialist panel: not required" not in resp.text
+
+
+# ---------------------------------------------------------------------------
+# `retro_consult_count` counts THIS interview's consults
+#
+# The retro count exists for pre-`specialist_consults` rows: no durable consult
+# rows, so the page recovers them from the hub's own tool log. But
+# `_load_tool_turns` selects log rows by (run, phase, agent, CHANNEL, time
+# window) — not by thread, which the log table cannot express. Several
+# interviews share a channel, so the scan legitimately pulls in other threads'
+# turns; `correlate_turns_to_messages` then fails to place them and returns
+# them as `unplaced`. Summing chips over ALL scanned turns therefore counted
+# other interviews' consults as this one's. Measured on production run
+# 60c53424: the kevrekidis assessment reported 11 against 7 real consults, with
+# 4 unplaced turns making up the difference exactly.
+# ---------------------------------------------------------------------------
+
+
+async def test_retro_consult_count_excludes_turns_from_other_interviews(
+    client, db_session, admin
+):
+    """Two consults sit in the scan window and exactly one is this interview's.
+
+    The other is on a turn that places nowhere — the shape of a turn belonging to
+    a different interview that shares this channel and time window. Before the fix
+    the count was 2.
+    """
+    from src.services.assessment_detail import build_assessment_detail
+
+    _, assessment = await _seed(db_session, with_consult=False)
+
+    def _consult_turn(tool_id, domain, response_text):
+        return LlmCallLog(
+            simulation_run_id=assessment.simulation_run_id,
+            agent_id=HUB,
+            phase="thread_reply",
+            channel=CHANNEL,
+            model="claude-opus-test",
+            system_prompt="sys",
+            messages_json=[
+                {"role": "assistant", "content": [{
+                    "type": "tool_use", "id": tool_id, "name": "consult_specialist",
+                    "input": {"domain": domain, "question": "a question"},
+                }]},
+                {"role": "user", "content": [{
+                    "type": "tool_result", "tool_use_id": tool_id,
+                    "content": domain.title() + " Specialist \u2014 signal: caution\n\nBody.",
+                }]},
+            ],
+            response_text=response_text,
+            created_at=datetime.now(UTC),
+        )
+
+    # Places on this thread: its posted text IS the thread's reply, so
+    # correlate_turns_to_messages matches it. This is the one that counts.
+    db_session.add(_consult_turn(
+        "toolu_mine", "scientific",
+        "<slack_message>\n" + REPLY_TEXT + "\n</slack_message>",
+    ))
+    # Places nowhere.
+    db_session.add(_consult_turn(
+        "toolu_other", "clinical",
+        "<slack_message>A reply on a different thread.</slack_message>",
+    ))
+    await db_session.flush()
+
+    ctx = await build_assessment_detail(db_session, assessment.id, admin_view=True)
+
+    assert len(ctx["unplaced_turns"]) == 1, "the other interview's turn is unplaced"
+    assert sum(
+        1 for turn in ctx["unplaced_turns"] for chip in turn["chips"] if chip["is_consult"]
+    ) == 1, "and it is a consult, so it is available to be miscounted"
+    assert ctx["retro_consult_count"] == 1, (
+        "only consults on turns placed in THIS interview count"
+    )

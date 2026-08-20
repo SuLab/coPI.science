@@ -25,7 +25,11 @@ from src.agent.post_types import (
 from src.agent.prompt_safety import delimit
 from src.agent.roles import load_role
 from src.agent.slack_client import SlackListingIncomplete, ThreadNotFound
-from src.agent.specialists import format_panel_note, required_domains_for
+from src.agent.specialists import (
+    PANEL_REQUIRED_FOR,
+    format_panel_note,
+    required_domains_for,
+)
 from src.agent.state import ProposalRef, ThreadState
 from src.agent.thread_guidance import CONCLUDE, phase4_guidance
 from src.agent.tools import execute_tool, tools_for_role
@@ -280,6 +284,24 @@ class SimulationEngine:
 
         # Closed thread IDs — prevents Phase 3 from re-activating decided threads
         self._closed_thread_ids: set[str] = set()
+
+        # Threads whose interview has already produced a verdict, so a second
+        # `<assessment_json>` sidecar on the same thread cannot become a second
+        # `opportunity_assessments` row. Run 60c53424 wrote THREE rows for one
+        # pearce interview and run 88d81cd8 wrote up to three per thread for
+        # five different labs; see `_capture_hub_assessment` for the full
+        # mechanism. A thread is added once its verdict is HELD — committed, or
+        # queued on `_pending_assessments` for a retry that will still land it.
+        #
+        # Process-local on purpose. It is the same scope as the duplicates it
+        # prevents (every observed one came from a single process), and the only
+        # durable alternative is a join back through `agent_messages`, because
+        # `opportunity_assessments.slack_ts` is the REPLY's ts and the table
+        # carries no thread_id of its own. A restart mid-interview can therefore
+        # still let a second verdict through — but `max_thread_messages` closes a
+        # thread the turn after it concludes, so there is normally no second
+        # concluding turn to come back to.
+        self._assessed_threads: set[str] = set()
 
         # Prior thread decisions per agent pair — for Phase 5 dedup context.
         # Key: tuple(sorted([agent_a, agent_b])), Value: list of dicts
@@ -2630,6 +2652,23 @@ class SimulationEngine:
         try:
             verdict = _extract_assessment_json(raw_response)
             if verdict is not None:
+                refusal = self._sidecar_refusal(agent.role, thread)
+                if refusal is not None:
+                    reason, detail = refusal
+                    logger.warning(
+                        "[%s] Phase 4: REFUSED an <assessment_json> sidecar for "
+                        "%s on thread %s — %s. The reply is already in Slack; "
+                        "the verdict is recorded as a drop, not stored.",
+                        agent.agent_id, thread.other_agent_id or "?",
+                        thread.thread_id, detail,
+                    )
+                    await self._record_assessment_drop(
+                        agent.agent_id, reason,
+                        subject_agent_id=thread.other_agent_id,
+                        thread_id=thread.thread_id,
+                        detail=detail,
+                    )
+                    return
                 # The model is asked for `subject_agent_id` in the sidecar,
                 # but unlike Phase 5's standalone post, a Phase-4 CONCLUDE
                 # reply always has a real interview thread behind it — the PI
@@ -2637,11 +2676,13 @@ class SimulationEngine:
                 # as a fallback (not written into `verdict` itself) so
                 # `raw_verdict` stays exactly what the model emitted — see
                 # _persist_assessment's docstring.
-                await self._persist_assessment(
+                held = await self._persist_assessment(
                     agent.agent_id, thread.channel, verdict, slack_ts=slack_ts,
                     subject_agent_id_fallback=thread.other_agent_id,
                     thread=thread,
                 )
+                if held:
+                    self._assessed_threads.add(thread.thread_id)
             elif _ASSESSMENT_UNCLOSED_RE.search(raw_response or ""):
                 # An <assessment_json> opening tag is present but
                 # _extract_assessment_json found no usable verdict in it —
@@ -2751,9 +2792,16 @@ class SimulationEngine:
     async def _persist_assessment(
         self, agent_id: str, channel: str, verdict: dict, slack_ts: str | None = None,
         *, subject_agent_id_fallback: str | None = None, thread: ThreadState | None = None,
-    ) -> None:
+    ) -> bool:
         """Store a scouting verdict. Best-effort: a failure here must never cost
         the Slack post that already went out.
+
+        Returns whether the verdict is HELD — committed, or queued on
+        ``_pending_assessments`` for a retry that will still land it. False means
+        nothing was stored and nothing will be: the engine has no database (see
+        ``__init__``). ``_capture_hub_assessment`` uses this to decide whether the
+        thread has had its one verdict; a queued row counts, because letting a
+        second verdict through while the first is still queued lands BOTH.
 
         ``slack_ts`` is the canonical post id ``_post_message`` returned for
         the post/reply the verdict came from (F7) — the row's link back to
@@ -2856,7 +2904,7 @@ class SimulationEngine:
                 "[%s] Skipping assessment persistence — no database configured",
                 agent_id,
             )
-            return
+            return False
 
         scores = verdict.get("scores") if isinstance(verdict.get("scores"), dict) else {}
         # An empty/missing `scores` map is "we don't know", not "we scored it
@@ -2939,6 +2987,7 @@ class SimulationEngine:
                 agent_id, subject_agent_id or "?",
                 recommendation or "?", computed_score, computed_band,
             )
+            return True
         except Exception as exc:  # noqa: BLE001 — never lose a posted assessment
             # This row is the actual product of the screening pipeline, and
             # unlike _close_thread/_record_assessment_drop it is fully built
@@ -2957,6 +3006,50 @@ class SimulationEngine:
                 "for retry: %s",
                 agent_id, exc, exc_info=True,
             )
+            return True
+
+    def _sidecar_refusal(self, role: str, thread: ThreadState) -> tuple[str, str] | None:
+        """Why this thread may not turn a sidecar into a verdict, or ``None``.
+
+        Returns the ``AssessmentDrop.reason`` and the human-facing detail, so the
+        log line and the stored row can never say different things.
+
+        Two gates, both learned from production:
+
+        ``premature_sidecar`` — the turn was not the interview's CONCLUDE turn.
+        Only CONCLUDE guidance asks for a sidecar, but the ``<assessment_json>``
+        contract sits in the STATIC body of ``phase4-thread-reply.md`` and is
+        therefore in front of the model on every phase-4 turn, EXPLORE and DECIDE
+        included. Run 60c53424's pearce interview filled it in at ordinals 8 and
+        10 as well as at 12, and all three became rows. A DECIDE-turn verdict is
+        also substantively wrong, not merely early: the panel is still being
+        convened, so the score is formed on a partial record.
+
+        ``duplicate_thread_verdict`` — the thread already holds a verdict. See
+        ``_assessed_threads`` for why this is process-local.
+
+        The ordinal arithmetic is ``_missing_sidecar_reason``'s exactly — prior
+        count plus one, because ``phase4_guidance`` wants the ordinal of the reply
+        just generated. The two must agree: one decides that a CONCLUDE turn OWED
+        a sidecar, this one decides that a sidecar CAME from a concluding turn,
+        and a drift between them would open a window where a reply both owes a
+        verdict and is refused the one it produced.
+        """
+        thread_phase, _, _ = phase4_guidance(role, thread.message_count + 1)
+        if thread_phase != CONCLUDE:
+            return (
+                "premature_sidecar",
+                f"sidecar arrived on a {thread_phase} turn (message ordinal "
+                f"{thread.message_count + 1}); only the CONCLUDE turn is asked "
+                "for one",
+            )
+        if thread.thread_id in self._assessed_threads:
+            return (
+                "duplicate_thread_verdict",
+                "this interview already produced a verdict; one interview "
+                "yields one assessment",
+            )
+        return None
 
     async def _record_assessment_drop(
         self,
@@ -3376,7 +3469,10 @@ class SimulationEngine:
         interview we have no record of."""
         return frozenset(self._specialist_consults.get((pi_agent_id, thread_id), ()))
 
-    _PANEL_REQUIRED_FOR = frozenset({"advance", "conditional"})
+    #: Alias for the one definition in src/agent/specialists.py, which the admin
+    #: detail page reads too (see PANEL_REQUIRED_FOR there). Kept as a class
+    #: attribute so every `self._PANEL_REQUIRED_FOR` reference below is unchanged.
+    _PANEL_REQUIRED_FOR = PANEL_REQUIRED_FOR
 
     def _specialist_floor_gap(
         self, verdict: dict, *, thread: ThreadState | None = None,

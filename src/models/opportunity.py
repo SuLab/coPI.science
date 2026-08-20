@@ -86,7 +86,20 @@ class OpportunityAssessment(Base):
     #             complete panel either, so it must never be counted as one.
     # Rows written before 2026-08-19 have NULL for both the verified and the
     # unverified case — that conflation is exactly what [] exists to end.
-    missing_domains: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    #
+    # `none_as_null=True` is load-bearing, not decoration. SQLAlchemy's JSON type
+    # defaults it False, which persists Python `None` as the JSONB scalar `null`
+    # rather than as SQL NULL — so the state documented above as NULL was stored
+    # as something `WHERE missing_domains IS NULL` does not match. Measured on
+    # production 2026-08-20: 15 rows held `jsonb_typeof = 'null'` while 18 older
+    # rows held a true SQL NULL, one logical state in two encodings. Both read
+    # back as `None` through the ORM, so the damage was confined to SQL-level
+    # readers — which is precisely the reader the three-state contract above
+    # invites. `[]` is unaffected: it is not None, so it still stores as an
+    # array and stays distinguishable. Migration 0031 normalized the 15 rows.
+    missing_domains: Mapped[list | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
 
     # Which rubric document scored this row (prompts/rubric/blackbird-rubric.toml
     # [meta].version, plus a short content hash of the file bytes). NULL means the
@@ -130,6 +143,14 @@ class AssessmentDrop(Base):
         closing tag).
       * ``missing_sidecar``      — the reply concluded, did not decline, and
         carried no sidecar at all.
+      * ``premature_sidecar``    — a sidecar arrived on a turn that was not the
+        interview's CONCLUDE turn. The ``<assessment_json>`` contract is in the
+        static body of ``phase4-thread-reply.md``, so the model sees it on every
+        phase-4 turn even though only CONCLUDE guidance asks for it; run
+        60c53424 filled it in at ordinals 8 and 10 as well as 12.
+      * ``duplicate_thread_verdict`` — the thread had already produced a verdict.
+        One interview yields one assessment; see
+        ``SimulationEngine._assessed_threads``.
     """
 
     __tablename__ = "assessment_drops"

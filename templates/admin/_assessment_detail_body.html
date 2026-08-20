@@ -169,19 +169,24 @@
     </div>
 </div>
 
-{# Panel status. Three states, not two — see OpportunityAssessment.missing_domains:
-   named domains = a demonstrated gap, NULL = the floor checked and found none,
-   [] = the floor could not check at all (typically a mid-interview restart).
-   Rendering "unverified" as "fine" is how an unvetted verdict gets acted on. #}
+{# Panel status. FOUR states — see OpportunityAssessment.missing_domains and
+   assessment_detail._panel_state: named domains = a demonstrated gap, [] = the
+   floor could not check at all (typically a mid-interview restart), and NULL
+   splits by recommendation into "the floor checked and found none" and "this
+   verdict was never held to the floor at all". Rendering EITHER "unverified" or
+   "not required" as "fine" is how an unvetted verdict gets acted on. #}
 <div class="mb-6 rounded-xl border p-4 text-sm
     {% if panel_state == 'gap' %}border-orange-300 bg-orange-50 text-orange-900
     {% elif panel_state == 'unverified' %}border-gray-300 bg-gray-50 text-gray-700
+    {% elif panel_state == 'not_owed' %}border-slate-300 bg-slate-50 text-slate-700
     {% else %}border-green-200 bg-green-50 text-green-900{% endif %}">
     <div class="font-semibold mb-1">
         {% if panel_state == 'gap' %}
             &#9873; Specialist panel incomplete
         {% elif panel_state == 'unverified' %}
             Specialist panel unverified
+        {% elif panel_state == 'not_owed' %}
+            Specialist panel: not required
         {% else %}
             Specialist panel: no gap recorded
         {% endif %}
@@ -193,6 +198,11 @@
         The floor could not be checked for this verdict (no consult was recorded for
         anyone, or the verdict named no lab). Not evidence of a gap, and not evidence
         of a complete panel either.
+    {% elif panel_state == 'not_owed' %}
+        A <span class="font-mono">{{ a.recommendation or 'verdict with no recommendation' }}</span>
+        is not held to the specialist floor, so no consult requirement was evaluated
+        for it. Any consults below were made anyway — read them as what the panel
+        happened to say, not as a completed panel. This is not a verification.
     {% else %}
         Nothing the verdict's own content owed a specialist was left unconsulted.
         On rows written before 2026-08-19 this state also covers "not recorded".

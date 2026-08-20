@@ -357,6 +357,28 @@ stay comparable.
 > a fresh consult can be stamped `panel_incomplete` with a full `missing_domains` list — a
 > false accusation, but only in that one-time window.
 
+> **`0031_normalize_missing_domains_null` needs NO deploy ordering.** It is
+> data-only — it rewrites `opportunity_assessments.missing_domains` from the JSONB
+> scalar `null` to a real SQL NULL, and changes no DDL. The code side is
+> `JSONB(none_as_null=True)` on the mapped column, which is a Python-side
+> property, so old code against normalized data and new code against
+> un-normalized data both read `None` exactly as before. Apply it in any order
+> relative to the restart. Details:
+> `docs/audits/2026-08-20-assessment-duplication/README.md`.
+
+**One interview yields exactly one assessment.** `_capture_hub_assessment` refuses
+a sidecar that arrives on a non-CONCLUDE turn (`premature_sidecar`) or on a thread
+that already holds a verdict (`duplicate_thread_verdict`), and records the refusal
+in `assessment_drops` rather than logging it and moving on. Both gates exist
+because the `<assessment_json>` contract sits in the STATIC body of
+`phase4-thread-reply.md` and is therefore in front of the model on every phase-4
+turn, not just the one asked for it — production wrote three rows for a single
+pearce interview (ordinals 8, 10 and 12) before the gates existed. When writing a
+test that drives a concluding reply, seed the thread's history in the
+`MessageLog`: `_reply_to_thread` overwrites `ThreadState.message_count` from
+`get_thread_history`, so `message_count=11` over an empty log is an ordinal-1
+EXPLORE turn, not the CONCLUDE turn it looks like.
+
 As of the 2026-08-12 removal cycle (private instructions + reply-only hub), there is no
 runtime "private profile" mechanism — `Agent._compose_system_prompt` injects the rendered
 rubric but no `## Your Private Instructions` header, and nothing reads

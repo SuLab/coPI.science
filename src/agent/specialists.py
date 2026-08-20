@@ -298,6 +298,21 @@ _PLATFORM_CUES = ("platform", "pipeline", "multiple shots", "reusable")
 
 _ALWAYS: frozenset[str] = frozenset({"scientific", "talent"})
 
+#: Recommendations held to the specialist floor at all. Everything else —
+#: ``pass``, ``route-to-incubation`` — is exempt: a decline costs Blackbird
+#: nothing, so requiring eight opinions to say no would burn calls on exactly the
+#: ideas that do not warrant them. The exemption is stated to the model too, in
+#: ``prompts/roles/scout_hub/phase4-thread-reply.md`` ("`pass` and
+#: `route-to-incubation` verdicts require no panel at all").
+#:
+#: Lives here, next to ``required_domains_for``, because two very different
+#: callers need the same answer and must not each keep their own copy: the engine
+#: decides whether to COMPUTE a gap (``_specialist_floor_gap``), and the admin
+#: detail page decides whether an empty gap means "verified" or merely "never
+#: evaluated" (``assessment_detail._panel_state``). When those two disagreed, the
+#: page claimed a verification the engine had never performed.
+PANEL_REQUIRED_FOR: frozenset[str] = frozenset({"advance", "conditional"})
+
 
 # Cues with a DEMONSTRATED false-positive risk in the corpus — not simply the
 # short ones. These match as WHOLE WORDS (plus a simple plural); every other

@@ -230,13 +230,13 @@ def test_revision_status_blocks_anywhere_else(rev):
 def test_supported_start_revisions_are_exactly_the_documented_set():
     assert pf.SUPPORTED_START_REVISIONS == (
         "0018", "0019", "0020", "0021", "0023", "0024", "0025", "0026", "0027", "0028",
-        "0029",
+        "0029", "0030",
     )
-    assert pf.DEFAULT_TARGET == "0030"
+    assert pf.DEFAULT_TARGET == "0031"
 
 
 def test_every_post_branch_revision_is_a_supported_start():
-    """Regression: DEFAULT_TARGET moved to 0028, then 0029, then 0030, each time
+    """Regression: DEFAULT_TARGET moved to 0028, then 0029, then 0030, then 0031, each time
     without the revision immediately behind the new target joining
     SUPPORTED_START_REVISIONS -- 0026/0027 went stale for the 0028 move, and left
     unguarded the same mistake would recur for every later move too. A database
@@ -1181,7 +1181,10 @@ def test_postflight_status_aliases_are_the_same_tokens_preflight_uses():
 def test_preflight_parser_defaults():
     args = pf.build_parser().parse_args([])
     assert args.database_url is None
-    assert args.target == "0030"
+    # Derived, not re-pinned: the literal tripwire lives in
+    # test_supported_start_revisions_are_exactly_the_documented_set, and a second
+    # copy here only ever produced a third place to forget on a target bump.
+    assert args.target == pf.DEFAULT_TARGET
     assert args.json is False
     assert args.snapshot is None
     assert args.backup_path is None
@@ -1222,7 +1225,7 @@ def test_preflight_parser_accepts_the_documented_interface():
 def test_postflight_parser_defaults_and_shape():
     args = po.build_parser().parse_args([])
     assert args.database_url is None
-    assert args.target == "0030"
+    assert args.target == po.DEFAULT_TARGET
     assert args.json is False
     assert args.snapshot is None
     assert args.allow_row_growth is False

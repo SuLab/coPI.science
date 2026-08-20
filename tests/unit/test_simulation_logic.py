@@ -1304,19 +1304,46 @@ class TestHumanRepliesAreInertToPhase4:
 # ---------------------------------------------------------------
 
 class TestHubAssessmentRelocation:
-    def _engine_with_hub_thread(self):
+    def _engine_with_hub_thread(self, prior_messages=11):
+        """A hub mid-interview, with ``prior_messages`` already in the thread.
+
+        The default of 11 makes this turn's reply the 12th — the CONCLUDE turn,
+        the only one `_capture_hub_assessment` will persist a sidecar from.
+        Seeding the real MessageLog is what makes that true: `_reply_to_thread`
+        overwrites `ThreadState.message_count` with the log's own thread history
+        length before computing the phase, so `message_count=11` over an empty log
+        was an ordinal-1 EXPLORE turn and these "concluding reply" tests were not
+        exercising a concluding reply at all.
+        """
         from src.agent.agent import Agent
+        from src.agent.message_log import LogEntry
         from src.agent.state import ThreadState
         from tests.fakes import FakeSlackClient
 
         hub = Agent("blackbird", "BlackbirdBot", "Blackbird", role="scout_hub")
         thread = ThreadState(
             thread_id="t1", channel="general", other_agent_id="wang",
-            message_count=11, has_pending_reply=True,
+            message_count=prior_messages, has_pending_reply=True,
         )
         hub.state.active_threads["t1"] = thread
         client = FakeSlackClient(agent_id="blackbird")
         engine = SimulationEngine(agents=[hub], slack_clients={"blackbird": client})
+        for i in range(prior_messages):
+            ts = "t1" if i == 0 else f"t1.{i}"
+            engine.message_log.append(LogEntry(
+                ts=ts,
+                channel="general",
+                sender_agent_id="wang" if i % 2 == 0 else "blackbird",
+                sender_name="WangBot" if i % 2 == 0 else "BlackbirdBot",
+                content=f"prior interview message {i}",
+                thread_ts=None if i == 0 else "t1",
+                posted_at=float(i),
+                # slack_ts == ts is pure-Slack-on mode. Without it the seeded root
+                # has no Slack presence and `_slack_parent_ts` returns None, so the
+                # reply is kept DB-only and never reaches `client.posted`.
+                slack_ts=ts,
+                slack_channel_id="C_GENERAL",
+            ))
         return engine, hub, thread, client
 
     @pytest.mark.asyncio

@@ -41,7 +41,7 @@ from typing import Any
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.agent.specialists import parse_opinion
+from src.agent.specialists import PANEL_REQUIRED_FOR, parse_opinion
 from src.models import AgentMessage, LlmCallLog, OpportunityAssessment, SpecialistConsult
 from src.services.blackbird_rubric import (
     BANDING,
@@ -379,18 +379,38 @@ def _message_at(message: AgentMessage) -> float:
 
 
 def _panel_state(assessment: OpportunityAssessment) -> str:
-    """The three states of the specialist floor's finding.
+    """The FOUR findings the specialist floor can leave behind.
 
-    Mirrors ``OpportunityAssessment.missing_domains``: names = a demonstrated
-    gap, NULL = verified complete, [] = the floor could not be checked at all.
-    Rows written before 2026-08-19 carry NULL for both of the last two, so
-    "verified" on an old row means "no gap recorded", which the page says.
+    Three come straight from ``OpportunityAssessment.missing_domains``: names = a
+    demonstrated gap, ``[]`` = the floor could not be checked at all, NULL = no
+    gap recorded. Rows written before 2026-08-19 carry NULL for both of the last
+    two, so "verified" on an old row means "no gap recorded", which the page says.
+
+    The fourth splits that NULL, because it was answering two questions with one
+    word. A NULL row is a real verification only if the verdict was held to the
+    floor in the first place, and ``PANEL_REQUIRED_FOR`` covers just
+    ``advance``/``conditional`` — for a ``pass`` or ``route-to-incubation``,
+    ``_specialist_floor_gap`` returns an empty set before it looks at a single
+    consult. Reporting that as "verified" claimed an audit that never ran:
+    production run 60c53424's pearce ``route-to-incubation`` row rendered the
+    green box while ``required_domains_for`` named ``clinical`` and no clinical
+    consult existed on that thread.
+
+    ``not_owed`` is the weakest claim of the four and yields to every other one.
+    A stored gap or a stored ``[]`` is evidence about this row, and evidence
+    outranks the exemption — otherwise reading a flagged exempt row (which
+    today's floor cannot produce, but historical rows and a future floor change
+    both can) would silently unflag it. An absent ``recommendation`` also lands
+    here: a verdict whose recommendation we cannot read cannot be shown to have
+    faced the floor.
     """
     if assessment.panel_incomplete:
         return "gap"
-    if assessment.missing_domains is None:
-        return "verified"
-    return "unverified"
+    if assessment.missing_domains is not None:
+        return "unverified"
+    if assessment.recommendation not in PANEL_REQUIRED_FOR:
+        return "not_owed"
+    return "verified"
 
 
 async def build_assessment_detail(
@@ -488,8 +508,23 @@ async def build_assessment_detail(
     # rather than in an arbitrary order.
     timeline.sort(key=lambda entry: entry["at"])
 
+    # Counted over PLACED turns only, not over every scanned turn.
+    # `_load_tool_turns` selects log rows by (run, phase, agent, channel, time
+    # window) because `llm_call_logs` carries no thread id, and several
+    # interviews share a channel — so the scan legitimately returns other
+    # threads' turns and `correlate_turns_to_messages` hands them back as
+    # `unplaced`. Summing over `turns` therefore attributed other interviews'
+    # consults to this one: production run 60c53424's kevrekidis assessment
+    # reported 11 against 7 real consults, the difference being its 4 unplaced
+    # turns exactly. The unplaced turns are still SHOWN, under their own heading
+    # — they are evidence of what the hub did — they are just not counted as
+    # this interview's panel.
     retro_consult_count = sum(
-        1 for turn in turns for chip in turn["chips"] if chip["is_consult"]
+        1
+        for placed in matched.values()
+        for turn in placed
+        for chip in turn["chips"]
+        if chip["is_consult"]
     )
 
     return {
