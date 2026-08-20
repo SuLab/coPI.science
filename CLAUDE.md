@@ -252,8 +252,9 @@ authoritative.)
 `hybrid_property` over `user_role`, so it still works in both SQL
 (`select(User.is_admin)`) and Python, but **cannot be assigned**. Set the role
 instead. The physical `users.is_admin` column stays in the database, unmapped and
-defaulted. Dropping it is deferred to a separate later migration, `0030`, which **has
-not been written, let alone applied** — see the design doc's §8.
+defaulted. Dropping it is deferred to a separate later migration (`0031`+ — `0030` is
+now taken by `specialist_consults`), which **has not been written, let alone applied** —
+see the design doc's §8.
 
 > **Deploy order for `0028_add_user_role` — migrate BEFORE the new code serves.**
 > `0028` is additive and gives `is_admin` a server default, so *old code against the
@@ -310,15 +311,39 @@ role. Between approval and role-setting the account behaves as a PI.
 ## BlackbirdBot (the scout_hub role)
 
 BlackbirdBot screens PI ideas against `data/Blackbird_initial_priorities-criteria_v1.pdf`.
-The rubric criteria and the `<assessment_json>` skeleton live directly in
-`prompts/roles/scout_hub/phase4-thread-reply.md`; the per-phase behaviour otherwise lives
-in `prompts/roles/scout_hub/` and `src/agent/thread_guidance.py`. As of the 2026-08-12
-removal cycle (private instructions + reply-only hub), there is no runtime "private
-profile" mechanism — `Agent._compose_system_prompt` no longer injects a `## Your Private
-Instructions` header, and nothing reads `profiles/private/{agent_id}.md` per-agent.
-**`profiles/private/blackbird.md`** is untracked and unread at runtime; archive-and-diff it
-against the tracked rubric text before any deploy in case it holds content that was never
-migrated (see the deploy checklist).
+**The rubric criteria live in one document, `prompts/rubric/blackbird-rubric.toml`** —
+weights, band thresholds, the 1–5 scale, gating criteria, checklist, red flags, the
+heuristic. `src/services/blackbird_rubric.py` loads it once at import (fail-fast on an
+invalid document) and renders it into the `{rubric}` placeholder of
+`prompts/roles/scout_hub/agent-system.md` at prompt-composition time, so the prompt the
+hub reads and the score the code computes cannot drift apart. The `<assessment_json>`
+skeleton stays in `prompts/roles/scout_hub/phase4-thread-reply.md` (it is the
+authoritative contract for the sidecar's shape);
+`tests/unit/test_rubric_prompt_sync.py` is the drift alarm between the two, plus
+`specialists.py`'s `maps_to_dimension`. The per-phase behaviour otherwise lives in
+`prompts/roles/scout_hub/` and `src/agent/thread_guidance.py`.
+
+**Editing the rubric takes effect on restart, not on rebuild.** `prompts/` is
+bind-mounted into exactly the two services that read it, `blackbird-app` and `agent`, so
+a document edit needs no image build (`worker` mounts only `./profiles` — it never
+imports the rubric). But the document is read ONCE at import, so a running process keeps
+the rubric it started with. Stop the run, start it again (see "Before restarting" above), and
+check the startup banner: it logs `Screening rubric: version X (content hash Y)`, which
+must match `[meta].version` in the file and its sha256. New assessments are stamped with
+both, so pre-/post-change rows stay comparable.
+
+As of the 2026-08-12 removal cycle (private instructions + reply-only hub), there is no
+runtime "private profile" mechanism — `Agent._compose_system_prompt` injects the rendered
+rubric but no `## Your Private Instructions` header, and nothing reads
+`profiles/private/{agent_id}.md` per-agent. The stale hub copy has now been diffed against
+the extracted rubric and archived as
+`profiles/private/blackbird.archived-2026-08-20.md` (untracked, git-ignored, unread — no
+longer a per-deploy chore) — the diff is recorded in
+`docs/audits/2026-08-20-rubric-extraction/blackbird-private-diff.md`. Its one substantive
+delta was a fourth **`baltimore_commitment`** gating criterion, deliberately absent from
+the tracked rubric: the three gating keys are structural (the sidecar's JSON keys and the
+`opportunity_assessments.gating` keys), and `blackbird_rubric.py`'s validator rejects a
+fourth outright.
 
 - **Interview guidance is per-role Python**, not a prompt: `src/agent/thread_guidance.py`.
   The `pi_lab` strings there are byte-identical to the pre-refactor literals and are pinned

@@ -10,10 +10,17 @@ from src.agent.roles import DEFAULT_ROLE, load_role, resolve_prompt_path
 from src.agent.state import AgentState, ThreadState
 from src.agent.thread_guidance import phase4_guidance
 from src.models.agent_activity import VISIBILITY_COLLAB_PRIVATE, VISIBILITY_PUBLIC
+from src.services.blackbird_rubric import render_rubric_markdown
 
 logger = logging.getLogger(__name__)
 
 PROFILES_DIR = Path("profiles")
+
+# The placeholder the scout_hub system prompt carries where the rendered
+# screening rubric goes (see _compose_system_prompt). src.services
+# .blackbird_rubric imports nothing from src.agent, so this import is
+# acyclic — the rubric document is stdlib-parsed data, not agent code.
+_RUBRIC_PLACEHOLDER = "{rubric}"
 
 # Matches a bare DOI. The character class deliberately excludes the delimiters
 # that wrap DOIs in Slack posts (whitespace, quotes, angle brackets from
@@ -293,6 +300,18 @@ class Agent:
         set byte-for-byte (see the callers below).
         """
         base_prompt = self._load_prompt("agent-system.md", _default_system_prompt())
+        # The scouting hub's system prompt carries the screening rubric as a
+        # `{rubric}` placeholder, rendered from prompts/rubric/
+        # blackbird-rubric.toml so the prompt the hub reads and the score
+        # src/services/blackbird_rubric.py computes cannot drift apart. Rendered
+        # only when the placeholder is present: pi_lab's global agent-system.md
+        # has none, so this is a no-op there (and the pi_lab golden masters stay
+        # byte-identical). str.replace, NOT str.format — prompt and profile files
+        # contain bare curly braces, same reason as _render_identity.
+        if _RUBRIC_PLACEHOLDER in base_prompt:
+            base_prompt = base_prompt.replace(
+                _RUBRIC_PLACEHOLDER, render_rubric_markdown()
+            )
         identity = self._render_identity()
 
         header = f"""{base_prompt}

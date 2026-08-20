@@ -18,6 +18,7 @@ from src.agent.agent import Agent
 from src.agent.ids import WRITER_ENGINE_AUX, set_default_writer_id
 from src.agent.simulation import SimulationEngine
 from src.config import get_settings
+from src.services.blackbird_rubric import RUBRIC_CONTENT_HASH, RUBRIC_VERSION
 
 logging.basicConfig(
     level=logging.INFO,
@@ -269,6 +270,16 @@ async def _run_simulation(
             "Starting simulation: %d agents, %s max runtime, %d budget/agent%s",
             len(agents), runtime_label, budget,
             " (fresh start)" if fresh else " (resuming)",
+        )
+        # Which rubric this run screens against. This line is what makes the
+        # rubric document's editing workflow checkable (see the header comment
+        # of prompts/rubric/blackbird-rubric.toml, step 3): the document is
+        # loaded ONCE at import, so applying an edit means a restart — and the
+        # only way to confirm the restart picked the edit up is to compare
+        # these two values against the file.
+        logger.info(
+            "Screening rubric: version %s (content hash %s)",
+            RUBRIC_VERSION, RUBRIC_CONTENT_HASH,
         )
         await sim_engine.start()
     except Exception:
