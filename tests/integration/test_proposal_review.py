@@ -278,6 +278,10 @@ async def _conclude_thread(
     await engine._check_thread_outcome(
         agents[0], thread, f"⏸️ No viable overlap. {body}",
     )
+    # _close_thread now QUEUES its working-memory synthesis calls instead of
+    # awaiting them inline (perf/memory/race remediation, Task 1) — drain
+    # before asserting the double actually ran.
+    await engine._drain_memory_events()
 
     assert llm_calls, (
         "the working-memory synthesis never ran, so the conclusion path was not "
