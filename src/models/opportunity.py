@@ -143,14 +143,25 @@ class AssessmentDrop(Base):
         closing tag).
       * ``missing_sidecar``      — the reply concluded, did not decline, and
         carried no sidecar at all.
-      * ``premature_sidecar``    — a sidecar arrived on a turn that was not the
-        interview's CONCLUDE turn. The ``<assessment_json>`` contract is in the
-        static body of ``phase4-thread-reply.md``, so the model sees it on every
-        phase-4 turn even though only CONCLUDE guidance asks for it; run
-        60c53424 filled it in at ordinals 8 and 10 as well as 12.
-      * ``duplicate_thread_verdict`` — the thread had already produced a verdict.
-        One interview yields one assessment; see
-        ``SimulationEngine._assessed_threads``.
+      * ``premature_sidecar``    — a sidecar arrived on a turn that neither
+        concluded the interview nor closed the thread, so a later turn is still
+        owed the verdict and this early one must not pre-empt it. The
+        ``<assessment_json>`` contract is in the static body of
+        ``phase4-thread-reply.md``, so the model sees it on every phase-4 turn
+        even though only CONCLUDE guidance asks for it; run 60c53424 filled it in
+        at ordinals 8 and 10 as well as 12. NOT the same as "not ordinal 12",
+        which is what this reason used to mean and which destroyed every verdict
+        delivered as a ⏸️ decline — the reply that carries one CLOSES the thread,
+        so there is no later turn to record it. See
+        ``SimulationEngine._sidecar_refusal``.
+      * ``duplicate_thread_verdict`` — one interview yields one assessment, and
+        this row is the verdict that did not become it: either a re-capture of a
+        turn already stored (or anything following a verdict whose reply closed
+        the interview), or an earlier provisional verdict SUPERSEDED by a later
+        concluding one — in which case the earlier row was retired and this drop
+        is the only remaining trace of it. See
+        ``SimulationEngine._assessed_threads`` and
+        ``_retire_superseded_verdict``.
     """
 
     __tablename__ = "assessment_drops"

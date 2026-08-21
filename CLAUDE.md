@@ -379,14 +379,26 @@ stay comparable.
 > relative to the restart. Details:
 > `docs/audits/2026-08-20-assessment-duplication/README.md`.
 
-**One interview yields exactly one assessment.** `_capture_hub_assessment` refuses
-a sidecar that arrives on a non-CONCLUDE turn (`premature_sidecar`) or on a thread
-that already holds a verdict (`duplicate_thread_verdict`), and records the refusal
-in `assessment_drops` rather than logging it and moving on. Both gates exist
-because the `<assessment_json>` contract sits in the STATIC body of
-`phase4-thread-reply.md` and is therefore in front of the model on every phase-4
-turn, not just the one asked for it — production wrote three rows for a single
-pearce interview (ordinals 8, 10 and 12) before the gates existed. When writing a
+**One interview yields exactly one assessment, and it comes from the reply that
+ENDS the interview.** `_capture_hub_assessment` stores a sidecar carried by a reply
+that concludes (ordinal 12) **or closes the thread** — the ⏸️ decline, decided by
+`_reply_closes_thread`, hoisted once in `_reply_to_thread` and passed down as
+`closes_thread` so the capture gate and `_check_thread_outcome` cannot disagree. It
+refuses one from a turn that does neither (`premature_sidecar`), and refuses a
+re-capture of a turn already stored or anything following a closing verdict
+(`duplicate_thread_verdict`) — recording every refusal in `assessment_drops` rather
+than logging it and moving on. **Gating on the ordinal alone destroys data:** every
+`pass` verdict is delivered as a ⏸️ decline, so its own reply closes the thread
+before ordinal 12 and no later turn exists to record it (run 076e80b6: 4 of 5
+`premature_sidecar` refusals were the thread's terminal message; all 23 `pass`
+sidecars ever emitted carried ⏸️). Gating on neither wrote three rows for a single
+pearce interview (ordinals 8, 10 and 12), because the `<assessment_json>` contract
+sits in the STATIC body of `phase4-thread-reply.md` and is therefore in front of the
+model on every phase-4 turn, not just the one asked for it. A later concluding or
+closing verdict **supersedes** an earlier provisional one — last write wins, and
+`_retire_superseded_verdict` removes the earlier row (leaving a
+`duplicate_thread_verdict` drop as its trace) so the one-row invariant still holds.
+When writing a
 test that drives a concluding reply, seed the thread's history in the
 `MessageLog`: `_reply_to_thread` overwrites `ThreadState.message_count` from
 `get_thread_history`, so `message_count=11` over an empty log is an ordinal-1

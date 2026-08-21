@@ -8,7 +8,7 @@ import re
 import time
 import uuid
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, NamedTuple
 
 from src.agent.agent import PROFILES_DIR, Agent
 from src.agent.channels import SEEDED_CHANNELS
@@ -182,6 +182,28 @@ RUN_STATS_UPDATE_INTERVAL = 30.0
 REBUILD_WINDOW_S = 14 * 24 * 3600  # 14 days
 
 
+class _HeldVerdict(NamedTuple):
+    """The verdict an interview thread already holds, and the turn it came from.
+
+    Recorded per thread in ``SimulationEngine._assessed_threads`` so a second
+    ``<assessment_json>`` sidecar on the same thread can be JUDGED rather than
+    merely counted: a re-capture of the same turn is a duplicate and is refused,
+    while a strictly later reply that concludes or closes the interview is the
+    better-informed verdict and supersedes this one. See ``_sidecar_refusal``.
+
+    ``ordinal`` is the message ordinal of the reply that carried it
+    (``thread.message_count + 1`` as read at capture time). ``final`` means that
+    reply CLOSED the thread, so no later turn exists and nothing may supersede
+    it. ``slack_ts`` is the stored row's own link back to that reply, and the
+    only handle ``_retire_superseded_verdict`` has for finding the row again —
+    ``opportunity_assessments`` carries no thread id of its own.
+    """
+
+    ordinal: int
+    final: bool
+    slack_ts: str | None
+
+
 class SimulationEngine:
     """
     Turn-based simulation engine.
@@ -290,8 +312,16 @@ class SimulationEngine:
         # `opportunity_assessments` row. Run 60c53424 wrote THREE rows for one
         # pearce interview and run 88d81cd8 wrote up to three per thread for
         # five different labs; see `_capture_hub_assessment` for the full
-        # mechanism. A thread is added once its verdict is HELD — committed, or
-        # queued on `_pending_assessments` for a retry that will still land it.
+        # mechanism. A thread is recorded once its verdict is HELD — committed,
+        # or queued on `_pending_assessments` for a retry that will still land
+        # it.
+        #
+        # The VALUE (see `_HeldVerdict`) is what makes last-write-wins possible:
+        # a same-turn re-capture is still refused as a duplicate, but a strictly
+        # later reply that concludes or closes the interview supersedes a
+        # provisional earlier verdict instead of being turned away by it — the
+        # earlier row is then retired (`_retire_superseded_verdict`) so the
+        # one-interview-one-assessment invariant still holds.
         #
         # Process-local on purpose. It is the same scope as the duplicates it
         # prevents (every observed one came from a single process), and the only
@@ -301,7 +331,7 @@ class SimulationEngine:
         # still let a second verdict through — but `max_thread_messages` closes a
         # thread the turn after it concludes, so there is normally no second
         # concluding turn to come back to.
-        self._assessed_threads: set[str] = set()
+        self._assessed_threads: dict[str, _HeldVerdict] = {}
 
         # Prior thread decisions per agent pair — for Phase 5 dedup context.
         # Key: tuple(sorted([agent_a, agent_b])), Value: list of dicts
@@ -1886,6 +1916,21 @@ class SimulationEngine:
             thread.empty_response_count = 0
             thread.suppressed_post_count = 0
 
+            # Does this reply END the interview? Decided ONCE here, then read
+            # twice: `_capture_hub_assessment` needs it to judge the reply's
+            # sidecar, and `_check_thread_outcome` below acts on it 3-8 ms later
+            # by actually closing the thread. Hoisted rather than recomputed
+            # inside the capture because the two must not be able to disagree:
+            # the prompts make the hub deliver a NEGATIVE verdict by opening
+            # with ⏸️ ("That closes the thread"), so a sidecar on a closing reply
+            # is the interview's LAST word — refusing it as "premature" loses
+            # the verdict permanently, which is exactly what production did to 4
+            # of 5 refusals in run 076e80b6. `_check_thread_outcome` re-derives
+            # the same answer from the same helper on the same string rather
+            # than taking this bool, so its own direct callers (tests, and any
+            # future call site) keep working unchanged.
+            closes_thread = _reply_closes_thread(response_text)
+
             # Option A relocation: the hub's :mag: Opportunity Assessment is
             # no longer a separate Phase-5 post — it is the machine-readable
             # sidecar this same concluding reply carries. Extract and persist
@@ -1895,7 +1940,10 @@ class SimulationEngine:
             # Slack message. A pi_lab reply never carries a sidecar, so this
             # is a no-op for every non-hub agent.
             if agent.role == "scout_hub":
-                await self._capture_hub_assessment(agent, thread, raw_response, posted)
+                await self._capture_hub_assessment(
+                    agent, thread, raw_response, posted,
+                    closes_thread=closes_thread,
+                )
                 missing = self._warn_if_hub_conclude_missing_assessment(
                     agent, thread, response_text, raw_response,
                 )
@@ -1935,9 +1983,14 @@ class SimulationEngine:
         still a valid ThreadDecision.outcome value for legacy rows and is
         still handled by _close_thread/admin routes/ProposalReview, but
         nothing in this method can produce a new one.
+
+        The ⏸️ test itself moved to `_reply_closes_thread` so that
+        `_capture_hub_assessment` can ask the SAME question a few lines earlier
+        — a sidecar on a reply that closes the interview is that interview's
+        real verdict, and the capture gate has to know it before this runs.
         """
         # Check for ⏸️ — explicit "no viable collaboration" signal
-        if "⏸️" in latest_reply or ":pause_button:" in latest_reply:
+        if _reply_closes_thread(latest_reply):
             logger.info(
                 "[%s] Thread %s: ⏸️ no-proposal close",
                 agent.agent_id, thread.thread_id,
@@ -2657,10 +2710,19 @@ class SimulationEngine:
                 logger.error("[%s] Phase 5 failed: %s", agent.agent_id, exc)
 
     async def _capture_hub_assessment(
-        self, agent: Agent, thread: ThreadState, raw_response: str, slack_ts: str | None,
+        self, agent: Agent, thread: ThreadState, raw_response: str,
+        slack_ts: str | None, *, closes_thread: bool,
     ) -> None:
         """Option A relocation: extract the hub's `<assessment_json>` verdict
         sidecar from its own raw Phase-4 CONCLUDE reply and persist it.
+
+        ``closes_thread`` is whether the reply this sidecar rode in on ENDS the
+        interview — the same ⏸️ decision ``_check_thread_outcome`` acts on
+        moments later, hoisted in ``_reply_to_thread`` and passed down so both
+        read one answer (see ``_reply_closes_thread``). Keyword-only and
+        REQUIRED, with no default: a silent ``False`` here is exactly the bug
+        this argument exists to fix, and every caller genuinely knows the
+        answer.
 
         ``raw_response`` is the full LLM response from BEFORE
         ``_extract_slack_message`` discarded everything outside
@@ -2692,7 +2754,9 @@ class SimulationEngine:
         try:
             verdict = _extract_assessment_json(raw_response)
             if verdict is not None:
-                refusal = self._sidecar_refusal(agent.role, thread)
+                refusal = self._sidecar_refusal(
+                    agent.role, thread, closes_thread=closes_thread,
+                )
                 if refusal is not None:
                     reason, detail = refusal
                     logger.warning(
@@ -2709,6 +2773,13 @@ class SimulationEngine:
                         detail=detail,
                     )
                     return
+                # Not refused. If the thread ALREADY holds a verdict, then by
+                # construction this one supersedes it: `_sidecar_refusal` is the
+                # only place that decision is made, and the only second verdict
+                # it lets past is one from a strictly later reply that concludes
+                # or closes the interview. Read before the write, because the
+                # write overwrites this slot.
+                superseded = self._assessed_threads.get(thread.thread_id)
                 # The model is asked for `subject_agent_id` in the sidecar,
                 # but unlike Phase 5's standalone post, a Phase-4 CONCLUDE
                 # reply always has a real interview thread behind it — the PI
@@ -2722,7 +2793,18 @@ class SimulationEngine:
                     thread=thread,
                 )
                 if held:
-                    self._assessed_threads.add(thread.thread_id)
+                    self._assessed_threads[thread.thread_id] = _HeldVerdict(
+                        ordinal=thread.message_count + 1,
+                        final=closes_thread,
+                        slack_ts=slack_ts,
+                    )
+                    # Retire the earlier row only once its replacement is
+                    # actually HELD — never leave the interview with neither.
+                    if superseded is not None:
+                        await self._retire_superseded_verdict(
+                            agent.agent_id, thread, superseded,
+                            replacement_ordinal=thread.message_count + 1,
+                        )
             elif _ASSESSMENT_UNCLOSED_RE.search(raw_response or ""):
                 # An <assessment_json> opening tag is present but
                 # _extract_assessment_json found no usable verdict in it —
@@ -3056,48 +3138,202 @@ class SimulationEngine:
             )
             return True
 
-    def _sidecar_refusal(self, role: str, thread: ThreadState) -> tuple[str, str] | None:
+    def _sidecar_refusal(
+        self, role: str, thread: ThreadState, *, closes_thread: bool,
+    ) -> tuple[str, str] | None:
         """Why this thread may not turn a sidecar into a verdict, or ``None``.
 
         Returns the ``AssessmentDrop.reason`` and the human-facing detail, so the
-        log line and the stored row can never say different things.
+        log line and the stored row can never say different things. ``None`` means
+        PERSIST — and when the thread already holds a verdict, ``None`` means this
+        one SUPERSEDES it. This is the only place either decision is made; the
+        caller infers the supersession from ``_assessed_threads`` alone (see
+        ``_capture_hub_assessment``), so the two cannot drift apart.
 
-        Two gates, both learned from production:
+        The question is "does this reply END the interview?", NOT "is the ordinal
+        12". The first version of this gate asked the second question and
+        destroyed the verdict class that matters most. The prompts tell the hub
+        to deliver a NEGATIVE verdict by opening its reply with ⏸️ — and ⏸️ is
+        what ``_check_thread_outcome`` closes the thread on, 3-8 ms later, in this
+        same code path. Measured over 204 hub ``thread_reply`` turns across three
+        runs: all 23 ``pass`` sidecars ever emitted landed on DECIDE ordinals
+        (6/8/10) and ALL 23 carried ⏸️. In run 076e80b6, 4 of the 5
+        ``premature_sidecar`` refusals were the thread's TERMINAL message — the
+        interview's real verdict, complete, 12-14k output tokens each, with
+        orphaned ``specialist_consults`` rows and no assessment to show for them.
+        Under an ordinal-12-only gate a ``pass`` can never be stored at all,
+        because delivering one closes the thread before ordinal 12 is reached
+        (only 1 of 62 threads in that run got there). So:
 
-        ``premature_sidecar`` — the turn was not the interview's CONCLUDE turn.
-        Only CONCLUDE guidance asks for a sidecar, but the ``<assessment_json>``
-        contract sits in the STATIC body of ``phase4-thread-reply.md`` and is
-        therefore in front of the model on every phase-4 turn, EXPLORE and DECIDE
-        included. Run 60c53424's pearce interview filled it in at ordinals 8 and
-        10 as well as at 12, and all three became rows. A DECIDE-turn verdict is
-        also substantively wrong, not merely early: the panel is still being
-        convened, so the score is formed on a partial record.
+        ``premature_sidecar`` — the reply is neither the interview's CONCLUDE turn
+        NOR a reply that closes the thread, so a later turn will still be asked
+        for a verdict and this early one must not pre-empt it. Only CONCLUDE
+        guidance asks for a sidecar, but the ``<assessment_json>`` contract sits
+        in the STATIC body of ``phase4-thread-reply.md`` and is therefore in front
+        of the model on every phase-4 turn, EXPLORE and DECIDE included. Run
+        60c53424's pearce interview filled it in at ordinals 8 and 10 as well as
+        at 12, and all three became rows. Such a verdict is also substantively
+        weaker, not merely early: the panel may still be being convened, so the
+        score is formed on a partial record — which is exactly why it yields to a
+        later one and never the other way round.
 
-        ``duplicate_thread_verdict`` — the thread already holds a verdict. See
-        ``_assessed_threads`` for why this is process-local.
+        ``duplicate_thread_verdict`` — the thread already holds a verdict that
+        this reply may not replace, in one of three ways:
+          * the held verdict is ``final`` (its reply closed the interview): there
+            is no legitimate later turn, so anything else on this thread is a
+            re-capture.
+          * this reply is not strictly LATER than the held one (same ordinal =
+            the same turn captured twice). A true duplicate, refused.
+          * this reply is later but neither concludes nor closes the interview —
+            a provisional verdict does not replace a provisional verdict; the
+            first one stands until a concluding or closing reply supersedes it.
+        See ``_assessed_threads`` for why the record is process-local.
 
-        The ordinal arithmetic is ``_missing_sidecar_reason``'s exactly — prior
-        count plus one, because ``phase4_guidance`` wants the ordinal of the reply
-        just generated. The two must agree: one decides that a CONCLUDE turn OWED
-        a sidecar, this one decides that a sidecar CAME from a concluding turn,
-        and a drift between them would open a window where a reply both owes a
-        verdict and is refused the one it produced.
+        The ordinal arithmetic is ``_warn_if_hub_conclude_missing_assessment``'s
+        exactly — prior count plus one, because ``phase4_guidance`` wants the
+        ordinal of the reply just generated. The two must agree: one decides that
+        a CONCLUDE turn OWED a sidecar, this one decides that a sidecar came from
+        a turn allowed to produce one, and a drift between them would open a
+        window where a reply both owes a verdict and is refused the one it
+        produced. (This gate is now the LOOSER of the two — it also accepts a
+        closing reply at any ordinal — so that window cannot reopen from here.)
         """
-        thread_phase, _, _ = phase4_guidance(role, thread.message_count + 1)
-        if thread_phase != CONCLUDE:
+        ordinal = thread.message_count + 1
+        thread_phase, _, _ = phase4_guidance(role, ordinal)
+        # "This reply is allowed to be the interview's verdict": the turn the
+        # guidance asks for one, or any turn that ends the interview.
+        concluding = thread_phase == CONCLUDE or closes_thread
+
+        held = self._assessed_threads.get(thread.thread_id)
+        if held is not None:
+            if held.final:
+                return (
+                    "duplicate_thread_verdict",
+                    "this interview already closed with a verdict (message "
+                    f"ordinal {held.ordinal}); one interview yields one "
+                    "assessment",
+                )
+            if ordinal <= held.ordinal:
+                return (
+                    "duplicate_thread_verdict",
+                    f"this interview's verdict from message ordinal {held.ordinal} "
+                    "is already stored; re-capturing the same turn is not a new "
+                    "verdict",
+                )
+            if not concluding:
+                return (
+                    "duplicate_thread_verdict",
+                    f"this interview already holds a verdict (message ordinal "
+                    f"{held.ordinal}); a later {thread_phase} turn that neither "
+                    "concludes nor closes the thread does not replace it",
+                )
+            # Later, and it ends the interview: last write wins. The caller
+            # retires the superseded row.
+            return None
+        if not concluding:
             return (
                 "premature_sidecar",
                 f"sidecar arrived on a {thread_phase} turn (message ordinal "
-                f"{thread.message_count + 1}); only the CONCLUDE turn is asked "
-                "for one",
-            )
-        if thread.thread_id in self._assessed_threads:
-            return (
-                "duplicate_thread_verdict",
-                "this interview already produced a verdict; one interview "
-                "yields one assessment",
+                f"{ordinal}) that neither concludes nor closes the interview; "
+                "a later turn is still owed the verdict",
             )
         return None
+
+    async def _retire_superseded_verdict(
+        self, agent_id: str, thread: ThreadState, superseded: _HeldVerdict,
+        *, replacement_ordinal: int,
+    ) -> None:
+        """Remove the provisional verdict a later concluding reply just replaced.
+
+        Last-write-wins needs both halves: without this, the later verdict lands
+        and the earlier one STAYS, which is precisely the duplication production
+        showed (three rows, 2.51/2.66/2.69, for one pearce interview). The
+        interview keeps exactly one row, and the one it keeps is the
+        better-informed one.
+
+        The supersession itself is recorded as a ``duplicate_thread_verdict``
+        drop for the SUPERSEDED verdict — the trail has to survive the deletion,
+        and ``assessment_drops`` is where every other lost verdict on this
+        surface already appears.
+
+        Best-effort in the same sense as every other write on this path: the
+        concluding reply is already in Slack, so nothing here may raise. Two
+        honest limits, both logged loudly rather than hidden:
+          * a superseded row with no ``slack_ts`` cannot be located again
+            (``opportunity_assessments`` carries no thread id), so it is left in
+            place and the duplicate is reported.
+          * a copy still sitting on ``_pending_assessments`` is dropped from the
+            queue first, because a retry that landed afterwards would recreate
+            the duplicate this just removed. A flush already in flight holds its
+            own list reference and can still land such a row; that is the same
+            process-local approximation ``_assessed_threads`` itself is.
+        """
+        detail = (
+            f"verdict from message ordinal {superseded.ordinal} superseded by the "
+            f"interview's concluding verdict at ordinal {replacement_ordinal}; "
+            "one interview yields one assessment, and the later verdict is the "
+            "better-informed one"
+        )
+        logger.info(
+            "[%s] Phase 4: superseded the earlier verdict for %s on thread %s — %s",
+            agent_id, thread.other_agent_id or "?", thread.thread_id, detail,
+        )
+        await self._record_assessment_drop(
+            agent_id, "duplicate_thread_verdict",
+            subject_agent_id=thread.other_agent_id,
+            thread_id=thread.thread_id,
+            detail=detail,
+        )
+        if not superseded.slack_ts:
+            logger.warning(
+                "[%s] Phase 4: the superseded verdict on thread %s has no "
+                "slack_ts to find its row by — it stays stored, so this "
+                "interview now has TWO assessments",
+                agent_id, thread.thread_id,
+            )
+            return
+        queued = [
+            row for row in self._pending_assessments
+            if row.get("slack_ts") == superseded.slack_ts
+        ]
+        if queued:
+            self._pending_assessments[:] = [
+                row for row in self._pending_assessments
+                if row.get("slack_ts") != superseded.slack_ts
+            ]
+            logger.info(
+                "[%s] Phase 4: dropped %d superseded verdict(s) from the "
+                "assessment retry queue (slack_ts=%s)",
+                agent_id, len(queued), superseded.slack_ts,
+            )
+        if not self.session_factory or not self.simulation_run_id:
+            return
+        try:
+            from sqlalchemy import delete as sa_delete
+
+            async with self.session_factory() as db:
+                result = await db.execute(
+                    sa_delete(OpportunityAssessment).where(
+                        OpportunityAssessment.simulation_run_id == self.simulation_run_id,
+                        OpportunityAssessment.agent_id == agent_id,
+                        OpportunityAssessment.slack_ts == superseded.slack_ts,
+                    )
+                )
+                await db.commit()
+            logger.info(
+                "[%s] Phase 4: removed %d superseded assessment row(s) for "
+                "thread %s (slack_ts=%s)",
+                agent_id, result.rowcount or 0, thread.thread_id,
+                superseded.slack_ts,
+            )
+        except Exception as exc:  # noqa: BLE001 — never lose a posted reply over this
+            logger.error(
+                "[%s] Failed to remove the superseded assessment row for thread "
+                "%s (slack_ts=%s): %s — the interview now has TWO assessments, "
+                "the drop row above says which is which",
+                agent_id, thread.thread_id, superseded.slack_ts, exc,
+                exc_info=True,
+            )
 
     async def _record_assessment_drop(
         self,
@@ -5905,19 +6141,43 @@ def _extract_slack_message(text: str) -> str:
     return _strip_llm_preamble(text)
 
 
+def _reply_closes_thread(text: str) -> bool:
+    """True if this reply ENDS the interview — the one definition of the ⏸️
+    no-viable-collaboration close.
+
+    ``_check_thread_outcome`` acts on it (``_close_thread(..., "no_proposal")``)
+    and ``_capture_hub_assessment`` reads it a few lines earlier, via the
+    ``closes_thread`` argument ``_reply_to_thread`` hoists. Those two MUST agree:
+    the prompts tell the hub to deliver a negative verdict by opening with ⏸️,
+    so a sidecar on a closing reply is the interview's real, final verdict and
+    there will be no later turn to supply another. When the gate refused those
+    (they are not on ordinal 12) the verdict was destroyed — measured in run
+    076e80b6, where 4 of 5 ``premature_sidecar`` refusals were the thread's
+    terminal message.
+
+    Deliberately permissive about WHERE the marker appears, matching what this
+    check has always done: the thread really is closed by any ⏸️ in the reply,
+    so the capture gate has to treat any ⏸️ as terminal too. The stricter
+    front-of-string variant is ``_reply_opens_with_pause``.
+    """
+    body = text or ""
+    return "⏸️" in body or ":pause_button:" in body
+
+
 def _reply_opens_with_pause(text: str) -> bool:
     """True if ``text`` follows the ⏸️ no-viable-collaboration convention
     thread_guidance.py's DECIDE/CONCLUDE instructions ask for verbatim
     ("start your reply with ⏸️") — checked at the front of the (stripped)
     string, not merely present anywhere in it.
 
-    Deliberately stricter than ``_check_thread_outcome``'s ``"⏸️" in
-    latest_reply`` check just below: that one exists to actually close the
-    thread and is intentionally permissive about where the marker appears,
-    while this one is asking "did the model follow the documented opening
-    convention" for ``_warn_if_hub_conclude_missing_assessment``'s absent-
-    sidecar detection — a marker buried mid-reply would not have been the
-    ⏸️-only decline thread_guidance describes.
+    Deliberately stricter than ``_reply_closes_thread`` just above: that one
+    exists to actually close the thread (and to tell the capture gate that this
+    reply is the interview's last) and is intentionally permissive about where
+    the marker appears, while this one is asking "did the model follow the
+    documented opening convention" for
+    ``_warn_if_hub_conclude_missing_assessment``'s absent-sidecar detection — a
+    marker buried mid-reply would not have been the ⏸️-only decline
+    thread_guidance describes.
     """
     stripped = (text or "").strip()
     return stripped.startswith("⏸️") or stripped.startswith(":pause_button:")
