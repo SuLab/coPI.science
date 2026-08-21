@@ -478,8 +478,16 @@ def test_an_unknown_signal_renders_bare_rather_than_reassuringly():
     assert "✅" not in note
 
 
+def test_the_panel_note_question_clip_is_600_chars():
+    """Pinned literally, not just derived from the constant, so a silent
+    future change to ``PANEL_NOTE_QUESTION_CHARS`` fails a test instead of
+    just reshaping notes in production. See the constant's comment for the
+    production measurement (n=134 consults) that set this value."""
+    assert PANEL_NOTE_QUESTION_CHARS == 600
+
+
 def test_the_question_is_clipped_on_a_word_boundary():
-    question = "Is the animal model encumbered " * 20  # 600 chars
+    question = "Is the animal model encumbered " * 25  # 800 chars
     note = format_panel_note(domain="legal", verdict_signal="clear", question=question)
     quoted = note.split('asked: "', 1)[1].rstrip('"')
     assert quoted.endswith("…")

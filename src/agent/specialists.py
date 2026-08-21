@@ -140,7 +140,12 @@ _PANEL_NOTE_SIGNAL_EMOJI: dict[str, str] = {
 # How much of the hub's question the note carries. The question is the only
 # free text in the note and is model-written, so it is clipped — long enough to
 # be recognisable in a thread, short enough not to become a second transcript.
-PANEL_NOTE_QUESTION_CHARS = 200
+#
+# 600, not 200: a production measurement (n=134 consults, 2026-08-20) found
+# the SHORTEST hub question was 241 chars, median 398, p90 552, max 814 — so
+# 200 truncated every single note mid-sentence. 600 renders 95% of observed
+# questions complete and clips only the tail of the 814-char worst case.
+PANEL_NOTE_QUESTION_CHARS = 600
 
 
 def format_panel_note(*, domain: str, verdict_signal: str, question: str) -> str:
