@@ -100,8 +100,11 @@ ls -t logs/blackbird_run_*.log | tail -n +11 | xargs -r rm -f
 
 # SIGTERM so the engine flushes. NOTE: -t 30 is often NOT enough — an in-flight
 # LLM call plus a max_tokens retry can exceed it, and Docker then SIGKILLs
-# (exit 137), skipping the shutdown handler. Give it real headroom.
-docker stop -t 120 blackbird-agent-run
+# (exit 137), skipping the shutdown handler. Give it real headroom: since the
+# thread_reply ceiling went to 16000 tokens, one uninterruptible final call can
+# run ~4-5 minutes. A larger -t costs nothing — `docker stop` returns as soon as
+# the container exits. See CLAUDE.md's restart procedure.
+docker stop -t 420 blackbird-agent-run
 docker rm blackbird-agent-run
 
 # Rebuild BOTH: src/ is baked into the images, not mounted.
