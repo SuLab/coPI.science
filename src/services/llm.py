@@ -14,8 +14,21 @@ logger = logging.getLogger(__name__)
 
 # Module-level callback for logging LLM calls.
 # Signature: callback(data: dict) where data contains system_prompt, messages,
-# response_text, model, input_tokens, output_tokens, latency_ms, and any extra
-# keys from log_meta.
+# response_text, model, input_tokens, output_tokens, latency_ms, call_stats, and
+# any extra keys from log_meta.
+#
+# ONE callback fires per TURN, not per API call — and a turn is 1..7 real API
+# calls (up to max_tool_rounds tool rounds, a terminating or forced-final call,
+# and at most one max_tokens retry). `input_tokens`/`output_tokens`/`latency_ms`
+# are therefore per-turn CUMULATIVE totals: correct for billing, and deliberately
+# left that way because SimulationEngine rebuilds `api_call_count` as a row COUNT
+# and the rate limiter's `call_times` as one entry per row, so splitting a turn
+# into several rows would inflate both after every restart.
+#
+# `call_stats` is what makes the row interpretable anyway: a list with one object
+# per real API call, in call order — see `_call_stat`. It is the only place
+# `stop_reason`, the requested `max_tokens` ceiling, and the thinking/text split
+# of `output_tokens` are recorded at all.
 _call_log_callback: Callable[[dict], None] | None = None
 
 
@@ -56,6 +69,57 @@ async def _acreate(client: anthropic.Anthropic, **kwargs: Any):
     """
     kwargs.setdefault("thinking", {"type": "disabled"})
     return await asyncio.to_thread(client.messages.create, **kwargs)
+
+
+def _thinking_tokens(usage: Any) -> int | None:
+    """``usage.output_tokens_details.thinking_tokens``, or None if unreported.
+
+    Read through two ``getattr``s on purpose. The field is new (anthropic
+    0.120's ``OutputTokensDetails``) and ``Usage.output_tokens_details`` is
+    ``Optional``, so it is absent both on an older SDK and on any reply the API
+    chose not to decompose; the test fakes also leave it off unless a test is
+    specifically about thinking. A hard attribute access here would turn a
+    missing *observability* field into a raised exception on a real agent turn.
+
+    Why it is worth recording at all: ``max_tokens`` caps thinking + text
+    TOGETHER, and ``generate_with_tools`` is the one call site running adaptive
+    thinking, so a truncated reply there is usually not a long answer — it is a
+    long *deliberation* that left no room for the answer. Without this number
+    ``output_tokens`` alone cannot tell those two apart, which is exactly the
+    ambiguity that made the thread_reply ceiling a guess.
+    """
+    details = getattr(usage, "output_tokens_details", None)
+    return getattr(details, "thinking_tokens", None)
+
+
+def _call_stat(
+    *, seq: int, kind: str, max_tokens: int, message: Any, latency_ms: float
+) -> dict[str, Any]:
+    """One entry of ``llm_call_logs.call_stats`` — the record of ONE real API call.
+
+    ``kind`` is one of:
+      ``round``        - a tool-use round (the reply carried tool_use blocks)
+      ``final``        - the terminating call whose reply carried no tool_use
+      ``forced_final`` - the no-tools call made after the tool loop ended
+      ``retry``        - a max_tokens retry, always the entry after the one it retries
+
+    ``max_tokens`` is the ceiling actually REQUESTED for this call, which is the
+    other half of a truncation report: ``stop_reason='max_tokens'`` says the
+    model wanted more, and this says how much it was allowed. Every field is
+    read defensively so a stub or a future SDK that drops one degrades to null
+    rather than raising inside a logging path.
+    """
+    usage = getattr(message, "usage", None)
+    return {
+        "seq": seq,
+        "kind": kind,
+        "max_tokens": max_tokens,
+        "input_tokens": getattr(usage, "input_tokens", None),
+        "output_tokens": getattr(usage, "output_tokens", None),
+        "thinking_tokens": _thinking_tokens(usage),
+        "stop_reason": getattr(message, "stop_reason", None),
+        "latency_ms": round(latency_ms, 1),
+    }
 
 
 def _first_text(message: Any) -> str:
@@ -203,6 +267,19 @@ async def generate_agent_response(
             messages=messages,
         )
         latency_ms = (time.monotonic() - t0) * 1000
+        # Per-turn billing totals (cumulative across the retry below), plus the
+        # per-CALL breakdown. The two are deliberately different questions: the
+        # totals answer "what did this turn cost", call_stats answers "which
+        # call truncated and how much was it allowed" — and one row can only
+        # answer the second by carrying a list.
+        total_input_tokens = message.usage.input_tokens
+        total_output_tokens = message.usage.output_tokens
+        call_stats = [
+            _call_stat(
+                seq=1, kind="final", max_tokens=max_tokens,
+                message=message, latency_ms=latency_ms,
+            )
+        ]
         if not message.content:
             agent_id = (log_meta or {}).get("agent_id", "?")
             phase = (log_meta or {}).get("phase", "?")
@@ -249,9 +326,23 @@ async def generate_agent_response(
             latency_ms += retry_latency
             if retry_msg.content:
                 response_text = _first_text(retry_msg)
-            message = retry_msg  # use retry stats for logging
+            # ACCUMULATE, matching latency_ms above and generate_with_tools.
+            # This line used to be `message = retry_msg  # use retry stats for
+            # logging`, which made the logged row carry ONLY the retry's tokens:
+            # the first call was real and billed even though its truncated text
+            # was thrown away, so every retried turn under-reported its input
+            # AND output tokens by a whole call. The per-call split now lives in
+            # call_stats, so the row no longer has to choose one call's numbers.
+            total_input_tokens += retry_msg.usage.input_tokens
+            total_output_tokens += retry_msg.usage.output_tokens
+            call_stats.append(
+                _call_stat(
+                    seq=2, kind="retry", max_tokens=retry_max,
+                    message=retry_msg, latency_ms=retry_latency,
+                )
+            )
 
-            if message.stop_reason == "max_tokens":
+            if retry_msg.stop_reason == "max_tokens":
                 # The retry doubled max_tokens and STILL truncated. The
                 # retry's (still-truncated) text is returned below — it is
                 # still the best available answer — but this must be loud:
@@ -267,7 +358,11 @@ async def generate_agent_response(
                     "out_tok=%d) — returning the truncated text; anything "
                     "the model emits last (e.g. a phase-5 <assessment_json> "
                     "sidecar) may be missing from it.",
-                    model, agent_id, phase, retry_max, message.usage.output_tokens,
+                    # retry_msg, not `message`: this used to read through the
+                    # `message = retry_msg` alias, which is gone now that the
+                    # token totals accumulate. The number that belongs in a
+                    # "the RETRY still truncated" line is the retry's own.
+                    model, agent_id, phase, retry_max, retry_msg.usage.output_tokens,
                 )
 
         if _call_log_callback and log_meta:
@@ -277,9 +372,10 @@ async def generate_agent_response(
                 "messages": messages,
                 "response_text": response_text,
                 "model": model,
-                "input_tokens": message.usage.input_tokens,
-                "output_tokens": message.usage.output_tokens,
+                "input_tokens": total_input_tokens,
+                "output_tokens": total_output_tokens,
                 "latency_ms": latency_ms,
+                "call_stats": call_stats,
                 "completed_at": datetime.now(timezone.utc),
                 **log_meta,
             })
@@ -365,6 +461,13 @@ async def generate_with_tools(
     conversation = list(messages)
     total_input_tokens = 0
     total_output_tokens = 0
+    # One entry per REAL API call, in call order. The totals above are per-turn
+    # billing and stay cumulative (see the module docstring on call_stats and
+    # SimulationEngine's restart rebuilds, which count rows, not calls); this
+    # list is what makes a single row interpretable — 78.6% of thread_reply rows
+    # are 2+ calls, so "output_tokens" on its own is a sum of unknown addends.
+    call_stats: list[dict[str, Any]] = []
+    seq = 0
 
     for round_num in range(max_tool_rounds + 1):
         # Round 0 always runs — without it this returns nothing at all. From
@@ -409,6 +512,22 @@ async def generate_with_tools(
         tool_use_blocks = [b for b in message.content if b.type == "tool_use"]
         text_blocks = [b for b in message.content if b.type == "text"]
 
+        # Recorded for EVERY round, not just the terminating one. `stop_reason`
+        # used to be inspected only inside the `not tool_use_blocks` branch
+        # below, so a tool-use round that hit max_tokens left no log line and no
+        # DB trace whatsoever — the single blindest spot in this module, and the
+        # one that made the truncation count on the last sizing exercise a guess.
+        seq += 1
+        call_stats.append(
+            _call_stat(
+                seq=seq,
+                kind="final" if not tool_use_blocks else "round",
+                max_tokens=max_tokens,
+                message=message,
+                latency_ms=latency_ms,
+            )
+        )
+
         if not tool_use_blocks:
             # Final text response — no more tool calls
             response_text = text_blocks[0].text if text_blocks else ""
@@ -438,6 +557,13 @@ async def generate_with_tools(
                 latency_ms += retry_latency
                 total_input_tokens += retry_msg.usage.input_tokens
                 total_output_tokens += retry_msg.usage.output_tokens
+                seq += 1
+                call_stats.append(
+                    _call_stat(
+                        seq=seq, kind="retry", max_tokens=retry_max,
+                        message=retry_msg, latency_ms=retry_latency,
+                    )
+                )
                 retry_texts = [b for b in retry_msg.content if b.type == "text"]
                 if retry_texts:
                     response_text = retry_texts[0].text
@@ -468,6 +594,7 @@ async def generate_with_tools(
                     "input_tokens": total_input_tokens,
                     "output_tokens": total_output_tokens,
                     "latency_ms": latency_ms,
+                    "call_stats": call_stats,
                     "completed_at": datetime.now(timezone.utc),
                     **log_meta,
                 })
@@ -511,6 +638,17 @@ async def generate_with_tools(
     latency_ms = (time.monotonic() - t0) * 1000
     total_input_tokens += message.usage.input_tokens
     total_output_tokens += message.usage.output_tokens
+    # `forced_final` rather than `final`: this call is reached either by
+    # exhausting max_tool_rounds or by the cooperative-shutdown `break` above,
+    # and both are worth telling apart from a turn that finished on its own —
+    # the tool loop spent its budget before the answer was written.
+    seq += 1
+    call_stats.append(
+        _call_stat(
+            seq=seq, kind="forced_final", max_tokens=max_tokens,
+            message=message, latency_ms=latency_ms,
+        )
+    )
     response_text = _first_text(message)
 
     # Retry once with higher max_tokens if response was truncated
@@ -537,6 +675,13 @@ async def generate_with_tools(
         latency_ms += retry_latency
         total_input_tokens += retry_msg.usage.input_tokens
         total_output_tokens += retry_msg.usage.output_tokens
+        seq += 1
+        call_stats.append(
+            _call_stat(
+                seq=seq, kind="retry", max_tokens=retry_max,
+                message=retry_msg, latency_ms=retry_latency,
+            )
+        )
         retry_texts = [b for b in retry_msg.content if b.type == "text"]
         if retry_texts:
             response_text = retry_texts[0].text
@@ -566,6 +711,7 @@ async def generate_with_tools(
             "input_tokens": total_input_tokens,
             "output_tokens": total_output_tokens,
             "latency_ms": latency_ms,
+            "call_stats": call_stats,
             "completed_at": datetime.now(timezone.utc),
             **log_meta,
         })

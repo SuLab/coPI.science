@@ -230,13 +230,13 @@ def test_revision_status_blocks_anywhere_else(rev):
 def test_supported_start_revisions_are_exactly_the_documented_set():
     assert pf.SUPPORTED_START_REVISIONS == (
         "0018", "0019", "0020", "0021", "0023", "0024", "0025", "0026", "0027", "0028",
-        "0029", "0030",
+        "0029", "0030", "0031",
     )
-    assert pf.DEFAULT_TARGET == "0031"
+    assert pf.DEFAULT_TARGET == "0032"
 
 
 def test_every_post_branch_revision_is_a_supported_start():
-    """Regression: DEFAULT_TARGET moved to 0028, then 0029, then 0030, then 0031, each time
+    """Regression: DEFAULT_TARGET moved to 0028, then 0029, 0030, 0031 and 0032, each time
     without the revision immediately behind the new target joining
     SUPPORTED_START_REVISIONS -- 0026/0027 went stale for the 0028 move, and left
     unguarded the same mistake would recur for every later move too. A database

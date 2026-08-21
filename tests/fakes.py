@@ -4,7 +4,8 @@ FakeAnthropic mirrors exactly what src/services/llm.py consumes off
 anthropic.Anthropic: ``client.messages.create(model=, max_tokens=, system=,
 messages=, [tools=])`` returning an object with ``.content`` (blocks exposing
 ``.type`` and ``.text``; tool_use blocks add ``.id/.name/.input/.model_dump()``),
-``.stop_reason``, and ``.usage.input_tokens/.output_tokens``. Install via
+``.stop_reason``, ``.usage.input_tokens/.output_tokens`` and the optional
+``.usage.output_tokens_details.thinking_tokens``. Install via
 ``monkeypatch.setattr("src.services.llm.get_anthropic_client", lambda: fake)``.
 
 FakeSlackClient records the AgentSlackClient calls the simulation makes and
@@ -21,9 +22,28 @@ from src.agent.slack_client import markdown_to_mrkdwn
 
 
 @dataclass
+class _OutputTokensDetails:
+    """The SDK's ``usage.output_tokens_details`` (anthropic >= 0.120).
+
+    Only field src/services/llm.py reads. Exists as its own class rather than a
+    plain int on _Usage because the real thing is a nested Optional model, and
+    the production code reaches it through two defensive ``getattr``s — a flat
+    attribute would let a bug in that traversal pass.
+    """
+
+    thinking_tokens: int = 0
+
+
+@dataclass
 class _Usage:
     input_tokens: int = 10
     output_tokens: int = 20
+    # None by DEFAULT, matching both the SDK (``Optional``, absent when the API
+    # did not decompose the reply) and every pre-existing user of this fake, for
+    # which the field simply is not the subject. llm._thinking_tokens must
+    # therefore return None here, not raise and not invent a 0 — a test that
+    # cares passes _OutputTokensDetails(...) explicitly.
+    output_tokens_details: "_OutputTokensDetails | None" = None
 
 
 @dataclass
@@ -74,9 +94,19 @@ class _Message:
     usage: _Usage = field(default_factory=_Usage)
 
 
-def text_response(text: str, *, stop_reason: str = "end_turn") -> _Message:
-    """A plain-text assistant message (the common case)."""
-    return _Message(content=[_TextBlock(text=text)], stop_reason=stop_reason)
+def text_response(
+    text: str, *, stop_reason: str = "end_turn", usage: _Usage | None = None
+) -> _Message:
+    """A plain-text assistant message (the common case).
+
+    ``usage`` is optional and defaults to _Message's own _Usage, so every
+    pre-existing caller is unchanged; pass it when the test is about the numbers
+    a call reports (per-call token accounting, the thinking/text split).
+    """
+    msg = _Message(content=[_TextBlock(text=text)], stop_reason=stop_reason)
+    if usage is not None:
+        msg.usage = usage
+    return msg
 
 
 def thinking_then_text_response(
@@ -95,14 +125,29 @@ def thinking_then_text_response(
 
 
 def tool_use_response(
-    tool_name: str, tool_input: dict, *, block_id: str = "toolu_1", text: str = ""
+    tool_name: str,
+    tool_input: dict,
+    *,
+    block_id: str = "toolu_1",
+    text: str = "",
+    stop_reason: str = "tool_use",
+    usage: _Usage | None = None,
 ) -> _Message:
-    """An assistant turn that requests a tool call (drives generate_with_tools)."""
+    """An assistant turn that requests a tool call (drives generate_with_tools).
+
+    ``stop_reason`` is overridable because a tool-use round CAN truncate: the API
+    returns the tool_use blocks it managed to emit with ``stop_reason
+    ='max_tokens'``. That combination had no representation here, which is part
+    of why the truncating-tool-round case went untested for so long.
+    """
     blocks: list[Any] = []
     if text:
         blocks.append(_TextBlock(text=text))
     blocks.append(_ToolUseBlock(id=block_id, name=tool_name, input=tool_input))
-    return _Message(content=blocks, stop_reason="tool_use")
+    msg = _Message(content=blocks, stop_reason=stop_reason)
+    if usage is not None:
+        msg.usage = usage
+    return msg
 
 
 def empty_response(*, stop_reason: str = "end_turn") -> _Message:

@@ -135,6 +135,23 @@
                     {% else %}bg-sky-100 text-sky-800{% endif %}">
                     {{ log.model.split('-')[1] | capitalize if '-' in log.model else log.model }}
                 </span>
+                {# One row is one TURN — 1..7 real API calls — and these two numbers
+                   are its sums. `call_stats` (0032) holds the per-call breakdown, so
+                   the one thing worth SCANNING a page for is surfaced here: did any
+                   call in this turn hit its max_tokens ceiling. `n` is shown because
+                   the sums are otherwise a total of unknown addends, and a truncating
+                   TOOL ROUND used to leave no trace anywhere at all. Rows written
+                   before 0032 have call_stats NULL and render exactly as before. #}
+                {% if log.call_stats %}
+                {% set truncated = log.call_stats | selectattr('stop_reason', 'equalto', 'max_tokens') | list %}
+                {% if truncated %}
+                <span class="px-2 py-0.5 rounded text-xs font-medium bg-orange-100 text-orange-800"
+                      title="{{ truncated | length }} of {{ log.call_stats | length }} API call(s) in this turn stopped at max_tokens (ceiling {{ truncated[0].max_tokens }})">
+                    truncated
+                </span>
+                {% endif %}
+                <span class="text-gray-400 text-xs">{{ log.call_stats | length }} call{{ '' if log.call_stats | length == 1 else 's' }}</span>
+                {% endif %}
                 <span class="text-gray-400 text-xs">{{ log.input_tokens }}+{{ log.output_tokens }} tok</span>
                 <span class="text-gray-400 text-xs">{{ "%.0f" | format(log.latency_ms) }}ms</span>
                 <span class="text-gray-400 text-xs ml-auto"><span data-utc="{{ log.created_at.isoformat() }}" data-utc-fmt="short">{{ log.created_at.strftime('%b %d %H:%M:%S') }}</span></span>

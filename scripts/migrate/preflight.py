@@ -71,7 +71,7 @@ EXIT_OK = 0
 EXIT_BLOCKED = 1
 EXIT_WARN = 2
 
-DEFAULT_TARGET = "0031"
+DEFAULT_TARGET = "0032"
 #: Revisions this migration path has been exercised from.
 #:
 #: 0020 and 0021 are here because origin/main's own alembic head is 0021 (PR19). A
@@ -83,8 +83,9 @@ DEFAULT_TARGET = "0031"
 #: 0023, 0024, 0025, 0026, 0027, 0028 and 0029 were each added here for the same reason:
 #: production's stamp at the time its target moved past them (0023 -> 0024, then
 #: 0024 -> 0025, then 0025 -> 0026, then 0026 -> 0027, then 0027 -> 0028, then
-#: 0028 -> 0029, then 0029 -> 0030, then 0030 -> 0031 — see git history on this constant). Each stays
-#: supported afterward; nothing here narrows. An earlier version of this comment claimed
+#: 0028 -> 0029, then 0029 -> 0030, then 0030 -> 0031, then 0031 -> 0032 — see git
+#: history on this constant). Each stays supported afterward; nothing here narrows. An
+#: earlier version of this comment claimed
 #: 0026 was "already done" and handled by the current == target branch of
 #: revision_status() instead of by membership in this tuple — that stopped being true the
 #: moment DEFAULT_TARGET moved past 0026 (first to 0027, then to 0028, then to 0029, then
@@ -100,11 +101,12 @@ DEFAULT_TARGET = "0031"
 #: researcher_profiles), 0024 (one column on agents), 0025 (one new table,
 #: opportunity_assessments), 0026 (drop grantbot_posted_foas), 0027 (one new table,
 #: assessment_drops), 0028 (one column + one constraint on users), 0029 (two columns on
-#: opportunity_assessments) and 0030 (one new table, specialist_consults, plus two columns
-#: on opportunity_assessments).
+#: opportunity_assessments), 0030 (one new table, specialist_consults, plus two columns on
+#: opportunity_assessments), 0031 (data-only, no DDL) and 0032 (one nullable JSONB column
+#: on llm_call_logs).
 SUPPORTED_START_REVISIONS = (
     "0018", "0019", "0020", "0021", "0023", "0024", "0025", "0026", "0027", "0028", "0029",
-    "0030",
+    "0030", "0031",
 )
 
 #: Start revisions at which migration 0019 has already run, so the expensive
@@ -261,11 +263,14 @@ PLANNED_OBJECTS: tuple[PlannedObject, ...] = (
     ),
     PlannedObject("0030", "column", "rubric_version", "opportunity_assessments"),
     PlannedObject("0030", "column", "rubric_content_hash", "opportunity_assessments"),
+    # 0031 is data-only (a JSONB-null normalizing UPDATE) and creates nothing, so it
+    # has no entry here — deliberately, not by omission.
+    PlannedObject("0032", "column", "call_stats", "llm_call_logs"),
 )
 
 REVISION_ORDER = (
     "0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027", "0028",
-    "0029", "0030", "0031",
+    "0029", "0030", "0031", "0032",
 )
 
 

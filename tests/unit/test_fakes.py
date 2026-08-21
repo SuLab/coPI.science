@@ -1,6 +1,13 @@
 """FakeAnthropic / FakeSlackClient behave like the real seams they replace."""
 
-from tests.fakes import FakeAnthropic, FakeSlackClient, text_response, tool_use_response
+from tests.fakes import (
+    FakeAnthropic,
+    FakeSlackClient,
+    _OutputTokensDetails,
+    _Usage,
+    text_response,
+    tool_use_response,
+)
 
 
 def test_fake_anthropic_scripted_text_in_order():
@@ -41,6 +48,27 @@ def test_tool_use_response_block_shape():
     assert block.input == {"q": "x"}
     assert block.model_dump() == {"type": "tool_use", "id": "toolu_9", "name": "search", "input": {"q": "x"}}
     assert m.stop_reason == "tool_use"
+
+
+def test_usage_reports_no_thinking_split_unless_a_test_asks_for_one():
+    """Mirrors the SDK, where `Usage.output_tokens_details` is Optional and absent
+    on a reply the API did not decompose. Defaulting it to a present object would
+    make llm._thinking_tokens' two defensive getattrs untestable."""
+    assert _Usage().output_tokens_details is None
+    assert text_response("x").usage.output_tokens_details is None
+
+
+def test_usage_can_carry_a_thinking_split_when_the_test_is_about_it():
+    usage = _Usage(output_tokens=4000, output_tokens_details=_OutputTokensDetails(2400))
+    assert text_response("x", usage=usage).usage.output_tokens_details.thinking_tokens == 2400
+
+
+def test_a_tool_use_round_can_be_scripted_as_truncated():
+    """The real API returns the tool_use blocks it managed to emit with
+    stop_reason='max_tokens'; that combination had no representation here."""
+    m = tool_use_response("search", {}, stop_reason="max_tokens")
+    assert m.stop_reason == "max_tokens"
+    assert m.content[0].type == "tool_use"
 
 
 def test_fake_slack_records_posts_and_returns_ts():

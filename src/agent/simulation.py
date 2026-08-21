@@ -5506,6 +5506,13 @@ class SimulationEngine:
                         input_tokens=entry.get("input_tokens", 0),
                         output_tokens=entry.get("output_tokens", 0),
                         latency_ms=entry.get("latency_ms", 0.0),
+                        # Per-API-call breakdown (stop_reason, the requested
+                        # max_tokens ceiling, thinking/text split) that the three
+                        # cumulative columns above cannot carry. Default None,
+                        # not [] — a producer that supplied nothing means "not
+                        # recorded", and an empty array would read as "recorded,
+                        # zero calls", which never happens.
+                        call_stats=entry.get("call_stats"),
                         created_at=entry.get("completed_at"),
                     )
                     db.add(record)

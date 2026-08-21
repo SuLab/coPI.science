@@ -18,7 +18,7 @@ from sqlalchemy import (
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSON, UUID
+from sqlalchemy.dialects.postgresql import JSON, JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from src.database import Base
@@ -190,9 +190,34 @@ class LlmCallLog(Base):
     system_prompt: Mapped[str] = mapped_column(Text, nullable=False)
     messages_json: Mapped[dict] = mapped_column(JSON, nullable=False)
     response_text: Mapped[str] = mapped_column(Text, nullable=False)
+    # PER-TURN CUMULATIVE, not per-API-call: one row is 1..7 real API calls (up
+    # to max_tool_rounds tool rounds, the terminating/forced-final call, and at
+    # most one max_tokens retry), and these are their sums. Correct as billing
+    # totals; useless for "which call truncated", which is what call_stats below
+    # exists to answer. Do NOT split this table one row per API call —
+    # SimulationEngine._rebuild_state reconstructs api_call_count as a row
+    # COUNT(*) and the sliding-window limiter's call_times as one entry per row,
+    # while live booking is one per turn (+1 on retry), so row-per-call would
+    # inflate both rebuilt ledgers and over-throttle every agent after a restart.
     input_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     output_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     latency_ms: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    # One object per real API call, in call order:
+    #   {seq, kind, max_tokens, input_tokens, output_tokens, thinking_tokens,
+    #    stop_reason, latency_ms}
+    # kind ∈ round | final | forced_final | retry. Written by
+    # src/services/llm.py's _call_stat; NULL on every row logged before 0032,
+    # and on any row whose producer did not supply it.
+    #
+    # JSONB (not the `JSON` this table's messages_json uses) so it is queryable:
+    # `jsonb_array_elements(call_stats)` is what turns "which calls truncated"
+    # from a text-scraping exercise into SQL. `none_as_null=True` for the reason
+    # migration 0031 documents at length: SQLAlchemy's JSON default writes Python
+    # None as the JSONB scalar `null`, which is a SECOND physical encoding of
+    # "absent" that `WHERE call_stats IS NULL` silently misses.
+    call_stats: Mapped[list | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
