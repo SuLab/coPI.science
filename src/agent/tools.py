@@ -259,28 +259,38 @@ async def execute_tool(
             )
 
         elif tool_name == "retrieve_abstract":
-            ref = str(tool_input.get("pmid_or_doi", ""))
+            ref = _require_arg(tool_input, "pmid_or_doi", tool_name)
             is_own = bool(own_dois) and bool(_extract_dois(ref) & own_dois)
             if thread_state and not is_own:
                 from src.config import get_settings
                 settings = get_settings()
                 if thread_state.abstracts_other >= settings.max_abstracts_other_per_thread:
                     return "Rate limit: you have used all your abstract retrievals for other labs in this thread."
+            result = await fetch_abstract(ref)
+            if "error" in result:
+                return result["error"]
+            # Charge only a retrieval that returned a paper — the debit used
+            # to land before the fetch, so an outage consumed the budget with
+            # no refund (issue #23 COR-30). Safe against double-spend: tool
+            # rounds are sequential within a turn, and the thread lock
+            # serializes turns per thread.
+            if thread_state and not is_own:
                 thread_state.abstracts_other += 1
-            return await _execute_retrieve_abstract(
-                _require_arg(tool_input, "pmid_or_doi", tool_name)
-            )
+            return _format_abstract(result)
 
         elif tool_name == "retrieve_full_text":
+            ref = _require_arg(tool_input, "pmid_or_doi", tool_name)
             if thread_state:
                 from src.config import get_settings
                 settings = get_settings()
                 if thread_state.full_text >= settings.max_full_text_per_thread:
                     return "Rate limit: you have used all your full-text retrievals in this thread."
+            result = await fetch_full_text(ref)
+            if "error" in result:
+                return result["error"]
+            if thread_state:
                 thread_state.full_text += 1
-            return await _execute_retrieve_full_text(
-                _require_arg(tool_input, "pmid_or_doi", tool_name)
-            )
+            return _format_full_text(result)
 
         elif tool_name == "search_prior_art":
             return await _execute_search_prior_art(
@@ -353,11 +363,8 @@ async def _execute_retrieve_profile(agent_id: str) -> str:
         return f"No public profile found for agent '{agent_id}'."
 
 
-async def _execute_retrieve_abstract(pmid_or_doi: str) -> str:
-    """Fetch and format a paper abstract."""
-    result = await fetch_abstract(pmid_or_doi)
-    if "error" in result:
-        return result["error"]
+def _format_abstract(result: dict) -> str:
+    """Format an already-fetched paper abstract."""
     # Title/abstract come from PubMed — untrusted external text (SEC-14).
     parts = [
         f"Title: {delimit(result['title'], 'paper_title')}",
@@ -369,11 +376,8 @@ async def _execute_retrieve_abstract(pmid_or_doi: str) -> str:
     return "\n".join(parts)
 
 
-async def _execute_retrieve_full_text(pmid_or_doi: str) -> str:
-    """Fetch and format paper full text (methods)."""
-    result = await fetch_full_text(pmid_or_doi)
-    if "error" in result:
-        return result["error"]
+def _format_full_text(result: dict) -> str:
+    """Format already-fetched paper full text (methods)."""
     # Title/abstract/methods come from PubMed/PMC — untrusted external text (SEC-14).
     parts = [
         f"Title: {delimit(result['title'], 'paper_title')}",

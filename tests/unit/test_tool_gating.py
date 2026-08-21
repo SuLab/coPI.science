@@ -263,3 +263,62 @@ async def test_other_tools_also_name_their_missing_argument():
         out = await tools_mod.execute_tool(tool, {}, "blackbird", None, role="scout_hub")
         assert arg in out, f"{tool} must name the missing {arg}"
         assert "missing required argument" in out
+
+
+# ---------------------------------------------------------------------------
+# retrieve_abstract / retrieve_full_text: charge the per-thread budget on
+# SUCCESS, not on attempt (issue #23 COR-30). Before this fix the debit
+# landed before the fetch, so a PubMed outage or transient failure consumed
+# a thread's retrieval budget with no refund.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_failed_abstract_fetch_does_not_consume_the_budget(monkeypatch):
+    from src.agent import tools
+    from src.agent.state import ThreadState
+
+    thread = ThreadState(thread_id="t", channel="c", other_agent_id="x")
+
+    async def failing_fetch(ref):
+        return {"error": "PubMed lookup failed"}
+    monkeypatch.setattr(tools, "fetch_abstract", failing_fetch)
+
+    out = await tools.execute_tool(
+        "retrieve_abstract", {"pmid_or_doi": "12345"}, "su",
+        thread_state=thread, role="pi_lab",
+    )
+    assert "failed" in out
+    assert thread.abstracts_other == 0, "a failed fetch consumed the budget"
+
+    async def ok_fetch(ref):
+        return {"pmid": "12345", "title": "T", "abstract": "A"}
+    monkeypatch.setattr(tools, "fetch_abstract", ok_fetch)
+    out = await tools.execute_tool(
+        "retrieve_abstract", {"pmid_or_doi": "12345"}, "su",
+        thread_state=thread, role="pi_lab",
+    )
+    assert "Title:" in out
+    assert thread.abstracts_other == 1
+
+
+@pytest.mark.asyncio
+async def test_over_cap_abstract_call_is_refused_without_fetching(monkeypatch):
+    from src.agent import tools
+    from src.agent.state import ThreadState
+    from src.config import get_settings
+
+    thread = ThreadState(thread_id="t", channel="c", other_agent_id="x")
+    thread.abstracts_other = get_settings().max_abstracts_other_per_thread
+    fetched = []
+
+    async def spy_fetch(ref):
+        fetched.append(ref)
+        return {"pmid": "1", "title": "T"}
+    monkeypatch.setattr(tools, "fetch_abstract", spy_fetch)
+    out = await tools.execute_tool(
+        "retrieve_abstract", {"pmid_or_doi": "1"}, "su",
+        thread_state=thread, role="pi_lab",
+    )
+    assert "Rate limit" in out
+    assert fetched == [], "an over-cap call must not reach the network"
