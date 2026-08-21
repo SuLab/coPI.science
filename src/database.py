@@ -19,6 +19,17 @@ def _get_engine():
         echo=False,
         pool_size=5,
         max_overflow=10,
+        # A DB restart otherwise leaves stale pooled connections that each
+        # 500 one request; pre-ping revalidates on checkout (issue #25 P3).
+        # The agent process's own engine (src/agent/main.py) has carried
+        # pool_pre_ping=True since it sized its own pool — that half is the
+        # web-tier transplant. It does NOT set pool_recycle (verified
+        # 2026-08-21: no such argument anywhere in agent/main.py), so
+        # pool_recycle=1800 below is a new addition on its own merits —
+        # retiring long-lived connections before infra does — not a
+        # transplant of something the agent process already does.
+        pool_pre_ping=True,
+        pool_recycle=1800,
     )
 
 
