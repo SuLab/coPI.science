@@ -164,3 +164,29 @@ def test_phase5_menu_uses_the_caller_supplied_text_when_given():
     # The rendered menu is gone; the Option C prose that *names* the types is
     # not, and must not be — that is the per-type guidance.
     assert "**`idea_crosslab`**" not in content
+
+
+def test_phase5_prior_threads_render_is_capped(tmp_path, monkeypatch):
+    from src.agent.agent import PRIOR_THREADS_RENDERED_PER_PAIR, Agent
+
+    monkeypatch.setattr("src.agent.agent.PROFILES_DIR", tmp_path)
+    agent = Agent("su", "SuBot", "Su", role="pi_lab")
+    prior = {
+        "wang": [
+            {"channel": "general", "outcome": "no_proposal", "summary": f"s{i}"}
+            for i in range(8)
+        ]
+    }
+    _, messages = agent.build_phase5_prompt(prior_threads=prior)
+    body = "\n".join(m["content"] for m in messages)
+    for i in range(3, 8):
+        assert f"s{i}" in body            # the 5 most recent render
+    for i in range(3):
+        assert f"s{i}" not in body        # older ones do not
+    assert "3 earlier closed threads with this agent not shown" in body
+    assert PRIOR_THREADS_RENDERED_PER_PAIR == 5
+
+    small = {"wang": prior["wang"][:3]}
+    _, messages = agent.build_phase5_prompt(prior_threads=small)
+    body = "\n".join(m["content"] for m in messages)
+    assert "not shown" not in body        # no banner under the cap

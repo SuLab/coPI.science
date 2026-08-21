@@ -27,6 +27,15 @@ _RUBRIC_PLACEHOLDER = "{rubric}"
 # <https://doi.org/...> links, and the ) ] that close markdown/parentheticals).
 _DOI_RE = re.compile(r"10\.\d{4,9}/[^\s\"'<>)\]]+", re.IGNORECASE)
 
+# Prior-thread dedup lines rendered per partner in the Phase-5 prompt. The
+# in-memory list is capped separately (simulation.PRIOR_THREADS_KEPT_PER_PAIR,
+# 50); this bounds the PROMPT: measured, every summary-carrying close added
+# ~60 input tokens to every later Phase-5 call by both agents, forever —
+# 500 closes made a ~38k-token prompt (audit 2026-08-21, finding 6). Five
+# recent outcomes plus a count is strictly better dedup context than a
+# 500-line list.
+PRIOR_THREADS_RENDERED_PER_PAIR = 5
+
 
 def _extract_dois(text: str | None) -> set[str]:
     """Return the set of normalized DOIs found in ``text`` (lowercased)."""
@@ -500,8 +509,15 @@ Use these to reference other labs' work in conversations. Include links when cit
             prior_parts = []
             for other_id in sorted(prior_threads):
                 agent_label = f"{other_id.capitalize()}Bot"
+                threads = prior_threads[other_id]
+                shown = threads[-PRIOR_THREADS_RENDERED_PER_PAIR:]
                 thread_lines = []
-                for t in prior_threads[other_id]:
+                if len(threads) > len(shown):
+                    thread_lines.append(
+                        f"- ({len(threads) - len(shown)} earlier closed "
+                        f"threads with this agent not shown)"
+                    )
+                for t in shown:
                     outcome_label = t["outcome"].replace("_", " ")
                     if t.get("summary"):
                         thread_lines.append(
