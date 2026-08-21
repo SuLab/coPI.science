@@ -8,6 +8,10 @@ messages=, [tools=])`` returning an object with ``.content`` (blocks exposing
 ``.usage.output_tokens_details.thinking_tokens``. Install via
 ``monkeypatch.setattr("src.services.llm.get_anthropic_client", lambda: fake)``.
 
+It also mirrors the one thing the real client REFUSES: a non-streaming request
+whose ``max_tokens`` implies more than 10 minutes of generation. See
+``_MAX_NONSTREAMING_MAX_TOKENS``.
+
 FakeSlackClient records the AgentSlackClient calls the simulation makes and
 hands back deterministic ts/channel ids, so agent-turn golden-master tests never
 touch the network.
@@ -19,6 +23,23 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from src.agent.slack_client import markdown_to_mrkdwn
+
+# The SDK's own ceiling, RE-DERIVED here rather than imported from
+# src.services.llm, on purpose. anthropic's
+# ``BaseClient._calculate_nonstreaming_timeout`` computes
+# ``expected_time = maximum_time * max_tokens / 128_000`` with
+# ``maximum_time = 60 * 60`` and raises ValueError once that exceeds its
+# ``default_time = 60 * 10`` — so the last accepted value is the floor of
+# ``600 * 128_000 / 3600``. Writing the arithmetic out means this fake agrees
+# with the SDK, not with whatever constant src happens to hold; if the two ever
+# disagree, test_llm_nonstreaming_ceiling.py fails on the comparison instead of
+# both being wrong together.
+#
+# The whole suite drives this seam, so without this check nothing in CI can
+# observe the ceiling at all: the 16000-token thread_reply ceiling shipped with a
+# 2x truncation retry that asks for 32000, which the real client rejects and this
+# fake used to accept happily.
+_MAX_NONSTREAMING_MAX_TOKENS = int(600 * 128_000 / 3600)  # 21_333
 
 
 @dataclass
@@ -160,6 +181,18 @@ class _Messages:
         self._parent = parent
 
     def create(self, **kwargs) -> _Message:
+        # BEFORE recording the call, exactly like the SDK: it validates the
+        # timeout it would need and raises without sending anything, so a
+        # rejected request must not show up in ``.calls`` either — that is how a
+        # test proves the guard fired instead of the request going out.
+        max_tokens = kwargs.get("max_tokens")
+        if max_tokens is not None and max_tokens > _MAX_NONSTREAMING_MAX_TOKENS:
+            raise ValueError(
+                "Streaming is required for operations that may take longer than "
+                "10 minutes. See "
+                "https://github.com/anthropics/anthropic-sdk-python#long-requests "
+                f"for more details (max_tokens={max_tokens})"
+            )
         self._parent.calls.append(kwargs)
         return self._parent._next(kwargs)
 

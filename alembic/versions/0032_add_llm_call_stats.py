@@ -6,10 +6,13 @@ Create Date: 2026-08-21 00:00:00.000000
 
 One ``llm_call_logs`` row is ONE TURN, and a turn is 1..7 real API calls: up to
 ``max_tool_rounds`` tool rounds, the terminating (or forced-final) call, and at
-most one ``max_tokens`` retry. ``input_tokens``/``output_tokens``/``latency_ms``
-are the sums over all of them, which is right for billing and useless for the
-question the table gets asked during an incident: *which* call truncated, and how
-many tokens did the model actually want? Measured before this migration: 78.6% of
+most one ``max_tokens`` retry. ``input_tokens``/``output_tokens`` are the sums
+over all of them, which is right for billing and useless for the question the
+table gets asked during an incident: *which* call truncated, and how many tokens
+did the model actually want? (``latency_ms`` is not even a sum: src/services/llm.py's
+``generate_with_tools`` assigns it per call, so a multi-round row carries the last
+call's latency plus any retry's. Per-call latency is one of the fields
+``call_stats`` adds below.) Measured before this migration: 78.6% of
 ``thread_reply`` rows were multi-call, and ``stop_reason`` — read in four places
 in src/services/llm.py — was logged in none of them, so sizing the thread_reply
 ceiling had to be done by inference from log text and got the event count wrong
@@ -36,12 +39,22 @@ row ``COUNT(*)`` and the sliding-window limiter's ``call_times`` as one entry pe
 row; live booking is one per turn (+1 on retry), so row-per-call would inflate
 both rebuilt ledgers and over-throttle every agent after every restart.
 
-Additive and nullable, and no code READS the column, so deploy ordering is
-unconstrained in both directions beyond the usual rule that the new code maps it
-(the ORM names ``call_stats`` in the SELECT list of every ``select(LlmCallLog)``,
-so migrate before the new code serves — same one-way constraint as 0028/0030, for
-the same reason). Old code against the new schema is safe: it never names the
-column and the column has no NOT NULL to satisfy.
+Additive and nullable, but deploy ordering is emphatically NOT free in both
+directions: **migrate before the new code serves**, the same one-way constraint as
+0028 and 0030. Old code against the new schema is safe (it never names the column
+and there is no NOT NULL to satisfy). New code against the old schema is not, for
+two independent reasons:
+
+* ``SimulationEngine._flush_llm_logs`` builds every ``LlmCallLog`` with
+  ``call_stats=`` set explicitly, so against a pre-0032 database EVERY flush
+  raises ``UndefinedColumn``. That path re-queues the failed batch and logs a
+  WARNING — by design, so a transient DB blip does not drop rows — which here
+  means the run's ENTIRE ``llm_call_logs`` history is lost silently: nothing is
+  ever persisted, the buffer only grows, and Slack looks completely normal
+  throughout. The observability table that exists to explain an incident is
+  exactly what the mis-ordered deploy empties.
+* The ORM maps the column, so ``call_stats`` is in the SELECT list of every
+  ``select(LlmCallLog)`` — the admin LLM-call views raise as well.
 """
 
 from typing import Sequence, Union

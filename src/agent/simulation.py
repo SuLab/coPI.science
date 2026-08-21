@@ -1835,10 +1835,19 @@ class SimulationEngine:
                 # specialist and regenerates the sidecar in a call that never
                 # saw the tool results.
                 #
-                # Per-call truncation is still not attributable from the DB
-                # today (see the cumulative-`output_tokens` note above) — a
-                # follow-up should add per-call stats so the next resizing of
-                # this ceiling isn't back to inferring it from container logs.
+                # Per-call truncation IS attributable from the DB now: 42fc0b2
+                # (migration 0032) added `llm_call_logs.call_stats`, one entry
+                # per real API call carrying `stop_reason`, the requested
+                # `max_tokens` and the thinking/text split. The next resizing of
+                # this ceiling is a `jsonb_array_elements(call_stats)` query, not
+                # another pass over container logs.
+                #
+                # 16000 is also the largest value this site may hold without a
+                # second change: the truncation retry asks for 2x, and
+                # src/services/llm.py's NONSTREAMING_MAX_TOKENS (21_333) is the
+                # most the SDK accepts on a non-streaming request. The retry is
+                # clamped there rather than doubling, so raising this ceiling
+                # again buys the retry nothing at all.
                 max_tokens=16000,
                 log_meta={
                     "agent_id": agent.agent_id,
@@ -6088,7 +6097,17 @@ Keep it concise — under 300 words.""",
                 # 715-1295 tokens (run 2026-08-19 14:45), so 1100 truncated.
                 # Thinking is disabled here, so this is tokenizer growth plus
                 # a more verbose model, not thinking sharing the budget.
-                max_tokens=1800,
+                #
+                # 2600, up from 1800, on 2026-08-21. `call_stats` (migration
+                # 0032) makes per-call output measurable, and over run 076e80b6
+                # the largest memory update returned 1646 output tokens — 91% of
+                # 1800, against the 715-1295 band this ceiling was sized to. A
+                # truncated memory write is quiet damage: the only guard below
+                # is "empty or blank", so a half-written summary is stored as
+                # the working memory and carried into every later turn with
+                # nothing in the logs to say the file is short. A ceiling is not
+                # a spend — the prompt still asks for under 300 words.
+                max_tokens=2600,
                 log_meta={"agent_id": agent.agent_id, "phase": "memory"},
                 on_retry=agent.record_api_call,
             )

@@ -579,7 +579,19 @@ async def _execute_consult_specialist(
             # the cost of the most numerous call in the system for no benefit.
             # 2500 clears the observed ceiling with headroom, and max_tokens is a
             # ceiling rather than a spend — a short opinion still bills short.
-            max_tokens=2500,
+            #
+            # 4000, up from 2500, on 2026-08-21. `call_stats` (migration 0032)
+            # makes per-call output measurable for the first time, and over run
+            # 076e80b6 the largest consult returned 2299 output tokens — 92% of
+            # 2500. The headroom above was real when it was measured and is not
+            # any more: the specialists write longer under rubric v2, and this is
+            # the one call in the system whose truncation is load-bearing rather
+            # than cosmetic — a lost specialist opinion is a domain missing from
+            # the panel the verdict's floor is checked against, so the verdict
+            # comes out `panel_incomplete` for a reason that was never about the
+            # science. Still not a spend: a 900-token opinion bills 900 at either
+            # ceiling.
+            max_tokens=4000,
             # `channel` joins this consult's log row to the interview it was
             # made during. Without it every `consult_*` row landed with
             # channel NULL — the phase name gave the domain but nothing tied

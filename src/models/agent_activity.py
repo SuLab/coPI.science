@@ -192,9 +192,18 @@ class LlmCallLog(Base):
     response_text: Mapped[str] = mapped_column(Text, nullable=False)
     # PER-TURN CUMULATIVE, not per-API-call: one row is 1..7 real API calls (up
     # to max_tool_rounds tool rounds, the terminating/forced-final call, and at
-    # most one max_tokens retry), and these are their sums. Correct as billing
-    # totals; useless for "which call truncated", which is what call_stats below
-    # exists to answer. Do NOT split this table one row per API call —
+    # most one max_tokens retry), and the two token columns are their sums.
+    # Correct as billing totals; useless for "which call truncated", which is
+    # what call_stats below exists to answer.
+    #
+    # latency_ms is the exception and is NOT a sum: src/services/llm.py's
+    # generate_with_tools ASSIGNS it per call rather than accumulating it, so a
+    # multi-round row carries the last call's latency plus any retry's, not the
+    # turn's wall time. Read per-call latency out of call_stats instead; the
+    # turn's total wall time is not stored anywhere. Do NOT "fix" this column by
+    # summing it — the numbers already in the table would then mean two
+    # different things depending on when they were written. Do NOT split this
+    # table one row per API call either —
     # SimulationEngine._rebuild_state reconstructs api_call_count as a row
     # COUNT(*) and the sliding-window limiter's call_times as one entry per row,
     # while live booking is one per turn (+1 on retry), so row-per-call would

@@ -12,6 +12,30 @@ from src.config import get_settings
 
 logger = logging.getLogger(__name__)
 
+# The largest `max_tokens` the Anthropic SDK will accept on a NON-STREAMING
+# request. `BaseClient._calculate_nonstreaming_timeout` computes
+# `expected_time = 3600 * max_tokens / 128_000` and raises
+# ValueError("Streaming is required for operations that may take longer than 10
+# minutes...") as soon as that exceeds its 600-second default timeout. So the
+# last accepted value is floor(600 * 128_000 / 3600) = 21_333, and 21_334 is
+# refused locally, before any HTTP request is made. Probed on both SDKs this
+# repo runs: anthropic 1.0.0 (the deployed agent image) and 0.120.2
+# (.venv-test) — highest accepted 21_333 in each. The SDK also carries a
+# per-model override (`MODEL_NONSTREAMING_TOKENS`, 8192 for the opus-4 ids)
+# which names no model configured here, so the formula is the only binding
+# limit for us.
+#
+# Every call in this module is non-streaming, so this is a hard ceiling on what
+# a call site may request AND on what a truncation retry may double up to. It
+# used to be unreachable in practice: at the old 4000 thread_reply ceiling the
+# 2x retry asked for 8000. At 16000 it asks for 32000, which the SDK refuses —
+# raising inside the retry, after the truncated first reply has already been
+# discarded, so the turn dies with nothing posted, no verdict and no drop row.
+# tests/fakes.py's FakeAnthropic enforces the same limit, because the suite
+# drives that seam and never reaches the real client, so nothing else in CI can
+# see this ceiling at all.
+NONSTREAMING_MAX_TOKENS = 21_333
+
 # Module-level callback for logging LLM calls.
 # Signature: callback(data: dict) where data contains system_prompt, messages,
 # response_text, model, input_tokens, output_tokens, latency_ms, call_stats, and
@@ -19,11 +43,18 @@ logger = logging.getLogger(__name__)
 #
 # ONE callback fires per TURN, not per API call — and a turn is 1..7 real API
 # calls (up to max_tool_rounds tool rounds, a terminating or forced-final call,
-# and at most one max_tokens retry). `input_tokens`/`output_tokens`/`latency_ms`
-# are therefore per-turn CUMULATIVE totals: correct for billing, and deliberately
-# left that way because SimulationEngine rebuilds `api_call_count` as a row COUNT
-# and the rate limiter's `call_times` as one entry per row, so splitting a turn
-# into several rows would inflate both after every restart.
+# and at most one max_tokens retry). `input_tokens`/`output_tokens` are therefore
+# per-turn CUMULATIVE totals: correct for billing, and deliberately left that way
+# because SimulationEngine rebuilds `api_call_count` as a row COUNT and the rate
+# limiter's `call_times` as one entry per row, so splitting a turn into several
+# rows would inflate both after every restart.
+#
+# `latency_ms` is NOT one of those sums, despite being logged beside them. In
+# `generate_with_tools` it is ASSIGNED per call, not accumulated across rounds, so
+# a multi-round row carries the LAST call's latency plus any retry's — never the
+# wall time of the turn. The two only coincide in `generate_agent_response`, which
+# makes one call plus at most a retry. Per-call latency is recoverable from
+# `call_stats`; a multi-round turn's total wall time is recorded nowhere.
 #
 # `call_stats` is what makes the row interpretable anyway: a list with one object
 # per real API call, in call order — see `_call_stat`. It is the only place
@@ -66,9 +97,62 @@ async def _acreate(client: anthropic.Anthropic, **kwargs: Any):
     Defaulting here rather than at each call site means a NEW call site cannot
     silently acquire thinking-on by forgetting the parameter; a site that wants
     it (``generate_with_tools``) passes it explicitly and overrides this.
+
+    Also the one choke point where ``max_tokens`` is checked against
+    ``NONSTREAMING_MAX_TOKENS``, because every non-streaming request this module
+    makes passes through here. A call site above the limit cannot succeed — the
+    SDK raises before sending anything — so raising here, by name, is the
+    difference between "max_tokens=32000 exceeds ..." and an SDK ValueError
+    about streaming surfacing from somewhere deep inside an agent turn, where
+    the broad handler in ``_reply_to_thread`` swallows it and posts nothing.
     """
     kwargs.setdefault("thinking", {"type": "disabled"})
+    requested = kwargs.get("max_tokens")
+    if requested is not None and requested > NONSTREAMING_MAX_TOKENS:
+        raise ValueError(
+            f"max_tokens={requested} exceeds NONSTREAMING_MAX_TOKENS="
+            f"{NONSTREAMING_MAX_TOKENS}: the Anthropic SDK refuses any "
+            "non-streaming request whose max_tokens implies more than 10 "
+            "minutes of generation, so this call could never have succeeded. "
+            "Lower the call site's max_tokens, or move that call to the "
+            "streaming API."
+        )
     return await asyncio.to_thread(client.messages.create, **kwargs)
+
+
+def _retry_budget(
+    max_tokens: int, *, model: str, log_meta: dict[str, str | None] | None
+) -> int:
+    """The ``max_tokens`` for a truncation retry: 2x, but never above the SDK cap.
+
+    All three retry sites in this module used a bare ``max_tokens * 2``, which is
+    fine while the doubling stays under ``NONSTREAMING_MAX_TOKENS`` and fatal the
+    moment it does not: the SDK raises ValueError instead of retrying, the first
+    (truncated) reply has already been discarded, and the exception unwinds
+    through the caller's broad handler — so a thread_reply at the 16000 ceiling
+    lost the entire turn, verdict sidecar included, on exactly the concluding
+    turns that carry one.
+
+    Clamping is logged at WARNING because the retry did not get what it asked
+    for: at the cap it is not a bigger budget at all. It is still worth making —
+    the retry passes no ``tools`` and takes ``_acreate``'s thinking-disabled
+    default, so the same ceiling buys strictly more *text* than the adaptive
+    thinking call that truncated — but an operator reading "retrying with
+    max_tokens=21333" after a 16000 truncation should not have to work out why
+    the number is not 32000.
+    """
+    doubled = max_tokens * 2
+    if doubled <= NONSTREAMING_MAX_TOKENS:
+        return doubled
+    logger.warning(
+        "Truncation retry clamped to max_tokens=%d (2x %d = %d is above the "
+        "SDK's non-streaming limit and would raise instead of retrying) "
+        "(model=%s agent=%s phase=%s) — the retry gets no extra budget, only "
+        "the room freed by dropping tools and thinking.",
+        NONSTREAMING_MAX_TOKENS, max_tokens, doubled, model,
+        (log_meta or {}).get("agent_id", "?"), (log_meta or {}).get("phase", "?"),
+    )
+    return NONSTREAMING_MAX_TOKENS
 
 
 def _thinking_tokens(usage: Any) -> int | None:
@@ -300,7 +384,7 @@ async def generate_agent_response(
 
         # Retry once with higher max_tokens if response was truncated
         if message.stop_reason == "max_tokens":
-            retry_max = max_tokens * 2
+            retry_max = _retry_budget(max_tokens, model=model, log_meta=log_meta)
             logger.warning(
                 "Response truncated (stop_reason=max_tokens, %d tokens). "
                 "Retrying with max_tokens=%d",
@@ -534,7 +618,9 @@ async def generate_with_tools(
 
             # Retry once with higher max_tokens if response was truncated
             if message.stop_reason == "max_tokens":
-                retry_max = max_tokens * 2
+                retry_max = _retry_budget(
+                    max_tokens, model=model, log_meta=log_meta
+                )
                 logger.warning(
                     "Response truncated (stop_reason=max_tokens, %d tokens). "
                     "Retrying with max_tokens=%d",
@@ -653,7 +739,7 @@ async def generate_with_tools(
 
     # Retry once with higher max_tokens if response was truncated
     if message.stop_reason == "max_tokens":
-        retry_max = max_tokens * 2
+        retry_max = _retry_budget(max_tokens, model=model, log_meta=log_meta)
         logger.warning(
             "Response truncated after max rounds (stop_reason=max_tokens, %d tokens). "
             "Retrying with max_tokens=%d",

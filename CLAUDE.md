@@ -23,6 +23,28 @@ Postgres via testcontainers and migrates it with the real alembic chain — no
 container, no manual database, no env var needed. This is exactly what
 `scripts/ci.sh` runs.
 
+> ### ⚠️ The suite does not necessarily run production's Anthropic SDK.
+>
+> `pyproject.toml` pins only `anthropic>=0.26.0`, and the two environments have
+> resolved different versions: the deployed agent image has **1.0.0**, while
+> `.venv-test` has **0.120.2** (both measured 2026-08-21). So a test that passes
+> here says nothing certain about SDK behaviour in the container. **Do not
+> "fix" this by tightening the pin** — dependency churn on a live deployment is
+> the riskier move; just know the skew is there when a failure smells like the
+> client library.
+>
+> The one SDK behaviour this has already cost us is the non-streaming
+> `max_tokens` ceiling: `BaseClient._calculate_nonstreaming_timeout` refuses any
+> non-streaming request with `max_tokens > 21_333`
+> (`3600 * max_tokens / 128_000 > 600s`). **Both** versions carry that guard,
+> verified in each — but no test could see it, because the suite drives
+> `tests/fakes.py`'s `FakeAnthropic` and never reaches the real client. That is
+> why the fake now enforces the same limit itself
+> (`_MAX_NONSTREAMING_MAX_TOKENS`, re-derived from the SDK's arithmetic rather
+> than imported from `src`), and why `src/services/llm.py` clamps every
+> truncation retry to `NONSTREAMING_MAX_TOKENS` and raises on a call site above
+> it. See `tests/unit/test_llm_nonstreaming_ceiling.py`.
+
 Running pytest **inside the container** (`docker compose exec blackbird-app
 python -m pytest ...`) does not currently work: the image installs with
 `pip install --no-cache-dir .` (`Dockerfile:14`), with no `[dev]` extra, so
