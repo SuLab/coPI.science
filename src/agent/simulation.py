@@ -1888,6 +1888,41 @@ class SimulationEngine:
                         "[%s] Phase 4: Backing off thread %s after %d empty responses",
                         agent.agent_id, thread.thread_id, thread.empty_response_count,
                     )
+                    # The back-off is the moment of loss, not the first empty
+                    # reply: has_pending_reply stays True after one empty, so
+                    # the next Phase-4 pass retries the same ordinal, and a
+                    # retry that succeeds owes no drop row. Once backed off,
+                    # nothing re-attempts this thread (the lab is waiting on
+                    # the hub), so whatever verdict this interview would have
+                    # produced — at ANY ordinal, not just CONCLUDE; run
+                    # 076e80b6 stranded a thread at count=2 — will never
+                    # exist. Hub-only: a lab's empty replies strand the
+                    # interview too, but the lab never owed the verdict and
+                    # this table records lost assessments.
+                    if agent.role == "scout_hub":
+                        message_ordinal = thread.message_count + 1
+                        thread_phase, _, _ = phase4_guidance(
+                            agent.role, message_ordinal
+                        )
+                        cause = (
+                            "the model returned no usable text (see the "
+                            "llm.py ERROR for the stop_reason)"
+                            if not (raw_response or "").strip()
+                            else "the reply could not be parsed into a "
+                            "Slack message"
+                        )
+                        await self._record_assessment_drop(
+                            agent.agent_id,
+                            "empty_reply",
+                            subject_agent_id=thread.other_agent_id,
+                            thread_id=thread.thread_id,
+                            detail=(
+                                f"interview abandoned after "
+                                f"{thread.empty_response_count} consecutive "
+                                f"empty replies at ordinal {message_ordinal} "
+                                f"({thread_phase}); {cause}"
+                            ),
+                        )
                 return
 
             # Post the reply

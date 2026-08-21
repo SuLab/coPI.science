@@ -123,10 +123,14 @@ class AssessmentDrop(Base):
     """One verdict that was generated but never became an OpportunityAssessment.
 
     The counterpart to the table above, and the reason it exists: every way an
-    assessment can be lost is silent. The concluding reply has already been
-    posted to Slack, the thread closes normally, and the only trace is one
-    WARNING line in a container log nobody is tailing — so an empty
-    /admin/assessments page is indistinguishable from "no ideas screened yet".
+    assessment can be lost is silent.
+
+    For every reason except ``empty_reply``, the concluding reply has already
+    been posted to Slack and the thread closes normally; for ``empty_reply``
+    nothing was posted at all — the turns themselves failed. Either way the
+    only trace is one WARNING line in a container log nobody is tailing — so an
+    empty /admin/assessments page is indistinguishable from "no ideas screened
+    yet".
 
     Recording a drop is strictly best-effort and must never cost the reply that
     already went out, exactly like the assessment write itself.
@@ -162,6 +166,14 @@ class AssessmentDrop(Base):
         is the only remaining trace of it. See
         ``SimulationEngine._assessed_threads`` and
         ``_retire_superseded_verdict``.
+      * ``empty_reply``          — the interview was ABANDONED: two consecutive
+        replies produced no usable text (an llm.py empty reply — its ERROR
+        names the stop reason — or a reply that could not be parsed into a
+        Slack message), so the engine backed off and no later turn exists to
+        produce the verdict. Unlike every other reason, NOTHING was posted to
+        Slack for the failing turns. Recorded at any ordinal, hub-only. Added
+        2026-08-21 after run 076e80b6 measured 13 empty replies in 90 minutes
+        and stranded a thread at message count 2.
     """
 
     __tablename__ = "assessment_drops"

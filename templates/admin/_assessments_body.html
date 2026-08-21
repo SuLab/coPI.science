@@ -47,14 +47,18 @@
                     {% elif reason == 'missing_sidecar' %}
                         &mdash; the interview concluded without declining, but carried no
                         sidecar at all.
+                    {% elif reason == 'empty_reply' %}
+                        &mdash; the model returned no usable reply twice in a row,
+                        so the interview was abandoned before any verdict could be
+                        written. Nothing was posted to Slack for these turns.
                     {% endif %}
                 </li>
                 {% endfor %}
             </ul>
             <div class="mt-2 text-xs text-amber-700">
-                The Slack reply for each of these was posted normally &mdash; only the
-                machine-readable verdict was lost, and it cannot be recovered from a
-                later turn.
+                Except for <code>empty_reply</code>, the Slack reply for each of
+                these was posted normally &mdash; only the machine-readable verdict
+                was lost. None of them can be recovered from a later turn.
             </div>
         </div>
     </div>
