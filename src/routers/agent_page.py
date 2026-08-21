@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import distinct, func, select, tuple_
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -504,12 +505,27 @@ async def review_proposal(
     )
     db.add(review)
 
-    # Record engagement and mark any outstanding email notification as responded
-    from src.services.email_notifications import mark_notification_responded, record_engagement
-    await record_engagement(current_user.id, db)
-    await mark_notification_responded(current_user.id, thread_decision_id, "review", db)
+    try:
+        # Record engagement and mark any outstanding email notification as
+        # responded. These run inside the same try as the commit — and MUST,
+        # because their SELECTs trigger SQLAlchemy's autoflush of the pending
+        # ProposalReview insert above, so on a lost race the IntegrityError
+        # can surface here rather than at the explicit commit() below.
+        from src.services.email_notifications import mark_notification_responded, record_engagement
+        await record_engagement(current_user.id, db)
+        await mark_notification_responded(current_user.id, thread_decision_id, "review", db)
 
-    await db.commit()
+        await db.commit()
+    except IntegrityError:
+        # Lost the race on uq_proposal_reviews_decision_agent (double-click,
+        # two tabs): a review for this decision+agent now exists. The
+        # rollback also discards THIS request's record_engagement /
+        # mark_notification_responded writes — correct, because the winning
+        # racer performed its own. Same outcome as the SELECT guard above.
+        await db.rollback()
+        return RedirectResponse(
+            url=f"/agent/{agent_id}/dashboard", status_code=302
+        )
 
     return RedirectResponse(url=f"/agent/{agent_id}/dashboard", status_code=302)
 

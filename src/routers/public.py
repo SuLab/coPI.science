@@ -500,7 +500,24 @@ async def waitlist_submit(
                 note=note_clean or None,
             )
         )
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError:
+        # Two concurrent first-time signups raced the unique email
+        # constraint; the row exists now — update it exactly like the
+        # `existing` branch above (same pattern as the vote endpoint).
+        await db.rollback()
+        existing = (
+            await db.execute(
+                select(WaitlistSignup).where(
+                    WaitlistSignup.email == email_clean
+                )
+            )
+        ).scalar_one()
+        existing.name = name_clean or existing.name
+        existing.institution = institution_clean or existing.institution
+        existing.note = note_clean or existing.note
+        await db.commit()
     logger.info("Waitlist signup: %s", email_clean)
 
     return templates.TemplateResponse(
