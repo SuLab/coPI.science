@@ -173,6 +173,12 @@ EPOCH_UTC = datetime.fromtimestamp(0, tz=UTC)
 # themselves are still upserted every flush.
 RUN_STATS_UPDATE_INTERVAL = 30.0
 
+# How many queued working-memory updates stop() will still run. Each is a
+# real LLM call (seconds); the container's stop grace period (-t 420) was
+# sized for ONE 16k call, so an unbounded shutdown drain can outlive it and
+# get SIGKILLed mid-flush. Anything beyond this bound is dropped LOUDLY.
+MEMORY_EVENTS_MAX_AT_SHUTDOWN = 10
+
 # Startup rebuild window (B2): the MessageLog is hydrated with messages from the
 # last REBUILD_WINDOW_S plus the full history of any still-undecided thread, so
 # RAM/startup cost grows with recent + live volume rather than all-time history.
@@ -394,6 +400,25 @@ class SimulationEngine:
         # stop()), so the shutdown flush covers the last assessment of a run
         # too. This table is the actual product of the screening pipeline.
         self._pending_assessments: list[dict] = []
+        # Working-memory events deferred from _close_thread. The close used
+        # to run its two _update_agent_memory LLM calls inside the thread
+        # lock + BOTH agents' locks + a reply-lane semaphore slot; in the
+        # star topology every close shares the hub's agent lock, so closes
+        # serialized on two LLM calls each and blocked semaphore slots for
+        # the duration (docs/audits/2026-08-21-perf-memory-race, finding 1).
+        # Queued here and drained OUTSIDE the dispatch fan-out, one event at
+        # a time — sequential draining is what preserves the lost-update
+        # guarantee the agent lock used to provide for these calls: no two
+        # updates for one agent can interleave, and each reads the memory
+        # text its predecessor wrote. Entries are (agent_id, event,
+        # visibility, channel_id); agent_id (not the Agent object) because a
+        # roster sync can rebuild the object between enqueue and drain.
+        self._pending_memory_events: list[tuple[str, str, str, str | None]] = []
+        # Guards against two drains running at once (main loop vs stop(), or
+        # a future second call site): concurrent drains would pop same-agent
+        # events into overlapping LLM calls — exactly the lost update this
+        # queue exists to prevent.
+        self._memory_drain_lock = asyncio.Lock()
         # Monotonic ts-shaped id minter, seeded at DB rebuild. Owns the engine's
         # writer slot so its ids can never collide with the web app's or
         # GrantBot's, which mint into the same agent_messages table from other
@@ -847,6 +872,12 @@ class SimulationEngine:
             # ingestion and every other agent for one agent's cooldown.
             # See .notes/cohort-system-v2.md §10.3.
 
+            # Deferred working-memory updates (audit finding 1): run OUTSIDE
+            # the reply lane's locks/semaphore. Before the flushes, so this
+            # tick's memory llm_call_logs rows land in this tick's flush.
+            if self._pending_memory_events:
+                await self._drain_memory_events()
+
             # Flush buffered message-log entries + LLM logs + any assessment
             # rows that failed their first write, periodically
             await self._flush_persisted()
@@ -891,6 +922,21 @@ class SimulationEngine:
         """
         self._running = False
         self._stop_event.set()
+        # Drain a BOUNDED number of queued memory updates BEFORE the log
+        # callback is cleared, so their llm_call_logs rows are captured by
+        # the flush below. Bounded: each is a real LLM call and the stop
+        # grace period is finite — the remainder is dropped loudly rather
+        # than racing the SIGKILL.
+        try:
+            await self._drain_memory_events(limit=MEMORY_EVENTS_MAX_AT_SHUTDOWN)
+        except Exception:
+            logger.exception("Shutdown memory drain failed")
+        if self._pending_memory_events:
+            logger.warning(
+                "Dropping %d queued working-memory update(s) at shutdown",
+                len(self._pending_memory_events),
+            )
+            self._pending_memory_events.clear()
         set_call_log_callback(None)
         await self._flush_persisted(force_stats=True)
         await self._flush_llm_logs()
@@ -2135,19 +2181,28 @@ class SimulationEngine:
                 agent.agent_id, thread.thread_id, outcome,
             )
 
-            # Update working memory for both agents
-            # summary_text is derived from a cross-agent conversation, so fence it
-            # as untrusted before it lands in working memory (which is later fed
-            # back into prompts) (SEC-14).
+            # Queue working-memory updates for both agents. NOT awaited here:
+            # these are LLM calls, and this block holds the thread lock, both
+            # agent locks and a reply-lane semaphore slot — running them here
+            # serialized every close on the hub's key and starved the reply
+            # lane (audit finding 1). _drain_memory_events (main loop / stop)
+            # applies them sequentially, which preserves the same lost-update
+            # protection the lock provided. summary_text is derived from a
+            # cross-agent conversation, so it is fenced as untrusted before it
+            # lands in working memory (SEC-14), same as before.
             event = f"Thread in #{thread.channel} with {thread.other_agent_id} closed: {outcome}"
             if summary_text:
                 event += f". Summary: {delimit(summary_text[:200], 'proposal_summary')}"
-            await self._update_agent_memory(agent, event)
+            self._pending_memory_events.append(
+                (agent.agent_id, event, VISIBILITY_PUBLIC, None)
+            )
             if other_agent:
                 other_event = f"Thread in #{thread.channel} with {agent.agent_id} closed: {outcome}"
                 if summary_text:
                     other_event += f". Summary: {delimit(summary_text[:200], 'proposal_summary')}"
-                await self._update_agent_memory(other_agent, other_event)
+                self._pending_memory_events.append(
+                    (other_agent.agent_id, other_event, VISIBILITY_PUBLIC, None)
+                )
 
     async def _evict_dead_thread(self, thread_id: str) -> None:
         """Remove a thread_id from every agent's in-memory state.
@@ -6063,6 +6118,41 @@ class SimulationEngine:
     # Post-simulation
     # ------------------------------------------------------------------
 
+    async def _drain_memory_events(self, limit: int | None = None) -> int:
+        """Run queued working-memory updates, strictly FIFO, one at a time.
+
+        Called from the main loop after the reply-lane dispatch and from
+        stop() (bounded). Sequential draining under the drain lock is what
+        preserves the lost-update guarantee for same-agent updates: each one
+        reads the memory text its predecessor wrote. Agents are resolved by
+        id at drain time — the roster can change (or an Agent object be
+        rebuilt by _sync_roster_from_db) between enqueue and drain, and a
+        stale reference would write memory for an object the engine no
+        longer owns. _update_agent_memory never raises, so one bad event
+        cannot wedge the queue.
+        """
+        drained = 0
+        async with self._memory_drain_lock:
+            while self._pending_memory_events:
+                if limit is not None and drained >= limit:
+                    break
+                agent_id, event, visibility, channel_id = (
+                    self._pending_memory_events.pop(0)
+                )
+                agent = self.agents.get(agent_id)
+                if agent is None:
+                    logger.info(
+                        "[memory] dropping queued memory event for %s — no "
+                        "longer on the roster", agent_id,
+                    )
+                    drained += 1
+                    continue
+                await self._update_agent_memory(
+                    agent, event, visibility, channel_id
+                )
+                drained += 1
+        return drained
+
     async def _update_agent_memory(
         self,
         agent: Agent,
@@ -6072,8 +6162,8 @@ class SimulationEngine:
     ) -> None:
         """Incrementally update an agent's working memory after a significant event.
 
-        Triggered by: thread closure, PI DM, or proposal review — not batched at
-        simulation end.
+        Triggered by thread closure, via the _pending_memory_events queue
+        (_close_thread enqueues; _drain_memory_events is the only caller).
 
         visibility/channel_id: controls which memory segment is updated and
             which subset of the message log is used as synthesis context, per

@@ -431,113 +431,6 @@ async def test_cross_agent_close_does_not_deadlock(engine, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# 3b. Final review fix (item 1) — `_close_thread`'s OWN agent lock
-# (`simulation.py:1792`) is untested: test 3 above only proves no DEADLOCK,
-# and removing a lock cannot introduce a deadlock (fewer locks can only ever
-# remove one), so no assertion there can fail against that mutation. This
-# test instead proves the lock's actual job: mutual exclusion. Two closes
-# that share the hub as their common agent both read-then-write the hub's
-# working-memory FILE via `_update_agent_memory` (read current memory ->
-# await a real LLM call -> write the result back) — a classic lost-update
-# window if they are allowed to overlap. `_close_thread`'s agent lock is
-# held across the WHOLE method, including both `_update_agent_memory` calls,
-# specifically to serialize this. No lock is applied by this test anywhere;
-# only the production line at `simulation.py:1792` can prevent the loss.
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_close_threads_agent_lock_prevents_a_lost_memory_update(
-    monkeypatch, tmp_path,
-):
-    """Two interviews close concurrently, both involving the hub: hub+lab1
-    on thread AB, hub+lab2 on thread CD. Both closes call `_update_agent_
-    memory(hub, ...)`. The fake `generate_agent_response` below plays the
-    part of the real LLM: it reads whatever "current working memory" text
-    the prompt embeds, sleeps (a REAL await, so a genuine interleaving is
-    possible), then returns that prior text with its own event appended —
-    exactly the read-await-write shape a real memory-update call has.
-
-    If `_close_thread`'s agent lock serializes the two closes (as it must,
-    since both acquire_all calls share the "blackbird" key), the second
-    close's memory update reads the FIRST close's already-written result, so
-    the final file accumulates BOTH events. If the lock is missing, both
-    reads happen against the same stale ("(empty)") prior text before either
-    writes, and whichever write lands last erases the other's event
-    entirely — confirmed via a disposable worktree that deleting
-    `simulation.py:1792`'s `async with self._agent_locks.acquire_all(...):`
-    makes this fail (only one of the two agent ids ends up present)."""
-    monkeypatch.setattr("src.agent.agent.PROFILES_DIR", tmp_path)
-
-    hub = Agent("blackbird", "BlackbirdBot", "Blackbird", role="scout_hub")
-    lab1 = Agent("wang1", "Wang1Bot", "Wang1", role="pi_lab")
-    lab2 = Agent("wang2", "Wang2Bot", "Wang2", role="pi_lab")
-
-    thread_ab = ThreadState(thread_id="tAB", channel="general", other_agent_id="wang1")
-    hub.state.active_threads["tAB"] = thread_ab
-    lab1.state.active_threads["tAB"] = ThreadState(
-        thread_id="tAB", channel="general", other_agent_id="blackbird",
-    )
-    thread_cd = ThreadState(thread_id="tCD", channel="general", other_agent_id="wang2")
-    hub.state.active_threads["tCD"] = thread_cd
-    lab2.state.active_threads["tCD"] = ThreadState(
-        thread_id="tCD", channel="general", other_agent_id="blackbird",
-    )
-
-    eng = SimulationEngine(
-        agents=[hub, lab1, lab2],
-        slack_clients={
-            "blackbird": FakeSlackClient(agent_id="blackbird"),
-            "wang1": FakeSlackClient(agent_id="wang1"),
-            "wang2": FakeSlackClient(agent_id="wang2"),
-        },
-        session_factory=None, simulation_run_id=None,
-    )
-
-    async def _fake_generate(*, messages, **kwargs):
-        content = messages[0]["content"]
-        event_marker = "The event that triggered this update:\n"
-        mem_marker = "Your current working memory:\n"
-        e_start = content.index(event_marker) + len(event_marker)
-        e_end = content.index("\n\n", e_start)
-        event = content[e_start:e_end]
-        m_start = content.index(mem_marker) + len(mem_marker)
-        m_end = content.index("\n\nWrite the complete", m_start)
-        prior = content[m_start:m_end]
-        # The real await: without it both "concurrent" calls would race
-        # through their entire body in one scheduler tick and could never
-        # observe each other's write regardless of locking.
-        await asyncio.sleep(0.05)
-        if prior == "(empty)":
-            return event
-        return f"{prior} || {event}"
-
-    monkeypatch.setattr(
-        "src.agent.simulation.generate_agent_response", _fake_generate
-    )
-
-    close_ab = asyncio.ensure_future(
-        eng._close_thread(hub, thread_ab, "no_proposal")
-    )
-    # Let close_ab acquire the shared "blackbird" agent lock and settle into
-    # its own genuine await inside _update_agent_memory.
-    await asyncio.sleep(0.01)
-    close_cd = asyncio.ensure_future(
-        eng._close_thread(hub, thread_cd, "no_proposal")
-    )
-    # Let close_cd register as a genuine waiter on "blackbird".
-    await asyncio.sleep(0.01)
-
-    await asyncio.wait_for(asyncio.gather(close_ab, close_cd), timeout=5.0)
-
-    final_memory = hub.working_memory
-    assert "wang1" in final_memory and "wang2" in final_memory, (
-        f"hub's working memory lost one of the two closes' events entirely: "
-        f"{final_memory!r}"
-    )
-
-
-# ---------------------------------------------------------------------------
 # 3c. Final review fix (item 2) — `_evict_dead_thread`'s OWN agent lock
 # (`simulation.py:1902`) is likewise untested. It takes EVERY agent's key,
 # so it can never truly overlap with `_close_thread` for the SAME thread
@@ -805,3 +698,144 @@ async def test_a_pair_already_in_flight_is_not_spawned_twice(engine, monkeypatch
         assert len(client.posted) == 1
     finally:
         await _delete_run(factory, run_id)
+
+
+@pytest.mark.asyncio
+async def test_close_thread_defers_memory_updates_out_of_the_dispatch_span(
+    monkeypatch, tmp_path,
+):
+    """A system-enforced close must ENQUEUE its two memory events, not run
+    them inside the dispatch fan-out where they hold the thread lock, both
+    agent locks and a semaphore slot (audit 2026-08-21 finding 1). This is
+    deterministic — it counts LLM calls, it does not race timers."""
+    monkeypatch.setattr("src.agent.agent.PROFILES_DIR", tmp_path)
+    hub = Agent("blackbird", "BlackbirdBot", "Blackbird", role="scout_hub")
+    lab = Agent("wang", "WangBot", "Wang", role="pi_lab")
+    thread = ThreadState(
+        thread_id="t1", channel="general", other_agent_id="wang",
+        has_pending_reply=True,
+    )
+    hub.state.active_threads["t1"] = thread
+    eng = SimulationEngine(
+        agents=[hub, lab],
+        slack_clients={
+            "blackbird": FakeSlackClient(agent_id="blackbird"),
+            "wang": FakeSlackClient(agent_id="wang"),
+        },
+    )
+    _seed_thread_history(
+        eng, "t1", "general", get_settings().max_thread_messages,
+    )
+
+    memory_calls: list[str] = []
+
+    async def fake_generate(*, system_prompt, messages, **kwargs):
+        memory_calls.append("memory")
+        await asyncio.sleep(0)
+        return "updated memory"
+
+    monkeypatch.setattr(
+        "src.agent.simulation.generate_agent_response", fake_generate
+    )
+    eng._running = True
+    await eng._dispatch_reply_lane()
+
+    assert memory_calls == [], (
+        "memory LLM calls ran inside the dispatch fan-out; they must be queued"
+    )
+    assert len(eng._pending_memory_events) == 2  # one per party of the close
+    drained = await eng._drain_memory_events()
+    assert drained == 2
+    assert memory_calls == ["memory", "memory"]
+    assert not eng._pending_memory_events
+
+
+@pytest.mark.asyncio
+async def test_sequential_drain_prevents_a_lost_memory_update(
+    monkeypatch, tmp_path,
+):
+    """Successor to test_close_threads_agent_lock_prevents_a_lost_memory_update
+    (which this task DELETES — see Step 3): the serialization duty moves from
+    the agent lock to the drain. Two closes both involving the hub enqueue
+    two hub events; the drain must apply them sequentially so the second
+    reads the first's written text. The fake is the same interleave detector:
+    it reads the prompt's 'current working memory', awaits, and appends."""
+    monkeypatch.setattr("src.agent.agent.PROFILES_DIR", tmp_path)
+    hub = Agent("blackbird", "BlackbirdBot", "Blackbird", role="scout_hub")
+    lab1 = Agent("wang1", "Wang1Bot", "Wang1", role="pi_lab")
+    lab2 = Agent("wang2", "Wang2Bot", "Wang2", role="pi_lab")
+    thread_ab = ThreadState(thread_id="tAB", channel="general", other_agent_id="wang1")
+    hub.state.active_threads["tAB"] = thread_ab
+    thread_cd = ThreadState(thread_id="tCD", channel="general", other_agent_id="wang2")
+    hub.state.active_threads["tCD"] = thread_cd
+    eng = SimulationEngine(
+        agents=[hub, lab1, lab2],
+        slack_clients={
+            "blackbird": FakeSlackClient(agent_id="blackbird"),
+            "wang1": FakeSlackClient(agent_id="wang1"),
+            "wang2": FakeSlackClient(agent_id="wang2"),
+        },
+        session_factory=None, simulation_run_id=None,
+    )
+
+    async def _fake_generate(*, messages, **kwargs):
+        content = messages[0]["content"]
+        event_marker = "The event that triggered this update:\n"
+        mem_marker = "Your current working memory:\n"
+        e_start = content.index(event_marker) + len(event_marker)
+        e_end = content.index("\n\n", e_start)
+        event = content[e_start:e_end]
+        m_start = content.index(mem_marker) + len(mem_marker)
+        m_end = content.index("\n\nWrite the complete", m_start)
+        prior = content[m_start:m_end]
+        await asyncio.sleep(0.05)
+        if prior == "(empty)":
+            return event
+        return f"{prior} || {event}"
+
+    monkeypatch.setattr(
+        "src.agent.simulation.generate_agent_response", _fake_generate
+    )
+
+    await asyncio.gather(
+        eng._close_thread(hub, thread_ab, "no_proposal"),
+        eng._close_thread(hub, thread_cd, "no_proposal"),
+    )
+    # The adversarial half: TWO drains racing must still not interleave
+    # same-agent updates (the drain lock's whole job).
+    await asyncio.gather(
+        eng._drain_memory_events(), eng._drain_memory_events(),
+    )
+    final_memory = hub.working_memory
+    assert "wang1" in final_memory and "wang2" in final_memory, (
+        f"hub's working memory lost one close's event: {final_memory!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_stop_drains_a_bounded_number_of_memory_events(
+    monkeypatch, tmp_path, caplog,
+):
+    monkeypatch.setattr("src.agent.agent.PROFILES_DIR", tmp_path)
+    hub = Agent("blackbird", "BlackbirdBot", "Blackbird", role="scout_hub")
+    eng = SimulationEngine(
+        agents=[hub],
+        slack_clients={"blackbird": FakeSlackClient(agent_id="blackbird")},
+    )
+    calls = []
+
+    async def fake_generate(*, system_prompt, messages, **kwargs):
+        calls.append(1)
+        return "m"
+
+    monkeypatch.setattr(
+        "src.agent.simulation.generate_agent_response", fake_generate
+    )
+    for i in range(12):
+        eng._pending_memory_events.append(
+            ("blackbird", f"event {i}", "public", None)
+        )
+    await eng.stop()
+    assert len(calls) == 10  # MEMORY_EVENTS_MAX_AT_SHUTDOWN
+    assert not eng._pending_memory_events
+    assert any("Dropping 2 queued" in r.message for r in caplog.records)
