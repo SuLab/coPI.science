@@ -82,3 +82,34 @@ async def test_an_empty_retry_after_truncation_still_logs(monkeypatch, caplog):
 
     assert out == ""
     assert any("final_retry" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_a_truncated_reply_survives_a_retry_that_returns_nothing(
+    monkeypatch, caplog
+):
+    # First call truncates but already carries usable text; the retry (fired
+    # because of that truncation) comes back with none. `response_text =
+    # _all_text(retry_msg) or response_text` must keep the truncated text
+    # rather than clobber it with the retry's "" — that's the data-recovery
+    # half of the fix the sibling test above only covers the logging half of.
+    fake = FakeAnthropic(responses=[
+        multi_text_response("partial", stop_reason="max_tokens"),
+        multi_text_response(),
+    ])
+    monkeypatch.setattr("src.services.llm.get_anthropic_client", lambda: fake)
+
+    async def _executor(name, params):
+        return "unused"
+
+    with caplog.at_level(logging.ERROR, logger="src.services.llm"):
+        out = await llm.generate_with_tools(
+            system_prompt="s",
+            messages=[{"role": "user", "content": "u"}],
+            tools=[{"name": "t", "description": "d",
+                    "input_schema": {"type": "object"}}],
+            tool_executor=_executor,
+        )
+
+    assert out == "partial"
+    assert caplog.records == []

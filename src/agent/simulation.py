@@ -3388,11 +3388,14 @@ class SimulationEngine:
         thread_id: str | None = None,
         detail: str | None = None,
     ) -> None:
-        """Record that a verdict was generated and then lost.
+        """Record that a verdict was lost — generated and discarded, or, for
+        ``empty_reply``, never produced at all.
 
-        Best-effort in exactly the same sense as ``_persist_assessment``: the
-        concluding reply is already in Slack by the time any of these fire, so
-        nothing here may raise, and a DB-less engine is a silent no-op.
+        Best-effort in exactly the same sense as ``_persist_assessment``: for
+        every reason except ``empty_reply`` the concluding reply is already in
+        Slack by the time any of these fire; for ``empty_reply`` nothing was
+        ever generated or posted. Either way nothing here may raise, and a
+        DB-less engine is a silent no-op.
 
         This exists because every loss path is otherwise invisible — one WARNING
         in a container log — which leaves an empty ``/admin/assessments`` page

@@ -31,7 +31,8 @@
         <div class="text-sm text-amber-900">
             <div class="font-semibold mb-1">
                 {{ drops_total }} verdict{{ '' if drops_total == 1 else 's' }}
-                generated but not stored{% if not show_all_runs %} in this run{% endif %}.
+                lost &mdash; generated and never stored, or never produced at
+                all{% if not show_all_runs %} in this run{% endif %}.
             </div>
             <ul class="list-disc list-inside space-y-0.5">
                 {% for reason, n in drop_counts %}

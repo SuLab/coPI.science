@@ -1928,7 +1928,8 @@ async def test_admin_page_warns_about_dropped_verdicts(client, db_session, admin
     # Collapse whitespace: the banner's sentence is wrapped across source lines,
     # and this test is about what it SAYS, not how the markup is folded.
     flat = " ".join(resp.text.split())
-    assert "2 verdicts generated but not stored" in flat
+    assert "2 verdicts lost" in flat
+    assert "generated and never stored, or never produced at all" in flat
     # Each reason is broken out, because each has a different fix.
     assert "specialist_floor" in flat
     assert "unparseable_sidecar" in flat

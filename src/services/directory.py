@@ -403,12 +403,14 @@ async def list_assessments(
         row.band for row in assessments if row.band
     ).items())
 
-    # Verdicts that were generated and then lost, scoped exactly like the rows
-    # above. Without this an empty page is ambiguous: "nothing screened yet" and
-    # "everything screened and every verdict discarded" look identical, and the
-    # latter is only visible as a WARNING in a container log. Grouped by reason
-    # so the banner can say WHICH failure is happening — they have different
-    # fixes (panel never convened / sidecar truncated / no sidecar emitted).
+    # Verdicts that were lost — generated and discarded, or never produced at
+    # all — scoped exactly like the rows above. Without this an empty page is
+    # ambiguous: "nothing screened yet" and "everything screened and every
+    # verdict discarded" look identical, and the latter is only visible as a
+    # WARNING in a container log. Grouped by reason so the banner can say WHICH
+    # failure is happening — they have different fixes (panel never convened /
+    # sidecar truncated / no sidecar emitted / interview abandoned with no
+    # reply at all).
     drops_result = await db.execute(
         select(AssessmentDrop.reason, func.count())
         .where(

@@ -120,7 +120,7 @@ class OpportunityAssessment(Base):
 
 
 class AssessmentDrop(Base):
-    """One verdict that was generated but never became an OpportunityAssessment.
+    """One verdict that was lost, whether generated and discarded or never produced at all.
 
     The counterpart to the table above, and the reason it exists: every way an
     assessment can be lost is silent.
