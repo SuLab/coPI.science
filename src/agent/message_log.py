@@ -1,5 +1,6 @@
 """Global append-only message log — single source of truth for the simulation."""
 
+import bisect
 import logging
 import re
 from dataclasses import dataclass
@@ -190,6 +191,26 @@ class MessageLog:
         # order is NOT time order (see _record), so latest_timestamp cannot read
         # the tail of _entries.
         self._max_posted_at: float = 0.0
+        # ---- read indexes (audit 2026-08-21 finding 3) -------------------
+        # Every read used to scan self._entries in full, synchronously, on
+        # the event-loop thread — dozens of scans per main-loop tick over an
+        # append-only list (measured 0.7s/tick at 100k entries). The indexes
+        # below make each read O(matches). INVARIANTS the indexes must not
+        # change: since-readers return matches in INSERTION order; ties in
+        # get_last_bot_sender_in_channel keep the LATER insertion;
+        # get_thread_history is stable by (posted_at, insertion); panel-note
+        # and cohort filters stay at READ time (get_entry must keep seeing
+        # notes). tests/unit/test_message_log_differential.py is the contract.
+        self._seq_by_ts: dict[str, int] = {}  # ts -> insertion seq
+        self._by_thread: dict[str, list[LogEntry]] = {}
+        self._by_time: list[tuple[float, int, LogEntry]] = []  # sorted
+        # Keyed on sender_agent_id INCLUDING None, so the two per-sender reads
+        # stay byte-equivalent to the full scans they replaced for every
+        # possible argument — a human top-level row (sender_agent_id=None) was
+        # matched by the old `e.sender_agent_id == agent_id` comparison too.
+        self._top_level_ts_by_sender: dict[str | None, set[str]] = {}
+        self._top_level_by_sender: dict[str | None, list[LogEntry]] = {}
+        self._last_bot_in_channel: dict[str, LogEntry] = {}
 
     def set_bot_name_map(self, mapping: dict[str, str]) -> None:
         """Register bot_name -> agent_id mapping (lowercase keys)."""
@@ -236,17 +257,53 @@ class MessageLog:
         self._record(entry)
 
     def _record(self, entry: LogEntry) -> None:
-        """Store an entry and advance the posted_at high-water mark.
+        """Store an entry, advance the high-water mark, maintain the indexes.
 
         The log is append-only in *insertion* order, which is not time order: the
         DB inbound poller and the Slack reconcile append entries whose posted_at
         can predate messages already stored. Every "most recent" query therefore
         has to key on posted_at rather than on the tail of ``_entries``.
+
+        Runs once per unique ts (append/load_entry dedupe first), in
+        insertion order — which is what makes the incremental
+        ``_last_bot_in_channel`` update below exactly equivalent to the old full
+        scan's ``>=`` tie rule.
         """
+        seq = len(self._entries)
         self._entries.append(entry)
         self._by_ts[entry.ts] = entry
+        self._seq_by_ts[entry.ts] = seq
         if entry.posted_at > self._max_posted_at:
             self._max_posted_at = entry.posted_at
+        if entry.thread_ts is not None:
+            self._by_thread.setdefault(entry.thread_ts, []).append(entry)
+        bisect.insort(self._by_time, (entry.posted_at, seq, entry),
+                      key=lambda t: (t[0], t[1]))
+        if entry.thread_ts is None:
+            self._top_level_ts_by_sender.setdefault(
+                entry.sender_agent_id, set()
+            ).add(entry.ts)
+            self._top_level_by_sender.setdefault(
+                entry.sender_agent_id, []
+            ).append(entry)
+        if entry.is_bot and entry.sender_agent_id and not is_panel_note(entry):
+            best = self._last_bot_in_channel.get(entry.channel)
+            if best is None or entry.posted_at >= best.posted_at:
+                self._last_bot_in_channel[entry.channel] = entry
+
+    def _since(self, since: float) -> list[LogEntry]:
+        """Entries with posted_at strictly greater than ``since``, in
+        INSERTION order — the same order the old full scans returned.
+
+        Insertion order, not time order, is load-bearing: Phase-3 activation
+        follows the order these reads return, so a time-ordered index would
+        silently reorder activations (audit 2026-08-21 §F3).
+        """
+        i = bisect.bisect_right(self._by_time, (since, float("inf")),
+                                key=lambda t: (t[0], t[1]))
+        tail = self._by_time[i:]
+        tail.sort(key=lambda t: t[1])
+        return [t[2] for t in tail]
 
     def get_entry(self, ts: str) -> LogEntry | None:
         """Look up a single entry by its timestamp.
@@ -278,10 +335,8 @@ class MessageLog:
                 COHORT-GATE: GATED via allowed_sender_ids.
         """
         results = []
-        for entry in self._entries:
+        for entry in self._since(since):
             if is_panel_note(entry):
-                continue
-            if entry.posted_at <= since:
                 continue
             if entry.thread_ts is not None:
                 continue
@@ -318,10 +373,12 @@ class MessageLog:
         root = self._by_ts.get(thread_ts)
         replies = sorted(
             (
-                e for e in self._entries
-                if e.thread_ts == thread_ts and not is_panel_note(e)
+                e for e in self._by_thread.get(thread_ts, [])
+                if not is_panel_note(e)
             ),
-            key=lambda e: e.posted_at,
+            # (posted_at, insertion seq) makes the sort explicitly what the old
+            # stable sort over insertion-ordered _entries was implicitly.
+            key=lambda e: (e.posted_at, self._seq_by_ts[e.ts]),
         )
         result = []
         # The root can never BE a panel note (a note is always posted with a
@@ -347,8 +404,8 @@ class MessageLog:
         """
         count = 1 if thread_ts in self._by_ts else 0
         count += sum(
-            1 for e in self._entries
-            if e.thread_ts == thread_ts and not is_panel_note(e)
+            1 for e in self._by_thread.get(thread_ts, [])
+            if not is_panel_note(e)
         )
         return count
 
@@ -363,11 +420,10 @@ class MessageLog:
         """
         posts = sorted(
             (
-                e for e in self._entries
-                if e.sender_agent_id == agent_id and e.thread_ts is None
-                and not is_panel_note(e)
+                e for e in self._top_level_by_sender.get(agent_id, [])
+                if not is_panel_note(e)
             ),
-            key=lambda e: e.posted_at,
+            key=lambda e: (e.posted_at, self._seq_by_ts[e.ts]),
         )
         return posts[-limit:]
 
@@ -385,19 +441,13 @@ class MessageLog:
                 COHORT-GATE: UNGATED by design — turn-taking within one channel, and the
         only callers are collab_private channels, which the gate exempts (v2 §7).
         """
-        best: LogEntry | None = None
-        for entry in self._entries:
-            if is_panel_note(entry):
-                # A note is not a turn: letting one answer as "the last poster"
-                # would hand the turn to the other bot in a flat private
-                # channel on the strength of the hub's own bookkeeping.
-                continue
-            if entry.channel != channel_name:
-                continue
-            if not entry.is_bot or not entry.sender_agent_id:
-                continue
-            if best is None or entry.posted_at >= best.posted_at:
-                best = entry
+        # Maintained incrementally by ``_record``, which applies the very same
+        # filters (a note is not a turn: letting one answer as "the last
+        # poster" would hand the turn to the other bot in a flat private
+        # channel on the strength of the hub's own bookkeeping) and the very
+        # same ``>=`` tie rule, in insertion order — so this is the old full
+        # scan's fold, precomputed.
+        best = self._last_bot_in_channel.get(channel_name)
         return best.sender_agent_id if best else None
 
     def get_replies_to_agent_posts(
@@ -421,15 +471,10 @@ class MessageLog:
                 COHORT-GATE: GATED via allowed_sender_ids.
         """
         # First, find all top-level posts by this agent
-        agent_post_ts = {
-            e.ts for e in self._entries
-            if e.sender_agent_id == agent_id and e.thread_ts is None
-        }
+        agent_post_ts = self._top_level_ts_by_sender.get(agent_id, set())
         results = []
-        for entry in self._entries:
+        for entry in self._since(since):
             if is_panel_note(entry):
-                continue
-            if entry.posted_at <= since:
                 continue
             if entry.thread_ts not in agent_post_ts:
                 continue
@@ -464,13 +509,11 @@ class MessageLog:
         """
         tag = f"@{agent_bot_name}".lower()
         results = []
-        for entry in self._entries:
+        for entry in self._since(since):
             if is_panel_note(entry):
                 # The note quotes the hub's own question back, so a bot name
                 # inside that question would otherwise read as an @-mention and
                 # activate a thread on the strength of the hub's bookkeeping.
-                continue
-            if entry.posted_at <= since:
                 continue
             if not _entry_allowed(entry, allowed_sender_ids):
                 continue
@@ -558,9 +601,7 @@ class MessageLog:
         ``post_agent_message``/``reopen_proposal`` (via
         ``src/services/pi_inbox.py::record_pi_message``) used to feed.
         """
-        for entry in self._entries:
-            if entry.thread_ts != thread_ts:
-                continue
+        for entry in self._by_thread.get(thread_ts, []):
             if is_panel_note(entry):
                 # The load-bearing one for panel notes. A note is authored by
                 # the hub, so it passes the `sender_agent_id == agent_id` skip
