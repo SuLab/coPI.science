@@ -209,7 +209,7 @@ def _call_stat(
 def _all_text(message: Any) -> str:
     """Every ``text`` block's text, joined with a newline — not just the first.
 
-    Supersedes ``_first_text``, which returned block 0 only. That was safe while
+    Supersedes the block-0-only helper this replaced. That was safe while
     a reply carried at most one text block, but a thinking-enabled turn can
     interleave several, and the hub's concluding reply emits its
     ``<assessment_json>`` sidecar LAST — so returning the first block dropped the
