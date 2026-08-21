@@ -179,6 +179,12 @@ RUN_STATS_UPDATE_INTERVAL = 30.0
 # get SIGKILLed mid-flush. Anything beyond this bound is dropped LOUDLY.
 MEMORY_EVENTS_MAX_AT_SHUTDOWN = 10
 
+# Closed-thread summaries kept in memory per agent pair, for the Phase-5
+# dedup context. The DB's thread_decisions table remains the full record;
+# this bounds only what a process accumulates (audit finding 5: one dict per
+# close, forever). Must be >= agent.PRIOR_THREADS_RENDERED_PER_PAIR.
+PRIOR_THREADS_KEPT_PER_PAIR = 50
+
 # Startup rebuild window (B2): the MessageLog is hydrated with messages from the
 # last REBUILD_WINDOW_S plus the full history of any still-undecided thread, so
 # RAM/startup cost grows with recent + live volume rather than all-time history.
@@ -2121,6 +2127,9 @@ class SimulationEngine:
                 "outcome": outcome,
                 "summary": (summary_text or "")[:400] or None,
             })
+            pair_list = self._prior_threads[pair_key]
+            if len(pair_list) > PRIOR_THREADS_KEPT_PER_PAIR:
+                del pair_list[: len(pair_list) - PRIOR_THREADS_KEPT_PER_PAIR]
             # Remove from active threads
             agent.state.active_threads.pop(thread.thread_id, None)
 
@@ -5295,6 +5304,9 @@ class SimulationEngine:
                             # Carried for G3 dedup-context visibility filtering.
                             "origin_visibility": td.origin_visibility,
                         })
+                        pair_list = self._prior_threads[pair_key]
+                        if len(pair_list) > PRIOR_THREADS_KEPT_PER_PAIR:
+                            del pair_list[: len(pair_list) - PRIOR_THREADS_KEPT_PER_PAIR]
                     self._closed_thread_ids.update(closed_thread_ids)
             except Exception as exc:
                 logger.warning("Failed to load thread decisions: %s", exc)

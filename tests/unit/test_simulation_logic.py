@@ -2107,3 +2107,42 @@ class TestEvictionIsAdditive:
         assert "t1" in eng._closed_thread_ids, (
             "eviction must not remove a closed marker — Phase 3 would re-activate it"
         )
+
+
+# ---------------------------------------------------------------
+# _prior_threads storage cap (audit finding 5)
+# ---------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_prior_threads_per_pair_storage_is_capped(monkeypatch, tmp_path):
+    import src.agent.simulation as sim
+    from src.agent.agent import Agent
+    from src.agent.simulation import SimulationEngine
+    from src.agent.state import ThreadState
+    from tests.fakes import FakeSlackClient
+
+    monkeypatch.setattr("src.agent.agent.PROFILES_DIR", tmp_path)
+
+    async def fake_generate(**kwargs):
+        return "m"
+    monkeypatch.setattr(sim, "generate_agent_response", fake_generate)
+
+    hub = Agent("blackbird", "BlackbirdBot", "Blackbird", role="scout_hub")
+    lab = Agent("wang", "WangBot", "Wang", role="pi_lab")
+    eng = SimulationEngine(
+        agents=[hub, lab],
+        slack_clients={
+            "blackbird": FakeSlackClient(agent_id="blackbird"),
+            "wang": FakeSlackClient(agent_id="wang"),
+        },
+    )
+    for i in range(sim.PRIOR_THREADS_KEPT_PER_PAIR + 10):
+        t = ThreadState(thread_id=f"t{i}", channel="general",
+                        other_agent_id="wang")
+        hub.state.active_threads[t.thread_id] = t
+        await eng._close_thread(hub, t, "no_proposal", summary_text=f"s{i}")
+    pair = tuple(sorted(["blackbird", "wang"]))
+    kept = eng._prior_threads[pair]
+    assert len(kept) == sim.PRIOR_THREADS_KEPT_PER_PAIR
+    assert kept[-1]["summary"] == f"s{sim.PRIOR_THREADS_KEPT_PER_PAIR + 9}"
