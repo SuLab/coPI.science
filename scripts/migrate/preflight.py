@@ -1588,7 +1588,12 @@ async def check_blocking_sessions(conn, max_xact_age_s: float = DEFAULT_MAX_TOLE
             # blackbird-agent-run, NOT agent-run: the unprefixed name belongs to the
             # OTHER deployment on this host (project copi-python), and stopping it
             # would halt that deployment's production simulation.
-            "  docker stop -t 30 blackbird-agent-run",
+            # -t 420, not -t 30: shutdown is cooperative (request_stop() only flips a
+            # flag; the durable flush needs the main loop in main.py's finally-block to
+            # RETURN), and a 16000-token thread_reply final call can run ~4-5 minutes
+            # uninterrupted. `docker stop` returns as soon as the container exits, so a
+            # generous -t costs nothing on the common path.
+            "  docker stop -t 420 blackbird-agent-run",
             "  docker compose -f docker-compose.prod.yml stop blackbird-app worker",
             "Then re-check, and only terminate what is left if you know what it is:",
             "  SELECT pid, state, now()-xact_start AS age, query FROM pg_stat_activity\n"
@@ -1734,7 +1739,11 @@ async def check_sizing(conn, rev: str | None = None):
         rem = [
             "Announce the window and stop the writers for its duration:",
             # See the note above: the unprefixed `agent-run` is org1's container.
-            "  docker stop -t 30 blackbird-agent-run && "
+            # -t 420: cooperative shutdown means the durable flush only runs once the
+            # main loop returns, and a 16000-token thread_reply final call can run
+            # ~4-5 minutes uninterrupted — a larger -t is free insurance since `docker
+            # stop` returns as soon as the container actually exits.
+            "  docker stop -t 420 blackbird-agent-run && "
             "docker compose -f docker-compose.prod.yml stop blackbird-app worker",
             "There is no CONCURRENTLY option available here: alembic runs the whole chain "
             "in one transaction and CREATE INDEX CONCURRENTLY cannot run inside one.",

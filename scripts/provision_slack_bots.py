@@ -502,7 +502,12 @@ def main():
         # not optional: a bare `docker compose` resolves to the dev stack, whose web
         # service is `app`, while the deployed prod service is `blackbird-app`.
         console.print("[green]All done! Restart the agent container to pick up the new tokens.[/green]")
-        console.print("  docker stop -t 30 blackbird-agent-run  # SIGTERM so the engine flushes")
+        # -t 420, not a short grace period: shutdown is cooperative (request_stop() only
+        # flips a flag; the durable flush of buffered llm_call_logs/messages/assessments
+        # runs in main.py's finally-block, which needs the main loop to RETURN), and a
+        # 16000-token thread_reply final call can run ~4-5 minutes uninterrupted. `docker
+        # stop` returns as soon as the container exits, so a generous -t is free insurance.
+        console.print("  docker stop -t 420 blackbird-agent-run  # SIGTERM so the engine flushes")
         console.print("  docker rm blackbird-agent-run")
         console.print("  docker compose -f docker-compose.prod.yml up -d --build blackbird-app worker")
         console.print("  docker compose -f docker-compose.prod.yml --profile agent build agent")

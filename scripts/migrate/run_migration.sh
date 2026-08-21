@@ -261,7 +261,11 @@ if [ "$MIG" -ne 0 ]; then
   echo "  The chain runs in one transaction, so the database is unchanged — verify:" >&2
   echo "    docker compose exec -T $PG_SVC psql -U copi -d <db> -c 'select * from alembic_version'" >&2
   echo "  A LockNotAvailableError means something held a lock on agent_messages." >&2
-  echo "  Stop the writers (docker stop -t 30 blackbird-agent-run) and re-run." >&2
+  # -t 420, not -t 30: shutdown is cooperative (request_stop() only flips a flag; the
+  # durable flush in main.py's finally-block needs the main loop to RETURN), and a
+  # 16000-token thread_reply final call can run ~4-5 minutes uninterrupted. `docker
+  # stop` returns as soon as the container exits, so a generous -t is free insurance.
+  echo "  Stop the writers (docker stop -t 420 blackbird-agent-run) and re-run." >&2
   exit "$EX_BLOCKED"
 fi
 
