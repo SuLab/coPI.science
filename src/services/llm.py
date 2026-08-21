@@ -226,6 +226,37 @@ def _all_text(message: Any) -> str:
     return "\n".join(parts)
 
 
+def _log_empty_reply(
+    message: Any, *, model: str, log_meta: dict[str, Any] | None, where: str
+) -> None:
+    """Say loudly that a call is about to return no text, and why.
+
+    Only this layer can see ``stop_reason``: callers receive a plain string, so
+    an empty reply reaches the engine indistinguishable from a model that
+    genuinely said nothing. A FIRST-pass ``max_tokens`` truncation is handled
+    by the retry path and not routed here — but the retry's own empty outcome
+    IS (the ``*_retry`` sites), as is every other terminal stop reason:
+    ``refusal``, a thinking-only reply, an unrecognised future value.
+
+    Never raises: this runs on a failure path, and a logging error must not
+    replace the failure it is describing.
+    """
+    try:
+        meta = log_meta or {}
+        logger.error(
+            "Empty reply from the model (stop_reason=%s model=%s agent=%s "
+            "phase=%s site=%s) — the caller will treat this as no answer, so "
+            "the turn is skipped and any verdict it carried is lost.",
+            getattr(message, "stop_reason", "?"),
+            model,
+            meta.get("agent_id", "?"),
+            meta.get("phase", "?"),
+            where,
+        )
+    except Exception:  # noqa: BLE001 — never let logging mask the failure
+        logger.error("Empty reply from the model; stop_reason unavailable")
+
+
 async def synthesize_profile(context_text: str, researcher_name: str) -> dict[str, Any]:
     """
     Call Claude Opus to synthesize a researcher profile from assembled context.
@@ -369,7 +400,7 @@ async def generate_agent_response(
             sys_chars = len(system_prompt)
             user_chars = sum(len(m.get("content", "")) for m in messages)
             user_tail = (messages[-1].get("content", "")[-400:] if messages else "")
-            logger.warning(
+            logger.error(
                 "Claude returned empty content (model=%s agent=%s phase=%s "
                 "stop=%r sys_chars=%d user_chars=%d in_tok=%d out_tok=%d) "
                 "user_tail=%r",
@@ -380,6 +411,10 @@ async def generate_agent_response(
             )
             return ""
         response_text = _all_text(message)
+        if not response_text.strip() and message.stop_reason != "max_tokens":
+            _log_empty_reply(
+                message, model=model, log_meta=log_meta, where="single_call"
+            )
 
         # Retry once with higher max_tokens if response was truncated
         if message.stop_reason == "max_tokens":
@@ -408,6 +443,11 @@ async def generate_agent_response(
             retry_latency = (time.monotonic() - t0) * 1000
             latency_ms += retry_latency
             response_text = _all_text(retry_msg) or response_text
+            if not response_text.strip():
+                _log_empty_reply(
+                    retry_msg, model=model, log_meta=log_meta,
+                    where="single_call_retry",
+                )
             # ACCUMULATE, matching latency_ms above and generate_with_tools.
             # This line used to be `message = retry_msg  # use retry stats for
             # logging`, which made the logged row carry ONLY the retry's tokens:
@@ -612,6 +652,10 @@ async def generate_with_tools(
         if not tool_use_blocks:
             # Final text response — no more tool calls
             response_text = _all_text(message)
+            if not response_text.strip() and message.stop_reason != "max_tokens":
+                _log_empty_reply(
+                    message, model=model, log_meta=log_meta, where="final"
+                )
 
             # Retry once with higher max_tokens if response was truncated
             if message.stop_reason == "max_tokens":
@@ -648,6 +692,11 @@ async def generate_with_tools(
                     )
                 )
                 response_text = _all_text(retry_msg) or response_text
+                if not response_text.strip():
+                    _log_empty_reply(
+                        retry_msg, model=model, log_meta=log_meta,
+                        where="final_retry",
+                    )
                 if retry_msg.stop_reason == "max_tokens":
                     # Loud and specific, matching generate_agent_response: a
                     # silent still-truncated retry here drops the tail of a
@@ -731,6 +780,10 @@ async def generate_with_tools(
         )
     )
     response_text = _all_text(message)
+    if not response_text.strip() and message.stop_reason != "max_tokens":
+        _log_empty_reply(
+            message, model=model, log_meta=log_meta, where="forced_final"
+        )
 
     # Retry once with higher max_tokens if response was truncated
     if message.stop_reason == "max_tokens":
@@ -764,6 +817,11 @@ async def generate_with_tools(
             )
         )
         response_text = _all_text(retry_msg) or response_text
+        if not response_text.strip():
+            _log_empty_reply(
+                retry_msg, model=model, log_meta=log_meta,
+                where="forced_final_retry",
+            )
         if retry_msg.stop_reason == "max_tokens":
             # This retry site never re-checked stop_reason at all before this
             # fix — a still-truncated response after exhausting max_tool_rounds
