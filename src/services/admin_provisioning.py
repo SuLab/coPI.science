@@ -9,6 +9,7 @@ Wraps the shared ``slack_provisioning`` helpers with web-flow concerns:
 - writing the resulting bot token onto the ``AgentRegistry`` row.
 """
 
+import asyncio
 import logging
 import secrets
 import time
@@ -96,7 +97,9 @@ async def _config_token(db: AsyncSession, *, force_rotate: bool = False) -> str:
     if refresh:
         try:
             from src.services.slack_provisioning import rotate_config_token
-            new_token, new_refresh, exp = rotate_config_token(refresh)
+            new_token, new_refresh, exp = await asyncio.to_thread(
+                rotate_config_token, refresh
+            )
         except Exception as exc:
             raise ProvisioningError(f"Could not rotate the Slack config token: {exc}")
         # Persist the whole new triple atomically: the refresh we just consumed
@@ -143,14 +146,20 @@ async def start_provisioning(db: AsyncSession, agent: AgentRegistry) -> str:
     # rotations rare and means a rotation is never "spent" on a manifest error
     # (SEC-10).
     config_token = await _config_token(db)
+    # _config_token's reads opened a transaction; commit so the pooled
+    # connection is released before the (possibly minutes-long, Slack-rate-
+    # limited) manifest call — otherwise one provisioning holds one of the
+    # web pool's 5 connections for the whole wait (issue #24 C2).
+    await db.commit()
     try:
-        app = _create(config_token)
+        app = await asyncio.to_thread(_create, config_token)
     except Exception as exc:
         if any(slug in str(exc) for slug in _AUTH_ERRORS):
             logger.info("Config token rejected (%s) — rotating and retrying", exc)
             config_token = await _config_token(db, force_rotate=True)
+            await db.commit()
             try:
-                app = _create(config_token)
+                app = await asyncio.to_thread(_create, config_token)
             except Exception as exc2:
                 raise ProvisioningError(f"Could not create the Slack app: {exc2}")
         else:
@@ -181,7 +190,7 @@ async def start_provisioning(db: AsyncSession, agent: AgentRegistry) -> str:
     extra = {"state": state, "redirect_uri": redirect_uri}
     team_token = await get_any_bot_token(db)
     if team_token:
-        team_id = lookup_team_id(team_token)
+        team_id = await asyncio.to_thread(lookup_team_id, team_token)
         if team_id:
             extra["team"] = team_id
     return app["oauth_url"] + "&" + urlencode(extra)
@@ -209,8 +218,9 @@ async def complete_provisioning(db: AsyncSession, state: str, code: str) -> Agen
         raise ProvisioningError("Agent no longer exists.")
 
     try:
-        token = exchange_code(
-            prov.client_id, prov.client_secret, code, _redirect_uri()
+        token = await asyncio.to_thread(
+            exchange_code,
+            prov.client_id, prov.client_secret, code, _redirect_uri(),
         )
     except Exception as exc:
         # Delete the bridge row on failure: it holds the app client_secret and a
