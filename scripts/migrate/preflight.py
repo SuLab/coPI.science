@@ -71,7 +71,7 @@ EXIT_OK = 0
 EXIT_BLOCKED = 1
 EXIT_WARN = 2
 
-DEFAULT_TARGET = "0032"
+DEFAULT_TARGET = "0033"
 #: Revisions this migration path has been exercised from.
 #:
 #: 0020 and 0021 are here because origin/main's own alembic head is 0021 (PR19). A
@@ -83,9 +83,9 @@ DEFAULT_TARGET = "0032"
 #: 0023, 0024, 0025, 0026, 0027, 0028 and 0029 were each added here for the same reason:
 #: production's stamp at the time its target moved past them (0023 -> 0024, then
 #: 0024 -> 0025, then 0025 -> 0026, then 0026 -> 0027, then 0027 -> 0028, then
-#: 0028 -> 0029, then 0029 -> 0030, then 0030 -> 0031, then 0031 -> 0032 — see git
-#: history on this constant). Each stays supported afterward; nothing here narrows. An
-#: earlier version of this comment claimed
+#: 0028 -> 0029, then 0029 -> 0030, then 0030 -> 0031, then 0031 -> 0032, then
+#: 0032 -> 0033 — see git history on this constant). Each stays supported afterward;
+#: nothing here narrows. An earlier version of this comment claimed
 #: 0026 was "already done" and handled by the current == target branch of
 #: revision_status() instead of by membership in this tuple — that stopped being true the
 #: moment DEFAULT_TARGET moved past 0026 (first to 0027, then to 0028, then to 0029, then
@@ -102,11 +102,12 @@ DEFAULT_TARGET = "0032"
 #: opportunity_assessments), 0026 (drop grantbot_posted_foas), 0027 (one new table,
 #: assessment_drops), 0028 (one column + one constraint on users), 0029 (two columns on
 #: opportunity_assessments), 0030 (one new table, specialist_consults, plus two columns on
-#: opportunity_assessments), 0031 (data-only, no DDL) and 0032 (one nullable JSONB column
-#: on llm_call_logs).
+#: opportunity_assessments), 0031 (data-only, no DDL), 0032 (one nullable JSONB column
+#: on llm_call_logs) and 0033 (two composite indexes on thread_decisions plus 18
+#: unindexed ondelete-FK columns — see issue #25 P1).
 SUPPORTED_START_REVISIONS = (
     "0018", "0019", "0020", "0021", "0023", "0024", "0025", "0026", "0027", "0028", "0029",
-    "0030", "0031",
+    "0030", "0031", "0032",
 )
 
 #: Start revisions at which migration 0019 has already run, so the expensive
@@ -266,11 +267,43 @@ PLANNED_OBJECTS: tuple[PlannedObject, ...] = (
     # 0031 is data-only (a JSONB-null normalizing UPDATE) and creates nothing, so it
     # has no entry here — deliberately, not by omission.
     PlannedObject("0032", "column", "call_stats", "llm_call_logs"),
+    PlannedObject("0033", "index", "ix_thread_decisions_agent_a_outcome", "thread_decisions"),
+    PlannedObject("0033", "index", "ix_thread_decisions_agent_b_outcome", "thread_decisions"),
+    PlannedObject("0033", "index", "ix_access_allowlist_added_by_user_id", "access_allowlist"),
+    PlannedObject("0033", "index", "ix_agent_delegates_invitation_id", "agent_delegates"),
+    PlannedObject("0033", "index", "ix_agent_delegates_user_id", "agent_delegates"),
+    PlannedObject("0033", "index", "ix_agents_approved_by", "agents"),
+    PlannedObject(
+        "0033", "index", "ix_delegate_invitations_accepted_by_user_id", "delegate_invitations",
+    ),
+    PlannedObject(
+        "0033", "index", "ix_delegate_invitations_invited_by_user_id", "delegate_invitations",
+    ),
+    PlannedObject(
+        "0033", "index", "ix_email_notifications_agent_registry_id", "email_notifications",
+    ),
+    PlannedObject(
+        "0033", "index", "ix_email_notifications_thread_decision_id", "email_notifications",
+    ),
+    PlannedObject(
+        "0033", "index", "ix_private_channel_members_added_by_user_id", "private_channel_members",
+    ),
+    PlannedObject("0033", "index", "ix_private_channel_members_user_id", "private_channel_members"),
+    PlannedObject("0033", "index", "ix_profile_revisions_changed_by_user_id", "profile_revisions"),
+    PlannedObject("0033", "index", "ix_proposal_reviews_delegate_user_id", "proposal_reviews"),
+    PlannedObject("0033", "index", "ix_proposal_reviews_reviewed_by_user_id", "proposal_reviews"),
+    PlannedObject("0033", "index", "ix_proposal_reviews_user_id", "proposal_reviews"),
+    PlannedObject(
+        "0033", "index", "ix_slack_app_provisions_agent_registry_id", "slack_app_provisions",
+    ),
+    PlannedObject("0033", "index", "ix_cohorts_created_by", "cohorts"),
+    PlannedObject("0033", "index", "ix_cohort_memberships_added_by", "cohort_memberships"),
+    PlannedObject("0033", "index", "ix_cohort_audit_events_actor_id", "cohort_audit_events"),
 )
 
 REVISION_ORDER = (
     "0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027", "0028",
-    "0029", "0030", "0031", "0032",
+    "0029", "0030", "0031", "0032", "0033",
 )
 
 

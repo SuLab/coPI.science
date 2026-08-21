@@ -26,6 +26,13 @@ class AgentBadgeMiddleware(BaseHTTPMiddleware):
     """Inject unreviewed proposal count into request.state for nav badge."""
 
     async def dispatch(self, request: Request, call_next):
+        # Asset and health probes carry no nav and need no badge; without this
+        # guard every /static request with a session cookie ran the per-agent
+        # COUNT queries below (issue #25 P1 — nginx has no location /static
+        # block, so they all reach uvicorn).
+        path = request.url.path
+        if path.startswith("/static/") or path == "/api/health":
+            return await call_next(request)
         request.state.posthog_api_key = get_settings().posthog_api_key
         request.state.agent_badge_count = 0
         user_id_str = request.session.get("user_id") if "session" in request.scope else None

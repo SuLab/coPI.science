@@ -242,6 +242,12 @@ class LlmCallLog(Base):
 
 class ThreadDecision(Base):
     __tablename__ = "thread_decisions"
+    __table_args__ = (
+        # The badge middleware counts proposals per agent on every
+        # authenticated page load; measured ~129x with these (issue #25 P1).
+        Index("ix_thread_decisions_agent_a_outcome", "agent_a", "outcome"),
+        Index("ix_thread_decisions_agent_b_outcome", "agent_b", "outcome"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
