@@ -206,25 +206,24 @@ def _call_stat(
     }
 
 
-def _first_text(message: Any) -> str:
-    """The first ``text`` block's text, or ``""`` when the reply has none.
+def _all_text(message: Any) -> str:
+    """Every ``text`` block's text, joined with a newline — not just the first.
 
-    Replaces ``message.content[0].text``, which assumed block 0 is always text.
-    That held while thinking was off, but a thinking-enabled reply leads with a
-    ``ThinkingBlock`` — which carries ``.thinking``, not ``.text`` — so indexing
-    block 0 raises ``AttributeError`` instead of returning the answer. Filtering
-    by type is correct under every ``thinking`` setting, so this stays right even
-    if a call site later turns thinking on.
+    Supersedes ``_first_text``, which returned block 0 only. That was safe while
+    a reply carried at most one text block, but a thinking-enabled turn can
+    interleave several, and the hub's concluding reply emits its
+    ``<assessment_json>`` sidecar LAST — so returning the first block dropped the
+    verdict while leaving the visible half of the reply intact.
 
-    Returning "" for a reply with no text block matches what the callers already
-    do with an empty response (log it loudly, treat it as no answer) — see
-    ``generate_agent_response``'s empty-content branch and
-    ``src/agent/specialists.has_usable_content``.
+    Returns "" when there is no text block at all (a refusal, or a
+    thinking-only reply). Callers treat "" as "no answer".
     """
-    for block in message.content:
-        if getattr(block, "type", None) == "text":
-            return block.text
-    return ""
+    parts = [
+        block.text
+        for block in message.content
+        if getattr(block, "type", None) == "text"
+    ]
+    return "\n".join(parts)
 
 
 async def synthesize_profile(context_text: str, researcher_name: str) -> dict[str, Any]:
@@ -255,7 +254,7 @@ Return your response as valid JSON matching the specified schema."""
             system=system_prompt,
             messages=[{"role": "user", "content": user_message}],
         )
-        response_text = _first_text(message)
+        response_text = _all_text(message)
 
         try:
             return _extract_json(response_text)
@@ -380,7 +379,7 @@ async def generate_agent_response(
                 user_tail,
             )
             return ""
-        response_text = _first_text(message)
+        response_text = _all_text(message)
 
         # Retry once with higher max_tokens if response was truncated
         if message.stop_reason == "max_tokens":
@@ -408,8 +407,7 @@ async def generate_agent_response(
                 on_retry()
             retry_latency = (time.monotonic() - t0) * 1000
             latency_ms += retry_latency
-            if retry_msg.content:
-                response_text = _first_text(retry_msg)
+            response_text = _all_text(retry_msg) or response_text
             # ACCUMULATE, matching latency_ms above and generate_with_tools.
             # This line used to be `message = retry_msg  # use retry stats for
             # logging`, which made the logged row carry ONLY the retry's tokens:
@@ -594,7 +592,6 @@ async def generate_with_tools(
 
         # Check if the response contains tool use
         tool_use_blocks = [b for b in message.content if b.type == "tool_use"]
-        text_blocks = [b for b in message.content if b.type == "text"]
 
         # Recorded for EVERY round, not just the terminating one. `stop_reason`
         # used to be inspected only inside the `not tool_use_blocks` branch
@@ -614,7 +611,7 @@ async def generate_with_tools(
 
         if not tool_use_blocks:
             # Final text response — no more tool calls
-            response_text = text_blocks[0].text if text_blocks else ""
+            response_text = _all_text(message)
 
             # Retry once with higher max_tokens if response was truncated
             if message.stop_reason == "max_tokens":
@@ -650,9 +647,7 @@ async def generate_with_tools(
                         message=retry_msg, latency_ms=retry_latency,
                     )
                 )
-                retry_texts = [b for b in retry_msg.content if b.type == "text"]
-                if retry_texts:
-                    response_text = retry_texts[0].text
+                response_text = _all_text(retry_msg) or response_text
                 if retry_msg.stop_reason == "max_tokens":
                     # Loud and specific, matching generate_agent_response: a
                     # silent still-truncated retry here drops the tail of a
@@ -735,7 +730,7 @@ async def generate_with_tools(
             message=message, latency_ms=latency_ms,
         )
     )
-    response_text = _first_text(message)
+    response_text = _all_text(message)
 
     # Retry once with higher max_tokens if response was truncated
     if message.stop_reason == "max_tokens":
@@ -768,9 +763,7 @@ async def generate_with_tools(
                 message=retry_msg, latency_ms=retry_latency,
             )
         )
-        retry_texts = [b for b in retry_msg.content if b.type == "text"]
-        if retry_texts:
-            response_text = retry_texts[0].text
+        response_text = _all_text(retry_msg) or response_text
         if retry_msg.stop_reason == "max_tokens":
             # This retry site never re-checked stop_reason at all before this
             # fix — a still-truncated response after exhausting max_tool_rounds

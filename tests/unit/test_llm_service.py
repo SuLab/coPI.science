@@ -414,7 +414,7 @@ def test_a_reply_with_only_thinking_yields_empty_string():
     from tests.fakes import _Message, _ThinkingBlock
 
     msg = _Message(content=[_ThinkingBlock(thinking="thought hard, said nothing")])
-    assert llm._first_text(msg) == ""
+    assert llm._all_text(msg) == ""
 
 
 # ---------------------------------------------------------------------------

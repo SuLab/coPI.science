@@ -130,6 +130,23 @@ def text_response(
     return msg
 
 
+def multi_text_response(
+    *texts: str, stop_reason: str = "end_turn", usage: "_Usage | None" = None
+) -> "_Message":
+    """A reply carrying N text blocks (N may be 0).
+
+    Several text blocks is what a thinking-enabled turn can interleave; zero
+    (same shape as ``empty_response``) models a refusal or a thinking-only
+    turn, which is the shape that used to produce a silent empty reply.
+    """
+    msg = _Message(
+        content=[_TextBlock(text=t) for t in texts], stop_reason=stop_reason
+    )
+    if usage is not None:
+        msg.usage = usage
+    return msg
+
+
 def thinking_then_text_response(
     text: str, *, thinking: str = "reasoning...", stop_reason: str = "end_turn"
 ) -> _Message:
