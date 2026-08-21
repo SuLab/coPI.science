@@ -69,8 +69,40 @@ def reconcile_pub_doi(
         return assigned, "ok"
     return auth, "corrected"
 
-# Rate limiting: with API key 10/s, without 3/s
-_request_semaphore = asyncio.Semaphore(8)  # Conservative limit
+# Rate limiting: NCBI allows 10 req/s with an API key, 3 req/s without.
+# Two separate bounds, deliberately: the semaphore caps CONCURRENCY (open
+# sockets against NCBI), and _pace() caps the RATE by spacing request
+# STARTS. The old design slept inside the semaphore, which bounds nothing:
+# rate = concurrency / per-request-time, so 8 concurrent holders each
+# pausing 0.12s could burst far past the keyless 3/s (issue #23 V9).
+_request_semaphore = asyncio.Semaphore(3)
+_next_slot: float = 0.0
+
+
+def _pace_interval() -> float:
+    return 0.11 if get_settings().ncbi_api_key else 0.34
+
+
+async def _pace() -> None:
+    """Space request starts at least _pace_interval() apart, process-wide.
+
+    The read-modify-write of _next_slot has no await between read and
+    write, so it is atomic on the event loop — no lock object needed (and
+    none wanted: a module-level asyncio primitive binds to the first event
+    loop that touches it, which breaks under pytest's per-test loops).
+    """
+    global _next_slot
+    loop = asyncio.get_running_loop()
+    now = loop.time()
+    wait = _next_slot - now
+    _next_slot = max(now, _next_slot) + _pace_interval()
+    if wait > 0:
+        await asyncio.sleep(wait)
+
+
+def _make_client() -> httpx.AsyncClient:
+    """Client factory — a seam so tests can inject httpx.MockTransport."""
+    return httpx.AsyncClient(timeout=60, follow_redirects=True)
 
 
 # NCBI's E-utilities usage policy requires every request to identify the caller with
@@ -82,18 +114,27 @@ _NCBI_TOOL = "copi-science"
 
 
 async def _ncbi_get(url: str, params: dict[str, Any]) -> httpx.Response:
-    """Make a rate-limited, identified GET request to NCBI."""
+    """Make a rate-limited, identified GET request to NCBI, with retry.
+
+    Pacing runs BEFORE raise_for_status — the old order skipped pacing
+    exactly when NCBI was already 429-ing us. Retries cover the transient
+    statuses NCBI actually emits under load; anything else raises as before.
+    """
     settings = get_settings()
     if settings.ncbi_api_key:
         params["api_key"] = settings.ncbi_api_key
     params.setdefault("tool", _NCBI_TOOL)
     params.setdefault("email", settings.ncbi_contact_email or settings.ses_sender_email)
     async with _request_semaphore:
-        async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
-            resp = await client.get(url, params=params)
-            resp.raise_for_status()
-            await asyncio.sleep(0.12)  # ~8 req/s
-            return resp
+        async with _make_client() as client:
+            for attempt in range(3):
+                await _pace()
+                resp = await client.get(url, params=params)
+                if resp.status_code in (429, 500, 502, 503) and attempt < 2:
+                    await asyncio.sleep(1.0 * (2 ** attempt))
+                    continue
+                resp.raise_for_status()
+                return resp
 
 
 async def fetch_pubmed_records(pmids: list[str]) -> list[dict[str, Any]]:
