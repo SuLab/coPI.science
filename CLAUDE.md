@@ -111,19 +111,32 @@ DC="docker compose -f docker-compose.prod.yml"
 #    sends SIGKILL, which skips the shutdown flush and permanently loses the
 #    in-flight turn's messages (the DB, not Slack, is the durable store).
 #
-#    -t 180, NOT -t 30. Measured 2026-08-19: a single `thread_reply` turn runs up
-#    to 134s (up to max_tool_rounds real API calls, each consult 25-40s), and
-#    `request_stop()` is cooperative — it flips a flag, and the flush in
-#    src/agent/main.py's finally-block only runs once the main loop RETURNS. At
-#    -t 30 and even -t 90, SIGKILL landed mid-turn and the flush never ran; 6
-#    buffered llm_call_logs rows were lost. `generate_with_tools` now polls the
-#    flag and stops opening new tool rounds (`should_continue`), which bounds a
-#    stopping turn to the round already underway plus one final call — but the
-#    grace period must still exceed that.
+#    -t 420, NOT -t 30 (and not -t 180 or -t 300 either, as of the
+#    thread_reply max_tokens raise below). Measured 2026-08-19: a single
+#    `thread_reply` turn runs up to 134s (up to max_tool_rounds real API
+#    calls, each consult 25-40s), and `request_stop()` is cooperative — it
+#    flips a flag, and the flush in src/agent/main.py's finally-block only
+#    runs once the main loop RETURNS. At -t 30 and even -t 90, SIGKILL landed
+#    mid-turn and the flush never ran; 6 buffered llm_call_logs rows were
+#    lost. `generate_with_tools` now polls the flag and stops opening new
+#    tool rounds (`should_continue`), which bounds a stopping turn to the
+#    round already underway plus one final call — but the grace period must
+#    still exceed that.
+#
+#    180 -> 420 for the 2026-08-21 thread_reply max_tokens raise (4000 ->
+#    16000, src/agent/simulation.py): a single 16000-token final call can run
+#    ~4-5 minutes at Opus output rates, and it is the round `should_continue`
+#    already lets finish — so it cannot be interrupted, only awaited out.
+#    Total turn time is not much worse (this one call replaces what used to be
+#    a call-then-retry pair), but it now lands in a single uninterruptible
+#    call instead of two shorter ones, so the grace period has to cover that
+#    call outright. Sized generously rather than to the minute: `docker stop`
+#    returns as soon as the container actually exits, so a larger `-t` costs
+#    nothing on the common path and is free insurance against the tail.
 #
 #    Verify it worked: exit code 0, and "Simulation stopping..." in the logs.
 #    Exit 137 means SIGKILL and a lost flush, NOT necessarily an OOM.
-docker stop -t 180 blackbird-agent-run
+docker stop -t 420 blackbird-agent-run
 docker inspect blackbird-agent-run --format 'exit={{.State.ExitCode}}'
 
 # 2. Save logs — AFTER the stop, so the shutdown lines are captured.

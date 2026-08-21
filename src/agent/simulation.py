@@ -1769,7 +1769,47 @@ class SimulationEngine:
                 # truncating here on Sonnet 4.6 (observed in run 2026-08-19
                 # 13:35), and a truncated CONCLUDE reply is exactly how a verdict
                 # gets lost.
-                max_tokens=4000,
+                #
+                # 16000, up from 4000. Measured on the run started 2026-08-21
+                # 12:01 (Opus 5, rubric v2): the container log shows 9 of 108
+                # thread_reply turns hit "Response truncated" at 4000 (~8%).
+                # That count has to come from the log, not `llm_call_logs`:
+                # this phase's stored `output_tokens` is CUMULATIVE across
+                # every tool round AND any retry, so `output_tokens > 4000`
+                # matches a 12-row candidate set with no way to pick out which
+                # 9 actually truncated. The largest sidecar reply's final
+                # text was 18,553 characters.
+                #
+                # Adaptive thinking, not the sidecar text, turned out to be
+                # the dominant consumer of this budget: this is the one call
+                # site running ADAPTIVE thinking, and max_tokens caps
+                # thinking + text TOGETHER. chars(response_text)/output_tokens
+                # on single-call rows measured 1.41 for claude-opus-5 (1.46
+                # restricted to 1-3900 tokens, where a retry is impossible)
+                # against 4.08 for claude-opus-4-6 — a ~30% denser tokenizer
+                # would predict ~3.1, so roughly 55-65% of output tokens at
+                # this site are invisible thinking, not text (six opus-5 rows
+                # even logged `length(response_text)=0` with up to 1600 output
+                # tokens, so response_text length is not a proxy for tokens
+                # consumed). Applying that share to the 18,553-character
+                # (~4.5-5k token) largest final text implies that call wanted
+                # something like 11-13k tokens total. Every 2x retry (8000,
+                # thinking DISABLED, tools dropped) succeeded, so 8000 is only
+                # the proven floor for text with thinking off, not a safe
+                # ceiling with thinking on; 16000 covers the measured text
+                # maximum plus the measured thinking share with headroom.
+                # This is not a spend increase: a ceiling is not a spend, and
+                # on the ~8% of turns that truncated it REMOVES a second
+                # billed call. It also closes a hazard: the retry path passes
+                # no `tools`, so a retried concluding turn cannot consult a
+                # specialist and regenerates the sidecar in a call that never
+                # saw the tool results.
+                #
+                # Per-call truncation is still not attributable from the DB
+                # today (see the cumulative-`output_tokens` note above) — a
+                # follow-up should add per-call stats so the next resizing of
+                # this ceiling isn't back to inferring it from container logs.
+                max_tokens=16000,
                 log_meta={
                     "agent_id": agent.agent_id,
                     "phase": "thread_reply",

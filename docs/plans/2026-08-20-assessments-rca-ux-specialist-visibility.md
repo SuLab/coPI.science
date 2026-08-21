@@ -349,7 +349,7 @@ phase4-thread-reply.md" pointer to the new file.
    the extraction itself is provably neutral and any later change is a deliberate,
    reviewed test update.
 3. Restart `blackbird-app`/`worker` and stop/start `blackbird-agent-run` (graceful,
-   `-t 180`) — no rebuild, since `prompts/` is mounted. Banner confirms version + hash.
+   `-t 420`) — no rebuild, since `prompts/` is mounted. Banner confirms version + hash.
 4. New assessments carry the new `rubric_version`.
 
 ---
@@ -377,7 +377,7 @@ Don't touch `_PI_LAB` guidance strings (GM-snapshot-pinned; never `--snapshot-up
 Deploy: additive migration → migrate before new code serves (`$DC build` → `run --rm
 blackbird-app alembic upgrade head` → `up -d`); the consult write path lives in the
 **agent image**, which must be rebuilt explicitly (`$DC --profile agent build agent`) —
-`src/` is baked in, not mounted. Graceful stop: `docker stop -t 180 blackbird-agent-run`,
+`src/` is baked in, not mounted. Graceful stop: `docker stop -t 420 blackbird-agent-run`,
 save logs, verify exit 0. Note: the agent-run container exited cleanly ~2026-08-19 and
 the simulation is **currently not running**; restarting it is an operator decision.
 

@@ -927,9 +927,11 @@ async def test_a_message_over_slacks_4000_char_limit_stays_in_bijection(full_run
     tail's clock, and the next restart's `_rebuild_state_from_slack` saw the unrecorded
     head chunks as brand-new inbound messages and ingested them.
 
-    Phase 4 replies are generated with `max_tokens=4000` (raised from 1500 so a
-    scout_hub CONCLUDE reply's `<assessment_json>` sidecar is not truncated), well
-    past 4000 characters, so this is reached by ordinary agent traffic: it is what
+    Phase 4 replies are generated with `max_tokens=16000` (raised from 1500,
+    then 2500, then 4000, then 10000, then 16000, so a scout_hub CONCLUDE reply's
+    `<assessment_json>` sidecar is not truncated), well past 4000 characters
+    (Slack's own `chat.postMessage` split boundary, unrelated to the token
+    ceiling), so this is reached by ordinary agent traffic: it is what
     the 20-turn run tripped over. Note the sidecar itself is stripped before the
     post, so the raised ceiling grows the model's output far more than the Slack body.
     The client now cuts at the boundary itself and reports every message it created, and
