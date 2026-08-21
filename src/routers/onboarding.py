@@ -5,7 +5,7 @@ import logging
 from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.database import get_db
@@ -172,6 +172,11 @@ async def save_profile(
     if not profile:
         profile = ResearcherProfile(user_id=current_user.id)
         db.add(profile)
+        # Flush the row into existence before the SQL-side bump below: on a
+        # pending object the expression would render inside the INSERT's VALUES,
+        # which cannot reference its own target table ("invalid reference to
+        # FROM-clause entry for table researcher_profiles").
+        await db.flush()
 
     profile.research_summary = research_summary
     profile.techniques = parse_list(techniques)
@@ -179,7 +184,10 @@ async def save_profile(
     profile.disease_areas = parse_list(disease_areas)
     profile.key_targets = parse_list(key_targets)
     profile.keywords = parse_list(keywords)
-    profile.profile_version = (profile.profile_version or 0) + 1
+    # SQL-side increment: the Python read-modify-write lost updates when two
+    # writers raced (issue #22 C1). Nothing below reads profile_version, so the
+    # expiry the expression assignment causes needs no refresh here.
+    profile.profile_version = func.coalesce(ResearcherProfile.profile_version, 0) + 1
 
     await db.commit()
 

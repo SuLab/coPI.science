@@ -18,7 +18,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.models import Job, Publication, ResearcherProfile, User
@@ -413,8 +413,20 @@ async def run_profile_pipeline(
             profile.synthesis_validated = validated
             profile.evidence_pmid_count = evidence_pmid_count
             profile.evidence_pub_count = evidence_pub_count
-            profile.profile_version = (profile.profile_version or 0) + 1
+            # SQL-side increment: the Python read-modify-write lost updates when
+            # two writers raced (issue #22 C1) — worst at this pipeline site,
+            # which holds the row across dozens of awaits between load and write.
+            profile.profile_version = func.coalesce(ResearcherProfile.profile_version, 0) + 1
             profile.profile_generated_at = datetime.now(UTC)
+
+            # The expression assignment EXPIRES profile_version, and the log line
+            # below reads it — in an async session a lazy re-load raises
+            # MissingGreenlet. Flush so the UPDATE lands, then load the new value
+            # explicitly. (`profile` is always persistent here: step 6 flushes a
+            # freshly created row, so the expression renders as an UPDATE, never
+            # as an INSERT that could not reference its own target table.)
+            await db.flush()
+            await db.refresh(profile, ["profile_version"])
 
             if not validated:
                 logger.error(

@@ -961,6 +961,11 @@ async def save_public_profile(
     if not profile:
         profile = ResearcherProfile(user_id=agent.user_id)
         db.add(profile)
+        # Flush the row into existence before the SQL-side bump below: on a
+        # pending object the expression would render inside the INSERT's VALUES,
+        # which cannot reference its own target table ("invalid reference to
+        # FROM-clause entry for table researcher_profiles").
+        await db.flush()
 
     profile.research_summary = research_summary
     profile.techniques = _parse_list(techniques)
@@ -968,7 +973,10 @@ async def save_public_profile(
     profile.disease_areas = _parse_list(disease_areas)
     profile.key_targets = _parse_list(key_targets)
     profile.keywords = _parse_list(keywords)
-    profile.profile_version = (profile.profile_version or 0) + 1
+    # SQL-side increment: the Python read-modify-write lost updates when two
+    # writers raced (issue #22 C1). Nothing below reads profile_version, so the
+    # expiry the expression assignment causes needs no refresh here.
+    profile.profile_version = func.coalesce(ResearcherProfile.profile_version, 0) + 1
 
     await db.commit()
 
@@ -1075,11 +1083,30 @@ async def delegate_connect_slack(
                     "Please join the workspace first."
                 )
             else:
-                current_ids = list(agent.delegate_slack_ids or [])
-                if sid not in current_ids:
-                    current_ids.append(sid)
-                    agent.delegate_slack_ids = current_ids
-                    await db.commit()
+                # Atomic, self-deduplicating append: the read-append-reassign
+                # this replaces wrote the WHOLE array back, so two delegates
+                # linking at once each dropped the other's id (issue #22 C1).
+                # The dedup guard has to live in the SQL — a check-then-append
+                # in Python just re-races. Commit unconditionally now: when the
+                # id is already present the UPDATE matches no row and the
+                # commit is a no-op.
+                from sqlalchemy import text as sa_text
+                from sqlalchemy import update as sa_update
+                await db.execute(
+                    sa_update(AgentRegistry)
+                    .where(
+                        AgentRegistry.id == agent.id,
+                        sa_text(
+                            "NOT (coalesce(delegate_slack_ids, '{}'::varchar[]) @> ARRAY[:sid]::varchar[])"
+                        ).bindparams(sid=sid),
+                    )
+                    .values(
+                        delegate_slack_ids=sa_text(
+                            "array_append(coalesce(delegate_slack_ids, '{}'::varchar[]), :sid2)"
+                        ).bindparams(sid2=sid)
+                    )
+                )
+                await db.commit()
                 return RedirectResponse(
                     url=f"/agent/{agent_id}/dashboard", status_code=302
                 )
@@ -1261,10 +1288,22 @@ async def remove_delegate(
                 bot_token = await get_any_bot_token(db)
                 if bot_token:
                     sid = await lookup_user_by_email_async(bot_token, delegate.user.email)
-                    current_ids = list(agent.delegate_slack_ids or [])
-                    if sid and sid in current_ids:
-                        current_ids.remove(sid)
-                        agent.delegate_slack_ids = current_ids if current_ids else None
+                    # Atomic removal, for the same reason as the append above:
+                    # the read-remove-reassign wrote the whole array back and
+                    # lost a concurrent append (issue #22 C1). NULLIF preserves
+                    # the old "empty means NULL" shape of this column.
+                    from sqlalchemy import text as sa_text
+                    from sqlalchemy import update as sa_update
+                    if sid:
+                        await db.execute(
+                            sa_update(AgentRegistry)
+                            .where(AgentRegistry.id == agent.id)
+                            .values(
+                                delegate_slack_ids=sa_text(
+                                    "nullif(array_remove(coalesce(delegate_slack_ids, '{}'::varchar[]), :sid), '{}'::varchar[])"
+                                ).bindparams(sid=sid)
+                            )
+                        )
             except Exception as exc:
                 logger.warning("Delegate Slack sync is best-effort; skipped: %s", exc)
 

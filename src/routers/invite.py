@@ -238,10 +238,27 @@ async def _accept_invitation(
             if bot_token:
                 sid = await lookup_user_by_email_async(bot_token, user.email)
                 if sid:
-                    current_ids = list(agent.delegate_slack_ids or [])
-                    if sid not in current_ids:
-                        current_ids.append(sid)
-                        agent.delegate_slack_ids = current_ids
+                    # Atomic, self-deduplicating append: the read-append-reassign
+                    # this replaces wrote the WHOLE array back, so two delegates
+                    # accepting at once each dropped the other's id (issue #22
+                    # C1). The dedup guard has to live in the SQL — a
+                    # check-then-append in Python just re-races.
+                    from sqlalchemy import text as sa_text
+                    from sqlalchemy import update as sa_update
+                    await db.execute(
+                        sa_update(AgentRegistry)
+                        .where(
+                            AgentRegistry.id == agent.id,
+                            sa_text(
+                                "NOT (coalesce(delegate_slack_ids, '{}'::varchar[]) @> ARRAY[:sid]::varchar[])"
+                            ).bindparams(sid=sid),
+                        )
+                        .values(
+                            delegate_slack_ids=sa_text(
+                                "array_append(coalesce(delegate_slack_ids, '{}'::varchar[]), :sid2)"
+                            ).bindparams(sid2=sid)
+                        )
+                    )
         except Exception as exc:
             # Best-effort by design (specs/web-delegates.md §Slack Linkage): a
             # delegate is useful without a Slack id. But LOG it — a bare `pass`
