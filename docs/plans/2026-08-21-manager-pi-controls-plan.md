@@ -30,8 +30,8 @@ re-derive them.
 
 - Test command: `.venv-test/bin/python -m pytest <path> -v` from the repo root, on the host (testcontainers spins the DB; no env vars needed). The full gate before any push is `./scripts/ci.sh`.
 - NEVER run bare `docker compose` on this host and NEVER pass `--remove-orphans` (a second production stack shares the machine — see CLAUDE.md).
-- **Line numbers in this plan were correct when read, but this repo has a second plan in flight** (`docs/plans/2026-08-21-perf-memory-race-remediation.md`) that touches `src/routers/profile.py:159` (Task 13) and `src/agent/slack_client.py`'s async-wrappers block around lines 1167-1186 (Task 2). **Grep before trusting any absolute line number in Tasks 3 and 10 below** — if that plan has landed first, the surrounding code has moved.
-- Migration numbering: current alembic head is `0032_add_llm_call_stats`. The in-flight remediation plan's Task 10 will add `0033_badge_and_fk_indexes`. **Before writing Task 1's migration, run `alembic heads` and use whatever it reports as `down_revision`** — do not assume `0033` exists yet, and do not assume it doesn't.
+- **The concurrent `docs/plans/2026-08-21-perf-memory-race-remediation.md` has now landed in full** (confirmed by `git log`: all 14 of its commits are present, `alembic heads` is `0033_badge_and_fk_indexes`, `src/routers/profile.py`'s `profile_version` increment is the atomic `func.coalesce(...)` form, and `src/agent/slack_client.py`'s async-wrappers block runs through `aconnect` at ~line 1207). Tasks 1, 3, and 10 below were updated to reflect this confirmed state rather than hedge about it. If you're executing this plan much later and more has landed since, **grep before trusting any absolute line number anyway** — that discipline doesn't expire just because these specific numbers were true once.
+- Migration numbering: current alembic head is `0033_badge_and_fk_indexes` (confirmed). Task 1 below uses `revision = "0034"`, `down_revision = "0033"`. If executing later, re-run `ls alembic/versions/ | sort | tail -5` and use the real head instead.
 - Migrate-before-serve applies to Task 1's migration (same class of risk as `0028`/`0030`/`0032` — see that migration's own docstring for the pattern to follow).
 - Do NOT reword any `pi_lab` string in `src/agent/thread_guidance.py`, and do NOT run `pytest --snapshot-update`. Nothing in this plan touches that file, but it's a standing repo rule.
 - Commits: conventional style matching the repo's log (`feat(manager): …`, `feat(assessments): …`, `feat(hub): …`), each ending with `Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>`.
@@ -45,7 +45,7 @@ re-derive them.
 
 **Files:**
 - Modify: `src/models/agent_registry.py` (add two columns after `approved_by`)
-- Create: `alembic/versions/<next>_agent_mute_tracking.py`
+- Create: `alembic/versions/0034_agent_mute_tracking.py`
 - Test: `tests/unit/test_agent_mute.py` (create — this file grows through Task 4 too)
 
 **Interfaces:**
@@ -53,8 +53,12 @@ re-derive them.
 
 - [ ] **Step 1: Determine the migration's `down_revision`**
 
-Run: `.venv-test/bin/python -m alembic heads` (from repo root; needs `TEST_DATABASE_URL` unset — this just reads the versions directory, no DB connection required for `heads`... if it errors needing a DB, instead run `ls alembic/versions/ | sort | tail -5` and take the highest-numbered file's revision id).
-Expected: either `0032` (if the perf-race remediation plan's Task 10 hasn't landed) or `0033` (if it has). Use that value as `down_revision` below. Name this migration's own revision the next integer (`0033` or `0034` respectively).
+**Confirmed as of this plan's writing: the perf-race remediation plan has
+already landed** (`alembic/versions/0033_badge_and_fk_indexes.py` exists).
+Use `down_revision = "0033"` and `revision = "0034"` below. If you're
+executing this plan much later and more migrations have landed since, don't
+trust this — re-run `ls alembic/versions/ | sort | tail -5` and use whatever
+the real current head is instead.
 
 - [ ] **Step 2: Write the failing test**
 
@@ -97,16 +101,15 @@ In `src/models/agent_registry.py`, after the `approved_by` column:
 
 - [ ] **Step 5: Write the migration**
 
-Create `alembic/versions/<next>_agent_mute_tracking.py` (substitute the real
-next integer and `down_revision` from Step 1):
+Create `alembic/versions/0034_agent_mute_tracking.py`:
 
 ```python
 """Add agents.muted_at / agents.muted_by — mute is a purpose-built control
 over the existing 'inactive' status, not a new status value (design decision
 D2/D3). Both nullable and additive.
 
-Revision ID: <next>
-Revises: <down_revision from Step 1>
+Revision ID: 0034
+Revises: 0033
 Create Date: 2026-08-21 00:00:00.000000
 
 Migrate-before-serve applies, same one-way constraint as 0028/0030/0032: once
@@ -124,8 +127,8 @@ from sqlalchemy.dialects import postgresql
 
 from alembic import op
 
-revision: str = "<next>"
-down_revision: Union[str, None] = "<down_revision from Step 1>"
+revision: str = "0034"
+down_revision: Union[str, None] = "0033"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
@@ -356,15 +359,14 @@ Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>"
 **Interfaces:**
 - Produces: `async def apply_profile_edits(db: AsyncSession, *, target_user: User, changed_by_user_id: uuid.UUID, name: str, email: str, institution: str, department: str, research_summary: str, techniques: str, experimental_models: str, disease_areas: str, key_targets: str, keywords: str) -> str | None` — returns an error code string (`"invalid_email"` / `"email_taken"`) if validation fails (nothing written in that case), or `None` on success (fully written and committed).
 
-**Before this task**, check whether the in-flight remediation plan's Task 13
-has already landed on `src/routers/profile.py:159`'s `profile_version`
-increment (`grep -n "profile_version" src/routers/profile.py`). If it has
-introduced an atomic update helper (e.g. a direct `UPDATE ... SET
-profile_version = profile_version + 1` rather than the read-modify-write
-`profile.profile_version = (profile.profile_version or 0) + 1`), call
-**that** helper from the extracted function below instead of the
-read-modify-write line shown here — do not reintroduce the race this plan's
-spec (§8) flags as a live coordination risk.
+**Confirmed as of this plan's writing: the remediation plan's Task 13 has
+already landed.** `src/routers/profile.py` now does
+`profile.profile_version = func.coalesce(ResearcherProfile.profile_version, 0) + 1`
+(a DB-side atomic increment, not the old Python read-modify-write) — the
+code block below already uses that exact line. If you're executing this
+plan much later and the surrounding code has changed again, re-grep
+(`grep -n "profile_version" src/routers/profile.py`) and use whatever the
+real current line does — do not reintroduce a read-modify-write race.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -477,7 +479,7 @@ changed_by_user_id parameter already supports that attribution without any
 schema change."""
 import uuid
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.models import Publication, ResearcherProfile, User
@@ -522,6 +524,10 @@ async def apply_profile_edits(
     if not profile:
         profile = ResearcherProfile(user_id=target_user.id)
         db.add(profile)
+        # Flush the row into existence before the SQL-side bump below: on a
+        # pending object the expression would render inside the INSERT's
+        # VALUES, which cannot reference its own target table.
+        await db.flush()
 
     profile.research_summary = research_summary
     profile.techniques = _parse_list(techniques)
@@ -529,7 +535,10 @@ async def apply_profile_edits(
     profile.disease_areas = _parse_list(disease_areas)
     profile.key_targets = _parse_list(key_targets)
     profile.keywords = _parse_list(keywords)
-    profile.profile_version = (profile.profile_version or 0) + 1
+    # SQL-side increment (matches profile.py's own fix for issue #22 C1) —
+    # nothing below reads profile_version, so the expiry this expression
+    # assignment causes needs no refresh here.
+    profile.profile_version = func.coalesce(ResearcherProfile.profile_version, 0) + 1
 
     await db.commit()
 
@@ -1679,7 +1688,7 @@ was written assuming this spike passes.
 ### Task 10: `AgentSlackClient.get_permalink` / `.aget_permalink`
 
 **Files:**
-- Modify: `src/agent/slack_client.py` (add near the async-wrappers block — **grep first**, per this plan's Global Constraints note about the concurrent remediation plan's Task 2 touching this exact region)
+- Modify: `src/agent/slack_client.py` (add near the async-wrappers block, now at lines ~1180-1207 — **confirmed as of this plan's writing**: the concurrent remediation plan's Task 2 already landed and added `ais_bot_user`/`ajoin_channel`/`aconnect` there; if executing this plan later, re-grep rather than trust these numbers)
 - Modify: `tests/fakes.py` (`FakeSlackClient` — add a fake so callers in tests don't need a real Slack connection)
 - Test: `tests/unit/test_slack_client_contract.py`
 
@@ -1741,11 +1750,12 @@ Expected: FAIL — `AttributeError: 'AgentSlackClient' object has no attribute '
 
 - [ ] **Step 3: Implement**
 
-Grep `grep -n "async def apost_message" src/agent/slack_client.py` to find
-the current async-wrappers block (was lines 1167-1186 when read for this
-plan — confirm it hasn't moved). Add, in the main body near `_api` (any
-existing synchronous method is fine — this doesn't have to be adjacent to
-`post_message`, just call the same chokepoint):
+Grep `grep -n "async def a" src/agent/slack_client.py` to find the current
+async-wrappers block — confirmed at lines ~1180-1207 as of this plan's
+writing, ending with `aconnect`; add `aget_permalink` after it. Add the
+synchronous `get_permalink` method anywhere in the main body near `_api`
+(any existing synchronous method is fine — it doesn't have to be adjacent
+to `post_message`, just call the same chokepoint):
 
 ```python
     def get_permalink(self, channel_id: str, message_ts: str) -> str | None:
