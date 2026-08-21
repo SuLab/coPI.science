@@ -38,6 +38,7 @@ from src.services.blackbird_rubric import (
     RUBRIC_VERSION,
     RUBRIC_WEIGHTS,
     RUBRIC_WEIGHTS_INCUBATION,
+    display_scale_for,
 )
 
 # Hard cap on rows fetched for one render of the triage queue (B1). Scoped to
@@ -348,6 +349,19 @@ async def list_assessments(
     result = await db.execute(query)
     assessments = result.scalars().all()
 
+    # Per-row display scale, keyed by assessment id — gated the same way the
+    # detail page is (blackbird_rubric.display_scale_for): incubation weights
+    # only for a row that was BOTH scored by a stage-aware (v2+) document AND
+    # named an incubation funnel_stage. The 34 pre-v2 rows (29 NULL
+    # rubric_version, 5 "1.0.0") were scored on the investment weights
+    # unconditionally, so their chips must show those weights even when
+    # funnel_stage says "incubation" — the template must not pick a scale from
+    # funnel_stage alone, or it would show weights that never scored the row.
+    row_scales = {
+        row.id: display_scale_for(row.rubric_version, row.funnel_stage)
+        for row in assessments
+    }
+
     # Per-dimension distribution. Four dimensions (external_signals, ip_fto,
     # exit_thesis, chemistry_dc_path) never exceeded 2 across the 18
     # assessments of run 1787010946 — 23 of 100 weight points pinned near
@@ -422,6 +436,13 @@ async def list_assessments(
         # same key order as `rubric_weights`, so the chips stay in one order
         # whichever set a row uses.
         "rubric_weights_incubation": RUBRIC_WEIGHTS_INCUBATION,
+        # Per-row selected scale (DisplayScale: .weights/.banding/.incubation/
+        # .label), keyed by assessment id — see the comment where it's built
+        # above. This is what the per-row "Scores:" chips must key off of,
+        # NOT funnel_stage alone: gating only on funnel_stage would show the
+        # 34 pre-v2 rows against incubation weights they were never scored
+        # with, just because their stage happens to say "incubation".
+        "row_scales": row_scales,
         # The band thresholds and the decline label the page's legend states,
         # read from the rubric document rather than typed into the template.
         # The legend used to hard-code "≥4.0 / 3.0–3.9 / <3.0"; the moment

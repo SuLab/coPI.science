@@ -388,6 +388,98 @@ async def test_admin_detail_page_survives_a_wiped_transcript(client, db_session,
     assert RATIONALE_MARKER in resp.text
 
 
+async def _seed_scale_fixture(db_session, *, rubric_version, funnel_stage):
+    """A bare-bones assessment for exercising ``display_scale_for``'s two
+    inputs directly, without the thread/consult apparatus ``_seed`` builds —
+    the display decision reads only ``rubric_version`` and ``funnel_stage``.
+    """
+    run = await factories.make_simulation_run(db_session)
+    assessment = OpportunityAssessment(
+        simulation_run_id=run.id,
+        agent_id=HUB,
+        subject_agent_id=SUBJECT,
+        channel_name=CHANNEL,
+        company_or_project="Scale Fixture Co",
+        funnel_stage=funnel_stage,
+        rubric_version=rubric_version,
+        recommendation="conditional",
+        weighted_score=3.20,
+        band="conditional",
+        scores={"differentiation": 4, "exit_thesis": 2},
+    )
+    db_session.add(assessment)
+    await db_session.flush()
+    return assessment
+
+
+async def test_detail_page_v2_incubation_row_renders_the_incubation_scale(
+    client, db_session, admin
+):
+    """rubric_version="2.0.0" + funnel_stage="incubation": the row was scored
+    on the incubation scale, and the legend and the dimension bars must show
+    it — the incubation band lines (3.4/2.7) and the incubation weight column
+    (differentiation 16%, not the investment 15%)."""
+    assessment = await _seed_scale_fixture(
+        db_session, rubric_version="2.0.0", funnel_stage="incubation"
+    )
+    html = (
+        await client.get(
+            f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+        )
+    ).text
+    assert "&ge;3.4 advance" in html
+    assert "&lt;2.7" in html
+    assert "&ge;4.0 advance" not in html
+    assert "16% weight" in html  # differentiation, incubation weight
+    assert "15% weight" not in html
+    assert "incubation scale (rubric v2)" in html
+
+
+async def test_detail_page_legacy_row_stays_on_the_investment_scale(
+    client, db_session, admin
+):
+    """rubric_version NULL + funnel_stage="incubation" -- the 29-row legacy
+    shape (34 total with the 5 "1.0.0" rows). These were scored on the
+    investment weights unconditionally, so the page must render that scale
+    even though funnel_stage names incubation — not the scale its stage
+    would otherwise suggest."""
+    assessment = await _seed_scale_fixture(
+        db_session, rubric_version=None, funnel_stage="incubation"
+    )
+    html = (
+        await client.get(
+            f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+        )
+    ).text
+    assert "&ge;4.0 advance" in html
+    assert "&lt;3.0" in html
+    assert "&ge;3.4 advance" not in html
+    assert "15% weight" in html  # differentiation, investment weight
+    assert "16% weight" not in html
+    assert "investment scale" in html
+    assert "incubation scale" not in html
+
+
+async def test_detail_page_v2_seed_row_renders_the_investment_scale(
+    client, db_session, admin
+):
+    """rubric_version="2.0.0" but funnel_stage="seed": stage-aware scoring
+    applied, but the stage itself is not incubation, so this is the other
+    half of the AND in display_scale_for -- still the investment scale."""
+    assessment = await _seed_scale_fixture(
+        db_session, rubric_version="2.0.0", funnel_stage="seed"
+    )
+    html = (
+        await client.get(
+            f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+        )
+    ).text
+    assert "&ge;4.0 advance" in html
+    assert "15% weight" in html
+    assert "investment scale" in html
+    assert "incubation scale" not in html
+
+
 async def test_admin_detail_page_404s_on_an_unknown_id(client, db_session, admin):
     resp = await client.get(
         f"/admin/assessments/{uuid.uuid4()}", headers=auth_headers(admin.id)

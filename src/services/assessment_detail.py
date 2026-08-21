@@ -44,9 +44,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.agent.specialists import PANEL_REQUIRED_FOR, parse_opinion
 from src.models import AgentMessage, LlmCallLog, OpportunityAssessment, SpecialistConsult
 from src.services.blackbird_rubric import (
-    BANDING,
     RUBRIC_VERSION,
-    RUBRIC_WEIGHTS,
+    display_scale_for,
     load_rubric,
 )
 
@@ -433,12 +432,18 @@ async def build_assessment_detail(
         return None
 
     rubric = load_rubric()
+    # Which scale this ROW was actually scored on, not which one the CURRENT
+    # document would pick: a row's own rubric_version says whether v2's
+    # stage-aware selection even applied to it, and only then does its
+    # funnel_stage matter. See display_scale_for's docstring — this is a
+    # display decision replaying a past write, not a fresh scoring decision.
+    scale = display_scale_for(assessment.rubric_version, assessment.funnel_stage)
     scores = assessment.scores if isinstance(assessment.scores, dict) else {}
     normalized_scores = {
         key.strip().lower(): value for key, value in scores.items() if isinstance(key, str)
     }
     dimensions = []
-    for key, weight in RUBRIC_WEIGHTS.items():
+    for key, weight in scale.weights.items():
         raw = normalized_scores.get(key)
         value = (
             float(raw)
@@ -531,8 +536,15 @@ async def build_assessment_detail(
         "assessment": assessment,
         "dimensions": dimensions,
         "scale_max": rubric.scale_max,
-        "rubric_weights": RUBRIC_WEIGHTS,
-        "banding": BANDING,
+        # The scale THIS ROW was scored on (display_scale_for above) — never
+        # unconditionally the investment set, or a v2 incubation-stage row
+        # would show weights and band lines it was never actually scored
+        # against. `scale_provenance` is the short label the legend and the
+        # dimension-scores heading print so a reader can tell which of the
+        # two scales the numbers below belong to.
+        "rubric_weights": scale.weights,
+        "banding": scale.banding,
+        "scale_provenance": scale.label,
         "rubric_version": RUBRIC_VERSION,
         "panel_state": _panel_state(assessment),
         "panel_summary": [

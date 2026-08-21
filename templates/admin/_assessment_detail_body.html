@@ -166,6 +166,13 @@
             not recorded. The current document is
             <span class="font-mono">{{ rubric_version }}</span>.
         {% endif %}
+        {# The legend and the dimension bars below both reflect THIS row's own
+           scale (src/services/assessment_detail.py::display_scale_for), which
+           is not necessarily what its funnel_stage alone would suggest: a
+           verdict scored before rubric v2 was stamped on the investment scale
+           regardless of stage, so it renders here on the scale it was
+           actually scored on, not the one its stage name might imply. #}
+        Displayed on the <span class="font-mono">{{ scale_provenance }}</span>.
     </div>
 </div>
 
@@ -284,7 +291,10 @@
    zero-length bar that reads as a scored zero — it counts as ZERO in the
    weighted score, which is a different statement from "scored 0". #}
 <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6">
-    <h3 class="text-sm font-semibold text-gray-700 uppercase mb-3">Dimension scores</h3>
+    <h3 class="text-sm font-semibold text-gray-700 uppercase mb-3">
+        Dimension scores
+        <span class="normal-case font-normal text-gray-400">&middot; weights shown: {{ scale_provenance }}</span>
+    </h3>
     <div class="space-y-1.5">
         {% for d in dimensions %}
         <div class="score-{{ d.key }} flex items-center gap-3 text-xs">

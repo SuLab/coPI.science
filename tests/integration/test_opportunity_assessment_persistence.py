@@ -1411,6 +1411,68 @@ async def test_admin_assessments_page_renders_rationale_and_scores(
 
 
 @pytest.mark.asyncio
+async def test_admin_assessments_page_score_chips_gate_on_rubric_version_not_stage_alone(
+    client, db_session, admin
+):
+    """34 rows in production (29 NULL rubric_version, 5 "1.0.0") predate the
+    incubation re-baseline and were scored on the investment weights no matter
+    what their funnel_stage says. A legacy row whose funnel_stage happens to
+    be "incubation" must still show its chips against the INVESTMENT weight
+    column — the same weights that actually scored it — not the incubation
+    one a funnel_stage-only check would pick.
+    """
+    run = SimulationRun()
+    db_session.add(run)
+    await db_session.flush()
+    db_session.add(OpportunityAssessment(
+        simulation_run_id=run.id, agent_id="blackbird", subject_agent_id="wang",
+        channel_name="general", company_or_project="Legacy incubation-stage fixture",
+        # rubric_version deliberately omitted (None) -- the pre-stamping shape.
+        funnel_stage="incubation",
+        scores={"differentiation": 4, "exit_thesis": 2},
+    ))
+    await db_session.flush()
+
+    resp = await client.get("/admin/assessments", headers=_auth(admin.id))
+    assert resp.status_code == 200
+    html = resp.text
+
+    # Investment weights (15% / 1%), NOT the incubation ones (16% / 2%) that a
+    # funnel_stage-only gate would have shown for this row.
+    assert _score_cell(html, "differentiation") == "differentiation 4 /15%"
+    assert _score_cell(html, "exit_thesis") == "exit thesis 2 /1%"
+    assert "investment scale" in html
+
+
+@pytest.mark.asyncio
+async def test_admin_assessments_page_score_chips_use_incubation_weights_for_a_v2_row(
+    client, db_session, admin
+):
+    """The other half of the gate: a row genuinely stamped by the stage-aware
+    (v2+) document AND scored incubation-stage must show the incubation
+    weight column (16% / 2%), not the investment one (15% / 1%)."""
+    run = SimulationRun()
+    db_session.add(run)
+    await db_session.flush()
+    db_session.add(OpportunityAssessment(
+        simulation_run_id=run.id, agent_id="blackbird", subject_agent_id="wang",
+        channel_name="general", company_or_project="V2 incubation-stage fixture",
+        rubric_version="2.0.0",
+        funnel_stage="incubation",
+        scores={"differentiation": 4, "exit_thesis": 2},
+    ))
+    await db_session.flush()
+
+    resp = await client.get("/admin/assessments", headers=_auth(admin.id))
+    assert resp.status_code == 200
+    html = resp.text
+
+    assert _score_cell(html, "differentiation") == "differentiation 4 /16%"
+    assert _score_cell(html, "exit_thesis") == "exit thesis 2 /2%"
+    assert "incubation scale (rubric v2)" in html
+
+
+@pytest.mark.asyncio
 async def test_admin_assessments_page_omits_detail_row_when_empty(
     client, db_session, admin
 ):

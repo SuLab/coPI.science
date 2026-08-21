@@ -58,6 +58,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import math
+import re
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -446,7 +447,7 @@ _BAND_THRESHOLDS_INCUBATION = (
 _INCUBATION_STAGE_PREFIX = "incubation"
 
 
-def _is_incubation(stage: object) -> bool:
+def is_incubation_stage(stage: object) -> bool:
     """Does ``stage`` name the incubation/grant funnel stage?
 
     ``None``, an empty/whitespace value, an unknown stage, and every later
@@ -455,6 +456,14 @@ def _is_incubation(stage: object) -> bool:
     keeps the pre-v2 behaviour every existing caller and pin expects, and the
     incubation scale — the more permissive one, with lower band lines — is only
     ever applied when the verdict actually asked for it.
+
+    Public (not ``_is_incubation``) because it is not just this module's own
+    scoring decision any more: a page rendering an ALREADY-STORED assessment
+    (src/services/assessment_detail.py, src/services/directory.py) needs the
+    identical normalization to pick which scale to DISPLAY a row against, and
+    a second, template- or view-level reimplementation of "strip, lower,
+    prefix-match 'incubation'" is exactly the kind of copy that drifts. See
+    ``display_scale_for`` below, which is what those callers actually use.
     """
     if stage is None:
         return False
@@ -481,7 +490,7 @@ def weighted_score(scores: dict[str, object] | None, stage: object = None) -> fl
     """
     if not scores:
         return 0.0
-    incubation = _is_incubation(stage)
+    incubation = is_incubation_stage(stage)
     weights = RUBRIC_WEIGHTS_INCUBATION if incubation else RUBRIC_WEIGHTS
     total_weight = _TOTAL_WEIGHT_INCUBATION if incubation else _TOTAL_WEIGHT
     thresholds = _BAND_THRESHOLDS_INCUBATION if incubation else _BAND_THRESHOLDS
@@ -572,7 +581,7 @@ def band(score: float, stage: object = None) -> str:
     ``stage`` here as to ``weighted_score`` — banding a score computed on one
     scale against the other's lines is meaningless.
     """
-    if _is_incubation(stage):
+    if is_incubation_stage(stage):
         if score >= _RUBRIC.advance_min_incubation:
             return "advance"
         if score >= _RUBRIC.conditional_min_incubation:
@@ -583,6 +592,82 @@ def band(score: float, stage: object = None) -> str:
     if score >= _RUBRIC.conditional_min:
         return "conditional"
     return "pass"
+
+
+# Leading digits of a version string, e.g. "2.0.0" -> "2", "10.0.0" -> "10".
+# `re.match` anchors at position 0 already; `.strip()` before matching absorbs
+# incidental whitespace without needing it in the pattern.
+_MAJOR_VERSION_RE = re.compile(r"^(\d+)")
+
+
+def scored_stage_aware(rubric_version: str | None) -> bool:
+    """Did the document that produced ``rubric_version`` select its scale from
+    the verdict's funnel stage, the way v2.0.0+ does?
+
+    Rows scored before the incubation re-baseline — ``rubric_version`` is
+    ``None`` (29 in production, unstamped rows predating the column) or
+    ``"1.0.0"`` (5 more, stamped but pre-scale) — were scored on the
+    INVESTMENT weights unconditionally, regardless of what their
+    ``funnel_stage`` says. So a page that displays a stored row must gate its
+    choice of scale on the row's OWN ``rubric_version``, not on funnel_stage
+    alone: reading a v1 row's funnel_stage as "incubation" and showing it next
+    to incubation weights would show numbers that were never applied to it.
+    See ``display_scale_for`` below, which does exactly that.
+
+    Compares the leading MAJOR version as an integer, never the raw string:
+    ``"10.0.0" < "2.0.0"`` lexically, but major version 10 is very much
+    ``>= 2``. ``None`` and any version with no leading integer ("garbage")
+    both answer False — the same conservative default as
+    ``is_incubation_stage``: an unparseable or absent stamp renders as the
+    scale that was actually (and knowably) applied, the investment one, never
+    a guess at the newer one.
+    """
+    if rubric_version is None:
+        return False
+    match = _MAJOR_VERSION_RE.match(rubric_version.strip())
+    if match is None:
+        return False
+    return int(match.group(1)) >= 2
+
+
+@dataclass(frozen=True)
+class DisplayScale:
+    """Which scale to render an ALREADY-STORED assessment against.
+
+    Distinct from the SCORING decision (`weighted_score`/`band`, which act on
+    a fresh verdict and take a bare ``stage``): this is a DISPLAY decision
+    about a row that already has a ``weighted_score`` and a ``band`` computed
+    at write time, so it must reconstruct — not recompute — what scale
+    actually produced them.
+    """
+
+    incubation: bool
+    weights: dict[str, int]
+    banding: dict[str, object]
+    label: str
+
+
+def display_scale_for(rubric_version: str | None, funnel_stage: object) -> DisplayScale:
+    """The scale a stored assessment was actually scored on, for display.
+
+    Incubation iff BOTH hold: the row was scored by a stage-aware document
+    (``scored_stage_aware(rubric_version)``) AND its ``funnel_stage``
+    normalizes to incubation (``is_incubation_stage``) — the same rule
+    ``weighted_score``/``band`` apply at write time, replayed here from the
+    two columns a stored row actually carries. A legacy row (pre-v2
+    ``rubric_version``) therefore always renders on the investment scale it
+    was really scored on, even when its ``funnel_stage`` says "incubation":
+    34 such rows exist in production, and showing them against incubation
+    weights they were never scored against would be a caption, not a
+    correction.
+    """
+    incubation = scored_stage_aware(rubric_version) and is_incubation_stage(funnel_stage)
+    return DisplayScale(
+        incubation=incubation,
+        weights=RUBRIC_WEIGHTS_INCUBATION if incubation else RUBRIC_WEIGHTS,
+        banding=BANDING_INCUBATION if incubation else BANDING,
+        label="incubation scale (rubric v2)" if incubation else "investment scale",
+    )
 
 
 def _format_threshold(value: float) -> str:

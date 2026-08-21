@@ -27,9 +27,11 @@ from src.services.blackbird_rubric import (
     RUBRIC_WEIGHTS,
     RUBRIC_WEIGHTS_INCUBATION,
     RubricError,
+    display_scale_for,
     load_rubric,
     parse_rubric,
     render_rubric_markdown,
+    scored_stage_aware,
 )
 
 # The exact weights of the 2026-08 re-cut, in display order. Literal on
@@ -187,7 +189,7 @@ def test_rejects_a_dimension_with_no_incubation_anchor(tmp_path):
     # both, and silent.
     path = _mutated_copy(
         tmp_path,
-        'anchors_incubation = "Reusable platform generating a pipeline vs one shot on goal. (Unchanged.)"',
+        'anchors_incubation = "Reusable platform generating a pipeline vs one shot on goal."',
         'anchors_incubation = ""',
     )
     with pytest.raises(RubricError, match="anchors_incubation"):
@@ -345,3 +347,63 @@ def test_specialist_ownership_is_declared_for_eight_dimensions():
         "experimental_rigor": "scientific",
         "chemistry_dc_path": "chemistry",
     }
+
+
+# ---------------------------------------------------------------------------
+# scored_stage_aware / display_scale_for (provenance gate, F1/F2/F3)
+#
+# 34 rows in production predate stage-aware scoring (29 NULL rubric_version, 5
+# "1.0.0") and were scored on the investment weights regardless of what their
+# funnel_stage says. A page rendering a STORED row has to reconstruct that
+# fact from rubric_version, not assume the current (stage-aware) document
+# scored every row it is now displaying.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "rubric_version, expected",
+    [
+        (None, False),
+        ("1.0.0", False),
+        ("2.0.0", True),
+        ("2.1.3", True),
+        ("10.0.0", True),
+        ("garbage", False),
+    ],
+)
+def test_scored_stage_aware(rubric_version, expected):
+    # "10.0.0" is the case a lexicographic string compare gets wrong:
+    # "10.0.0" < "2.0.0" as strings, but major version 10 is >= 2.
+    assert scored_stage_aware(rubric_version) is expected
+
+
+def test_display_scale_for_a_legacy_row_stays_on_the_investment_scale():
+    # rubric_version=None, funnel_stage="incubation": exactly the 29-row
+    # legacy shape. Must NOT flip to incubation just because the stage says
+    # so — that scale was never applied when this row was scored.
+    scale = display_scale_for(None, "incubation")
+    assert scale.incubation is False
+    assert scale.weights == RUBRIC_WEIGHTS
+    assert scale.banding == BANDING
+    assert scale.label == "investment scale"
+
+    # Same for the 5 "1.0.0" rows.
+    scale = display_scale_for("1.0.0", "incubation")
+    assert scale.incubation is False
+    assert scale.weights == RUBRIC_WEIGHTS
+
+
+def test_display_scale_for_a_v2_incubation_row_uses_incubation_weights():
+    scale = display_scale_for("2.0.0", "incubation")
+    assert scale.incubation is True
+    assert scale.weights == RUBRIC_WEIGHTS_INCUBATION
+    assert scale.banding == BANDING_INCUBATION
+    assert scale.label == "incubation scale (rubric v2)"
+
+
+def test_display_scale_for_a_v2_investment_row_stays_investment():
+    # A v2-scored row whose funnel_stage is NOT incubation (pre-seed and
+    # later) is the other half of the AND: stage-aware alone is not enough.
+    scale = display_scale_for("2.0.0", "pre-seed")
+    assert scale.incubation is False
+    assert scale.weights == RUBRIC_WEIGHTS
+    assert scale.banding == BANDING

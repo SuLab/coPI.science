@@ -741,6 +741,11 @@ async def admin_assessments(
             # funnel_stage and needs both here (the allowlist below is why this
             # is not automatic).
             rubric_weights_incubation=view["rubric_weights_incubation"],
+            # Per-row selected scale (weights/banding/label), gated on each
+            # row's OWN rubric_version, not on funnel_stage alone — see
+            # list_assessments' comment. The per-row "Scores:" chips key off
+            # this rather than reimplementing the funnel_stage/version rule.
+            row_scales=view["row_scales"],
             # The band thresholds and the decline label the legend states, from
             # the rubric document rather than as template literals — the page
             # and the scorer must never be able to disagree about where the

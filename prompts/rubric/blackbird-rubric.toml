@@ -231,7 +231,7 @@ weight = 4
 weight_incubation = 5
 title = "Platform vs. single asset"
 anchors = "Reusable platform generating a pipeline / multiple shots on goal"
-anchors_incubation = "Reusable platform generating a pipeline vs one shot on goal. (Unchanged.)"
+anchors_incubation = "Reusable platform generating a pipeline vs one shot on goal."
 specialist = "technologic"
 
 [[dimension]]

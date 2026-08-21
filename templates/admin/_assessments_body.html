@@ -399,22 +399,24 @@
                            be able to tell "scored low" from "never answered".
 
                            The "/N%" annotation must come from the weight set
-                           that actually scored THIS row, which follows from its
-                           own funnel_stage (rubric v2.0.0) — one page can hold
-                           rows from both scales, so this cannot be a per-page
-                           choice. The normalisation mirrors
-                           blackbird_rubric._is_incubation exactly: strip, lower,
-                           prefix-match "incubation" (which covers both
-                           "incubation" and the rubric's own "Incubation/Grant"),
-                           with a missing stage falling back to investment. #}
-                        {% set is_incubation_row = (a.funnel_stage or "").strip().lower().startswith("incubation") %}
-                        {% set row_weights = rubric_weights_incubation if is_incubation_row else rubric_weights %}
+                           that actually scored THIS row — which is NOT simply
+                           whatever its funnel_stage says: a row scored before
+                           rubric v2 was stamped on the investment weights no
+                           matter what its funnel_stage names, so gating on
+                           funnel_stage alone would show 34 historical rows
+                           against incubation weights that never scored them.
+                           `row_scales` (src/services/directory.py, built via
+                           blackbird_rubric.display_scale_for) already applies
+                           that gate per row — do not reimplement the
+                           version/stage rule here. #}
+                        {% set row_scale = row_scales.get(a.id) %}
+                        {% set row_weights = row_scale.weights if row_scale else rubric_weights %}
                         <div class="assessment-scores flex flex-wrap gap-x-3 gap-y-1">
                             <span class="font-medium text-gray-500">Scores:</span>
                             {% for key, weight in row_weights.items() %}
                                 {% set val = a.scores.get(key) %}
                                 <span class="score-{{ key }}{% if val is none %} text-gray-400{% endif %}"
-                                      title="{{ key.replace('_', ' ') }} — {{ weight }}% of the weighted score on the {{ "incubation" if is_incubation_row else "investment" }} scale{% if val is none %} (not scored: counts as zero){% endif %}">
+                                      title="{{ key.replace('_', ' ') }} — {{ weight }}% of the weighted score on the {{ row_scale.label if row_scale else "investment scale" }}{% if val is none %} (not scored: counts as zero){% endif %}">
                                     {{ key.replace("_", " ") }}
                                     <span class="font-semibold">{% if val is none %}—{% else %}{{ val }}{% endif %}</span>
                                     <span class="text-gray-400">/{{ weight }}%</span>
