@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import time
+from functools import lru_cache
 from typing import Any, Callable
 
 import anthropic
@@ -69,9 +70,21 @@ def set_call_log_callback(callback: Callable[[dict], None] | None) -> None:
     _call_log_callback = callback
 
 
+@lru_cache(maxsize=8)
+def _client_for_key(api_key: str) -> anthropic.Anthropic:
+    """One long-lived client per API key. ``anthropic.Anthropic`` owns an
+    httpx connection pool; constructing one per call meant a fresh TCP+TLS
+    handshake for every LLM call in the engine — thread replies, up to 8
+    specialist consults per concluding turn, memory updates, retries
+    (audit 2026-08-21, finding 4: 8 calls -> 8 connections; 1 shared client
+    -> 1). The sync client is thread-safe, so one instance is safe under
+    ``asyncio.to_thread`` concurrency."""
+    return anthropic.Anthropic(api_key=api_key)
+
+
 def get_anthropic_client() -> anthropic.Anthropic:
     settings = get_settings()
-    return anthropic.Anthropic(api_key=settings.anthropic_api_key)
+    return _client_for_key(settings.anthropic_api_key)
 
 
 async def _acreate(client: anthropic.Anthropic, **kwargs: Any):
