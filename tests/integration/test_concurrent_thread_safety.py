@@ -839,3 +839,50 @@ async def test_stop_drains_a_bounded_number_of_memory_events(
     assert len(calls) == 10  # MEMORY_EVENTS_MAX_AT_SHUTDOWN
     assert not eng._pending_memory_events
     assert any("Dropping 2 queued" in r.message for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_poller_is_bot_lookup_does_not_block_the_loop(monkeypatch):
+    """5 human channel messages used to freeze the loop for the SUM of the
+    sync users.info round trips (audit finding 2, harness B: one 1.5s stall).
+    With ais_bot_user the poll may still take that wall time, but the LOOP
+    must stay responsive throughout."""
+    import time as _time
+
+    from src.agent.slack_client import AgentSlackClient
+
+    class _Stub:
+        def conversations_history(self, **kw):
+            return {"messages": [
+                {"ts": f"1000.00000{i}", "user": f"UH{i}", "text": "hi"}
+                for i in range(5)
+            ], "has_more": False, "response_metadata": {}}
+        def users_info(self, **kw):
+            _time.sleep(0.3)  # what a real sync HTTP call does
+            return {"user": {"is_bot": False}}
+
+    a = Agent("su", "SuBot", "Su", role="pi_lab")
+    client = AgentSlackClient(agent_id="su", bot_token="xoxb-x")
+    client._client = _Stub()
+    client._bot_user_id = "UBOT"
+    eng = SimulationEngine(agents=[a], slack_clients={"su": client})
+    eng._channel_id_map = {"general": "C1"}
+    eng._last_channel_poll = 0.0
+
+    gaps: list[float] = []
+    stop = asyncio.Event()
+
+    async def heartbeat():
+        last = time.monotonic()
+        while not stop.is_set():
+            await asyncio.sleep(0.05)
+            now = time.monotonic()
+            if now - last > 0.25:
+                gaps.append(now - last)
+            last = now
+
+    hb = asyncio.create_task(heartbeat())
+    await eng._poll_slack_for_bot_messages()
+    stop.set()
+    await hb
+    assert not gaps, f"event loop stalled during the poll: {gaps}"

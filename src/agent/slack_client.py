@@ -284,6 +284,7 @@ class AgentSlackClient:
         self._bot_user_id: str | None = None
         self._channel_name_to_id: dict[str, str] = {}  # name -> ID cache
         self._dm_channels: dict[str, str] = {}  # user_id -> DM channel_id
+        self._user_is_bot_cache: dict[str, bool] = {}
         # Guards both caches above. Before Task 1 (2026-08-14) moved the
         # transport off the event loop, "concurrent" asyncio callers of a
         # synchronous method never actually overlapped in execution, so the
@@ -681,13 +682,25 @@ class AgentSlackClient:
             return user_id
 
     def is_bot_user(self, user_id: str) -> bool:
-        """Check if a user ID corresponds to a bot."""
-        if not self._client:
+        """Check if a user ID corresponds to a bot.
+
+        Successful answers are cached per user id — a Slack user record does
+        not flip between bot and human, and the poller asks per MESSAGE, not
+        per user. A failed lookup is NOT cached: is_bot_user answers False on
+        error, and caching that would permanently misclassify a bot as human,
+        silently dropping its messages forever.
+        """
+        if not user_id or not self._client:
             return False
+        cached = self._user_is_bot_cache.get(user_id)
+        if cached is not None:
+            return cached
         try:
             info = self._api("users_info", user=user_id)
             user = info.get("user", {})
-            return user.get("is_bot", False)
+            result = bool(user.get("is_bot", False))
+            self._user_is_bot_cache[user_id] = result
+            return result
         except SlackApiError:
             return False
 
@@ -1184,3 +1197,12 @@ class AgentSlackClient:
 
     async def aget_all_thread_replies(self, *args, **kwargs):
         return await asyncio.to_thread(self.get_all_thread_replies, *args, **kwargs)
+
+    async def ais_bot_user(self, *args, **kwargs) -> bool:
+        return await asyncio.to_thread(self.is_bot_user, *args, **kwargs)
+
+    async def ajoin_channel(self, *args, **kwargs) -> None:
+        return await asyncio.to_thread(self.join_channel, *args, **kwargs)
+
+    async def aconnect(self) -> bool:
+        return await asyncio.to_thread(self.connect)

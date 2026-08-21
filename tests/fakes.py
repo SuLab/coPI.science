@@ -301,6 +301,21 @@ class FakeSlackClient:
     async def apoll_channel_messages(self, *args, **kwargs) -> list:
         return await asyncio.to_thread(self.poll_channel_messages, *args, **kwargs)
 
+    def is_bot_user(self, user_id: str) -> bool:
+        return False
+
+    async def ais_bot_user(self, user_id: str) -> bool:
+        return self.is_bot_user(user_id)
+
+    def join_channel(self, channel_id: str) -> None:
+        return None
+
+    async def ajoin_channel(self, channel_id: str) -> None:
+        return self.join_channel(channel_id)
+
+    async def aconnect(self) -> bool:
+        return self.connect()
+
     def create_channel(self, name: str) -> dict:
         ch = {"id": f"C_{name}", "name": name}
         self.created_channels.append(ch)

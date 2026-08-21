@@ -1403,7 +1403,7 @@ class SimulationEngine:
         agent.state.in_flight = True
         try:
             # Phase 1: Channel discovery
-            self._phase1_channel_discovery(agent)
+            await self._phase1_channel_discovery(agent)
 
             # Spontaneous post timer — allow one Phase 5 call after enough
             # idle time so agents can organically start new conversations. This
@@ -1437,7 +1437,7 @@ class SimulationEngine:
     # Phase 1: Channel Discovery
     # ------------------------------------------------------------------
 
-    def _phase1_channel_discovery(self, agent: Agent) -> None:
+    async def _phase1_channel_discovery(self, agent: Agent) -> None:
         """Join new channels based on profile keyword matching."""
         profile_text = agent.public_profile.lower()
         channels_to_join = set(_UNIVERSAL_CHANNELS)
@@ -1453,7 +1453,7 @@ class SimulationEngine:
                 if ch_id:
                     client = self.slack_clients.get(agent.agent_id)
                     if client:
-                        client.join_channel(ch_id)
+                        await client.ajoin_channel(ch_id)
             agent.state.subscribed_channels.update(new_channels)
             logger.info("[%s] Phase 1: Joined channels: %s", agent.agent_id, new_channels)
 
@@ -4286,7 +4286,7 @@ class SimulationEngine:
                     is_bot = bool(msg.get("bot_id") or msg.get("subtype") == "bot_message")
 
                     if not is_bot and user_id:
-                        is_bot = client.is_bot_user(user_id)
+                        is_bot = await client.ais_bot_user(user_id)
 
                     # Bot messages are mirrored into the log so agents can scan
                     # them; a human message is dropped outright — advance the
@@ -5737,7 +5737,7 @@ class SimulationEngine:
                     if not is_valid_token(token):
                         continue  # still tokenless — retry on a later tick
                     client = AgentSlackClient(agent_id=aid, bot_token=token)
-                    if not client.connect():
+                    if not await asyncio.to_thread(client.connect):
                         logger.warning(
                             "[roster] Slack connect failed adopting %s — will retry", aid,
                         )
@@ -5785,7 +5785,7 @@ class SimulationEngine:
                         )
                         continue
                     client = AgentSlackClient(agent_id=aid, bot_token=token)
-                    if not client.connect():
+                    if not await asyncio.to_thread(client.connect):
                         logger.warning("[roster] Slack connect failed for new agent %s — skipping", aid)
                         continue
                 else:

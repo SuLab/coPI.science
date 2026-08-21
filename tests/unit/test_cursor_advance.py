@@ -149,7 +149,7 @@ async def test_a_post_turn_in_the_same_tick_as_a_dispatch_does_not_swallow_a_tag
             ))
 
     monkeypatch.setattr(eng, "_service_reply", _serve)
-    monkeypatch.setattr(eng, "_phase1_channel_discovery", lambda a: None)
+    monkeypatch.setattr(eng, "_phase1_channel_discovery", _noop_async)
     monkeypatch.setattr(eng, "_phase5_new_post", _noop_async)
 
     # Tick 1: dispatch (posts the tag mid-sweep, via cravatt's pair), then a

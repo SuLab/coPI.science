@@ -987,3 +987,35 @@ def test_an_unconnected_client_raises_rather_than_calling_a_missing_endpoint():
     c = AgentSlackClient(agent_id="su", bot_token="xoxb-test")
     with pytest.raises(SlackNotConnected):
         c._api("auth_test")
+
+
+def test_is_bot_user_caches_successes_but_never_failures():
+    from slack_sdk.errors import SlackApiError
+
+    from src.agent.slack_client import AgentSlackClient
+
+    class _Resp:
+        headers: dict = {}
+        def get(self, key, default=None):
+            return {"error": "internal_error"}.get(key, default)
+
+    class _Stub:
+        def __init__(self):
+            self.calls = 0
+            self.fail_first = True
+        def users_info(self, **kw):
+            self.calls += 1
+            if self.fail_first:
+                self.fail_first = False
+                raise SlackApiError("boom", response=_Resp())
+            return {"user": {"is_bot": True}}
+
+    client = AgentSlackClient(agent_id="su", bot_token="xoxb-x")
+    stub = _Stub()
+    client._client = stub
+    # Failure path: returns False and must NOT be cached as an answer.
+    assert client.is_bot_user("U1") is False
+    # Retry reaches the API again and the success IS cached.
+    assert client.is_bot_user("U1") is True
+    assert client.is_bot_user("U1") is True
+    assert stub.calls == 2

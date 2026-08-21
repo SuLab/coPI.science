@@ -48,7 +48,7 @@ async def test_spontaneous_ready_triggers_phase5(monkeypatch):
     async def _phase5(_a):
         called.append(_a.agent_id)
 
-    monkeypatch.setattr(eng, "_phase1_channel_discovery", lambda a: None)
+    monkeypatch.setattr(eng, "_phase1_channel_discovery", _noop_async)
     monkeypatch.setattr(eng, "_phase5_new_post", _phase5)
 
     did_work = await eng._run_post_turn(agent)
@@ -71,7 +71,7 @@ async def test_not_yet_due_skips_phase5(monkeypatch):
     async def _phase5(_a):
         called.append(_a.agent_id)
 
-    monkeypatch.setattr(eng, "_phase1_channel_discovery", lambda a: None)
+    monkeypatch.setattr(eng, "_phase1_channel_discovery", _noop_async)
     monkeypatch.setattr(eng, "_phase5_new_post", _phase5)
 
     await eng._run_post_turn(agent)
@@ -88,7 +88,11 @@ async def test_run_post_turn_calls_phase1(monkeypatch):
     agent.state.last_phase5_action_time = _time.time()  # not due — isolates Phase 1
 
     called = []
-    monkeypatch.setattr(eng, "_phase1_channel_discovery", lambda a: called.append(a.agent_id))
+
+    async def _phase1(a):
+        called.append(a.agent_id)
+
+    monkeypatch.setattr(eng, "_phase1_channel_discovery", _phase1)
     monkeypatch.setattr(eng, "_phase5_new_post", _noop_async)
 
     await eng._run_post_turn(agent)
@@ -107,7 +111,7 @@ async def test_in_flight_is_true_during_the_turn_and_false_after(monkeypatch):
         agents=[agent], slack_clients={"wang": FakeSlackClient(agent_id="wang")}
     )
     agent.state.last_phase5_action_time = _time.time() - 10**9  # due
-    monkeypatch.setattr(eng, "_phase1_channel_discovery", lambda a: None)
+    monkeypatch.setattr(eng, "_phase1_channel_discovery", _noop_async)
 
     seen_in_flight = []
 
