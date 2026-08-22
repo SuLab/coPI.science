@@ -19,6 +19,16 @@ SEEDED_CHANNELS = [
     "chemical-biology",
 ]
 
+# The hub's one-way announcement channel (design D11): deliberately NOT in
+# SEEDED_CHANNELS, _CHANNEL_KEYWORDS, or _UNIVERSAL_CHANNELS
+# (src/agent/simulation.py) — those three drive Phase-1 topical
+# discovery/auto-join for PI-lab agents, and channel polling scope
+# (_poll_slack_for_bot_messages, _rebuild_state_from_slack) is keyed off
+# SEEDED_CHANNELS membership too. Keeping this name out of all three means
+# no PI-lab bot ever joins it, scans it, or treats the hub's headline posts
+# as something to reply to.
+ASSESSMENTS_SUMMARY_CHANNEL = "assessments-summary"
+
 
 def normalize_channel_name(name: str) -> str:
     """Normalize a channel name to Slack's requirements (lowercase, hyphens, max 80 chars)."""

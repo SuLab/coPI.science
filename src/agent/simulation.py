@@ -11,7 +11,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, NamedTuple
 
 from src.agent.agent import PROFILES_DIR, Agent
-from src.agent.channels import SEEDED_CHANNELS
+from src.agent.channels import ASSESSMENTS_SUMMARY_CHANNEL, SEEDED_CHANNELS
 from src.agent.ids import WRITER_ENGINE, TsMinter
 from src.agent.locks import LockRegistry
 from src.agent.message_log import PHASE_PANEL_NOTE, LogEntry, MessageLog, is_panel_note
@@ -312,6 +312,9 @@ class SimulationEngine:
         # see the private channel; non-member bots get channel_not_found from
         # Slack for private channels they aren't in.
         self._private_channel_members: dict[str, set[str]] = {}
+
+        # Assessments-summary channel ID (hub-only, created separately from SEEDED_CHANNELS)
+        self._assessments_summary_channel_id: str | None = None
 
         # Slack poll cursor: channel_id -> latest ts seen
         self._poll_cursors: dict[str, str] = {}
@@ -634,6 +637,7 @@ class SimulationEngine:
 
         # Setup
         self._ensure_seeded_channels()
+        self._ensure_assessments_summary_channel()
         await self._persist_seeded_channels()
         # Load any collab_private channels created via the web-UI reopen flow
         # BEFORE rebuilding state so the rebuild's history-fetch loop covers
@@ -4720,6 +4724,40 @@ class SimulationEngine:
         # Share channel map across all clients
         for c in self.slack_clients.values():
             c.cache_channel_ids(existing)
+
+    def _ensure_assessments_summary_channel(self) -> None:
+        """Create (or adopt) the hub's one-way assessments-summary channel
+        and join only the hub to it — never added to SEEDED_CHANNELS, so it
+        never enters Phase-1 discovery or the poller's scope (design D11).
+        """
+        hub = next(
+            (a for a in self.agents.values() if a.role == "scout_hub"), None
+        )
+        if hub is None:
+            return
+        client = self.slack_clients.get(hub.agent_id)
+        if not client or not client.is_connected:
+            self._assessments_summary_channel_id = f"local:{ASSESSMENTS_SUMMARY_CHANNEL}"
+            self._channel_id_map[ASSESSMENTS_SUMMARY_CHANNEL] = self._assessments_summary_channel_id
+            return
+
+        try:
+            existing = client.list_channels()
+        except SlackListingIncomplete:
+            # Same caution as _ensure_seeded_channels: an incomplete listing
+            # must not risk creating a duplicate channel.
+            return
+
+        ch_id = existing.get(ASSESSMENTS_SUMMARY_CHANNEL)
+        if ch_id is None:
+            ch_data = client.create_channel(ASSESSMENTS_SUMMARY_CHANNEL)
+            ch_id = ch_data.get("id") if ch_data else None
+        if not ch_id:
+            return
+
+        self._assessments_summary_channel_id = ch_id
+        self._channel_id_map[ASSESSMENTS_SUMMARY_CHANNEL] = ch_id
+        client.join_channel(ch_id)
 
     async def _persist_seeded_channels(self) -> None:
         """Record seeded channels in agent_channels for this run (idempotent).
