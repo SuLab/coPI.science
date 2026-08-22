@@ -22,7 +22,12 @@ async def test_container_is_migrated(engine):
         # 0034 agents.muted_at/muted_by mute tracking
         # 0035 assessment_drops.raw_verdict + llm_call_logs.wall_ms
         #      + thread_decisions.closed_by_role
-        assert v == "0035"
+        # 0036 opportunity_assessments.panel_owed/.thread_id,
+        #      specialist_consults.truncated,
+        #      llm_call_logs.cache_read_input_tokens/.cache_creation_input_tokens,
+        #      private_channel_members.user_id FK SET NULL -> CASCADE,
+        #      plus two data repairs (milestones, JSON null -> SQL NULL)
+        assert v == "0036"
 
 
 async def test_writes_are_rolled_back_part1(db_session):

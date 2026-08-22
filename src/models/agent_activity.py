@@ -219,6 +219,31 @@ class LlmCallLog(Base):
     #: rows, so summing the column understated true LLM wait by 25% (215.9 min
     #: stored against 289.4 min actual). NULL on rows written before 0035.
     wall_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
+    #: The input tokens Anthropic bills SEPARATELY from `input_tokens` above.
+    #: `usage.input_tokens` EXCLUDES anything served from or written to the prompt
+    #: cache, so on a cached turn it counts only the uncached tail: 109 of 141 live
+    #: rows recorded fewer input tokens than the system prompt alone can account
+    #: for, and one recorded **2** for a 30 KB prompt. `cache_read` is a cache hit
+    #: (billed at a discount), `cache_creation` is a cache write (billed at a
+    #: premium); they are separate columns because they are separately priced, so
+    #: collapsing them would make cost unrecoverable from the row.
+    #:
+    #: Added in 0036 as NEW columns rather than as a correction to `input_tokens`,
+    #: for exactly the reason `latency_ms` and `wall_ms` are separate above: fold
+    #: them into an existing column and the numbers already in it mean two
+    #: different things depending on when they were written.
+    #: **Billable input volume for a turn is the SUM of the three** — that is the
+    #: reader's job, not this table's.
+    #:
+    #: NULL means "not recorded": a row written before 0036, or one whose SDK
+    #: `usage` carried no cache fields at all (they are `Optional[int]` and arrive
+    #: as `None` on a non-cached request). NULL is NOT zero — a `0` here is a
+    #: measured cache miss, and the two must stay distinguishable or "is prompt
+    #: caching working?" cannot be answered from this table.
+    cache_read_input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cache_creation_input_tokens: Mapped[int | None] = mapped_column(
+        Integer, nullable=True
+    )
     # One object per real API call, in call order:
     #   {seq, kind, max_tokens, input_tokens, output_tokens, thinking_tokens,
     #    stop_reason, latency_ms}
@@ -335,9 +360,18 @@ class PrivateChannelMember(Base):
         nullable=False,
     )
     agent_id: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    # CASCADE, not SET NULL (migration 0036). The CheckConstraint above requires
+    # exactly one owner, and on a human-member row `agent_id` is already NULL — so
+    # SET NULL made the cascade's own UPDATE violate that CHECK, and ANY user
+    # delete for a private-channel member raised `pcm_exactly_one_of_agent_or_user`
+    # (reproduced; both POST /profile/delete-account and the admin delete 500'd).
+    # SET NULL was never coherent here: the row's entire content is the member it
+    # names, so a row with no owner is unrepresentable rather than merely
+    # degraded. `added_by_user_id` below stays SET NULL — nulling the adder
+    # violates nothing and the membership is still meaningful without them.
     user_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
-        ForeignKey("users.id", ondelete="SET NULL"),
+        ForeignKey("users.id", ondelete="CASCADE"),
         nullable=True,
     )
     role: Mapped[str] = mapped_column(String(10), nullable=False)  # 'bot', 'pi', 'delegate'

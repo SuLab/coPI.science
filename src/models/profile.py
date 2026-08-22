@@ -27,7 +27,15 @@ class ResearcherProfile(Base):
     keywords: Mapped[list[str] | None] = mapped_column(ARRAY(String), nullable=True)
     grant_titles: Mapped[list[str] | None] = mapped_column(ARRAY(String), nullable=True)
     # [{label: str, content: str, submitted_at: str}]  — deprecated, use private_profile_md
-    user_submitted_texts: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # `none_as_null=True` so "nothing submitted" is SQL NULL, not the JSON scalar
+    # `null`. The ORM cannot tell the two apart (both decode to `None`), so the
+    # cost falls entirely on SQL-level readers, where `WHERE col IS NULL` silently
+    # skips every row that took the other encoding. Migration 0031 documents the
+    # mechanism, 0036 normalized the rows already written that way, and
+    # tests/unit/test_json_none_as_null.py is the drift alarm.
+    user_submitted_texts: Mapped[dict | None] = mapped_column(
+        JSON(none_as_null=True), nullable=True
+    )
     # retired 2026-08-12 removal cycle; columns kept, no writers
     private_profile_md: Mapped[str | None] = mapped_column(Text, nullable=True)
     # LLM-generated draft staged for user review during onboarding
@@ -63,8 +71,15 @@ class ResearcherProfile(Base):
     #                         because 30 is a cap and never a floor.
     evidence_pmid_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     evidence_pub_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    # Nullable JSON: stores candidate profile awaiting user review
-    pending_profile: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # Nullable JSON: stores candidate profile awaiting user review. NULL means
+    # "nothing pending", and `none_as_null=True` is what makes that true in SQL as
+    # well as in Python — without it a cleared draft stored the JSON scalar `null`,
+    # which `WHERE pending_profile IS NULL` does not match, so an operator counting
+    # PIs with a review outstanding would count the cleared ones too. Same
+    # mechanism as `user_submitted_texts` above; see 0031 and 0036.
+    pending_profile: Mapped[dict | None] = mapped_column(
+        JSON(none_as_null=True), nullable=True
+    )
     pending_profile_created_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )

@@ -71,7 +71,7 @@ EXIT_OK = 0
 EXIT_BLOCKED = 1
 EXIT_WARN = 2
 
-DEFAULT_TARGET = "0035"
+DEFAULT_TARGET = "0036"
 #: Revisions this migration path has been exercised from.
 #:
 #: 0020 and 0021 are here because origin/main's own alembic head is 0021 (PR19). A
@@ -84,8 +84,8 @@ DEFAULT_TARGET = "0035"
 #: reason: production's stamp at the time its target moved past them (0023 -> 0024, then
 #: 0024 -> 0025, then 0025 -> 0026, then 0026 -> 0027, then 0027 -> 0028, then
 #: 0028 -> 0029, then 0029 -> 0030, then 0030 -> 0031, then 0031 -> 0032, then
-#: 0032 -> 0033, then 0033 -> 0034 — see git history on this constant). Each stays
-#: supported afterward; nothing here narrows. An earlier version of this comment claimed
+#: 0032 -> 0033, then 0033 -> 0034, then 0034 -> 0035 — see git history on this
+#: constant). Each stays supported afterward; nothing here narrows. An earlier version of this comment claimed
 #: 0026 was "already done" and handled by the current == target branch of
 #: revision_status() instead of by membership in this tuple — that stopped being true the
 #: moment DEFAULT_TARGET moved past 0026 (first to 0027, then to 0028, then to 0029, then
@@ -94,7 +94,8 @@ DEFAULT_TARGET = "0035"
 #: 0034 and left 0033 out. Concretely: with DEFAULT_TARGET at 0034 and 0033 absent from
 #: this tuple, a database stamped 0033 is neither current == target nor a supported
 #: start, so revision_status() BLOCKS the very migration (0034) this task adds. Adding it
-#: here is the fix.
+#: here is the fix. 0035 is here for exactly that reason: production is stamped 0035, so
+#: it is the starting point for 0036.
 #:
 #: Starting at 0020/0021 is strictly safer than starting at 0018: uq_agent_messages_run_ts
 #: already exists, so duplicates cannot be present and there is no 0019 index build to
@@ -105,11 +106,12 @@ DEFAULT_TARGET = "0035"
 #: opportunity_assessments), 0030 (one new table, specialist_consults, plus two columns on
 #: opportunity_assessments), 0031 (data-only, no DDL), 0032 (one nullable JSONB column
 #: on llm_call_logs), 0033 (two composite indexes on thread_decisions plus 18
-#: unindexed ondelete-FK columns — see issue #25 P1) and 0034 (two nullable columns plus
-#: one foreign-key constraint on agents).
+#: unindexed ondelete-FK columns — see issue #25 P1), 0034 (two nullable columns plus
+#: one foreign-key constraint on agents) and 0035 (three nullable columns across three
+#: tables, no backfill).
 SUPPORTED_START_REVISIONS = (
     "0018", "0019", "0020", "0021", "0023", "0024", "0025", "0026", "0027", "0028", "0029",
-    "0030", "0031", "0032", "0033", "0034",
+    "0030", "0031", "0032", "0033", "0034", "0035",
 )
 
 #: Start revisions at which migration 0019 has already run, so the expensive
@@ -310,7 +312,7 @@ PLANNED_OBJECTS: tuple[PlannedObject, ...] = (
 
 REVISION_ORDER = (
     "0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027", "0028",
-    "0029", "0030", "0031", "0032", "0033", "0034", "0035",
+    "0029", "0030", "0031", "0032", "0033", "0034", "0035", "0036",
 )
 
 

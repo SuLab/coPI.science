@@ -39,6 +39,20 @@ class OpportunityAssessment(Base):
     subject_agent_id: Mapped[str | None] = mapped_column(String(50), nullable=True)
     channel_name: Mapped[str] = mapped_column(String(100), nullable=False)
     slack_ts: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    #: The interview thread this verdict came out of (the hub's thread root ts).
+    #: One interview yields exactly one assessment — but until 0036 the table did
+    #: not record WHICH interview, so that invariant was unenforceable and, worse,
+    #: unrehydratable: after a restart `SimulationEngine._assessed_threads` is
+    #: empty and the engine cannot tell a first verdict from a re-capture of a
+    #: turn it already stored. Indexed for exactly that per-run lookup.
+    #: NULL on every row written before 0036, and on any row whose thread could
+    #: not be identified. Deliberately NOT unique with `simulation_run_id`: all 63
+    #: historical rows are NULL, so a unique index would have to be partial
+    #: (`WHERE thread_id IS NOT NULL`), and choosing that belongs with the change
+    #: that starts writing the column, not with the one that adds it.
+    thread_id: Mapped[str | None] = mapped_column(
+        String(50), nullable=True, index=True
+    )
 
     company_or_project: Mapped[str | None] = mapped_column(Text, nullable=True)
     funnel_stage: Mapped[str | None] = mapped_column(String(20), nullable=True)
@@ -49,13 +63,25 @@ class OpportunityAssessment(Base):
     weighted_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     band: Mapped[str | None] = mapped_column(String(20), nullable=True)
 
-    gating: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
-    scores: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
-    red_flags: Mapped[list | None] = mapped_column(JSONB, nullable=True)
-    derisking_milestones: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    # `none_as_null=True` on every one of these: see `missing_domains` below for
+    # the full account. Without it SQLAlchemy writes Python `None` as the JSONB
+    # scalar `null`, which is a SECOND physical encoding of "absent" that
+    # `WHERE col IS NULL` does not match. Migration 0036 normalized the rows
+    # already written that way; tests/unit/test_json_none_as_null.py is the drift
+    # alarm that stops a new column reintroducing it a third time.
+    gating: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
+    scores: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
+    red_flags: Mapped[list | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
+    derisking_milestones: Mapped[list | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
     rationale: Mapped[str | None] = mapped_column(Text, nullable=True)
     # The verdict exactly as emitted, so a schema change never loses the original.
-    raw_verdict: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    raw_verdict: Mapped[dict | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
 
     # The specialist floor's finding, recorded rather than enforced by
     # discarding. `_specialist_floor_gap` used to REFUSE an advance/conditional
@@ -100,6 +126,23 @@ class OpportunityAssessment(Base):
     missing_domains: Mapped[list | None] = mapped_column(
         JSONB(none_as_null=True), nullable=True
     )
+    # Was this verdict OWED a specialist panel, as judged when the row was
+    # written? THREE states, and the third is the whole point of the column:
+    #   True  — a panel was owed under the rules in force at write time, so the
+    #           floor evaluated this verdict. `panel_incomplete`/`missing_domains`
+    #           above then say what it found; an empty gap here is a real finding.
+    #   False — no panel was owed (the floor determined this and recorded it).
+    #   NULL  — the row was written before 0036. We do not know whether any floor
+    #           ran at all, and saying "verified" for it is a claim nobody made.
+    # Deliberately NOT backfilled: guessing would manufacture exactly the
+    # verification this column exists to stop asserting.
+    #
+    # It exists because the read path used to re-derive this by calling
+    # `panel_is_owed` at RENDER time, which answers a different question — "would
+    # a panel be owed under today's rules" — and therefore silently re-labels
+    # rows written under an older rule every time the predicate moves. It moved
+    # twice in 2026-08 alone. A durable fact belongs in a column.
+    panel_owed: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
 
     # Which rubric document scored this row (prompts/rubric/blackbird-rubric.toml
     # [meta].version, plus a short content hash of the file bytes). NULL means the
@@ -203,7 +246,20 @@ class AssessmentDrop(Base):
     #: because `llm_call_logs.response_text` happens to keep the raw response.
     #: A refusal is now non-destructive whatever the gate policy of the day is.
     #: NULL for a drop with nothing to keep (`empty_reply`, `missing_sidecar`).
-    raw_verdict: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    #:
+    #: `none_as_null=True` was missing when 0035 added this column, so "nothing to
+    #: keep" got stored two ways at once — production held 15 SQL NULLs and 2 JSONB
+    #: `null`s for one logical state, and the obvious operator query ("which
+    #: refusals kept their verdict?", i.e. `WHERE raw_verdict IS NOT NULL`)
+    #: returned exactly the 2 rows that kept nothing. This is the same defect 0031
+    #: fixed on `OpportunityAssessment.missing_domains` six weeks earlier, on a
+    #: brand-new column, because the only guard was a test about that one column.
+    #: 0036 normalized the 2 rows and added
+    #: tests/unit/test_json_none_as_null.py — a walk over `Base.metadata` — so a
+    #: third occurrence fails the gate instead of reaching production.
+    raw_verdict: Mapped[dict | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

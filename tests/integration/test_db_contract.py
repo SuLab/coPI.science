@@ -260,25 +260,57 @@ async def test_simulation_run_delete_cascades_children(db_session):
 
 
 # --------------------------------------------------------------------------
-# 6. DAT-1: deleting a User who is a PI member of a private channel drives
-#    private_channel_members.user_id -> NULL (FK SET NULL) on a row whose
-#    agent_id is ALSO NULL, violating the CHECK -> the DELETE raises.
+# 6. DAT-1: deleting a User who is a PI member of a private channel. The
+#    membership row must go WITH the user (FK CASCADE, migration 0036).
 # --------------------------------------------------------------------------
 
-async def test_dat1_deleting_pi_member_user_violates_pcm_check(db_session):
+async def test_dat1_deleting_pi_member_user_cascades_the_membership(db_session):
+    """DAT-1, inverted by migration 0036 — and the inversion is the fix.
+
+    Until 0036 this test asserted the OPPOSITE, and did so deliberately: it
+    pinned a real defect so nothing could change it by accident.
+    ``private_channel_members.user_id`` was ``ON DELETE SET NULL`` under
+    ``CHECK ((agent_id IS NULL) <> (user_id IS NULL))``, so on a PI membership row
+    (``agent_id`` already NULL) the cascade's own UPDATE drove BOTH owner columns
+    to NULL and violated that CHECK. The DELETE therefore raised
+    ``pcm_exactly_one_of_agent_or_user`` — meaning ANY user delete for a
+    private-channel member 500'd, both ``POST /profile/delete-account`` and the
+    admin delete.
+
+    SET NULL was never a coherent rule for this column: the row's whole identity
+    is the member it names, so a row with neither owner is not a degraded record,
+    it is an unrepresentable one. 0036 recreates the FK as ON DELETE CASCADE, so
+    the membership goes with the user and the CHECK is never asked to hold an
+    impossible row. ``added_by_user_id`` stays SET NULL and is unaffected — see
+    ``test_dat1_deleting_added_by_user_is_safe`` below, which is the contrast that
+    makes the distinction visible: nulling the ADDER violates no CHECK, so that
+    row must survive.
+
+    The table had 0 production rows when 0036 landed, which is why the swap was
+    cheap then and would only have got dearer.
+    """
     ch = await factories.make_agent_channel(db_session, visibility="collab_private")
     u = await factories.make_user(db_session)
-    await factories.make_private_channel_member(
+    m = await factories.make_private_channel_member(
         db_session, channel=ch, agent_id=None, user_id=u.id, role="pi"
     )
-    with pytest.raises(IntegrityError) as ei:
-        async with db_session.begin_nested():
-            await db_session.execute(
-                text("DELETE FROM users WHERE id = :id"), {"id": u.id}
-            )
-    # Lock the SPECIFIC constraint that fires, so a future schema change that makes a
-    # different IntegrityError fire first can't silently re-point what "DAT-1" pins.
-    assert "pcm_exactly_one_of_agent_or_user" in str(ei.value)
+    # Assert the row is really there first, so the post-delete 0-count below cannot
+    # pass vacuously against a factory that stopped persisting.
+    before = await db_session.scalar(
+        select(func.count())
+        .select_from(PrivateChannelMember)
+        .where(PrivateChannelMember.id == m.id)
+    )
+    assert before == 1
+
+    await db_session.execute(text("DELETE FROM users WHERE id = :id"), {"id": u.id})
+
+    after = await db_session.scalar(
+        select(func.count())
+        .select_from(PrivateChannelMember)
+        .where(PrivateChannelMember.id == m.id)
+    )
+    assert after == 0, "membership row must cascade away with its user, not be nulled"
 
 
 async def test_user_delete_cascades_researcher_profile(db_session):

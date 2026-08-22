@@ -145,7 +145,16 @@ class CohortAuditEvent(Base):
     simulation_run_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), nullable=True
     )
-    topology: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    # `none_as_null=True` so an event with no snapshot stores SQL NULL rather than
+    # the JSON scalar `null`. Both read back as `None` through the ORM, but only
+    # the former is matched by `WHERE topology IS NULL` — and on an audit trail
+    # whose whole purpose is to be queried later, "which events carry a topology?"
+    # returning the wrong set is the one failure that matters. See migration 0031
+    # for the full account and 0036 for the normalization of existing rows;
+    # tests/unit/test_json_none_as_null.py is the drift alarm.
+    topology: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON(none_as_null=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
