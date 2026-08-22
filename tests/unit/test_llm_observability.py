@@ -213,3 +213,77 @@ async def test_an_empty_content_reply_with_no_log_meta_writes_nothing(
 
     assert out == ""
     assert logged == []
+
+
+# ---------------------------------------------------------------------------
+# the hook that could kill the turn it was describing
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "entry_point",
+    ["generate_agent_response", "generate_with_tools", "empty_content_branch"],
+)
+async def test_a_raising_log_callback_does_not_cost_the_reply(
+    monkeypatch, caplog, entry_point
+):
+    """Its two siblings already hold this line; `_emit_call_log` did not.
+
+    `_notify_stop_reason` and `_log_empty_reply` both swallow everything on the
+    stated principle that an observability hook must not cost the reply.
+    `_emit_call_log` invoked the callback bare, and in effect all four of its
+    call sites were unprotected — two have no `try` at all, and the other two
+    sit under a handler that logs and re-raises. The callback is
+    `SimulationEngine._on_llm_call`, which appends to a buffer and can spawn a
+    flush task: a raise there would have destroyed a finished, fully-billed
+    reply on its way out the door.
+    """
+    def _boom(_data):
+        raise RuntimeError("log sink down")
+
+    llm.set_call_log_callback(_boom)
+    try:
+        if entry_point == "generate_agent_response":
+            _install(monkeypatch, FakeAnthropic([text_response("the answer")]))
+            with caplog.at_level(logging.ERROR, logger="src.services.llm"):
+                out = await llm.generate_agent_response(
+                    "sys", [{"role": "user", "content": "hi"}], log_meta=LOG_META
+                )
+            assert out == "the answer"
+        elif entry_point == "generate_with_tools":
+            _install(
+                monkeypatch,
+                FakeAnthropic(
+                    [
+                        tool_use_response("consult_specialist", {}, block_id="t1"),
+                        text_response("the answer"),
+                    ]
+                ),
+            )
+            with caplog.at_level(logging.ERROR, logger="src.services.llm"):
+                out = await llm.generate_with_tools(
+                    system_prompt="sys",
+                    messages=[{"role": "user", "content": "hi"}],
+                    tools=[{"name": "consult_specialist", "input_schema": {}}],
+                    tool_executor=_noop_executor,
+                    log_meta=LOG_META,
+                )
+            assert out == "the answer"
+        else:
+            # The fourth call site: the early return that only started writing a
+            # row at all this cycle. "" is the honest answer here — what must
+            # not happen is a RuntimeError replacing it.
+            _install(
+                monkeypatch, FakeAnthropic([empty_response(stop_reason="refusal")])
+            )
+            with caplog.at_level(logging.ERROR, logger="src.services.llm"):
+                out = await llm.generate_agent_response(
+                    "sys", [{"role": "user", "content": "hi"}], log_meta=LOG_META
+                )
+            assert out == ""
+
+        assert any(
+            "call log callback raised" in r.getMessage() for r in caplog.records
+        ), "swallowed, but never in silence"
+    finally:
+        llm.set_call_log_callback(None)

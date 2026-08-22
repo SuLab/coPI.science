@@ -66,6 +66,21 @@ class _Usage:
     # therefore return None here, not raise and not invent a 0 — a test that
     # cares passes _OutputTokensDetails(...) explicitly.
     output_tokens_details: "_OutputTokensDetails | None" = None
+    # The CACHED halves of the input, which ``input_tokens`` above EXCLUDES:
+    # a cache hit moves tokens out of ``input_tokens`` and into these, it does
+    # not add to them. Absent from this fake until 2026-08-22, which is the
+    # whole reason nothing in CI could see that the prompt-caching change had
+    # gutted every input-token number the system records — 184 of 228 rows on
+    # the one run that used caching report fewer input tokens than the system
+    # prompt alone can be, one of them 2 tokens for a 30 KB prompt.
+    #
+    # None by DEFAULT, matching the deployed SDK (anthropic 1.0.0: both are
+    # ``Optional[int]`` and are None on a reply that used no cache — verified in
+    # the deployed image) and every pre-existing user of this fake, for which
+    # the field is simply not the subject. llm._call_stat must therefore record
+    # None here, not raise and not invent a 0.
+    cache_read_input_tokens: int | None = None
+    cache_creation_input_tokens: int | None = None
 
 
 @dataclass

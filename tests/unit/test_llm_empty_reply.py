@@ -10,7 +10,7 @@ import logging
 import pytest
 
 from src.services import llm
-from tests.fakes import FakeAnthropic, multi_text_response
+from tests.fakes import FakeAnthropic, multi_text_response, tool_use_response
 
 
 def test_all_text_joins_every_text_block():
@@ -113,3 +113,82 @@ async def test_a_truncated_reply_survives_a_retry_that_returns_nothing(
 
     assert out == "partial"
     assert caplog.records == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("whitespace", ["\n\n   \n", " ", "\t\n"])
+async def test_a_whitespace_only_retry_keeps_the_first_pass_text(
+    monkeypatch, caplog, whitespace
+):
+    """`_all_text(retry_msg) or response_text` only defends against "".
+
+    A retry that comes back as a newline, a space, or an indent is TRUTHY, so it
+    won the `or` and replaced a truncated-but-usable first pass with blankness —
+    the same data loss the sibling test above pins, through a value the guard
+    did not consider. The turn then posts nothing and looks like a model that
+    said nothing.
+
+    The first pass is kept VERBATIM rather than stripped: `response_text` is
+    what lands in `llm_call_logs.response_text` and what the backfill scripts
+    regex for `<assessment_json>`, so trimming here would silently rewrite the
+    stored record of the reply.
+    """
+    fake = FakeAnthropic(responses=[
+        multi_text_response("  partial verdict\n", stop_reason="max_tokens"),
+        multi_text_response(whitespace),
+    ])
+    monkeypatch.setattr("src.services.llm.get_anthropic_client", lambda: fake)
+
+    async def _executor(name, params):
+        return "unused"
+
+    with caplog.at_level(logging.ERROR, logger="src.services.llm"):
+        out = await llm.generate_with_tools(
+            system_prompt="s",
+            messages=[{"role": "user", "content": "u"}],
+            tools=[{"name": "t", "description": "d",
+                    "input_schema": {"type": "object"}}],
+            tool_executor=_executor,
+        )
+
+    assert out == "  partial verdict\n"
+    assert caplog.records == []
+
+
+@pytest.mark.asyncio
+async def test_a_whitespace_only_retry_keeps_the_first_pass_in_the_other_two_sites(
+    monkeypatch
+):
+    """The same three-line pattern guards three call sites, so all three are
+    pinned: `generate_agent_response`'s retry (here) and
+    `generate_with_tools`'s forced-final retry (below)."""
+    fake = FakeAnthropic(responses=[
+        multi_text_response("partial", stop_reason="max_tokens"),
+        multi_text_response("\n \n"),
+    ])
+    monkeypatch.setattr("src.services.llm.get_anthropic_client", lambda: fake)
+
+    assert await llm.generate_agent_response(
+        "s", [{"role": "user", "content": "u"}]
+    ) == "partial"
+
+    fake = FakeAnthropic(responses=[
+        tool_use_response("t", {}, block_id="a"),
+        tool_use_response("t", {}, block_id="b"),
+        multi_text_response("partial forced", stop_reason="max_tokens"),
+        multi_text_response("   "),
+    ])
+    monkeypatch.setattr("src.services.llm.get_anthropic_client", lambda: fake)
+
+    async def _executor(name, params):
+        return "unused"
+
+    out = await llm.generate_with_tools(
+        system_prompt="s",
+        messages=[{"role": "user", "content": "u"}],
+        tools=[{"name": "t", "description": "d",
+                "input_schema": {"type": "object"}}],
+        tool_executor=_executor,
+        max_tool_rounds=1,
+    )
+    assert out == "partial forced"

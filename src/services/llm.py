@@ -1,11 +1,14 @@
 """Anthropic Claude API wrapper."""
 
 import asyncio
+import contextvars
 import json
 import logging
 import time
+import weakref
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
-from functools import lru_cache
+from functools import lru_cache, partial
 from typing import Any, Callable
 
 import anthropic
@@ -77,9 +80,14 @@ NONSTREAMING_MAX_TOKENS = 21_333
 # response_text, model, input_tokens, output_tokens, latency_ms, call_stats, and
 # any extra keys from log_meta.
 #
-# ONE callback fires per TURN, not per API call — and a turn is 1..7 real API
-# calls (up to max_tool_rounds tool rounds, a terminating or forced-final call,
-# and at most one max_tokens retry). `input_tokens`/`output_tokens` are therefore
+# ONE callback fires per TURN, not per API call — and a turn is 1..8 real API
+# calls at the default `max_tool_rounds=5`: up to max_tool_rounds + 1 tool-capable
+# calls (the loop is `range(max_tool_rounds + 1)` — see the comment on it, which
+# explains why the `+ 1` stays), a terminating or forced-final call, and at most
+# one max_tokens retry. This comment said "1..7" until 2026-08-22, taking the
+# setting's name at face value and under-counting the loop by one.
+#
+# `input_tokens`/`output_tokens` are
 # per-turn CUMULATIVE totals: correct for billing, and deliberately left that way
 # because SimulationEngine rebuilds `api_call_count` as a row COUNT and the rate
 # limiter's `call_times` as one entry per row, so splitting a turn into several
@@ -196,6 +204,92 @@ def get_anthropic_client() -> anthropic.Anthropic:
     return _client_for_key(settings.anthropic_api_key)
 
 
+# How many real API requests this process may have in flight at once.
+#
+# 8 = one full specialist panel. That is the largest fan-out a single turn can
+# ask for (a concluding hub turn gathers up to 8 ``consult_specialist`` calls),
+# so a panel is never re-serialized — that gather is what recovered 2,344 s,
+# 21.2% of run 8b64a0e0 — while four concurrent reply-lane turns queue against
+# the API rather than opening 32 sockets at once.
+#
+# There has to be a number here at all because the dedicated pool below removes
+# one. ``asyncio.to_thread`` submits to the loop's DEFAULT executor, which is
+# ``min(32, cpu_count + 4)`` = **6** threads on this 2-vCPU host (measured in the
+# deployed container: ``cpu_count 2``, ``default max_workers 6``). That 6 was an
+# accident, but a load-bearing one: nothing in this module paces requests and the
+# SDK gives up after two 429s. Sizing "from the intended fan-out" instead
+# computes to ``reply_lane_max_in_flight=4`` x 8 specialists = 32 concurrent
+# 300-second requests, which is not a throttle at all.
+_API_MAX_CONCURRENCY = 8
+
+# The pool the requests actually run on, and why it is not the default one:
+# ``src/agent/slack_client.py`` routes EVERY Slack call through
+# ``asyncio.to_thread`` as well, so 8 gathered consults at this module's 300 s
+# read timeout could starve the Slack pollers, the persist flush and the roster
+# sync out of the same 6 threads.
+#
+# 12 = the 8 above plus slack for orphans. A cancelled ``_acreate`` (shutdown, a
+# ``wait_for``) releases its semaphore slot the moment the await unwinds, but the
+# thread it left behind stays blocked inside the HTTP request until the read
+# timeout fires — up to 300 s. Without that margin a few of those would make the
+# POOL the binding constraint again, which is the thing this constant exists to
+# stop being decided by accident.
+_API_EXECUTOR_MAX_WORKERS = 12
+
+# Named, so a thread dump (or a test) can tell an API request apart from the
+# default pool's Slack/DB work at a glance.
+_API_THREAD_NAME_PREFIX = "llm-api"
+
+_api_executor: ThreadPoolExecutor | None = None
+
+
+def _get_api_executor() -> ThreadPoolExecutor:
+    """The API thread pool, created on first use.
+
+    LAZILY, because the web tier imports this module too (``synthesize_profile``,
+    ``email_inbound.classify_reply``) and most of those processes never make an
+    LLM call — 12 idle threads per uvicorn worker would be a cost for nothing.
+
+    Never shut down, deliberately, and that CHANGES SHUTDOWN ORDERING: the
+    default executor is drained by ``loop.shutdown_default_executor()`` inside
+    ``asyncio.run``, whereas a pool of our own is joined by
+    ``concurrent.futures``' atexit hook at INTERPRETER exit. So ``asyncio.run``
+    can now return — and ``src/agent/main.py``'s finally-block flush can run —
+    while a request is still in flight here, with the process blocking at exit
+    instead. That is the right order for the durable flush (the DB, not Slack, is
+    the store of record), at the price of a stuck request holding the process
+    open for up to CLIENT_READ_TIMEOUT_SECONDS after the run "finished".
+    """
+    global _api_executor
+    if _api_executor is None:
+        _api_executor = ThreadPoolExecutor(
+            max_workers=_API_EXECUTOR_MAX_WORKERS,
+            thread_name_prefix=_API_THREAD_NAME_PREFIX,
+        )
+    return _api_executor
+
+
+# One semaphore per LOOP, not one per process. ``asyncio.Semaphore`` binds itself
+# to the first running loop that touches it and raises RuntimeError ("is bound to
+# a different event loop") on every other one — so a module-level singleton would
+# work in the agent process, which has exactly one loop, and fail from the second
+# test onwards in a suite that gives each test its own. Weak keys so a finished
+# loop's entry goes with it.
+_api_semaphores: "weakref.WeakKeyDictionary[Any, asyncio.Semaphore]" = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def _api_semaphore() -> asyncio.Semaphore:
+    """The running loop's API-concurrency semaphore, created on first use."""
+    loop = asyncio.get_running_loop()
+    semaphore = _api_semaphores.get(loop)
+    if semaphore is None:
+        semaphore = asyncio.Semaphore(_API_MAX_CONCURRENCY)
+        _api_semaphores[loop] = semaphore
+    return semaphore
+
+
 async def _acreate(client: anthropic.Anthropic, **kwargs: Any):
     """``client.messages.create`` awaited OFF the event-loop thread.
 
@@ -207,8 +301,15 @@ async def _acreate(client: anthropic.Anthropic, **kwargs: Any):
     flush, the roster sync, and the asyncio SIGTERM handler (so `docker stop`
     escalated to SIGKILL and lost the shutdown flush).
 
-    ``to_thread`` keeps the sync client (no SDK swap, no behaviour change per
-    call) while giving the loop back. See tests/unit/test_llm_event_loop.py.
+    Running it on a thread keeps the sync client (no SDK swap, no behaviour
+    change per call) while giving the loop back. See
+    tests/unit/test_llm_event_loop.py.
+
+    On a pool of OUR OWN rather than ``asyncio.to_thread``'s default one, and
+    under a semaphore: see _API_MAX_CONCURRENCY and _API_EXECUTOR_MAX_WORKERS for
+    both numbers and what the default pool's 6 threads were silently doing to a
+    gathered specialist panel — and to every Slack call in the process, which
+    reaches its own thread through the same default pool.
 
     Also the single place ``thinking`` is defaulted, deliberately. On Opus 5 and
     Sonnet 5, OMITTING ``thinking`` runs ADAPTIVE thinking; on the 4.6 pair this
@@ -249,7 +350,20 @@ async def _acreate(client: anthropic.Anthropic, **kwargs: Any):
             "Lower the call site's max_tokens, or move that call to the "
             "streaming API."
         )
-    return await asyncio.to_thread(client.messages.create, **kwargs)
+    # Everything ``asyncio.to_thread`` does except choosing the pool: the
+    # ``contextvars.Context`` copy is the part a bare ``run_in_executor`` would
+    # drop, and dropping it would silently unbind anything context-local (the
+    # agent/phase bindings a logging filter or a tracer reads) inside the thread.
+    #
+    # The semaphore is acquired around the whole request, so the slot is held for
+    # the call's real duration rather than for the submission.
+    ctx = contextvars.copy_context()
+    loop = asyncio.get_running_loop()
+    async with _api_semaphore():
+        return await loop.run_in_executor(
+            _get_api_executor(),
+            partial(ctx.run, client.messages.create, **kwargs),
+        )
 
 
 # The one tool a round may run in parallel with its siblings, and the only one.
@@ -420,6 +534,26 @@ def _block_types(message: Any) -> list[str | None]:
         return []
 
 
+def is_truncated_stop(stop_reason: str | None) -> bool:
+    """True when the model stopped before finishing its answer.
+
+    Both values mean "the text in hand is incomplete": ``refusal`` is the
+    classifier cutting the generation, ``max_tokens`` is the ceiling doing it.
+    A ``refusal``-only test misses every turn that truncated, retried, and
+    truncated again — and misses a fallthrough from the retry path, which
+    reports ``max_tokens`` even when the first pass was refused.
+
+    Public and defined ONCE, because the call sites that act on this are
+    scattered (a specialist opinion published as ``⚠️ caution``, a
+    working-memory write, a hub reply posted to Slack) and they were disagreeing
+    about which reasons count — which is how run 8b64a0e0 posted 4 truncated
+    replies as complete while a refusal-truncated memory overwrote a complete
+    one. ``_notify_stop_reason`` reports "" for a reply carrying no stop_reason,
+    so the None case is spelled out here rather than left to a caller.
+    """
+    return stop_reason in {"refusal", "max_tokens"}
+
+
 def _notify_stop_reason(
     callback: Callable[[str], None] | None, message: Any
 ) -> None:
@@ -451,6 +585,20 @@ def _notify_stop_reason(
         logger.exception(
             "on_stop_reason callback raised; the reply is unaffected"
         )
+
+
+def _sum_reported(call_stats: list[dict[str, Any]], key: str) -> int | None:
+    """A turn's total for one OPTIONAL per-call number, or None if none reported.
+
+    None rather than 0, because the columns these feed are nullable for a
+    reason: a turn whose SDK never reported ``cache_read_input_tokens`` and a
+    turn that genuinely read nothing from the cache are different facts, and only
+    the second one belongs in an average. Entries that reported the field are
+    summed even when their siblings did not — a partial answer is still the best
+    available one.
+    """
+    reported = [c.get(key) for c in call_stats if c.get(key) is not None]
+    return sum(reported) if reported else None
 
 
 def _emit_call_log(
@@ -486,10 +634,19 @@ def _emit_call_log(
 
     The ``_call_log_callback and log_meta`` gate is unchanged, so an
     uninstrumented call site still writes nothing.
+
+    The callback itself cannot kill the turn: it is ``SimulationEngine
+    ._on_llm_call``, which appends to a buffer and may spawn a flush task, and
+    it used to be invoked bare — from four call sites of which two have no
+    ``try`` at all and two sit under a handler that re-raises. So a failing log
+    sink would have destroyed a finished, fully-billed reply on its way out the
+    door. Same principle as ``_notify_stop_reason`` and ``_log_empty_reply``: an
+    observability hook must not cost the reply it is describing.
     """
-    if not (_call_log_callback and log_meta):
+    callback = _call_log_callback
+    if not (callback and log_meta):
         return
-    _call_log_callback({
+    payload = {
         "system_prompt": system_prompt,
         "messages": messages,
         "response_text": response_text,
@@ -504,10 +661,32 @@ def _emit_call_log(
         # also includes the tool execution between rounds, which is what actually
         # makes a hub turn slow.
         "wall_ms": wall_ms,
+        # The cached input this turn read and wrote, per-turn cumulative like
+        # `input_tokens` beside it — but SUMMED FROM `call_stats` rather than
+        # accumulated at each of the six sites that add up the other totals.
+        # Derived in one place, they cannot drift from the entries they are
+        # supposed to total, and the failure path in `generate_with_tools` gets
+        # them right for free. None (not 0) when no call reported either field:
+        # "the SDK told us nothing" and "the cache was read zero times" are
+        # different answers, and the columns are nullable for that reason.
+        "cache_read_input_tokens": _sum_reported(
+            call_stats, "cache_read_input_tokens"
+        ),
+        "cache_creation_input_tokens": _sum_reported(
+            call_stats, "cache_creation_input_tokens"
+        ),
         "call_stats": call_stats,
         "completed_at": datetime.now(timezone.utc),
         **log_meta,
-    })
+    }
+    try:
+        callback(payload)
+    except Exception:  # noqa: BLE001 — a logging hook must not cost the reply
+        logger.exception(
+            "LLM call log callback raised; the reply is unaffected, but this "
+            "turn's row is lost (agent=%s phase=%s)",
+            log_meta.get("agent_id", "?"), log_meta.get("phase", "?"),
+        )
 
 
 def _call_stat(
@@ -535,6 +714,36 @@ def _call_stat(
         "input_tokens": getattr(usage, "input_tokens", None),
         "output_tokens": getattr(usage, "output_tokens", None),
         "thinking_tokens": _thinking_tokens(usage),
+        # The CACHED halves of the input, which ``input_tokens`` above EXCLUDES:
+        # a cache hit MOVES tokens out of ``input_tokens``, it does not add to
+        # them. Unread by anything in this repo until 2026-08-22, so the
+        # prompt-caching change silently gutted every input-token number the
+        # system records — 184 of the 228 rows on the one run that used caching
+        # report fewer input tokens than the system prompt alone can be, one
+        # ``call_stats`` entry recording 2 input tokens for a 30 KB prompt.
+        #
+        # Kept as their own numbers rather than folded into ``input_tokens``,
+        # for the reason src/models/agent_activity.py gives for adding ``wall_ms``
+        # instead of redefining ``latency_ms``: a column that means "uncached
+        # input" before a date and "all input" after it cannot be summed across
+        # the change. They are also billed at three different rates. Whatever
+        # wants the total can add the three.
+        #
+        # Read through ``getattr`` like ``_thinking_tokens``: both fields are
+        # ``Optional[int]`` and are None on any reply that used no cache
+        # (verified on the deployed anthropic 1.0.0), and an older SDK does not
+        # carry them at all — so a bare arithmetic use of either is a TypeError
+        # raised inside a billed turn.
+        #
+        # ``usage.cache_creation`` is deliberately NOT read: it is the same
+        # ``cache_creation_input_tokens`` broken out per TTL bucket
+        # (``ephemeral_5m_input_tokens`` + ``ephemeral_1h_input_tokens``), so
+        # recording it alongside would count every cache write twice. There is
+        # nothing to "complete" here later.
+        "cache_read_input_tokens": getattr(usage, "cache_read_input_tokens", None),
+        "cache_creation_input_tokens": getattr(
+            usage, "cache_creation_input_tokens", None
+        ),
         "stop_reason": getattr(message, "stop_reason", None),
         # What the reply was actually MADE of. `stop_reason` says why generation
         # ended; this says what came back, which is the only way to tell a
@@ -823,7 +1032,18 @@ async def generate_agent_response(
             retry_latency = (time.monotonic() - t0) * 1000
             latency_ms += retry_latency
             final_message = retry_msg
-            response_text = _all_text(retry_msg) or response_text
+            # `_all_text(retry_msg) or response_text` only defended against "".
+            # A retry that comes back as "\n\n   \n" is TRUTHY, so it won the
+            # `or` and replaced a truncated-but-usable first pass with
+            # blankness — which the engine reads as "the model said nothing"
+            # and skips, losing the turn to the very retry meant to save it.
+            #
+            # Tested, not stripped: `response_text` is what lands in
+            # `llm_call_logs.response_text` VERBATIM and what the backfill
+            # scripts regex for `<assessment_json>`, so storing the stripped
+            # text here would quietly rewrite the record of the reply.
+            retry_text = _all_text(retry_msg)
+            response_text = retry_text if retry_text.strip() else response_text
             if not response_text.strip():
                 _log_empty_reply(
                     retry_msg, model=model, log_meta=log_meta,
@@ -932,6 +1152,11 @@ async def generate_with_tools(
     Loops: call API -> if tool_use blocks, execute tools, append results,
     re-call until we get a final text response or hit max_tool_rounds.
 
+    ``max_tool_rounds`` names the rounds, and the loop makes
+    ``max_tool_rounds + 1`` tool-capable calls — the setting under-counts the
+    calls by one, deliberately and permanently. See the comment on the loop
+    itself for why the ``+ 1`` stays.
+
     Returns the final text response.
 
     ``on_retry``, same contract as ``generate_agent_response``'s: it fires
@@ -991,19 +1216,245 @@ async def generate_with_tools(
     # set, below.
     cached_tool_result: dict[str, Any] | None = None
 
-    for round_num in range(max_tool_rounds + 1):
-        # Round 0 always runs — without it this returns nothing at all. From
-        # round 1 on, a stop request ends the loop rather than opening another
-        # round. `break` (not `return`) so control reaches the forced-final call
-        # below and the caller still gets a reply to post.
-        if round_num > 0 and should_continue is not None and not should_continue():
-            logger.info(
-                "Stop requested — ending the tool loop after %d round(s) "
-                "instead of %d, so shutdown is not blocked by further calls",
-                round_num, max_tool_rounds,
-            )
-            break
+    # Everything below runs under ONE guard, at the bottom of this function.
+    # See it for why the class of bug it closes cannot be fixed at the retry
+    # sites: the tool-round `_acreate`, `_execute_tool_blocks` and
+    # `b.model_dump()` can each raise after a round has been BILLED, and every
+    # one of them used to take the whole turn's record with it.
+    #
+    # These are read by that guard, alongside `call_stats` and the two totals
+    # above, so they are bound before the `try` and kept current as the turn
+    # proceeds.
+    latency_ms = 0.0
+    # The best answer in hand, and the reply that produced it, if the turn dies
+    # from here on. `None` means "nothing salvageable — re-raise"; "" means "the
+    # turn got far enough that returning nothing is the honest outcome".
+    recovered_text: str | None = None
+    recovered_message: Any = None
 
+    try:
+        # `+ 1` — one more tool-capable call than the setting names, and it
+        # STAYS. It reads like an off-by-one and behaves like headroom nobody
+        # has ever needed: across all 1,121 stored rows carrying `call_stats`,
+        # the most rounds any turn used is 4 against a budget of 6, and no
+        # caller anywhere passes `max_tool_rounds` at all. Removing it would
+        # also delete coverage rather than add it — seven tests pass
+        # `max_tool_rounds=1` as SETUP to force a two-round turn (the only
+        # multi-round path the suite exercises), so `range(max_tool_rounds)`
+        # would turn all of them into single-round turns that assert nothing.
+        # The documentation was wrong, not the loop; it has been corrected
+        # instead (the module comment on `call_stats`, this function's
+        # docstring, and the "Max tool rounds" warning below).
+        for round_num in range(max_tool_rounds + 1):
+            # Round 0 always runs — without it this returns nothing at all. From
+            # round 1 on, a stop request ends the loop rather than opening another
+            # round. `break` (not `return`) so control reaches the forced-final call
+            # below and the caller still gets a reply to post.
+            if round_num > 0 and should_continue is not None and not should_continue():
+                logger.info(
+                    "Stop requested — ending the tool loop after %d round(s) "
+                    "instead of %d, so shutdown is not blocked by further calls",
+                    round_num, max_tool_rounds,
+                )
+                break
+
+            t0 = time.monotonic()
+            message = await _acreate(
+                client,
+                model=model,
+                max_tokens=max_tokens,
+                system=system_prompt,
+                messages=conversation,
+                tools=tools,
+                # ADAPTIVE here, unlike every other call site in this module (which
+                # take _acreate's thinking-disabled default). This is the only call
+                # that passes `tools`, and on Opus 5 a thinking-DISABLED turn can
+                # write a tool call into its visible TEXT instead of emitting a
+                # tool_use block: the turn succeeds, the call never runs, and no
+                # error is raised. For the hub that would mean silently skipping
+                # consult_specialist — the panel would look convened and never be.
+                # Thinking shares the max_tokens budget, so this path's budget was
+                # raised alongside this change (src/agent/simulation.py).
+                # The truncation retry below deliberately does NOT set this: it
+                # passes no `tools`, so it carries no tool-in-text risk and is
+                # better off spending its whole budget on the answer.
+                thinking={"type": "adaptive"},
+            )
+            latency_ms = (time.monotonic() - t0) * 1000
+            total_input_tokens += message.usage.input_tokens
+            total_output_tokens += message.usage.output_tokens
+
+            # Check if the response contains tool use
+            tool_use_blocks = [b for b in message.content if b.type == "tool_use"]
+
+            # Recorded for EVERY round, not just the terminating one. `stop_reason`
+            # used to be inspected only inside the `not tool_use_blocks` branch
+            # below, so a tool-use round that hit max_tokens left no log line and no
+            # DB trace whatsoever — the single blindest spot in this module, and the
+            # one that made the truncation count on the last sizing exercise a guess.
+            seq += 1
+            call_stats.append(
+                _call_stat(
+                    seq=seq,
+                    kind="final" if not tool_use_blocks else "round",
+                    max_tokens=max_tokens,
+                    message=message,
+                    latency_ms=latency_ms,
+                )
+            )
+
+            if not tool_use_blocks:
+                # Final text response — no more tool calls
+                response_text = _all_text(message)
+                # The call that ended the turn; reassigned by the retry below.
+                final_message = message
+                if not response_text.strip() and message.stop_reason != "max_tokens":
+                    _log_empty_reply(
+                        message, model=model, log_meta=log_meta, where="final"
+                    )
+
+                # Retry once with higher max_tokens if response was truncated
+                if message.stop_reason == "max_tokens":
+                    retry_max = _retry_budget(
+                        max_tokens, model=model, log_meta=log_meta
+                    )
+                    logger.warning(
+                        "Response truncated (stop_reason=max_tokens, %d tokens). "
+                        "Retrying with max_tokens=%d",
+                        message.usage.output_tokens, retry_max,
+                    )
+                    # If the retry throws, THIS is the answer: truncated, billed,
+                    # and the best one available — the retry is the call most
+                    # likely to fail (it asks for up to NONSTREAMING_MAX_TOKENS,
+                    # ~351 s of generation against a 300 s read timeout) and the
+                    # reply it would discard is a concluding hub turn's verdict.
+                    # `message`, not `final_message`: the stop_reason reported
+                    # must be true of the TEXT being returned, which is
+                    # `max_tokens`.
+                    recovered_text, recovered_message = response_text, message
+                    t0 = time.monotonic()
+                    retry_msg = await _acreate(
+                        client,
+                        model=model,
+                        max_tokens=retry_max,
+                        system=system_prompt,
+                        messages=conversation,
+                    )
+                    # Second real, billed API call for what the caller booked as
+                    # one turn — fire the caller's own accounting hook (if any),
+                    # same reasoning as generate_agent_response's retry (B0).
+                    if on_retry is not None:
+                        on_retry()
+                    retry_latency = (time.monotonic() - t0) * 1000
+                    latency_ms += retry_latency
+                    total_input_tokens += retry_msg.usage.input_tokens
+                    total_output_tokens += retry_msg.usage.output_tokens
+                    seq += 1
+                    call_stats.append(
+                        _call_stat(
+                            seq=seq, kind="retry", max_tokens=retry_max,
+                            message=retry_msg, latency_ms=retry_latency,
+                        )
+                    )
+                    final_message = retry_msg
+                    # Whitespace is truthy and is not an answer — see the same
+                    # three lines in generate_agent_response for the whole story.
+                    retry_text = _all_text(retry_msg)
+                    response_text = (
+                        retry_text if retry_text.strip() else response_text
+                    )
+                    if not response_text.strip():
+                        _log_empty_reply(
+                            retry_msg, model=model, log_meta=log_meta,
+                            where="final_retry",
+                        )
+                    if retry_msg.stop_reason == "max_tokens":
+                        # Loud and specific, matching generate_agent_response: a
+                        # silent still-truncated retry here drops the tail of a
+                        # phase-4 reply (e.g. the closing </slack_message> tag)
+                        # with no trace in the logs.
+                        agent_id = (log_meta or {}).get("agent_id", "?")
+                        phase = (log_meta or {}).get("phase", "?")
+                        logger.error(
+                            "Response still truncated after 2x max_tokens retry "
+                            "(model=%s agent=%s phase=%s retry_max_tokens=%d "
+                            "out_tok=%d) — returning the truncated text; anything "
+                            "the model emits last (e.g. a closing tag) may be "
+                            "missing from it.",
+                            model, agent_id, phase, retry_max,
+                            retry_msg.usage.output_tokens,
+                        )
+
+                _emit_call_log(
+                    system_prompt=system_prompt,
+                    messages=conversation,
+                    response_text=response_text,
+                    model=model,
+                    input_tokens=total_input_tokens,
+                    output_tokens=total_output_tokens,
+                    latency_ms=latency_ms,
+                    call_stats=call_stats,
+                    log_meta=log_meta,
+                    wall_ms=(time.monotonic() - _turn_t0) * 1000,
+                )
+                _notify_stop_reason(on_stop_reason, final_message)
+
+                return response_text
+
+            # Append the assistant message with tool_use blocks
+            conversation.append({
+                "role": "assistant",
+                "content": [b.model_dump() for b in message.content],
+            })
+
+            # Execute this round's tool calls — consults together, the rest serially
+            # — and build one tool_result per block, in block order.
+            tool_results = await _execute_tool_blocks(tool_use_blocks, tool_executor)
+
+            # The message-side cache breakpoint, ROLLED FORWARD rather than
+            # accumulated: the API allows at most 4 `cache_control` blocks per
+            # request and a 5-round turn would want 6. Moving it is free — a marker
+            # designates where to check for and write a cache entry, it is not part
+            # of the content being matched, so dropping the previous round's does not
+            # invalidate the entry it wrote. The tool outputs are the bulk of what
+            # each subsequent round re-sends, so this is where the second breakpoint
+            # earns its keep.
+            #
+            # Caveat worth knowing: a breakpoint walks back at most 20 content blocks
+            # looking for a prior entry, and one round of 8 consults contributes 16
+            # blocks. A round that wide can miss the previous round's entry even
+            # though the marker is placed correctly.
+            if tool_results:
+                if cached_tool_result is not None:
+                    cached_tool_result.pop("cache_control", None)
+                tool_results[-1]["cache_control"] = _EPHEMERAL_CACHE
+                cached_tool_result = tool_results[-1]
+
+            conversation.append({"role": "user", "content": tool_results})
+
+            logger.debug(
+                "Tool-use round %d: %d tool calls",
+                round_num + 1,
+                len(tool_use_blocks),
+            )
+
+        # Exhausted max rounds — force a final call without tools.
+        #
+        # `max_tool_rounds + 1`, because that is how many tool-capable calls the
+        # loop above actually made; naming the SETTING here under-counted them by
+        # one for as long as this line has existed.
+        logger.warning(
+            "Max tool rounds (%d) reached, forcing final response",
+            max_tool_rounds + 1,
+        )
+        # From here on, an exception returns "" instead of raising: the tool loop
+        # is over, its rounds are billed and recorded, and there is nothing left
+        # to try. Deliberately NOT a fallthrough into the accounting below —
+        # `response_text` is unbound at this point and `message` still points at
+        # the LAST TOOL ROUND, so falling through would add that round's tokens a
+        # second time and label the entry `forced_final`, inventing an API call
+        # that never happened.
+        recovered_text = ""
         t0 = time.monotonic()
         message = await _acreate(
             client,
@@ -1011,116 +1462,125 @@ async def generate_with_tools(
             max_tokens=max_tokens,
             system=system_prompt,
             messages=conversation,
-            tools=tools,
-            # ADAPTIVE here, unlike every other call site in this module (which
-            # take _acreate's thinking-disabled default). This is the only call
-            # that passes `tools`, and on Opus 5 a thinking-DISABLED turn can
-            # write a tool call into its visible TEXT instead of emitting a
-            # tool_use block: the turn succeeds, the call never runs, and no
-            # error is raised. For the hub that would mean silently skipping
-            # consult_specialist — the panel would look convened and never be.
-            # Thinking shares the max_tokens budget, so this path's budget was
-            # raised alongside this change (src/agent/simulation.py).
-            # The truncation retry below deliberately does NOT set this: it
-            # passes no `tools`, so it carries no tool-in-text risk and is
-            # better off spending its whole budget on the answer.
-            thinking={"type": "adaptive"},
         )
         latency_ms = (time.monotonic() - t0) * 1000
         total_input_tokens += message.usage.input_tokens
         total_output_tokens += message.usage.output_tokens
-
-        # Check if the response contains tool use
-        tool_use_blocks = [b for b in message.content if b.type == "tool_use"]
-
-        # Recorded for EVERY round, not just the terminating one. `stop_reason`
-        # used to be inspected only inside the `not tool_use_blocks` branch
-        # below, so a tool-use round that hit max_tokens left no log line and no
-        # DB trace whatsoever — the single blindest spot in this module, and the
-        # one that made the truncation count on the last sizing exercise a guess.
+        # `forced_final` rather than `final`: this call is reached either by
+        # exhausting max_tool_rounds or by the cooperative-shutdown `break` above,
+        # and both are worth telling apart from a turn that finished on its own —
+        # the tool loop spent its budget before the answer was written.
         seq += 1
         call_stats.append(
             _call_stat(
-                seq=seq,
-                kind="final" if not tool_use_blocks else "round",
-                max_tokens=max_tokens,
-                message=message,
-                latency_ms=latency_ms,
+                seq=seq, kind="forced_final", max_tokens=max_tokens,
+                message=message, latency_ms=latency_ms,
             )
         )
+        response_text = _all_text(message)
+        # The call that ended the turn; reassigned by the retry below.
+        final_message = message
+        if not response_text.strip() and message.stop_reason != "max_tokens":
+            _log_empty_reply(
+                message, model=model, log_meta=log_meta, where="forced_final"
+            )
 
-        if not tool_use_blocks:
-            # Final text response — no more tool calls
-            response_text = _all_text(message)
-            # The call that ended the turn; reassigned by the retry below.
-            final_message = message
-            if not response_text.strip() and message.stop_reason != "max_tokens":
+        # Retry once with higher max_tokens if response was truncated
+        if message.stop_reason == "max_tokens":
+            retry_max = _retry_budget(max_tokens, model=model, log_meta=log_meta)
+            logger.warning(
+                "Response truncated after max rounds (stop_reason=max_tokens, %d tokens). "
+                "Retrying with max_tokens=%d",
+                message.usage.output_tokens, retry_max,
+            )
+            # Same as the other retry site: a retry that throws must not take
+            # the truncated forced-final reply down with it.
+            recovered_text, recovered_message = response_text, message
+            t0 = time.monotonic()
+            retry_msg = await _acreate(
+                client,
+                model=model,
+                max_tokens=retry_max,
+                system=system_prompt,
+                messages=conversation,
+            )
+            # Second real, billed API call for what the caller booked as one
+            # turn — same accounting hook as the other retry site above (B0).
+            if on_retry is not None:
+                on_retry()
+            retry_latency = (time.monotonic() - t0) * 1000
+            latency_ms += retry_latency
+            total_input_tokens += retry_msg.usage.input_tokens
+            total_output_tokens += retry_msg.usage.output_tokens
+            seq += 1
+            call_stats.append(
+                _call_stat(
+                    seq=seq, kind="retry", max_tokens=retry_max,
+                    message=retry_msg, latency_ms=retry_latency,
+                )
+            )
+            final_message = retry_msg
+            # Whitespace is truthy and is not an answer — see the same three lines
+            # in generate_agent_response for the whole story.
+            retry_text = _all_text(retry_msg)
+            response_text = retry_text if retry_text.strip() else response_text
+            if not response_text.strip():
                 _log_empty_reply(
-                    message, model=model, log_meta=log_meta, where="final"
+                    retry_msg, model=model, log_meta=log_meta,
+                    where="forced_final_retry",
+                )
+            if retry_msg.stop_reason == "max_tokens":
+                # This retry site never re-checked stop_reason at all before this
+                # fix — a still-truncated response after exhausting max_tool_rounds
+                # AND doubling max_tokens passed silently. Loud and specific, same
+                # as the other retry site.
+                agent_id = (log_meta or {}).get("agent_id", "?")
+                phase = (log_meta or {}).get("phase", "?")
+                logger.error(
+                    "Response still truncated after 2x max_tokens retry "
+                    "(model=%s agent=%s phase=%s retry_max_tokens=%d "
+                    "out_tok=%d) — returning the truncated text; anything "
+                    "the model emits last (e.g. a closing tag) may be "
+                    "missing from it.",
+                    model, agent_id, phase, retry_max, retry_msg.usage.output_tokens,
                 )
 
-            # Retry once with higher max_tokens if response was truncated
-            if message.stop_reason == "max_tokens":
-                retry_max = _retry_budget(
-                    max_tokens, model=model, log_meta=log_meta
-                )
-                logger.warning(
-                    "Response truncated (stop_reason=max_tokens, %d tokens). "
-                    "Retrying with max_tokens=%d",
-                    message.usage.output_tokens, retry_max,
-                )
-                t0 = time.monotonic()
-                retry_msg = await _acreate(
-                    client,
-                    model=model,
-                    max_tokens=retry_max,
-                    system=system_prompt,
-                    messages=conversation,
-                )
-                # Second real, billed API call for what the caller booked as
-                # one turn — fire the caller's own accounting hook (if any),
-                # same reasoning as generate_agent_response's retry (B0).
-                if on_retry is not None:
-                    on_retry()
-                retry_latency = (time.monotonic() - t0) * 1000
-                latency_ms += retry_latency
-                total_input_tokens += retry_msg.usage.input_tokens
-                total_output_tokens += retry_msg.usage.output_tokens
-                seq += 1
-                call_stats.append(
-                    _call_stat(
-                        seq=seq, kind="retry", max_tokens=retry_max,
-                        message=retry_msg, latency_ms=retry_latency,
-                    )
-                )
-                final_message = retry_msg
-                response_text = _all_text(retry_msg) or response_text
-                if not response_text.strip():
-                    _log_empty_reply(
-                        retry_msg, model=model, log_meta=log_meta,
-                        where="final_retry",
-                    )
-                if retry_msg.stop_reason == "max_tokens":
-                    # Loud and specific, matching generate_agent_response: a
-                    # silent still-truncated retry here drops the tail of a
-                    # phase-4 reply (e.g. the closing </slack_message> tag)
-                    # with no trace in the logs.
-                    agent_id = (log_meta or {}).get("agent_id", "?")
-                    phase = (log_meta or {}).get("phase", "?")
-                    logger.error(
-                        "Response still truncated after 2x max_tokens retry "
-                        "(model=%s agent=%s phase=%s retry_max_tokens=%d "
-                        "out_tok=%d) — returning the truncated text; anything "
-                        "the model emits last (e.g. a closing tag) may be "
-                        "missing from it.",
-                        model, agent_id, phase, retry_max,
-                        retry_msg.usage.output_tokens,
-                    )
+        _emit_call_log(
+            system_prompt=system_prompt,
+            messages=conversation,
+            response_text=response_text,
+            model=model,
+            input_tokens=total_input_tokens,
+            output_tokens=total_output_tokens,
+            latency_ms=latency_ms,
+            call_stats=call_stats,
+            log_meta=log_meta,
+            wall_ms=(time.monotonic() - _turn_t0) * 1000,
+        )
+        _notify_stop_reason(on_stop_reason, final_message)
 
+        return response_text
+    except Exception:
+        # ``Exception``, so ``CancelledError`` (a BaseException since 3.8) still
+        # propagates untouched: a cancelled turn is not a failed one, and the
+        # cooperative-shutdown path must not be silently converted into a reply.
+        #
+        # ONE guard for the whole turn, not four patches at the retry sites.
+        # Measured: an exception anywhere after the first call wrote
+        # `rows written: 0` for a turn that had made 6 real API calls — and
+        # `SimulationEngine` rebuilds `api_call_count` and the rate limiter's
+        # `call_times` ledger from exactly those rows, so the calls stopped
+        # existing at the next restart.
+        #
+        # `if call_stats` because one row is one TURN and a turn that completed
+        # no call has nothing to report: `_acreate` refuses an oversized
+        # `max_tokens` BEFORE issuing anything, and a row for that would book a
+        # throttle slot after the next restart for a call that was never made.
+        if call_stats:
             _emit_call_log(
                 system_prompt=system_prompt,
                 messages=conversation,
-                response_text=response_text,
+                response_text=recovered_text or "",
                 model=model,
                 input_tokens=total_input_tokens,
                 output_tokens=total_output_tokens,
@@ -1129,148 +1589,27 @@ async def generate_with_tools(
                 log_meta=log_meta,
                 wall_ms=(time.monotonic() - _turn_t0) * 1000,
             )
-            _notify_stop_reason(on_stop_reason, final_message)
-
-            return response_text
-
-        # Append the assistant message with tool_use blocks
-        conversation.append({
-            "role": "assistant",
-            "content": [b.model_dump() for b in message.content],
-        })
-
-        # Execute this round's tool calls — consults together, the rest serially
-        # — and build one tool_result per block, in block order.
-        tool_results = await _execute_tool_blocks(tool_use_blocks, tool_executor)
-
-        # The message-side cache breakpoint, ROLLED FORWARD rather than
-        # accumulated: the API allows at most 4 `cache_control` blocks per
-        # request and a 5-round turn would want 6. Moving it is free — a marker
-        # designates where to check for and write a cache entry, it is not part
-        # of the content being matched, so dropping the previous round's does not
-        # invalidate the entry it wrote. The tool outputs are the bulk of what
-        # each subsequent round re-sends, so this is where the second breakpoint
-        # earns its keep.
-        #
-        # Caveat worth knowing: a breakpoint walks back at most 20 content blocks
-        # looking for a prior entry, and one round of 8 consults contributes 16
-        # blocks. A round that wide can miss the previous round's entry even
-        # though the marker is placed correctly.
-        if tool_results:
-            if cached_tool_result is not None:
-                cached_tool_result.pop("cache_control", None)
-            tool_results[-1]["cache_control"] = _EPHEMERAL_CACHE
-            cached_tool_result = tool_results[-1]
-
-        conversation.append({"role": "user", "content": tool_results})
-
-        logger.debug(
-            "Tool-use round %d: %d tool calls",
-            round_num + 1,
-            len(tool_use_blocks),
+        if recovered_text is None:
+            # Nothing to salvage, so the exception IS the outcome. Swallowing it
+            # here would turn the one error this module raises BY NAME — a call
+            # site above NONSTREAMING_MAX_TOKENS — into a turn that silently
+            # said nothing, which is the failure mode that constant exists to
+            # prevent.
+            raise
+        logger.exception(
+            "LLM turn failed after %d billed call(s) (model=%s agent=%s "
+            "phase=%s) — returning the %d character(s) already in hand rather "
+            "than losing them with the exception.",
+            len(call_stats), model, (log_meta or {}).get("agent_id", "?"),
+            (log_meta or {}).get("phase", "?"), len(recovered_text),
         )
-
-    # Exhausted max rounds — force a final call without tools
-    logger.warning("Max tool rounds (%d) reached, forcing final response", max_tool_rounds)
-    t0 = time.monotonic()
-    message = await _acreate(
-        client,
-        model=model,
-        max_tokens=max_tokens,
-        system=system_prompt,
-        messages=conversation,
-    )
-    latency_ms = (time.monotonic() - t0) * 1000
-    total_input_tokens += message.usage.input_tokens
-    total_output_tokens += message.usage.output_tokens
-    # `forced_final` rather than `final`: this call is reached either by
-    # exhausting max_tool_rounds or by the cooperative-shutdown `break` above,
-    # and both are worth telling apart from a turn that finished on its own —
-    # the tool loop spent its budget before the answer was written.
-    seq += 1
-    call_stats.append(
-        _call_stat(
-            seq=seq, kind="forced_final", max_tokens=max_tokens,
-            message=message, latency_ms=latency_ms,
-        )
-    )
-    response_text = _all_text(message)
-    # The call that ended the turn; reassigned by the retry below.
-    final_message = message
-    if not response_text.strip() and message.stop_reason != "max_tokens":
-        _log_empty_reply(
-            message, model=model, log_meta=log_meta, where="forced_final"
-        )
-
-    # Retry once with higher max_tokens if response was truncated
-    if message.stop_reason == "max_tokens":
-        retry_max = _retry_budget(max_tokens, model=model, log_meta=log_meta)
-        logger.warning(
-            "Response truncated after max rounds (stop_reason=max_tokens, %d tokens). "
-            "Retrying with max_tokens=%d",
-            message.usage.output_tokens, retry_max,
-        )
-        t0 = time.monotonic()
-        retry_msg = await _acreate(
-            client,
-            model=model,
-            max_tokens=retry_max,
-            system=system_prompt,
-            messages=conversation,
-        )
-        # Second real, billed API call for what the caller booked as one
-        # turn — same accounting hook as the other retry site above (B0).
-        if on_retry is not None:
-            on_retry()
-        retry_latency = (time.monotonic() - t0) * 1000
-        latency_ms += retry_latency
-        total_input_tokens += retry_msg.usage.input_tokens
-        total_output_tokens += retry_msg.usage.output_tokens
-        seq += 1
-        call_stats.append(
-            _call_stat(
-                seq=seq, kind="retry", max_tokens=retry_max,
-                message=retry_msg, latency_ms=retry_latency,
-            )
-        )
-        final_message = retry_msg
-        response_text = _all_text(retry_msg) or response_text
-        if not response_text.strip():
-            _log_empty_reply(
-                retry_msg, model=model, log_meta=log_meta,
-                where="forced_final_retry",
-            )
-        if retry_msg.stop_reason == "max_tokens":
-            # This retry site never re-checked stop_reason at all before this
-            # fix — a still-truncated response after exhausting max_tool_rounds
-            # AND doubling max_tokens passed silently. Loud and specific, same
-            # as the other retry site.
-            agent_id = (log_meta or {}).get("agent_id", "?")
-            phase = (log_meta or {}).get("phase", "?")
-            logger.error(
-                "Response still truncated after 2x max_tokens retry "
-                "(model=%s agent=%s phase=%s retry_max_tokens=%d "
-                "out_tok=%d) — returning the truncated text; anything "
-                "the model emits last (e.g. a closing tag) may be "
-                "missing from it.",
-                model, agent_id, phase, retry_max, retry_msg.usage.output_tokens,
-            )
-
-    _emit_call_log(
-        system_prompt=system_prompt,
-        messages=conversation,
-        response_text=response_text,
-        model=model,
-        input_tokens=total_input_tokens,
-        output_tokens=total_output_tokens,
-        latency_ms=latency_ms,
-        call_stats=call_stats,
-        log_meta=log_meta,
-        wall_ms=(time.monotonic() - _turn_t0) * 1000,
-    )
-    _notify_stop_reason(on_stop_reason, final_message)
-
-    return response_text
+        # The reply that ended the turn is the one whose text we are returning —
+        # so a fallthrough from a retry site reports `max_tokens`, NOT `refusal`,
+        # even when the first pass was refused and the retry is what died. That
+        # is why callers need `is_truncated_stop` rather than a `== "refusal"`
+        # test. `None` here (the forced-final case) reports "".
+        _notify_stop_reason(on_stop_reason, recovered_message)
+        return recovered_text
 
 
 def _default_synthesis_prompt() -> str:

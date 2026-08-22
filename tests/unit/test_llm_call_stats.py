@@ -1,11 +1,13 @@
 """`llm_call_logs.call_stats`: one entry per REAL API call, in call order.
 
-One logged row is one TURN, and a turn is 1..7 API calls — up to
-``max_tool_rounds`` tool rounds, a terminating or forced-final call, and at most
-one ``max_tokens`` retry. The row's ``input_tokens``/``output_tokens``/
-``latency_ms`` are sums over all of them, so on their own they cannot answer the
-question the table gets asked during an incident: *which* call truncated, and how
-many tokens did the model actually want? Measured: 78.6% of production
+One logged row is one TURN, and a turn is 1..8 API calls at the default
+``max_tool_rounds=5`` — the loop is ``range(max_tool_rounds + 1)``, so it makes
+one more tool-capable call than the setting names, plus a terminating or
+forced-final call and at most one ``max_tokens`` retry. The row's
+``input_tokens``/``output_tokens``/``latency_ms`` are sums over all of them, so
+on their own they cannot answer the question the table gets asked during an
+incident: *which* call truncated, and how many tokens did the model actually
+want? Measured: 78.6% of production
 ``thread_reply`` rows were multi-call, ``stop_reason`` was read in four places in
 src/services/llm.py and logged in none, and the requested ``max_tokens`` ceiling
 was recorded nowhere at all — so sizing the thread_reply ceiling had to be done by
@@ -404,6 +406,183 @@ async def test_thinking_tokens_survive_a_usage_object_without_the_attribute_at_a
     (entry,) = logged[0]["call_stats"]
     assert entry["thinking_tokens"] is None
     assert (entry["input_tokens"], entry["output_tokens"]) == (5, 7)
+
+
+# ---------------------------------------------------------------------------
+# cached input tokens
+# ---------------------------------------------------------------------------
+
+
+async def test_call_stats_records_the_cache_split(monkeypatch, logged):
+    """`usage.input_tokens` EXCLUDES cached input, and nothing read the rest.
+
+    Prompt caching moved 90% of the hub's system prompt out of `input_tokens`
+    and into `cache_read_input_tokens`, which this module never looked at — so
+    on the one run that used caching, 184 of 228 rows record fewer input tokens
+    than the system prompt alone can be, and one entry records **2** input
+    tokens for a 30 KB prompt. The three numbers are recorded separately rather
+    than summed into `input_tokens`, because they are billed at three different
+    rates and because a column that means "uncached input" before a date and
+    "all input" after it cannot be summed over a run at all.
+    """
+    _install(
+        monkeypatch,
+        FakeAnthropic(
+            [
+                text_response(
+                    "answer",
+                    usage=_Usage(
+                        input_tokens=2,
+                        output_tokens=20,
+                        cache_read_input_tokens=7800,
+                        cache_creation_input_tokens=120,
+                    ),
+                )
+            ]
+        ),
+    )
+
+    await llm.generate_agent_response(
+        "sys", [{"role": "user", "content": "hi"}], log_meta=LOG_META
+    )
+
+    (entry,) = logged[0]["call_stats"]
+    assert entry["input_tokens"] == 2, "still the UNCACHED half, unredefined"
+    assert entry["cache_read_input_tokens"] == 7800
+    assert entry["cache_creation_input_tokens"] == 120
+
+
+async def test_a_usage_without_cache_fields_still_works(monkeypatch, logged):
+    """Both fields are `Optional[int]` on the deployed SDK and are None whenever
+    a request used no cache — and an older SDK does not carry them at all. A
+    bare `+=` on either would be a TypeError raised inside a billed turn, so
+    both shapes have to degrade to null the way `thinking_tokens` does."""
+    class _OldUsage:
+        input_tokens = 5
+        output_tokens = 7
+
+    bare = text_response("answer")
+    bare.usage = _OldUsage()
+    _install(
+        monkeypatch,
+        FakeAnthropic([text_response("answer", usage=_Usage()), bare]),
+    )
+
+    await llm.generate_agent_response(
+        "sys", [{"role": "user", "content": "hi"}], log_meta=LOG_META
+    )
+    await llm.generate_agent_response(
+        "sys", [{"role": "user", "content": "hi"}], log_meta=LOG_META
+    )
+
+    for row in logged:
+        (entry,) = row["call_stats"]
+        assert entry["cache_read_input_tokens"] is None
+        assert entry["cache_creation_input_tokens"] is None
+        # Null on the ROW too, not 0: "no cache field was reported" and "the
+        # cache was read zero times" are different answers, and only the second
+        # one may be averaged.
+        assert row["cache_read_input_tokens"] is None
+        assert row["cache_creation_input_tokens"] is None
+
+
+async def test_the_callback_carries_the_cache_counts(monkeypatch, logged):
+    """The engine can only persist what reaches the payload, under these exact
+    keys — `llm_call_logs.cache_read_input_tokens` /
+    `.cache_creation_input_tokens`. Per-turn cumulative, like `input_tokens`
+    and `output_tokens` beside them."""
+    _install(
+        monkeypatch,
+        FakeAnthropic(
+            [
+                tool_use_response(
+                    "consult_specialist",
+                    {},
+                    block_id="t1",
+                    usage=_Usage(
+                        input_tokens=11,
+                        output_tokens=22,
+                        cache_read_input_tokens=0,
+                        cache_creation_input_tokens=9000,
+                    ),
+                ),
+                text_response(
+                    "done",
+                    usage=_Usage(
+                        input_tokens=33,
+                        output_tokens=44,
+                        cache_read_input_tokens=9000,
+                        cache_creation_input_tokens=0,
+                    ),
+                ),
+            ]
+        ),
+    )
+
+    await llm.generate_with_tools(
+        system_prompt="sys",
+        messages=[{"role": "user", "content": "hi"}],
+        tools=[{"name": "consult_specialist", "input_schema": {}}],
+        tool_executor=_noop_executor,
+        max_tokens=1000,
+        log_meta=LOG_META,
+    )
+
+    (row,) = logged
+    assert row["cache_read_input_tokens"] == 9000
+    assert row["cache_creation_input_tokens"] == 9000
+    assert row["input_tokens"] == 44, (
+        "the write on round 1 and the read on round 2 are the SAME 9000 tokens "
+        "of prompt — folding either into input_tokens would count them twice"
+    )
+
+
+async def test_the_row_totals_are_the_sums_of_the_cache_entries(monkeypatch, logged):
+    """The same invariant `test_the_cumulative_columns_and_the_entries_agree_on_a
+    _multi_call_turn` pins for input/output, extended to the cache columns and
+    made non-vacuous: with cache fields actually set, `input_tokens` must STILL
+    be the sum of the entries' `input_tokens` alone."""
+    _install(
+        monkeypatch,
+        FakeAnthropic(
+            [
+                text_response(
+                    "truncated",
+                    stop_reason="max_tokens",
+                    usage=_Usage(
+                        input_tokens=3,
+                        output_tokens=4,
+                        cache_read_input_tokens=100,
+                        cache_creation_input_tokens=10,
+                    ),
+                ),
+                text_response(
+                    "done",
+                    usage=_Usage(
+                        input_tokens=5,
+                        output_tokens=6,
+                        cache_read_input_tokens=110,
+                        cache_creation_input_tokens=0,
+                    ),
+                ),
+            ]
+        ),
+    )
+
+    await llm.generate_agent_response(
+        "sys", [{"role": "user", "content": "hi"}], log_meta=LOG_META
+    )
+
+    (row,) = logged
+    assert _kinds(row) == ["final", "retry"]
+    assert row["input_tokens"] == sum(c["input_tokens"] for c in row["call_stats"]) == 8
+    assert row["output_tokens"] == sum(c["output_tokens"] for c in row["call_stats"])
+    assert row["cache_read_input_tokens"] == sum(
+        c["cache_read_input_tokens"] for c in row["call_stats"]
+    ) == 210
+    assert row["cache_creation_input_tokens"] == sum(
+        c["cache_creation_input_tokens"] for c in row["call_stats"]
+    ) == 10
 
 
 # ---------------------------------------------------------------------------
