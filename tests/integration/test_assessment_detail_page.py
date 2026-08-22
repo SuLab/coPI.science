@@ -749,7 +749,12 @@ async def _seed_exempt(db_session, recommendation: str):
     return assessment
 
 
-@pytest.mark.parametrize("recommendation", ["pass", "route-to-incubation"])
+# `route-to-incubation` was dropped from this list on 2026-08-22: it is no longer
+# exempt from the floor. It was exempted alongside `pass` on the reasoning that
+# "a decline costs Blackbird nothing", but it is not a decline — it is the
+# incubation grant Blackbird exists to award, which made it the one positive
+# verdict class nobody reviewed. See `specialists.panel_is_owed`.
+@pytest.mark.parametrize("recommendation", ["pass"])
 async def test_an_exempt_verdict_does_not_claim_a_verified_panel(
     client, db_session, admin, recommendation
 ):

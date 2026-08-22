@@ -388,13 +388,77 @@ def test_a_verdict_with_no_subject_is_not_verifiable():
 def test_a_verdict_that_owes_no_panel_is_verifiable():
     """A `pass` is exempt from the panel entirely, so nothing about it failed
     to verify — otherwise the unverified sentinel would land on the commonest
-    verdict there is and mean nothing."""
+    verdict there is and mean nothing.
+
+    `route-to-incubation` used to sit in this list, exempted on the reasoning
+    that "a decline costs Blackbird nothing". It is not a decline: it is the
+    incubation grant Blackbird exists to award, so it was the one verdict class
+    that most needed a panel and the only positive one that never got it. It now
+    owes a panel — see the test below.
+    """
     eng = _engine(_hub())
     assert eng._specialist_consults == {}              # unarmed, as after a restart
-    for recommendation in ("pass", "route-to-incubation", None):
+    verdict = {"recommendation": "pass", "subject_agent_id": "gill"}
+    assert eng._specialist_floor_gap(verdict) == set()
+    assert eng._floor_verifiable(verdict) is True
+
+
+def test_an_unreadable_recommendation_owes_a_panel():
+    """`panel_is_owed` fails CLOSED, and this pins the direction.
+
+    The old test was "not in {advance, conditional} ⇒ exempt", so a missing,
+    empty or off-contract recommendation bought an exemption silently. The
+    asymmetry is cheap in one direction only: a wrongly-owed panel costs a
+    `panel_incomplete` flag on a row, a wrongly-exempt one costs the review of a
+    funding decision.
+    """
+    eng = _engine(_hub())
+    eng._specialist_consults = {"gill": {"scientific"}}   # armed
+    for recommendation in (None, "", "definitely-maybe"):
         verdict = {"recommendation": recommendation, "subject_agent_id": "gill"}
-        assert eng._specialist_floor_gap(verdict) == set()
-        assert eng._floor_verifiable(verdict) is True, recommendation
+        assert eng._specialist_floor_gap(verdict), recommendation
+
+
+def test_route_to_incubation_owes_a_panel():
+    """Blackbird's own positive outcome is held to the floor like any other."""
+    eng = _engine(_hub())
+    eng._specialist_consults = {"gill": {"scientific"}}   # armed, one domain done
+    verdict = {"recommendation": "route-to-incubation", "subject_agent_id": "gill"}
+
+    assert eng._specialist_floor_gap(verdict), (
+        "route-to-incubation must owe the panel it used to be exempt from"
+    )
+
+
+def test_a_conditional_band_with_a_pass_recommendation_still_owes_a_panel():
+    """The floor keys on the COMPUTED band as well as the written recommendation.
+
+    Keying on the model's `recommendation` alone let a verdict that scores into
+    `conditional` exempt itself by writing `pass` — 3 of the 4 conditional bands
+    in the v2 corpus do exactly that, so the band that is supposed to trigger
+    diligence was the one buying an exemption from review.
+    """
+    eng = _engine(_hub())
+    eng._specialist_consults = {"gill": {"scientific"}}
+    # Scores chosen to band `conditional` on the incubation lines (>= 2.7).
+    verdict = {
+        "recommendation": "pass",
+        "subject_agent_id": "gill",
+        "funnel_stage": "incubation",
+        "scores": {k: 4 for k in (
+            "differentiation", "market_unmet_need", "team", "external_signals",
+            "ip_fto", "platform", "dev_regulatory_feasibility",
+            "workplan_capital_efficiency", "exit_thesis", "mechanism_validation",
+            "toxicity_selectivity", "experimental_rigor", "chemistry_dc_path",
+        )},
+    }
+    _, band = eng._computed_score_and_band(verdict)
+    assert band in ("advance", "conditional"), band
+
+    assert eng._specialist_floor_gap(verdict), (
+        "a verdict scoring into a diligence band must owe a panel even when the "
+        "model wrote 'pass'"
+    )
 
 
 # --- clear-rate monitor (Task 9) --------------------------------------------
@@ -407,7 +471,13 @@ def test_a_verdict_that_owes_no_panel_is_verifiable():
 # pre-existing `total == 0` coverage in test_simulation_logic.py's
 # TestGracefulShutdown did).
 
-_CLEAR_RATE_WARNING = "NOT ONE returned"
+# A substring of the message `specialists.clear_rate_warning` builds. It used to
+# be "NOT ONE returned", from when the alarm was a ZERO test. That mattered more
+# than a wording change: once the alarm became a rate test, an assertion looking
+# for the old string passed *vacuously* on the "does not warn" cases — the new
+# warning fired and the test could not see it. Anchor on the invariant part of
+# the sentence, not on the tally.
+_CLEAR_RATE_WARNING = "cannot discriminate"
 
 
 def test_note_consult_records_the_domain_and_tallies_the_signal():
@@ -441,16 +511,36 @@ async def test_stop_warns_when_fifty_or_more_consults_never_clear(caplog):
 
 
 @pytest.mark.asyncio
-async def test_stop_does_not_warn_when_at_least_one_clear_is_present(caplog):
+async def test_stop_does_not_warn_when_the_panel_actually_clears_things(caplog):
     eng = _engine(_hub())
-    # Still >= 50 total, but one of them cleared — the monitor exists to catch
-    # a signal with NO variance, not merely a low clear rate.
-    eng._consult_signal_counts = {"caution": 29, "blocking": 20, "clear": 1}
+    # >= 50 total and clearing 10% of them — a panel with real variance, which
+    # is what the monitor exists NOT to shout about.
+    eng._consult_signal_counts = {"caution": 25, "blocking": 20, "clear": 5}
 
     with caplog.at_level(logging.WARNING, logger="src.agent.simulation"):
         await eng.stop()
 
     assert _CLEAR_RATE_WARNING not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_single_clear_no_longer_silences_the_monitor(caplog):
+    """The regression this alarm was rebuilt for.
+
+    Under the old zero test, ONE `clear` bought silence no matter how many
+    consults surrounded it. Run 8b64a0e0 supplied exactly that: 1 clear in 168
+    consults (0.6%) — and it was the only `clear` in the database across every
+    run ever — so the first run whose panel demonstrably could not discriminate
+    was also the first run the monitor stayed quiet for.
+    """
+    eng = _engine(_hub())
+    eng._consult_signal_counts = {"caution": 29, "blocking": 20, "clear": 1}
+
+    with caplog.at_level(logging.WARNING, logger="src.agent.simulation"):
+        await eng.stop()
+
+    assert _CLEAR_RATE_WARNING in caplog.text
+    assert "2.0%" in caplog.text
 
 
 @pytest.mark.asyncio

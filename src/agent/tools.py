@@ -417,7 +417,7 @@ _PATENT_UNAVAILABLE = (
 )
 
 # Distinct from _PATENT_UNAVAILABLE: this is a caller-side bad query (empty, or
-# punctuation-only so _Q_SANITISE strips it to nothing), not a tool outage. No HTTP
+# punctuation-only so `patents._tokenise` yields nothing), not a tool outage. No HTTP
 # call was ever made, so this must never read like a negative title search.
 _PATENT_NO_QUERY = (
     "No search was performed: the query had no usable terms once punctuation was "
@@ -449,9 +449,10 @@ def _scope_note(result: "PriorArtResult") -> str:
             f"SCOPE: your full phrase matched no title, so this searched {narrowed}. "
             f"That is a BROADER search than you asked for — any hits "
             f"may be adjacent rather than on point, and an empty result at this "
-            f"breadth is the strongest negative this tool can give you (still not FTO).\n\n"
+            f"breadth is the strongest negative this tool can give you (still not FTO)."
+            f"{result.truncation_note}\n\n"
         )
-    return f"SCOPE: searched titles for {terms}.\n\n"
+    return f"SCOPE: searched titles for {terms}.{result.truncation_note}\n\n"
 
 
 async def _execute_search_prior_art(query: str) -> str:

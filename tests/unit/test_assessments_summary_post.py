@@ -7,7 +7,7 @@ import pytest
 
 from src.agent.agent import Agent
 from src.agent.channels import ASSESSMENTS_SUMMARY_CHANNEL
-from src.agent.simulation import SimulationEngine
+from src.agent.simulation import SimulationEngine, _HeldVerdict
 from src.agent.state import ThreadState
 from tests.fakes import FakeSlackClient
 
@@ -324,7 +324,7 @@ async def test_a_refused_sidecar_never_posts_a_summary(monkeypatch, tmp_path):
     eng, hub, lab, hub_client = _engine(monkeypatch, tmp_path)
     thread = ThreadState(thread_id="t6", channel="general", other_agent_id="wang")
     hub.state.active_threads["t6"] = thread
-    thread.message_count = 1  # an early, non-concluding, non-closing turn
+    thread.message_count = 1
 
     drops: list[tuple] = []
 
@@ -336,15 +336,46 @@ async def test_a_refused_sidecar_never_posts_a_summary(monkeypatch, tmp_path):
         raise AssertionError("_persist_assessment must not be reached")
     monkeypatch.setattr(eng, "_persist_assessment", never)
 
-    # closes_thread=False on an early ordinal is exactly the premature_sidecar
-    # refusal case (see CLAUDE.md's "One interview yields exactly one
-    # assessment" section) — verified against `_sidecar_refusal`: ordinal=2
-    # (message_count + 1) is neither the CONCLUDE ordinal nor a closing reply,
-    # so the sidecar is refused before `_persist_assessment` (and therefore
-    # `_post_assessment_summary`) is ever reached.
+    # A verdict whose reply CLOSED the interview is terminal, so the thread is
+    # done: anything arriving afterwards is a re-capture and is refused. This
+    # used to be exercised via `premature_sidecar` (an early, non-concluding
+    # turn), but that refusal no longer exists — an early sidecar is now stored
+    # as provisional rather than destroyed, because nothing guaranteed the
+    # "later turn still owed the verdict" it was being held for. See
+    # `_sidecar_refusal`.
+    eng._assessed_threads["t6"] = _HeldVerdict(ordinal=1, final=True, slack_ts="1.0")
+
     await eng._capture_hub_assessment(hub, thread, _raw(VERDICT), "666.000", closes_thread=False)
 
     # Assert the refusal branch is what ran — a `raw` string this test failed
     # to build correctly would otherwise "pass" by parsing to no verdict at all.
-    assert drops == [("blackbird", "premature_sidecar")]
+    assert drops == [("blackbird", "duplicate_thread_verdict")]
     assert ASSESSMENTS_SUMMARY_CHANNEL not in hub_client.posted_messages
+
+
+@pytest.mark.asyncio
+async def test_a_provisional_verdict_is_stored_but_not_announced(monkeypatch, tmp_path):
+    """The other half of relaxing the gate, and the reason it is safe.
+
+    An early sidecar is now HELD rather than refused — but a headline is a public
+    Slack post that cannot be retracted when a later turn supersedes the row it
+    described. So a verdict that does not end the interview is stored for staff
+    and stays off the channel until the interview concludes.
+    """
+    eng, hub, lab, hub_client = _engine(monkeypatch, tmp_path)
+    thread = ThreadState(thread_id="t7", channel="general", other_agent_id="wang")
+    hub.state.active_threads["t7"] = thread
+    thread.message_count = 1  # ordinal 2: neither CONCLUDE nor a closing reply
+
+    persisted: list[dict] = []
+
+    async def fake_persist(agent_id, channel, verdict, **kw):
+        persisted.append(verdict)
+        return True
+    monkeypatch.setattr(eng, "_persist_assessment", fake_persist)
+
+    await eng._capture_hub_assessment(hub, thread, _raw(VERDICT), "777.000", closes_thread=False)
+
+    assert len(persisted) == 1, "an early sidecar must be stored, not destroyed"
+    assert ASSESSMENTS_SUMMARY_CHANNEL not in hub_client.posted_messages
+    assert eng._assessed_threads["t7"].final is False

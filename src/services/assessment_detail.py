@@ -41,7 +41,7 @@ from typing import Any
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.agent.specialists import PANEL_REQUIRED_FOR, parse_opinion
+from src.agent.specialists import PANEL_REQUIRED_FOR, panel_is_owed, parse_opinion
 from src.models import AgentMessage, LlmCallLog, OpportunityAssessment, SpecialistConsult
 from src.services.blackbird_rubric import (
     RUBRIC_VERSION,
@@ -407,7 +407,14 @@ def _panel_state(assessment: OpportunityAssessment) -> str:
         return "gap"
     if assessment.missing_domains is not None:
         return "unverified"
-    if assessment.recommendation not in PANEL_REQUIRED_FOR:
+    # Ask the same predicate the ENGINE's floor asks, not the bare
+    # `recommendation in PANEL_REQUIRED_FOR` test this used to. The floor now also
+    # owes a panel when the COMPUTED band is advance/conditional even though the
+    # model wrote `pass`, and it no longer exempts `route-to-incubation` — so
+    # keeping the old test here would make the page report `not_owed` for a row
+    # the engine had in fact held to the floor. That engine/page drift is exactly
+    # what PANEL_REQUIRED_FOR's own comment warns about.
+    if not panel_is_owed(assessment.recommendation, assessment.band):
         return "not_owed"
     return "verified"
 

@@ -690,8 +690,15 @@ async def test_a_failed_readback_costs_the_fallback_not_the_verdict(engine, capl
 
 @pytest.mark.asyncio
 async def test_a_verdict_that_owes_no_panel_does_not_query_the_table(engine):
-    """A ``pass`` is not held to the panel, so there is nothing for a read-back
-    to inform. One session is opened for this call: the write."""
+    """A verdict that owes no panel has nothing for a read-back to inform. One
+    session is opened for this call: the write.
+
+    The scores are overridden as well as the recommendation, and that is the
+    point. `_VERDICT`'s straight 3s band `conditional` on the investment scale,
+    and the floor now keys on the COMPUTED band as well as the written
+    recommendation — so a `pass` sitting on a conditional-banding score sheet
+    DOES owe a panel. Exempting this call needs both halves to be unowed.
+    """
     real_factory = async_sessionmaker(engine, expire_on_commit=False)
     run_id = await _new_run(real_factory)
     calls = {"n": 0}
@@ -704,7 +711,9 @@ async def test_a_verdict_that_owes_no_panel_does_not_query_the_table(engine):
     thread = _restored_thread()
     try:
         await sim._persist_assessment(
-            "blackbird", "general", {**_VERDICT, "recommendation": "pass"},
+            "blackbird", "general",
+            {**_VERDICT, "recommendation": "pass",
+             "scores": {k: 2 for k in RUBRIC_WEIGHTS}},
             slack_ts="1.1", subject_agent_id_fallback="gordy", thread=thread,
         )
         assert calls["n"] == 1, "no panel owed, so no read-back round trip"

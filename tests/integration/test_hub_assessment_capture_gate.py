@@ -273,23 +273,31 @@ async def test_an_ordinal_11_closing_reply_persists_its_verdict(engine, monkeypa
 
 
 @pytest.mark.asyncio
-async def test_a_non_closing_decide_reply_is_still_refused_on_the_real_path(
+async def test_a_non_closing_decide_reply_is_stored_as_provisional_on_the_real_path(
     engine, monkeypatch,
 ):
-    """Unchanged behaviour, and the reason the gate cannot simply accept
-    everything: this reply does NOT close the thread, so the interview continues
-    and a later turn is still owed the verdict. The early one is refused and
-    recorded."""
+    """Inverted 2026-08-22. This used to be refused as `premature_sidecar`.
+
+    The refusal's justification was that "a later turn is still owed the
+    verdict" — but nothing scheduled that turn, nothing tracked the debt, and
+    nothing kept the discarded JSON. Run 8b64a0e0 refused two verdicts this way
+    at ordinal 10, one of them the run's highest-scoring idea and its only
+    `route-to-incubation`, and the run's timer ended both interviews minutes
+    later. The verdict is now stored as provisional and superseded by any later
+    one, which is what `_retire_superseded_verdict` was built for.
+    """
     sim, agent, thread, client, factory, run_id = await _drive_reply(
         engine, monkeypatch, _reply_with_sidecar(), prior_messages=_DECIDE_COUNT,
     )
     try:
-        assert await _assessments(factory, run_id) == []
-        drops = await _drops(factory, run_id)
-        assert [d.reason for d in drops] == ["premature_sidecar"]
-        assert drops[0].thread_id == "t1"
-        assert drops[0].subject_agent_id == "gordy"
+        rows = await _assessments(factory, run_id)
+        assert len(rows) == 1, "an early verdict is kept, not destroyed"
+        assert rows[0].subject_agent_id == "gordy"
+        assert await _drops(factory, run_id) == []
         assert thread.status != "closed", "an ordinary DECIDE reply does not close"
+        assert sim._assessed_threads["t1"].announced is False, (
+            "a provisional verdict is stored for staff but not announced"
+        )
     finally:
         await _delete_run(factory, run_id)
 
@@ -317,10 +325,15 @@ async def test_the_conclude_turn_persists_its_verdict_on_the_real_path(
 
 
 @pytest.mark.asyncio
-async def test_a_sidecar_from_a_non_closing_decide_turn_is_refused(engine):
-    """The original production bug: ordinal 8 is a DECIDE turn, its guidance never
-    asks for a sidecar, and a sidecar that shows up anyway on a reply that leaves
-    the interview open must not become the verdict of record."""
+async def test_a_sidecar_from_a_non_closing_decide_turn_is_kept(engine):
+    """Ordinal 8 is a DECIDE turn whose guidance never asks for a sidecar — but
+    the `<assessment_json>` contract sits in the STATIC body of
+    `phase4-thread-reply.md`, so the model sees it on every phase-4 turn and
+    fills it in when it has made up its mind early.
+
+    That is a verdict, and the measured cost of treating it as noise was two lost
+    ones in a single run. It is kept as provisional; a later turn overrides it.
+    """
     factory = async_sessionmaker(engine, expire_on_commit=False)
     run_id = await _new_run(factory)
     sim, agent = _hub(factory, run_id)
@@ -329,11 +342,11 @@ async def test_a_sidecar_from_a_non_closing_decide_turn_is_refused(engine):
             agent, _thread(_DECIDE_COUNT), _reply_with_sidecar(), "1787259939.257539",
             closes_thread=False,
         )
-        assert await _assessments(factory, run_id) == []
-        drops = await _drops(factory, run_id)
-        assert [d.reason for d in drops] == ["premature_sidecar"]
-        assert drops[0].thread_id == "t1"
-        assert drops[0].subject_agent_id == "gordy"
+        rows = await _assessments(factory, run_id)
+        assert len(rows) == 1
+        assert rows[0].subject_agent_id == "gordy"
+        assert rows[0].slack_ts == "1787259939.257539"
+        assert await _drops(factory, run_id) == []
     finally:
         await _delete_run(factory, run_id)
 

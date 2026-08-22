@@ -147,17 +147,22 @@ class AssessmentDrop(Base):
         closing tag).
       * ``missing_sidecar``      — the reply concluded, did not decline, and
         carried no sidecar at all.
-      * ``premature_sidecar``    — a sidecar arrived on a turn that neither
-        concluded the interview nor closed the thread, so a later turn is still
-        owed the verdict and this early one must not pre-empt it. The
-        ``<assessment_json>`` contract is in the static body of
-        ``phase4-thread-reply.md``, so the model sees it on every phase-4 turn
-        even though only CONCLUDE guidance asks for it; run 60c53424 filled it in
-        at ordinals 8 and 10 as well as 12. NOT the same as "not ordinal 12",
-        which is what this reason used to mean and which destroyed every verdict
-        delivered as a ⏸️ decline — the reply that carries one CLOSES the thread,
-        so there is no later turn to record it. See
-        ``SimulationEngine._sidecar_refusal``.
+      * ``premature_sidecar``    — HISTORICAL ONLY as of 2026-08-22. Meant "a
+        sidecar arrived on a turn that neither concluded the interview nor closed
+        the thread, so a later turn is still owed the verdict". That promise was
+        unbacked: nothing scheduled the later turn, nothing tracked the debt, and
+        nothing kept the discarded JSON. Run 8b64a0e0 refused two verdicts this
+        way at ordinal 10 — one of them the run's highest-scoring idea and its
+        only ``route-to-incubation`` — and the run's timer ended both interviews
+        minutes later. The gate now trusts the sidecar and lets
+        ``_retire_superseded_verdict`` (which shipped in the same commit as this
+        reason) handle "a later turn knows more". No new rows.
+      * ``closed_before_verdict`` — a reply from a NON-hub agent closed the
+        interview with ⏸️ before the hub reached a verdict. ⏸️ is an instruction
+        to both roles, and ``_check_thread_outcome`` acts on whoever replied, so
+        a lab bot declining its own pitch ends the hub's screen: seven times on
+        run 8b64a0e0, none with an assessment. The hub's OWN ⏸️ decline is not
+        recorded here — that is Outcome 2, where most interviews are meant to end.
       * ``duplicate_thread_verdict`` — one interview yields one assessment, and
         this row is the verdict that did not become it: either a re-capture of a
         turn already stored (or anything following a verdict whose reply closed
@@ -190,6 +195,15 @@ class AssessmentDrop(Base):
     thread_id: Mapped[str | None] = mapped_column(String(50), nullable=True)
     reason: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
     detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: The verdict that was dropped, exactly as the model emitted it — the whole
+    #: point of the column. Before 0035 a drop recorded only a reason and a
+    #: sentence of prose, so refusing a sidecar DESTROYED it: run 8b64a0e0 lost
+    #: markham (which recomputes to 3.04, that run's highest score, and its only
+    #: `route-to-incubation`) and weeraratna, recoverable afterwards only by luck,
+    #: because `llm_call_logs.response_text` happens to keep the raw response.
+    #: A refusal is now non-destructive whatever the gate policy of the day is.
+    #: NULL for a drop with nothing to keep (`empty_reply`, `missing_sidecar`).
+    raw_verdict: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

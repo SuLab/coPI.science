@@ -71,7 +71,7 @@ EXIT_OK = 0
 EXIT_BLOCKED = 1
 EXIT_WARN = 2
 
-DEFAULT_TARGET = "0034"
+DEFAULT_TARGET = "0035"
 #: Revisions this migration path has been exercised from.
 #:
 #: 0020 and 0021 are here because origin/main's own alembic head is 0021 (PR19). A
@@ -109,7 +109,7 @@ DEFAULT_TARGET = "0034"
 #: one foreign-key constraint on agents).
 SUPPORTED_START_REVISIONS = (
     "0018", "0019", "0020", "0021", "0023", "0024", "0025", "0026", "0027", "0028", "0029",
-    "0030", "0031", "0032", "0033",
+    "0030", "0031", "0032", "0033", "0034",
 )
 
 #: Start revisions at which migration 0019 has already run, so the expensive
@@ -310,7 +310,7 @@ PLANNED_OBJECTS: tuple[PlannedObject, ...] = (
 
 REVISION_ORDER = (
     "0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027", "0028",
-    "0029", "0030", "0031", "0032", "0033", "0034",
+    "0029", "0030", "0031", "0032", "0033", "0034", "0035",
 )
 
 

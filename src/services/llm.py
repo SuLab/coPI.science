@@ -464,6 +464,7 @@ def _emit_call_log(
     latency_ms: float,
     call_stats: list[dict[str, Any]],
     log_meta: dict[str, Any] | None,
+    wall_ms: float | None = None,
 ) -> None:
     """Write one ``llm_call_logs`` row for one TURN, if anyone is listening.
 
@@ -496,6 +497,13 @@ def _emit_call_log(
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
         "latency_ms": latency_ms,
+        # The TURN's wall time, which `latency_ms` deliberately is not — that one
+        # carries only the LAST API call's latency (532 of 532 rows on run
+        # 8b64a0e0), so summing the column understated real LLM wait by 25%.
+        # Measured around the whole call, so unlike a sum over `call_stats` it
+        # also includes the tool execution between rounds, which is what actually
+        # makes a hub turn slow.
+        "wall_ms": wall_ms,
         "call_stats": call_stats,
         "completed_at": datetime.now(timezone.utc),
         **log_meta,
@@ -711,6 +719,10 @@ async def generate_agent_response(
     answer may be posted / persisted / credited differs per call site. See
     ``_notify_stop_reason``.
     """
+    # Start of the TURN, for `wall_ms`. Distinct from the per-call `t0`
+    # below: this one spans every round, every retry and the tool execution
+    # between them, which is the number `latency_ms` has never carried.
+    _turn_t0 = time.monotonic()
     settings = get_settings()
     model = model or settings.llm_agent_model
     client = get_anthropic_client()
@@ -769,6 +781,7 @@ async def generate_agent_response(
                 latency_ms=latency_ms,
                 call_stats=call_stats,
                 log_meta=log_meta,
+                wall_ms=(time.monotonic() - _turn_t0) * 1000,
             )
             _notify_stop_reason(on_stop_reason, message)
             return ""
@@ -865,6 +878,7 @@ async def generate_agent_response(
             latency_ms=latency_ms,
             call_stats=call_stats,
             log_meta=log_meta,
+            wall_ms=(time.monotonic() - _turn_t0) * 1000,
         )
         # `final_message`, not `message`: when a retry ran it is the retry that
         # ended the turn, so a turn that truncated and then recovered must report
@@ -953,6 +967,10 @@ async def generate_with_tools(
     Omitting it is exactly the pre-existing behaviour: the loop runs to
     max_tool_rounds as before.
     """
+    # Start of the TURN, for `wall_ms`. Distinct from the per-call `t0`
+    # below: this one spans every round, every retry and the tool execution
+    # between them, which is the number `latency_ms` has never carried.
+    _turn_t0 = time.monotonic()
     settings = get_settings()
     model = model or settings.llm_agent_model
     client = get_anthropic_client()
@@ -1109,6 +1127,7 @@ async def generate_with_tools(
                 latency_ms=latency_ms,
                 call_stats=call_stats,
                 log_meta=log_meta,
+                wall_ms=(time.monotonic() - _turn_t0) * 1000,
             )
             _notify_stop_reason(on_stop_reason, final_message)
 
@@ -1247,6 +1266,7 @@ async def generate_with_tools(
         latency_ms=latency_ms,
         call_stats=call_stats,
         log_meta=log_meta,
+        wall_ms=(time.monotonic() - _turn_t0) * 1000,
     )
     _notify_stop_reason(on_stop_reason, final_message)
 

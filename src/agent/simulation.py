@@ -27,7 +27,9 @@ from src.agent.roles import load_role
 from src.agent.slack_client import SlackListingIncomplete, ThreadNotFound
 from src.agent.specialists import (
     PANEL_REQUIRED_FOR,
+    clear_rate_warning,
     format_panel_note,
+    panel_is_owed,
     required_domains_for,
 )
 from src.agent.state import ProposalRef, ThreadState
@@ -209,11 +211,22 @@ class _HeldVerdict(NamedTuple):
     it. ``slack_ts`` is the stored row's own link back to that reply, and the
     only handle ``_retire_superseded_verdict`` has for finding the row again —
     ``opportunity_assessments`` carries no thread id of its own.
+
+    ``announced`` records whether this verdict already produced an
+    ``#assessments-summary`` headline. Deliberately separate from ``final``: a
+    CONCLUDE-ordinal reply is terminal enough to ANNOUNCE, but not enough to
+    freeze the thread, because ``thread_guidance`` renders CONCLUDE for every
+    ordinal above 11 — so a longer interview gets a run of concluding turns and
+    the last of them is still the verdict of record. Conflating the two blocks
+    that supersession. And because a headline is a public Slack post that cannot
+    be retracted, a superseded verdict that was already announced does not get
+    announced again: the row changes, the channel keeps the first word.
     """
 
     ordinal: int
     final: bool
     slack_ts: str | None
+    announced: bool = False
 
 
 class SimulationEngine:
@@ -693,6 +706,20 @@ class SimulationEngine:
         # stays attributable to its configuration (v2 §13.1).
         await self._record_topology_snapshot()
 
+        # Start every agent's staleness clock at NOW, not at the epoch.
+        # `_select_agent` weights on `max(now - last_selected, 1.0) * load`, and
+        # `AgentState.last_selected` defaults to 0.0 — so a never-selected agent
+        # scored ~1.79e9 against ~187 for one selected a tick ago, a 10^7 ratio
+        # that turned a weighted random draw into a shuffle WITHOUT replacement.
+        # That is why run 8b64a0e0 gave 59 turns to 59 distinct agents and no
+        # agent a second turn: nobody could repeat until all 63 had run, and 63
+        # ticks did not fit in the budget. Anchoring here makes staleness a
+        # preference again rather than a veto; the first draw is then decided by
+        # `_agent_load` alone, which is what it is for.
+        _run_start = time.time()
+        for _agent in self.agents.values():
+            _agent.state.last_selected = _run_start
+
         await self._run_main_loop()
 
     # ------------------------------------------------------------------
@@ -960,14 +987,14 @@ class SimulationEngine:
         await self._flush_llm_logs()
         await self._flush_pending_assessments()
 
-        total = sum(self._consult_signal_counts.values())
-        if total >= 50 and not self._consult_signal_counts.get("clear"):
-            logger.warning(
-                "[specialists] %d consults this run and NOT ONE returned "
-                "'clear'. A panel that never clears anything cannot "
-                "discriminate — check persona calibration.",
-                total,
-            )
+        # A RATE test, not a zero test. The old `not counts.get("clear")` form
+        # was silenced by a single outlier, and run 8b64a0e0 was the first run to
+        # silence it: 141 caution / 26 blocking / 1 clear out of 168, and that
+        # one `clear` is the only one in the database's entire history. The alarm
+        # existed precisely for that distribution and could not fire.
+        alarm = clear_rate_warning(self._consult_signal_counts)
+        if alarm:
+            logger.warning("%s", alarm)
 
         logger.info("Simulation stopping...")
 
@@ -2100,10 +2127,35 @@ class SimulationEngine:
         # Check for ⏸️ — explicit "no viable collaboration" signal
         if _reply_closes_thread(latest_reply):
             logger.info(
-                "[%s] Thread %s: ⏸️ no-proposal close",
-                agent.agent_id, thread.thread_id,
+                "[%s] Thread %s: ⏸️ no-proposal close (by %s)",
+                agent.agent_id, thread.thread_id, agent.role,
             )
-            await self._close_thread(agent, thread, "no_proposal")
+            # An interview that ends with no verdict on record is the failure the
+            # whole assessment pipeline exists to avoid, and until now it was
+            # invisible: `_warn_if_hub_conclude_missing_assessment` only fires on
+            # a CONCLUDE turn, so on run 8b64a0e0 it fired ZERO times against a
+            # run that lost two verdicts and had seven interviews closed
+            # mid-screen by the PI's own bot. Record it wherever it happens.
+            #
+            # A hub ⏸️ decline is NOT this case: `phase4-thread-reply.md`'s
+            # Outcome 2 is explicitly "close gracefully, emit no sidecar", and
+            # most interviews are meant to end there. Only a close that leaves no
+            # verdict AND was not the hub's own decline is anomalous.
+            if agent.role != "scout_hub" and thread.thread_id not in self._assessed_threads:
+                await self._record_assessment_drop(
+                    agent.agent_id,
+                    "closed_before_verdict",
+                    subject_agent_id=agent.agent_id,
+                    thread_id=thread.thread_id,
+                    detail=(
+                        f"a {agent.role} reply closed the interview with ⏸️ before "
+                        "the hub reached a verdict; no assessment was stored and "
+                        "none can be now"
+                    ),
+                )
+            await self._close_thread(
+                agent, thread, "no_proposal", closed_by_role=agent.role,
+            )
 
     async def _close_thread(
         self,
@@ -2111,8 +2163,17 @@ class SimulationEngine:
         thread: ThreadState,
         outcome: str,
         summary_text: str | None = None,
+        closed_by_role: str | None = None,
     ) -> None:
         """Close a thread and log the decision.
+
+        ``closed_by_role`` is the role of whoever's reply ended the interview, or
+        None for the ``max_thread_messages`` timeout, which no reply triggered.
+        Recorded because ⏸️ is an instruction to BOTH roles — the hub's decline
+        and a lab withdrawing its own pitch — and ``_check_thread_outcome`` tests
+        for it on whichever agent just replied. Seven of run 8b64a0e0's closes
+        were a lab bot ending the hub's own screen mid-interview, and in this
+        table they looked identical to the single genuine timeout.
 
         Fires from inside `_reply_to_thread` (system-enforced close) or
         `_check_thread_outcome` (⏸️ decline), both of which run under the
@@ -2178,6 +2239,7 @@ class SimulationEngine:
                             agent_b=thread.other_agent_id,
                             outcome=outcome,
                             summary_text=summary_text,
+                            closed_by_role=closed_by_role,
                         )
                         db.add(decision)
                         await db.commit()
@@ -2891,6 +2953,10 @@ class SimulationEngine:
                         subject_agent_id=thread.other_agent_id,
                         thread_id=thread.thread_id,
                         detail=detail,
+                        # Keep the verdict itself. A refusal is a decision about
+                        # WHERE this verdict belongs, never a licence to destroy
+                        # it — see AssessmentDrop.raw_verdict.
+                        raw_verdict=verdict,
                     )
                     return
                 # Not refused. If the thread ALREADY holds a verdict, then by
@@ -2913,12 +2979,44 @@ class SimulationEngine:
                     thread=thread,
                 )
                 if held:
+                    terminal = self._verdict_is_terminal(
+                        agent.role, thread, closes_thread=closes_thread,
+                    )
+                    # Announce once per interview. `superseded.announced` carries
+                    # forward because the earlier headline is already public and
+                    # unretractable — a second one would describe a row that
+                    # replaced a row nobody knew had been replaced.
+                    already_announced = (
+                        superseded.announced if superseded is not None else False
+                    )
+                    announce = terminal and not already_announced
                     self._assessed_threads[thread.thread_id] = _HeldVerdict(
                         ordinal=thread.message_count + 1,
+                        # `final` is CLOSED, not merely concluding — see
+                        # `_HeldVerdict`. A CONCLUDE ordinal can repeat.
                         final=closes_thread,
                         slack_ts=slack_ts,
+                        announced=already_announced or announce,
                     )
-                    await self._post_assessment_summary(agent, thread, verdict, slack_ts)
+                    # Announce only a verdict that ends the interview. Since a
+                    # provisional sidecar is now STORED rather than refused, a
+                    # single interview can hold several in turn — and a headline
+                    # is a public Slack post that cannot be retracted when the
+                    # row it described is superseded moments later. Design D14
+                    # says a verdict that is not held never posts; the same logic
+                    # says a verdict that is not final does not post YET.
+                    if announce:
+                        await self._post_assessment_summary(
+                            agent, thread, verdict, slack_ts,
+                        )
+                    elif not terminal:
+                        logger.info(
+                            "[%s] Provisional verdict stored for %s (message "
+                            "ordinal %d); no #assessments-summary headline until "
+                            "the interview concludes",
+                            agent.agent_id, thread.other_agent_id or "?",
+                            thread.message_count + 1,
+                        )
                     # Retire the earlier row only once its replacement is
                     # actually HELD — never leave the interview with neither.
                     if superseded is not None:
@@ -3007,6 +3105,17 @@ class SimulationEngine:
             # every other outbound call site uses — see ``_post_message``'s
             # ``if client and client.is_connected``.
             if not channel_id or not client or not client.is_connected:
+                # Say so. This return used to be silent, which is why nobody
+                # noticed that #assessments-summary has exactly one member (the
+                # hub bot itself) and that every headline it has ever posted went
+                # into an empty room. A skip and a successful post were equally
+                # invisible, so neither could be audited.
+                logger.warning(
+                    "[%s] Skipping #assessments-summary headline for thread %s: "
+                    "channel_id=%r, transport %s",
+                    agent.agent_id, thread.thread_id, channel_id,
+                    "missing" if not client else "not connected",
+                )
                 return
 
             subject_agent_id = thread.other_agent_id
@@ -3065,6 +3174,10 @@ class SimulationEngine:
                 f":mag: {pi_label} — {project} → *{recommendation}*{score_part}{link_part}"
             )
             await client.apost_message(ASSESSMENTS_SUMMARY_CHANNEL, text)
+            logger.info(
+                "[%s] Posted #assessments-summary headline for %s (%s)",
+                agent.agent_id, subject_agent_id or "?", recommendation,
+            )
         except Exception:
             logger.exception(
                 "[%s] Failed to post assessments-summary headline for thread %s",
@@ -3259,25 +3372,7 @@ class SimulationEngine:
             return False
 
         scores = verdict.get("scores") if isinstance(verdict.get("scores"), dict) else {}
-        # An empty/missing `scores` map is "we don't know", not "we scored it
-        # a 0.00 pass" — rubric_weighted_score({}) returns 0.0 and that bands
-        # as "pass", which is a real, decisive decline the model never made.
-        # weighted_score/band are both nullable for exactly this case; leave
-        # them unset rather than record a verdict nobody rendered (F6).
-        if scores:
-            # Stage-aware since rubric v2.0.0: an incubation-stage verdict is
-            # scored on the incubation weights and banded on the incubation
-            # lines, every other stage (and a missing one) on the investment
-            # scale. The RAW funnel_stage goes in — normalizing it is
-            # blackbird_rubric's job, and `_bounded_str` below has not run yet.
-            # Both calls take the same stage: a score computed on one scale and
-            # banded against the other's lines is meaningless.
-            stage = verdict.get("funnel_stage")
-            computed_score = rubric_weighted_score(scores, stage)
-            computed_band = rubric_band(computed_score, stage)
-        else:
-            computed_score = None
-            computed_band = None
+        computed_score, computed_band = self._computed_score_and_band(verdict)
         gating = _normalize_gating(verdict.get("gating"))
         red_flags = verdict.get("red_flags")
         milestones = verdict.get("suggested_derisking_milestones")
@@ -3368,6 +3463,27 @@ class SimulationEngine:
             )
             return True
 
+    @staticmethod
+    def _verdict_is_terminal(
+        role: str, thread: ThreadState, *, closes_thread: bool
+    ) -> bool:
+        """Is this reply the LAST word the interview will get?
+
+        True when the reply closes the thread (⏸️) or is the turn the guidance
+        asks to conclude on. Two consequences, and they must agree, which is why
+        both callers ask this one function: a terminal verdict marks
+        ``_HeldVerdict.final`` so nothing later can re-capture it, and it is the
+        only thing that releases the public ``#assessments-summary`` headline.
+
+        NOT an admission test. ``_sidecar_refusal`` deliberately no longer asks
+        it — a non-terminal sidecar is stored as provisional rather than
+        destroyed. Announcing one, though, is not reversible: the headline goes
+        to a Slack channel and cannot be retracted when a later turn supersedes
+        the row it described.
+        """
+        thread_phase, _, _ = phase4_guidance(role, thread.message_count + 1)
+        return closes_thread or thread_phase == CONCLUDE
+
     def _sidecar_refusal(
         self, role: str, thread: ThreadState, *, closes_thread: bool,
     ) -> tuple[str, str] | None:
@@ -3380,60 +3496,57 @@ class SimulationEngine:
         caller infers the supersession from ``_assessed_threads`` alone (see
         ``_capture_hub_assessment``), so the two cannot drift apart.
 
-        The question is "does this reply END the interview?", NOT "is the ordinal
-        12". The first version of this gate asked the second question and
-        destroyed the verdict class that matters most. The prompts tell the hub
-        to deliver a NEGATIVE verdict by opening its reply with ⏸️ — and ⏸️ is
-        what ``_check_thread_outcome`` closes the thread on, 3-8 ms later, in this
-        same code path. Measured over 204 hub ``thread_reply`` turns across three
-        runs: all 23 ``pass`` sidecars ever emitted landed on DECIDE ordinals
-        (6/8/10) and ALL 23 carried ⏸️. In run 076e80b6, 4 of the 5
-        ``premature_sidecar`` refusals were the thread's TERMINAL message — the
-        interview's real verdict, complete, 12-14k output tokens each, with
-        orphaned ``specialist_consults`` rows and no assessment to show for them.
-        Under an ordinal-12-only gate a ``pass`` can never be stored at all,
-        because delivering one closes the thread before ordinal 12 is reached
-        (only 1 of 62 threads in that run got there). So:
+        **A sidecar is now trusted on its own.** Emitting one IS the hub saying
+        "this is my verdict", and that is a better signal than either proxy this
+        gate used to compute from outside the artifact. The only refusals left
+        are re-captures (below); an EARLY verdict is accepted as provisional and
+        superseded by any later one.
 
-        ``premature_sidecar`` — the reply is neither the interview's CONCLUDE turn
-        NOR a reply that closes the thread, so a later turn will still be asked
-        for a verdict and this early one must not pre-empt it. Only CONCLUDE
-        guidance asks for a sidecar, but the ``<assessment_json>`` contract sits
-        in the STATIC body of ``phase4-thread-reply.md`` and is therefore in front
-        of the model on every phase-4 turn, EXPLORE and DECIDE included. Run
-        60c53424's pearce interview filled it in at ordinals 8 and 10 as well as
-        at 12, and all three became rows. Such a verdict is also substantively
-        weaker, not merely early: the panel may still be being convened, so the
-        score is formed on a partial record — which is exactly why it yields to a
-        later one and never the other way round.
+        Two rounds of evidence forced that. The gate first asked only "is the
+        ordinal 12", which destroyed every ``pass`` — delivering one opens with
+        ⏸️, and ⏸️ closes the thread 3-8 ms later in this same code path, so no
+        ordinal-12 turn ever arrives (run 076e80b6: 4 of 5 refusals were the
+        thread's terminal message; only 1 of 62 threads reached 12). The fix
+        added ``or closes_thread``, which rescued declines and left positives
+        exposed, because the prompts bind the two to MUTUALLY EXCLUSIVE outcomes:
+        ``phase4-thread-reply.md``'s Outcome 1 is verdict + sidecar and NO ⏸️,
+        Outcome 2 is ⏸️ and "emit no sidecar". So the only sidecar the code
+        reliably accepted was one the prompt forbids. Run 8b64a0e0 measured the
+        result: the CONCLUDE door was offered **once in 140 hub reply turns**, 0
+        of 15 sidecars used it, all 13 stored verdicts came through the ⏸️ door,
+        and the two refused at ordinal 10 included the run's highest-scoring
+        idea (markham, 3.04, its only ``route-to-incubation``) — refused 6
+        minutes before the run's timer ended the interview that was supposedly
+        still owed a verdict. A prompt-COMPLIANT model would have stored nothing
+        at all that run.
 
-        ``duplicate_thread_verdict`` — the thread already holds a verdict that
-        this reply may not replace, in one of three ways:
-          * the held verdict is ``final`` (its reply closed the interview): there
-            is no legitimate later turn, so anything else on this thread is a
-            re-capture.
+        The "wait for a better-informed turn" instinct behind the old refusal is
+        right and is now served by ``_retire_superseded_verdict`` — which landed
+        in the SAME commit as the refusal it makes unnecessary. Last write wins,
+        so a later turn still overrides an earlier one; the difference is that
+        the interview is never left with nothing when that later turn does not
+        come.
+
+        ``duplicate_thread_verdict`` — the thread already holds a verdict this
+        reply may not replace, in one of two ways:
+          * the held verdict is ``final`` (its reply concluded or closed the
+            interview): there is no legitimate later turn, so anything after it
+            is a re-capture.
           * this reply is not strictly LATER than the held one (same ordinal =
             the same turn captured twice). A true duplicate, refused.
-          * this reply is later but neither concludes nor closes the interview —
-            a provisional verdict does not replace a provisional verdict; the
-            first one stands until a concluding or closing reply supersedes it.
         See ``_assessed_threads`` for why the record is process-local.
+
+        ``concluding`` still matters, just not for admission: the caller uses it
+        to decide whether the verdict is TERMINAL — which marks the held record
+        ``final`` and is the only thing that releases the public
+        ``#assessments-summary`` headline. A provisional verdict is stored and
+        visible to staff; it is not announced.
 
         The ordinal arithmetic is ``_warn_if_hub_conclude_missing_assessment``'s
         exactly — prior count plus one, because ``phase4_guidance`` wants the
-        ordinal of the reply just generated. The two must agree: one decides that
-        a CONCLUDE turn OWED a sidecar, this one decides that a sidecar came from
-        a turn allowed to produce one, and a drift between them would open a
-        window where a reply both owes a verdict and is refused the one it
-        produced. (This gate is now the LOOSER of the two — it also accepts a
-        closing reply at any ordinal — so that window cannot reopen from here.)
+        ordinal of the reply just generated.
         """
         ordinal = thread.message_count + 1
-        thread_phase, _, _ = phase4_guidance(role, ordinal)
-        # "This reply is allowed to be the interview's verdict": the turn the
-        # guidance asks for one, or any turn that ends the interview.
-        concluding = thread_phase == CONCLUDE or closes_thread
-
         held = self._assessed_threads.get(thread.thread_id)
         if held is not None:
             if held.final:
@@ -3450,23 +3563,13 @@ class SimulationEngine:
                     "is already stored; re-capturing the same turn is not a new "
                     "verdict",
                 )
-            if not concluding:
-                return (
-                    "duplicate_thread_verdict",
-                    f"this interview already holds a verdict (message ordinal "
-                    f"{held.ordinal}); a later {thread_phase} turn that neither "
-                    "concludes nor closes the thread does not replace it",
-                )
-            # Later, and it ends the interview: last write wins. The caller
-            # retires the superseded row.
+            # Later, and the earlier verdict was provisional: last write wins.
+            # A later turn has strictly more of the interview behind it (more
+            # answers, more consults), so it is better-informed by construction —
+            # which is the same argument the old `premature_sidecar` arm used to
+            # justify DESTROYING the early one, applied in the direction that
+            # keeps data. The caller retires the superseded row.
             return None
-        if not concluding:
-            return (
-                "premature_sidecar",
-                f"sidecar arrived on a {thread_phase} turn (message ordinal "
-                f"{ordinal}) that neither concludes nor closes the interview; "
-                "a later turn is still owed the verdict",
-            )
         return None
 
     async def _retire_superseded_verdict(
@@ -3573,9 +3676,18 @@ class SimulationEngine:
         subject_agent_id: str | None = None,
         thread_id: str | None = None,
         detail: str | None = None,
+        raw_verdict: dict | None = None,
     ) -> None:
         """Record that a verdict was lost — generated and discarded, or, for
         ``empty_reply``, never produced at all.
+
+        ``raw_verdict`` is the discarded verdict itself, and passing it whenever
+        one exists is the point of the column. Without it a refusal is
+        irreversible: run 8b64a0e0 refused markham's sidecar — 3.04, that run's
+        highest score and its only ``route-to-incubation`` — and the JSON
+        survived only because ``llm_call_logs.response_text`` happens to keep the
+        whole response. A gate decision about WHERE a verdict belongs must never
+        also be a decision to destroy it.
 
         Best-effort in exactly the same sense as ``_persist_assessment``: for
         every reason except ``empty_reply`` the concluding reply is already in
@@ -3600,6 +3712,7 @@ class SimulationEngine:
                     thread_id=(thread_id or None),
                     reason=reason,
                     detail=detail,
+                    raw_verdict=raw_verdict,
                 ))
                 await db.commit()
         except Exception as exc:  # noqa: BLE001 — visibility must never cost a reply
@@ -3991,6 +4104,34 @@ class SimulationEngine:
     #: attribute so every `self._PANEL_REQUIRED_FOR` reference below is unchanged.
     _PANEL_REQUIRED_FOR = PANEL_REQUIRED_FOR
 
+    @staticmethod
+    def _computed_score_and_band(verdict: dict) -> tuple[float | None, str | None]:
+        """The weighted score and band this verdict's own scores imply.
+
+        One definition, because two callers now need it and they must agree: the
+        row writer (`_persist_assessment`) and the specialist floor, which gates
+        on the COMPUTED band as well as the model's written recommendation.
+
+        An empty/missing ``scores`` map is "we don't know", not "we scored it a
+        0.00 pass" — ``rubric_weighted_score({})`` returns 0.0 and that bands as
+        ``pass``, a real and decisive decline the model never made. Both columns
+        are nullable for exactly this case; leave them unset rather than record a
+        verdict nobody rendered.
+
+        Stage-aware since rubric v2.0.0: an incubation-stage verdict is scored on
+        the incubation weights and banded on the incubation lines, every other
+        stage (and a missing one) on the investment scale. The RAW ``funnel_stage``
+        goes in — normalizing it is ``blackbird_rubric``'s job. Both calls take
+        the same stage: a score computed on one scale and banded against the
+        other's lines is meaningless.
+        """
+        scores = verdict.get("scores") if isinstance(verdict.get("scores"), dict) else {}
+        if not scores:
+            return None, None
+        stage = verdict.get("funnel_stage")
+        score = rubric_weighted_score(scores, stage)
+        return score, rubric_band(score, stage)
+
     def _specialist_floor_gap(
         self, verdict: dict, *, thread: ThreadState | None = None,
     ) -> set[str]:
@@ -4052,8 +4193,16 @@ class SimulationEngine:
         that consulted one cheap specialist must not thereby buy an exemption
         from the rest.
         """
-        recommendation = verdict.get("recommendation")
-        if recommendation not in self._PANEL_REQUIRED_FOR:
+        # Gate on the COMPUTED band as well as the model's written
+        # recommendation, and stop exempting `route-to-incubation`. Keying on
+        # `recommendation` alone let a verdict that scores into `conditional`
+        # exempt itself by writing `pass` — 3 of the 4 conditional bands in the
+        # v2 corpus do exactly that — and it exempted Blackbird's own POSITIVE
+        # outcome on the reasoning that "a decline costs Blackbird nothing".
+        # `route-to-incubation` is the grant Blackbird exists to award; it is the
+        # last verdict that should go unreviewed. See `panel_is_owed`.
+        _, band = self._computed_score_and_band(verdict)
+        if not panel_is_owed(verdict.get("recommendation"), band):
             return set()
 
         unverifiable = self._floor_unverifiable_reason(verdict, thread)
@@ -4074,7 +4223,7 @@ class SimulationEngine:
         consulted = self._consulted_domains(
             subject, thread.thread_id if thread is not None else None
         )
-        return set(required_domains_for(verdict) - consulted)
+        return set(required_domains_for(verdict, band=band) - consulted)
 
     def _floor_unverifiable_reason(
         self, verdict: dict, thread: ThreadState | None,
@@ -4087,7 +4236,8 @@ class SimulationEngine:
         string is human-facing: it is logged, and it is the reason the row is
         written with ``missing_domains=[]``.
         """
-        if verdict.get("recommendation") not in self._PANEL_REQUIRED_FOR:
+        _, band = self._computed_score_and_band(verdict)
+        if not panel_is_owed(verdict.get("recommendation"), band):
             # No panel was owed, so there is nothing to be unable to verify.
             return None
         subject = verdict.get("subject_agent_id")
@@ -5883,6 +6033,13 @@ class SimulationEngine:
                         input_tokens=entry.get("input_tokens", 0),
                         output_tokens=entry.get("output_tokens", 0),
                         latency_ms=entry.get("latency_ms", 0.0),
+                        # The turn's real wall time, which `latency_ms` above is
+                        # not — it carries only the LAST API call's latency, so
+                        # summing that column understated true LLM wait by 25% on
+                        # run 8b64a0e0. Default None rather than 0.0: a producer
+                        # that supplied nothing means "not recorded", and 0.0
+                        # would read as an instantaneous turn.
+                        wall_ms=entry.get("wall_ms"),
                         # Per-API-call breakdown (stop_reason, the requested
                         # max_tokens ceiling, thinking/text split) that the three
                         # cumulative columns above cannot carry. Default None,

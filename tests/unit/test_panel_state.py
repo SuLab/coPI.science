@@ -64,11 +64,17 @@ def test_a_pass_verdict_reports_that_no_panel_was_owed():
     assert _panel_state(_assessment(recommendation="pass")) == "not_owed"
 
 
-def test_a_route_to_incubation_verdict_reports_that_no_panel_was_owed():
-    """The production case. `route-to-incubation` commits Blackbird to incubating
-    an idea, and it is exempt from the floor — so this is the state where a false
-    "verified" is most expensive."""
-    assert _panel_state(_assessment(recommendation="route-to-incubation")) == "not_owed"
+def test_a_route_to_incubation_verdict_now_owes_a_panel():
+    """The production case, inverted 2026-08-22.
+
+    `route-to-incubation` commits Blackbird to incubating an idea, and it used to
+    be EXEMPT from the floor — exempted alongside `pass` on the reasoning that "a
+    decline costs Blackbird nothing". It is not a decline: it is the grant
+    Blackbird exists to award, which made it the one positive verdict class
+    nobody reviewed. It is now owed a panel, and the page must say so or it will
+    describe a floor the engine no longer runs.
+    """
+    assert _panel_state(_assessment(recommendation="route-to-incubation")) == "verified"
 
 
 def test_an_exempt_verdict_with_a_real_gap_still_reports_the_gap():
@@ -90,11 +96,17 @@ def test_an_exempt_verdict_that_could_not_be_checked_reports_unverified():
     assert _panel_state(row) == "unverified"
 
 
-def test_a_missing_recommendation_does_not_claim_a_verification():
-    """`recommendation` is nullable and degrades to None when the model omitted it
-    or it was clipped. An unknown recommendation cannot be shown to have been
-    held to the floor, so it must not render as verified."""
-    assert _panel_state(_assessment(recommendation=None)) == "not_owed"
+def test_a_missing_recommendation_is_owed_a_panel_rather_than_exempted():
+    """`recommendation` is nullable and degrades to None when the model omitted
+    it or it was clipped.
+
+    This used to render `not_owed`, which reads as "the floor had no business
+    here" — but an unreadable recommendation is precisely the case where nobody
+    can say that. `panel_is_owed` now fails CLOSED, so an unknown recommendation
+    is owed a panel: a wrongly-owed panel costs a flag on a row, a wrongly-exempt
+    one costs the review of a funding decision.
+    """
+    assert _panel_state(_assessment(recommendation=None)) == "verified"
 
 
 def test_the_exempt_set_is_the_engine_s_own():

@@ -211,6 +211,14 @@ class LlmCallLog(Base):
     input_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     output_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     latency_ms: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    #: The TURN's wall time, which `latency_ms` above deliberately is not. Added
+    #: in 0035 as a new column rather than by redefining `latency_ms`, for exactly
+    #: the reason the comment above gives: the values already in that column would
+    #: otherwise mean two things depending on when they were written. Measured on
+    #: run 8b64a0e0, `latency_ms` equalled the LAST call's latency in 532 of 532
+    #: rows, so summing the column understated true LLM wait by 25% (215.9 min
+    #: stored against 289.4 min actual). NULL on rows written before 0035.
+    wall_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
     # One object per real API call, in call order:
     #   {seq, kind, max_tokens, input_tokens, output_tokens, thinking_tokens,
     #    stop_reason, latency_ms}
@@ -266,6 +274,16 @@ class ThreadDecision(Base):
         nullable=False,
     )
     summary_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: The ROLE of whoever's reply ended the interview — `scout_hub`, `pi_lab`, or
+    #: NULL for a close nobody's reply triggered (the `max_thread_messages`
+    #: timeout). `_check_thread_outcome` tests for ⏸️ on whichever agent just
+    #: replied, and ⏸️ is an explicit instruction to BOTH roles, so a lab bot
+    #: declining its own pitch closes the hub's screen. Seven interviews ended
+    #: that way on run 8b64a0e0, none of them with a verdict, and they were
+    #: indistinguishable here from the one genuine timeout — which is what made
+    #: the first count of them wrong. Recording the role changes no behaviour;
+    #: whether a lab's ⏸️ should end the screen at all is a prompt question.
+    closed_by_role: Mapped[str | None] = mapped_column(String(20), nullable=True)
     origin_visibility: Mapped[str] = mapped_column(
         String(20), nullable=False, default=VISIBILITY_PUBLIC,
     )  # drives Phase 5 dedup-context filter; see specs/privacy-and-channel-visibility.md §G3
