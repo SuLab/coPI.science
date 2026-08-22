@@ -385,12 +385,20 @@ async def list_assessments(
     # assessments of run 1787010946 — 23 of 100 weight points pinned near
     # minimum, invisible on a page that shows only totals.
     #
-    # `specialist` is the first runtime read maps_to_dimension has ever had:
+    # `specialist` is the first runtime read maps_to_dimensions has ever had:
     # it names who to ask when a dimension is scoring badly.
+    #
+    # Keyed by DIMENSION, which is why the flattening below is not cosmetic: the
+    # field became a tuple when `scientific` and `chemistry` each took ownership
+    # of a second dimension (2026-08-22), and reading only the first entry would
+    # have silently orphaned `mechanism_validation` and `toxicity_selectivity`
+    # here while the floor could require their specialists. A dimension with two
+    # owners would collapse to whichever came last in the table — forbidden by
+    # `test_no_dimension_has_two_owning_specialists`.
     specialist_for = {
-        spec.maps_to_dimension: domain
+        dimension: domain
         for domain, spec in SPECIALIST_DOMAINS.items()
-        if spec.maps_to_dimension
+        for dimension in spec.maps_to_dimensions
     }
     dimension_stats = []
     for dimension, weight in RUBRIC_WEIGHTS.items():

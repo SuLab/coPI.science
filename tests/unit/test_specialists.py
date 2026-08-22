@@ -6,12 +6,15 @@ docs/specs/2026-08-07-nine-evaluator-panel-design.md §2, §4.
 """
 import itertools
 import json
+import logging
 from pathlib import Path
 
 from src.agent.specialists import (
+    MIN_CLEAR_RATE,
     PANEL_NOTE_QUESTION_CHARS,
     SPECIALIST_DOMAINS,
     VERDICT_SIGNALS,
+    clear_rate_warning,
     clip_question,
     format_panel_note,
     has_usable_content,
@@ -43,9 +46,63 @@ def test_every_domain_declares_when_to_consult_it():
 
 def test_the_two_missing_personas_map_to_new_dimensions():
     """Scientific and Chemistry are the personas with no representation in the
-    old rubric, and the reason the panel exists. Each must land somewhere."""
-    assert SPECIALIST_DOMAINS["scientific"].maps_to_dimension == "experimental_rigor"
-    assert SPECIALIST_DOMAINS["chemistry"].maps_to_dimension == "chemistry_dc_path"
+    old rubric, and the reason the panel exists. Each must land somewhere.
+
+    Both now own two dimensions rather than one — see
+    `test_every_dimension_above_5_percent_incubation_weight_has_an_owning_specialist`
+    for why. The first entry stays the original 1:1 mapping so a reader can
+    still tell which dimension the persona was written against.
+    """
+    assert SPECIALIST_DOMAINS["scientific"].maps_to_dimensions == (
+        "experimental_rigor", "mechanism_validation",
+    )
+    assert SPECIALIST_DOMAINS["chemistry"].maps_to_dimensions == (
+        "chemistry_dc_path", "toxicity_selectivity",
+    )
+
+
+def test_no_dimension_has_two_owning_specialists():
+    """`src/services/directory.py` inverts this table into a dict keyed by
+    dimension, so two owners would silently mean "last one in the table wins"
+    on the page that tells a reader who to ask about a badly-scoring
+    dimension."""
+    seen: dict[str, str] = {}
+    for domain, spec in SPECIALIST_DOMAINS.items():
+        for dimension in spec.maps_to_dimensions:
+            assert dimension not in seen, (
+                f"{dimension!r} is claimed by both {seen[dimension]!r} and {domain!r}"
+            )
+            seen[dimension] = domain
+
+
+def test_every_dimension_above_5_percent_incubation_weight_has_an_owning_specialist():
+    """A dimension with no owner is a dimension no specialist can be required
+    for, so a bad score there is never sourced to an opinion.
+
+    Measured 2026-08-22: 5 of 13 dimensions were unowned — 25% of the
+    incubation weight — including `mechanism_validation` (10) and
+    `toxicity_selectivity` (8), which are the two most-cited rejection reasons
+    in the stakeholder document that justified the panel in the first place
+    (mechanism validation 5 of 15 rejections, toxicity/selectivity 4).
+
+    The bar is *above* 5, not "all thirteen": `external_signals` (2),
+    `dev_regulatory_feasibility` (3) and `exit_thesis` (2) are deliberately
+    left unowned — inventing a specialist for a 2-point dimension would buy a
+    required consult, and a `panel_incomplete` risk, for nothing.
+    """
+    from src.services.blackbird_rubric import RUBRIC_WEIGHTS_INCUBATION
+
+    owned = {
+        dimension
+        for spec in SPECIALIST_DOMAINS.values()
+        for dimension in spec.maps_to_dimensions
+    }
+    unowned = sorted(
+        dimension
+        for dimension, weight in RUBRIC_WEIGHTS_INCUBATION.items()
+        if weight > 5 and dimension not in owned
+    )
+    assert unowned == [], f"heavy dimensions with no owning specialist: {unowned}"
 
 
 def test_persona_path_is_under_prompts_specialists():
@@ -113,6 +170,84 @@ def test_non_list_concerns_degrade_to_empty():
     assert op.concerns == ()
 
 
+# --- parse_opinion, the tolerant extractor -----------------------------------
+#
+# 6 of 168 consults in run 8b64a0e0 were laundered into `caution`/`low`/no
+# concerns by a `json.loads` that saw the whole reply or nothing. The recovery
+# line is clean and was measured: `end_turn` replies carry a COMPLETE object
+# plus trailing prose and recover; `refusal` replies are cut mid-array and do
+# not. See docs/audits/2026-08-22-run-8b64a0e0/rca-and-corrections.md, H5.
+
+def test_json_with_trailing_prose_keeps_its_blocking_signal():
+    """The chute/scientific consult, in the shape it actually arrived.
+
+    Before the tolerant extractor this parsed as `caution`/`low`/no concerns —
+    and `caution` is what was published into the PI's own thread, as ⚠️, for a
+    specialist who had said ⛔ with high confidence. The inversion is the whole
+    reason this test exists; a merely-lost signal would have been survivable.
+    """
+    raw = (
+        _raw(verdict_signal="blocking", confidence="high",
+             concerns=["A single-antibody ICC cannot establish translocation"],
+             questions_to_ask=[])
+        + "\n\nNote: I have marked this blocking rather than caution because the "
+          "claim rests entirely on that one stain."
+    )
+    op = parse_opinion(raw, domain="scientific")
+    assert op.verdict_signal == "blocking"
+    assert op.confidence == "high"
+    assert len(op.concerns) == 1
+    assert op.raw == raw, "the hub still sees every byte, prose included"
+
+
+def test_a_fenced_object_with_trailing_prose_parses():
+    """`_strip_fence` anchors the closing fence at the end of the string, so a
+    model that adds one sentence after the fence defeats it. Two of the six."""
+    raw = (
+        "```json\n" + _raw(verdict_signal="clear", confidence="high") + "\n```\n\n"
+        "Happy to go deeper on selectivity if that would help."
+    )
+    op = parse_opinion(raw, domain="chemistry")
+    assert op.verdict_signal == "clear"
+    assert op.confidence == "high"
+
+
+def test_a_truncated_object_still_falls_back_to_caution():
+    """The `refusal` half: unrecoverable, and it must stay `caution`.
+
+    `clear` here would turn a specialist we could not read into an approval —
+    the exact failure `has_usable_content` was written to prevent. The floor,
+    not the parser, is what must refuse to credit this consult.
+    """
+    op = parse_opinion(
+        '{"verdict_signal": "blocking", "concerns": ["The dose-response is not',
+        domain="scientific",
+    )
+    assert op.verdict_signal == "caution"
+    assert op.confidence == "low"
+    assert op.concerns == ()
+
+
+def test_a_defaulted_signal_logs_a_warning_naming_the_domain(caplog):
+    """The six were invisible: a laundered opinion looks exactly like a genuine
+    cautious one in every log line and every stored row. One WARNING naming the
+    domain is what makes the next six greppable."""
+    with caplog.at_level(logging.WARNING, logger="src.agent.specialists"):
+        parse_opinion("I would rather not answer that.", domain="legal")
+    assert any(
+        record.levelno == logging.WARNING and "legal" in record.getMessage()
+        for record in caplog.records
+    ), caplog.text
+
+
+def test_a_signal_that_was_read_logs_nothing(caplog):
+    """The warning has to stay rare enough to be worth reading: 141 of 168
+    consults parsed fine, and a line per consult is a line nobody greps."""
+    with caplog.at_level(logging.WARNING, logger="src.agent.specialists"):
+        parse_opinion(_raw(), domain="legal")
+    assert caplog.records == []
+
+
 # --- required_domains_for ----------------------------------------------------
 
 def test_scientific_and_talent_are_always_required():
@@ -148,6 +283,51 @@ def test_unconfirmed_fto_does_not_require_legal():
 def test_a_platform_claim_requires_technologic():
     v = {"scores": {"platform": 5}, "rationale": "A reusable editing platform."}
     assert "technologic" in required_domains_for(v)
+
+
+def test_commercial_is_required_when_a_differentiation_claim_is_made():
+    """`commercial` owns `differentiation` — 16 of 100 incubation weight, the
+    heaviest single dimension — and until now NO input could require it. So the
+    heaviest dimension in the rubric was the one dimension whose specialist the
+    floor could never demand.
+    """
+    for text in (
+        "First-in-class against a target nobody else is drugging.",
+        "The differentiation from the two clinical-stage competitors is unclear.",
+        "A crowded competitive landscape with three named competitors.",
+        "Best-in-class potency, but the comparables are weak.",
+    ):
+        assert "commercial" in required_domains_for(_verdict(text)), text
+
+
+def test_budget_is_required_when_a_workplan_claim_is_made():
+    """`budget` owns `workplan_capital_efficiency`, which the v2 incubation
+    scale re-weighted from 1 to 8 — the single largest weight change in the
+    re-baseline — while leaving the domain unrequirable."""
+    for text in (
+        "The workplan is a 24-month effort at roughly $750k.",
+        "A milestone-driven budget with a 12-month timeline.",
+        "Burn rate is the binding constraint on this scope.",
+    ):
+        assert "budget" in required_domains_for(_verdict(text)), text
+
+
+def test_the_new_cues_do_not_fire_on_ordinary_verdict_prose():
+    """The cost model here is inverted from what it looks like: this runs AFTER
+    the interview has ended, so a false positive cannot be repaired by asking
+    one more question — it marks a finished verdict `panel_incomplete`. The two
+    new cue sets are held to the same false-positive discipline as the four
+    that preceded them.
+    """
+    for text in (
+        "The marketing of this idea outran the data.",
+        "We discussed the costume of scientific rigor, not rigor itself.",
+        "A timely response from the PI, but no new data.",
+        "Deal-breaking is not the same as blocking.",
+    ):
+        required = required_domains_for(_verdict(text))
+        assert "commercial" not in required, text
+        assert "budget" not in required, text
 
 
 def test_a_bare_verdict_requires_only_the_always_pair():
@@ -416,13 +596,17 @@ def test_only_the_documented_domains_are_reachable():
                         )
                     )
 
-    assert reachable == {
-        "scientific", "talent", "chemistry", "clinical", "technologic", "legal",
-    }
-    assert {"commercial", "budget"}.isdisjoint(reachable), (
-        "commercial maps to `differentiation`, the heaviest dimension at 15%, "
-        "and the floor still cannot demand it — F5, deferred by D6"
+    assert reachable == set(SPECIALIST_DOMAINS), (
+        "every one of the eight domains must be reachable by some input; the "
+        "floor cannot demand a specialist no verdict can ever trigger"
     )
+    # The history this assertion replaces: for as long as the panel existed,
+    # `commercial` and `budget` were unreachable — finding F5, deferred by D6
+    # because closing it needed a hub prompt change. `commercial` owns
+    # `differentiation`, the heaviest dimension on both scales (15 investment /
+    # 16 incubation), so the floor could not demand an opinion on the thing it
+    # weighted most. Re-measured and closed 2026-08-22 (M7).
+    assert {"commercial", "budget"} <= reachable
 
 
 def test_an_empty_reply_is_not_an_opinion():
@@ -507,6 +691,64 @@ def test_a_single_unbroken_token_is_still_bounded():
     clipped = clip_question("x" * 5000)
     assert len(clipped) == PANEL_NOTE_QUESTION_CHARS + 1
     assert clipped.endswith("…")
+
+
+# ---------------------------------------------------------------
+# clear_rate_warning — the panel-discrimination alarm.
+#
+# It used to be `total >= 50 and not counts.get("clear")`: a ZERO test. Run
+# 8b64a0e0 returned 141 caution / 26 blocking / 1 clear over 168 consults and
+# was the first run ever to silence it — that single `clear` is the only one in
+# the whole database. A zero-test is silenced by one outlier; a rate test is
+# not.
+# ---------------------------------------------------------------
+
+
+def test_a_single_clear_does_not_silence_the_discrimination_alarm():
+    """The exact production shape, minus the blocking column: 167 caution and
+    one clear must still warn."""
+    message = clear_rate_warning({"caution": 167, "clear": 1})
+    assert message is not None
+    assert "clear" in message
+    assert "168" in message, "the operator needs the denominator, not just the rate"
+
+
+def test_the_run_that_motivated_the_change_still_warns():
+    assert clear_rate_warning({"caution": 141, "blocking": 26, "clear": 1}) is not None
+
+
+def test_a_panel_that_never_clears_anything_still_warns():
+    """The original zero case must not regress out of coverage."""
+    assert clear_rate_warning({"caution": 100, "blocking": 60}) is not None
+
+
+def test_a_discriminating_panel_is_silent():
+    """A panel clearing comfortably above the floor is the whole point; it must
+    not produce a warning nobody can act on."""
+    clears = 40
+    assert clear_rate_warning({"caution": 100, "blocking": 20, "clear": clears}) is None
+    assert clears / 160 > MIN_CLEAR_RATE
+
+
+def test_the_alarm_stays_quiet_below_its_sample_floor():
+    """Fifty is the smallest sample the alarm has ever spoken on, and it is kept
+    deliberately: at n=10 a zero `clear` rate is ordinary luck, and an alarm
+    that cries at the start of every run is an alarm that gets muted."""
+    assert clear_rate_warning({"caution": 49}) is None
+    assert clear_rate_warning({"caution": 50}) is not None
+
+
+def test_the_alarm_never_divides_by_zero():
+    for counts in ({}, {"caution": 0}, {"clear": 0}):
+        assert clear_rate_warning(counts) is None
+
+
+def test_the_clear_rate_floor_is_pinned():
+    """Pinned literally so a future loosening is a diff, not a drift. 5% is the
+    first floor this alarm has ever had: run 8b64a0e0's 0.6% (1 of 168) is an
+    order of magnitude under it, while a genuinely selective panel clearing one
+    idea in twenty stays silent."""
+    assert MIN_CLEAR_RATE == 0.05
 
 
 def test_nothing_but_the_three_publishable_fields_can_reach_a_note():

@@ -333,9 +333,18 @@ def test_renderer_covers_the_whole_document():
 
 def test_specialist_ownership_is_declared_for_eight_dimensions():
     # Eight of the thirteen dimensions each name the evaluation-panel domain
-    # that owns them (src/agent/specialists.py maps_to_dimension); the other
-    # five inform judgement without a single owner. Pinned so a document edit
-    # cannot silently orphan or double-assign a dimension.
+    # that owns them; the other five declare no owner here. Pinned so a document
+    # edit cannot silently orphan or double-assign a dimension.
+    #
+    # This is the DOCUMENT's side and it is deliberately narrower than the code's
+    # since 2026-08-22: `src/agent/specialists.py` additionally gives
+    # `mechanism_validation` to `scientific` and `toxicity_selectivity` to
+    # `chemistry` (weights 10 and 8 on the incubation scale — the two most-cited
+    # rejection reasons in the stakeholder document). Nothing requires the two
+    # directions to be a bijection: the document's field is what the hub is told,
+    # and the code's is what the floor and the admin pages use. Only the
+    # code -> document direction is a hard constraint, and
+    # tests/unit/test_rubric_prompt_sync.py enforces it.
     owners = {d.key: d.specialist for d in load_rubric().dimensions if d.specialist}
     assert owners == {
         "differentiation": "commercial",

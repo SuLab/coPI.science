@@ -12,7 +12,7 @@ still restate parts of it and can therefore drift out of sync with it silently:
   document but not to the skeleton would drag every future assessment down
   invisibly; a key the skeleton invents is logged as unmatched and scored as
   unset.
-* ``src/agent/specialists.py`` — each specialist's ``maps_to_dimension``, which
+* ``src/agent/specialists.py`` — each specialist's ``maps_to_dimensions``, which
   is where a blocking specialist signal lands. A dimension renamed in the
   document leaves that mapping pointing at nothing.
 * the prose percentages in the phase-4 prompt and in the document's own scoring
@@ -119,17 +119,15 @@ def test_phase4_states_the_dimension_count_the_document_defines():
 
 @pytest.mark.parametrize("domain", sorted(SPECIALIST_DOMAINS))
 def test_specialist_maps_to_a_real_rubric_dimension(domain):
-    """A specialist's concerns land in ``maps_to_dimension``. If the document
-    renames or drops that dimension, the mapping points at nothing and a
-    blocking signal has nowhere to go. (None is allowed — some specialists
-    inform judgement without owning a dimension.)"""
-    mapped = SPECIALIST_DOMAINS[domain].maps_to_dimension
-    if mapped is None:
-        return
-    assert mapped in RUBRIC_WEIGHTS, (
-        f"specialists.py maps {domain!r} to dimension {mapped!r}, which is not in "
-        "prompts/rubric/blackbird-rubric.toml"
-    )
+    """A specialist's concerns land in ``maps_to_dimensions``. If the document
+    renames or drops one of those dimensions, the mapping points at nothing and
+    a blocking signal has nowhere to go. (An EMPTY tuple is allowed — some
+    specialists inform judgement without owning a dimension.)"""
+    for mapped in SPECIALIST_DOMAINS[domain].maps_to_dimensions:
+        assert mapped in RUBRIC_WEIGHTS, (
+            f"specialists.py maps {domain!r} to dimension {mapped!r}, which is not in "
+            "prompts/rubric/blackbird-rubric.toml"
+        )
 
 
 def test_document_specialist_fields_name_real_specialist_domains():

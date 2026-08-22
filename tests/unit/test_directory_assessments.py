@@ -99,6 +99,6 @@ async def test_dimension_stats_expose_the_constant_dimensions(db_session):
     assert stats["ip_fto"]["max"] == 2
     assert stats["differentiation"]["max"] == 5
     assert stats["ip_fto"]["specialist"] == "legal", (
-        "maps_to_dimension has never had a runtime read; this is it"
+        "maps_to_dimensions has never had a runtime read; this is it"
     )
     assert view["band_counts"] == [("pass", 3)]

@@ -231,3 +231,105 @@ async def test_an_empty_specialist_reply_is_billed_but_not_counted(monkeypatch):
     assert billed, "a call that was issued is billed whatever it returned"
     assert consulted == [], "an empty reply must not satisfy the floor"
     assert "empty response" in result
+
+
+# --- refusal-truncated consults ---------------------------------------------
+#
+# `stop_reason` was compared against "max_tokens" at nine sites in llm.py and
+# branched on NOWHERE else in src/. So a `refusal` — the SDK's own word for a
+# reply the model stopped mid-sentence — was indistinguishable from a complete
+# answer at every call site. Measured over run 8b64a0e0: 47 refusals (21
+# recorded + 26 that wrote no row at all), 3 of them specialist consults, all 3
+# credited to the panel while contributing zero concerns and zero questions,
+# all 3 published into the PI's own thread as "⚠️ caution". markham's verdict
+# rested on that panel.
+#
+# See docs/audits/2026-08-22-run-8b64a0e0/rca-and-corrections.md, H4/H5.
+
+
+@pytest.mark.asyncio
+async def test_a_refusal_truncated_consult_is_recorded_but_not_credited(monkeypatch):
+    """Three callbacks, three different questions, and they must disagree here.
+
+    - `on_api_call`  — "was this billed?"            yes, it was.
+    - `on_consult_record` — "what did we get?"       write it; a truncated
+      opinion is the only evidence the attempt happened at all, and it is what
+      a backfill or an audit reads.
+    - `on_consult`   — "does this satisfy the floor?" NO. A specialist that was
+      cut off mid-array has not cleared, cautioned or blocked anything.
+    """
+    consulted, billed, recorded = [], [], []
+
+    async def _refused(**kwargs):
+        # The pinned contract from src/services/llm.py: invoked exactly once,
+        # with the FINAL call's stop_reason, before the text is returned.
+        on_stop_reason = kwargs.get("on_stop_reason")
+        if on_stop_reason is not None:
+            on_stop_reason("refusal")
+        return '{"verdict_signal": "blocking", "concerns": ["The dose-response is not'
+
+    async def _record(**fields):
+        recorded.append(fields)
+
+    monkeypatch.setattr("src.agent.tools.generate_agent_response", _refused)
+
+    result = await _execute_consult_specialist(
+        "chemistry", "Is the series tractable?", "The PI said a great deal.",
+        agent_id="blackbird",
+        on_consult=lambda domain, signal: consulted.append(domain),
+        on_consult_record=_record,
+        on_api_call=lambda: billed.append(1),
+    )
+
+    assert billed, "the call was issued and is billed"
+    assert consulted == [], "a truncated consult must not satisfy the floor"
+    assert len(recorded) == 1, "the durable record is the whole point of C1.3"
+    assert recorded[0]["domain"] == "chemistry"
+    assert recorded[0]["raw_opinion"].endswith("The dose-response is not")
+    # The model is told, in the string it reads, that this one did not land —
+    # otherwise it consults once, believes the domain is covered, and concludes.
+    assert "truncated" in result.lower()
+
+
+@pytest.mark.asyncio
+async def test_a_complete_consult_that_stopped_on_end_turn_is_still_credited(monkeypatch):
+    """The other side of the branch. `end_turn` is the normal terminator and
+    must not be caught up in this."""
+    consulted = []
+
+    async def _complete(**kwargs):
+        on_stop_reason = kwargs.get("on_stop_reason")
+        if on_stop_reason is not None:
+            on_stop_reason("end_turn")
+        return '{"verdict_signal": "clear", "confidence": "high"}'
+
+    monkeypatch.setattr("src.agent.tools.generate_agent_response", _complete)
+
+    await _execute_consult_specialist(
+        "chemistry", "Is the series tractable?", "The PI said a great deal.",
+        agent_id="blackbird",
+        on_consult=lambda domain, signal: consulted.append(domain),
+    )
+    assert consulted == ["chemistry"]
+
+
+@pytest.mark.asyncio
+async def test_a_consult_whose_stop_reason_never_arrives_is_credited(monkeypatch):
+    """`on_stop_reason` is additive and best-effort on the llm.py side: it is
+    wrapped so it can never raise into the caller, which also means it can fail
+    to fire. A missing stop_reason must degrade to today's behaviour — crediting
+    a consult that returned a usable opinion — and not to a silent floor
+    failure on every consult in the system."""
+    consulted = []
+
+    async def _no_signal(**kwargs):
+        return '{"verdict_signal": "clear", "confidence": "high"}'
+
+    monkeypatch.setattr("src.agent.tools.generate_agent_response", _no_signal)
+
+    await _execute_consult_specialist(
+        "chemistry", "Is the series tractable?", "The PI said a great deal.",
+        agent_id="blackbird",
+        on_consult=lambda domain, signal: consulted.append(domain),
+    )
+    assert consulted == ["chemistry"]

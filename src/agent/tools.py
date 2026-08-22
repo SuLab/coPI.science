@@ -236,10 +236,12 @@ async def execute_tool(
     successful consult — see ``_execute_consult_specialist``.
 
     ``on_consult_record`` is the DURABLE half of the same event: an awaitable
-    the engine supplies to write the consult to ``specialist_consults``, fired
-    on exactly the same successful path as ``on_consult`` and defaulting to
-    None so every caller without one (a pi_lab reply, a direct test call)
-    behaves exactly as before.
+    the engine supplies to write the consult to ``specialist_consults``,
+    defaulting to None so every caller without one (a pi_lab reply, a direct
+    test call) behaves exactly as before. It fires on a STRICTLY WIDER path than
+    ``on_consult``: a consult truncated by a `refusal` is recorded and not
+    counted, because a truncated opinion is the only evidence the attempt
+    happened at all. See ``_execute_consult_specialist``.
 
     ``own_dois``: the calling agent's own-lab publication DOIs (see
     ``Agent.own_publication_dois``, GitHub issue #7). A ``retrieve_abstract``
@@ -504,13 +506,15 @@ async def _execute_consult_specialist(
     """Ask one specialist persona for an opinion.
 
     ``on_consult`` is invoked with the domain and the parsed verdict signal
-    ONLY on a successful call. A refused domain, a missing persona file, or a
-    failed LLM call must not satisfy the enforcement floor — otherwise "the
-    specialist was unreachable" would silently become "the specialist
-    approved".
+    ONLY on a successful call. A refused domain, a missing persona file, a
+    failed LLM call, an empty reply, or a reply the API stopped mid-sentence
+    (``stop_reason == "refusal"``) must not satisfy the enforcement floor —
+    otherwise "the specialist was unreachable" would silently become "the
+    specialist approved".
 
-    ``on_consult_record`` fires on that same success path, and is the durable
-    record of it (``specialist_consults``). It carries only what this function
+    ``on_consult_record`` fires on a strictly WIDER path — every case above that
+    produced text at all, truncated ones included — and is the durable record of
+    the attempt (``specialist_consults``). It carries only what this function
     knows — the ask and the parsed opinion; the engine's own closure supplies
     who asked, about whom, and in which thread and channel. Deliberately
     SECOND: the in-memory ``on_consult`` is what the floor reads in-process and
@@ -553,6 +557,10 @@ async def _execute_consult_specialist(
     # on success would let a flapping specialist run free.
     if on_api_call is not None:
         on_api_call()
+    # Filled by `on_stop_reason` below — a list rather than a scalar because the
+    # callback fires once per generate_agent_response invocation and a truncation
+    # retry makes two. Only the LAST one describes the text we were handed.
+    stop_reasons: list[str] = []
     # Local import, matching the two other get_settings uses in this module.
     from src.config import get_settings
 
@@ -612,6 +620,12 @@ async def _execute_consult_specialist(
             # A truncation retry is a second billed call — book it too, same
             # contract every other generate_agent_response caller uses.
             on_retry=on_api_call,
+            # Why a consult needs the stop_reason at all: `stop_reason` was
+            # compared against "max_tokens" at nine sites in llm.py and branched
+            # on NOWHERE else in src/, so a `refusal` — the API's own word for a
+            # reply it stopped mid-sentence — was indistinguishable from a
+            # complete answer at every call site. See the `refused` branch below.
+            on_stop_reason=stop_reasons.append,
         )
     except Exception as exc:  # noqa: BLE001 — a dead specialist must not kill the turn
         logger.error("[specialists] %s consult failed: %s", domain, exc)
@@ -633,11 +647,33 @@ async def _execute_consult_specialist(
             "without this opinion; it will not count as consulted."
         )
     opinion = parse_opinion(raw, domain=domain)
-    if on_consult is not None:
+    # A reply the API stopped mid-sentence is not an opinion either, and it is a
+    # WORSE failure than an empty one because it looks like a complete answer.
+    # Measured over run 8b64a0e0: 3 consults ended in `refusal`, all 3 were
+    # credited to the panel, all 3 contributed zero concerns and zero questions
+    # (the JSON was cut mid-array, so `parse_opinion` defaulted the signal), and
+    # all 3 were published into the PI's own interview thread as "⚠️ caution".
+    # markham's discarded 3.04 verdict rested on that panel. See
+    # docs/audits/2026-08-22-run-8b64a0e0/rca-and-corrections.md, H4/H5.
+    #
+    # Note what this does NOT do: it does not suppress the durable record below.
+    # A truncated opinion is the only evidence the attempt happened at all — the
+    # same run's `sinnis` has NO chemistry consult on record while chemistry was
+    # attempted and refused five times, which is how a panel record becomes
+    # substantially fictional. Record it; just do not count it.
+    refused = bool(stop_reasons) and stop_reasons[-1] == "refusal"
+    if refused:
+        logger.error(
+            "[specialists] %s consult for %s ended in a refusal (truncated "
+            "mid-reply) — recorded, but NOT counted as consulted",
+            domain, agent_id,
+        )
+    elif on_consult is not None:
         on_consult(domain, opinion.verdict_signal)
     logger.info(
-        "[specialists] %s consulted %s -> %s (%s)",
+        "[specialists] %s consulted %s -> %s (%s)%s",
         agent_id, domain, opinion.verdict_signal, opinion.confidence,
+        " [TRUNCATED, uncounted]" if refused else "",
     )
     if on_consult_record is not None:
         try:
@@ -664,4 +700,16 @@ async def _execute_consult_specialist(
                 "[specialists] %s consult recorded in memory but NOT durably: %s",
                 domain, exc, exc_info=True,
             )
+    if refused:
+        # Say so in the string the MODEL reads, not just in the log. Otherwise
+        # the hub consults once, sees a plausible opinion, believes the domain is
+        # covered, and concludes — while the floor it is about to be checked
+        # against has recorded nothing. The signal is deliberately not repeated
+        # here: it was defaulted, and quoting it would dress a parse failure up
+        # as a verdict.
+        return (
+            f"The {domain} specialist's reply was TRUNCATED mid-answer, so it "
+            f"does not count as consulted — consult {domain} again before you "
+            f"conclude. The partial text follows, unparsed:\n\n{opinion.raw}"
+        )
     return f"{spec.title} — signal: {opinion.verdict_signal}\n\n{opinion.raw}"
