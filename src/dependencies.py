@@ -69,6 +69,42 @@ async def get_current_user(
             headers={"Location": "/login"},
         )
 
+    # Revocation. Sessions are unkeyed signed cookies with a 30-day max_age and
+    # no server-side store, so there is no session to invalidate and
+    # `access_status` is the ONLY revocation signal there is. Nothing read it
+    # after login, so admin_deny_access set the column and changed nothing a
+    # signed-in user could observe: a denied user's GET /profile returned 200
+    # for up to thirty more days (E1.2).
+    #
+    # Checked on `session_user`, the account that actually holds the session —
+    # deliberately BEFORE the impersonation block below, and never on the
+    # impersonated user. An admin looking at a denied account is a support
+    # action, not that account's own session.
+    #
+    # POP `user_id`; do NOT call request.session.clear(). /access-pending
+    # renders `session["pending_access"]`, so clearing the session lands the
+    # user on a page that cannot say which account is blocked. We repopulate
+    # `pending_access` in exactly the shape src/routers/auth.py's own access
+    # gate writes at login, so the two arrivals at that page look the same.
+    #
+    # This redirect target and POST /logout must both stay free of
+    # get_current_user: /access-pending (src/routers/public.py) takes no auth
+    # dependency and POST /logout (src/routers/auth.py) takes none either.
+    # Adding one to either turns this bounce into a loop with no way out — see
+    # tests/integration/test_access_revocation.py.
+    if session_user.access_status != "allowed":
+        request.session.pop("user_id", None)
+        request.session["pending_access"] = {
+            "user_id": str(session_user.id),
+            "orcid": session_user.orcid,
+            "email": session_user.email,
+            "name": session_user.name,
+        }
+        raise HTTPException(
+            status_code=status.HTTP_302_FOUND,
+            headers={"Location": "/access-pending"},
+        )
+
     # Impersonation: admin can view as another user
     impersonate_id = request.cookies.get("copi-impersonate")
     if impersonate_id and session_user.is_admin:

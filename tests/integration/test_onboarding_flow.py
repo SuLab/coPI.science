@@ -506,7 +506,17 @@ async def test_the_start_page_enqueues_a_job_only_when_there_is_nothing_to_show(
     assert await _job_count(db_session, allowed.id) == 1
 
     # controls: the two guards the self-heal is written with.
-    assert (await client.get("/onboarding", headers=_auth(pending.id))).status_code == 200
+    #
+    # The access_status guard is now belt-and-braces rather than the thing doing
+    # the work: since E1.2, get_current_user bounces any user whose
+    # access_status is not 'allowed' to /access-pending, so onboarding_start
+    # never runs for `pending` at all. The observable moved from "200 with no
+    # job" to "302 with no job" — a strictly stronger control, and the reason
+    # the guard inside onboarding_start is kept anyway (it is the only thing
+    # left if that bounce is ever loosened).
+    r_pending = await client.get("/onboarding", headers=_auth(pending.id))
+    assert r_pending.status_code == 302
+    assert r_pending.headers["location"] == "/access-pending"
     assert await _job_count(db_session, pending.id) == 0, "self-heal ignored access_status"
     assert (await client.get("/onboarding", headers=_auth(has_profile.id))).status_code == 200
     assert await _job_count(db_session, has_profile.id) == 0, "self-heal ignored the profile"
