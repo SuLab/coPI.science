@@ -1052,7 +1052,14 @@ async def impersonate_user(
         max_age=86400,
         httponly=True,
         samesite="lax",
-        secure=not request.app.state.allow_http if hasattr(request.app.state, "allow_http") else False,
+        # Same switch the session cookie uses in src/main.py. This used to read
+        # `request.app.state.allow_http`, guarded by a hasattr — but nothing in
+        # src/ has ever SET app.state.allow_http (the setting is called
+        # allow_http_sessions and lives on Settings), so the hasattr was always
+        # False and the whole ternary was a constant secure=False. Production
+        # runs ALLOW_HTTP_SESSIONS=false, so this cookie was shipping without
+        # Secure beside a session cookie that requires HTTPS (E1.5).
+        secure=not get_settings().allow_http_sessions,
     )
     return response
 
