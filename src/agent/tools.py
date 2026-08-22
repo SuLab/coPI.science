@@ -663,7 +663,8 @@ async def _execute_consult_specialist(
             # compared against "max_tokens" at nine sites in llm.py and branched
             # on NOWHERE else in src/, so a `refusal` — the API's own word for a
             # reply it stopped mid-sentence — was indistinguishable from a
-            # complete answer at every call site. See the `refused` branch below.
+            # complete answer at every call site. See the `truncated` branch
+            # below, which reads BOTH stops through `is_truncated_stop`.
             on_stop_reason=stop_reasons.append,
         )
     except Exception as exc:  # noqa: BLE001 — a dead specialist must not kill the turn
@@ -736,7 +737,8 @@ async def _execute_consult_specialist(
                 concerns=list(opinion.concerns),
                 questions_to_ask=list(opinion.questions_to_ask),
                 raw_opinion=opinion.raw,
-                # The row's own copy of the refusal above. Without it the
+                # The row's own copy of the refusal above — a `refusal` OR a
+                # `max_tokens`, whichever cut the reply off. Without it the
                 # stored consult is byte-indistinguishable from a complete
                 # one, so `_seed_consults_from_db` rehydrates it after a
                 # restart as a domain that counts and the floor is satisfied

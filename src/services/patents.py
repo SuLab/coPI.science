@@ -74,16 +74,40 @@ _Q_TOKEN = re.compile(r"[A-Za-z0-9]+(?:-[0-9][A-Za-z0-9]*)*")
 # 1,862, i.e. ten arbitrary filings offered to the hub as adjacent prior art.
 #
 # Case is preserved (Γ -> "Gamma", γ -> "gamma") so `_salience`'s "this is a
-# symbol, not prose" bonus survives the rewrite. U+00B5 MICRO SIGN is listed
-# separately from U+03BC GREEK SMALL LETTER MU: they are different codepoints
-# and unit strings carry the first one.
+# symbol, not prose" bonus survives the rewrite.
+#
+# THE WHOLE ALPHABET, not the letters some incident happened to name. A partial
+# table reproduces the bug above through whichever letter is missing, and the
+# first version of this table proved it: `π-π stacking` tokenised as
+# ['stacking'], `CD3ζ signalling` as ['CD3', 'signalling'] and `Φ29 polymerase`
+# as ['29', 'polymerase'] — the specific term deleted in all three, `broadened`
+# reported False, and `dropped_or_rewritten` empty. The alphabet is finite and
+# fits here; the judgement call about which letters "matter" does not.
+#
+# Compatibility duplicates are NOT listed, because `_to_ascii` runs NFKD FIRST
+# and NFKD folds every one of them onto the base letter: U+00B5 MICRO SIGN and
+# U+2126 OHM SIGN (the codepoints a units string and a PDF paste really carry),
+# the ϐϑϒϕϖϰϱϵϴ variant letters, the mathematical alphanumerics (𝛽 …), and
+# accented Greek (ά -> α + combining acute). Verified for each, 2026-08-22.
+# U+03C2 FINAL SIGMA is the exception — NFKD leaves it alone — so it is listed.
+#
+# Known hazard, deliberately accepted: the capitals ΑΒΕΖΗΙΚΜΝΟΡΤΥΧ are
+# homoglyphs of Latin ABEZHIKMNOPTYX, so a paste artifact spells out as
+# "Omicron" rather than reading as "O". Both readings are wrong for a paste and
+# neither can be told from the other at this layer — but the spelled-out one is
+# DISCLOSED (`dropped_or_rewritten`), where a silent drop was not, which is the
+# property this whole path is being repaired for.
 _GREEK_TO_ASCII = {
     "α": "alpha", "β": "beta", "γ": "gamma", "δ": "delta", "ε": "epsilon",
-    "κ": "kappa", "λ": "lambda", "μ": "mu", "µ": "mu", "σ": "sigma",
-    "ς": "sigma", "τ": "tau", "ω": "omega",
+    "ζ": "zeta", "η": "eta", "θ": "theta", "ι": "iota", "κ": "kappa",
+    "λ": "lambda", "μ": "mu", "ν": "nu", "ξ": "xi", "ο": "omicron",
+    "π": "pi", "ρ": "rho", "ς": "sigma", "σ": "sigma", "τ": "tau",
+    "υ": "upsilon", "φ": "phi", "χ": "chi", "ψ": "psi", "ω": "omega",
     "Α": "Alpha", "Β": "Beta", "Γ": "Gamma", "Δ": "Delta", "Ε": "Epsilon",
-    "Κ": "Kappa", "Λ": "Lambda", "Μ": "Mu", "Σ": "Sigma", "Τ": "Tau",
-    "Ω": "Omega",
+    "Ζ": "Zeta", "Η": "Eta", "Θ": "Theta", "Ι": "Iota", "Κ": "Kappa",
+    "Λ": "Lambda", "Μ": "Mu", "Ν": "Nu", "Ξ": "Xi", "Ο": "Omicron",
+    "Π": "Pi", "Ρ": "Rho", "Σ": "Sigma", "Τ": "Tau", "Υ": "Upsilon",
+    "Φ": "Phi", "Χ": "Chi", "Ψ": "Psi", "Ω": "Omega",
 }
 
 # Unicode dashes -> ASCII "-", so `_Q_TOKEN`'s SYMBOL-N protection (which is
@@ -123,13 +147,21 @@ def _to_ascii(text: str) -> str:
     """Fold one chunk of caller text to ASCII: Greek spelled out, Unicode dashes
     folded, combining marks stripped from accented Latin (Ångström -> Angstrom).
 
-    NFKD runs AFTER the table so the table sees the composed codepoints it
-    names; anything still non-ASCII afterwards (CJK, an arrow, an emoji) is left
-    alone and is discarded by `_Q_TOKEN` as it always was.
+    NFKD runs FIRST, so the table only ever has to list BASE letters: every
+    compatibility duplicate (U+00B5 MICRO SIGN, U+2126 OHM SIGN, the variant
+    letters, the mathematical alphanumerics, accented Greek) decomposes onto one
+    of them on the way in. It used to run second, which is how U+2126 reached
+    `_Q_TOKEN` as U+03A9, was dropped, and was reported as `Ω29→Ω29` — a
+    disclosure that rendered as no change at all. NFKD also folds U+2011 to
+    U+2010 and U+FF0D to ASCII "-", both of which the dash table then covers.
+
+    Anything still non-ASCII afterwards (CJK, Cyrillic, an arrow, ∆) is left
+    alone here and discarded by `_Q_TOKEN` — `_prepare` is what makes sure the
+    caller is TOLD about it.
     """
-    folded = text.translate(_TRANSLITERATE)
+    decomposed = unicodedata.normalize("NFKD", text)
     return "".join(
-        ch for ch in unicodedata.normalize("NFKD", folded)
+        ch for ch in decomposed.translate(_TRANSLITERATE)
         if not unicodedata.combining(ch)
     )
 
@@ -144,23 +176,54 @@ def _prepare(query: str) -> tuple[list[str], tuple[str, ...]]:
     ``PriorArtResult.dropped_or_rewritten`` and rendered by
     ``src/agent/tools.py::_scope_note``.
 
-    Transliteration is per whitespace-chunk and re-joined, not applied to the
-    whole string at once, so a chunk and its rewrite always line up — NFKD folds
-    U+00A0 to a space, which would otherwise change the chunk count mid-compare.
+    The disclosure is TOTAL, and the first version was not: it fired only when
+    the fold CHANGED the chunk, so a chunk that folded to itself and then
+    vanished at the ASCII token class reported nothing — `π-π stacking` reached
+    the model as "SCOPE: searched titles for stacking." with `broadened` False, a
+    term silently deleted and the note saying nothing had happened. That is the
+    same class of damage the transliteration exists to stop. Three branches
+    instead of one, per whitespace chunk:
+
+    * nothing survived and the chunk was not ASCII -> say the term was dropped.
+      An ASCII punctuation-only chunk ("/") is deliberately silent: nothing was
+      ever there to lose, and a note per slash would drown the real ones. An
+      all-operator chunk is silent here too, having already been noted below.
+    * something survived but characters did not -> say what was actually
+      searched, not just that "something changed".
+    * a clean rewrite -> the arrow form.
+
+    In every arrow-form note the right-hand side is what was SENT, and what is
+    sent is always ASCII — so a note can never again render as an identity
+    mapping (pinned by `test_a_disclosure_note_is_never_an_identity_mapping`).
+
+    Chunk-at-a-time rather than whole-string, so a chunk and its rewrite always
+    line up. `_Q_TOKEN` cannot span whitespace, so this tokenises identically to
+    the joined form.
     """
-    rewritten: list[str] = []
+    tokens: list[str] = []
     notes: list[str] = []
     for chunk in (query or "").split():
         folded = _to_ascii(chunk)
-        if folded != chunk:
+        kept: list[str] = []
+        for token in _Q_TOKEN.findall(folded):
+            if token.lower() in _QUERY_OPERATORS:
+                notes.append(f"{token} (dropped — a query operator, not a title word)")
+                continue
+            kept.append(token)
+        if not kept:
+            if not chunk.isascii():
+                notes.append(
+                    f"{chunk} (dropped — no ASCII equivalent, so nothing was "
+                    f"searched for it)"
+                )
+        elif not folded.isascii():
+            notes.append(
+                f"{chunk}→{' '.join(kept)} "
+                f"(characters with no ASCII equivalent were removed)"
+            )
+        elif folded != chunk:
             notes.append(f"{chunk}→{folded}")
-        rewritten.append(folded)
-    tokens: list[str] = []
-    for token in _Q_TOKEN.findall(" ".join(rewritten)):
-        if token.lower() in _QUERY_OPERATORS:
-            notes.append(f"{token} (dropped — a query operator, not a title word)")
-            continue
-        tokens.append(token)
+        tokens.extend(kept)
     return tokens, tuple(notes)
 
 

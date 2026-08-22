@@ -76,7 +76,7 @@ async def _new_run(factory):
 async def _drive_a_consult(
     engine, monkeypatch, *, opinion=_OPINION_JSON, domain="legal",
     question=_QUESTION, context=_CONTEXT, channel="general", fail_the_record=False,
-    fail_the_note=False,
+    fail_the_note=False, stop_reason=None,
 ):
     """Run one mid-interview hub turn whose single tool call is a consult.
 
@@ -93,6 +93,12 @@ async def _drive_a_consult(
     (keyed on the phase, so the turn's real reply still goes out through the
     real code path) — the same reason ``fail_the_record`` exists: the note post
     is best-effort and its guard has to be driven to be proven.
+
+    ``stop_reason``, when given, is fired through the real ``on_stop_reason``
+    callback that ``_execute_consult_specialist`` passes down — the only way to
+    drive the truncation branch, since it is decided from that callback and not
+    from the text. ``None`` (the default) fires nothing, which is what every
+    other case here has always done.
     """
     factory = async_sessionmaker(engine, expire_on_commit=False)
     run_id = await _new_run(factory)
@@ -141,6 +147,10 @@ async def _drive_a_consult(
         log_metas.append(kwargs.get("log_meta"))
         if isinstance(opinion, Exception):
             raise opinion
+        if stop_reason is not None:
+            on_stop = kwargs.get("on_stop_reason")
+            if on_stop is not None:
+                on_stop(stop_reason)
         return opinion
 
     async def _fake_reply(**kwargs):
@@ -287,6 +297,77 @@ async def test_a_prose_opinion_still_records_with_the_degraded_defaults(
         assert rows[0].confidence == "low"
         assert rows[0].concerns == []
         assert rows[0].raw_opinion.startswith("The mouse line")
+    finally:
+        await _delete_run(turn.factory, turn.run_id)
+
+
+# --- 1b. …and the row says whether the reply was CUT OFF ---------------------
+#
+# The column (migration 0036) exists so that a truncated consult stays refused
+# across a restart: `tools.py` declines to credit it in-process, but the row it
+# writes used to be byte-indistinguishable from a complete one, so
+# `_seed_consults_from_db` rehydrated it as a domain that counts and the refusal
+# was undone by the next `docker stop`.
+#
+# These are DB-backed on purpose. The unit tests
+# (tests/unit/test_consult_accounting.py) pin the kwarg at the
+# `on_consult_record` boundary, which proves the tool computes and sends the
+# flag — and proves nothing about the last hop, engine -> `SpecialistConsult(...)`
+# -> committed row. Deleting `truncated=truncated` from that constructor left
+# the entire suite green; these are the tests that turn red.
+
+_TRUNCATED_OPINION = (
+    '{"verdict_signal": "blocking", "concerns": ["The Baltimore animal-model'
+)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stop_reason", ["refusal", "max_tokens"])
+async def test_a_truncated_consult_is_marked_truncated_on_the_committed_row(
+    engine, monkeypatch, stop_reason,
+):
+    """Both truncation stops, all the way to the column.
+
+    `refusal` is the classifier cutting the reply and `max_tokens` is the ceiling
+    doing it; the text in hand is equally partial, so the row must say so either
+    way (`src.services.llm.is_truncated_stop`).
+    """
+    turn = await _drive_a_consult(
+        engine, monkeypatch, opinion=_TRUNCATED_OPINION, stop_reason=stop_reason,
+    )
+    try:
+        rows = await _consult_rows(turn.factory, turn.run_id)
+        assert len(rows) == 1, "a truncated consult is still the only evidence it happened"
+        assert rows[0].truncated is True
+        assert rows[0].raw_opinion == _TRUNCATED_OPINION
+        # The in-memory half of the same refusal, so the two cannot disagree:
+        # the row exists AND the domain does not count.
+        assert turn.sim._consulted_domains("wang", "t1") == frozenset()
+        assert "truncated" in turn.results[0].lower()
+    finally:
+        await _delete_run(turn.factory, turn.run_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stop_reason", ["end_turn", None])
+async def test_a_complete_consult_is_not_marked_truncated_on_the_committed_row(
+    engine, monkeypatch, stop_reason,
+):
+    """The negative, and it is not "not True" — it is `False`.
+
+    NULL in that column is a THIRD state, "written before 0036", which
+    `_seed_consults_from_db` must keep reading as "not truncated" for the rows
+    already in production. A live write that leaves it NULL would be
+    indistinguishable from those, so the ordinary consult has to assert the flag
+    positively. `stop_reason=None` covers the other real path: `on_stop_reason`
+    is best-effort on the llm.py side and can legitimately never fire.
+    """
+    turn = await _drive_a_consult(engine, monkeypatch, stop_reason=stop_reason)
+    try:
+        rows = await _consult_rows(turn.factory, turn.run_id)
+        assert len(rows) == 1
+        assert rows[0].truncated is False
+        assert turn.sim._consulted_domains("wang", "t1") == frozenset({"legal"})
     finally:
         await _delete_run(turn.factory, turn.run_id)
 

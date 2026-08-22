@@ -634,6 +634,93 @@ def test_a_unicode_hyphen_symbol_is_not_split():
     assert patents._tokenise("GDF–15 antibody") == ["GDF-15", "antibody"]
 
 
+def test_an_unmapped_greek_letter_is_still_transliterated():
+    """The first table covered only the letters the brief happened to list, so
+    every other one fell through to the ASCII-only class and was DELETED.
+
+    Measured against that table: `π-π stacking` tokenised as ['stacking'],
+    `CD3ζ signalling` as ['CD3', 'signalling'] and `Φ29 polymerase` as ['29',
+    'polymerase'] — the specific term gone in all three, `broadened` False, and
+    nothing disclosed. That is the same damage as the one-letter `Q` search this
+    module already carries an incident for, reached through a letter that was
+    not on the list. The alphabet is finite; the table is now all of it.
+    """
+    assert patents._tokenise("π-π stacking") == ["pi", "pi", "stacking"]
+    assert patents._tokenise("CD3ζ signalling") == ["CD3zeta", "signalling"]
+    assert patents._tokenise("Φ29 polymerase") == ["Phi29", "polymerase"]
+    assert patents._tokenise("Ξ Ψ Η ν") == ["Xi", "Psi", "Eta", "nu"]
+
+
+def test_a_compatibility_duplicate_folds_onto_its_base_letter():
+    """U+2126 OHM SIGN is to U+03A9 what U+00B5 MICRO SIGN is to U+03BC: a
+    separate codepoint for the same letter, and the one a units string or a
+    PDF paste actually carries.
+
+    Handled by running NFKD BEFORE the table rather than by listing every
+    duplicate — which also covers the ϐϑϕϖϰϱϵϴ variant letters, the
+    mathematical alphanumerics, and accented Greek, none of which were on any
+    list. Before the reorder U+2126 survived NFKD as U+03A9, stayed non-ASCII,
+    and was dropped.
+    """
+    assert patents._tokenise("\u212629 assay") == ["Omega29", "assay"]
+    assert patents._tokenise("\u00b5M \u03bcm") == ["muM", "mum"]
+    assert patents._tokenise("\u03d0-sheet") == ["beta", "sheet"]      # BETA SYMBOL
+    assert patents._tokenise("\U0001d6fd-catenin") == ["beta", "catenin"]  # MATH BETA
+    assert patents._tokenise("\u03ac-form") == ["alpha", "form"]       # ALPHA WITH TONOS
+
+
+def test_a_term_that_vanishes_is_always_disclosed():
+    """`dropped_or_rewritten` only fired when the fold CHANGED the chunk, so a
+    chunk that folded to itself and then vanished at the token class reported
+    nothing at all — `π-π stacking` reached the model as
+    "SCOPE: searched titles for stacking." with broadened=False, a term silently
+    deleted and the disclosure saying nothing had happened.
+
+    A chunk that produces no searchable term must say so; a chunk that keeps
+    some of itself but loses characters we cannot render must say that too.
+    """
+    # Nothing survives: Cyrillic, CJK, an arrow — none of them Greek.
+    tokens, notes = patents._prepare("белок TFEB")
+    assert tokens == ["TFEB"]
+    assert any("белок" in n for n in notes), notes
+    tokens, notes = patents._prepare("TFEB 蛋白")
+    assert any("蛋白" in n for n in notes), notes
+    # Partly survives: the deletion marker is not Greek and is silently lost, so
+    # the note has to name what was actually searched.
+    tokens, notes = patents._prepare("∆F508 corrector")
+    assert tokens == ["F508", "corrector"]
+    assert any("F508" in n and "∆F508" in n for n in notes), notes
+    # ASCII punctuation is NOT a vanished term — nothing was ever there, and a
+    # note per slash would drown the real disclosures.
+    assert patents._prepare("TFEB / TFE3 fusion")[1] == ()
+
+
+def test_a_disclosure_note_is_never_an_identity_mapping():
+    """`Ω29 assay` produced the note `Ω29→Ω29`: the fold left the chunk
+    unchanged (Ω was not in the table), so the "rewritten" branch fired and
+    rendered the caller's own text on both sides of the arrow. A note that says
+    nothing changed, about a term that was then deleted, is worse than silence.
+    """
+    corpus = [
+        "π-π stacking", "\u212629 assay", "CD3ζ signalling", "белок TFEB",
+        "∆F508 corrector", "LOX‑1 antibody", "Qβ malaria", "TFEB AND NOT melanoma",
+        "µM potency", "Ångström resolution", "TFEB / TFE3 fusion", "plain query",
+    ]
+    for query in corpus:
+        for note in patents._prepare(query)[1]:
+            before, arrow, after = note.partition("→")
+            if not arrow:
+                continue
+            # Codepoint inequality is NOT enough: U+2126 OHM SIGN and U+03A9
+            # GREEK CAPITAL OMEGA are different strings that render identically,
+            # which is exactly how `Ω29→Ω29` got past a naive check. The real
+            # invariant is that the right-hand side is what was SENT — and what
+            # is sent is always ASCII, because ODP 404s anything else.
+            after = after.split(" (")[0]
+            assert after.isascii(), f"{query!r}: {note!r} promises a non-ASCII search"
+            assert before.strip() != after.strip(), f"{query!r}: {note!r}"
+
+
 def test_a_word_operator_never_becomes_a_search_term():
     """`AND` / `OR` / `NOT` are query syntax, not title words.
 
@@ -899,12 +986,14 @@ async def test_a_rewritten_query_is_disclosed_to_the_model(monkeypatch):
     from src.agent import tools as tools_mod
     result = PriorArtResult(
         [], ["Qbeta", "malaria"], 2,
-        dropped_or_rewritten=("Qβ→Qbeta", "NOT (dropped — a query operator)"),
+        dropped_or_rewritten=(
+            "Qβ→Qbeta", "NOT (dropped — a query operator, not a title word)",
+        ),
     )
     monkeypatch.setattr(tools_mod, "search_prior_art", lambda q, limit=10: _fake(result))
     out = await _execute_search_prior_art("Qβ malaria NOT vaccine")
     assert "Qβ→Qbeta" in out
-    assert "NOT (dropped — a query operator)" in out
+    assert "NOT (dropped — a query operator, not a title word)" in out
     assert "\n\n\n" not in out
 
 
@@ -932,6 +1021,12 @@ async def test_total_terms_is_not_the_whitespace_count(monkeypatch):
     result = await patents.search_prior_art("TFEB AND TFE3 fusion")
     assert result.total_terms == 3
     assert result.broadened is False
+    # The note as `_prepare` really emits it. The rendering test above builds its
+    # own tuple by hand, so on its own it pins `_rewrite_note` and not the string
+    # production actually produces.
+    assert result.dropped_or_rewritten == (
+        "AND (dropped — a query operator, not a title word)",
+    )
 
 
 @pytest.mark.asyncio
