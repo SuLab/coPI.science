@@ -45,6 +45,14 @@ class AgentRegistry(Base):
         ForeignKey("users.id", ondelete="SET NULL"),
         nullable=True,
     )
+    muted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    muted_by: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
 
     # Relationships
     user: Mapped["User | None"] = relationship(
