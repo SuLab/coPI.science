@@ -142,17 +142,27 @@ async def test_concurrent_api_calls_are_bounded_by_the_semaphore(monkeypatch):
 
 
 def test_the_semaphore_survives_a_second_event_loop():
-    """`asyncio.Semaphore` binds itself to the first loop that touches it and
-    raises `RuntimeError: ... is bound to a different event loop` on any other.
+    """`asyncio.Semaphore` binds itself to a loop and raises
+    `RuntimeError: ... is bound to a different event loop` on any other.
 
     One module-level instance would therefore work in production (one process,
     one loop) and fail from the second test onwards in a suite that gives every
     test its own loop — and, worse, in any future process that runs
     `asyncio.run` twice. It is kept per-loop for that reason.
+
+    The calls must CONTEND, or this test cannot fail: `Semaphore.acquire()`
+    only reaches `_get_loop()` when the semaphore is already locked, so an
+    uncontended acquire never binds `_loop` at all and a module-level singleton
+    sails through. Saturating it on each loop is what makes the second
+    `asyncio.run` the real assertion.
     """
-    fake = _RecordingAnthropic()
+    fake = _RecordingAnthropic(block_s=0.02)
+    attempts = llm._API_MAX_CONCURRENCY + 2
 
-    asyncio.run(_api_call(fake))
-    asyncio.run(_api_call(fake))
+    async def _saturate():
+        await asyncio.gather(*(_api_call(fake) for _ in range(attempts)))
 
-    assert len(fake.thread_names) == 2
+    asyncio.run(_saturate())
+    asyncio.run(_saturate())
+
+    assert len(fake.thread_names) == 2 * attempts

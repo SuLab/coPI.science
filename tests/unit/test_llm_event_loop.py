@@ -14,8 +14,11 @@ Consequences measured on the hub, which sits on all 62 spoke edges:
     mid-turn and loses the shutdown flush that the runbook treats as the
     guarantee that the DB, not Slack, is the durable store.
 
-The fix is `asyncio.to_thread`, so the call is awaited off the loop thread.
-These tests pin the property (loop stays responsive), not the mechanism.
+The fix is to await the call off the loop thread — originally via
+`asyncio.to_thread`, now on a dedicated pool under a semaphore (see
+tests/unit/test_llm_executor.py for why the default pool had to go). These tests
+pin the property (loop stays responsive), not the mechanism, which is exactly
+why they did not need changing when the mechanism did.
 """
 
 import asyncio

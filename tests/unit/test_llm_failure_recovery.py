@@ -241,15 +241,25 @@ async def test_a_raising_tool_executor_still_writes_the_round_it_billed(
 
 
 async def test_a_call_that_never_reached_the_api_writes_no_row(monkeypatch, logged):
-    """The other half of the invariant: one row is one TURN, and a turn that
-    made no successful API call has nothing to report. Writing a row anyway
-    would book a rate-limiter slot at the next restart for a call that was never
-    issued — `_acreate` raises on an oversized `max_tokens` BEFORE sending
-    anything."""
+    """The ONE exception to "a failed turn still writes its row", and it is
+    narrow by construction: `_acreate`'s pre-flight check raises before any HTTP
+    request is made, so nothing was sent and nothing was billed. A row here would
+    book a rate-limiter slot after the next restart for a call that never
+    existed.
+
+    The suppression is keyed on the exception TYPE rather than on an empty
+    `call_stats`, because "no call completed" and "no call was issued" are
+    different facts and only the second one justifies silence — a request that
+    went out and then timed out has no `usage` either.
+    """
     fake = FakeAnthropic([text_response("never reached")])
     _install(monkeypatch, fake)
 
-    with pytest.raises(ValueError, match="NONSTREAMING_MAX_TOKENS"):
+    assert issubclass(llm.NonStreamingMaxTokensError, ValueError), (
+        "call sites catch ValueError; narrowing the type must not narrow what "
+        "they catch"
+    )
+    with pytest.raises(llm.NonStreamingMaxTokensError, match="NONSTREAMING_MAX_TOKENS"):
         await llm.generate_with_tools(
             system_prompt="sys",
             messages=[{"role": "user", "content": "hi"}],
@@ -261,3 +271,95 @@ async def test_a_call_that_never_reached_the_api_writes_no_row(monkeypatch, logg
 
     assert fake.calls == []
     assert logged == []
+
+
+async def test_a_first_round_failure_after_the_request_went_out_still_writes_a_row(
+    monkeypatch, logged
+):
+    """A request that WAS sent and then failed is a billed generation.
+
+    The distinction that matters is "did anything go out", not "did anything come
+    back": a 300 s `APITimeoutError` on the first round leaves no `usage` to
+    record, but the call happened, was paid for, and — since `SimulationEngine`
+    rebuilds `api_call_count` and the limiter's `call_times` from these rows —
+    disappears from the ledger entirely if this writes nothing. An empty
+    `call_stats` on the row is the honest report: the turn is recorded, no call
+    completed.
+    """
+    fake = FakeAnthropic([_boom])
+    _install(monkeypatch, fake)
+
+    with pytest.raises(RuntimeError, match="connection reset"):
+        await llm.generate_with_tools(
+            system_prompt="sys",
+            messages=[{"role": "user", "content": "hi"}],
+            tools=TOOLS,
+            tool_executor=_noop_executor,
+            log_meta=LOG_META,
+        )
+
+    assert len(fake.calls) == 1, "the request went out — that is the premise"
+    (row,) = logged
+    assert row["call_stats"] == []
+    assert (row["input_tokens"], row["output_tokens"]) == (0, 0)
+
+
+async def test_generate_agent_response_writes_a_row_for_a_request_that_went_out(
+    monkeypatch, logged
+):
+    """The same rule in the other function — the higher-traffic one. Every
+    specialist consult, every memory write and every phase-1 decision goes
+    through `generate_agent_response`."""
+    fake = FakeAnthropic([_boom])
+    _install(monkeypatch, fake)
+
+    with pytest.raises(RuntimeError, match="connection reset"):
+        await llm.generate_agent_response(
+            "sys", [{"role": "user", "content": "hi"}], log_meta=LOG_META
+        )
+
+    assert len(fake.calls) == 1
+    (row,) = logged
+    assert row["call_stats"] == []
+
+
+async def test_a_raising_retry_in_generate_agent_response_still_writes_its_row(
+    monkeypatch, logged
+):
+    """The retry site a `generate_with_tools` guard cannot reach.
+
+    Both calls are billed; the first one's tokens and its truncated text are the
+    only evidence the turn happened. The exception STILL propagates, and the
+    truncated text is deliberately NOT returned to the caller here — see the
+    comment at that site: `src/agent/tools.py` still tests
+    `stop_reasons[-1] == "refusal"`, so a fallthrough reporting `max_tokens`
+    would be credited to the specialist panel as a complete opinion.
+    """
+    _install(
+        monkeypatch,
+        FakeAnthropic(
+            [
+                text_response(
+                    "half an opinion",
+                    stop_reason="max_tokens",
+                    usage=_Usage(input_tokens=11, output_tokens=22),
+                ),
+                _boom,
+            ]
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="connection reset"):
+        await llm.generate_agent_response(
+            "sys", [{"role": "user", "content": "hi"}], max_tokens=1000,
+            log_meta=LOG_META,
+        )
+
+    assert len(logged) == 1, "one turn, one row — covering BOTH billed calls"
+    (row,) = logged
+    assert _kinds(row) == ["final"], "the retry never returned, so it never happened"
+    assert (row["input_tokens"], row["output_tokens"]) == (11, 22)
+    # The ROW carries the truncated text even though the CALLER does not get it:
+    # `llm_call_logs.response_text` is what the dropped-verdict backfill regexes
+    # for `<assessment_json>`, and this is a reply that was paid for.
+    assert row["response_text"] == "half an opinion"

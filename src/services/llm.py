@@ -204,7 +204,29 @@ def get_anthropic_client() -> anthropic.Anthropic:
     return _client_for_key(settings.anthropic_api_key)
 
 
-# How many real API requests this process may have in flight at once.
+class NonStreamingMaxTokensError(ValueError):
+    """A call site asked for more ``max_tokens`` than non-streaming allows.
+
+    Raised by ``_acreate``'s pre-flight check BEFORE any HTTP request is made,
+    which is the one property that distinguishes it from every other exception
+    in this module: nothing was sent and nothing was billed. That is why the
+    failure paths in ``generate_agent_response`` and ``generate_with_tools``
+    write a ``llm_call_logs`` row for everything EXCEPT this — a row is a
+    rate-limiter slot after the next restart, and booking one for a request that
+    never existed is the same error, pointed the other way.
+
+    "No call completed" is deliberately NOT the test used there: a request that
+    went out and then hit the 300 s read timeout also has no ``usage`` to
+    record, and it was still paid for.
+
+    A ``ValueError`` subclass so nothing catching ValueError has to change —
+    including tests/unit/test_llm_nonstreaming_ceiling.py, which asserts the
+    message names the constant.
+    """
+
+
+# How many real API requests may be in flight at once, per event loop (the agent
+# process runs exactly one, so there it is per process).
 #
 # 8 = one full specialist panel. That is the largest fan-out a single turn can
 # ask for (a concluding hub turn gathers up to 8 ``consult_specialist`` calls),
@@ -273,8 +295,14 @@ def _get_api_executor() -> ThreadPoolExecutor:
 # to the first running loop that touches it and raises RuntimeError ("is bound to
 # a different event loop") on every other one — so a module-level singleton would
 # work in the agent process, which has exactly one loop, and fail from the second
-# test onwards in a suite that gives each test its own. Weak keys so a finished
-# loop's entry goes with it.
+# test onwards in a suite that gives each test its own.
+#
+# Weak keys, but only half the leak they look like they close: an UNCONTENDED
+# semaphore never touches the loop, so its entry dies with the loop as intended,
+# while a semaphore that has actually contended stores `_loop` internally and
+# therefore keeps its own key alive. That is bounded at one entry per loop that
+# ever queued a call — one, in the agent process — and is the price of the
+# per-loop binding above.
 _api_semaphores: "weakref.WeakKeyDictionary[Any, asyncio.Semaphore]" = (
     weakref.WeakKeyDictionary()
 )
@@ -342,7 +370,7 @@ async def _acreate(client: anthropic.Anthropic, **kwargs: Any):
         kwargs["system"] = _cacheable_system(system)
     requested = kwargs.get("max_tokens")
     if requested is not None and requested > NONSTREAMING_MAX_TOKENS:
-        raise ValueError(
+        raise NonStreamingMaxTokensError(
             f"max_tokens={requested} exceeds NONSTREAMING_MAX_TOKENS="
             f"{NONSTREAMING_MAX_TOKENS}: the Anthropic SDK refuses any "
             "non-streaming request whose max_tokens implies more than 10 "
@@ -935,6 +963,20 @@ async def generate_agent_response(
     settings = get_settings()
     model = model or settings.llm_agent_model
     client = get_anthropic_client()
+    # Per-turn billing totals (cumulative across the retry below), plus the
+    # per-CALL breakdown. The two are deliberately different questions: the
+    # totals answer "what did this turn cost", call_stats answers "which call
+    # truncated and how much was it allowed" — and one row can only answer the
+    # second by carrying a list.
+    #
+    # Bound BEFORE the `try`, with `response_text` and `latency_ms`, because the
+    # failure path at the bottom reports them: a retry that raises used to take
+    # the record of both billed calls with it.
+    total_input_tokens = 0
+    total_output_tokens = 0
+    call_stats: list[dict[str, Any]] = []
+    latency_ms = 0.0
+    response_text = ""
     try:
         t0 = time.monotonic()
         message = await _acreate(
@@ -945,19 +987,14 @@ async def generate_agent_response(
             messages=messages,
         )
         latency_ms = (time.monotonic() - t0) * 1000
-        # Per-turn billing totals (cumulative across the retry below), plus the
-        # per-CALL breakdown. The two are deliberately different questions: the
-        # totals answer "what did this turn cost", call_stats answers "which
-        # call truncated and how much was it allowed" — and one row can only
-        # answer the second by carrying a list.
-        total_input_tokens = message.usage.input_tokens
-        total_output_tokens = message.usage.output_tokens
-        call_stats = [
+        total_input_tokens += message.usage.input_tokens
+        total_output_tokens += message.usage.output_tokens
+        call_stats.append(
             _call_stat(
                 seq=1, kind="final", max_tokens=max_tokens,
                 message=message, latency_ms=latency_ms,
             )
-        ]
+        )
         if not message.content:
             agent_id = (log_meta or {}).get("agent_id", "?")
             phase = (log_meta or {}).get("phase", "?")
@@ -1109,6 +1146,39 @@ async def generate_agent_response(
         return response_text
     except Exception as exc:
         logger.error("Failed to generate agent response: %s", exc)
+        # The record half of what generate_with_tools' guard does, and ONLY the
+        # record half. Both calls of a retried turn are billed; without this the
+        # turn wrote no row at all, and SimulationEngine rebuilds
+        # `api_call_count` and the rate limiter's `call_times` from these rows —
+        # so a failure here silently refunded the throttle at the next restart.
+        # The row carries the first pass's truncated text too: it is what the
+        # dropped-verdict backfill regexes `llm_call_logs.response_text` for, and
+        # it was paid for.
+        #
+        # What this deliberately does NOT do is RETURN that text, unlike
+        # generate_with_tools. A fallthrough here would report
+        # stop_reason=max_tokens, and src/agent/tools.py's consult path still
+        # tests `stop_reasons[-1] == "refusal"` — so a truncated specialist
+        # opinion would be credited to the panel as a complete one, which is the
+        # exact defect the stop-reason contract was introduced to stop. Deferred
+        # until that call site adopts `is_truncated_stop`; do not "complete" this
+        # before then.
+        #
+        # The one failure that writes nothing is the request that was never
+        # issued — see NonStreamingMaxTokensError.
+        if not isinstance(exc, NonStreamingMaxTokensError):
+            _emit_call_log(
+                system_prompt=system_prompt,
+                messages=messages,
+                response_text=response_text,
+                model=model,
+                input_tokens=total_input_tokens,
+                output_tokens=total_output_tokens,
+                latency_ms=latency_ms,
+                call_stats=call_stats,
+                log_meta=log_meta,
+                wall_ms=(time.monotonic() - _turn_t0) * 1000,
+            )
         raise
 
 
@@ -1238,10 +1308,11 @@ async def generate_with_tools(
         # has ever needed: across all 1,121 stored rows carrying `call_stats`,
         # the most rounds any turn used is 4 against a budget of 6, and no
         # caller anywhere passes `max_tool_rounds` at all. Removing it would
-        # also delete coverage rather than add it — seven tests pass
-        # `max_tool_rounds=1` as SETUP to force a two-round turn (the only
-        # multi-round path the suite exercises), so `range(max_tool_rounds)`
-        # would turn all of them into single-round turns that assert nothing.
+        # also delete coverage rather than add it — `max_tool_rounds=1` is used
+        # as SETUP to force a two-round turn in 12 places across 6 test files
+        # (the only multi-round path the suite exercises), so
+        # `range(max_tool_rounds)` would turn every one of them into a
+        # single-round turn that asserts nothing.
         # The documentation was wrong, not the loop; it has been corrected
         # instead (the module comment on `call_stats`, this function's
         # docstring, and the "Max tool rounds" warning below).
@@ -1560,7 +1631,7 @@ async def generate_with_tools(
         _notify_stop_reason(on_stop_reason, final_message)
 
         return response_text
-    except Exception:
+    except Exception as exc:
         # ``Exception``, so ``CancelledError`` (a BaseException since 3.8) still
         # propagates untouched: a cancelled turn is not a failed one, and the
         # cooperative-shutdown path must not be silently converted into a reply.
@@ -1572,11 +1643,15 @@ async def generate_with_tools(
         # `call_times` ledger from exactly those rows, so the calls stopped
         # existing at the next restart.
         #
-        # `if call_stats` because one row is one TURN and a turn that completed
-        # no call has nothing to report: `_acreate` refuses an oversized
-        # `max_tokens` BEFORE issuing anything, and a row for that would book a
-        # throttle slot after the next restart for a call that was never made.
-        if call_stats:
+        # The row is written for EVERY failure except the one request that was
+        # never issued (`NonStreamingMaxTokensError`, raised by `_acreate`'s
+        # pre-flight check before any I/O). Not `if call_stats`, which was the
+        # first version of this line: a first-round `_acreate` that raises AFTER
+        # the request went out — a 300 s APITimeoutError, the latent trigger this
+        # whole guard exists for — leaves `call_stats` empty while having been
+        # fully billed, and would have written nothing. An empty `call_stats` on
+        # the row says exactly that: the turn is recorded, no call completed.
+        if not isinstance(exc, NonStreamingMaxTokensError):
             _emit_call_log(
                 system_prompt=system_prompt,
                 messages=conversation,
