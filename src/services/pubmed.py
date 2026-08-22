@@ -13,7 +13,12 @@ from src.config import get_settings
 logger = logging.getLogger(__name__)
 
 EUTILS_BASE = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
-IDCONV_BASE = "https://pmc.ncbi.nlm.nih.gov/tools/idconv/api/v1/articles"
+# The trailing slash is load-bearing: without it NCBI answers 301 to the same path
+# WITH one (live-verified 2026-08-22), so every lookup cost two requests. That was
+# 388 requests for 194 lookups in run 8b64a0e0 — 32% of all our NCBI traffic — and
+# because _pace() only counts the request it issues, the real rate against NCBI was
+# twice what the pacer believed.
+IDCONV_BASE = "https://pmc.ncbi.nlm.nih.gov/tools/idconv/api/v1/articles/"
 
 # Strips a leading "doi:" or a doi.org URL prefix from a raw DOI string.
 _DOI_PREFIX_RE = re.compile(r"^\s*(?:doi:\s*|https?://(?:dx\.)?doi\.org/)", re.IGNORECASE)
@@ -112,13 +117,32 @@ def _make_client() -> httpx.AsyncClient:
 # funnels through _ncbi_get, so omitting these made the whole deployment anonymous.
 _NCBI_TOOL = "copi-science"
 
+# Transport-level failures NCBI actually produces under load. These carry no status
+# code, so the status-code retry below cannot see them: a truncated response body
+# surfaces as RemoteProtocolError and used to abort the call outright. In run
+# 8b64a0e0 exactly one of those made fetch_abstract tell the model "No PubMed record
+# found for 41130592" — a paper that exists and that the same run had fetched
+# successfully 69 seconds earlier.
+#
+# Deliberately narrower than httpx.TransportError: every member here means "the
+# request did not complete", which is retryable by definition, whereas
+# UnsupportedProtocol / ProxyError / InvalidURL mean the request was never
+# well-formed and retrying it just triples the traffic behind a bug of ours.
+_RETRYABLE_TRANSPORT = (
+    httpx.RemoteProtocolError,
+    httpx.ReadTimeout,
+    httpx.ConnectError,
+    httpx.ReadError,
+)
+
 
 async def _ncbi_get(url: str, params: dict[str, Any]) -> httpx.Response:
     """Make a rate-limited, identified GET request to NCBI, with retry.
 
     Pacing runs BEFORE raise_for_status — the old order skipped pacing
     exactly when NCBI was already 429-ing us. Retries cover the transient
-    statuses NCBI actually emits under load; anything else raises as before.
+    statuses NCBI actually emits under load *and* the transport failures in
+    ``_RETRYABLE_TRANSPORT``; anything else raises as before.
     """
     settings = get_settings()
     if settings.ncbi_api_key:
@@ -129,7 +153,17 @@ async def _ncbi_get(url: str, params: dict[str, Any]) -> httpx.Response:
         async with _make_client() as client:
             for attempt in range(3):
                 await _pace()
-                resp = await client.get(url, params=params)
+                try:
+                    resp = await client.get(url, params=params)
+                except _RETRYABLE_TRANSPORT as exc:
+                    if attempt == 2:
+                        raise
+                    logger.info(
+                        "NCBI transport failure on attempt %d (%s: %s) — retrying",
+                        attempt + 1, type(exc).__name__, exc,
+                    )
+                    await asyncio.sleep(1.0 * (2 ** attempt))
+                    continue
                 if resp.status_code in (429, 500, 502, 503) and attempt < 2:
                     await asyncio.sleep(1.0 * (2 ** attempt))
                     continue
@@ -444,11 +478,33 @@ def _extract_text(element) -> str:
 # ---------------------------------------------------------------------------
 
 
+# src/agent/tools.py returns this dict's ``error`` value to the model verbatim, so
+# the wording IS the claim the model acts on. "No PubMed record found for X" is an
+# affirmative statement about the world; a request that never completed does not
+# license it. Run 8b64a0e0 (M12) made exactly that substitution for PMID 41130592,
+# a paper the hub had cited by DOI four seconds earlier.
+_LOOKUP_FAILED = (
+    "PubMed lookup FAILED for {ident} ({exc}) — the request did not complete after "
+    "retries. This is NOT evidence that no such record exists; retry before drawing "
+    "any conclusion from it."
+)
+
+
 async def fetch_abstract(pmid_or_doi: str) -> dict[str, Any]:
     """
     Fetch a paper's abstract given a PMID or DOI.
 
     Returns dict with: pmid, title, abstract, journal, year (or error key).
+
+    Three failure modes, deliberately worded differently (see ``_LOOKUP_FAILED``):
+    the lookup did not complete, the lookup completed and PubMed has no such
+    record, and the DOI could not be resolved — which is itself either of the
+    first two, because ``convert_dois_to_pmids`` swallows its own errors and
+    cannot say which.
+
+    Calls ``_fetch_pubmed_batch`` rather than ``fetch_pubmed_records`` on purpose:
+    the batch wrapper's job is to keep a long ingest run going, so it swallows
+    per-batch failures, which is exactly the information this caller needs.
     """
     pmid = pmid_or_doi.strip()
 
@@ -457,10 +513,21 @@ async def fetch_abstract(pmid_or_doi: str) -> dict[str, Any]:
         mapping = await convert_dois_to_pmids([pmid])
         resolved = mapping.get(pmid)
         if not resolved:
-            return {"error": f"Could not resolve DOI {pmid} to a PMID"}
+            return {
+                "error": (
+                    f"Could not resolve DOI {pmid} to a PMID — either PubMed has no "
+                    f"record for it or the lookup failed (both are swallowed by the "
+                    f"converter, so they are indistinguishable here). This is not "
+                    f"evidence that the paper does not exist."
+                )
+            }
         pmid = resolved
 
-    records = await fetch_pubmed_records([pmid])
+    try:
+        records = await _fetch_pubmed_batch([pmid])
+    except Exception as exc:
+        logger.warning("PubMed lookup failed for %s: %s", pmid, exc)
+        return {"error": _LOOKUP_FAILED.format(ident=pmid, exc=type(exc).__name__)}
     if not records:
         return {"error": f"No PubMed record found for {pmid}"}
 

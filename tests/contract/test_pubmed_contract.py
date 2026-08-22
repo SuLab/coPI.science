@@ -15,7 +15,10 @@ from src.services import pubmed
 pytestmark = pytest.mark.contract
 
 EUTILS = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
-IDCONV = "https://pmc.ncbi.nlm.nih.gov/tools/idconv/api/v1/articles"
+# Trailing slash: without it NCBI 301-redirects to the same path with one, so the
+# URL the code must actually request is this one. See pubmed.IDCONV_BASE and
+# tests/unit/test_pubmed_transport.py::test_idconv_issues_no_redirect.
+IDCONV = "https://pmc.ncbi.nlm.nih.gov/tools/idconv/api/v1/articles/"
 
 EFETCH_XML = """<?xml version="1.0"?>
 <PubmedArticleSet>

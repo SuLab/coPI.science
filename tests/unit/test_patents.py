@@ -1,8 +1,28 @@
+import json
+import time
+
 import httpx
 import pytest
 import respx
 
 from src.services import patents
+
+
+@pytest.fixture(autouse=True)
+def _isolated_and_unpaced(monkeypatch):
+    """Each case gets its own empty memo and no real waiting.
+
+    The memo is process-wide and keyed on the query's terms, and several cases here
+    deliberately search "widget" against different mocks — so without the clear,
+    one case's cached hits become the next one's answer and the HTTP mock never
+    runs. Pacing and 429 backoff are real seconds; the two cases that assert on
+    them raise the interval back up themselves.
+    """
+    patents.clear_prior_art_cache()
+    monkeypatch.setattr(patents, "_PACE_INTERVAL", 0.0)
+    monkeypatch.setattr(patents, "_ODP_BACKOFF", 0.0)
+    patents._next_slot = 0.0
+
 
 # A realistic USPTO ODP Patent File Wrapper search response (trimmed).
 _ODP_ONE_HIT = {
@@ -192,6 +212,137 @@ async def test_404_no_matches_returns_empty_list(monkeypatch):
     assert (await patents.search_prior_art("nonexistent-xyzzy-concept")).hits == []
 
 
+# A page of a much larger match set: ODP reports `count` at the top of every 200,
+# and `sort: filingDate desc` + `limit: 10` means these ten are merely the ten
+# most-recently-filed. 2,070 is the live count for a title search on "COVID".
+_ODP_TRUNCATED = {
+    "count": 2070,
+    "patentFileWrapperDataBag": [
+        {
+            "applicationNumberText": f"18/{i:06d}",
+            "applicationMetaData": {
+                "inventionTitle": "Coronavirus Widget",
+                "earliestPublicationNumber": f"US2026{i:07d}A1",
+                "earliestPublicationDate": "2026-01-01",
+                "filingDate": "2025-01-01",
+                "firstApplicantName": "Acme Corp",
+                "firstInventorName": "Jane Doe",
+                "applicationStatusDescriptionText": "Docketed New Case - Ready for Examination",
+            },
+        }
+        for i in range(10)
+    ],
+}
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_truncation_is_disclosed_when_odp_returns_a_page_of_a_huge_match_set(monkeypatch):
+    # H2: the code requested 10 hits sorted by filing date and threw ODP's own
+    # `count` away, so the hub could not tell "10 of 10" from "10 of 2,070".
+    # 49 of 109 broadened searches in run 8b64a0e0 returned exactly 10. The
+    # existing caveats disclaim SCOPE (a broadened query) and cannot disclaim
+    # COMPLETENESS, because nothing ever told the model there was any.
+    monkeypatch.setattr(patents, "_api_key", lambda: "k")
+    respx.post(patents.SEARCH_URL).mock(return_value=httpx.Response(200, json=_ODP_TRUNCATED))
+    result = await patents.search_prior_art("COVID")
+    assert result.total_count == 2070
+    assert result.truncated is True
+    assert "10" in result.truncation_note and "2070" in result.truncation_note
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_a_complete_small_result_set_is_not_called_truncated(monkeypatch):
+    # The mirror image: count == len(hits) means the hub is looking at everything
+    # ODP matched, and claiming otherwise would be its own false disclosure.
+    monkeypatch.setattr(patents, "_api_key", lambda: "k")
+    respx.post(patents.SEARCH_URL).mock(return_value=httpx.Response(200, json=_ODP_ONE_HIT))
+    result = await patents.search_prior_art("widget")
+    assert result.total_count == 1
+    assert result.truncated is False
+    assert result.truncation_note == ""
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_a_response_without_a_count_reports_an_unknown_total(monkeypatch):
+    # `count` is not a guaranteed field. Absent it, "how many matched" is unknown,
+    # which must read as unknown rather than as "everything you asked for".
+    monkeypatch.setattr(patents, "_api_key", lambda: "k")
+    respx.post(patents.SEARCH_URL).mock(
+        return_value=httpx.Response(
+            200, json={"patentFileWrapperDataBag": _ODP_ONE_HIT["patentFileWrapperDataBag"]}
+        )
+    )
+    result = await patents.search_prior_art("widget")
+    assert result.total_count is None
+    assert result.truncated is False
+    assert result.truncation_note == ""
+
+
+# An expired provisional: no publication number and no publication date, because a
+# provisional application is never published. 17.4% of the 624 hit rows shown to
+# the hub in run 8b64a0e0 looked like this.
+_ODP_PROVISIONAL = {
+    "count": 1,
+    "patentFileWrapperDataBag": [
+        {
+            "applicationNumberText": "63/000000",
+            "applicationMetaData": {
+                "inventionTitle": "Widget Concept",
+                "filingDate": "2024-05-01",
+                "firstApplicantName": "Acme Corp",
+                "firstInventorName": "Jane Doe",
+                "applicationStatusDescriptionText": "Provisional Application Expired",
+            },
+        }
+    ],
+}
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_an_expired_provisional_is_labelled_not_prior_art(monkeypatch):
+    # Of the 624 hit rows the hub read in run 8b64a0e0, only 12% were granted,
+    # 17.4% were expired provisionals — never published, and therefore not prior
+    # art at all — and 30% were unexamined 2026 filings, all rendered identically.
+    monkeypatch.setattr(patents, "_api_key", lambda: "k")
+    respx.post(patents.SEARCH_URL).mock(
+        return_value=httpx.Response(200, json=_ODP_PROVISIONAL)
+    )
+    hit = (await patents.search_prior_art("widget concept")).hits[0]
+    assert "NOT prior art" in hit["prior_art_status"]
+    # `status` is the only one of the two fields src/agent/tools.py renders, so the
+    # label has to reach the model through it — without discarding ODP's own text.
+    assert "NOT prior art" in hit["status"]
+    assert "Provisional Application Expired" in hit["status"]
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_a_published_pending_application_is_still_labelled_prior_art(monkeypatch):
+    # Deliberately NOT filtered out: a published pending application is prior art
+    # under 35 USC 102(a)(2) even though it has never been examined.
+    monkeypatch.setattr(patents, "_api_key", lambda: "k")
+    respx.post(patents.SEARCH_URL).mock(return_value=httpx.Response(200, json=_ODP_TRUNCATED))
+    hit = (await patents.search_prior_art("COVID")).hits[0]
+    assert "102(a)(2)" in hit["prior_art_status"]
+
+
+def test_the_prior_art_classes_are_distinguishable():
+    assert "granted" in patents._prior_art_class("Patented Case", published=True)
+    assert "abandoned" in patents._prior_art_class(
+        "Abandoned -- Failure to Respond to an Office Action", published=True
+    )
+    # Filed but not yet published: not yet prior art, and not a provisional either.
+    assert "not yet" in patents._prior_art_class(
+        "Docketed New Case - Ready for Examination", published=False
+    )
+    # No status text at all: the publication itself is still enough to say this much.
+    assert "102(a)(2)" in patents._prior_art_class("", published=True)
+
+
 @pytest.mark.asyncio
 @respx.mock
 async def test_first_tier_ands_all_title_tokens(monkeypatch):
@@ -201,7 +352,6 @@ async def test_first_tier_ands_all_title_tokens(monkeypatch):
     captured = []
 
     def _capture(request):
-        import json
         captured.append(json.loads(request.content)["q"])
         return httpx.Response(200, json={"patentFileWrapperDataBag": []})
 
@@ -219,7 +369,6 @@ async def test_backs_off_to_fewer_terms_when_full_phrase_misses(monkeypatch):
     queries = []
 
     def _capture(request):
-        import json
         q = json.loads(request.content)["q"]
         queries.append(q)
         # EXACT match, not substring: the full-phrase tier also contains both
@@ -285,6 +434,98 @@ async def test_rate_limit_mid_backoff_returns_none_not_a_clean_result(monkeypatc
 
 @pytest.mark.asyncio
 @respx.mock
+async def test_a_429_is_retried_before_the_search_is_abandoned(monkeypatch):
+    # M9: a 429 aborted the whole search with no retry, asymmetric with
+    # pubmed._ncbi_get which retries 3x with backoff. 10 of 125 searches were lost
+    # this way in run 8b64a0e0 and only 1 of the 10 was disclosed to the PI; one of
+    # the 429s succeeded 41 ms later on the same key.
+    monkeypatch.setattr(patents, "_api_key", lambda: "k")
+    monkeypatch.setattr(patents, "_ODP_BACKOFF", 0.0)
+    calls = {"n": 0}
+
+    def _capture(request):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(429, headers={"Retry-After": "1"})
+        return httpx.Response(200, json=_ODP_ONE_HIT)
+
+    respx.post(patents.SEARCH_URL).mock(side_effect=_capture)
+    result = await patents.search_prior_art("widget")
+    assert result is not None and len(result.hits) == 1
+    assert calls["n"] == 2
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_an_identical_query_issues_no_second_http_request(monkeypatch):
+    # 109 searches in run 8b64a0e0 resolved to only 91 distinct term-sets, so 18
+    # of them (16.5%) re-ran the whole ladder AND re-paid the full-text enrichment
+    # behind it — enrichment alone was 57% of the run's USPTO request budget, so
+    # the redundant searches were ~24% of it.
+    monkeypatch.setattr(patents, "_api_key", lambda: "k")
+    route = respx.post(patents.SEARCH_URL).mock(
+        return_value=httpx.Response(200, json=_ODP_ONE_HIT)
+    )
+    first = await patents.search_prior_art("widget")
+    second = await patents.search_prior_art("widget")
+    assert route.call_count == 1
+    assert second.hits == first.hits
+    # A cached result is handed to every later caller in the run, and `hits` is a
+    # list of MUTABLE dicts — so it must be a copy, not the same object.
+    assert second.hits[0] is not first.hits[0]
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_a_reordered_query_hits_the_same_cache_entry(monkeypatch):
+    # ODP's AND is commutative (live-verified), so a permutation is the same search
+    # and must not be paid for twice. Only the term ORDER shown back to the caller
+    # differs, and that is the order the search actually ran in.
+    monkeypatch.setattr(patents, "_api_key", lambda: "k")
+    route = respx.post(patents.SEARCH_URL).mock(
+        return_value=httpx.Response(200, json=_ODP_ONE_HIT)
+    )
+    await patents.search_prior_art("deoxyhypusine synthase")
+    await patents.search_prior_art("synthase deoxyhypusine")
+    assert route.call_count == 1
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_a_search_that_could_not_run_is_never_cached(monkeypatch):
+    # Caching a None would poison the rest of the run: "could not search" is not a
+    # result, and a rate limit is by definition transient.
+    monkeypatch.setattr(patents, "_api_key", lambda: "k")
+    monkeypatch.setattr(patents, "_ODP_BACKOFF", 0.0)
+    respx.post(patents.SEARCH_URL).mock(return_value=httpx.Response(429))
+    assert await patents.search_prior_art("widget") is None
+    respx.post(patents.SEARCH_URL).mock(return_value=httpx.Response(200, json=_ODP_ONE_HIT))
+    again = await patents.search_prior_art("widget")
+    assert again is not None and len(again.hits) == 1
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_every_odp_request_in_the_ladder_is_paced(monkeypatch):
+    # Every one of the 10 429s in run 8b64a0e0 landed on the 3rd POST of its own
+    # tier ladder, issued back-to-back with no spacing at all — the burst was ours,
+    # which is why pacing matters more here than retrying (mirroring
+    # pubmed._ncbi_get, where `await _pace()` before every attempt is the
+    # load-bearing half).
+    monkeypatch.setattr(patents, "_api_key", lambda: "k")
+    monkeypatch.setattr(patents, "_PACE_INTERVAL", 0.05)
+    patents._next_slot = 0.0
+    respx.post(patents.SEARCH_URL).mock(
+        return_value=httpx.Response(200, json={"count": 0, "patentFileWrapperDataBag": []})
+    )
+    t0 = time.monotonic()
+    await patents.search_prior_art("alpha beta gamma delta epsilon")  # four tiers
+    elapsed = time.monotonic() - t0
+    assert elapsed >= 0.05 * 3, f"four POSTs finished in {elapsed:.3f}s — the ladder is not paced"
+
+
+@pytest.mark.asyncio
+@respx.mock
 async def test_lone_specific_term_among_generics_still_gets_a_narrower_tier(monkeypatch):
     # Regression: when only ONE token survives generics-filtering, the ranked pool
     # is narrower than both backoff widths (3 and _MIN_TERMS=2). Skipping the
@@ -296,7 +537,6 @@ async def test_lone_specific_term_among_generics_still_gets_a_narrower_tier(monk
     queries = []
 
     def _capture(request):
-        import json
         q = json.loads(request.content)["q"]
         queries.append(q)
         if q == "applicationMetaData.inventionTitle:(BRAF)":
@@ -311,6 +551,77 @@ async def test_lone_specific_term_among_generics_still_gets_a_narrower_tier(monk
     assert result.terms_used == ["BRAF"]
     assert result.broadened is True
     assert len(queries) > 1
+
+
+def test_a_hyphenated_symbol_survives_as_one_token():
+    # H3, root cause half 1: the sanitiser split on every hyphen, so the numeric
+    # suffix of every SYMBOL-N name became a token of its own — and (see the next
+    # test) outranked the symbol. The narrowest backoff tier of this query used to
+    # be ['1']: a USPTO title search for the numeral one.
+    tokens = patents._tokenise("LOX-1 myeloid-derived suppressor cells")
+    assert tokens[0] == "LOX-1"
+    assert patents._tiers(tokens)[-1] == ["LOX-1"]
+    # A hyphen before a LETTER stays a token boundary: only SYMBOL-N is protected,
+    # so every non-hyphenated query is tokenised exactly as it was before.
+    assert "myeloid-derived" not in tokens
+    assert patents._tokenise("CRISPR base editing") == ["CRISPR", "base", "editing"]
+
+
+def test_a_leading_hyphen_can_never_reach_uspto():
+    # "-" is the simplified query syntax's NOT operator when it leads a term. A
+    # token can only START on an alphanumeric, so no amount of caller punctuation
+    # can turn a clause into its negation.
+    assert patents._tokenise("-BRAF --1 kinase") == ["BRAF", "1", "kinase"]
+
+
+def test_an_all_digit_token_scores_below_a_gene_symbol():
+    # H3, root cause half 2: _salience awarded +3 for containing a digit AND +2 for
+    # `not token.islower()` — and a pure-digit token satisfies BOTH, since
+    # "1".islower() is False. That is 5 before the length bonus, against GDF=3 and
+    # LOX=3, so the numeral was promoted to rank 1 of every SYMBOL-N query.
+    assert patents._salience("441524") < patents._salience("LOX")
+    assert patents._salience("1") < patents._salience("GDF")
+    assert patents._rank_terms(["GDF", "15"])[0] == "GDF"
+    # The digit bonus itself must survive: it is what promotes the symbols the
+    # _salience docstring names.
+    assert patents._salience("C9orf72") > patents._salience("kinase")
+    assert patents._salience("HER3") > patents._salience("kinase")
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_a_hyphenated_symbol_is_sent_as_a_quoted_phrase(monkeypatch):
+    # Live-verified 2026-08-22 against api.uspto.gov: an UNQUOTED hyphen inside a
+    # term is read as OR, not as part of the word.
+    #   inventionTitle:(LOX-1)   -> count 34,680  (= LOX 111 + "1" 34,595 - 26 both)
+    #   inventionTitle:("LOX-1") -> count 26      (= LOX AND 1, exactly)
+    # So keeping the hyphen without quoting it would be strictly worse than the
+    # bug it fixes: the most specific token in the query would become the least
+    # specific clause in it, and sort-by-filing-date + limit 10 would hand the hub
+    # ten unrelated recent filings as prior art.
+    monkeypatch.setattr(patents, "_api_key", lambda: "k")
+    captured = []
+
+    def _capture(request):
+        captured.append(json.loads(request.content)["q"])
+        return httpx.Response(200, json=_ODP_ONE_HIT)
+
+    respx.post(patents.SEARCH_URL).mock(side_effect=_capture)
+    await patents.search_prior_art("LOX-1 antibody")
+    assert captured[0] == 'applicationMetaData.inventionTitle:("LOX-1" AND antibody)'
+
+
+def test_a_permutation_tier_is_not_issued_as_a_second_request():
+    # M13: _tiers deduped candidates with a LIST comparison, but ODP's AND is
+    # commutative — live-verified, `deoxyhypusine AND synthase` and
+    # `synthase AND deoxyhypusine` both return 27. Salience ranking reorders a
+    # 2-token query into the same SET as tier 1, which the list comparison read as
+    # a new tier: 17 provably-wasted POSTs in run 8b64a0e0, each of which also
+    # brought the ladder one step closer to the 429 it eventually took.
+    assert patents._tiers(["synthase", "deoxyhypusine"]) == [
+        ["synthase", "deoxyhypusine"],
+        ["deoxyhypusine"],
+    ]
 
 
 def test_generic_terms_lose_to_specific_ones():
