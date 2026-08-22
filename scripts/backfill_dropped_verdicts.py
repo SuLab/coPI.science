@@ -54,7 +54,8 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from src.config import get_settings
 from src.models import AssessmentDrop, LlmCallLog, OpportunityAssessment
-from src.services.blackbird_rubric import weighted_score
+from src.services.blackbird_rubric import band as rubric_band
+from src.services.blackbird_rubric import weighted_score as rubric_weighted_score
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 logger = logging.getLogger("backfill_dropped_verdicts")
@@ -68,23 +69,30 @@ _SIDECAR_RE = re.compile(
 _RECOVERABLE = ("premature_sidecar", "duplicate_thread_verdict", "unparseable_sidecar")
 
 
-def _band(score: float, *, advance_min: float, conditional_min: float) -> str:
-    if score >= advance_min:
-        return "advance"
-    if score >= conditional_min:
-        return "conditional"
-    return "pass"
+def _score_and_band(verdict: dict) -> tuple[float | None, str | None]:
+    """Exactly what ``_persist_assessment`` would have computed for this verdict.
+
+    STAGE-AWARE, and that is the whole point of routing through the rubric module
+    rather than doing the arithmetic here. Since v2.0.0 an incubation-stage
+    verdict is scored on the incubation weights and banded on the incubation
+    lines; everything else uses the investment scale. Both of the verdicts this
+    script exists to recover are incubation-stage, and scoring them on the
+    investment scale understates them — markham comes out at 2.84/conditional
+    instead of 3.04/conditional, which is the wrong number to put in a corpus
+    other rows will be compared against.
+    """
+    scores = verdict.get("scores") if isinstance(verdict.get("scores"), dict) else {}
+    if not scores:
+        return None, None
+    stage = verdict.get("funnel_stage")
+    score = rubric_weighted_score(scores, stage)
+    return score, rubric_band(score, stage)
 
 
 async def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--run", required=True, help="simulation_run_id to backfill")
     ap.add_argument("--dry-run", action="store_true")
-    ap.add_argument(
-        "--advance-min", type=float, default=3.4,
-        help="incubation band line, from the run's rubric",
-    )
-    ap.add_argument("--conditional-min", type=float, default=2.7)
     # Stamped from the RUN, not from whatever blackbird_rubric imports now —
     # see the module docstring. Defaults are run 8b64a0e0's stamps.
     ap.add_argument("--rubric-version", default="2.0.0")
@@ -163,12 +171,7 @@ async def main() -> int:
             # Same rule as _persist_assessment: an empty scores map is "we don't
             # know", and weighted_score({}) is a 0.00 that bands as a decline
             # nobody made — so leave both columns NULL rather than invent one.
-            ws = weighted_score(scores) if scores else None
-            band = (
-                _band(ws, advance_min=args.advance_min,
-                      conditional_min=args.conditional_min)
-                if ws is not None else None
-            )
+            ws, band = _score_and_band(verdict)
 
             row = OpportunityAssessment(
                 id=uuid.uuid4(),
