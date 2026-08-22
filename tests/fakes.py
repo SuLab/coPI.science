@@ -250,7 +250,8 @@ class FakeSlackClient:
     stable. Extend as agent-turn tests exercise more of the interface.
     """
 
-    def __init__(self, agent_id: str = "agent1", bot_token: str = "xoxb-fake") -> None:
+    def __init__(self, agent_id: str = "agent1", bot_token: str = "xoxb-fake",
+                 existing_channels: dict | None = None) -> None:
         self.agent_id = agent_id
         self.bot_token = bot_token
         self._bot_user_id = f"U_{agent_id}"
@@ -258,6 +259,7 @@ class FakeSlackClient:
         self.created_channels: list[dict] = []
         self.invites: list[dict] = []
         self.joined_channels: set[str] = set()
+        self._existing_channels: dict = existing_channels or {}  # name -> id for list_channels
         self._ts = 1_700_000_000
 
     def connect(self) -> bool:
@@ -337,7 +339,7 @@ class FakeSlackClient:
         return True
 
     def list_channels(self, include_private: bool = False) -> dict:
-        return {}
+        return dict(self._existing_channels)
 
     def _resolve_channel_id(self, channel: str) -> str:
         """Name -> id, mirroring AgentSlackClient (ids pass through unchanged)."""
