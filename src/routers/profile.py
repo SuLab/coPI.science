@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.database import get_db
 from src.dependencies import get_current_user, get_pi_user
 from src.models import Job, Publication, ResearcherProfile, User
+from src.services.profile_edit import apply_profile_edits
 from src.services.validators import is_valid_email
 
 logger = logging.getLogger(__name__)
@@ -113,93 +114,15 @@ async def profile_save(
     current_user: User = Depends(get_current_user),
 ):
     """Save profile changes."""
-    # Validate the email up front so a bad value rejects the whole submission
-    # before anything is persisted.
-    email_clean = (email or "").strip().lower()
-    if email_clean != (current_user.email or ""):
-        if email_clean:
-            if not is_valid_email(email_clean):
-                return RedirectResponse(
-                    url="/profile/edit?error=invalid_email", status_code=302
-                )
-            existing = await db.execute(
-                select(User).where(
-                    User.email == email_clean, User.id != current_user.id
-                )
-            )
-            if existing.scalar_one_or_none():
-                return RedirectResponse(
-                    url="/profile/edit?error=email_taken", status_code=302
-                )
-        current_user.email = email_clean or None
-
-    # Update user fields
-    if name:
-        current_user.name = name
-    if institution is not None:
-        current_user.institution = institution or None
-    if department is not None:
-        current_user.department = department or None
-
-    # Update profile fields
-    profile_result = await db.execute(
-        select(ResearcherProfile).where(ResearcherProfile.user_id == current_user.id)
+    error = await apply_profile_edits(
+        db, target_user=current_user, changed_by_user_id=current_user.id,
+        name=name, email=email, institution=institution, department=department,
+        research_summary=research_summary, techniques=techniques,
+        experimental_models=experimental_models, disease_areas=disease_areas,
+        key_targets=key_targets, keywords=keywords,
     )
-    profile = profile_result.scalar_one_or_none()
-    if not profile:
-        profile = ResearcherProfile(user_id=current_user.id)
-        db.add(profile)
-        # Flush the row into existence before the SQL-side bump below: on a
-        # pending object the expression would render inside the INSERT's VALUES,
-        # which cannot reference its own target table ("invalid reference to
-        # FROM-clause entry for table researcher_profiles").
-        await db.flush()
-
-    profile.research_summary = research_summary
-    profile.techniques = _parse_list(techniques)
-    profile.experimental_models = _parse_list(experimental_models)
-    profile.disease_areas = _parse_list(disease_areas)
-    profile.key_targets = _parse_list(key_targets)
-    profile.keywords = _parse_list(keywords)
-    # SQL-side increment: the Python read-modify-write lost updates when two
-    # writers raced (issue #22 C1). Nothing below reads profile_version, so the
-    # expiry the expression assignment causes needs no refresh here.
-    profile.profile_version = func.coalesce(ResearcherProfile.profile_version, 0) + 1
-
-    await db.commit()
-
-    # Look up agent_id (gates file export and revision)
-    from src.models import AgentRegistry
-    agent_result = await db.execute(
-        select(AgentRegistry).where(AgentRegistry.user_id == current_user.id)
-    )
-    agent_reg = agent_result.scalar_one_or_none()
-    agent_id_for_export = agent_reg.agent_id if agent_reg else None
-
-    # Export to markdown for agent consumption (include publications)
-    from src.services.profile_export import export_profile_to_markdown
-    from src.models import Publication
-    pub_result = await db.execute(
-        select(Publication).where(Publication.user_id == current_user.id)
-    )
-    user_pubs = list(pub_result.scalars().all())
-    exported_path = export_profile_to_markdown(
-        current_user, profile, agent_id_for_export, publications=user_pubs
-    )
-
-    # Record revision
-    from src.services.profile_versioning import create_revision
-    if agent_reg and exported_path:
-        await create_revision(
-            db,
-            agent_registry_id=agent_reg.id,
-            profile_type="public",
-            content=exported_path.read_text(encoding="utf-8"),
-            changed_by_user_id=current_user.id,
-            mechanism="web",
-        )
-        await db.commit()
-
+    if error:
+        return RedirectResponse(url=f"/profile/edit?error={error}", status_code=302)
     return RedirectResponse(url="/profile?saved=1", status_code=302)
 
 
