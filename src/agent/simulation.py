@@ -2972,7 +2972,19 @@ class SimulationEngine:
 
         Never raises: a Slack failure here must not affect anything the
         caller already did (the assessment row's persistence, or the reply
-        already posted to Slack).
+        already posted to Slack). Two levels of that, deliberately: the
+        permalink lookup has its own inner guard so a link failure DEGRADES
+        (design D16 — "(link unavailable)", never a dropped post), while the
+        outer one is the last resort for the post itself.
+
+        Only the headline's five fields are ever rendered — PI/lab name,
+        project, recommendation, band/score, permalink (design D12). The
+        verdict's `rationale`, `red_flags`, `gating` and `raw_verdict` are
+        never read here at all, which is what keeps this post from saying more
+        than the manager read-only detail view already shows staff. Pinned by
+        `tests/unit/test_assessments_summary_post.py`'s sentinel test —
+        widening this to interpolate `verdict` wholesale, or to add a
+        "why" line, is a content-policy change, not a formatting one.
         """
         try:
             channel_id = self._assessments_summary_channel_id
@@ -3021,7 +3033,24 @@ class SimulationEngine:
             source_channel_id = self._channel_id_map.get(thread.channel)
             permalink = None
             if source_channel_id and slack_ts:
-                permalink = await client.aget_permalink(source_channel_id, slack_ts)
+                # Its OWN try, narrower than the whole-method one below: design
+                # D16 says a missing permalink degrades to "(link unavailable)"
+                # and is "not a dropped post", and a RAISE has to degrade the
+                # same way a None does. `get_permalink` only catches
+                # `SlackApiError` itself (src/agent/slack_client.py), so a
+                # transport-level error — or anything `_call_with_retry` gives
+                # up on that is not a rate limit — comes straight out of it.
+                # Left in the method-wide try, such a raise would skip the
+                # `apost_message` below entirely and lose a verdict's headline
+                # over a cosmetic link.
+                try:
+                    permalink = await client.aget_permalink(source_channel_id, slack_ts)
+                except Exception:
+                    logger.warning(
+                        "[%s] Could not resolve a permalink for thread %s's "
+                        "verdict; posting the headline without one",
+                        agent.agent_id, thread.thread_id, exc_info=True,
+                    )
             link_part = f" — <{permalink}|View interview>" if permalink else " (link unavailable)"
 
             text = (

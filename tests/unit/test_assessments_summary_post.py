@@ -54,6 +54,9 @@ async def test_a_held_pass_verdict_posts_a_headline(monkeypatch, tmp_path):
     assert "Wang" in text or "wang" in text
     assert "CRISPR Platform" in text
     assert "pass" in text
+    # A weak smoke check only — `VERDICT` carries no `rationale` key at all, so
+    # this would pass even against code that leaked one. D12's real gate is
+    # test_the_headline_leaks_no_rationale_red_flags_gating_or_raw_verdict.
     assert "rationale" not in text.lower()
 
 
@@ -82,6 +85,63 @@ async def test_no_scores_still_posts_without_a_band(monkeypatch, tmp_path):
     text = hub_client.posted_messages[ASSESSMENTS_SUMMARY_CHANNEL][0]
     assert "band" not in text.lower()
     assert "score" not in text.lower()
+
+
+# Every field D12 forbids the headline from carrying, each filled with a value
+# that could only appear in the post by having leaked from this verdict. The
+# other tests use `VERDICT`, which has none of these keys at all — so an
+# assertion against THAT fixture proves nothing about whether the code would
+# leak them if they were present. This one is the real gate.
+_LEAK_SENTINELS = (
+    "SENTINEL_RATIONALE_TEXT",
+    "SENTINEL_FLAG",
+    "SENTINEL_GATE_KEY",
+    "SENTINEL_RAW",
+    "SENTINEL_MILESTONE",
+    "SENTINEL_CONFIDENCE",
+)
+
+LEAKY_VERDICT = {
+    **VERDICT,
+    "rationale": "SENTINEL_RATIONALE_TEXT",
+    "red_flags": ["SENTINEL_FLAG", "a second SENTINEL_FLAG"],
+    "gating": {"SENTINEL_GATE_KEY": "not_met"},
+    "raw_verdict": {"anything": "SENTINEL_RAW"},
+    "suggested_derisking_milestones": ["SENTINEL_MILESTONE"],
+    "confidence": "SENTINEL_CONFIDENCE",
+}
+
+
+async def test_the_headline_leaks_no_rationale_red_flags_gating_or_raw_verdict(
+    monkeypatch, tmp_path,
+):
+    """D12: the summary post is headline-only. A public channel must not show
+    more than the manager read-only detail view already shows staff, so none of
+    `rationale`, `red_flags`, `gating`, `raw_verdict` (nor the milestones or
+    confidence) may reach it — by value OR by field name."""
+    eng, hub, lab, hub_client = _engine(monkeypatch, tmp_path)
+    thread = ThreadState(thread_id="t13", channel="general", other_agent_id="wang")
+
+    await eng._post_assessment_summary(hub, thread, LEAKY_VERDICT, "131.000")
+
+    # A post must actually have happened, or "the sentinels are absent" would
+    # be vacuously true and this test would guard nothing.
+    assert len(hub_client.posted_messages[ASSESSMENTS_SUMMARY_CHANNEL]) == 1
+    text = hub_client.posted_messages[ASSESSMENTS_SUMMARY_CHANNEL][0]
+
+    # The headline still says what it is SUPPOSED to say...
+    assert "CRISPR Platform" in text
+    assert "pass" in text
+
+    # ...and nothing it is not.
+    for sentinel in _LEAK_SENTINELS:
+        assert sentinel not in text, f"{sentinel} leaked into the summary post: {text!r}"
+    lowered = text.lower()
+    for field_name in ("rationale", "red_flag", "gating", "raw_verdict",
+                       "milestone", "confidence", "not_met"):
+        assert field_name not in lowered, (
+            f"the field name {field_name!r} leaked into the summary post: {text!r}"
+        )
 
 
 async def test_the_headline_carries_a_permalink_to_the_interview(monkeypatch, tmp_path):
@@ -126,9 +186,18 @@ async def test_a_slack_post_failure_is_swallowed(monkeypatch, tmp_path):
     await eng._post_assessment_summary(hub, thread, VERDICT, "444.000")  # must not raise
 
 
-async def test_a_permalink_failure_is_swallowed_too(monkeypatch, tmp_path):
-    """D16 covers the permalink call as well as the post — and the whole
-    helper is inside one try, so a raise there cannot escape either."""
+async def test_a_raising_permalink_degrades_instead_of_dropping_the_post(
+    monkeypatch, tmp_path,
+):
+    """D16 again, for the RAISE case rather than the returned-None one.
+
+    `AgentSlackClient.get_permalink` only catches `SlackApiError` itself, so a
+    transport-level error (or anything `_call_with_retry` gives up on that is
+    not a rate limit) propagates out of it. That must degrade exactly like a
+    `None` does — the design says a failed permalink is "not a dropped post".
+    Asserting "did not raise" alone would have passed while the headline was
+    silently lost to the method-wide except.
+    """
     eng, hub, lab, hub_client = _engine(monkeypatch, tmp_path)
     thread = ThreadState(thread_id="t9", channel="general", other_agent_id="wang")
 
@@ -137,6 +206,14 @@ async def test_a_permalink_failure_is_swallowed_too(monkeypatch, tmp_path):
     monkeypatch.setattr(hub_client, "aget_permalink", boom)
 
     await eng._post_assessment_summary(hub, thread, VERDICT, "999.000")  # must not raise
+
+    assert len(hub_client.posted_messages[ASSESSMENTS_SUMMARY_CHANNEL]) == 1
+    text = hub_client.posted_messages[ASSESSMENTS_SUMMARY_CHANNEL][0]
+    assert "link unavailable" in text
+    # The verdict itself still made it to the channel — the link was the only
+    # casualty.
+    assert "CRISPR Platform" in text
+    assert "pass" in text
 
 
 async def test_a_model_supplied_project_that_is_not_a_string_never_reaches_slack(
