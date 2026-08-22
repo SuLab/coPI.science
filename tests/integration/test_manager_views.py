@@ -50,11 +50,26 @@ def _manager_get_paths(param_values: dict[str, str] | None = None) -> list[str]:
     return sorted(paths)
 
 
-def test_manager_router_exposes_no_mutating_routes():
-    """D12. If there is no mutation route there is no mutation risk, and this
-    turns that from a promise into a check."""
+def test_manager_router_mutations_are_an_explicit_allowlist():
+    """D12 amended, not abolished (design decision D1): the manager router may
+    have non-GET routes now, but only these four, named exactly. A future
+    accidental fifth write route still fails this test loudly."""
+    allowed_post_paths = {
+        "/pis",
+        "/pis/{user_id}/profile",
+        "/pis/{user_id}/mute",
+        "/pis/{user_id}/unmute",
+    }
     methods = {m for r in manager_router.router.routes for m in getattr(r, "methods", ())}
-    assert methods == {"GET"}, f"non-GET route on the manager router: {methods}"
+    assert methods == {"GET", "POST"}, f"unexpected method on the manager router: {methods}"
+
+    post_paths = {
+        route.path for route in manager_router.router.routes
+        if "POST" in getattr(route, "methods", ())
+    }
+    assert post_paths == allowed_post_paths, (
+        f"manager router POST paths changed: {post_paths}"
+    )
 
 
 async def test_unauthenticated_manager_root_redirects_to_login(client):

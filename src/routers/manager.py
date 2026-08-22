@@ -18,14 +18,16 @@ headroom under.
 import logging
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.database import get_db
 from src.dependencies import get_staff_user
-from src.models import USER_ROLE_PI, User
+from src.models import USER_ROLE_PI, AgentRegistry, User
+from src.services.agent_mute import set_agent_mute_state
 from src.services.assessment_detail import build_assessment_detail
 from src.services.directory import (
     build_discussions_view,
@@ -35,6 +37,8 @@ from src.services.directory import (
     list_runs_overview,
     load_user_detail,
 )
+from src.services.pi_onboarding import find_or_create_pi_by_orcid
+from src.services.profile_edit import apply_profile_edits
 from src.services.thread_panel import panel_cards_by_thread
 
 logger = logging.getLogger(__name__)
@@ -141,6 +145,101 @@ async def manager_pi_detail(
             jobs=detail["jobs"],
         ),
     )
+
+
+@router.post("/pis")
+async def manager_create_pi(
+    orcid: str = Form(...),
+    db: AsyncSession = _DB,
+    current_user: User = _STAFF,
+):
+    """Create a PI via the ORCID pipeline (design D5/D6) — no manual profile
+    form exists anywhere in the app; every profile is ORCID/publication
+    derived. Rejects if the ORCID already belongs to anyone, any role."""
+    try:
+        pi = await find_or_create_pi_by_orcid(db, orcid)
+        await db.commit()
+    except ValueError as exc:
+        return RedirectResponse(
+            url=f"/manager/pis?error={exc}", status_code=302
+        )
+    return RedirectResponse(url=f"/manager/pis/{pi.id}", status_code=302)
+
+
+@router.post("/pis/{user_id}/profile")
+async def manager_edit_pi_profile(
+    user_id: uuid.UUID,
+    name: str = Form(""),
+    email: str = Form(""),
+    institution: str = Form(""),
+    department: str = Form(""),
+    research_summary: str = Form(""),
+    techniques: str = Form(""),
+    experimental_models: str = Form(""),
+    disease_areas: str = Form(""),
+    key_targets: str = Form(""),
+    keywords: str = Form(""),
+    db: AsyncSession = _DB,
+    current_user: User = _STAFF,
+):
+    """Edit a PI's profile fields (design D8) — same fields as the PI's own
+    /profile/save, attributed to the acting manager via changed_by_user_id."""
+    detail = await load_user_detail(db, user_id)
+    if detail is None or detail["user"].user_role != USER_ROLE_PI:
+        raise HTTPException(status_code=404, detail="PI not found")
+
+    error = await apply_profile_edits(
+        db, target_user=detail["user"], changed_by_user_id=current_user.id,
+        name=name, email=email, institution=institution, department=department,
+        research_summary=research_summary, techniques=techniques,
+        experimental_models=experimental_models, disease_areas=disease_areas,
+        key_targets=key_targets, keywords=keywords,
+    )
+    if error:
+        return RedirectResponse(url=f"/manager/pis/{user_id}?error={error}", status_code=302)
+    return RedirectResponse(url=f"/manager/pis/{user_id}?saved=1", status_code=302)
+
+
+async def _manager_set_mute(
+    user_id: uuid.UUID, db: AsyncSession, current_user: User, *, muted: bool,
+) -> RedirectResponse:
+    detail = await load_user_detail(db, user_id)
+    if detail is None or detail["user"].user_role != USER_ROLE_PI:
+        raise HTTPException(status_code=404, detail="PI not found")
+
+    agent = (
+        await db.execute(select(AgentRegistry).where(AgentRegistry.user_id == user_id))
+    ).scalar_one_or_none()
+    if agent is None:
+        return RedirectResponse(
+            url=f"/manager/pis/{user_id}?error=no_agent", status_code=302
+        )
+
+    ok = await set_agent_mute_state(
+        db, agent=agent, muted=muted, actor_user_id=current_user.id,
+    )
+    if not ok:
+        return RedirectResponse(
+            url=f"/manager/pis/{user_id}?error=agent_not_mutable", status_code=302
+        )
+    return RedirectResponse(url=f"/manager/pis/{user_id}", status_code=302)
+
+
+@router.post("/pis/{user_id}/mute")
+async def manager_mute_pi(
+    user_id: uuid.UUID, db: AsyncSession = _DB, current_user: User = _STAFF,
+):
+    """Mute a PI's agent — maps to status='inactive' (design D2), not a new
+    status value. No-ops (redirects with an error) if the agent doesn't
+    exist or isn't currently active/inactive."""
+    return await _manager_set_mute(user_id, db, current_user, muted=True)
+
+
+@router.post("/pis/{user_id}/unmute")
+async def manager_unmute_pi(
+    user_id: uuid.UUID, db: AsyncSession = _DB, current_user: User = _STAFF,
+):
+    return await _manager_set_mute(user_id, db, current_user, muted=False)
 
 
 @router.get("/assessments", response_class=HTMLResponse)
