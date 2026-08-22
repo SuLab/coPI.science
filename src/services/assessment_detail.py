@@ -431,6 +431,21 @@ async def build_assessment_detail(
     if assessment is None:
         return None
 
+    # Resolves to a live AgentRegistry row's user_id, so the template can
+    # link to that PI's profile. Left None for a null subject_agent_id, a
+    # stale/decommissioned slug with no AgentRegistry row, or an unlinked
+    # agent whose AgentRegistry.user_id is itself NULL — all three are
+    # "no link", not an error.
+    pi_user_id: str | None = None
+    if assessment.subject_agent_id:
+        from src.models import AgentRegistry
+        row = (await db.execute(
+            select(AgentRegistry.user_id)
+            .where(AgentRegistry.agent_id == assessment.subject_agent_id)
+        )).scalar_one_or_none()
+        if row is not None:
+            pi_user_id = str(row)
+
     rubric = load_rubric()
     # Which scale this ROW was actually scored on, not which one the CURRENT
     # document would pick: a row's own rubric_version says whether v2's
@@ -534,6 +549,7 @@ async def build_assessment_detail(
 
     return {
         "assessment": assessment,
+        "pi_user_id": pi_user_id,
         "dimensions": dimensions,
         "scale_max": rubric.scale_max,
         # The scale THIS ROW was scored on (display_scale_for above) — never

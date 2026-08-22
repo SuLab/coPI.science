@@ -349,6 +349,24 @@ async def list_assessments(
     result = await db.execute(query)
     assessments = result.scalars().all()
 
+    # Batched agent_id -> user_id lookup, so the template can link a row's
+    # lab to that PI's profile. Only ever resolvable for a LIVE roster entry
+    # with a linked user: a stale/decommissioned subject_agent_id (no
+    # AgentRegistry row) or an unlinked agent (AgentRegistry.user_id IS NULL)
+    # is silently omitted here rather than raising, and the template must
+    # treat a missing key the same as "no link".
+    subject_ids = {a.subject_agent_id for a in assessments if a.subject_agent_id}
+    pi_user_ids: dict[str, str] = {}
+    if subject_ids:
+        from src.models import AgentRegistry
+        rows = (await db.execute(
+            select(AgentRegistry.agent_id, AgentRegistry.user_id)
+            .where(AgentRegistry.agent_id.in_(subject_ids))
+        )).all()
+        pi_user_ids = {
+            r.agent_id: str(r.user_id) for r in rows if r.user_id is not None
+        }
+
     # Per-row display scale, keyed by assessment id — gated the same way the
     # detail page is (blackbird_rubric.display_scale_for): incubation weights
     # only for a row that was BOTH scored by a stage-aware (v2+) document AND
@@ -474,6 +492,10 @@ async def list_assessments(
         "sort_options": ASSESSMENT_SORT_OPTIONS,
         "lab_filter": lab_filter,
         "lab_options": lab_options,
+        # Keyed by subject_agent_id, same key space as lab_options — a
+        # missing key means "no resolvable PI" (stale slug or unlinked
+        # agent), not an error.
+        "pi_user_ids": pi_user_ids,
         "total_count": total_count,
         "assessments_limit": ASSESSMENTS_LIMIT,
         "drop_counts": drop_counts,

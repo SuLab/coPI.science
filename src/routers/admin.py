@@ -769,6 +769,7 @@ async def admin_assessments(
             sort_options=view["sort_options"],
             lab_filter=view["lab_filter"],
             lab_options=view["lab_options"],
+            pi_user_ids=view["pi_user_ids"],
             total_count=view["total_count"],
             assessments_limit=view["assessments_limit"],
             drop_counts=view["drop_counts"],
