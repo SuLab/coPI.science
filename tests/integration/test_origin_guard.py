@@ -79,10 +79,15 @@ async def test_a_post_without_an_origin_is_refused(client_without_origin, db_ses
 
     r = await client_without_origin.post("/logout", headers=auth_headers(user.id))
     assert r.status_code == 403, r.text
-    assert not _session_cookies(r), (
-        "a refused request still reached SessionMiddleware — the guard is not "
-        "outermost, or it did not refuse at all"
-    )
+    # The logout did not run: SessionMiddleware re-sets the cookie only when
+    # the session is modified, and a refused request never gets that far.
+    #
+    # Read this as "the refusal was effective", NOT as evidence about middleware
+    # ORDER. It carries no ordering signal at all — a refused request does not
+    # modify the session wherever the guard sits in the stack, so this passes
+    # with the guard innermost too (measured). Ordering is pinned separately by
+    # test_the_guard_is_the_outermost_middleware.
+    assert not _session_cookies(r), "the POST was refused but the logout ran anyway"
 
 
 @pytest.mark.parametrize("origin", FOREIGN_ORIGINS)
@@ -212,3 +217,40 @@ async def test_the_unsubscribe_exemption_requires_no_session_cookie(
         )
         == "weekly"
     ), "a cookie-bearing cross-site POST unsubscribed the victim"
+
+
+def test_the_guard_is_the_outermost_middleware():
+    """Structural, because no request-level assertion in this file can see it.
+
+    The obvious behavioural proxy — "a refused request set no session cookie",
+    asserted in ``test_a_post_without_an_origin_is_refused`` — carries ZERO
+    ordering signal, and the first version of this file wrongly claimed it did.
+    Starlette's ``SessionMiddleware.send_wrapper`` emits ``Set-Cookie`` only
+    ``if session.modified and session``, and a request the guard refuses never
+    touches the session at all. Demote the guard to innermost and that
+    assertion still passes; measured, 12/12 green with
+    ``add_middleware(OriginGuardMiddleware)`` moved to the first call in
+    ``create_app()``. So the invariant needs a direct look at the stack.
+
+    Why outermost is the requirement and not a preference: everything the guard
+    is in front of costs something on a request it is going to refuse. In
+    particular ``AgentBadgeMiddleware`` (src/main.py) opens its own database
+    session and runs an own-agents SELECT, a delegated-agents JOIN, and a
+    ThreadDecision/ProposalReview COUNT pair PER agent — for any request
+    carrying a session cookie. A demoted guard therefore turns every forged
+    cross-site POST into an unauthenticated database-load amplifier: the
+    attacker still cannot change anything, but they can make each refused
+    request cost several queries. Refusing on headers alone, before any of that
+    is constructed, is the point.
+
+    ``user_middleware`` is in outermost-to-innermost order (Starlette's
+    ``build_middleware_stack`` wraps in reverse), and ``add_middleware``
+    PREPENDS — so "outermost" means "added last in create_app()", which reads
+    backwards and is exactly the kind of thing a later edit gets wrong.
+    """
+    from src.main import create_app
+
+    order = [m.cls.__name__ for m in create_app().user_middleware]
+    assert order[0] == "OriginGuardMiddleware", (
+        f"the CSRF guard is not outermost; stack is {order}"
+    )

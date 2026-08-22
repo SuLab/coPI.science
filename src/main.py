@@ -248,6 +248,11 @@ def create_app() -> FastAPI:
     # add_middleware prepends. It reads headers only and needs no session, so
     # running it outside SessionMiddleware is both correct and cheaper — a
     # forged POST is refused before AgentBadgeMiddleware opens a connection.
+    #
+    # Outermost is a REQUIREMENT, not a preference, and no request-level
+    # assertion can see it (a refused request never modifies the session, so
+    # SessionMiddleware emits no Set-Cookie either way). It is pinned
+    # structurally by test_origin_guard.py::test_the_guard_is_the_outermost_middleware.
     application.add_middleware(OriginGuardMiddleware)
 
     # Static files
