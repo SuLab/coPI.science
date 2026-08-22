@@ -13,7 +13,12 @@
    `admin_view` gates the two admin-only strands (plan decision 2): the hub's
    tool activity, and each specialist's verbatim opinion. Those values are
    already ABSENT from a manager render's context (the service omits them), so
-   these conditionals are the second of two locks, not the only one. #}
+   these conditionals are the second of two locks, not the only one.
+
+   CONTRACT: an including template must define a `pi_link(a)` macro BEFORE the
+   include (see either wrapper). That is how the "Lab:" line's link to
+   /admin|/manager/users|pis/{id} gets a literal URL without one appearing
+   here. #}
 
 {% set a = assessment %}
 {% set signal_chip = {
@@ -108,7 +113,7 @@
                 {% endif %}
             </h2>
             <div class="text-sm text-gray-500 mt-1">
-                Lab: <span class="font-medium text-gray-700">{{ a.subject_agent_id or "—" }}</span>
+                Lab: <span class="font-medium text-gray-700">{{ pi_link(a) }}</span>
                 &middot; Stage: {{ a.funnel_stage or "—" }}
                 &middot; Screened by {{ a.agent_id }}
                 &middot; <span data-utc="{{ a.created_at.isoformat() }}" data-utc-fmt="short">{{ a.created_at.strftime('%Y-%m-%d %H:%M') }}</span>

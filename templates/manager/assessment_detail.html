@@ -12,6 +12,10 @@
     <a href="/manager/assessments" class="text-sm text-gray-500 hover:text-gray-700">&larr; Opportunity Assessments</a>
     <h1 class="text-2xl font-bold text-gray-900 mt-1 mb-4">Assessment detail</h1>
 
+    {# The manager surface's own copy of pi_link — see the twin comment in
+       templates/admin/assessment_detail.html. Points at /manager/pis, never
+       /admin, for the same F6 reason as this page's other links. #}
+    {% macro pi_link(a) %}{% if a.subject_agent_id and pi_user_id %}<a class="underline text-indigo-600 hover:text-indigo-800" href="/manager/pis/{{ pi_user_id }}">{{ a.subject_agent_id }}</a>{% else %}{{ a.subject_agent_id or "—" }}{% endif %}{% endmacro %}
     {% include "admin/_assessment_detail_body.html" %}
 
     <p class="text-xs text-gray-400 mb-6">

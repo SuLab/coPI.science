@@ -34,6 +34,13 @@
         </a>
     </div>
 
+    {# The "Lab:" line's link to the PI's own profile, same reasoning as the
+       assessment_link macro on templates/admin/assessments.html: a literal
+       /admin/users/{id} URL, defined here rather than in the shared body, so
+       test_reachability's _link_credits can see it. This page shows exactly
+       one assessment, so it uses the singular `pi_user_id` context key from
+       the detail service rather than the list page's `pi_user_ids` dict. #}
+    {% macro pi_link(a) %}{% if a.subject_agent_id and pi_user_id %}<a class="underline text-indigo-600 hover:text-indigo-800" href="/admin/users/{{ pi_user_id }}">{{ a.subject_agent_id }}</a>{% else %}{{ a.subject_agent_id or "—" }}{% endif %}{% endmacro %}
     {% include "admin/_assessment_detail_body.html" %}
 
     {# The verdict exactly as the model emitted it, kept so a schema change

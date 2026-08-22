@@ -84,5 +84,10 @@
    click is worse than no control (F6), so this points at /manager, never
    /admin: test_manager_assessments_never_links_into_admin pins that. #}
 {% macro assessment_link(a) %}<a class="assessment-open-link underline text-indigo-600 hover:text-indigo-800 whitespace-nowrap" href="/manager/assessments/{{ a.id }}" onclick="event.stopPropagation()" title="Full verdict and interview timeline">detail &rarr;</a>{% endmacro %}
+{# The manager surface's own copy of pi_link — see the twin comment in
+   templates/admin/assessments.html. Points at /manager/pis, never /admin, for
+   the same F6 reason as assessment_link above: test_manager_assessments_never_links_into_admin
+   pins that no /admin URL appears anywhere on this page. #}
+{% macro pi_link(a) %}{% if a.subject_agent_id and pi_user_ids.get(a.subject_agent_id) %}<a class="underline text-indigo-600 hover:text-indigo-800" href="/manager/pis/{{ pi_user_ids[a.subject_agent_id] }}">{{ a.subject_agent_id }}</a>{% else %}{{ a.subject_agent_id or "—" }}{% endif %}{% endmacro %}
 {% include "admin/_assessments_body.html" %}
 {% endblock %}

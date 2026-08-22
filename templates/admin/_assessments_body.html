@@ -10,8 +10,9 @@
    file — it must print nothing.
 
    CONTRACT: an including template must define an `assessment_link(a)` macro
-   BEFORE the include (see either wrapper). That is how the per-row link to
-   /admin|/manager/assessments/{id} gets a literal URL without one appearing
+   AND a `pi_link(a)` macro BEFORE the include (see either wrapper). That is
+   how the per-row links to /admin|/manager/assessments/{id} and
+   /admin|/manager/users|pis/{id} get literal URLs without one appearing
    here. #}
 <p class="text-xs text-gray-400 mb-6">
     Gating: <span class="text-green-600 font-medium">&#9989; met</span> &middot;
@@ -241,7 +242,7 @@
                         <span class="text-xs text-gray-400">[{{ a.confidence.strip("[]") }}]</span>
                     {% endif %}
                 </td>
-                <td class="px-4 py-3 text-sm text-gray-600">{{ a.subject_agent_id or "—" }}</td>
+                <td class="px-4 py-3 text-sm text-gray-600">{{ pi_link(a) }}</td>
                 <td class="px-4 py-3 text-sm text-gray-600">{{ a.funnel_stage or "—" }}</td>
                 <td class="px-4 py-3 text-sm">
                     <span class="font-semibold
