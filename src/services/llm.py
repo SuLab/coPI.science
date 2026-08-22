@@ -950,11 +950,16 @@ async def generate_agent_response(
     return contract.
 
     ``on_stop_reason``, if given, fires exactly once — synchronously, before
-    this returns — with the FINAL API call's ``stop_reason`` (so the retry's,
-    when a retry ran). It never raises into this function and never changes what
-    is returned: a partial answer still comes back, because whether a partial
-    answer may be posted / persisted / credited differs per call site. See
-    ``_notify_stop_reason``.
+    this returns — with the ``stop_reason`` of the reply whose text is being
+    returned: the retry's when a retry ran and returned, the FIRST pass's
+    ``max_tokens`` when the retry raised and its text is being salvaged (see the
+    handler at the bottom). It never raises into this function and never changes
+    what is returned: a partial answer still comes back, because whether a
+    partial answer may be posted / persisted / credited differs per call site.
+    See ``_notify_stop_reason``.
+
+    Raises only when there is nothing to hand back — a first call that failed, or
+    a call refused before it was issued (``NonStreamingMaxTokensError``).
     """
     # Start of the TURN, for `wall_ms`. Distinct from the per-call `t0`
     # below: this one spans every round, every retry and the tool execution
@@ -977,6 +982,11 @@ async def generate_agent_response(
     call_stats: list[dict[str, Any]] = []
     latency_ms = 0.0
     response_text = ""
+    # The best answer in hand, and the reply that produced it, if the turn dies
+    # from here on — same two locals, same meaning, as ``generate_with_tools``.
+    # ``None`` means "nothing salvageable, the exception IS the outcome".
+    recovered_text: str | None = None
+    recovered_message: Any = None
     try:
         t0 = time.monotonic()
         message = await _acreate(
@@ -1051,6 +1061,12 @@ async def generate_agent_response(
                 message.usage.output_tokens, retry_max,
             )
             t0 = time.monotonic()
+            # Truncated is not worthless: this text is a real, billed answer,
+            # and if the retry dies it is the only one there will ever be.
+            # `message` (not `retry_msg`) is what `on_stop_reason` should then
+            # report — `max_tokens`, i.e. "incomplete" — which is what makes the
+            # fallthrough safe for the specialist floor.
+            recovered_text, recovered_message = response_text, message
             retry_msg = await _acreate(
                 client,
                 model=model,
@@ -1145,24 +1161,14 @@ async def generate_agent_response(
 
         return response_text
     except Exception as exc:
-        logger.error("Failed to generate agent response: %s", exc)
-        # The record half of what generate_with_tools' guard does, and ONLY the
-        # record half. Both calls of a retried turn are billed; without this the
-        # turn wrote no row at all, and SimulationEngine rebuilds
-        # `api_call_count` and the rate limiter's `call_times` from these rows —
-        # so a failure here silently refunded the throttle at the next restart.
-        # The row carries the first pass's truncated text too: it is what the
-        # dropped-verdict backfill regexes `llm_call_logs.response_text` for, and
-        # it was paid for.
-        #
-        # What this deliberately does NOT do is RETURN that text, unlike
-        # generate_with_tools. A fallthrough here would report
-        # stop_reason=max_tokens, and src/agent/tools.py's consult path still
-        # tests `stop_reasons[-1] == "refusal"` — so a truncated specialist
-        # opinion would be credited to the panel as a complete one, which is the
-        # exact defect the stop-reason contract was introduced to stop. Deferred
-        # until that call site adopts `is_truncated_stop`; do not "complete" this
-        # before then.
+        # Both halves of what generate_with_tools' guard does. THE RECORD:
+        # both calls of a retried turn are billed; without this the turn wrote
+        # no row at all, and SimulationEngine rebuilds `api_call_count` and the
+        # rate limiter's `call_times` from these rows — so a failure here
+        # silently refunded the throttle at the next restart. The row carries
+        # the first pass's truncated text too: it is what the dropped-verdict
+        # backfill regexes `llm_call_logs.response_text` for, and it was paid
+        # for.
         #
         # The one failure that writes nothing is the request that was never
         # issued — see NonStreamingMaxTokensError.
@@ -1179,7 +1185,28 @@ async def generate_agent_response(
                 log_meta=log_meta,
                 wall_ms=(time.monotonic() - _turn_t0) * 1000,
             )
-        raise
+        if recovered_text is None:
+            # Nothing succeeded yet, so the exception IS the outcome — and a
+            # mis-sized max_tokens, the one error this module raises by name,
+            # must stay as loud as it was.
+            logger.error("Failed to generate agent response: %s", exc)
+            raise
+        # THE TEXT: the retry died on top of a truncated-but-usable first pass.
+        # This half was deferred when the record half landed, because
+        # src/agent/tools.py's consult path tested `stop_reasons[-1] ==
+        # "refusal"` and a fallthrough reports `max_tokens` — so a truncated
+        # specialist opinion would have been credited to the panel as a complete
+        # one. That call site now uses `is_truncated_stop`, which covers both, so
+        # returning the text can no longer launder an unfinished opinion.
+        logger.exception(
+            "The max_tokens retry failed after %d billed call(s) (model=%s "
+            "agent=%s phase=%s) — returning the %d character(s) the first pass "
+            "already produced rather than losing them with the exception.",
+            len(call_stats), model, (log_meta or {}).get("agent_id", "?"),
+            (log_meta or {}).get("phase", "?"), len(recovered_text),
+        )
+        _notify_stop_reason(on_stop_reason, recovered_message)
+        return recovered_text
 
 
 async def make_decision(

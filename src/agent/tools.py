@@ -15,7 +15,7 @@ from src.agent.specialists import (
     parse_opinion,
     persona_path,
 )
-from src.services.llm import generate_agent_response
+from src.services.llm import generate_agent_response, is_truncated_stop
 from src.services.patents import PriorArtResult, search_prior_art
 from src.services.pubmed import fetch_abstract, fetch_full_text
 
@@ -239,9 +239,10 @@ async def execute_tool(
     the engine supplies to write the consult to ``specialist_consults``,
     defaulting to None so every caller without one (a pi_lab reply, a direct
     test call) behaves exactly as before. It fires on a STRICTLY WIDER path than
-    ``on_consult``: a consult truncated by a `refusal` is recorded and not
+    ``on_consult``: a consult the API cut off mid-reply is recorded and not
     counted, because a truncated opinion is the only evidence the attempt
-    happened at all. See ``_execute_consult_specialist``.
+    happened at all — and the record carries ``truncated=True`` so the row can
+    say which it was. See ``_execute_consult_specialist``.
 
     ``own_dois``: the calling agent's own-lab publication DOIs (see
     ``Agent.own_publication_dois``, GitHub issue #7). A ``retrieve_abstract``
@@ -509,15 +510,16 @@ async def _execute_consult_specialist(
     ``on_consult`` is invoked with the domain and the parsed verdict signal
     ONLY on a successful call. A refused domain, a missing persona file, a
     failed LLM call, an empty reply, or a reply the API stopped mid-sentence
-    (``stop_reason == "refusal"``) must not satisfy the enforcement floor —
-    otherwise "the specialist was unreachable" would silently become "the
-    specialist approved".
+    (``is_truncated_stop`` — ``refusal`` OR ``max_tokens``) must not satisfy the
+    enforcement floor — otherwise "the specialist was unreachable" would
+    silently become "the specialist approved".
 
     ``on_consult_record`` fires on a strictly WIDER path — every case above that
     produced text at all, truncated ones included — and is the durable record of
     the attempt (``specialist_consults``). It carries only what this function
-    knows — the ask and the parsed opinion; the engine's own closure supplies
-    who asked, about whom, and in which thread and channel. Deliberately
+    knows — the ask, the parsed opinion, and whether the reply was cut off
+    (``truncated``); the engine's own closure supplies who asked, about whom,
+    and in which thread and channel. Deliberately
     SECOND: the in-memory ``on_consult`` is what the floor reads in-process and
     stays authoritative there, so a write that fails must not un-count a
     consult that really happened. It is awaited rather than
@@ -662,19 +664,29 @@ async def _execute_consult_specialist(
     # same run's `sinnis` has NO chemistry consult on record while chemistry was
     # attempted and refused five times, which is how a panel record becomes
     # substantially fictional. Record it; just do not count it.
-    refused = bool(stop_reasons) and stop_reasons[-1] == "refusal"
-    if refused:
+    #
+    # `is_truncated_stop`, not `== "refusal"`: `refusal` is the classifier
+    # cutting the reply and `max_tokens` is the ceiling doing it, and the text
+    # in hand is equally partial either way. The one-value test credited every
+    # consult that hit the 4000-token ceiling, retried and truncated AGAIN — the
+    # loudest case in the module, since `max_tokens=4000`'s own comment above
+    # records consults already returning 2299 output tokens. It also decides
+    # whether `generate_agent_response` may hand back a first-pass answer whose
+    # retry died: that fallthrough reports `max_tokens`, so it is safe here only
+    # while this predicate is the shared one (src/services/llm.py).
+    truncated = bool(stop_reasons) and is_truncated_stop(stop_reasons[-1])
+    if truncated:
         logger.error(
-            "[specialists] %s consult for %s ended in a refusal (truncated "
-            "mid-reply) — recorded, but NOT counted as consulted",
-            domain, agent_id,
+            "[specialists] %s consult for %s was cut off mid-reply "
+            "(stop_reason=%r) — recorded, but NOT counted as consulted",
+            domain, agent_id, stop_reasons[-1],
         )
     elif on_consult is not None:
         on_consult(domain, opinion.verdict_signal)
     logger.info(
         "[specialists] %s consulted %s -> %s (%s)%s",
         agent_id, domain, opinion.verdict_signal, opinion.confidence,
-        " [TRUNCATED, uncounted]" if refused else "",
+        " [TRUNCATED, uncounted]" if truncated else "",
     )
     if on_consult_record is not None:
         try:
@@ -688,6 +700,15 @@ async def _execute_consult_specialist(
                 concerns=list(opinion.concerns),
                 questions_to_ask=list(opinion.questions_to_ask),
                 raw_opinion=opinion.raw,
+                # The row's own copy of the refusal above. Without it the
+                # stored consult is byte-indistinguishable from a complete
+                # one, so `_seed_consults_from_db` rehydrates it after a
+                # restart as a domain that counts and the floor is satisfied
+                # by an opinion nobody finished reading — the in-process
+                # refusal undone by the next `docker stop`. Always sent, False
+                # included: NULL in that column means "written before 0036",
+                # which is a third state and not this one.
+                truncated=truncated,
             )
         except Exception as exc:  # noqa: BLE001 — a record must not cost the opinion
             # The engine's writer is itself best-effort and already logs its own
@@ -701,7 +722,7 @@ async def _execute_consult_specialist(
                 "[specialists] %s consult recorded in memory but NOT durably: %s",
                 domain, exc, exc_info=True,
             )
-    if refused:
+    if truncated:
         # Say so in the string the MODEL reads, not just in the log. Otherwise
         # the hub consults once, sees a plausible opinion, believes the domain is
         # covered, and concludes — while the floor it is about to be checked

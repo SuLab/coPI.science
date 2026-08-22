@@ -292,6 +292,86 @@ async def test_a_refusal_truncated_consult_is_recorded_but_not_credited(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_a_max_tokens_truncated_consult_is_not_credited(monkeypatch):
+    """`refusal` was never the only way a consult gets cut off.
+
+    The local test here was `stop_reasons[-1] == "refusal"`, so a consult that
+    hit the 4000-token ceiling, retried, and STILL truncated reported
+    `max_tokens` and was credited to the specialist floor as a complete opinion
+    — a partial reply satisfying the domain the verdict is checked against.
+    `src.services.llm.is_truncated_stop` is the single definition of "the text
+    in hand is incomplete", and this call site must use it rather than its own
+    one-value copy.
+    """
+    consulted, recorded = [], []
+
+    async def _still_truncated(**kwargs):
+        on_stop_reason = kwargs.get("on_stop_reason")
+        if on_stop_reason is not None:
+            # The retry ran, doubled max_tokens and truncated again: llm.py
+            # returns the retry's text and reports the RETRY's stop_reason.
+            on_stop_reason("max_tokens")
+        return '{"verdict_signal": "clear", "confidence": "high", "concerns": ['
+
+    async def _record(**fields):
+        recorded.append(fields)
+
+    monkeypatch.setattr("src.agent.tools.generate_agent_response", _still_truncated)
+
+    result = await _execute_consult_specialist(
+        "chemistry", "Is the series tractable?", "The PI said a great deal.",
+        agent_id="blackbird",
+        on_consult=lambda domain, signal: consulted.append(domain),
+        on_consult_record=_record,
+    )
+
+    assert consulted == [], "a max_tokens-truncated consult must not satisfy the floor"
+    assert len(recorded) == 1, "it still happened, so it is still recorded"
+    assert "truncated" in result.lower()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stop_reason", "expected"),
+    [("refusal", True), ("max_tokens", True), ("end_turn", False), (None, False)],
+)
+async def test_a_truncated_consult_is_marked_on_the_record(
+    monkeypatch, stop_reason, expected
+):
+    """The stored row must be able to say it was cut off.
+
+    Without this the `specialist_consults` row of a truncated consult is
+    byte-indistinguishable from a complete one, so `_seed_consults_from_db`
+    rehydrates it after a restart as a domain that counts — the in-process
+    refusal above is undone by the next `docker stop`. `specialist_consults
+    .truncated` (migration 0036) is where this lands; NULL there means "written
+    before the column existed", which is why the value is always sent, `False`
+    included.
+    """
+    recorded = []
+
+    async def _reply(**kwargs):
+        on_stop_reason = kwargs.get("on_stop_reason")
+        if on_stop_reason is not None and stop_reason is not None:
+            on_stop_reason(stop_reason)
+        return '{"verdict_signal": "clear", "confidence": "high"}'
+
+    async def _record(**fields):
+        recorded.append(fields)
+
+    monkeypatch.setattr("src.agent.tools.generate_agent_response", _reply)
+
+    await _execute_consult_specialist(
+        "chemistry", "Is the series tractable?", "The PI said a great deal.",
+        agent_id="blackbird",
+        on_consult_record=_record,
+    )
+
+    assert len(recorded) == 1
+    assert recorded[0]["truncated"] is expected
+
+
+@pytest.mark.asyncio
 async def test_a_complete_consult_that_stopped_on_end_turn_is_still_credited(monkeypatch):
     """The other side of the branch. `end_turn` is the normal terminator and
     must not be caught up in this."""

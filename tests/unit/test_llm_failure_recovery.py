@@ -323,17 +323,24 @@ async def test_generate_agent_response_writes_a_row_for_a_request_that_went_out(
     assert row["call_stats"] == []
 
 
-async def test_a_raising_retry_in_generate_agent_response_still_writes_its_row(
+async def test_a_raising_retry_returns_the_first_pass_text_now_that_the_predicate_is_safe(
     monkeypatch, logged
 ):
     """The retry site a `generate_with_tools` guard cannot reach.
 
     Both calls are billed; the first one's tokens and its truncated text are the
-    only evidence the turn happened. The exception STILL propagates, and the
-    truncated text is deliberately NOT returned to the caller here — see the
-    comment at that site: `src/agent/tools.py` still tests
-    `stop_reasons[-1] == "refusal"`, so a fallthrough reporting `max_tokens`
-    would be credited to the specialist panel as a complete opinion.
+    only evidence the turn happened. The row half landed first, alone: a
+    fallthrough reports `max_tokens`, and `src/agent/tools.py` tested
+    `stop_reasons[-1] == "refusal"` at the time, so returning the text would
+    have credited a truncated specialist opinion to the panel as a complete one.
+
+    That call site now uses `is_truncated_stop`, so the text half is safe and is
+    done here: the caller gets the truncated-but-real answer instead of losing
+    it with the exception, and `on_stop_reason` reports the FIRST pass's
+    `max_tokens` so a caller that must not act on a partial answer still can't.
+    The invariant that makes this safe is pinned in
+    `tests/unit/test_consult_accounting.py`
+    (`test_a_max_tokens_truncated_consult_is_not_credited`).
     """
     _install(
         monkeypatch,
@@ -348,18 +355,61 @@ async def test_a_raising_retry_in_generate_agent_response_still_writes_its_row(
             ]
         ),
     )
+    stops: list[str] = []
 
-    with pytest.raises(RuntimeError, match="connection reset"):
-        await llm.generate_agent_response(
-            "sys", [{"role": "user", "content": "hi"}], max_tokens=1000,
-            log_meta=LOG_META,
-        )
+    out = await llm.generate_agent_response(
+        "sys", [{"role": "user", "content": "hi"}], max_tokens=1000,
+        log_meta=LOG_META, on_stop_reason=stops.append,
+    )
 
+    assert out == "half an opinion", "the answer was in hand and was paid for"
+    assert stops == ["max_tokens"], (
+        "the reply that ended the turn is the truncated first pass — a caller "
+        "reading this through is_truncated_stop must see an incomplete answer"
+    )
     assert len(logged) == 1, "one turn, one row — covering BOTH billed calls"
     (row,) = logged
     assert _kinds(row) == ["final"], "the retry never returned, so it never happened"
     assert (row["input_tokens"], row["output_tokens"]) == (11, 22)
-    # The ROW carries the truncated text even though the CALLER does not get it:
     # `llm_call_logs.response_text` is what the dropped-verdict backfill regexes
     # for `<assessment_json>`, and this is a reply that was paid for.
     assert row["response_text"] == "half an opinion"
+
+
+async def test_a_first_call_that_raises_still_propagates_out_of_generate_agent_response(
+    monkeypatch, logged
+):
+    """The fallthrough above must not become "every failure returns ''".
+
+    Nothing has succeeded when the FIRST call throws, so there is no answer to
+    hand back and the exception is the outcome — the row is still written,
+    because the request went out and was billed.
+    """
+    fake = FakeAnthropic([_boom])
+    _install(monkeypatch, fake)
+
+    with pytest.raises(RuntimeError, match="connection reset"):
+        await llm.generate_agent_response(
+            "sys", [{"role": "user", "content": "hi"}], log_meta=LOG_META
+        )
+
+    assert len(fake.calls) == 1
+    assert len(logged) == 1
+
+
+async def test_generate_agent_response_still_refuses_an_oversized_call_and_writes_nothing(
+    monkeypatch, logged
+):
+    """The discrimination the fallthrough must preserve: a call that never
+    reached the API raises (loudly, by name) and books nothing."""
+    fake = FakeAnthropic([text_response("never reached")])
+    _install(monkeypatch, fake)
+
+    with pytest.raises(llm.NonStreamingMaxTokensError, match="NONSTREAMING_MAX_TOKENS"):
+        await llm.generate_agent_response(
+            "sys", [{"role": "user", "content": "hi"}],
+            max_tokens=llm.NONSTREAMING_MAX_TOKENS + 1, log_meta=LOG_META,
+        )
+
+    assert fake.calls == []
+    assert logged == []

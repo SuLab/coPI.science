@@ -3741,6 +3741,7 @@ class SimulationEngine:
         concerns: list | None,
         questions_to_ask: list | None,
         raw_opinion: str,
+        truncated: bool | None = None,
     ) -> None:
         """Write one successful consult to ``specialist_consults``.
 
@@ -3753,11 +3754,20 @@ class SimulationEngine:
         the opinion the hub is about to act on.
 
         Called from the ``on_consult_record`` closure in ``_reply_to_thread``,
-        which is fired on the SAME success path as ``on_consult``: a refused
-        domain, a missing persona file, a failed call or an empty reply all
-        write nothing, so a row here always means the domain counts as
-        consulted. That is what makes the row safe to read back as evidence of
-        a convened panel (``_seed_consults_from_db``).
+        which is fired on a WIDER path than ``on_consult``: a refused domain, a
+        missing persona file, a failed call or an empty reply all write nothing,
+        but a reply the API cut off mid-sentence DOES write a row (it is the only
+        evidence the attempt happened) while not counting toward the floor. So
+        "a row here means the domain counts as consulted" holds only for
+        ``truncated`` in ``(False, None)`` — the qualification
+        ``src/models/specialist_consult.py`` states and the one a reader of these
+        rows as evidence of a convened panel (``_seed_consults_from_db``) has to
+        apply.
+
+        ``truncated`` defaults to ``None`` — "not stated" — so a caller written
+        before the column existed keeps its old meaning rather than asserting
+        completeness it never checked. ``src/agent/tools.py`` always sends a
+        real boolean.
 
         Awaited inline by the tool call rather than dispatched as a background
         task: an orphaned task would outlive the turn, and the engine's
@@ -3783,6 +3793,7 @@ class SimulationEngine:
                     concerns=concerns,
                     questions_to_ask=questions_to_ask,
                     raw_opinion=raw_opinion,
+                    truncated=truncated,
                 ))
                 await db.commit()
         except Exception as exc:  # noqa: BLE001 — a record must not cost the opinion

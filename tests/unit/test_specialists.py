@@ -228,6 +228,40 @@ def test_a_truncated_object_still_falls_back_to_caution():
     assert op.concerns == ()
 
 
+def test_a_fenced_braceless_blocking_opinion_is_not_laundered():
+    """`_strip_fence` used to run BEFORE `extract_json`, which defeated the one
+    recovery branch written for exactly this shape.
+
+    `json_extract` carries a branch whose own comment says "Claude sometimes
+    drops the opening brace inside the fence" — and it tests for the ```json
+    fence that `_strip_fence` had already removed. So this reply parsed
+    correctly from `raw` and RAISED after stripping, landing on the
+    `caution`/`low`/no-concerns default: the same laundering the branch exists
+    to prevent, reintroduced by the call that was meant to help it.
+    """
+    raw = (
+        '```json\n'
+        '"verdict_signal": "blocking", '
+        '"concerns": ["The mouse line is third-party encumbered"], '
+        '"questions_to_ask": [], '
+        '"confidence": "high"\n'
+        '```'
+    )
+    op = parse_opinion(raw, domain="legal")
+    assert op.verdict_signal == "blocking"
+    assert op.confidence == "high"
+    assert op.concerns == ("The mouse line is third-party encumbered",)
+    assert op.raw == raw
+
+
+def test_a_fenced_empty_object_still_reads_as_no_content():
+    """The trap on the other side of the same change: `_strip_fence` stays
+    load-bearing in `has_usable_content`, where a fenced `{}` must still read as
+    "says nothing". Only `parse_opinion` stopped pre-stripping."""
+    assert has_usable_content("```json\n{}\n```") is False
+    assert has_usable_content("```\n{}\n```") is False
+
+
 def test_a_defaulted_signal_logs_a_warning_naming_the_domain(caplog):
     """The six were invisible: a laundered opinion looks exactly like a genuine
     cautious one in every log line and every stored row. One WARNING naming the

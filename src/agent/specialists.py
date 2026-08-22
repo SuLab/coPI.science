@@ -222,6 +222,11 @@ _FENCE_RE = re.compile(r"^\s*```(?:json)?\s*(.*?)\s*```\s*$", re.DOTALL)
 
 
 def _strip_fence(raw: str) -> str:
+    """Unwrap a whole-string ``` fence. ONE caller: ``has_usable_content``,
+    which asks "is there anything in here at all" and so must see a fenced
+    ``{}`` as the empty object it is. ``parse_opinion`` deliberately does not
+    use it — see that function's docstring for the recovery branch pre-stripping
+    destroyed."""
     m = _FENCE_RE.match(raw)
     return m.group(1) if m else raw
 
@@ -240,7 +245,18 @@ def parse_opinion(raw: str, *, domain: str) -> SpecialistOpinion:
     not satisfy the floor, and that is decided by the caller, not here.
 
     Models fence JSON by reflex, so a fenced block is unwrapped rather than
-    treated as a parse failure.
+    treated as a parse failure — by ``extract_json``, which has two fence
+    branches of its own. This deliberately does NOT pre-strip the fence: doing
+    so was strictly worse than not, because ``json_extract``'s brace-restoring
+    branch ("Claude sometimes drops the opening brace inside the fence") tests
+    for the very fence ``_strip_fence`` had just removed. A fenced brace-less
+    ``blocking``/``high`` opinion therefore parsed from ``raw`` and RAISED after
+    stripping, landing on the ``caution``/``low``/``()`` default below — the
+    exact laundering that branch exists to prevent, reintroduced by the call
+    that was meant to help it. ``extract_json(raw)`` dominates
+    ``extract_json(_strip_fence(raw))`` across every measured shape.
+    ``_strip_fence`` stays load-bearing in ``has_usable_content``, where a
+    fenced ``{}`` must still read as "says nothing".
 
     TOLERANT, since 2026-08-22, and measurably so. This used to be a bare
     ``json.loads`` over the fence-stripped text, which saw the whole reply or
@@ -262,7 +278,7 @@ def parse_opinion(raw: str, *, domain: str) -> SpecialistOpinion:
     """
     data: object = None
     try:
-        data = extract_json(_strip_fence(raw or ""))
+        data = extract_json(raw or "")
     except (ValueError, TypeError):
         # ValueError covers json.JSONDecodeError and extract_json's own raise.
         # TypeError guards a non-str `raw` reaching `.strip()`, which this
