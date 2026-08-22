@@ -162,3 +162,133 @@ async def test_an_unresolvable_doi_is_not_reported_as_a_nonexistent_paper(monkey
     assert "error" in out
     assert "10.1038/nature12373" in out["error"]
     assert "not evidence" in out["error"].lower()
+
+
+# ---------------------------------------------------------------------------
+# A COMPLETED request whose body will not parse is still not evidence of
+# nonexistence — the same distinction as the transport failures above, one
+# layer in.
+# ---------------------------------------------------------------------------
+
+
+async def test_malformed_xml_does_not_claim_the_record_is_absent(monkeypatch):
+    """`_parse_pubmed_xml` swallowed `ET.ParseError` and returned `[]`.
+
+    So `_fetch_pubmed_batch` returned `[]` WITHOUT raising, `fetch_abstract`'s
+    `_LOOKUP_FAILED` guard never fired, and the model was told "No PubMed record
+    found for X" about a request that completed with a body we could not read.
+    Malformed XML is our end of the conversation failing, not PubMed's answer.
+    """
+    def handler(request):
+        return httpx.Response(200, text="<PubmedArticleSet><PubmedArticle>")
+
+    monkeypatch.setattr(pubmed, "_make_client", _client_factory(handler))
+    out = await pubmed.fetch_abstract("41130592")
+    assert "error" in out
+    assert "No PubMed record found" not in out["error"]
+    assert "41130592" in out["error"]
+    assert "failed" in out["error"].lower()
+
+
+async def test_the_batch_path_still_survives_one_bad_response(monkeypatch):
+    """`fetch_pubmed_records`' documented job is to keep a long ingest going, so
+    the new exception must be swallowed THERE and only there.
+
+    Two chunks (the batch size is 100): the first comes back unparseable, the
+    second is fine. The good records must still arrive — a profile build must not
+    lose 100 publications to one bad response — and nothing may propagate.
+    """
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(200, text="<not-xml")
+        return httpx.Response(200, text=_ONE_RECORD_XML)
+
+    monkeypatch.setattr(pubmed, "_make_client", _client_factory(handler))
+    records = await pubmed.fetch_pubmed_records([str(i) for i in range(150)])
+    assert calls["n"] == 2
+    assert [r["pmid"] for r in records] == ["41130592"]
+
+
+def test_a_parse_failure_is_its_own_exception_not_an_empty_result():
+    """Raising rather than returning `[]` is the whole fix, so it is pinned
+    directly: `[]` and "unreadable" are different answers and only the caller
+    knows which one it can act on."""
+    with pytest.raises(pubmed.PubMedParseError):
+        pubmed._parse_pubmed_xml("<not-xml")
+    assert issubclass(pubmed.PubMedParseError, ValueError)
+    assert pubmed._parse_pubmed_xml(_EMPTY_SET_XML) == []
+
+
+# ---------------------------------------------------------------------------
+# _RETRYABLE_TRANSPORT: base classes, not a list of leaf names
+# ---------------------------------------------------------------------------
+
+
+def test_every_timeout_class_is_retried():
+    """The tuple's own comment claims "every member here means 'the request did
+    not complete'". Enumerating leaves cannot keep that promise: it named
+    ReadTimeout but not ConnectTimeout, WriteTimeout or PoolTimeout, and
+    ReadError but not WriteError — so `_ncbi_get` surfaced four transport
+    failures as hard errors that are as transient as the one it retried, and
+    `fetch_abstract` turned them into an affirmative claim about the world.
+
+    This walks the hierarchy rather than listing names, so a class httpx adds
+    later is covered on the day it appears.
+    """
+    for base in (httpx.TimeoutException, httpx.NetworkError):
+        assert issubclass(base, pubmed._RETRYABLE_TRANSPORT), base
+        subclasses = base.__subclasses__()
+        assert subclasses, f"{base.__name__} should have leaves to check"
+        for cls in subclasses:
+            assert issubclass(cls, pubmed._RETRYABLE_TRANSPORT), cls
+    # The four httpx names in 0.28.1 that this must catch, spelled out so a
+    # rename shows up as a failure here rather than as silence.
+    for cls in (
+        httpx.ConnectTimeout, httpx.ReadTimeout, httpx.WriteTimeout,
+        httpx.PoolTimeout, httpx.ConnectError, httpx.ReadError,
+        httpx.WriteError, httpx.CloseError, httpx.RemoteProtocolError,
+    ):
+        assert issubclass(cls, pubmed._RETRYABLE_TRANSPORT), cls
+
+
+def test_a_malformed_request_of_ours_is_still_not_retried():
+    """The other half: retrying a request that was never well-formed just
+    triples the traffic behind a bug of ours. `LocalProtocolError` is the
+    pointed one — its sibling `RemoteProtocolError` IS retried, and a
+    `ProtocolError` base would have swept both in."""
+    for cls in (
+        httpx.ProxyError, httpx.UnsupportedProtocol, httpx.LocalProtocolError,
+    ):
+        assert not issubclass(cls, pubmed._RETRYABLE_TRANSPORT), cls
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        httpx.ConnectTimeout("connect timed out"),
+        httpx.WriteTimeout("write timed out"),
+        httpx.PoolTimeout("no connection available"),
+        httpx.WriteError("broken pipe"),
+    ],
+)
+async def test_the_newly_covered_transport_failures_are_actually_retried(
+    monkeypatch, exc
+):
+    """The property above, driven through `_ncbi_get` — a class that is a
+    subclass but that the retry loop somehow did not catch would pass the
+    hierarchy walk and fail here."""
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise exc
+        return httpx.Response(200, text=_ONE_RECORD_XML)
+
+    monkeypatch.setattr(pubmed, "_make_client", _client_factory(handler))
+    out = await pubmed.fetch_abstract("41130592")
+    assert calls["n"] == 3
+    assert out["title"] == "A Paper That Exists"

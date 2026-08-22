@@ -126,13 +126,27 @@ _NCBI_TOOL = "copi-science"
 #
 # Deliberately narrower than httpx.TransportError: every member here means "the
 # request did not complete", which is retryable by definition, whereas
-# UnsupportedProtocol / ProxyError / InvalidURL mean the request was never
-# well-formed and retrying it just triples the traffic behind a bug of ours.
+# UnsupportedProtocol / ProxyError / InvalidURL / LocalProtocolError mean the
+# request was never well-formed and retrying it just triples the traffic behind
+# a bug of ours.
+#
+# BASE classes, not leaf names. The tuple used to enumerate
+# (RemoteProtocolError, ReadTimeout, ConnectError, ReadError), which left
+# ConnectTimeout, WriteTimeout, PoolTimeout and WriteError uncaught while the
+# sentence above claimed to cover them — four ways for a request that did not
+# complete to be surfaced as a hard error and turned by `fetch_abstract` into
+# "No PubMed record found for X". A base-class tuple is also the only form a
+# test named "every timeout class is retried" can actually check, and it covers
+# whatever httpx adds next on the day it appears
+# (tests/unit/test_pubmed_transport.py).
+#
+# `RemoteProtocolError` stays named individually rather than widening to its
+# `ProtocolError` base: that base's other child is `LocalProtocolError`, which
+# is a malformed request of OURS.
 _RETRYABLE_TRANSPORT = (
+    httpx.TimeoutException,
+    httpx.NetworkError,
     httpx.RemoteProtocolError,
-    httpx.ReadTimeout,
-    httpx.ConnectError,
-    httpx.ReadError,
 )
 
 
@@ -175,6 +189,13 @@ async def fetch_pubmed_records(pmids: list[str]) -> list[dict[str, Any]]:
     """
     Batch fetch PubMed records for a list of PMIDs.
     Returns list of dicts with: pmid, title, abstract, journal, year, author_position.
+
+    This is the path whose job is to keep a long ingest going, so it swallows
+    per-batch failures — ``PubMedParseError`` included, which is why raising it
+    from ``_parse_pubmed_xml`` costs a profile build nothing: one unreadable
+    response loses its own 100 PMIDs and no more. ``fetch_abstract`` deliberately
+    does NOT come through here (see its docstring): a single-record lookup needs
+    exactly the information this loop discards.
     """
     if not pmids:
         return []
@@ -237,14 +258,34 @@ async def _fetch_pubmed_batch(pmids: list[str]) -> list[dict[str, Any]]:
     return _parse_pubmed_xml(resp.text)
 
 
+class PubMedParseError(ValueError):
+    """A PubMed response that arrived and could not be read.
+
+    Distinct from "PubMed has no such record", which is an EMPTY result and a
+    real answer. This used to be swallowed into that same empty list, so
+    `_fetch_pubmed_batch` returned `[]` without raising, `fetch_abstract`'s
+    `_LOOKUP_FAILED` guard never fired, and the model was told "No PubMed record
+    found for X" — an affirmative statement about the world — for a request that
+    completed with a body we could not parse.
+
+    A `ValueError` so the broad `except Exception` handlers that already exist
+    on every long-running path keep catching it unchanged; the point is that a
+    caller who needs to tell the two apart now CAN.
+    """
+
+
 def _parse_pubmed_xml(xml_text: str) -> list[dict[str, Any]]:
-    """Parse PubMed XML efetch response."""
+    """Parse PubMed XML efetch response.
+
+    Returns `[]` for a well-formed response containing no articles. RAISES
+    `PubMedParseError` when the body is not XML at all — see that class.
+    """
     results = []
     try:
         root = ET.fromstring(xml_text)
     except ET.ParseError as exc:
         logger.error("Failed to parse PubMed XML: %s", exc)
-        return results
+        raise PubMedParseError(f"PubMed response was not parseable XML: {exc}") from exc
 
     for article in root.findall(".//PubmedArticle"):
         record: dict[str, Any] = {}
@@ -421,7 +462,18 @@ async def fetch_pmc_methods(pmcid: str) -> str | None:
 
 
 def _extract_methods_section(xml_text: str) -> str | None:
-    """Extract the methods/materials section text from PMC XML."""
+    """Extract the methods/materials section text from PMC XML.
+
+    The module's OTHER ``ET.ParseError`` handler, and it deliberately keeps
+    swallowing — checked when ``_parse_pubmed_xml`` was changed to raise. The
+    reason they differ is what the caller says afterwards: an empty parse there
+    became "No PubMed record found for X", an affirmative claim about the world,
+    whereas ``None`` here reaches ``fetch_full_text`` as ``methods: None``, which
+    ``src/agent/tools.py::_format_full_text`` renders by omitting the Methods
+    block entirely. Nothing is asserted, so there is nothing to correct — and
+    ``fetch_pmc_methods`` wraps this in ``except Exception -> None`` anyway, so
+    raising would change no observable behaviour.
+    """
     try:
         root = ET.fromstring(xml_text)
     except ET.ParseError:
@@ -484,9 +536,10 @@ def _extract_text(element) -> str:
 # license it. Run 8b64a0e0 (M12) made exactly that substitution for PMID 41130592,
 # a paper the hub had cited by DOI four seconds earlier.
 _LOOKUP_FAILED = (
-    "PubMed lookup FAILED for {ident} ({exc}) — the request did not complete after "
-    "retries. This is NOT evidence that no such record exists; retry before drawing "
-    "any conclusion from it."
+    "PubMed lookup FAILED for {ident} ({exc}) — the lookup did not complete "
+    "SUCCESSFULLY after retries (the request never landed, or it came back "
+    "unreadable). This is NOT evidence that no such record exists; retry before "
+    "drawing any conclusion from it."
 )
 
 
@@ -497,10 +550,15 @@ async def fetch_abstract(pmid_or_doi: str) -> dict[str, Any]:
     Returns dict with: pmid, title, abstract, journal, year (or error key).
 
     Three failure modes, deliberately worded differently (see ``_LOOKUP_FAILED``):
-    the lookup did not complete, the lookup completed and PubMed has no such
-    record, and the DOI could not be resolved — which is itself either of the
-    first two, because ``convert_dois_to_pmids`` swallows its own errors and
+    the lookup did not complete successfully, the lookup completed and PubMed has
+    no such record, and the DOI could not be resolved — which is itself either of
+    the first two, because ``convert_dois_to_pmids`` swallows its own errors and
     cannot say which.
+
+    "Did not complete successfully" covers a response that ARRIVED and would not
+    parse (``PubMedParseError``), which used to come through as an empty list and
+    therefore as the second message — an affirmative "No PubMed record found for
+    X" about a paper nobody had actually looked up.
 
     Calls ``_fetch_pubmed_batch`` rather than ``fetch_pubmed_records`` on purpose:
     the batch wrapper's job is to keep a long ingest run going, so it swallows
