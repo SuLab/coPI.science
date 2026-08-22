@@ -5,14 +5,13 @@ import logging
 from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.database import get_db
 from src.dependencies import get_current_user, get_pi_user
 from src.models import Job, Publication, ResearcherProfile, User
 from src.services.profile_edit import apply_profile_edits
-from src.services.validators import is_valid_email
 
 logger = logging.getLogger(__name__)
 router = APIRouter()

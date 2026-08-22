@@ -1,14 +1,13 @@
 """apply_profile_edits: shared field-mutation logic for self-service
 profile.py:/profile/save and the manager's PI-edit route."""
 import tempfile
-import uuid
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 from sqlalchemy import select
 
-from src.models import ProfileRevision, ResearcherProfile, User
+from src.models import ProfileRevision, ResearcherProfile
 from src.services.profile_edit import apply_profile_edits
 from tests import factories
 
