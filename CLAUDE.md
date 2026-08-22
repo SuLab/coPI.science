@@ -449,12 +449,37 @@ fourth outright.
   The `pi_lab` strings there are byte-identical to the pre-refactor literals and are pinned
   by `tests/characterization/__snapshots__/test_agent_turn_gm.ambr` — do not reword them,
   and never run `pytest --snapshot-update` to make a mismatch go away.
-- **The hub is reply-only — it never makes a top-level post.** An Opportunity Assessment is
-  not a post type: it is an `<assessment_json>` sidecar carried inside the hub's CONCLUDING
-  reply in the interview thread (bare JSON, *no* ``` fence). It is stripped from the Slack
-  body before anything is posted and written to `opportunity_assessments`, visible at
-  `/admin/assessments`. `:mag:` names the sidecar, not a post label — it never appears on
-  anything a PI or another lab sees.
+- **Inside an interview thread the hub is reply-only — it never makes a top-level post
+  there.** An Opportunity Assessment is not a post type: it is an `<assessment_json>`
+  sidecar carried inside the hub's CONCLUDING reply in the interview thread (bare JSON, *no*
+  ``` fence). It is stripped from the Slack body before anything is posted and written to
+  `opportunity_assessments`, visible at `/admin/assessments`. To the MODEL, `:mag:` names
+  the sidecar and is never a post label it may write
+  (`prompts/roles/scout_hub/agent-system.md`); the full verdict — rationale, red flags,
+  gating, `raw_verdict` — never appears on anything a PI or another lab sees.
+  As of the 2026-08-21 manager-PI-controls cycle
+  (`SimulationEngine._post_assessment_summary`, `src/agent/simulation.py`), every HELD
+  verdict — pass or fail alike — does additionally trigger one genuinely top-level post,
+  written by the ENGINE rather than the model and prefixed with that same `:mag:`: a
+  headline-only line (PI/lab name, `company_or_project`, `recommendation`, band/score, and a
+  permalink or `(link unavailable)`) to `#assessments-summary`
+  (`ASSESSMENTS_SUMMARY_CHANNEL`, `src/agent/channels.py`) — deliberately with **no**
+  rationale, red flags, gating, or `raw_verdict` (design D12). Band/score are omitted
+  entirely when the verdict carried no dimension scores, for the same reason
+  `_persist_assessment` leaves those columns NULL: an empty `scores` map is "we don't know",
+  and `weighted_score({})` is a 0.00 that bands as a decline nobody made. That channel is
+  human-joinable/workspace-visible ("public" in the Slack sense — design D11) but is never
+  added to `SEEDED_CHANNELS` or any per-agent subscription, so no PI-lab bot is ever joined
+  to it or polls it — it still never reaches a PI/lab **agent**'s own view of the
+  simulation, only human staff who join the channel directly. The post fires synchronously
+  right after `_persist_assessment` returns HELD inside `_capture_hub_assessment`; a dropped
+  or refused sidecar (an `AssessmentDrop` row, never an `opportunity_assessments` row) never
+  posts (design D14), and a Slack failure in the post/permalink step is caught and logged,
+  never raised into the calling turn (design D16) — see
+  `docs/specs/2026-08-21-manager-pi-controls-design.md`. With `SLACK_ENABLED=false` the
+  headline is skipped outright (the hub's transport is a `NullTransport`, which has no
+  async post/permalink methods at all) — the assessment row is still written, so nothing is
+  lost but the Slack copy.
 - **`weighted_score` is computed**, never taken from the model:
   `src/services/blackbird_rubric.py`. `recommendation` (which may be
   `route-to-incubation`) comes straight from the model's verdict and the computed `band`

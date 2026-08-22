@@ -2910,6 +2910,7 @@ class SimulationEngine:
                         final=closes_thread,
                         slack_ts=slack_ts,
                     )
+                    await self._post_assessment_summary(agent, thread, verdict, slack_ts)
                     # Retire the earlier row only once its replacement is
                     # actually HELD — never leave the interview with neither.
                     if superseded is not None:
@@ -2951,6 +2952,86 @@ class SimulationEngine:
                 "[%s] Failed to extract/persist the assessment sidecar for "
                 "thread %s: %s",
                 agent.agent_id, thread.thread_id, exc,
+            )
+
+    async def _post_assessment_summary(
+        self, agent: Agent, thread: ThreadState, verdict: dict, slack_ts: str | None,
+    ) -> None:
+        """Post a headline-only summary of a concluded interview to the
+        assessments-summary channel (design D12/D13/D14/D16). Called from
+        _capture_hub_assessment right after a verdict is HELD — covers both
+        the immediate fail (closes_thread) path and the pass path
+        symmetrically, since both funnel through that one call site.
+
+        Deliberately duplicates two PURE function calls
+        (rubric_weighted_score/rubric_band) rather than changing
+        _persist_assessment's return signature to hand back its computed
+        values — that would risk breaking existing direct unit-test callers
+        of _persist_assessment that assert a plain bool return. The
+        weighting LOGIC itself is not duplicated, only these two calls.
+
+        Never raises: a Slack failure here must not affect anything the
+        caller already did (the assessment row's persistence, or the reply
+        already posted to Slack).
+        """
+        try:
+            channel_id = self._assessments_summary_channel_id
+            client = self.slack_clients.get(agent.agent_id)
+            # ``is_connected`` is not redundant with ``channel_id``: with Slack
+            # off, ``_ensure_assessments_summary_channel`` still fills that id in
+            # with a ``local:`` placeholder, and the transport is then a
+            # ``NullTransport`` — which implements the SYNC Transport protocol
+            # only and has no ``apost_message``/``aget_permalink`` at all. Without
+            # this the DB-only mode would log an AttributeError traceback for
+            # every held verdict (swallowed below, but pure noise). Same guard
+            # every other outbound call site uses — see ``_post_message``'s
+            # ``if client and client.is_connected``.
+            if not channel_id or not client or not client.is_connected:
+                return
+
+            subject_agent_id = thread.other_agent_id
+            pi = self.agents.get(subject_agent_id) if subject_agent_id else None
+            pi_label = pi.pi_name if pi else (subject_agent_id or "Unknown lab")
+
+            scores = verdict.get("scores") if isinstance(verdict.get("scores"), dict) else {}
+            if scores:
+                stage = verdict.get("funnel_stage")
+                score = rubric_weighted_score(scores, stage)
+                band = rubric_band(score, stage)
+                score_part = f" (band: {band}, score: {score:.1f})"
+            else:
+                score_part = ""
+
+            # Both fields come straight from the model and land in a PUBLIC
+            # channel, so they get the same treatment `_persist_assessment`
+            # gives them before they reach a bounded column: `_bounded_str`
+            # drops a non-string (a model that answers `company_or_project`
+            # with an object would otherwise have a Python `repr` posted to
+            # Slack) and clips an over-long one, which is what keeps this a
+            # HEADLINE (design D12) instead of an unbounded wall of model text
+            # that `split_for_slack` would then cut into several messages.
+            # `recommendation`'s 30 is its column's own width, so the post and
+            # the stored row can never disagree about it; `company_or_project`
+            # is a `Text` column with no width, so its 120 is this post's own
+            # display bound — the full title is always in the row and on the
+            # `/admin/assessments` detail page the permalink's reader can reach.
+            project = _bounded_str(verdict.get("company_or_project"), 120) or "(untitled)"
+            recommendation = _bounded_str(verdict.get("recommendation"), 30) or "unknown"
+
+            source_channel_id = self._channel_id_map.get(thread.channel)
+            permalink = None
+            if source_channel_id and slack_ts:
+                permalink = await client.aget_permalink(source_channel_id, slack_ts)
+            link_part = f" — <{permalink}|View interview>" if permalink else " (link unavailable)"
+
+            text = (
+                f":mag: {pi_label} — {project} → *{recommendation}*{score_part}{link_part}"
+            )
+            await client.apost_message(ASSESSMENTS_SUMMARY_CHANNEL, text)
+        except Exception:
+            logger.exception(
+                "[%s] Failed to post assessments-summary headline for thread %s",
+                agent.agent_id, thread.thread_id,
             )
 
     def _warn_if_hub_conclude_missing_assessment(
