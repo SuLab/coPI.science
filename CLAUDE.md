@@ -308,11 +308,17 @@ see the design doc's §8.
 >     $DC up -d blackbird-app worker
 
 - **PI** — the original account: own profile, own lab agent, `/profile` and `/agent`.
-- **Manager** — global, strictly **read-only**: `/manager/pis`, `/manager/assessments`,
-  `/manager/discussions`, `/manager/activity`. No lab, no PI onboarding, **cannot
-  impersonate**, and there is deliberately no LLM-call drill-down and no export.
-  Managers *do* see private (`collab_private`) discussion threads — a policy decision,
-  recorded in the design doc.
+- **Manager** — global, read-mostly: `/manager/pis`, `/manager/assessments`,
+  `/manager/discussions`, `/manager/activity`. A scoped, deliberate reversal of the
+  original all-GET guarantee (design D1) adds exactly four write routes — `POST
+  /manager/pis` (create a PI via ORCID), `/manager/pis/{id}/profile` (edit a PI's
+  profile fields), and `/manager/pis/{id}/mute` / `/unmute` (toggle a PI's agent) —
+  and nothing else; `tests/integration/test_manager_views.py`'s
+  `test_manager_router_mutations_are_an_explicit_allowlist` fails loudly on a fifth.
+  **Still cannot impersonate**, set roles, or provision Slack bots (all three stay
+  admin-only), and there is deliberately no LLM-call drill-down and no export.
+  Managers *do* see private (`collab_private`) discussion threads — a policy
+  decision, recorded in the design doc.
 - **Admin** — everything, including `/admin/*` and impersonation.
 
 `is_manager` means exactly `user_role == 'manager'`. The "may see the manager views"
