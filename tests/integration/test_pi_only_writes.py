@@ -188,3 +188,53 @@ async def test_a_manager_with_a_completed_profile_still_gets_no_agent(client, db
     assert await db_session.scalar(
         select(func.count(AgentRegistry.id)).where(AgentRegistry.user_id == pi.id)
     ) == 1
+
+
+async def test_a_manager_cannot_save_a_pi_profile(client, db_session):
+    """The FIFTH PI write, missed by the original sweep: POST /profile/save.
+
+    Its four siblings above were moved to ``get_pi_user``; this one was left on
+    ``Depends(get_current_user)``, so a manager could POST it and have a
+    ``ResearcherProfile`` created on their own account — a lab profile for an
+    account D7 says has no lab. It is not by itself a path to a lab bot
+    (``request_agent`` also needs ``onboarding_complete``, and POST
+    /onboarding/save-profile is still the only writer of that flag), which is
+    why it reads as a guard-consistency defect rather than an escalation.
+
+    The email half is the part that is not merely cosmetic: ``/profile/save``
+    routes through ``apply_profile_edits``, which rewrites ``users.email`` —
+    the field delegate-invitation acceptance is bound to.
+
+    Managers keep their own legitimate route to the same service function,
+    ``POST /manager/pis/{user_id}/profile``; nothing here narrows that.
+    """
+    mgr = await factories.make_user(
+        db_session, user_role=USER_ROLE_MANAGER, name="Mona Manager"
+    )
+    original_email = mgr.email
+    await db_session.flush()
+
+    form = {**_save_profile_form(mgr), "email": "manager-rewrote-this@example.edu"}
+    r = await client.post("/profile/save", data=form, headers=auth_headers(mgr.id))
+    assert r.status_code == 403, "POST /profile/save served a manager"
+
+    assert await db_session.scalar(
+        select(func.count(ResearcherProfile.id)).where(ResearcherProfile.user_id == mgr.id)
+    ) == 0, "a manager got a ResearcherProfile out of /profile/save"
+    assert await db_session.scalar(
+        select(User.email).where(User.id == mgr.id)
+    ) == original_email, "a manager rewrote their own email via /profile/save"
+
+    # Control: the same request from a PI must still do all of that, or the
+    # denial above would be indistinguishable from a broken endpoint.
+    pi = await factories.make_user(db_session, user_role=USER_ROLE_PI, name="Percy Pi")
+    await db_session.flush()
+    pi_form = {**_save_profile_form(pi), "email": "pi-rewrote-this@example.edu"}
+    r2 = await client.post("/profile/save", data=pi_form, headers=auth_headers(pi.id))
+    assert r2.status_code == 302, "POST /profile/save refused a PI"
+    assert await db_session.scalar(
+        select(func.count(ResearcherProfile.id)).where(ResearcherProfile.user_id == pi.id)
+    ) == 1
+    assert await db_session.scalar(
+        select(User.email).where(User.id == pi.id)
+    ) == "pi-rewrote-this@example.edu"

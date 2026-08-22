@@ -110,9 +110,18 @@ async def profile_save(
     key_targets: str = Form(""),
     keywords: str = Form(""),
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_pi_user),
 ):
-    """Save profile changes."""
+    """Save profile changes.
+
+    get_pi_user, matching the four sibling PI writes (/profile/refresh,
+    /onboarding/save-profile, /onboarding/retry, /agent/request). This one was
+    left on get_current_user when the others were moved, so a manager could
+    create a ResearcherProfile on their own account and — via
+    apply_profile_edits — rewrite users.email, the field delegate-invitation
+    acceptance binds to (E1.3). Managers keep POST
+    /manager/pis/{user_id}/profile, which calls the same service function.
+    """
     error = await apply_profile_edits(
         db, target_user=current_user, changed_by_user_id=current_user.id,
         name=name, email=email, institution=institution, department=department,
