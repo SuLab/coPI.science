@@ -78,8 +78,12 @@ async def get_current_user(
     #
     # Checked on `session_user`, the account that actually holds the session —
     # deliberately BEFORE the impersonation block below, and never on the
-    # impersonated user. An admin looking at a denied account is a support
-    # action, not that account's own session.
+    # impersonated user. CONSEQUENCE, INTENTIONAL AND RULED ON: an admin can
+    # still impersonate a user whose access_status is 'denied' or 'pending'.
+    # That is a support path (looking at a blocked account is how you find out
+    # why it is blocked), not a hole — the admin's own session is what is being
+    # authorised here, and it is 'allowed'. Do not "fix" it by moving this
+    # check below the impersonation block.
     #
     # POP `user_id`; do NOT call request.session.clear(). /access-pending
     # renders `session["pending_access"]`, so clearing the session lands the

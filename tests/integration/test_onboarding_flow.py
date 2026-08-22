@@ -507,13 +507,22 @@ async def test_the_start_page_enqueues_a_job_only_when_there_is_nothing_to_show(
 
     # controls: the two guards the self-heal is written with.
     #
-    # The access_status guard is now belt-and-braces rather than the thing doing
-    # the work: since E1.2, get_current_user bounces any user whose
-    # access_status is not 'allowed' to /access-pending, so onboarding_start
-    # never runs for `pending` at all. The observable moved from "200 with no
-    # job" to "302 with no job" — a strictly stronger control, and the reason
-    # the guard inside onboarding_start is kept anyway (it is the only thing
-    # left if that bounce is ever loosened).
+    # READ THIS BEFORE TRUSTING THE PENDING CASE BELOW. Since E1.2,
+    # get_current_user bounces any user whose access_status is not 'allowed' to
+    # /access-pending, so onboarding_start NEVER RUNS for `pending`. What the
+    # next three lines now pin is that bounce — a different property from the
+    # one they were written for.
+    #
+    # The job-count assertion in particular is a REDUNDANT CONTROL: it holds
+    # because the handler never executed, so it holds whatever the handler
+    # says. src/routers/onboarding.py's own
+    # `current_user.access_status == "allowed"` condition is consequently an
+    # UNTESTED BACKSTOP — delete it and this suite stays green. That is a known
+    # gap, not coverage: the state it defends (a non-'allowed' user inside
+    # onboarding_start) is unreachable over HTTP, so there is no honest HTTP
+    # test to write for it, and a unit test that called the handler directly
+    # would be pinning a call the app cannot make. It is kept because it is the
+    # only thing left if the E1.2 bounce is ever loosened.
     r_pending = await client.get("/onboarding", headers=_auth(pending.id))
     assert r_pending.status_code == 302
     assert r_pending.headers["location"] == "/access-pending"

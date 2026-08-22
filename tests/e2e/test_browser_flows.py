@@ -55,13 +55,57 @@ def _origin_headers(url: str) -> dict:
     """What a browser would send on a form post from a page on ``url``.
 
     Required since E1.1: ``OriginGuardMiddleware`` (src/main.py) 403s any
-    non-GET request whose Origin/Referer is not the server's own
-    ``settings.base_url``. These replays are the one tier that talks to a real
-    deployment, so the value has to come from the URL under test rather than
-    from this process's config.
+    non-GET request whose Origin/Sec-Fetch-Site/Referer does not identify the
+    server's OWN ``settings.base_url``.
+
+    **Configuration requirement, and it is not optional:** the process behind
+    ``E2E_BASE_URL`` must be configured with ``BASE_URL`` equal to
+    ``E2E_BASE_URL``. This header is built from the URL we dial, but the server
+    compares it against the URL it was *told* it serves, and those are two
+    different pieces of configuration. Point ``E2E_BASE_URL=http://localhost:8001``
+    at a container whose ``.env`` says ``BASE_URL=https://blackbird.copi.science``
+    and every form post in this tier 403s — the exact failure E1.1's own tests
+    were written to prevent, relocated to the one tier that talks to a real
+    deployment. ``_the_server_agrees_about_its_own_origin`` below turns that
+    into one directed failure instead of a scattering of silent 403s.
     """
     parts = urlsplit(url)
     return {"Origin": f"{parts.scheme}://{parts.netloc}"}
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _the_server_agrees_about_its_own_origin():
+    """Fail loudly, once, if the target's BASE_URL is not E2E_BASE_URL.
+
+    One cheap probe: ``POST /waitlist`` with a deliberately invalid address,
+    which the app answers 400 and persists nothing. If the CSRF guard answers
+    403 instead, the two URLs disagree and every form post in this tier is
+    about to fail for a reason that has nothing to do with the app.
+
+    A hard failure rather than a skip. Silently skipping the whole tier because
+    of a config typo is indistinguishable from the tier having no tests, which
+    is the failure mode ``tests/conftest.py``'s own collection hook exists to
+    avoid.
+    """
+    if not BASE_URL:
+        return
+    with httpx.Client(base_url=BASE_URL, timeout=30) as c:
+        r = c.post(
+            "/waitlist",
+            data={"email": "e2e-origin-probe-not-an-email"},
+            headers=_origin_headers(BASE_URL),
+        )
+    if r.status_code == 403 and "Cross-site request refused" in r.text:
+        pytest.fail(
+            "The server at E2E_BASE_URL refused a same-origin POST, which means "
+            "its BASE_URL is not "
+            f"{_origin_headers(BASE_URL)['Origin']}. OriginGuardMiddleware "
+            "compares against the server's own settings.base_url, so E2E_BASE_URL "
+            "and the target process's BASE_URL must name the same origin. Fix the "
+            "target's BASE_URL (or dial it by the name it already believes it has) "
+            "and re-run.",
+            pytrace=False,
+        )
 
 
 # ---------------------------------------------------------------------------

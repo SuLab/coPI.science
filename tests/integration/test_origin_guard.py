@@ -374,3 +374,24 @@ async def test_default_ports_are_normalised_away(
     assert r.status_code == (302 if allowed else 403), (
         f"base_url={base_url} origin={origin} -> {r.status_code}"
     )
+
+
+async def test_the_refusal_body_is_the_string_the_e2e_probe_matches_on(
+    client_without_origin, db_session
+):
+    """Drift alarm for a consumer outside this file.
+
+    ``tests/e2e/test_browser_flows.py``'s
+    ``_the_server_agrees_about_its_own_origin`` distinguishes "the CSRF guard
+    refused me" from "the app returned 403 for some other reason" by grepping
+    the response body for this exact substring. It cannot import the constant —
+    that tier talks to a separately deployed server, possibly on older code —
+    so a reworded message would silently turn its directed configuration error
+    back into the scattering of unexplained 403s it exists to replace.
+    """
+    user = await factories.make_user(db_session)
+    await db_session.flush()
+
+    r = await client_without_origin.post("/logout", headers=auth_headers(user.id))
+    assert r.status_code == 403
+    assert "Cross-site request refused" in r.text, r.text
