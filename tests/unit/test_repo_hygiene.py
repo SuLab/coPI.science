@@ -94,14 +94,36 @@ def _close_thread_calls(tree: ast.AST) -> list[ast.Call]:
 def _string_args(call: ast.Call) -> list[str]:
     """Every string literal passed at a call site, positional or keyword.
 
-    Deliberately not "argument number 3": `_close_thread`'s signature is expected
-    to grow (recording which role closed the thread is a live plan item), and an
-    index-based read would then silently stop looking at the outcome.
+    Deliberately wider than the outcome parameter for the "proposal" check below:
+    if that literal reappears anywhere in a `_close_thread` call it is worth a
+    failure regardless of which parameter it landed in.
     """
     values = [*call.args, *(kw.value for kw in call.keywords)]
     return [
         v.value for v in values if isinstance(v, ast.Constant) and isinstance(v.value, str)
     ]
+
+
+def _outcome_arg(call: ast.Call) -> str | None:
+    """The `outcome` argument specifically, or None if it is not a literal.
+
+    Narrower than `_string_args` on purpose: `_close_thread`'s signature is
+    expected to grow (recording which role closed the thread is a live plan
+    item), and a set-equality assertion fed by every literal at the call site
+    would fail on an unrelated new argument.
+    """
+    for kw in call.keywords:
+        if kw.arg == "outcome":
+            value = kw.value
+            break
+    else:
+        # `self` is bound, so (agent, thread, outcome) puts outcome at index 2.
+        if len(call.args) <= 2:
+            return None
+        value = call.args[2]
+    if isinstance(value, ast.Constant) and isinstance(value.value, str):
+        return value.value
+    return None
 
 
 def _function_range(tree: ast.AST, name: str) -> tuple[int, int]:
@@ -128,12 +150,18 @@ def test_no_src_path_can_construct_a_proposal_outcome():
     # call sites were not all deleted out from under this test.
     assert calls, f"no _close_thread call sites found in {SIMULATION.name}"
 
-    outcomes = {value for call in calls for value in _string_args(call)}
-    assert "proposal" not in outcomes, (
-        "a _close_thread call site now passes outcome='proposal'. That row type was "
-        "retired with the ✅-confirms-:memo: handshake and nothing renders it "
+    literals = {value for call in calls for value in _string_args(call)}
+    assert "proposal" not in literals, (
+        "a _close_thread call site now passes the literal 'proposal'. That row type "
+        "was retired with the ✅-confirms-:memo: handshake and nothing renders it "
         "correctly; if it is genuinely coming back, the dashboard/badge/public-page "
         "readers all need revisiting in the same change."
+    )
+
+    outcomes = {_outcome_arg(call) for call in calls}
+    assert None not in outcomes, (
+        "a _close_thread call site passes a non-literal outcome, so this test can no "
+        "longer enumerate what src/ produces — read the call sites by hand"
     )
     assert outcomes == LIVE_OUTCOMES, (
         f"the set of ThreadDecision outcomes src/ can produce changed to {sorted(outcomes)}. "
