@@ -27,6 +27,7 @@ What cannot be automated at all, and why, is in ``HUMAN_ONLY``.
 import os
 import re
 import uuid
+from urllib.parse import urlsplit
 
 import httpx
 import pytest
@@ -48,6 +49,19 @@ requires_isolation_server = pytest.mark.skipif(
     not ISOLATION_URL,
     reason="needs E2E_ISOLATION_BASE_URL (same app, COHORT_ISOLATION_ENABLED=true)",
 )
+
+
+def _origin_headers(url: str) -> dict:
+    """What a browser would send on a form post from a page on ``url``.
+
+    Required since E1.1: ``OriginGuardMiddleware`` (src/main.py) 403s any
+    non-GET request whose Origin/Referer is not the server's own
+    ``settings.base_url``. These replays are the one tier that talks to a real
+    deployment, so the value has to come from the URL under test rather than
+    from this process's config.
+    """
+    parts = urlsplit(url)
+    return {"Origin": f"{parts.scheme}://{parts.netloc}"}
 
 
 # ---------------------------------------------------------------------------
@@ -260,7 +274,10 @@ def client():
     client accumulates one identity's cookie and the next test silently runs as
     that identity.
     """
-    with httpx.Client(base_url=BASE_URL, follow_redirects=True, timeout=30) as c:
+    with httpx.Client(
+        base_url=BASE_URL, follow_redirects=True, timeout=30,
+        headers=_origin_headers(BASE_URL),
+    ) as c:
         yield c
 
 
@@ -286,7 +303,10 @@ def as_user():
     created: list[httpx.Client] = []
 
     def _make(user_id: str) -> httpx.Client:
-        c = httpx.Client(base_url=BASE_URL, follow_redirects=True, timeout=30)
+        c = httpx.Client(
+            base_url=BASE_URL, follow_redirects=True, timeout=30,
+            headers=_origin_headers(BASE_URL),
+        )
         c.cookies.set(COOKIE_NAME, forge_session_cookie(user_id))
         created.append(c)
         return c
@@ -387,7 +407,10 @@ def test_the_banner_states_the_live_setting_not_a_constant(as_user, admin_id):
 @requires_isolation_server
 def test_the_banner_and_gate_change_when_isolation_is_on(admin_id):
     """Second half of the control, against the isolation-on process."""
-    with httpx.Client(base_url=ISOLATION_URL, follow_redirects=True, timeout=30) as c:
+    with httpx.Client(
+        base_url=ISOLATION_URL, follow_redirects=True, timeout=30,
+        headers=_origin_headers(ISOLATION_URL),
+    ) as c:
         c.cookies.set(COOKIE_NAME, forge_session_cookie(admin_id))
         page = c.get("/admin/cohorts/topology").text
     assert "Cohort isolation is ACTIVE" in page, (

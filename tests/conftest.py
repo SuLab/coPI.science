@@ -97,8 +97,8 @@ async def db_session(engine):
 
 
 @pytest_asyncio.fixture
-async def client(db_session, engine, monkeypatch):
-    """ASGI TestClient over create_app() with get_db routed to the rolled-back session.
+async def asgi_app(db_session, engine, monkeypatch):
+    """create_app() with get_db routed to the test's rolled-back session.
 
     Also repoints AgentBadgeMiddleware's session factory at the test engine. The
     middleware (src/main.py) calls src.database.get_session_factory() directly rather
@@ -106,6 +106,8 @@ async def client(db_session, engine, monkeypatch):
     session against the real configured DB — unreachable here — and hang the request.
     That factory yields its own committed connection (not the rolled-back db_session),
     which is fine: it only reads for badge computation and tolerates missing rows.
+
+    Split out of ``client`` so ``client_without_origin`` can drive the same app.
     """
     from src.database import get_db
     from src.main import create_app
@@ -119,10 +121,59 @@ async def client(db_session, engine, monkeypatch):
         yield db_session
 
     app.dependency_overrides[get_db] = _override_get_db
-    transport = ASGITransport(app=app)
+    yield app
+    app.dependency_overrides.clear()
+
+
+def _own_origin() -> str:
+    """The origin ``OriginGuardMiddleware`` accepts, derived at runtime.
+
+    NOT hardcoded, and not ``http://testserver``. src/config.py reads ``.env``,
+    and the deployment this suite runs on sets
+    ``BASE_URL=https://blackbird.copi.science`` — so a hardcoded header would
+    pass on a laptop with no ``.env`` and 403 every POST in the suite on the
+    host. ``urlsplit`` also drops any trailing slash or path.
+    """
+    from urllib.parse import urlsplit
+
+    from src.config import get_settings
+
+    parts = urlsplit(get_settings().base_url)
+    return f"{parts.scheme}://{parts.netloc}"
+
+
+@pytest_asyncio.fixture
+async def client(asgi_app):
+    """ASGI client that looks like the app's own pages: same-origin.
+
+    Every unsafe request carries an ``Origin`` matching ``settings.base_url``,
+    because ``OriginGuardMiddleware`` (src/main.py) 403s any POST/PUT/PATCH/
+    DELETE that does not. That is what a browser sends for a form on one of our
+    own pages, so this is the realistic default; the deliberately origin-less
+    client is ``client_without_origin`` below.
+    """
+    transport = ASGITransport(app=asgi_app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://testserver",
+        headers={"Origin": _own_origin()},
+    ) as c:
+        yield c
+
+
+@pytest_asyncio.fixture
+async def client_without_origin(asgi_app):
+    """The same app, with no default ``Origin`` header on any request.
+
+    httpx merges client-level headers into every request and offers no way to
+    *remove* one per-request, so "what happens with no Origin at all" needs its
+    own client rather than an override. Used by
+    tests/integration/test_origin_guard.py, and by anything else that needs to
+    speak as a non-browser caller (RFC 8058 one-click unsubscribe).
+    """
+    transport = ASGITransport(app=asgi_app)
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as c:
         yield c
-    app.dependency_overrides.clear()
 
 
 @pytest.fixture

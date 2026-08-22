@@ -2,12 +2,14 @@
 
 import logging
 import uuid
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import func, select
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.sessions import SessionMiddleware
+from starlette.responses import PlainTextResponse
 
 from src.agent.ids import WRITER_WEB, set_default_writer_id
 from src.config import get_settings
@@ -20,6 +22,99 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+
+#: Methods that are not supposed to change state. Everything else must prove
+#: it came from one of our own pages.
+SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+
+#: The session cookie, spelled the same way create_app() configures it below.
+SESSION_COOKIE = "copi-session"
+
+#: Path prefixes whose POST is issued by a machine that cannot send an Origin.
+#:
+#: RFC 8058 one-click unsubscribe: src/services/email_notifications.py sets
+#: ``List-Unsubscribe-Post: List-Unsubscribe=One-Click``, and the matching POST
+#: to src/routers/settings.py's ``/settings/unsubscribe/{token}`` is issued
+#: SERVER-SIDE by Gmail / Apple / Yahoo — no Origin, no Referer, no cookies.
+#: Refusing it breaks one-click unsubscribe and with it bulk-sender compliance.
+#: src/routers/auth.py already carries the same path as a non-browser exemption
+#: (``_POST_LOGIN_DENY_PREFIXES``).
+#:
+#: The exemption is conditional on the request carrying NO session cookie (see
+#: below), so it cannot be repurposed as a CSRF gadget: a real provider's
+#: one-click POST has no cookies for us, and a forged one from a sibling tab
+#: necessarily does.
+ORIGINLESS_POST_PREFIXES = ("/settings/unsubscribe/",)
+
+
+def normalized_origin(url: str | None) -> str | None:
+    """``scheme://host[:port]`` for ``url``, or None if it carries no origin.
+
+    Both sides of the comparison go through this. ``settings.base_url`` is
+    configuration and may or may not have a trailing slash (production has
+    none; other environments do), a browser's ``Origin`` header never has one,
+    and a ``Referer`` is a full URL with a path — so raw string equality would
+    be wrong in three different directions. ``Origin: null`` (what a sandboxed
+    iframe sends) parses to no scheme and no netloc and therefore returns None,
+    which never matches.
+    """
+    if not url:
+        return None
+    parts = urlsplit(url.strip())
+    if not parts.scheme or not parts.netloc:
+        return None
+    return f"{parts.scheme.lower()}://{parts.netloc.lower()}"
+
+
+class OriginGuardMiddleware(BaseHTTPMiddleware):
+    """Refuse state-changing requests that did not come from our own origin.
+
+    There was no request-side CSRF check anywhere in src/, and the only defence
+    was ``same_site="lax"`` on the session cookie. That defence is void in this
+    deployment: one nginx serves ``blackbird.copi.science``, ``copi.science``
+    (an unrelated production tenant) and ``devel.copi.science``. SameSite is
+    computed on the REGISTRABLE domain, so all three count as the same site — a
+    page on either sibling could auto-submit a top-level POST and the victim's
+    ``copi-session`` cookie would ride along. ``POST /profile/delete-account``
+    (cascades nine tables) and, against a signed-in admin, ``POST
+    /admin/users/{id}/role`` were both reachable that way (E1.1).
+
+    Added LAST in create_app(), because Starlette's ``add_middleware``
+    *prepends*: last added is outermost. Outermost is both correct and cheaper
+    here — this reads headers only and needs no session, so it refuses before
+    AgentBadgeMiddleware opens a connection and runs its per-agent COUNTs.
+
+    Not affected, verified rather than assumed: the ORCID callback is a GET;
+    there is no inbound Slack POST route; ``POST /api/proposal-vote`` takes a
+    JSON body and there is no CORSMiddleware, so it was already preflight-bound.
+    """
+
+    async def dispatch(self, request: Request, call_next):
+        if request.method.upper() in SAFE_METHODS:
+            return await call_next(request)
+
+        path = request.url.path
+        if path.startswith(ORIGINLESS_POST_PREFIXES) and SESSION_COOKIE not in request.cookies:
+            return await call_next(request)
+
+        # Referer only when Origin is ABSENT — an Origin we cannot parse
+        # ("null") is an answer, not a missing header, and must not fall
+        # through to a Referer the same page also controls.
+        sent_raw = request.headers.get("origin")
+        if sent_raw is None:
+            sent_raw = request.headers.get("referer")
+
+        expected = normalized_origin(get_settings().base_url)
+        sent = normalized_origin(sent_raw)
+        if expected is None or sent is None or sent != expected:
+            logger.warning(
+                "Refused cross-site %s %s (origin=%r, expected=%r)",
+                request.method, path, sent_raw, expected,
+            )
+            return PlainTextResponse("Cross-site request refused.", status_code=403)
+
+        return await call_next(request)
 
 
 class AgentBadgeMiddleware(BaseHTTPMiddleware):
@@ -143,11 +238,17 @@ def create_app() -> FastAPI:
     application.add_middleware(
         SessionMiddleware,
         secret_key=settings.secret_key,
-        session_cookie="copi-session",
+        session_cookie=SESSION_COOKIE,
         max_age=30 * 24 * 3600,  # 30 days
         https_only=not settings.allow_http_sessions,
         same_site="lax",
     )
+
+    # CSRF guard. Added LAST, so it is the OUTERMOST middleware: Starlette's
+    # add_middleware prepends. It reads headers only and needs no session, so
+    # running it outside SessionMiddleware is both correct and cheaper — a
+    # forged POST is refused before AgentBadgeMiddleware opens a connection.
+    application.add_middleware(OriginGuardMiddleware)
 
     # Static files
     try:
