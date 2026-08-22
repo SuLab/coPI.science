@@ -254,3 +254,123 @@ def test_the_guard_is_the_outermost_middleware():
     assert order[0] == "OriginGuardMiddleware", (
         f"the CSRF guard is not outermost; stack is {order}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Sec-Fetch-Site (fix round 1)
+#
+# Origin-or-Referer alone is an availability defect, not just an incomplete
+# guard: a browser under a `no-referrer` policy — set by an extension or by
+# enterprise config — sends `Origin: null` AND no Referer on a **same-origin**
+# form POST. Every form on the site then returns a bare-text 403 with no way to
+# recover. `Sec-Fetch-Site` is the header that distinguishes that user from an
+# attacker, and the browser computes it.
+# ---------------------------------------------------------------------------
+
+
+async def test_a_no_referrer_browser_is_accepted_on_sec_fetch_site(
+    client_without_origin, db_session
+):
+    """The availability case: same-origin POST, Origin: null, no Referer."""
+    user = await factories.make_user(db_session)
+    await db_session.flush()
+
+    r = await client_without_origin.post(
+        "/logout",
+        headers={
+            **auth_headers(user.id),
+            "Origin": "null",
+            "Sec-Fetch-Site": "same-origin",
+        },
+    )
+    assert r.status_code == 302, r.text
+    assert _session_was_cleared(r), "allowed, but the logout did not run"
+
+
+@pytest.mark.parametrize("fetch_site", ["same-site", "cross-site", "none", ""])
+async def test_only_sec_fetch_site_same_origin_is_accepted(
+    client_without_origin, db_session, fetch_site
+):
+    """``same-site`` is the one that matters and the one that is refused.
+
+    It is computed on the REGISTRABLE domain, so ``copi.science`` and
+    ``devel.copi.science`` attacking ``blackbird.copi.science`` send exactly
+    that — accepting it would hand back the whole attack this guard exists to
+    stop. ``none`` (typed URL / bookmark) and ``cross-site`` are refused too.
+    """
+    user = await factories.make_user(db_session)
+    await db_session.flush()
+
+    headers = {**auth_headers(user.id), "Origin": "null"}
+    if fetch_site:
+        headers["Sec-Fetch-Site"] = fetch_site
+
+    r = await client_without_origin.post("/logout", headers=headers)
+    assert r.status_code == 403, f"Sec-Fetch-Site: {fetch_site!r} was accepted"
+    assert not _session_was_cleared(r)
+
+
+@pytest.mark.parametrize("origin", ["https://copi.science", "https://evil.example"])
+async def test_a_wrong_origin_is_refused_even_with_sec_fetch_site_same_origin(
+    client_without_origin, db_session, origin
+):
+    """Precedence: a real Origin decides on its own.
+
+    ``Sec-Fetch-Site`` is only consulted when there is no usable Origin, so the
+    two signals can never be played off against each other — an attacker has to
+    beat whichever one the browser actually sent, not the weakest of them.
+    """
+    user = await factories.make_user(db_session)
+    await db_session.flush()
+
+    r = await client_without_origin.post(
+        "/logout",
+        headers={
+            **auth_headers(user.id),
+            "Origin": origin,
+            "Sec-Fetch-Site": "same-origin",
+        },
+    )
+    assert r.status_code == 403, r.text
+    assert not _session_was_cleared(r)
+
+
+@pytest.mark.parametrize(
+    "base_url,origin,allowed",
+    [
+        # The default port, spelled out, is the same origin.
+        ("https://lab.example", "https://lab.example:443", True),
+        ("https://lab.example:443", "https://lab.example", True),
+        ("http://lab.example", "http://lab.example:80", True),
+        ("http://lab.example:80", "http://lab.example", True),
+        # ...but only the DEFAULT one. A non-default port is a different origin,
+        # and so is the default port of the *other* scheme.
+        ("https://lab.example", "https://lab.example:8443", False),
+        ("https://lab.example", "https://lab.example:80", False),
+        ("http://lab.example", "http://lab.example:443", False),
+        # Host comparison is case-insensitive; scheme is still significant.
+        ("https://lab.example", "https://LAB.EXAMPLE", True),
+        ("https://lab.example", "http://lab.example", False),
+    ],
+)
+async def test_default_ports_are_normalised_away(
+    client_without_origin, db_session, monkeypatch, base_url, origin, allowed
+):
+    """``https://host:443`` and ``https://host`` are the same origin by
+    definition (RFC 6454 §4 normalises the default port away). Browsers happen
+    never to spell it out, but a reverse proxy, a redirect or a non-browser
+    client will — so comparing the strings is merely adequate, not correct."""
+    real = get_settings()
+    monkeypatch.setattr(
+        "src.main.get_settings",
+        lambda: real.model_copy(update={"base_url": base_url}),
+    )
+    user = await factories.make_user(db_session)
+    await db_session.flush()
+
+    r = await client_without_origin.post(
+        "/logout", headers={**auth_headers(user.id), "Origin": origin}
+    )
+    assert r.status_code == (302 if allowed else 403), (
+        f"base_url={base_url} origin={origin} -> {r.status_code}"
+    )
