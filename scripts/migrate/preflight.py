@@ -71,7 +71,7 @@ EXIT_OK = 0
 EXIT_BLOCKED = 1
 EXIT_WARN = 2
 
-DEFAULT_TARGET = "0033"
+DEFAULT_TARGET = "0034"
 #: Revisions this migration path has been exercised from.
 #:
 #: 0020 and 0021 are here because origin/main's own alembic head is 0021 (PR19). A
@@ -80,19 +80,20 @@ DEFAULT_TARGET = "0033"
 #: it ("migrate from 0018 or 0019") described where production was at the time, not where
 #: main is.
 #:
-#: 0023, 0024, 0025, 0026, 0027, 0028 and 0029 were each added here for the same reason:
-#: production's stamp at the time its target moved past them (0023 -> 0024, then
+#: 0023, 0024, 0025, 0026, 0027, 0028, 0029 and 0033 were each added here for the same
+#: reason: production's stamp at the time its target moved past them (0023 -> 0024, then
 #: 0024 -> 0025, then 0025 -> 0026, then 0026 -> 0027, then 0027 -> 0028, then
 #: 0028 -> 0029, then 0029 -> 0030, then 0030 -> 0031, then 0031 -> 0032, then
-#: 0032 -> 0033 — see git history on this constant). Each stays supported afterward;
-#: nothing here narrows. An earlier version of this comment claimed
+#: 0032 -> 0033, then 0033 -> 0034 — see git history on this constant). Each stays
+#: supported afterward; nothing here narrows. An earlier version of this comment claimed
 #: 0026 was "already done" and handled by the current == target branch of
 #: revision_status() instead of by membership in this tuple — that stopped being true the
 #: moment DEFAULT_TARGET moved past 0026 (first to 0027, then to 0028, then to 0029, then
 #: to 0030 here), and the same went stale for 0027 the moment DEFAULT_TARGET moved past
-#: IT, and again for 0028/0029. Concretely: with DEFAULT_TARGET at 0030 and 0029 absent
-#: from this tuple, a database stamped 0029 is neither current == target nor a supported
-#: start, so revision_status() BLOCKS the very migration (0030) this task adds. Adding it
+#: IT, and again for 0028/0029, and again for 0032 the moment DEFAULT_TARGET moved to
+#: 0034 and left 0033 out. Concretely: with DEFAULT_TARGET at 0034 and 0033 absent from
+#: this tuple, a database stamped 0033 is neither current == target nor a supported
+#: start, so revision_status() BLOCKS the very migration (0034) this task adds. Adding it
 #: here is the fix.
 #:
 #: Starting at 0020/0021 is strictly safer than starting at 0018: uq_agent_messages_run_ts
@@ -103,11 +104,12 @@ DEFAULT_TARGET = "0033"
 #: assessment_drops), 0028 (one column + one constraint on users), 0029 (two columns on
 #: opportunity_assessments), 0030 (one new table, specialist_consults, plus two columns on
 #: opportunity_assessments), 0031 (data-only, no DDL), 0032 (one nullable JSONB column
-#: on llm_call_logs) and 0033 (two composite indexes on thread_decisions plus 18
-#: unindexed ondelete-FK columns — see issue #25 P1).
+#: on llm_call_logs), 0033 (two composite indexes on thread_decisions plus 18
+#: unindexed ondelete-FK columns — see issue #25 P1) and 0034 (two nullable columns plus
+#: one foreign-key constraint on agents).
 SUPPORTED_START_REVISIONS = (
     "0018", "0019", "0020", "0021", "0023", "0024", "0025", "0026", "0027", "0028", "0029",
-    "0030", "0031", "0032",
+    "0030", "0031", "0032", "0033",
 )
 
 #: Start revisions at which migration 0019 has already run, so the expensive
@@ -299,11 +301,15 @@ PLANNED_OBJECTS: tuple[PlannedObject, ...] = (
     PlannedObject("0033", "index", "ix_cohorts_created_by", "cohorts"),
     PlannedObject("0033", "index", "ix_cohort_memberships_added_by", "cohort_memberships"),
     PlannedObject("0033", "index", "ix_cohort_audit_events_actor_id", "cohort_audit_events"),
+    # 0034_agent_mute_tracking
+    PlannedObject("0034", "column", "muted_at", "agents"),
+    PlannedObject("0034", "column", "muted_by", "agents"),
+    PlannedObject("0034", "constraint", "fk_agents_muted_by_users", "agents"),
 )
 
 REVISION_ORDER = (
     "0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027", "0028",
-    "0029", "0030", "0031", "0032", "0033",
+    "0029", "0030", "0031", "0032", "0033", "0034",
 )
 
 

@@ -1035,6 +1035,7 @@ def test_get_permalink_returns_the_url_on_success():
 
 def test_get_permalink_returns_none_on_any_failure():
     from slack_sdk.errors import SlackApiError
+
     from src.agent.slack_client import AgentSlackClient
 
     class _Resp:

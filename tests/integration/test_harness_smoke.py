@@ -19,7 +19,8 @@ async def test_container_is_migrated(engine):
         # 0031 normalize missing_domains JSONB 'null' -> SQL NULL (data-only),
         # 0032 llm_call_logs.call_stats (per-API-call breakdown of a logged turn),
         # 0033 thread_decisions badge composites + 18 unindexed ondelete-FK columns
-        assert v == "0033"
+        # 0034 agents.muted_at/muted_by mute tracking
+        assert v == "0034"
 
 
 async def test_writes_are_rolled_back_part1(db_session):

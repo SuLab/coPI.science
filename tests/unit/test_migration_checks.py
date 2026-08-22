@@ -230,9 +230,9 @@ def test_revision_status_blocks_anywhere_else(rev):
 def test_supported_start_revisions_are_exactly_the_documented_set():
     assert pf.SUPPORTED_START_REVISIONS == (
         "0018", "0019", "0020", "0021", "0023", "0024", "0025", "0026", "0027", "0028",
-        "0029", "0030", "0031", "0032",
+        "0029", "0030", "0031", "0032", "0033",
     )
-    assert pf.DEFAULT_TARGET == "0033"
+    assert pf.DEFAULT_TARGET == "0034"
 
 
 def test_every_post_branch_revision_is_a_supported_start():

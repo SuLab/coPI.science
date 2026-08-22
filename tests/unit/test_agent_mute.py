@@ -1,8 +1,8 @@
 """Mute/unmute: the muted_at/muted_by columns, and set_agent_mute_state."""
-import pytest
 from datetime import UTC, datetime
 
-from src.models import AgentRegistry
+import pytest
+
 from src.services.agent_mute import set_agent_mute_state
 from tests import factories
 
