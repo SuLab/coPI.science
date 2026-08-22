@@ -8,7 +8,34 @@
             <a href="/manager/pis" class="text-sm text-gray-500 hover:text-gray-700">← All PIs</a>
             <h1 class="text-2xl font-bold text-gray-900 mt-1">{{ target_user.name }}</h1>
         </div>
+        {% if target_user.agent and target_user.agent.status == 'inactive' %}
+            <form method="post" action="/manager/pis/{{ target_user.id }}/unmute" class="inline">
+                <button type="submit" class="text-sm px-3 py-1 rounded bg-green-600 text-white hover:opacity-90">
+                    Unmute
+                </button>
+            </form>
+        {% elif target_user.agent and target_user.agent.status == 'active' %}
+            <form method="post" action="/manager/pis/{{ target_user.id }}/mute" class="inline">
+                <button type="submit" class="text-sm px-3 py-1 rounded bg-yellow-600 text-white hover:opacity-90">
+                    Mute
+                </button>
+            </form>
+        {% elif target_user.agent %}
+            <span class="text-xs text-gray-400">
+                Agent is {{ target_user.agent.status }} — mute is only available for an active or already-muted agent.
+            </span>
+        {% endif %}
     </div>
+
+    {% if request.query_params.get('error') %}
+    <div class="bg-red-50 border border-red-200 rounded-lg p-4 mb-4">
+        <p class="text-red-800 text-sm">
+            {% if request.query_params.get('error') == 'invalid_email' %}Please enter a valid email address.
+            {% elif request.query_params.get('error') == 'email_taken' %}That email address is already in use by another account.
+            {% else %}Something went wrong saving changes.{% endif %}
+        </p>
+    </div>
+    {% endif %}
 
     <!-- Account info -->
     <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
@@ -47,6 +74,66 @@
             </div>
         </dl>
     </div>
+
+    <!-- Edit profile -->
+    <form method="post" action="/manager/pis/{{ target_user.id }}/profile" class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
+        <h2 class="text-lg font-semibold text-gray-800 mb-4">Edit Profile</h2>
+        <div class="grid grid-cols-1 gap-4 mb-5">
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Display Name</label>
+                <input type="text" name="name" value="{{ target_user.name }}"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Email</label>
+                <input type="email" name="email" value="{{ target_user.email or '' }}"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Institution</label>
+                <input type="text" name="institution" value="{{ target_user.institution or '' }}"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Department</label>
+                <input type="text" name="department" value="{{ target_user.department or '' }}"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Research Summary</label>
+                <textarea name="research_summary" rows="5"
+                          class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">{{ profile.research_summary if profile else '' }}</textarea>
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Techniques &amp; Methods (comma-separated)</label>
+                <input type="text" name="techniques" value="{{ (profile.techniques or []) | join(', ') if profile else '' }}"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Model Systems (comma-separated)</label>
+                <input type="text" name="experimental_models" value="{{ (profile.experimental_models or []) | join(', ') if profile else '' }}"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Disease Areas (comma-separated)</label>
+                <input type="text" name="disease_areas" value="{{ (profile.disease_areas or []) | join(', ') if profile else '' }}"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Key Molecular Targets (comma-separated)</label>
+                <input type="text" name="key_targets" value="{{ (profile.key_targets or []) | join(', ') if profile else '' }}"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Keywords (comma-separated)</label>
+                <input type="text" name="keywords" value="{{ (profile.keywords or []) | join(', ') if profile else '' }}"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+            </div>
+        </div>
+        <button type="submit" class="bg-indigo-600 text-white px-6 py-2 rounded-lg hover:bg-indigo-700 font-medium">
+            Save Changes
+        </button>
+    </form>
 
     {% if profile %}
     <!-- Profile -->

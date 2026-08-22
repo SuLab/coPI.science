@@ -170,3 +170,31 @@ async def test_muting_a_pending_agent_redirects_with_an_error(client, db_session
     )
     assert r.status_code == 302
     assert "error=" in r.headers["location"]
+
+
+async def test_pis_page_shows_an_add_pi_form(client, db_session):
+    manager = await _manager(db_session)
+    r = await client.get("/manager/pis", headers=auth_headers(manager.id))
+    assert r.status_code == 200
+    assert '<form' in r.text and 'action="/manager/pis"' in r.text
+    assert 'name="orcid"' in r.text
+
+
+async def test_pi_detail_shows_mute_button_for_an_active_agent(client, db_session):
+    manager = await _manager(db_session)
+    pi = await factories.make_user(db_session)
+    await factories.make_agent(db_session, user=pi, status="active")
+
+    r = await client.get(f"/manager/pis/{pi.id}", headers=auth_headers(manager.id))
+    assert r.status_code == 200
+    assert f'/manager/pis/{pi.id}/mute' in r.text
+
+
+async def test_pi_detail_hides_mute_button_for_a_pending_agent(client, db_session):
+    manager = await _manager(db_session)
+    pi = await factories.make_user(db_session)
+    await factories.make_agent(db_session, user=pi, status="pending")
+
+    r = await client.get(f"/manager/pis/{pi.id}", headers=auth_headers(manager.id))
+    assert r.status_code == 200
+    assert f'/manager/pis/{pi.id}/mute' not in r.text

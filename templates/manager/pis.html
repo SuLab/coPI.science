@@ -7,6 +7,21 @@
     <span class="text-sm text-gray-500">{{ user_data | length }} PIs</span>
 </div>
 
+<!-- Add PI -->
+<form method="post" action="/manager/pis" class="mb-6 flex items-end gap-2">
+    <div>
+        <label class="block text-xs text-gray-500 mb-1" for="orcid">Add a PI by ORCID iD</label>
+        <input type="text" id="orcid" name="orcid" placeholder="0000-0000-0000-0000"
+               class="border rounded px-2 py-1 text-sm" required>
+    </div>
+    <button type="submit" class="bg-indigo-600 text-white text-sm px-3 py-1 rounded hover:bg-indigo-700">
+        Add PI
+    </button>
+    {% if request.query_params.get('error') %}
+        <span class="text-sm text-red-600">{{ request.query_params.get('error') }}</span>
+    {% endif %}
+</form>
+
 <!-- Filters -->
 <div class="bg-white rounded-lg border border-gray-200 p-4 mb-4 flex flex-wrap gap-4">
     <div>

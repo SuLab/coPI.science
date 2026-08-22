@@ -210,7 +210,7 @@ async def load_user_detail(db: AsyncSession, user_id: uuid.UUID) -> dict[str, An
     result = await db.execute(
         select(User)
         .where(User.id == user_id)
-        .options(selectinload(User.profile), selectinload(User.jobs))
+        .options(selectinload(User.profile), selectinload(User.jobs), selectinload(User.agent))
     )
     user = result.scalar_one_or_none()
     if not user:
