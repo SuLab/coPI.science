@@ -34,6 +34,21 @@ from tests.fakes import FakeAnthropic, FakeSlackClient
 pytestmark = pytest.mark.characterization
 
 
+def _system_text(system) -> str:
+    """The system PROMPT out of whatever shape the request carried it in.
+
+    ``llm._acreate`` sends the system prompt as a list of content blocks so it
+    can put a ``cache_control`` breakpoint at the end of the stable prefix (see
+    ``llm._cacheable_system``). That is a transport detail; what this golden
+    master pins is the prompt text the model receives, which is byte-identical
+    either way — so the blocks are rejoined here rather than the ``.ambr``
+    snapshot being regenerated to hold a list of dicts.
+    """
+    if isinstance(system, str):
+        return system
+    return "".join(block["text"] for block in system)
+
+
 @pytest.fixture(autouse=True)
 def _hermetic_profiles(tmp_path, monkeypatch):
     """Prompt assembly reads public/private profile + working memory from PROFILES_DIR
@@ -179,7 +194,7 @@ async def test_reply_turn_composes_prompt_and_posts_gm(snapshot, monkeypatch):
     assert {
         "llm_model": call["model"],
         "llm_max_tokens": call["max_tokens"],
-        "llm_system": call["system"],
+        "llm_system": _system_text(call["system"]),
         "llm_messages": call["messages"],
         "returned": returned,
         "posted": posted,

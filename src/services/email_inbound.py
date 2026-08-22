@@ -294,8 +294,29 @@ async def classify_reply(body: str, proposal_summary: str) -> dict:
     """Classify an email reply using Sonnet LLM.
 
     Returns dict with keys: category, rating, comment, instruction
+
+    Goes through ``llm._acreate`` rather than calling ``messages.create``
+    directly, which fixes three things at once (run 8b64a0e0, finding C6):
+
+    1. **It stops pinning the event loop.** ``anthropic.Anthropic`` is the
+       SYNCHRONOUS client, so calling it from inside an ``async def`` froze the
+       whole process for the length of the HTTP request — the inbound-email
+       poller, the Slack pollers, the DB persist flush and the asyncio SIGTERM
+       handler with it. ``_acreate`` runs it under ``asyncio.to_thread``.
+    2. **It inherits a timeout.** This call had none of its own, so it took the
+       SDK's 600 s default read timeout — and both of that run's stalls
+       fingerprinted at exactly 600.09 / 600.10 s. Combined with the poller's
+       own interval that put the worst case at 1,801.5 s of a wedged process.
+       The shared client now carries ``llm.CLIENT_READ_TIMEOUT_SECONDS``.
+    3. **It disables thinking.** On Opus 5 and Sonnet 5, OMITTING ``thinking``
+       runs ADAPTIVE thinking, which puts a thinking block first in
+       ``content`` — and this function used to read ``content[0].text``, which
+       raises AttributeError on such a reply. Every classification would have
+       degraded to ``unparseable`` for a reason that has nothing to do with the
+       email. ``_acreate`` defaults thinking off; ``_all_text`` filters by block
+       type rather than indexing, so both halves of that trap are closed.
     """
-    from src.services.llm import get_anthropic_client
+    from src.services.llm import _acreate, _all_text, get_anthropic_client
 
     system_prompt = "You classify email replies to collaboration proposal notifications. Respond with only valid JSON."
 
@@ -339,13 +360,14 @@ Respond with only the JSON object, no other text."""
     try:
         settings = get_settings()
         client = get_anthropic_client()
-        message = client.messages.create(
+        message = await _acreate(
+            client,
             model=settings.llm_agent_model_sonnet,
             max_tokens=500,
             system=system_prompt,
             messages=[{"role": "user", "content": user_message}],
         )
-        response_text = message.content[0].text.strip()
+        response_text = _all_text(message).strip()
 
         # Handle potential markdown code blocks
         if response_text.startswith("```"):

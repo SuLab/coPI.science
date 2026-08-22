@@ -126,6 +126,80 @@ async def test_no_call_site_in_src_asks_for_more_than_the_ceiling():
 
 
 # ---------------------------------------------------------------------------
+# the client-level read timeout — and what setting it costs
+# ---------------------------------------------------------------------------
+
+
+async def test_the_shared_client_carries_a_300s_timeout():
+    """300 s, not the SDK's 600 and not the 120 the first audit draft proposed.
+
+    Run 8b64a0e0 stalled twice at 600.09 / 600.10 s — ``read=600`` exactly, on
+    HTTP 200s, so no overload story survives. 120 would have cut legitimate
+    calls: the run's largest honest reply took 119.18 s, 0.8 s under it, and
+    ``max_tokens=16000`` at the measured 60.7 tok/s authorises up to 264 s. 300
+    cut zero legitimate calls in that run.
+
+    ``connect`` is left at the SDK's own 5 s rather than dragged up to 300 with
+    the rest: a black-holed SYN is not a long generation, and a bare
+    ``timeout=300.0`` float would set all four fields.
+    """
+    client = llm._client_for_key("sk-ant-not-a-real-key")
+    assert llm.CLIENT_READ_TIMEOUT_SECONDS == 300.0
+    assert client.timeout.read == 300.0
+    assert client.timeout.connect == 5.0, (
+        "a connection that never establishes must still fail fast — only the "
+        "READ ceiling is what a long generation needs"
+    )
+
+
+async def test_setting_any_timeout_disables_the_sdks_own_ceiling_guard():
+    """The trap that makes ``_acreate``'s guard load-bearing rather than belt.
+
+    ``Messages.create`` applies ``_calculate_nonstreaming_timeout`` — the thing
+    that raises on ``max_tokens > 21_333`` — only ``if not stream and not
+    is_given(timeout) and self._client.timeout == DEFAULT_TIMEOUT``. Giving the
+    client a timeout of our own permanently fails that condition, so the SDK no
+    longer refuses an oversized non-streaming request for us. This test is the
+    alarm on that reasoning: if it ever starts failing because the client is
+    back on the default, the guard below is belt-and-braces again and the
+    comment at ``NONSTREAMING_MAX_TOKENS`` needs revising.
+    """
+    try:
+        from anthropic._constants import DEFAULT_TIMEOUT
+    except ImportError:  # pragma: no cover - SDK internals moved
+        pytest.skip("anthropic moved DEFAULT_TIMEOUT; re-derive this assertion")
+
+    client = llm._client_for_key("sk-ant-not-a-real-key")
+    assert client.timeout != DEFAULT_TIMEOUT
+
+
+async def test_acreate_still_raises_above_the_nonstreaming_ceiling():
+    """With the SDK's guard out of the picture, this is the only one left.
+
+    Asserted against ``_acreate`` directly rather than through a public entry
+    point, because ``_acreate`` is the single choke point every non-streaming
+    request in this module passes through — the property under test is that the
+    check lives THERE, not that one caller happens to be covered.
+    """
+    fake = FakeAnthropic([text_response("never reached")])
+
+    with pytest.raises(ValueError, match="NONSTREAMING_MAX_TOKENS"):
+        await llm._acreate(
+            fake, model="m", max_tokens=llm.NONSTREAMING_MAX_TOKENS + 1,
+            system="s", messages=[],
+        )
+    assert fake.calls == [], "a request that cannot succeed must not be issued"
+
+    # ...and the last accepted value still goes through, so the guard is a
+    # ceiling rather than an off-by-one that costs a whole token of budget.
+    await llm._acreate(
+        fake, model="m", max_tokens=llm.NONSTREAMING_MAX_TOKENS,
+        system="s", messages=[],
+    )
+    assert len(fake.calls) == 1
+
+
+# ---------------------------------------------------------------------------
 # the fake is the seam, so the fake has to hold the line
 # ---------------------------------------------------------------------------
 

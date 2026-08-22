@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import time
+from datetime import datetime, timezone
 from functools import lru_cache
 from typing import Any, Callable
 
@@ -12,6 +13,29 @@ import anthropic
 from src.config import get_settings
 
 logger = logging.getLogger(__name__)
+
+# The READ timeout every request in this module inherits from the shared client.
+#
+# 300 s, and the number is measured rather than chosen. Run 8b64a0e0 stalled
+# twice at 600.09 / 600.10 s — `read=600` exactly, which is the SDK's own
+# default — on HTTP 200 responses, so no overload or rate-limit story survives:
+# the connection simply went quiet. 1,167 s (10.6%) of that run was dead air.
+#
+# NOT 120, which the first audit draft proposed: the run's largest LEGITIMATE
+# reply took 119.18 s, 0.8 s under that ceiling, and `max_tokens=16000` at the
+# observed 60.7 tok/s authorises up to 264 s of honest generation. 300 cut zero
+# legitimate calls in the measured run. The one place it is tight is a
+# truncation retry clamped to NONSTREAMING_MAX_TOKENS: 21_333 tokens at 60.7
+# tok/s is ~351 s, so a retry that genuinely needs its whole budget can now time
+# out. That is a rare path, it already has a loud WARNING, and the alternative is
+# keeping a 600 s stall on the common one.
+#
+# `connect` is deliberately left at the SDK's own 5 s instead of being dragged up
+# with the rest — a bare `timeout=300.0` float sets connect/read/write/pool
+# alike, and a black-holed SYN is not a long generation. (One of this run's three
+# SDK retries was a fast connection failure, not a timeout; that should stay
+# fast.)
+CLIENT_READ_TIMEOUT_SECONDS = 300.0
 
 # The largest `max_tokens` the Anthropic SDK will accept on a NON-STREAMING
 # request. `BaseClient._calculate_nonstreaming_timeout` computes
@@ -35,6 +59,17 @@ logger = logging.getLogger(__name__)
 # tests/fakes.py's FakeAnthropic enforces the same limit, because the suite
 # drives that seam and never reaches the real client, so nothing else in CI can
 # see this ceiling at all.
+#
+# ⚠️ THE SDK NO LONGER ENFORCES THIS FOR US. `Messages.create` applies
+# `_calculate_nonstreaming_timeout` only `if not stream and not
+# is_given(timeout) and self._client.timeout == DEFAULT_TIMEOUT` — and
+# `_client_for_key` now passes a timeout of its own (CLIENT_READ_TIMEOUT_SECONDS
+# above), so that condition is permanently false. Verified against the installed
+# SDK source, both versions this repo runs. The check in `_acreate` is therefore
+# the ONLY thing standing between a mis-sized call site and a request the API
+# will reject after it has been sent: do not remove it, and do not "simplify" it
+# on the grounds that the SDK checks too. tests/unit/
+# test_llm_nonstreaming_ceiling.py asserts both halves.
 NONSTREAMING_MAX_TOKENS = 21_333
 
 # Module-level callback for logging LLM calls.
@@ -59,8 +94,12 @@ NONSTREAMING_MAX_TOKENS = 21_333
 #
 # `call_stats` is what makes the row interpretable anyway: a list with one object
 # per real API call, in call order — see `_call_stat`. It is the only place
-# `stop_reason`, the requested `max_tokens` ceiling, and the thinking/text split
-# of `output_tokens` are recorded at all.
+# `stop_reason`, the requested `max_tokens` ceiling, the thinking/text split of
+# `output_tokens`, and the reply's content-BLOCK types are recorded at all.
+#
+# One row per turn also means a turn that returned nothing. `generate_agent
+# _response`'s empty-content branch used to return above the callback, so 26
+# billed refusals in run 8b64a0e0 wrote no row at all — see `_emit_call_log`.
 _call_log_callback: Callable[[dict], None] | None = None
 
 
@@ -78,8 +117,78 @@ def _client_for_key(api_key: str) -> anthropic.Anthropic:
     specialist consults per concluding turn, memory updates, retries
     (audit 2026-08-21, finding 4: 8 calls -> 8 connections; 1 shared client
     -> 1). The sync client is thread-safe, so one instance is safe under
-    ``asyncio.to_thread`` concurrency."""
-    return anthropic.Anthropic(api_key=api_key)
+    ``asyncio.to_thread`` concurrency.
+
+    Also the one place the request timeout is set, so every call in the process
+    inherits it — including ``email_inbound.classify_reply``, which used to make
+    its own untimed request. See CLIENT_READ_TIMEOUT_SECONDS for why 300, and
+    NONSTREAMING_MAX_TOKENS for what setting any timeout at all costs us."""
+    return anthropic.Anthropic(
+        api_key=api_key,
+        timeout=anthropic.Timeout(CLIENT_READ_TIMEOUT_SECONDS, connect=5.0),
+    )
+
+
+# One `cache_control` value, used at both breakpoints. `{"type": "ephemeral"}`
+# with no `ttl` is the DEFAULT 5-minute TTL, chosen deliberately over `"1h"`:
+# median hub turn inter-arrival is 58 s, so the common case is comfortably inside
+# 5 minutes, and the extra hits an hour-long entry would catch do not pay for
+# doubling the write premium (1.25x -> 2x base input price; break-even moves from
+# two requests to three).
+_EPHEMERAL_CACHE = {"type": "ephemeral"}
+
+# Where an agent's system prompt stops being stable. `Agent._compose_system_prompt`
+# renders this section LAST — after the base role prompt, the rendered rubric, the
+# identity block, the public lab profile and (when present) the lab directory — so
+# everything a turn changes lives behind it.
+#
+# ⚠️ That ordering is what makes caching possible at all. Measured on run
+# 8b64a0e0: 90.4% of the hub's prompt is the stable half, and the re-sent system
+# prompt is 5.18 M tokens = 40.6% of all input spend. Move working memory earlier,
+# or interpolate anything per-turn ahead of it, and the hit rate silently goes to
+# zero — no error, no failing request, just the old bill.
+# tests/unit/test_llm_prompt_caching.py is the alarm on that.
+_STABLE_PREFIX_BOUNDARY = "\n## Your Working Memory\n"
+
+
+def _cacheable_system(system_prompt: str) -> list[dict[str, Any]]:
+    """Split a system prompt into a cache-marked stable prefix and a live tail.
+
+    The breakpoint goes at the END of the stable prefix, not at the end of the
+    whole prompt: marking the volatile half would write a distinct cache entry
+    every turn and read none of them, paying the write premium for nothing.
+
+    A prompt with no working-memory section — a specialist persona, a
+    profile-synthesis prompt, a phase-1 decision — is static per call site, so
+    the whole thing is the prefix and comes back as one marked block.
+
+    One breakpoint here covers the tool definitions too: the API renders
+    ``tools`` -> ``system`` -> ``messages``, so a marker on a system block caches
+    everything before it. ``tools_for_role`` is deterministic per role, which is
+    what makes that safe — a tool list that varied per turn would render at
+    position 0 and invalidate every downstream entry.
+
+    Returns blocks, never a bare string, so callers do not have to care which
+    shape they got. `_acreate` is the only caller.
+    """
+    boundary = system_prompt.find(_STABLE_PREFIX_BOUNDARY)
+    if boundary <= 0:
+        return [
+            {
+                "type": "text",
+                "text": system_prompt,
+                "cache_control": _EPHEMERAL_CACHE,
+            }
+        ]
+    return [
+        {
+            "type": "text",
+            "text": system_prompt[:boundary],
+            "cache_control": _EPHEMERAL_CACHE,
+        },
+        # No marker: this is the half that changes.
+        {"type": "text", "text": system_prompt[boundary:]},
+    ]
 
 
 def get_anthropic_client() -> anthropic.Anthropic:
@@ -118,8 +227,18 @@ async def _acreate(client: anthropic.Anthropic, **kwargs: Any):
     difference between "max_tokens=32000 exceeds ..." and an SDK ValueError
     about streaming surfacing from somewhere deep inside an agent turn, where
     the broad handler in ``_reply_to_thread`` swallows it and posts nothing.
+
+    And the one place the system prompt's cache breakpoint is applied, for the
+    same reason: every non-streaming request in this module comes through here,
+    including the truncation retries — which re-send the identical prompt and so
+    are pure cache reads. Callers keep passing a plain string; ``_cacheable_system``
+    turns it into blocks. An empty (or whitespace-only) prompt is passed through
+    untouched, because the API rejects an empty text block.
     """
     kwargs.setdefault("thinking", {"type": "disabled"})
+    system = kwargs.get("system")
+    if isinstance(system, str) and system.strip():
+        kwargs["system"] = _cacheable_system(system)
     requested = kwargs.get("max_tokens")
     if requested is not None and requested > NONSTREAMING_MAX_TOKENS:
         raise ValueError(
@@ -131,6 +250,92 @@ async def _acreate(client: anthropic.Anthropic, **kwargs: Any):
             "streaming API."
         )
     return await asyncio.to_thread(client.messages.create, **kwargs)
+
+
+# The one tool a round may run in parallel with its siblings, and the only one.
+# See `_execute_tool_blocks` for why each of the others is excluded by name.
+CONCURRENT_TOOL_NAME = "consult_specialist"
+
+
+async def _execute_tool_blocks(
+    tool_use_blocks: list[Any], tool_executor: Any
+) -> list[dict[str, Any]]:
+    """Run one round's tool blocks and return their results IN BLOCK ORDER.
+
+    ``consult_specialist`` blocks are gathered; every other tool stays as serial
+    as it has always been, including relative to the consults. Run 8b64a0e0:
+    81% of tool rounds carried two or more blocks and this was a plain ``for``
+    loop, so the hub waited 25-40 s per consult in series for calls the API had
+    already decided to make in parallel — **2,344 s, 21.2% of the run**, the
+    largest single perf item in the audit.
+
+    The narrowness is the design. Each excluded tool breaks under concurrency for
+    its own reason:
+
+    - ``ThreadState.abstracts_other`` / ``full_text`` are check-then-increment
+      (``tools.py:278`` / ``:292``): two concurrent fetches read the same count
+      and both pass a per-thread cap of one.
+    - ``agent.record_api_call`` mutates a deque per call. It is safe today only
+      because it is synchronous — under ``asyncio`` that makes it atomic — and an
+      ``await`` added inside it later would turn this into a silent race.
+    - ``_record_specialist_consult`` must land before ``_post_panel_note``; that
+      ordering holds inside one consult's own coroutine and nowhere else.
+    - ``search_prior_art`` already loses 10 of 125 searches to self-inflicted
+      429s, every one on the 3rd POST of its own un-paced tier ladder.
+      Parallelism multiplies exactly that.
+
+    Consults are gathered FIRST and the serial blocks run after, rather than
+    being interleaved in block order. They are the slow ones (25-40 s against
+    sub-second for the rest), so front-loading them costs nothing and keeps the
+    partition legible. Nothing depends on the original execution order: the model
+    chose every block's input in the same round, before any of them ran, and all
+    the results go back in one message.
+
+    Ordering that DOES matter is preserved exactly: the returned list is
+    positional, so ``result[i]`` pairs with ``tool_use_blocks[i]``, and each
+    result carries its own block's ``tool_use_id``. A mismatched or missing pair
+    is a 400 from the API that kills the whole turn.
+
+    An exception from ``tool_executor`` still propagates, as it did serially — in
+    practice it cannot, because ``execute_tool`` catches everything and returns an
+    error string, but a gather must not be the thing that turns a raise into a
+    silently short result list.
+    """
+
+    def _result(block: Any, text: str) -> dict[str, Any]:
+        return {
+            "type": "tool_result",
+            "tool_use_id": block.id,
+            "content": text,
+        }
+
+    # Keyed by block index rather than a pre-sized list with None holes, so a
+    # block that somehow went unexecuted raises KeyError on the way out instead
+    # of silently shortening the result list — which the API answers with a 400
+    # about a missing tool_result and no hint as to which block it lost.
+    results: dict[int, dict[str, Any]] = {}
+
+    concurrent = [
+        i for i, b in enumerate(tool_use_blocks)
+        if getattr(b, "name", None) == CONCURRENT_TOOL_NAME
+    ]
+    # Only worth a gather at 2+: one block gathered is one block awaited, and
+    # taking the serial path there keeps the common round byte-identical to
+    # what it was before this change.
+    if len(concurrent) > 1:
+        outputs = await asyncio.gather(*(
+            tool_executor(tool_use_blocks[i].name, tool_use_blocks[i].input)
+            for i in concurrent
+        ))
+        for i, output in zip(concurrent, outputs, strict=True):
+            results[i] = _result(tool_use_blocks[i], output)
+
+    for i, block in enumerate(tool_use_blocks):
+        if i in results:
+            continue
+        results[i] = _result(block, await tool_executor(block.name, block.input))
+
+    return [results[i] for i in range(len(tool_use_blocks))]
 
 
 def _retry_budget(
@@ -189,6 +394,114 @@ def _thinking_tokens(usage: Any) -> int | None:
     return getattr(details, "thinking_tokens", None)
 
 
+def _block_types(message: Any) -> list[str | None]:
+    """The ``type`` of every content block in a reply, in order.
+
+    The cheapest possible answer to the question run 8b64a0e0 could not answer:
+    two turns billed several hundred non-reasoning output tokens and returned no
+    text at all, with ``stop_reason='end_turn'``. Summarized thinking and every
+    accounting explanation were ruled out (36 calibration rows, 8 negative
+    controls); the only surviving hypothesis is a block type ``_all_text``
+    ignores — ``redacted_thinking`` — and it stays INFERRED because zero such
+    blocks appear in the 5,543 stored ``llm_call_logs`` rows. Nothing had ever
+    recorded the types. Now everything does, so the next occurrence names itself.
+
+    Read defensively twice over, because both consumers are logging paths: a
+    block without ``.type`` contributes null rather than raising, and a
+    ``content`` that is absent or not iterable at all (a stub, a future SDK
+    rename) yields an empty list.
+    """
+    try:
+        return [
+            getattr(block, "type", None)
+            for block in (getattr(message, "content", None) or [])
+        ]
+    except TypeError:
+        return []
+
+
+def _notify_stop_reason(
+    callback: Callable[[str], None] | None, message: Any
+) -> None:
+    """Hand the FINAL call's ``stop_reason`` to the call site, exactly once.
+
+    ``stop_reason`` is compared against ``"max_tokens"`` at nine sites in this
+    module and branched on NOWHERE else in ``src/``, so every other terminal
+    reason — ``refusal`` above all — reached callers as an ordinary string. Run
+    8b64a0e0 paid for that three ways: 4 truncated hub replies were posted to
+    Slack as if complete, a refusal-truncated working-memory write replaced a
+    complete 1,977-char memory with a 1,437-char one (twice — a
+    ``profile_revisions`` row and the file on disk), and 3 truncated specialist
+    opinions were published as ``⚠️ caution`` and fed back into the next prompt.
+
+    This layer only REPORTS. Whether a partial answer is worth posting, worth
+    persisting, or worth crediting to a panel is a call-site decision and they
+    differ — so the text is still returned unchanged either way.
+
+    Never raises into the caller: an observability hook that can kill a turn is
+    worse than the silence it replaces. Reports the empty string rather than None
+    when the reply carries no ``stop_reason``, so a call site comparing against
+    ``"refusal"`` has a ``str`` in hand as the interface promises.
+    """
+    if callback is None:
+        return
+    try:
+        callback(getattr(message, "stop_reason", None) or "")
+    except Exception:  # noqa: BLE001 — a reporting hook must not cost the reply
+        logger.exception(
+            "on_stop_reason callback raised; the reply is unaffected"
+        )
+
+
+def _emit_call_log(
+    *,
+    system_prompt: str,
+    messages: list[Any],
+    response_text: str,
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+    latency_ms: float,
+    call_stats: list[dict[str, Any]],
+    log_meta: dict[str, Any] | None,
+) -> None:
+    """Write one ``llm_call_logs`` row for one TURN, if anyone is listening.
+
+    Extracted so the four return paths in this module cannot drift apart — which
+    is exactly what happened: ``generate_agent_response``'s empty-content branch
+    returned "" ABOVE its callback, so a reply with no content blocks wrote no
+    row at all. 26 billed, refused calls vanished that way in run 8b64a0e0,
+    reconciling three separate ways (838 − 812 = 558 − 532 = 26), while
+    ``tools.py``'s ``on_api_call`` had already fired for every one of them.
+
+    That mattered more than the missing observability: ``SimulationEngine``
+    rebuilds ``api_call_count`` as a row COUNT and the rate limiter's
+    ``call_times`` ledger as one entry per row, so a refusal booked a throttle
+    slot in-process and then disappeared at restart. Logging these rows moves
+    both counters TOWARDS the truth — and it does mean a restart now replays
+    refusals into ``call_times`` that it previously ignored, which is the correct
+    direction (they were real, billed calls) but is a real change in post-restart
+    allowance.
+
+    The ``_call_log_callback and log_meta`` gate is unchanged, so an
+    uninstrumented call site still writes nothing.
+    """
+    if not (_call_log_callback and log_meta):
+        return
+    _call_log_callback({
+        "system_prompt": system_prompt,
+        "messages": messages,
+        "response_text": response_text,
+        "model": model,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "latency_ms": latency_ms,
+        "call_stats": call_stats,
+        "completed_at": datetime.now(timezone.utc),
+        **log_meta,
+    })
+
+
 def _call_stat(
     *, seq: int, kind: str, max_tokens: int, message: Any, latency_ms: float
 ) -> dict[str, Any]:
@@ -215,6 +528,11 @@ def _call_stat(
         "output_tokens": getattr(usage, "output_tokens", None),
         "thinking_tokens": _thinking_tokens(usage),
         "stop_reason": getattr(message, "stop_reason", None),
+        # What the reply was actually MADE of. `stop_reason` says why generation
+        # ended; this says what came back, which is the only way to tell a
+        # refusal apart from a reply whose every block is of a type `_all_text`
+        # skips. See `_block_types`.
+        "block_types": _block_types(message),
         "latency_ms": round(latency_ms, 1),
     }
 
@@ -257,10 +575,14 @@ def _log_empty_reply(
     try:
         meta = log_meta or {}
         logger.error(
-            "Empty reply from the model (stop_reason=%s model=%s agent=%s "
-            "phase=%s site=%s) — the caller will treat this as no answer, so "
-            "the turn is skipped and any verdict it carried is lost.",
+            "Empty reply from the model (stop_reason=%s block_types=%s model=%s "
+            "agent=%s phase=%s site=%s) — the caller will treat this as no "
+            "answer, so the turn is skipped and any verdict it carried is lost.",
             getattr(message, "stop_reason", "?"),
+            # The same list `_call_stat` records, in the line an operator reads
+            # first. `[]` is a refusal; `['thinking', ...]` with no 'text' is the
+            # unresolved end_turn shape and should be reported.
+            _block_types(message),
             model,
             meta.get("agent_id", "?"),
             meta.get("phase", "?"),
@@ -370,6 +692,7 @@ async def generate_agent_response(
     max_tokens: int = 1000,
     log_meta: dict[str, str | None] | None = None,
     on_retry: Callable[[], None] | None = None,
+    on_stop_reason: Callable[[str], None] | None = None,
 ) -> str:
     """Generate an agent response via Claude.
 
@@ -380,6 +703,13 @@ async def generate_agent_response(
     so a retried turn is booked as the two real API calls it made, not one.
     Optional and additive: omitting it changes nothing about behavior or the
     return contract.
+
+    ``on_stop_reason``, if given, fires exactly once — synchronously, before
+    this returns — with the FINAL API call's ``stop_reason`` (so the retry's,
+    when a retry ran). It never raises into this function and never changes what
+    is returned: a partial answer still comes back, because whether a partial
+    answer may be posted / persisted / credited differs per call site. See
+    ``_notify_stop_reason``.
     """
     settings = get_settings()
     model = model or settings.llm_agent_model
@@ -413,17 +743,41 @@ async def generate_agent_response(
             sys_chars = len(system_prompt)
             user_chars = sum(len(m.get("content", "")) for m in messages)
             user_tail = (messages[-1].get("content", "")[-400:] if messages else "")
+            # ONE error line, deliberately. This branch keeps its own early
+            # return rather than falling through to `_log_empty_reply`, so a
+            # single billed call still produces a single ERROR — and this is the
+            # only place `user_tail` exists, which is what names the prompt that
+            # caused it.
             logger.error(
                 "Claude returned empty content (model=%s agent=%s phase=%s "
                 "stop=%r sys_chars=%d user_chars=%d in_tok=%d out_tok=%d) "
                 "user_tail=%r",
-                model, agent_id, phase, message.stop_reason,
+                model, agent_id, phase, getattr(message, "stop_reason", None),
                 sys_chars, user_chars,
                 message.usage.input_tokens, message.usage.output_tokens,
                 user_tail,
             )
+            # The row, BEFORE the return. This used to be the one exit from this
+            # module that wrote nothing at all (C5) — see `_emit_call_log`.
+            _emit_call_log(
+                system_prompt=system_prompt,
+                messages=messages,
+                response_text="",
+                model=model,
+                input_tokens=total_input_tokens,
+                output_tokens=total_output_tokens,
+                latency_ms=latency_ms,
+                call_stats=call_stats,
+                log_meta=log_meta,
+            )
+            _notify_stop_reason(on_stop_reason, message)
             return ""
         response_text = _all_text(message)
+        # The reply that ENDED this turn, which is what `on_stop_reason`
+        # reports. Reassigned by the retry below; `message` deliberately keeps
+        # pointing at the first call so the "still truncated" log line and the
+        # token accumulation can both name the right one.
+        final_message = message
         if not response_text.strip() and message.stop_reason != "max_tokens":
             _log_empty_reply(
                 message, model=model, log_meta=log_meta, where="single_call"
@@ -455,6 +809,7 @@ async def generate_agent_response(
                 on_retry()
             retry_latency = (time.monotonic() - t0) * 1000
             latency_ms += retry_latency
+            final_message = retry_msg
             response_text = _all_text(retry_msg) or response_text
             if not response_text.strip():
                 _log_empty_reply(
@@ -500,20 +855,22 @@ async def generate_agent_response(
                     model, agent_id, phase, retry_max, retry_msg.usage.output_tokens,
                 )
 
-        if _call_log_callback and log_meta:
-            from datetime import datetime, timezone
-            _call_log_callback({
-                "system_prompt": system_prompt,
-                "messages": messages,
-                "response_text": response_text,
-                "model": model,
-                "input_tokens": total_input_tokens,
-                "output_tokens": total_output_tokens,
-                "latency_ms": latency_ms,
-                "call_stats": call_stats,
-                "completed_at": datetime.now(timezone.utc),
-                **log_meta,
-            })
+        _emit_call_log(
+            system_prompt=system_prompt,
+            messages=messages,
+            response_text=response_text,
+            model=model,
+            input_tokens=total_input_tokens,
+            output_tokens=total_output_tokens,
+            latency_ms=latency_ms,
+            call_stats=call_stats,
+            log_meta=log_meta,
+        )
+        # `final_message`, not `message`: when a retry ran it is the retry that
+        # ended the turn, so a turn that truncated and then recovered must report
+        # `end_turn` — otherwise every recovered turn looks truncated to the
+        # caller.
+        _notify_stop_reason(on_stop_reason, final_message)
 
         return response_text
     except Exception as exc:
@@ -552,6 +909,7 @@ async def generate_with_tools(
     max_tool_rounds: int = 5,
     log_meta: dict[str, str | None] | None = None,
     on_retry: Callable[[], None] | None = None,
+    on_stop_reason: Callable[[str], None] | None = None,
     should_continue: Callable[[], bool] | None = None,
 ) -> str:
     """
@@ -571,6 +929,13 @@ async def generate_with_tools(
     should pass that callable here so a retried turn is booked as the two
     real API calls it made, not one. Optional and additive: omitting it
     changes nothing about behavior or the return contract.
+
+    ``on_stop_reason``, same contract as ``generate_agent_response``'s: it
+    fires exactly once, with the stop_reason of whichever call actually ended
+    the turn — the terminating text call, the forced final call, or either
+    one's retry. A tool ROUND's stop_reason is never reported here (it is in
+    ``call_stats``); the question this answers is "is the answer I am holding
+    complete?".
 
     ``should_continue``, if given, is polled before each tool round AFTER the
     first. Returning False stops the loop from opening a NEW round; it does not
@@ -603,6 +968,10 @@ async def generate_with_tools(
     # are 2+ calls, so "output_tokens" on its own is a sum of unknown addends.
     call_stats: list[dict[str, Any]] = []
     seq = 0
+    # The tool_result block currently carrying the message-side cache
+    # breakpoint, so the next round can take the marker off it. See where it is
+    # set, below.
+    cached_tool_result: dict[str, Any] | None = None
 
     for round_num in range(max_tool_rounds + 1):
         # Round 0 always runs — without it this returns nothing at all. From
@@ -665,6 +1034,8 @@ async def generate_with_tools(
         if not tool_use_blocks:
             # Final text response — no more tool calls
             response_text = _all_text(message)
+            # The call that ended the turn; reassigned by the retry below.
+            final_message = message
             if not response_text.strip() and message.stop_reason != "max_tokens":
                 _log_empty_reply(
                     message, model=model, log_meta=log_meta, where="final"
@@ -704,6 +1075,7 @@ async def generate_with_tools(
                         message=retry_msg, latency_ms=retry_latency,
                     )
                 )
+                final_message = retry_msg
                 response_text = _all_text(retry_msg) or response_text
                 if not response_text.strip():
                     _log_empty_reply(
@@ -727,20 +1099,18 @@ async def generate_with_tools(
                         retry_msg.usage.output_tokens,
                     )
 
-            if _call_log_callback and log_meta:
-                from datetime import datetime, timezone
-                _call_log_callback({
-                    "system_prompt": system_prompt,
-                    "messages": conversation,
-                    "response_text": response_text,
-                    "model": model,
-                    "input_tokens": total_input_tokens,
-                    "output_tokens": total_output_tokens,
-                    "latency_ms": latency_ms,
-                    "call_stats": call_stats,
-                    "completed_at": datetime.now(timezone.utc),
-                    **log_meta,
-                })
+            _emit_call_log(
+                system_prompt=system_prompt,
+                messages=conversation,
+                response_text=response_text,
+                model=model,
+                input_tokens=total_input_tokens,
+                output_tokens=total_output_tokens,
+                latency_ms=latency_ms,
+                call_stats=call_stats,
+                log_meta=log_meta,
+            )
+            _notify_stop_reason(on_stop_reason, final_message)
 
             return response_text
 
@@ -750,15 +1120,28 @@ async def generate_with_tools(
             "content": [b.model_dump() for b in message.content],
         })
 
-        # Execute each tool call and build tool_result blocks
-        tool_results = []
-        for tool_block in tool_use_blocks:
-            result_text = await tool_executor(tool_block.name, tool_block.input)
-            tool_results.append({
-                "type": "tool_result",
-                "tool_use_id": tool_block.id,
-                "content": result_text,
-            })
+        # Execute this round's tool calls — consults together, the rest serially
+        # — and build one tool_result per block, in block order.
+        tool_results = await _execute_tool_blocks(tool_use_blocks, tool_executor)
+
+        # The message-side cache breakpoint, ROLLED FORWARD rather than
+        # accumulated: the API allows at most 4 `cache_control` blocks per
+        # request and a 5-round turn would want 6. Moving it is free — a marker
+        # designates where to check for and write a cache entry, it is not part
+        # of the content being matched, so dropping the previous round's does not
+        # invalidate the entry it wrote. The tool outputs are the bulk of what
+        # each subsequent round re-sends, so this is where the second breakpoint
+        # earns its keep.
+        #
+        # Caveat worth knowing: a breakpoint walks back at most 20 content blocks
+        # looking for a prior entry, and one round of 8 consults contributes 16
+        # blocks. A round that wide can miss the previous round's entry even
+        # though the marker is placed correctly.
+        if tool_results:
+            if cached_tool_result is not None:
+                cached_tool_result.pop("cache_control", None)
+            tool_results[-1]["cache_control"] = _EPHEMERAL_CACHE
+            cached_tool_result = tool_results[-1]
 
         conversation.append({"role": "user", "content": tool_results})
 
@@ -793,6 +1176,8 @@ async def generate_with_tools(
         )
     )
     response_text = _all_text(message)
+    # The call that ended the turn; reassigned by the retry below.
+    final_message = message
     if not response_text.strip() and message.stop_reason != "max_tokens":
         _log_empty_reply(
             message, model=model, log_meta=log_meta, where="forced_final"
@@ -829,6 +1214,7 @@ async def generate_with_tools(
                 message=retry_msg, latency_ms=retry_latency,
             )
         )
+        final_message = retry_msg
         response_text = _all_text(retry_msg) or response_text
         if not response_text.strip():
             _log_empty_reply(
@@ -851,20 +1237,18 @@ async def generate_with_tools(
                 model, agent_id, phase, retry_max, retry_msg.usage.output_tokens,
             )
 
-    if _call_log_callback and log_meta:
-        from datetime import datetime, timezone
-        _call_log_callback({
-            "system_prompt": system_prompt,
-            "messages": conversation,
-            "response_text": response_text,
-            "model": model,
-            "input_tokens": total_input_tokens,
-            "output_tokens": total_output_tokens,
-            "latency_ms": latency_ms,
-            "call_stats": call_stats,
-            "completed_at": datetime.now(timezone.utc),
-            **log_meta,
-        })
+    _emit_call_log(
+        system_prompt=system_prompt,
+        messages=conversation,
+        response_text=response_text,
+        model=model,
+        input_tokens=total_input_tokens,
+        output_tokens=total_output_tokens,
+        latency_ms=latency_ms,
+        call_stats=call_stats,
+        log_meta=log_meta,
+    )
+    _notify_stop_reason(on_stop_reason, final_message)
 
     return response_text
 

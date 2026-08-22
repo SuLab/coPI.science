@@ -18,6 +18,7 @@ touch the network.
 """
 
 import asyncio
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -98,6 +99,26 @@ class _ThinkingBlock:
 
 
 @dataclass
+class _RedactedThinkingBlock:
+    """A ``redacted_thinking`` block: encrypted reasoning the API will not show.
+
+    Carries neither ``.text`` nor ``.thinking`` — only opaque ``data``. It is the
+    one surviving hypothesis for run 8b64a0e0's two ``end_turn`` empties: a reply
+    that billed several hundred non-reasoning output tokens while ``_all_text``
+    found nothing, because every block in it was of a type that helper ignores.
+    Zero such blocks appear in the 5,543 stored ``llm_call_logs`` rows — which is
+    exactly the point, since nothing recorded the block types until
+    ``_call_stat``'s ``block_types``.
+    """
+
+    data: str = "EncryptedReasoningBlob"
+    type: str = "redacted_thinking"
+
+    def model_dump(self) -> dict:
+        return {"type": "redacted_thinking", "data": self.data}
+
+
+@dataclass
 class _ToolUseBlock:
     id: str
     name: str
@@ -162,6 +183,26 @@ def thinking_then_text_response(
     )
 
 
+def thinking_only_response(
+    *,
+    thinking: str = "reasoning...",
+    redacted: bool = True,
+    stop_reason: str = "end_turn",
+) -> _Message:
+    """A reply whose content is real but carries NO text block at all.
+
+    The shape of the run-8b64a0e0 ``end_turn`` empties: ``message.content`` is
+    non-empty (so the empty-CONTENT branch does not fire) while ``_all_text``
+    still returns "". Distinct from ``empty_response`` for exactly that reason —
+    the two take different branches, and only this one is invisible without
+    ``call_stat``'s ``block_types``.
+    """
+    blocks: list[Any] = [_ThinkingBlock(thinking=thinking)]
+    if redacted:
+        blocks.append(_RedactedThinkingBlock())
+    return _Message(content=blocks, stop_reason=stop_reason)
+
+
 def tool_use_response(
     tool_name: str,
     tool_input: dict,
@@ -188,6 +229,28 @@ def tool_use_response(
     return msg
 
 
+def multi_tool_use_response(
+    *calls: tuple[str, dict],
+    text: str = "",
+    stop_reason: str = "tool_use",
+) -> _Message:
+    """A round that requests SEVERAL tools in one reply.
+
+    The common case, not the exotic one: 81% of run 8b64a0e0's tool rounds
+    carried two or more blocks, and ``generate_with_tools`` executed them in a
+    plain ``for`` loop — 2,344 s (21.2% of the run) spent waiting serially on
+    calls the API had already decided to make in parallel. Block ids are
+    ``toolu_1..N`` in the order given, which is the order ``tool_results`` must
+    come back in.
+    """
+    blocks: list[Any] = []
+    if text:
+        blocks.append(_TextBlock(text=text))
+    for i, (name, tool_input) in enumerate(calls, start=1):
+        blocks.append(_ToolUseBlock(id=f"toolu_{i}", name=name, input=tool_input))
+    return _Message(content=blocks, stop_reason=stop_reason)
+
+
 def empty_response(*, stop_reason: str = "end_turn") -> _Message:
     """An assistant message with no content blocks (Claude occasionally returns this)."""
     return _Message(content=[], stop_reason=stop_reason)
@@ -211,6 +274,12 @@ class _Messages:
                 f"for more details (max_tokens={max_tokens})"
             )
         self._parent.calls.append(kwargs)
+        # BLOCKING, like the real synchronous client: this is what makes it
+        # possible to prove a caller ran the request off the event-loop thread
+        # rather than pinning the loop for its duration. 0.0 by default, so
+        # every pre-existing user of this fake still returns instantly.
+        if self._parent.latency:
+            time.sleep(self._parent.latency)
         return self._parent._next(kwargs)
 
 
@@ -221,6 +290,10 @@ class FakeAnthropic:
     text message), a pre-built _Message, or a callable(kwargs) -> str | _Message.
     When exhausted, returns ``default_text``. Every create() call is recorded on
     ``.calls`` for assertions.
+
+    ``latency`` (seconds) makes ``create`` ``time.sleep`` before returning, the
+    way the real synchronous client blocks its thread for the whole HTTP
+    request. Defaults to 0.0, so it is invisible to every existing user.
     """
 
     def __init__(
@@ -228,9 +301,11 @@ class FakeAnthropic:
         responses: list[str | _Message | Callable[[dict], Any]] | None = None,
         *,
         default_text: str = "OK",
+        latency: float = 0.0,
     ) -> None:
         self._responses = list(responses or [])
         self.default_text = default_text
+        self.latency = latency
         self.calls: list[dict] = []
         self.messages = _Messages(self)
 
