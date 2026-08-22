@@ -469,8 +469,27 @@ fourth outright.
   ``` fence). It is stripped from the Slack body before anything is posted and written to
   `opportunity_assessments`, visible at `/admin/assessments`. To the MODEL, `:mag:` names
   the sidecar and is never a post label it may write
-  (`prompts/roles/scout_hub/agent-system.md`); the full verdict — rationale, red flags,
-  gating, `raw_verdict` — never appears on anything a PI or another lab sees.
+  (`prompts/roles/scout_hub/agent-system.md`); it never appears on anything a PI or another
+  lab sees. **What is confidential is the sidecar, not the verdict.** The hub's concluding
+  reply is *required* to state its verdict inline in the visible `<slack_message>` — funnel
+  stage, gating status, recommendation, red flags, confidence label — by
+  `src/agent/thread_guidance.py`'s `_SCOUT_HUB[CONCLUDE]` (both strings), by
+  `prompts/roles/scout_hub/agent-system.md` and by `phase4-thread-reply.md`: four places,
+  all naming those same five things. An interview that ended saying nothing would be the
+  defect, and when a sidecar is never stored the visible prose is the only surviving record
+  of the verdict. What never reaches Slack is the sidecar and what only it carries —
+  `raw_verdict`, the computed `weighted_score`, the `band`, and the per-dimension rubric
+  scores — measured at **0 leaks across all 1,354 messages** of run 8b64a0e0. The protected
+  class in the *visible* half is the PI's own **unpublished** disclosures:
+  `phase4-thread-reply.md` binds the visible reply to describe the idea and its evidence
+  "only at the level the PI has already made public", confining an unpublished result, an
+  unfiled construct, an undisclosed compound or a volunteered limitation to the sidecar — an
+  invariant no code and no test currently checks. (Until 2026-08-22 this bullet claimed the
+  whole verdict was hidden: `5d67e92` grafted the `#assessments-summary` D12 field list onto
+  an unrelated claim about the `:mag:` label, which sent an audit chasing a leak that was
+  in fact prompt compliance. See
+  `docs/audits/2026-08-22-run-8b64a0e0/rca-and-corrections.md` §1;
+  `tests/unit/test_claude_md_disclosure_sync.py` is now the drift alarm.)
   As of the 2026-08-21 manager-PI-controls cycle
   (`SimulationEngine._post_assessment_summary`, `src/agent/simulation.py`), every HELD
   verdict — pass or fail alike — does additionally trigger one genuinely top-level post,

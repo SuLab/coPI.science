@@ -25,9 +25,14 @@ env/
 *.db
 *.sqlite3
 
-# Logs
-logs/*.json
-logs/*.log
+# Run artifacts. The whole directory, not per-extension: the saved-log rotation
+# in CLAUDE.md's restart recipe writes `logs/*.log`, but the same directory also
+# accumulates data — `logs/opportunity_assessments_backup_*.sql` (a dump of
+# assessment bodies) and `logs/profiles_public_pre_sync_*.tgz` (a tarball of
+# agent profiles) were untracked AND unignored, one `git add -A` from being
+# committed. Nothing under logs/ is tracked; pinned by
+# tests/unit/test_repo_hygiene.py::test_logs_directory_is_fully_ignored.
+logs/
 
 # Agent profiles (versioned in database via ProfileRevision, not git)
 profiles/public/*.md
@@ -86,3 +91,6 @@ mutants/
 # Production migration dumps (scripts/migrate/run_migration.sh). Never commit these:
 # they are full database copies containing message bodies and tokens.
 backups/
+
+# Subagent-driven-development scratch workspace
+.superpowers/
