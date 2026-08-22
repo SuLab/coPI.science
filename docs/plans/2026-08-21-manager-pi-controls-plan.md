@@ -1763,6 +1763,8 @@ to `post_message`, just call the same chokepoint):
         free). Returns None on any failure — callers degrade gracefully
         (design D16), they never treat a missing permalink as a reason to
         skip a post entirely."""
+        if not self._client:
+            return None
         try:
             resp = self._api(
                 "chat_getPermalink", channel=channel_id, message_ts=message_ts,
@@ -1771,6 +1773,11 @@ to `post_message`, just call the same chokepoint):
             return None
         return resp.get("permalink") if resp else None
 ```
+
+(This plan originally omitted the `if not self._client: return None` guard
+that every other public method in `AgentSlackClient` has — caught by task
+review, not written correctly here the first time. Corrected in place
+2026-08-21 after Task 10's implementation.)
 
 And in the async-wrappers block:
 
