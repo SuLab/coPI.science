@@ -23,6 +23,20 @@ Postgres via testcontainers and migrates it with the real alembic chain — no
 container, no manual database, no env var needed. This is exactly what
 `scripts/ci.sh` runs.
 
+> ### ⚠️ Two host/sshfs hazards that have each cost multiple sessions real time.
+>
+> 1. **Never run `pip install` against `.venv-test` from a client mounting this
+>    repo over sshfs.** It corrupts the venv's console-script shebangs — they
+>    get rewritten to the client's own interpreter path, which does not exist
+>    on the host — and every DB-backed test then fails with a plain
+>    `FileNotFoundError` that has nothing obviously to do with the real cause.
+>    Run `pip install`/`uv pip install` against `.venv-test` on the host itself.
+> 2. **Running pytest through an sshfs-mounted checkout can be dramatically
+>    slower than on the host's local disk** — measured as much as 100-400x
+>    slower in practice, from FUSE round-trips on every file read. If a run
+>    that normally takes minutes appears to hang, check whether you're on an
+>    sshfs mount before assuming a real regression.
+
 > ### ⚠️ The suite does not necessarily run production's Anthropic SDK.
 >
 > `pyproject.toml` pins only `anthropic>=0.26.0`, and the two environments have

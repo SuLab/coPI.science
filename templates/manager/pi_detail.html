@@ -9,11 +9,16 @@
             <h1 class="text-2xl font-bold text-gray-900 mt-1">{{ target_user.name }}</h1>
         </div>
         {% if target_user.agent and target_user.agent.status == 'inactive' %}
-            <form method="post" action="/manager/pis/{{ target_user.id }}/unmute" class="inline">
-                <button type="submit" class="text-sm px-3 py-1 rounded bg-green-600 text-white hover:opacity-90">
-                    Unmute
-                </button>
-            </form>
+            <div class="text-right">
+                <form method="post" action="/manager/pis/{{ target_user.id }}/unmute" class="inline">
+                    <button type="submit" class="text-sm px-3 py-1 rounded bg-green-600 text-white hover:opacity-90">
+                        Unmute
+                    </button>
+                </form>
+                {% if target_user.agent.muted_at %}
+                    <p class="text-xs text-gray-400 mt-1">Muted {{ target_user.agent.muted_at.strftime('%Y-%m-%d %H:%M UTC') }}</p>
+                {% endif %}
+            </div>
         {% elif target_user.agent and target_user.agent.status == 'active' %}
             <form method="post" action="/manager/pis/{{ target_user.id }}/mute" class="inline">
                 <button type="submit" class="text-sm px-3 py-1 rounded bg-yellow-600 text-white hover:opacity-90">

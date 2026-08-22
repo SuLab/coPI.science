@@ -1,4 +1,6 @@
-"""The /manager surface: deny-by-default, read-only, and PI-scoped."""
+"""The /manager surface: deny-by-default, PI-scoped, and read-only except for
+an explicit, mechanically-enumerated allowlist of four write routes (design
+D1)."""
 
 import re
 import uuid

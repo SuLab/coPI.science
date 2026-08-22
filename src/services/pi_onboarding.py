@@ -1,7 +1,10 @@
 """ORCID-driven PI onboarding, shared by the manager Add-PI route and admin's
-impersonate-if-new path. Ports the fetch->create->enqueue logic that used to
-be duplicated in src/cli.py's _seed_one_orcid and inline in
-src/routers/admin.py's impersonate_user — see design decision D7."""
+impersonate-if-new path. Ports the fetch->create->enqueue logic that was
+duplicated inline in src/routers/admin.py's impersonate_user — see design
+decision D7. A third copy remains in src/cli.py's _seed_one_orcid,
+deliberately not unified here: that CLI path reuses an existing user and
+falls back to a stub user on fetch failure, both of which this function
+refuses by design (D6)."""
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession

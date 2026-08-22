@@ -90,7 +90,7 @@ DEFAULT_TARGET = "0034"
 #: revision_status() instead of by membership in this tuple — that stopped being true the
 #: moment DEFAULT_TARGET moved past 0026 (first to 0027, then to 0028, then to 0029, then
 #: to 0030 here), and the same went stale for 0027 the moment DEFAULT_TARGET moved past
-#: IT, and again for 0028/0029, and again for 0032 the moment DEFAULT_TARGET moved to
+#: IT, and again for 0028/0029, and again for 0033 the moment DEFAULT_TARGET moved to
 #: 0034 and left 0033 out. Concretely: with DEFAULT_TARGET at 0034 and 0033 absent from
 #: this tuple, a database stamped 0033 is neither current == target nor a supported
 #: start, so revision_status() BLOCKS the very migration (0034) this task adds. Adding it
@@ -305,6 +305,7 @@ PLANNED_OBJECTS: tuple[PlannedObject, ...] = (
     PlannedObject("0034", "column", "muted_at", "agents"),
     PlannedObject("0034", "column", "muted_by", "agents"),
     PlannedObject("0034", "constraint", "fk_agents_muted_by_users", "agents"),
+    PlannedObject("0034", "index", "ix_agents_muted_by", "agents"),
 )
 
 REVISION_ORDER = (
