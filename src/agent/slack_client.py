@@ -704,6 +704,19 @@ class AgentSlackClient:
         except SlackApiError:
             return False
 
+    def get_permalink(self, channel_id: str, message_ts: str) -> str | None:
+        """chat.getPermalink through the _api chokepoint (retry/backoff for
+        free). Returns None on any failure — callers degrade gracefully
+        (design D16), they never treat a missing permalink as a reason to
+        skip a post entirely."""
+        try:
+            resp = self._api(
+                "chat_getPermalink", channel=channel_id, message_ts=message_ts,
+            )
+        except SlackApiError:
+            return None
+        return resp.get("permalink") if resp else None
+
     # ------------------------------------------------------------------
     # Posting
     # ------------------------------------------------------------------
@@ -1206,3 +1219,6 @@ class AgentSlackClient:
 
     async def aconnect(self) -> bool:
         return await asyncio.to_thread(self.connect)
+
+    async def aget_permalink(self, *args, **kwargs) -> str | None:
+        return await asyncio.to_thread(self.get_permalink, *args, **kwargs)

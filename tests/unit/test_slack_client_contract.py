@@ -1019,3 +1019,46 @@ def test_is_bot_user_caches_successes_but_never_failures():
     assert client.is_bot_user("U1") is True
     assert client.is_bot_user("U1") is True
     assert stub.calls == 2
+
+
+def test_get_permalink_returns_the_url_on_success():
+    from src.agent.slack_client import AgentSlackClient
+
+    class _Stub:
+        def chat_getPermalink(self, **kw):
+            return {"ok": True, "permalink": "https://example.slack.com/archives/C1/p123"}
+
+    client = AgentSlackClient(agent_id="hub", bot_token="xoxb-x")
+    client._client = _Stub()
+    assert client.get_permalink("C1", "123.000") == "https://example.slack.com/archives/C1/p123"
+
+
+def test_get_permalink_returns_none_on_any_failure():
+    from slack_sdk.errors import SlackApiError
+    from src.agent.slack_client import AgentSlackClient
+
+    class _Resp:
+        headers: dict = {}
+        def get(self, key, default=None):
+            return {"error": "channel_not_found"}.get(key, default)
+
+    class _Stub:
+        def chat_getPermalink(self, **kw):
+            raise SlackApiError("boom", response=_Resp())
+
+    client = AgentSlackClient(agent_id="hub", bot_token="xoxb-x")
+    client._client = _Stub()
+    assert client.get_permalink("C1", "123.000") is None
+
+
+async def test_aget_permalink_wraps_the_sync_call():
+    from src.agent.slack_client import AgentSlackClient
+
+    class _Stub:
+        def chat_getPermalink(self, **kw):
+            return {"ok": True, "permalink": "https://example.slack.com/archives/C1/p999"}
+
+    client = AgentSlackClient(agent_id="hub", bot_token="xoxb-x")
+    client._client = _Stub()
+    result = await client.aget_permalink("C1", "999.000")
+    assert result == "https://example.slack.com/archives/C1/p999"

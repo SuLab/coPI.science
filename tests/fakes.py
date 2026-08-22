@@ -347,6 +347,12 @@ class FakeSlackClient:
             return channel
         return f"C_{channel}"
 
+    def get_permalink(self, channel_id: str, message_ts: str) -> str | None:
+        return f"https://fake.slack.com/archives/{channel_id}/p{message_ts.replace('.', '')}"
+
+    async def aget_permalink(self, *args, **kwargs) -> str | None:
+        return self.get_permalink(*args, **kwargs)
+
 
 class RecordingSlackClient:
     """Records outbound Slack Web API calls; scripts responses and errors.
