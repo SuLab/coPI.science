@@ -256,6 +256,12 @@ class FakeSlackClient:
         self.bot_token = bot_token
         self._bot_user_id = f"U_{agent_id}"
         self.posted: list[dict] = []
+        # channel (name or id, as passed by the caller) -> list of texts
+        # posted to it, in order. A second, channel-keyed view onto the same
+        # calls `self.posted` records, for tests that only care "did exactly
+        # one message land in #assessments-summary" without wading through
+        # every post the agent made across every channel.
+        self.posted_messages: dict[str, list[str]] = {}
         self.created_channels: list[dict] = []
         self.invites: list[dict] = []
         self.joined_channels: set[str] = set()
@@ -284,6 +290,7 @@ class FakeSlackClient:
         # actually receives (e.g. **bold** -> *bold*), not the pre-conversion text.
         rec = {"channel": channel, "text": markdown_to_mrkdwn(text), "thread_ts": thread_ts, "ts": ts}
         self.posted.append(rec)
+        self.posted_messages.setdefault(channel, []).append(rec["text"])
         return {"ts": ts, "channel": channel}
 
     def send_dm(self, user_id: str, text: str) -> dict:
