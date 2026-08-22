@@ -109,10 +109,13 @@ KNOWN_DEAD_IMPORTS: set[tuple[str, str]] = set()
 # ---------------------------------------------------------------------------
 
 ROUTE_ALLOWLIST: dict[tuple[str, str], str] = {
-    ("GET", "/docs"): "FastAPI-generated Swagger UI; entered by typing the URL.",
-    ("GET", "/docs/oauth2-redirect"): "FastAPI-generated; used by Swagger UI's own JS.",
-    ("GET", "/redoc"): "FastAPI-generated ReDoc UI; entered by typing the URL.",
-    ("GET", "/openapi.json"): "FastAPI-generated schema; fetched by /docs and /redoc JS.",
+    # /docs, /docs/oauth2-redirect, /redoc and /openapi.json are no longer
+    # allowlisted here: create_app() now passes docs_url=None, redoc_url=None,
+    # openapi_url=None (E1.4), so FastAPI never registers those four routes and
+    # there is nothing left to exempt. Re-enabling any of them puts an
+    # unauthenticated inventory of every path and form field back on the public
+    # internet — see test_public_routes.py::test_the_openapi_schema_is_not_public.
+    #
     # /api/health is no longer allowlisted here (issue #25 P1, badge-middleware
     # short-circuit): AgentBadgeMiddleware.dispatch now compares request.url.path
     # against the literal string "/api/health", which makes src_referenced_paths()

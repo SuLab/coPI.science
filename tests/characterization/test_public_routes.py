@@ -196,3 +196,25 @@ async def test_proposal_vote_details_wrong_or_absent_token_403(
     )
     assert r2.status_code == 200
     assert r2.json() == {"ok": True}
+
+
+# --- interactive docs (E1.4) -------------------------------------------------
+
+@pytest.mark.parametrize(
+    "path", ["/docs", "/docs/oauth2-redirect", "/redoc", "/openapi.json"]
+)
+async def test_the_openapi_schema_is_not_public(client, path):
+    """FastAPI's default doc surface is an unauthenticated route inventory.
+
+    ``create_app()`` used to pass no ``docs_url``/``redoc_url``/``openapi_url``,
+    so all four of these were served to anyone: between them they publish every
+    path, every method and every form field name in the app — the
+    reconnaissance half of a CSRF attack. They are now switched off at the
+    application factory, so the routes are not registered at all: the assertion
+    is 404 (no such route), not 401/403 (route exists, needs auth).
+
+    ``app.openapi()`` still works in-process, which is what
+    tests/unit/test_reachability.py's route walk uses.
+    """
+    r = await client.get(path)
+    assert r.status_code == 404, f"{path} is still served publicly ({r.status_code})"

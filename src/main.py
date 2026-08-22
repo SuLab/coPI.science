@@ -123,6 +123,17 @@ def create_app() -> FastAPI:
         title="CoPI / LabAgent",
         description="Research collaboration platform with Slack-based AI agents",
         version="0.1.0",
+        # No public API documentation. FastAPI mounts /docs, /docs/oauth2-redirect,
+        # /redoc and /openapi.json by default and puts NONE of them behind auth, so
+        # they published the whole route inventory — every path, method and form
+        # field name — to anonymous callers. That is the reconnaissance half of the
+        # CSRF problem OriginGuardMiddleware (this module) closes (E1.4). Passing
+        # None unregisters the routes outright, so they 404 rather than 401.
+        # `application.openapi()` still builds the schema in-process, which is what
+        # tests/unit/test_reachability.py's route walk needs.
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
     )
 
     # Agent badge middleware (added first so it runs inside session middleware)
