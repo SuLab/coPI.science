@@ -15,28 +15,44 @@ normal ``opportunity_assessments`` row.
 
 Two things it does deliberately:
 
-* **Stamps the rubric version from the RUN, not from whatever
-  ``blackbird_rubric`` imports at backfill time.** A row stamped with today's
-  rubric but scored under the run's would silently break every cross-run
-  comparison the stamp exists to protect.
+* **Stamps the rubric version/hash from what the RUN ITSELF already wrote**,
+  not from a hardcoded default and not from whatever ``blackbird_rubric``
+  imports at backfill time — see ``_derive_rubric_stamp``. A row stamped with
+  today's rubric but scored under the run's would silently break every
+  cross-run comparison the stamp exists to protect; a row stamped from one
+  run's default applied to a DIFFERENT run would do the same thing more
+  quietly. The supervised re-run spans three run ids (``88d81cd8``,
+  ``076e80b6``, ``8b64a0e0``), which is exactly the scenario a single
+  hardcoded default cannot serve.
 * **Does not fire the ``#assessments-summary`` headline.** Those posts are
   announcements of a live verdict; replaying them weeks later would be noise,
   and design D14's promise is about what a drop does NOT post, not about
   retroactive completeness.
 
 Idempotent: skips any ``(run, thread_id)`` that already has an assessment row;
-for a row with no ``thread_id`` recorded — every row this script wrote before
-this fix, since it never populated the column, plus any drop whose own
-``thread_id`` could not be identified — falls back to ``(run,
-subject_agent_id)``, matched only against OTHER thread_id-less rows so a PI's
-second interview is never mistaken for a re-run of its first. See
-``_existing_assessment_for``.
+when EITHER side of a candidate pair lacks a ``thread_id`` — the existing row
+(every row this script wrote before this fix, since it never populated the
+column) or the drop itself (not producible by ``_persist_assessment`` today,
+but not this script's invariant to assume) — falls back to ``(run,
+subject_agent_id)``. See ``_existing_assessment_for``.
 
 (This docstring claimed "(run, thread)" from the day this script was written,
 while the code beneath it keyed on ``subject_agent_id`` alone with no
 ``thread_id`` column to key on at all — a docstring/code mismatch, not a
 behaviour change here: this fix is what finally makes the two agree, now that
 migration 0036 gives ``opportunity_assessments`` a ``thread_id`` to key on.)
+
+The ``llm_call_logs`` fallback (when a drop has no ``raw_verdict`` of its own)
+walks backward from the drop, bounded to ``--max-lookback-seconds`` (default
+``_MAX_LOOKBACK_SECONDS``), and accepts only a candidate whose OWN sidecar
+names this drop's subject — see ``_subject_matches`` and
+``_recover_from_llm_logs``. Both defences are load-bearing independently:
+measured on the nine real recoverable drops across all three runs, the 60s
+cap alone would still hand ``pienta`` a candidate list containing
+``huganir``'s sidecar (two candidates inside the window, the nearer one
+huganir's), and the subject check alone would still accept ``hart``'s
+4½-minute-old superseded sidecar if a nearer same-subject one didn't exist to
+out-rank it.
 
 Usage (inside the app container, AFTER migration 0036 is applied — that is
 what added ``opportunity_assessments.panel_owed`` and ``.thread_id``, both
@@ -46,6 +62,11 @@ written below):
         python scripts/backfill_dropped_verdicts.py --run 8b64a0e0-1fa7-40c4-b9a2-f57a4e058fb0
     # preview only:
     ... python scripts/backfill_dropped_verdicts.py --run <uuid> --dry-run
+    # override the derived rubric stamp (must be given together):
+    ... python scripts/backfill_dropped_verdicts.py --run <uuid> \
+            --rubric-version 2.0.0 --rubric-hash e3ef75f84c48
+    # widen the llm_call_logs lookback if a row comes back unrecoverable:
+    ... python scripts/backfill_dropped_verdicts.py --run <uuid> --max-lookback-seconds 300
 """
 
 from __future__ import annotations
@@ -73,7 +94,9 @@ from src.models import AssessmentDrop, LlmCallLog, OpportunityAssessment
 from src.services.blackbird_rubric import band as rubric_band
 from src.services.blackbird_rubric import weighted_score as rubric_weighted_score
 
-logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+# NOT configured here (fix round 1, FIX 7): `logging.basicConfig` used to run
+# at import time, which fired on every test collection too. Configured only
+# under `if __name__ == "__main__"` below.
 logger = logging.getLogger("backfill_dropped_verdicts")
 
 _SIDECAR_RE = re.compile(
@@ -83,6 +106,20 @@ _SIDECAR_RE = re.compile(
 # The reasons that mean "a complete verdict existed and was thrown away".
 # `missing_sidecar` and `empty_reply` are NOT recoverable — nothing was emitted.
 _RECOVERABLE = ("premature_sidecar", "duplicate_thread_verdict", "unparseable_sidecar")
+
+# Fix round 1, FIX 2: how far back `_recover_from_llm_logs` may walk before
+# giving up, in seconds. Measured directly on the nine real recoverable drops
+# across all three runs in the supervised re-run (88d81cd8, 076e80b6,
+# 8b64a0e0): every one of them has its own matching sidecar 0.2-0.3s before
+# the drop, so 60s is a ~200x margin on the real cases — and it is tight
+# enough to exclude hart's 272.6s-old SUPERSEDED sidecar (a
+# `duplicate_thread_verdict` drop whose near candidate failed `json.loads`;
+# without a cap, the unbounded walk falls through to the stale one 4.5
+# minutes back and writes it, unmarked, as this interview's verdict — it
+# doesn't bite in practice only because hart is also caught by
+# `_existing_assessment_for` first). Overridable via `--max-lookback-seconds`
+# for a supervisor who hits a row that comes back unrecoverable.
+_MAX_LOOKBACK_SECONDS = 60.0
 
 
 def _score_and_band(verdict: dict) -> tuple[float | None, str | None]:
@@ -105,6 +142,46 @@ def _score_and_band(verdict: dict) -> tuple[float | None, str | None]:
     return score, rubric_band(score, stage)
 
 
+def _subject_matches(candidate_subject: object, drop_subject: str | None) -> bool:
+    """Can a sidecar's own ``subject_agent_id`` be trusted to name the drop's subject?
+
+    Fix round 1, FIX 1 — an amendment to the original brief, ruled in: strict
+    equality loses real, recoverable verdicts. The phase-4 prompt never shows
+    the hub its interview partner's real ``agent_id`` — only
+    ``{other_agent_name}`` (``bot_name``, generated as ``{LastName}Bot``) — so
+    a sidecar naming the bot is not a wrong guess, it is the ONLY name the
+    model was ever given for that PI. Measured directly on all 63 production
+    ``opportunity_assessments`` rows: exactly four have a
+    ``raw_verdict->>'subject_agent_id'`` that differs from the stored
+    ``subject_agent_id`` —
+
+        dang    -> dangbot
+        krieger -> kriegerbot
+        lee     -> leebot
+        pearce  -> epearce
+
+    — three of which are the bot-name form and MUST be accepted, and the
+    fourth of which MUST be refused: ``epearce``/``pearce`` are two
+    genuinely different agents (a last-name collision gets a first-initial
+    prefix, ``src/agent/agent.py``'s roster rules), not a naming variant of
+    one. So the match is deliberately narrow: case-folded exact equality, or
+    case-folded equality against ``f"{drop_subject}bot"``. Nothing looser —
+    in particular no substring or prefix check, which is exactly what would
+    also accept ``epearce`` for ``pearce``.
+
+    Returns ``False`` (never raises) for a non-string or empty
+    ``candidate_subject``/``drop_subject`` — the caller already handles "no
+    subject to check" as a refusal, not a crash.
+    """
+    if not isinstance(candidate_subject, str) or not candidate_subject:
+        return False
+    if not drop_subject:
+        return False
+    candidate_folded = candidate_subject.casefold()
+    drop_folded = drop_subject.casefold()
+    return candidate_folded in (drop_folded, f"{drop_folded}bot")
+
+
 def _existing_assessment_for(
     candidates: Iterable[OpportunityAssessment],
     run_id: uuid.UUID,
@@ -121,24 +198,38 @@ def _existing_assessment_for(
     ever written has ``thread_id IS NULL`` — the pre-fix code never populated
     the column at all — so a naive thread-only check would fail to find
     markham's and weeraratna's existing rows and re-write them on a second
-    run. The documented fallback covers exactly that: when an existing row's
-    OWN ``thread_id`` is NULL, match it on ``subject_agent_id`` instead, since
-    a NULL-thread_id row predates this fix and cannot be told apart from a
-    genuinely different interview any other way.
+    run. The fallback covers exactly that: when EITHER side of a candidate
+    pair lacks a ``thread_id`` to key on, match on ``subject_agent_id``
+    instead.
 
-    The fallback is deliberately keyed off the CANDIDATE row's thread_id, not
-    the drop's: if the drop has a known thread_id but no candidate shares it,
-    we must NOT then fall back to matching any old NULL-thread_id row for the
-    same subject — that would resurrect the exact bug this function exists to
-    fix, just from the other direction (a second interview's drop wrongly
-    matching the first interview's pre-fix row).
+    Fix round 1, FIX 6: the fallback checks EITHER side's ``thread_id``, not
+    just the existing row's. Checking only the existing row's left a gap —
+    a drop with ``thread_id IS NULL`` against an existing (thread-keyed) row
+    for the same subject fired neither clause, and a duplicate would be
+    written. Unreachable today (``_persist_assessment`` never writes
+    ``thread_id``, so nothing in this fallback's INPUT can have a real
+    thread_id... except a row THIS SCRIPT wrote, since fix round 1 wrote
+    ``thread_id=drop.thread_id`` — so this becomes reachable the moment two
+    recoverable drops for the same subject appear in one run and the first
+    one's drop happened to carry a thread_id while a later one's did not, or
+    the moment a later task teaches ``_persist_assessment`` to write
+    ``thread_id`` at all (plan task A2.4, out of scope here). Either way it
+    is this function's own invariant to hold, not something to leave
+    depending on what else happens to be true today.
+
+    The fallback still requires an exact ``subject_agent_id`` match — never
+    ``drop.thread_id is not None and row.thread_id != drop.thread_id`` for
+    two DIFFERENT known thread ids, which is a real second interview and
+    must not be skipped (see ``test_a_second_interview_with_the_same_pi_is_not_skipped``).
     """
     for row in candidates:
         if row.simulation_run_id != run_id:
             continue
         if drop.thread_id is not None and row.thread_id == drop.thread_id:
             return row
-        if row.thread_id is None and row.subject_agent_id == drop.subject_agent_id:
+        if row.subject_agent_id == drop.subject_agent_id and (
+            row.thread_id is None or drop.thread_id is None
+        ):
             return row
     return None
 
@@ -151,12 +242,15 @@ def _fallback_llm_log_query(run_id: uuid.UUID, drop: AssessmentDrop):
     ``messages_json``, hundreds of ~30 KB prompts, for three columns' worth of
     actual use.
 
-    Ordered most-recent-first (at or before the drop) so
-    ``_recover_from_llm_logs`` can take the first sidecar whose OWN embedded
-    ``subject_agent_id`` matches the drop's, rather than assuming the
-    chronologically nearest log row belongs to this interview at all — the
-    hub interviews many PIs at once under one ``agent_id``, so "nearest in
-    time" and "same interview" are not the same claim.
+    Bounded above by ``drop.created_at`` (a candidate cannot postdate the
+    drop it explains) and ordered most-recent-first so
+    ``_recover_from_llm_logs`` walks backward in time. The LOWER time bound
+    (``--max-lookback-seconds``, fix round 1 FIX 2) is enforced in
+    ``_recover_from_llm_logs`` instead of here — it is a property of the
+    WALK, independently unit-testable there without a database, and cheap
+    enough at this table's per-run row counts (single digits to low hundreds
+    for one hub agent_id) that pushing it into SQL as well would only be a
+    minor performance nicety, not a correctness requirement.
     """
     return (
         select(LlmCallLog.id, LlmCallLog.created_at, LlmCallLog.response_text)
@@ -171,21 +265,37 @@ def _fallback_llm_log_query(run_id: uuid.UUID, drop: AssessmentDrop):
 
 
 def _recover_from_llm_logs(
-    rows: Iterable[tuple], drop: AssessmentDrop
+    rows: Iterable[tuple],
+    drop: AssessmentDrop,
+    max_lookback_seconds: float = _MAX_LOOKBACK_SECONDS,
 ) -> tuple[dict | None, str | None]:
     """Pick the ``llm_call_logs`` row that is actually THIS interview's sidecar.
 
-    ``rows`` is ``(id, created_at, response_text)`` tuples, most recent first,
-    already filtered to the drop's ``agent_id`` and to at-or-before its
-    ``created_at`` (see ``_fallback_llm_log_query``). The old code took
+    ``rows`` is ``(id, created_at, response_text)`` tuples, most recent
+    first, already filtered to the drop's ``agent_id`` and to at-or-before
+    its ``created_at`` (see ``_fallback_llm_log_query``). The old code took
     whichever of these was simply last in time — "it happened to work on the
     two real rows (log rows 249 ms and 232 ms before their drops) but nothing
-    enforces it" (task brief). A row that parses but whose own
-    ``subject_agent_id`` names a different PI is refused outright rather than
-    returned: recovering the wrong PI's verdict under this drop's identity
-    would be worse than leaving it unrecoverable.
+    enforces it" (task brief).
+
+    TWO independent defences, and both are load-bearing (fix round 1,
+    addendum — measured directly on the nine real recoverable drops in the
+    supervised re-run's window ``(drop.created_at - 60s, drop.created_at]``):
+
+    * A candidate more than ``max_lookback_seconds`` before the drop is
+      skipped outright (FIX 2). Without this, hart's `duplicate_thread_verdict`
+      drop — whose nearest candidate fails to parse — falls through to a
+      272.6s-old SUPERSEDED sidecar and would write it unmarked.
+    * A candidate whose own sidecar names a different subject is skipped
+      (via ``_subject_matches``, F1.4/FIX 1) even when it is inside the
+      window. Without this, ``pienta`` — which has TWO candidates inside the
+      60s window — would take huganir's sidecar, the nearer of the two. The
+      cap alone does not make this check redundant.
     """
-    for log_id, _created_at, response_text in rows:
+    for log_id, created_at, response_text in rows:
+        delta = (drop.created_at - created_at).total_seconds()
+        if delta > max_lookback_seconds:
+            continue
         match = _SIDECAR_RE.search(response_text or "")
         if not match:
             continue
@@ -195,17 +305,66 @@ def _recover_from_llm_logs(
             continue
         if not isinstance(candidate, dict):
             continue
-        if candidate.get("subject_agent_id") != drop.subject_agent_id:
+        if not _subject_matches(candidate.get("subject_agent_id"), drop.subject_agent_id):
             continue
-        return candidate, f"llm_call_logs {log_id}"
+        return candidate, f"llm_call_logs {log_id} ({delta:.1f}s before drop)"
     return None, None
+
+
+def _derive_rubric_stamp(
+    existing: Iterable[OpportunityAssessment],
+) -> tuple[str | None, str | None]:
+    """Stamp from what the RUN ITSELF already wrote (fix round 1, FIX 5).
+
+    The module docstring has always promised to stamp a backfilled row from
+    the run, not from today's ``blackbird_rubric`` import or a hardcoded
+    default — but the code shipped with exactly the latter: CLI defaults of
+    run 8b64a0e0's own stamp (``2.0.0``/``e3ef75f84c48``), applied silently
+    to ANY ``--run``. Measured directly: run 076e80b6 happens to carry the
+    identical stamp (so the bug was invisible there), but 88d81cd8's rows
+    carry NULL stamps — a hardcoded default would have fabricated a rubric
+    version for a run that recorded none.
+
+    ``existing`` is this run's own ``opportunity_assessments`` rows (already
+    fetched once by ``main`` for idempotency — reused here rather than
+    queried again).
+
+      * Every row's pair is ``(None, None)`` (the run recorded no stamp at
+        all) -> return ``(None, None)``. A backfilled row must not invent a
+        stamp its own run never wrote.
+      * Exactly one distinct non-NULL pair -> that IS the run's rubric;
+        return it.
+      * More than one distinct pair -> the run's own rows disagree (a rubric
+        edit mid-run, or a genuinely mixed dataset), and guessing which one
+        applies to an unstamped drop would fabricate a fact nobody recorded.
+        Raises rather than picks one; the caller's job is to refuse to run
+        and tell the operator to pass ``--rubric-version``/``--rubric-hash``
+        explicitly.
+
+    A row is counted as "stamped" if EITHER column is non-NULL — every real
+    write path sets both together, but nothing here should assume that.
+    """
+    pairs = {
+        (row.rubric_version, row.rubric_content_hash)
+        for row in existing
+        if row.rubric_version is not None or row.rubric_content_hash is not None
+    }
+    if not pairs:
+        return None, None
+    if len(pairs) > 1:
+        raise ValueError(
+            "this run's opportunity_assessments carry more than one rubric "
+            f"stamp ({sorted(pairs)}); pass --rubric-version and "
+            "--rubric-hash explicitly rather than guessing which applies"
+        )
+    return next(iter(pairs))
 
 
 def _build_assessment_row(
     verdict: dict,
     drop: AssessmentDrop,
-    rubric_version: str,
-    rubric_hash: str,
+    rubric_version: str | None,
+    rubric_hash: str | None,
 ) -> OpportunityAssessment:
     """Build the row ``_persist_assessment`` would have written for this verdict.
 
@@ -214,9 +373,12 @@ def _build_assessment_row(
     engine's one-row-per-commit writes, a single bad value here would take
     every recovered row down with it, not just its own.
 
-      * ``_bounded_str`` clips the four bounded VARCHAR columns
+      * ``_bounded_str`` clips the bounded VARCHAR columns
         (``funnel_stage``, ``recommendation``, ``confidence``,
-        ``channel_name``) instead of letting an over-long LLM-sourced value
+        ``channel_name``, and — fix round 1, FIX 5 — ``rubric_version``/
+        ``rubric_content_hash``, both ``String(20)`` and, unlike the other
+        four, OPERATOR-sourced via ``--rubric-version``/``--rubric-hash``
+        rather than model-sourced) instead of letting an over-long value
         raise ``StringDataRightTruncation`` at commit.
       * ``_normalize_gating`` enforces the tri-state
         ``met``/``not_met``/``unconfirmed`` contract, dropping (not
@@ -275,8 +437,12 @@ def _build_assessment_row(
         derisking_milestones=milestones if isinstance(milestones, list) else None,
         rationale=_str_or_none(verdict.get("rationale")),
         raw_verdict=verdict,
-        rubric_version=rubric_version,
-        rubric_content_hash=rubric_hash,
+        # Fix round 1, FIX 5: guarded the same way as every other bounded
+        # VARCHAR on this row, even though these two are operator- rather
+        # than model-sourced — an operator's --rubric-version typo is the
+        # same StringDataRightTruncation risk as an over-long recommendation.
+        rubric_version=_bounded_str(rubric_version, 20),
+        rubric_content_hash=_bounded_str(rubric_hash, 20),
         # F1.2 — see the docstring above. Explicit, not omitted: this row's
         # floor never ran, so it cannot claim a verified (False/NULL) panel,
         # and must not guess an owed/not-owed panel_owed either. The
@@ -291,11 +457,28 @@ async def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--run", required=True, help="simulation_run_id to backfill")
     ap.add_argument("--dry-run", action="store_true")
-    # Stamped from the RUN, not from whatever blackbird_rubric imports now —
-    # see the module docstring. Defaults are run 8b64a0e0's stamps.
-    ap.add_argument("--rubric-version", default="2.0.0")
-    ap.add_argument("--rubric-hash", default="e3ef75f84c48")
+    # Fix round 1, FIX 5: no more hardcoded default — see _derive_rubric_stamp.
+    # Both or neither: a lone override would let one column drift stamped
+    # while the other is derived, defeating the whole point of a single pair.
+    ap.add_argument(
+        "--rubric-version", default=None,
+        help="Override the derived stamp. Must be given together with "
+             "--rubric-hash; if omitted, derived from this run's own "
+             "opportunity_assessments rows.",
+    )
+    ap.add_argument(
+        "--rubric-hash", default=None,
+        help="Override the derived stamp. Must be given together with "
+             "--rubric-version.",
+    )
+    ap.add_argument(
+        "--max-lookback-seconds", type=float, default=_MAX_LOOKBACK_SECONDS,
+        help="How far back the llm_call_logs fallback may walk for a "
+             "matching sidecar before giving up (default: %(default)s).",
+    )
     args = ap.parse_args()
+    if (args.rubric_version is None) != (args.rubric_hash is None):
+        ap.error("--rubric-version and --rubric-hash must be given together")
     run_id = uuid.UUID(args.run)
 
     settings = get_settings()
@@ -318,12 +501,25 @@ async def main() -> int:
         # appended to this same list below (not committed until the very end),
         # so two recoverable drops for the same interview within ONE run are
         # still caught by `_existing_assessment_for` without relying on
-        # autoflush semantics.
+        # autoflush semantics. Also doubles as `_derive_rubric_stamp`'s input.
         existing = list((await db.execute(
             select(OpportunityAssessment).where(
                 OpportunityAssessment.simulation_run_id == run_id
             )
         )).scalars().all())
+
+        if args.rubric_version is not None:
+            rubric_version, rubric_hash = args.rubric_version, args.rubric_hash
+        else:
+            try:
+                rubric_version, rubric_hash = _derive_rubric_stamp(existing)
+            except ValueError as exc:
+                logger.error("%s", exc)
+                return 1
+        logger.info(
+            "rubric stamp for this run: version=%r hash=%r",
+            rubric_version, rubric_hash,
+        )
 
         for drop in drops:
             if _existing_assessment_for(existing, run_id, drop) is not None:
@@ -343,11 +539,14 @@ async def main() -> int:
                 rows = (await db.execute(
                     _fallback_llm_log_query(run_id, drop)
                 )).all()
-                verdict, source = _recover_from_llm_logs(rows, drop)
+                verdict, source = _recover_from_llm_logs(
+                    rows, drop, args.max_lookback_seconds
+                )
                 if verdict is None:
                     logger.warning(
-                        "no sidecar in llm_call_logs matched subject %s for %s",
-                        drop.subject_agent_id, drop.id,
+                        "no sidecar in llm_call_logs matched subject %s for %s "
+                        "within %.0fs",
+                        drop.subject_agent_id, drop.id, args.max_lookback_seconds,
                     )
                     unrecoverable += 1
                     continue
@@ -356,9 +555,7 @@ async def main() -> int:
                 unrecoverable += 1
                 continue
 
-            row = _build_assessment_row(
-                verdict, drop, args.rubric_version, args.rubric_hash
-            )
+            row = _build_assessment_row(verdict, drop, rubric_version, rubric_hash)
             logger.info(
                 "%s %s -> %s (score %s, band %s) from %s",
                 "WOULD WRITE" if args.dry_run else "WRITE",
@@ -366,9 +563,13 @@ async def main() -> int:
                 f"{row.weighted_score:.2f}" if row.weighted_score is not None else "n/a",
                 row.band, source,
             )
+            # Fix round 1, FIX 7: append regardless of --dry-run, so a
+            # preview over two recoverable drops for the SAME interview
+            # predicts what a real run would do (write the first, skip the
+            # second) instead of showing "WOULD WRITE" for both.
+            existing.append(row)
             if not args.dry_run:
                 db.add(row)
-                existing.append(row)
                 written += 1
 
         if not args.dry_run and written:
@@ -383,4 +584,5 @@ async def main() -> int:
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     raise SystemExit(asyncio.run(main()))
