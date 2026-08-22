@@ -709,6 +709,8 @@ class AgentSlackClient:
         free). Returns None on any failure — callers degrade gracefully
         (design D16), they never treat a missing permalink as a reason to
         skip a post entirely."""
+        if not self._client:
+            return None
         try:
             resp = self._api(
                 "chat_getPermalink", channel=channel_id, message_ts=message_ts,

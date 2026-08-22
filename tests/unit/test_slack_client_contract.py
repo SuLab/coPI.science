@@ -1062,3 +1062,11 @@ async def test_aget_permalink_wraps_the_sync_call():
     client._client = _Stub()
     result = await client.aget_permalink("C1", "999.000")
     assert result == "https://example.slack.com/archives/C1/p999"
+
+
+def test_get_permalink_returns_none_when_disconnected():
+    from src.agent.slack_client import AgentSlackClient
+
+    client = AgentSlackClient(agent_id="hub", bot_token="xoxb-x")
+    # client._client is None by default (not connected)
+    assert client.get_permalink("C1", "123.000") is None
