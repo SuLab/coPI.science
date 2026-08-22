@@ -574,6 +574,83 @@ def test_a_leading_hyphen_can_never_reach_uspto():
     assert patents._tokenise("-BRAF --1 kinase") == ["BRAF", "1", "kinase"]
 
 
+def test_the_character_class_still_blocks_a_leading_dash():
+    # The transliteration step folds six Unicode dash codepoints to ASCII "-"
+    # BEFORE tokenising, which is exactly the move that could have opened this
+    # hole: a caller (or a model quoting a PDF) writing U+2212 MINUS SIGN in
+    # front of a term must not end up with ODP's NOT operator in the query.
+    # The character class stays ASCII and a token can still only START on an
+    # alphanumeric, so folding the dash changes what a hyphen JOINS and never
+    # what a term BEGINS with.
+    assert patents._tokenise("−BRAF ––1 kinase") == [
+        "BRAF", "1", "kinase",
+    ]
+    assert patents._tokenise("‐‑‒–—―－TFEB") == ["TFEB"]
+
+
+def test_a_greek_letter_is_transliterated_not_dropped():
+    """The specific term must not collapse to a one-letter title search.
+
+    `Qβ malaria epitope` did NOT lose its specific term to the ASCII-only
+    character class — `Q` is ASCII, so the tokens were ['Q', 'malaria',
+    'epitope'] and `_salience('Q')` ranked it FIRST, making the narrowest
+    backoff tier a title search for the single letter Q. Live 2026-08-22:
+    `inventionTitle:(Q)` -> HTTP 200, count 1,862 — ten arbitrary filings
+    offered to the hub as adjacent prior art.
+
+    Widening the character class would have been worse, not better: ODP cannot
+    represent non-ASCII at all (`inventionTitle:(β)`, `(Qβ)` and `("Qβ")` all
+    return HTTP 404, which this module maps to "searched, matched nothing"), so
+    every tier would have 404'd and the hub would have been told "No US filings
+    matched this query" — fake novelty, which CLAUDE.md forbids outright.
+    Patent titles spell the letter out, so that is what is searched:
+    `inventionTitle:(beta)` -> count 13,640.
+    """
+    assert patents._tokenise("Qβ malaria epitope") == ["Qbeta", "malaria", "epitope"]
+    # ...and it is still the most specific term, so the narrowest tier is IT and
+    # not a stray letter.
+    assert patents._tiers(patents._tokenise("Qβ malaria epitope"))[-1] == ["Qbeta"]
+    assert patents._tokenise("TGF-β1 signalling") == ["TGF", "beta1", "signalling"]
+    # Uppercase keeps its case, so `_salience`'s "this is a symbol, not prose"
+    # bonus survives the rewrite.
+    assert patents._tokenise("IFN-Γ release") == ["IFN", "Gamma", "release"]
+    # The micro sign (U+00B5) is a different codepoint from GREEK SMALL LETTER
+    # MU (U+03BC) and reaches us from unit strings; both spell out.
+    assert patents._tokenise("µM μm") == ["muM", "mum"]
+    # Accented Latin folds rather than vanishing: "Ångström" must not become
+    # "ngstr m".
+    assert patents._tokenise("Ångström resolution") == ["Angstrom", "resolution"]
+
+
+def test_a_unicode_hyphen_symbol_is_not_split():
+    # U+2011 NON-BREAKING HYPHEN is what a PDF-derived query carries, and the
+    # SYMBOL-N protection in `_Q_TOKEN` is written against ASCII "-" only — so
+    # the measured `LOX‑1` case tokenised as ['LOX', '1'] and backed off to the
+    # numeral, the very bug the hyphen rule was added to fix. NFKC does NOT fold
+    # U+2010/2011/2013/2014 to ASCII "-", which is why this is an explicit
+    # translation table rather than a normalisation form.
+    assert patents._tokenise("LOX‑1 myeloid cells") == ["LOX-1", "myeloid", "cells"]
+    assert patents._q_term("LOX-1") == '"LOX-1"'
+    assert patents._tokenise("GDF–15 antibody") == ["GDF-15", "antibody"]
+
+
+def test_a_word_operator_never_becomes_a_search_term():
+    """`AND` / `OR` / `NOT` are query syntax, not title words.
+
+    `_q_term` quotes only hyphenated tokens, so a bare `NOT` survived
+    tokenisation — and `_salience("NOT")` (uppercase, 3 chars) outranks all
+    prose, so it could become a whole backoff tier on its own. Live 2026-08-22:
+    `inventionTitle:(TFEB AND NOT)` -> HTTP 200, count 0, which this tool
+    renders as "No US filings matched this query": clean novelty out of a syntax
+    accident. `and`/`or` were already in `_GENERIC`, which only affects RANKING —
+    tier 1 is the query verbatim, which is where the damage was.
+    """
+    assert patents._tokenise("TFEB AND NOT melanoma") == ["TFEB", "melanoma"]
+    assert patents._tokenise("BRAF or MEK") == ["BRAF", "MEK"]
+    for tier in patents._tiers(patents._tokenise("TFEB AND NOT melanoma")):
+        assert "NOT" not in tier and "AND" not in tier
+
+
 def test_an_all_digit_token_scores_below_a_gene_symbol():
     # H3, root cause half 2: _salience awarded +3 for containing a digit AND +2 for
     # `not token.islower()` — and a pure-digit token satisfies BOTH, since
@@ -791,6 +868,93 @@ async def test_singular_broadened_term_reads_naturally(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_the_scope_note_reads_as_prose(monkeypatch):
+    # `truncation_note` used to end in "\n\n" and was interpolated straight
+    # after a full stop, producing
+    #   "...for TFEB AND melanoma.COMPLETENESS: showing..."
+    # and a trailing "\n\n\n\n". The sentence a model reads is the disclosure;
+    # a disclosure that reads as a typo is one it can discount.
+    from src.agent import tools as tools_mod
+    result = PriorArtResult([], ["TFEB", "melanoma"], 2, total_count=2070)
+    monkeypatch.setattr(tools_mod, "search_prior_art", lambda q, limit=10: _fake(result))
+    out = await _execute_search_prior_art("TFEB melanoma")
+    assert "TFEB AND melanoma. COMPLETENESS:" in out
+    assert ".COMPLETENESS" not in out
+    assert "\n\n\n" not in out
+    assert out.endswith("No US filings matched this query.")
+
+    # ...and with nothing to disclose the sentence must not gain a stray space
+    # before its own paragraph break.
+    plain = PriorArtResult([], ["TFEB", "melanoma"], 2)
+    monkeypatch.setattr(tools_mod, "search_prior_art", lambda q, limit=10: _fake(plain))
+    out = await _execute_search_prior_art("TFEB melanoma")
+    assert "searched titles for TFEB AND melanoma.\n\n" in out
+
+
+@pytest.mark.asyncio
+async def test_a_rewritten_query_is_disclosed_to_the_model(monkeypatch):
+    # The model judges the hits against the phrase it thinks it searched. When
+    # transliteration or operator-dropping changed that phrase, the note has to
+    # say so — otherwise "Qbeta" hits read as a clean answer about "Qβ".
+    from src.agent import tools as tools_mod
+    result = PriorArtResult(
+        [], ["Qbeta", "malaria"], 2,
+        dropped_or_rewritten=("Qβ→Qbeta", "NOT (dropped — a query operator)"),
+    )
+    monkeypatch.setattr(tools_mod, "search_prior_art", lambda q, limit=10: _fake(result))
+    out = await _execute_search_prior_art("Qβ malaria NOT vaccine")
+    assert "Qβ→Qbeta" in out
+    assert "NOT (dropped — a query operator)" in out
+    assert "\n\n\n" not in out
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_total_terms_is_not_the_whitespace_count(monkeypatch):
+    """`broadened` is `len(terms_used) < total_terms`, so `total_terms` must be
+    the count of TOKENS the search was built from — not the caller's
+    whitespace-split word count.
+
+    `TFEB / TFE3 fusion` whitespace-splits to 4 against 3 tokens, so a
+    whitespace-derived total would make tier 1 — the query exactly as asked —
+    report `broadened=True` and emit "your full phrase matched no title" about a
+    search that was never broadened. A false disclosure is not a safe default;
+    it teaches the model to discount the real ones.
+    """
+    monkeypatch.setattr(patents, "_api_key", lambda: "k")
+    respx.post(patents.SEARCH_URL).mock(return_value=httpx.Response(200, json=_ODP_ONE_HIT))
+    result = await patents.search_prior_art("TFEB / TFE3 fusion")
+    assert result.terms_used == ["TFEB", "TFE3", "fusion"]
+    assert result.total_terms == 3
+    assert result.broadened is False
+    # The dropped operator is not a term either, so it cannot inflate the total.
+    patents.clear_prior_art_cache()
+    result = await patents.search_prior_art("TFEB AND TFE3 fusion")
+    assert result.total_terms == 3
+    assert result.broadened is False
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_the_query_sent_to_uspto_is_pure_ascii(monkeypatch):
+    # ODP answers 404 to any non-ASCII title query and this module maps 404 to
+    # "searched, matched nothing" — so a single stray codepoint would be
+    # reported to the hub as novelty. Nothing non-ASCII may leave here.
+    monkeypatch.setattr(patents, "_api_key", lambda: "k")
+    captured = []
+
+    def _capture(request):
+        captured.append(json.loads(request.content)["q"])
+        return httpx.Response(200, json=_ODP_ONE_HIT)
+
+    respx.post(patents.SEARCH_URL).mock(side_effect=_capture)
+    result = await patents.search_prior_art("Qβ malaria epitope")
+    assert captured[0] == "applicationMetaData.inventionTitle:(Qbeta AND malaria AND epitope)"
+    assert captured[0].isascii()
+    assert result.dropped_or_rewritten == ("Qβ→Qbeta",)
+
+
+@pytest.mark.asyncio
 async def test_empty_query_is_not_reported_as_a_negative_result(monkeypatch):
     # search_prior_art("") / an all-punctuation query short-circuits to
     # PriorArtResult(hits=[], terms_used=[], total_terms=0) WITHOUT ever calling
@@ -813,3 +977,7 @@ def test_tool_description_demands_a_short_specific_query():
     text = spec["description"] + spec["input_schema"]["properties"]["query"]["description"]
     assert "2-4" in text
     assert "title" in text.lower()
+    # The preventive half of dropping AND/OR/NOT from the token stream: the
+    # description is the only place the model is told the terms are ANDed for it,
+    # so without this it has every reason to write the operator itself.
+    assert "AND/OR/NOT" in text

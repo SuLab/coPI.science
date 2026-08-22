@@ -24,6 +24,7 @@ import asyncio
 import html
 import logging
 import re
+import unicodedata
 from dataclasses import dataclass
 from typing import Any
 
@@ -53,10 +54,119 @@ SEARCH_URL = "https://api.uspto.gov/api/v1/patent/applications/search"
 # was ['441524'] and of "TARP gamma-8 ..." was ['8'].
 _Q_TOKEN = re.compile(r"[A-Za-z0-9]+(?:-[0-9][A-Za-z0-9]*)*")
 
+# Greek spelled out, the way patent titles write it — this module's own comments
+# above already cite MIP-3alpha and gamma-8, and live 2026-08-22
+# `inventionTitle:(beta)` returns 13,640 while `inventionTitle:(alpha AND
+# estrogen)` returns 112.
+#
+# This is here INSTEAD of widening `_Q_TOKEN` to accept non-ASCII, which is the
+# obvious fix and the wrong one. ODP cannot represent non-ASCII at all: probed
+# live, `inventionTitle:(β)`, `(Qβ)` and `("Qβ")` all return HTTP 404, and
+# `_search_titles` maps 404 to `([], 0)` = "searched, matched nothing". Widening
+# the class would therefore 404 every tier and report "No US filings matched
+# this query" — fake novelty, which is the one thing this tool must never
+# manufacture ("An empty title search is never FTO").
+#
+# What the ASCII-only class actually cost was not the term but its SPECIFICITY:
+# for `Qβ malaria epitope` the tokens were ['Q', 'malaria', 'epitope'] — `Q` is
+# ASCII — and `_salience('Q')` ranks it first, so the narrowest backoff tier was
+# a one-letter title search. Live: `inventionTitle:(Q)` -> HTTP 200, count
+# 1,862, i.e. ten arbitrary filings offered to the hub as adjacent prior art.
+#
+# Case is preserved (Γ -> "Gamma", γ -> "gamma") so `_salience`'s "this is a
+# symbol, not prose" bonus survives the rewrite. U+00B5 MICRO SIGN is listed
+# separately from U+03BC GREEK SMALL LETTER MU: they are different codepoints
+# and unit strings carry the first one.
+_GREEK_TO_ASCII = {
+    "α": "alpha", "β": "beta", "γ": "gamma", "δ": "delta", "ε": "epsilon",
+    "κ": "kappa", "λ": "lambda", "μ": "mu", "µ": "mu", "σ": "sigma",
+    "ς": "sigma", "τ": "tau", "ω": "omega",
+    "Α": "Alpha", "Β": "Beta", "Γ": "Gamma", "Δ": "Delta", "Ε": "Epsilon",
+    "Κ": "Kappa", "Λ": "Lambda", "Μ": "Mu", "Σ": "Sigma", "Τ": "Tau",
+    "Ω": "Omega",
+}
+
+# Unicode dashes -> ASCII "-", so `_Q_TOKEN`'s SYMBOL-N protection (which is
+# written against ASCII "-" only) still sees the join. An EXPLICIT table rather
+# than NFKC, because NFKC does not fold U+2010/2011/2013/2014 to ASCII at all —
+# so the measured `LOX‑1` (U+2011, the form a PDF-derived query carries)
+# tokenised as ['LOX', '1'] and backed off to the numeral, the exact bug the
+# hyphen rule was added to fix.
+#
+# This cannot open an injection: the folded "-" is still only ever a token
+# CONTINUATION, because `_Q_TOKEN` can only START a match on an alphanumeric.
+# A leading "−" (U+2212) becomes a leading "-" and is discarded the same way an
+# ASCII one always was — pinned by
+# `test_the_character_class_still_blocks_a_leading_dash`.
+_DASH_TO_ASCII = dict.fromkeys(
+    (0x2010, 0x2011, 0x2012, 0x2013, 0x2014, 0x2015, 0x2212, 0xFF0D), "-"
+)
+
+_TRANSLITERATE = {
+    **{ord(k): v for k, v in _GREEK_TO_ASCII.items()},
+    **_DASH_TO_ASCII,
+}
+
+# ODP's boolean operators, which are SYNTAX and never search terms. `_q_term`
+# quotes only hyphenated tokens, so a bare `NOT` survived tokenisation — and
+# `_salience("NOT")` (uppercase, 3 chars) outranks all prose, so it could become
+# a whole backoff tier of its own. Live: `inventionTitle:(TFEB AND NOT)` ->
+# HTTP 200, count 0, which `_execute_search_prior_art` renders as "No US filings
+# matched this query": clean novelty out of a syntax accident. `and`/`or` were
+# already in `_GENERIC`, but that only affects RANKING — tier 1 is the query
+# verbatim, which is where the damage was, so they are dropped from the token
+# stream instead.
+_QUERY_OPERATORS = frozenset({"and", "or", "not"})
+
+
+def _to_ascii(text: str) -> str:
+    """Fold one chunk of caller text to ASCII: Greek spelled out, Unicode dashes
+    folded, combining marks stripped from accented Latin (Ångström -> Angstrom).
+
+    NFKD runs AFTER the table so the table sees the composed codepoints it
+    names; anything still non-ASCII afterwards (CJK, an arrow, an emoji) is left
+    alone and is discarded by `_Q_TOKEN` as it always was.
+    """
+    folded = text.translate(_TRANSLITERATE)
+    return "".join(
+        ch for ch in unicodedata.normalize("NFKD", folded)
+        if not unicodedata.combining(ch)
+    )
+
+
+def _prepare(query: str) -> tuple[list[str], tuple[str, ...]]:
+    """Title-search tokens, plus a note for everything the caller's text had to
+    have done to it to get there. Never raises; may return ``([], ...)``.
+
+    The notes exist because the model judges the hits against the phrase it
+    THINKS it searched: `Qbeta` results read as a clean answer about `Qβ` unless
+    something says otherwise. They are carried on
+    ``PriorArtResult.dropped_or_rewritten`` and rendered by
+    ``src/agent/tools.py::_scope_note``.
+
+    Transliteration is per whitespace-chunk and re-joined, not applied to the
+    whole string at once, so a chunk and its rewrite always line up — NFKD folds
+    U+00A0 to a space, which would otherwise change the chunk count mid-compare.
+    """
+    rewritten: list[str] = []
+    notes: list[str] = []
+    for chunk in (query or "").split():
+        folded = _to_ascii(chunk)
+        if folded != chunk:
+            notes.append(f"{chunk}→{folded}")
+        rewritten.append(folded)
+    tokens: list[str] = []
+    for token in _Q_TOKEN.findall(" ".join(rewritten)):
+        if token.lower() in _QUERY_OPERATORS:
+            notes.append(f"{token} (dropped — a query operator, not a title word)")
+            continue
+        tokens.append(token)
+    return tokens, tuple(notes)
+
 
 def _tokenise(query: str) -> list[str]:
     """Split caller text into title-search tokens. Never raises; may return []."""
-    return _Q_TOKEN.findall(query or "")
+    return _prepare(query)[0]
 
 
 def _q_term(term: str) -> str:
@@ -86,6 +196,20 @@ class PriorArtResult:
     ``total_terms`` the query was broadened because the full phrase matched nothing,
     and the caller MUST say so rather than presenting the result as on-point.
 
+    ``total_terms`` is the number of TOKENS the search was built from, and stays
+    that. It is deliberately NOT the caller's whitespace-split word count:
+    ``TFEB / TFE3 fusion`` splits to 4 against 3 tokens, so a whitespace-derived
+    total would make tier 1 — the query exactly as asked — report
+    ``broadened=True`` and claim "your full phrase matched no title" about a
+    search that was never broadened. What the caller's text lost on the way to
+    those tokens is reported separately, by ``dropped_or_rewritten``.
+
+    ``dropped_or_rewritten`` names every piece of the caller's text that had to
+    change before it could be sent (see ``_prepare``): a Greek letter spelled
+    out, a Unicode dash folded, a boolean operator dropped. Empty on the ordinary
+    query. The caller MUST surface it — the model judges the hits against the
+    phrase it thinks it searched.
+
     ``total_count`` is ODP's own ``count`` for the tier that produced ``hits`` —
     how many filings matched, as opposed to how many were returned — or ``None``
     when the response carried no count. ``hits`` is only ever a page (``limit``,
@@ -100,6 +224,7 @@ class PriorArtResult:
     terms_used: list[str]
     total_terms: int
     total_count: int | None = None
+    dropped_or_rewritten: tuple[str, ...] = ()
 
     @property
     def broadened(self) -> bool:
@@ -121,14 +246,18 @@ class PriorArtResult:
 
         Lives here rather than in the caller so the number and the sentence about
         it cannot drift apart. ``src/agent/tools.py::_scope_note`` is the intended
-        consumer.
+        consumer, and it owns the SPACING: this used to end in ``\\n\\n``, which
+        that caller interpolated straight after a full stop and produced
+        "...for TFEB AND melanoma.COMPLETENESS: showing..." plus a trailing
+        ``\\n\\n\\n\\n``. A disclosure that reads as a typo is one a model can
+        discount.
         """
         if not self.truncated:
             return ""
         return (
             f"COMPLETENESS: showing the {len(self.hits)} most-recently-filed of "
             f"{self.total_count} filings matching at this breadth. The absence of a "
-            f"close match below is NOT evidence that there isn't one.\n\n"
+            f"close match below is NOT evidence that there isn't one."
         )
 
 
@@ -457,15 +586,29 @@ def clear_prior_art_cache() -> None:
     _CACHE.clear()
 
 
-def _memo_copy(result: PriorArtResult) -> PriorArtResult:
+def _memo_copy(
+    result: PriorArtResult, dropped_or_rewritten: tuple[str, ...] | None = None
+) -> PriorArtResult:
     """Hand out a copy. ``hits`` is a list of MUTABLE dicts and a cached result is
     shared by every later caller in the run, so returning the stored object would
-    let one caller's edit become another's input."""
+    let one caller's edit become another's input.
+
+    ``dropped_or_rewritten`` is overridable because it describes THIS caller's
+    text, not the cached search: the memo is keyed on the token multiset, and
+    ``Qβ malaria`` and ``Qbeta malaria`` produce the same tokens from different
+    words. Serving the stored note to the second caller would tell it its query
+    was rewritten when it was not.
+    """
     return PriorArtResult(
         hits=[dict(h) for h in result.hits],
         terms_used=list(result.terms_used),
         total_terms=result.total_terms,
         total_count=result.total_count,
+        dropped_or_rewritten=(
+            result.dropped_or_rewritten
+            if dropped_or_rewritten is None
+            else dropped_or_rewritten
+        ),
     )
 
 
@@ -481,9 +624,10 @@ async def search_prior_art(query: str, limit: int = 10) -> PriorArtResult | None
       endpoint was unreachable / errored / rate-limited / returned unparseable JSON.
     - ``PriorArtResult``   — the search ran. ``.hits`` may be empty (genuinely no
       title match at the narrowest breadth tried). ``.broadened`` tells the caller
-      the query was widened and the hits may be adjacent rather than on point, and
+      the query was widened and the hits may be adjacent rather than on point,
       ``.truncation_note`` tells it whether ``.hits`` is the whole match set or
-      just the most-recently-filed page of it.
+      just the most-recently-filed page of it, and ``.dropped_or_rewritten``
+      tells it which of its own words are not what was actually searched.
 
     Every ODP request is paced (``_pace``) and repeated queries are served from a
     per-run memo (``_CACHE``), so the request count is bounded by the number of
@@ -493,15 +637,17 @@ async def search_prior_art(query: str, limit: int = 10) -> PriorArtResult | None
     if not key:
         logger.info("[patents] no USPTO API key configured — cannot search")
         return None
-    tokens = _tokenise(query)
+    tokens, rewrites = _prepare(query)
     if not tokens:
-        return PriorArtResult(hits=[], terms_used=[], total_terms=0)
+        return PriorArtResult(
+            hits=[], terms_used=[], total_terms=0, dropped_or_rewritten=rewrites
+        )
 
     cache_key = (limit, tuple(sorted(tokens)))
     cached = _CACHE.get(cache_key)
     if cached is not None:
         logger.info("[patents] cache hit for %s (%d hits)", sorted(tokens), len(cached.hits))
-        return _memo_copy(cached)
+        return _memo_copy(cached, rewrites)
 
     tiers = _tiers(tokens)
     hits: list[dict[str, Any]] = []
@@ -533,6 +679,7 @@ async def search_prior_art(query: str, limit: int = 10) -> PriorArtResult | None
         terms_used=list(terms_used),
         total_terms=len(tokens),
         total_count=total_count,
+        dropped_or_rewritten=rewrites,
     )
     if len(_CACHE) < _CACHE_MAX:
         _CACHE[cache_key] = result

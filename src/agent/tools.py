@@ -93,6 +93,8 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
             "A long descriptive query cannot match any real patent title and will come "
             "back empty no matter how crowded the field is. Good: 'TFEB melanoma'. "
             "Bad: 'TFEB inhibitor nuclear translocation melanoma BRAF resistance'. "
+            "Your terms are ANDed for you: do NOT write AND/OR/NOT, which are "
+            "query syntax and are dropped rather than searched. "
             "US filings only — absence of a hit is NOT proof of novelty or FTO."
         ),
         "input_schema": {
@@ -427,15 +429,41 @@ _PATENT_NO_QUERY = (
 )
 
 
+def _rewrite_note(result: "PriorArtResult") -> str:
+    """Name the caller's own words that are not what was searched, or "".
+
+    The model judges the hits against the phrase it THINKS it sent, so a silent
+    rewrite is a disclosure gap rather than a cosmetic one: `Qbeta` results read
+    as a clean answer about `Qβ`, and a dropped `NOT` turns a syntax accident
+    into apparent novelty. See ``src/services/patents.py::_prepare``.
+    """
+    if not result.dropped_or_rewritten:
+        return ""
+    return (
+        "REWRITTEN: the USPTO title index is ASCII-only and treats AND/OR/NOT as "
+        "syntax, so your query text was changed before it was sent — "
+        + "; ".join(result.dropped_or_rewritten)
+        + ". Judge the filings below against the terms named above, not against "
+        "your original wording."
+    )
+
+
 def _scope_note(result: "PriorArtResult") -> str:
-    """Tell the model what breadth actually produced this answer. A broadened
-    search must never be read as an on-point clean result.
+    """Tell the model what breadth actually produced this answer, and how much of
+    its own query survived. A broadened search must never be read as an on-point
+    clean result.
 
     Precondition: ``result.terms_used`` is non-empty. The only caller,
     ``_execute_search_prior_art``, already short-circuits an empty ``terms_used`` to
     ``_PATENT_NO_QUERY`` before this is ever called, so that case is asserted here
     rather than handled — a silent `return ""` would mask a real bug (a caveat posted
     with no scope disclosure) instead of failing loudly.
+
+    Assembled by joining the sentences that apply, rather than interpolating them:
+    the previous form ran ``truncation_note`` straight onto a full stop and
+    produced "...for TFEB AND melanoma.COMPLETENESS: showing..." with a trailing
+    ``\\n\\n\\n\\n``, because that property already ended in ``\\n\\n``. It no
+    longer does; spacing is decided here, once, for all three sentences.
     """
     assert result.terms_used, "caller must filter empty terms_used before calling _scope_note"
     terms = " AND ".join(result.terms_used)
@@ -446,14 +474,22 @@ def _scope_note(result: "PriorArtResult") -> str:
             if n == 1
             else f"the {n} most specific of your {result.total_terms} terms ({terms})"
         )
-        return (
+        scope = (
             f"SCOPE: your full phrase matched no title, so this searched {narrowed}. "
             f"That is a BROADER search than you asked for — any hits "
             f"may be adjacent rather than on point, and an empty result at this "
             f"breadth is the strongest negative this tool can give you (still not FTO)."
-            f"{result.truncation_note}\n\n"
         )
-    return f"SCOPE: searched titles for {terms}.{result.truncation_note}\n\n"
+    else:
+        scope = f"SCOPE: searched titles for {terms}."
+    return (
+        " ".join(
+            part
+            for part in (scope, result.truncation_note, _rewrite_note(result))
+            if part
+        )
+        + "\n\n"
+    )
 
 
 async def _execute_search_prior_art(query: str) -> str:
