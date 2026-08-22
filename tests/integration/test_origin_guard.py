@@ -395,3 +395,61 @@ async def test_the_refusal_body_is_the_string_the_e2e_probe_matches_on(
     r = await client_without_origin.post("/logout", headers=auth_headers(user.id))
     assert r.status_code == 403
     assert "Cross-site request refused" in r.text, r.text
+
+
+async def test_an_opaque_origin_is_not_rescued_by_a_referer(
+    client_without_origin, db_session
+):
+    """``Origin: null`` may be rescued by ``Sec-Fetch-Site`` and by nothing else.
+
+    ``null`` is a header the browser DID send, carrying an opaque origin — it is
+    an answer, not a missing header, and it is the answer a sandboxed
+    ``<iframe>`` gets. So it does not fall through to the Referer check the way
+    an absent Origin does.
+
+    That distinction is not a formality:
+
+    * It rescues nobody. The users the ``Sec-Fetch-Site`` path exists for are on
+      a ``no-referrer`` policy — they send Origin: null AND no Referer, so a
+      Referer fallback never fires for them anyway.
+    * The shape that WOULD produce "opaque origin plus a Referer on our own
+      origin" is a sandboxed iframe pointed at one of our own pages, and the
+      only thing standing in its way today is nginx's ``X-Frame-Options: DENY``
+      — a header set in a different tier's config file. This guard's
+      correctness must not depend on that.
+    """
+    user = await factories.make_user(db_session)
+    await db_session.flush()
+
+    r = await client_without_origin.post(
+        "/logout",
+        headers={
+            **auth_headers(user.id),
+            "Origin": "null",
+            "Referer": f"{_own_origin()}/profile",
+        },
+    )
+    assert r.status_code == 403, r.text
+    assert not _session_was_cleared(r), "an opaque origin was rescued by its Referer"
+
+
+async def test_an_opaque_origin_with_sec_fetch_site_is_still_allowed(
+    client_without_origin, db_session
+):
+    """The control for the test above: closing the Referer path must not close
+    the ``Sec-Fetch-Site`` path that the availability fix depends on, including
+    when a Referer happens to be present as well."""
+    user = await factories.make_user(db_session)
+    await db_session.flush()
+
+    r = await client_without_origin.post(
+        "/logout",
+        headers={
+            **auth_headers(user.id),
+            "Origin": "null",
+            "Referer": f"{_own_origin()}/profile",
+            "Sec-Fetch-Site": "same-origin",
+        },
+    )
+    assert r.status_code == 302, r.text
+    assert _session_was_cleared(r)

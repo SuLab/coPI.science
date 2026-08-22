@@ -124,7 +124,9 @@ class OriginGuardMiddleware(BaseHTTPMiddleware):
        ``Sec-Fetch-Site`` says otherwise;
     2. failing that, ``Sec-Fetch-Site: same-origin`` — and ONLY
        ``same-origin`` (see ``SEC_FETCH_SAME_ORIGIN``);
-    3. failing that, the origin component of ``Referer``.
+    3. failing that, the origin component of ``Referer`` — but ONLY when there
+       was no ``Origin`` header at all. An ``Origin: null`` has already had its
+       one chance at step 2 and is refused here.
 
     Anything else is a 403.
 
@@ -150,11 +152,13 @@ class OriginGuardMiddleware(BaseHTTPMiddleware):
         origin_raw = request.headers.get("origin")
         fetch_site = (request.headers.get("sec-fetch-site") or "").strip().lower()
 
-        # A literal "null" Origin is a real header with an opaque value, not a
-        # missing one: sandboxed iframes, data: URLs and `no-referrer` browsers
-        # all send it. It can never match, so it is treated as "no usable
-        # Origin" and the weaker signals below get their turn.
-        has_origin = origin_raw is not None and origin_raw.strip().lower() != "null"
+        # A literal "null" Origin is a real header carrying an OPAQUE origin,
+        # not a missing header: sandboxed iframes, data: URLs and
+        # `no-referrer` browsers all send it. It can never match, but it is
+        # also not the same state as "the browser sent no Origin at all", and
+        # the two are handled differently below.
+        origin_is_opaque = origin_raw is not None and origin_raw.strip().lower() == "null"
+        has_origin = origin_raw is not None and not origin_is_opaque
 
         if expected is None:
             # Misconfigured base_url. Fail closed rather than compare equal to
@@ -166,7 +170,7 @@ class OriginGuardMiddleware(BaseHTTPMiddleware):
             #    same-origin, so the two signals can never be played against
             #    each other — defence in depth, and it costs nothing.
             allowed = normalized_origin(origin_raw) == expected
-        else:
+        elif fetch_site == SEC_FETCH_SAME_ORIGIN:
             # 2. No usable Origin. Sec-Fetch-Site is the browser's own answer
             #    to the question this guard is asking, and it is the ONLY thing
             #    that keeps the site usable for a reader whose browser (or
@@ -179,12 +183,25 @@ class OriginGuardMiddleware(BaseHTTPMiddleware):
             #    an attacker's page forge one. Only a non-browser client can —
             #    and a non-browser client carries no ambient session cookie, so
             #    it is not a CSRF vector in the first place.
+            allowed = True
+        elif origin_is_opaque:
+            # 3a. An OPAQUE origin stops here. Sec-Fetch-Site is its only
+            #     rescue; it is deliberately NOT allowed to fall through to the
+            #     Referer check below.
             #
-            # 3. Referer's origin, last, for the browsers that send neither.
-            allowed = (
-                fetch_site == SEC_FETCH_SAME_ORIGIN
-                or normalized_origin(request.headers.get("referer")) == expected
-            )
+            #     It costs no real user anything: the readers the branch above
+            #     exists for are on a `no-referrer` policy and send no Referer
+            #     at all, so a Referer fallback would never fire for them. And
+            #     the one shape that WOULD produce "opaque origin plus a Referer
+            #     on our own origin" is a sandboxed <iframe> pointed at one of
+            #     our own pages — which today is stopped only by nginx's
+            #     `X-Frame-Options: DENY`. This guard's correctness must not
+            #     depend on a header set in another tier's config file.
+            allowed = False
+        else:
+            # 3b. No Origin header at all: Referer's origin, for the browsers
+            #     that send neither of the above.
+            allowed = normalized_origin(request.headers.get("referer")) == expected
 
         if not allowed:
             logger.warning(
