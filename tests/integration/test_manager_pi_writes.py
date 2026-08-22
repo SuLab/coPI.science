@@ -2,6 +2,7 @@
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from sqlalchemy import select
 
 from src.models import USER_ROLE_ADMIN, USER_ROLE_MANAGER, USER_ROLE_PI, User
 from tests import factories
@@ -30,20 +31,34 @@ async def test_pi_is_denied_all_four_write_routes(client, db_session):
 
 
 async def test_manager_creates_a_pi_via_orcid(client, db_session):
+    """Mocks only the ORCID fetch (as tests/unit/test_pi_onboarding.py does),
+    so the real find_or_create_pi_by_orcid — including the route's own
+    db.commit() — actually runs. Asserting on the redirect alone would still
+    pass even if that commit were deleted, since the User object created in
+    the request's own session would still carry an id in memory; querying the
+    database directly is what proves the row was actually persisted."""
     manager = await _manager(db_session)
     with patch(
-        "src.routers.manager.find_or_create_pi_by_orcid",
-        new=AsyncMock(),
-    ) as mock_create:
-        mock_create.return_value = User(
-            id="00000000-0000-0000-0000-000000000001", orcid="0000-0004-0000-0000",
-        )
+        "src.services.pi_onboarding.fetch_orcid_profile",
+        new=AsyncMock(return_value={
+            "name": "Ada Lovelace", "email": "ada@example.edu",
+            "institution": "Example University", "department": "Computing",
+        }),
+    ):
         r = await client.post(
             "/manager/pis", data={"orcid": "0000-0004-0000-0000"},
             headers=auth_headers(manager.id), follow_redirects=False,
         )
     assert r.status_code == 302
     assert "/manager/pis/" in r.headers["location"]
+
+    created = (await db_session.execute(
+        select(User).where(User.orcid == "0000-0004-0000-0000")
+    )).scalar_one_or_none()
+    assert created is not None
+    assert created.name == "Ada Lovelace"
+    assert created.user_role == USER_ROLE_PI
+    assert f"/manager/pis/{created.id}" == r.headers["location"]
 
 
 async def test_manager_create_pi_rejects_a_duplicate_orcid(client, db_session):
@@ -83,6 +98,31 @@ async def test_manager_edit_404s_on_a_non_pi_target(client, db_session):
 
     r = await client.post(
         f"/manager/pis/{other_admin.id}/profile", data={}, headers=auth_headers(manager.id),
+    )
+    assert r.status_code == 404
+
+
+async def test_manager_mute_404s_on_a_non_pi_target(client, db_session):
+    """The 404 guard must run before the agent lookup, not just happen to
+    404 because there's no agent to find — a real AgentRegistry row on the
+    non-PI target proves that ordering."""
+    manager = await _manager(db_session)
+    other_admin = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN)
+    await factories.make_agent(db_session, user=other_admin, status="active")
+
+    r = await client.post(
+        f"/manager/pis/{other_admin.id}/mute", headers=auth_headers(manager.id),
+    )
+    assert r.status_code == 404
+
+
+async def test_manager_unmute_404s_on_a_non_pi_target(client, db_session):
+    manager = await _manager(db_session)
+    other_admin = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN)
+    await factories.make_agent(db_session, user=other_admin, status="inactive")
+
+    r = await client.post(
+        f"/manager/pis/{other_admin.id}/unmute", headers=auth_headers(manager.id),
     )
     assert r.status_code == 404
 
