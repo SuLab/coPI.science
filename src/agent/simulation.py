@@ -238,6 +238,7 @@ class SimulationEngine:
         simulation_run_id: uuid.UUID | None = None,
         reset_cursors: bool = False,
         slack_enabled: bool = True,
+        fresh_start: bool = False,
     ):
         self.agents = {a.agent_id: a for a in agents}
         self.slack_clients = slack_clients
@@ -246,6 +247,13 @@ class SimulationEngine:
         self.session_factory = session_factory
         self.simulation_run_id = simulation_run_id
         self._reset_cursors = reset_cursors
+        # True only for `--fresh`, which has just deleted this run's
+        # agent_messages/agent_channels rows. The engine has to KNOW that,
+        # because the DB wipe is only one of the ways prior state gets back in:
+        # the Slack transport still holds every message the workspace ever saw,
+        # and both the startup reconcile and the live poller will happily
+        # re-import it. See _restore_slack_state.
+        self._fresh_start = fresh_start
         # When False, the local DB is the sole conversation store and no Slack
         # API calls are made (transports are NullTransport). Drives the roster
         # gate and the DB inbox poller. See specs/local-db-conversations.md.
@@ -650,7 +658,7 @@ class SimulationEngine:
         # from the combined log. This whole sequence runs with Slack fully off.
         self.message_log.set_persist_callback(self._enqueue_persist)
         await self._rebuild_state_from_db()
-        await self._rebuild_state_from_slack()
+        await self._restore_slack_state()
         await self._rebuild_agent_state()
         # Rebuild advanced last_seen_cursor to max(all_messages), which can
         # overshoot messages in private channels (typically older than the
@@ -5286,12 +5294,119 @@ class SimulationEngine:
         """MessageLog persist callback — buffer a new entry for the next flush."""
         self._pending_persist.append(entry)
 
+    async def _restore_slack_state(self) -> None:
+        """Decide what a startup does with the history already on Slack.
+
+        A resumed run reconciles it (that is how a restart recovers its own
+        in-flight interviews). A `--fresh` run must NOT: `main.py` has just
+        deleted this run's agent_messages, and re-importing the same
+        conversations from the transport puts them straight back — measured on
+        run 8b64a0e0, where `--fresh` wiped the tables and then appended 914
+        messages across 86 threads, so 916 of that run's 1354 rows were
+        actually posted before it began (oldest eight days earlier). Three of
+        the seven hub interviews that resurrected refused twice on their first
+        turn and were abandoned. See
+        docs/audits/2026-08-22-run-8b64a0e0/README.md finding M2.
+
+        Skipping the reconcile is NOT sufficient on its own, which is why this
+        is a branch and not an early return in the caller. The live poller
+        bounds itself with a DIFFERENT cursor map (`_poll_cursors`, defaulting
+        to "0"), and on a fresh run nothing populates it —
+        `_rebuild_state_from_db` seeds it per stored row and there are no
+        stored rows. Left alone it would re-ingest the identical history on the
+        first poll tick, just less visibly. So a fresh start still has to walk
+        Slack once to establish a baseline; it simply records where history
+        ENDS instead of what it contains.
+
+        `agent.state.last_seen_cursor` deliberately needs no equivalent
+        treatment: it bounds scans over the in-memory MessageLog, which a fresh
+        start leaves empty, and every entry appended during the run carries a
+        current timestamp well above its 0.0 default.
+        """
+        if self._fresh_start:
+            await self._seed_slack_cursors_without_ingest()
+        else:
+            await self._rebuild_state_from_slack()
+
+    async def _seed_slack_cursors_without_ingest(self) -> None:
+        """Advance the Slack poll cursors past all existing history, ingesting none.
+
+        The fresh-start half of `_restore_slack_state`. Reads the same channels
+        the reconcile and the live poller read, and for each one moves
+        `_poll_cursors` to the newest timestamp present, so the first poll tick
+        asks Slack only for messages this run itself produced.
+
+        The cursor is the ONLY thing standing between a fresh run and the whole
+        back catalogue: `_poll_slack_for_bot_messages` dedups against
+        `message_log.get_entry(ts)`, which a fresh start leaves empty, so it
+        would re-append every message it fetched. `_known_slack_ts` is
+        deliberately NOT seeded here — its only readers are inside
+        `_rebuild_state_from_slack`, which this branch exists to skip.
+
+        Channel history is top-level-only, so a pre-run THREAD REPLY can carry a
+        ts above the cursor this leaves. That is safe rather than lucky: the
+        live poller reads the same top-level-only endpoint, and the only code
+        that fetches replies works from a thread the run is already tracking —
+        of which a fresh start has none.
+        """
+        default_client = next(iter(self.slack_clients.values()), None)
+        if not default_client or not default_client.is_connected:
+            logger.info("No Slack client available — skipping fresh-start cursor seed")
+            return
+
+        polled_ids = {
+            ch_name: ch_id for ch_name, ch_id in self._channel_id_map.items()
+            if ch_name in SEEDED_CHANNELS
+            or self._channel_visibility.get(ch_name) == VISIBILITY_COLLAB_PRIVATE
+        }
+        channels = 0
+        skipped = 0
+        for ch_name, ch_id in polled_ids.items():
+            client = self._client_for_channel(ch_id, default_client)
+            if client is None:
+                logger.debug(
+                    "Skipping fresh-start cursor seed for private channel #%s "
+                    "— no connected member bot", ch_name,
+                )
+                continue
+            try:
+                messages = await client.aget_full_channel_history(ch_id)
+            except Exception as exc:  # noqa: BLE001
+                # Best-effort: a channel we cannot read leaves its cursor at
+                # "0", which is the pre-fix behaviour for that one channel
+                # rather than a reason to abort the whole startup.
+                logger.warning(
+                    "Fresh-start cursor seed failed for #%s: %s", ch_name, exc,
+                )
+                continue
+            newest = ""
+            for msg in messages:
+                ts = msg.get("ts", "")
+                if not ts:
+                    continue
+                skipped += 1
+                if ts > newest:
+                    newest = ts
+            if newest:
+                cur = self._poll_cursors.get(ch_id, "0")
+                if newest > cur:
+                    self._poll_cursors[ch_id] = newest
+                channels += 1
+        logger.info(
+            "--fresh: ignoring %d pre-existing Slack message(s) across %d "
+            "channel(s); poll cursors advanced to the current head",
+            skipped, channels,
+        )
+
     async def _rebuild_state_from_slack(self) -> None:
         """Reconcile the MessageLog with Slack history (Slack-on only).
 
         The DB is the primary store (_rebuild_state_from_db); this pass only
         adds messages that exist on Slack but not yet in the log — via the
         idempotent append, which also persists them to the DB.
+
+        Reached via `_restore_slack_state`, which is what decides a resumed run
+        wants this and a `--fresh` run does not.
         """
         default_client = next(iter(self.slack_clients.values()), None)
         if not default_client or not default_client.is_connected:

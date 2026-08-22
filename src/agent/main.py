@@ -239,6 +239,10 @@ async def _run_simulation(
         simulation_run_id=simulation_run_id,
         reset_cursors=reset_cursors,
         slack_enabled=slack_enabled,
+        # The wipe above only clears the DB. Without this the engine would
+        # reconcile the same conversations straight back off Slack — see
+        # SimulationEngine._restore_slack_state.
+        fresh_start=fresh,
     )
 
     # Handle shutdown signals

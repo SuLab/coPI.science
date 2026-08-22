@@ -266,6 +266,12 @@ class FakeSlackClient:
         self.invites: list[dict] = []
         self.joined_channels: set[str] = set()
         self._existing_channels: dict = existing_channels or {}  # name -> id for list_channels
+        # channel_id -> raw Slack message dicts that ALREADY exist on the
+        # transport before this engine starts, oldest first. Empty by default so
+        # every existing test keeps seeing a silent channel; a test about
+        # startup restore (`--fresh` vs resume) sets it to give the reconcile
+        # and the live poller something to find.
+        self.channel_history: dict[str, list[dict]] = {}
         self._ts = 1_700_000_000
 
     def connect(self) -> bool:
@@ -297,10 +303,27 @@ class FakeSlackClient:
         return self.post_message(f"D_{user_id}", text)
 
     def poll_channel_messages(self, channel_id: str, oldest: str = "0", limit: int = 100) -> list:
-        return []
+        # Honours `oldest` the way Slack does, so a test can prove that a cursor
+        # left at "0" re-fetches history a cursor advanced past it would skip.
+        return [
+            m for m in self.channel_history.get(channel_id, [])
+            if str(m.get("ts", "0")) > oldest
+        ][:limit]
 
     def get_thread_replies(self, channel_id: str, thread_ts: str, oldest: str = "0") -> list:
         return []
+
+    def get_full_channel_history(self, channel_id: str, *_a, **_kw) -> list:
+        return list(self.channel_history.get(channel_id, []))
+
+    def get_all_thread_replies(self, channel_id: str, thread_ts: str, *_a, **_kw) -> list:
+        return []
+
+    async def aget_full_channel_history(self, *args, **kwargs) -> list:
+        return await asyncio.to_thread(self.get_full_channel_history, *args, **kwargs)
+
+    async def aget_all_thread_replies(self, *args, **kwargs) -> list:
+        return await asyncio.to_thread(self.get_all_thread_replies, *args, **kwargs)
 
     # Async twins — the engine now awaits these, off the loop thread, exactly
     # like the real AgentSlackClient (src/agent/slack_client.py). Kept here so
