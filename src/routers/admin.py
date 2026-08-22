@@ -54,7 +54,7 @@ from src.services.directory import (
     list_runs_overview,
     load_user_detail,
 )
-from src.services.orcid import fetch_orcid_profile
+from src.services.pi_onboarding import find_or_create_pi_by_orcid
 from src.services.thread_panel import panel_cards_by_thread
 from src.services.validators import csv_safe_cell
 
@@ -1033,26 +1033,10 @@ async def impersonate_user(
     target = result.scalar_one_or_none()
 
     if not target:
-        # Try to fetch from ORCID and create unclaimed record
         try:
-            profile_data = await fetch_orcid_profile(orcid)
-            target = User(
-                orcid=orcid,
-                name=profile_data.get("name", orcid),
-                email=profile_data.get("email"),
-                institution=profile_data.get("institution"),
-                department=profile_data.get("department"),
-            )
-            db.add(target)
-            await db.flush()  # get target.id
-            job = Job(
-                type="generate_profile",
-                user_id=target.id,
-                payload={"user_id": str(target.id), "orcid": orcid},
-            )
-            db.add(job)
+            target = await find_or_create_pi_by_orcid(db, orcid)
             await db.commit()
-        except Exception as exc:
+        except ValueError as exc:
             logger.error("Failed to fetch ORCID profile for impersonation: %s", exc)
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
