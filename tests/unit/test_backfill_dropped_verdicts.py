@@ -173,8 +173,9 @@ def test_a_backfilled_row_does_not_claim_a_verified_panel():
 
     row = _build_assessment_row(verdict, drop, RUBRIC_VERSION, RUBRIC_HASH)
 
-    # NULL means VERIFIED complete (a claim no backfilled row can support);
-    # [] is the documented UNVERIFIED state.
+    # NULL means "no gap recorded", which `panel_owed is True` turns into the
+    # VERIFIED claim no backfilled row can support; [] is the documented
+    # UNVERIFIED state and is what this row must carry.
     assert row.missing_domains == []
     # panel_owed must be *explicitly* None (a deliberate "we don't know"),
     # not merely left unset — `"panel_owed" in sa_inspect(row).dict` is only
@@ -187,6 +188,15 @@ def test_a_backfilled_row_does_not_claim_a_verified_panel():
     # this table; a backfilled row must not borrow that meaning for "nobody
     # looked".
     assert row.panel_incomplete is False
+    # And what a reader actually SEES. `unverified`, not `unrecorded`:
+    # `panel_state` tests `missing_domains is not None` before it looks at
+    # `panel_owed`, and `[]` is not None. The script's own comment claimed
+    # `unrecorded` until 2026-08-22 — both are non-green and both mean
+    # "unvetted", so the code was right and the comment was wrong, but nothing
+    # pinned which of the two it is.
+    from src.services.assessment_detail import panel_state
+
+    assert panel_state(row) == "unverified"
 
 
 # ---------------------------------------------------------------------------

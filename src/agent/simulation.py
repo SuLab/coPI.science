@@ -3694,7 +3694,16 @@ class SimulationEngine:
             panel_incomplete=bool(gap),
             # Three states, one column — see OpportunityAssessment.missing_domains:
             #   [names] a real gap, these domains were owed and never consulted
-            #   NULL    the panel was VERIFIED complete (or none was owed at all)
+            #   NULL    NO GAP RECORDED — read this column ALONE and that is all
+            #           it says. It covers BOTH "a floor evaluated this verdict
+            #           and found nothing owed and unconsulted" and "no floor
+            #           ran on it at all", and only `panel_owed` below (written
+            #           two lines from here) separates them. This comment used
+            #           to call NULL "VERIFIED complete (or none was owed)",
+            #           which is the exact reading `panel_owed` exists to end:
+            #           12 production rows written by a floor that EXEMPTED them
+            #           were later re-read as completed audits, at least five
+            #           with a demonstrable gap.
             #   []      the floor could not be checked at all; this row is
             #           UNVERIFIED, and must not be counted as a clean panel
             # `panel_incomplete` stays False for [] on purpose: we have no

@@ -445,8 +445,15 @@ def _build_assessment_row(
         rubric_content_hash=_bounded_str(rubric_hash, 20),
         # F1.2 — see the docstring above. Explicit, not omitted: this row's
         # floor never ran, so it cannot claim a verified (False/NULL) panel,
-        # and must not guess an owed/not-owed panel_owed either. The
-        # assessment page's `unrecorded` state is what this renders as.
+        # and must not guess an owed/not-owed panel_owed either.
+        #
+        # The assessment page renders this as `unverified`, NOT `unrecorded`:
+        # `assessment_detail.panel_state` tests `missing_domains is not None`
+        # BEFORE it looks at `panel_owed`, and `[]` is not None. Both states are
+        # non-green and both mean "unvetted", so the code is right and it is
+        # this comment that was wrong — but they are not interchangeable, and
+        # `[]` is the more accurate of the two here: it says the floor could not
+        # check, which is exactly what happened.
         panel_incomplete=False,
         missing_domains=[],
         panel_owed=None,

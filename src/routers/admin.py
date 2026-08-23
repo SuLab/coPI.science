@@ -54,6 +54,7 @@ from src.services.directory import (
     list_runs_overview,
     load_user_detail,
 )
+from src.services.llm import is_truncated_stop
 from src.services.pi_onboarding import find_or_create_pi_by_orcid
 from src.services.thread_panel import panel_cards_by_thread
 from src.services.validators import csv_safe_cell
@@ -61,6 +62,18 @@ from src.services.validators import csv_safe_cell
 logger = logging.getLogger(__name__)
 router = APIRouter()
 templates = Jinja2Templates(directory="templates")
+
+# "Did this API call stop before it finished?" — registered as a Jinja TEST so
+# `admin/llm_calls.html` can `selectattr('stop_reason', 'truncated_stop')` and
+# reach the real predicate rather than re-listing its stop reasons.
+#
+# The template used to test `stop_reason == 'max_tokens'` on its own, which
+# rendered a `refusal`-truncated turn as complete on the one page an operator
+# opens to audit truncation. `is_truncated_stop` (src/services/llm.py) is the
+# single definition — the engine, the specialist floor and the Slack posting
+# path all read it — so a third stop reason added there reaches this page for
+# free. A test, not a filter or a global: `selectattr` takes a test name.
+templates.env.tests["truncated_stop"] = is_truncated_stop
 
 # Valid AgentRegistry.status values (see src/models/agent_registry.py). Admins
 # can move an already-approved agent between these from the edit page; the sim

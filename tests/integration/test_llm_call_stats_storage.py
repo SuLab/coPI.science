@@ -278,7 +278,10 @@ async def test_a_turn_with_a_truncated_call_is_badged_and_a_clean_one_is_not(
     # template's indentation — "truncated" appears in prose elsewhere on this
     # page's rows and whitespace is not a contract.
     assert html.count("bg-orange-100") == 1, "exactly one of the two turns truncated"
-    assert "1 of 2 API call(s) in this turn stopped at max_tokens (ceiling 16000)" in html
+    assert (
+        "1 of 2 API call(s) in this turn stopped before finishing "
+        "(max_tokens; ceiling 16000)"
+    ) in html
     # The call count makes a multi-call row legible as such; the sums above are
     # otherwise a total of an unknown number of addends.
     assert "2 calls" in html
@@ -361,3 +364,67 @@ async def test_an_entry_without_the_cache_counts_stores_null_not_zero(engine):
             assert (row.input_tokens, row.call_stats) == (26923, _STATS)
     finally:
         await _delete_run(factory, run_id)
+
+
+async def test_a_refusal_truncated_turn_is_badged_on_the_operator_page(
+    client, db_session, admin
+):
+    """`refusal` is a truncation too — `src/services/llm.py::is_truncated_stop`
+    is the one definition of that predicate, and the engine, the specialist
+    floor and the Slack posting path all read it.
+
+    This page labelled a turn truncated on `stop_reason == 'max_tokens'` alone,
+    so a refusal-truncated turn rendered as COMPLETE on the one surface an
+    operator would open to audit truncation. Run 8b64a0e0 posted four truncated
+    replies as complete and overwrote a working memory with a refusal-truncated
+    synthesis; this page could not have shown either.
+    """
+    run = await factories.make_simulation_run(db_session)
+    await factories.make_llm_call_log(
+        db_session, run=run, agent_id="blackbird", phase="thread_reply",
+        response_text="REFUSAL-TRUNCATED-TURN",
+        call_stats=[{
+            "seq": 1, "kind": "final", "max_tokens": 16000, "input_tokens": 900,
+            "output_tokens": 16000, "thinking_tokens": None,
+            "stop_reason": "refusal", "latency_ms": 21000.0,
+        }],
+    )
+    await factories.make_llm_call_log(
+        db_session, run=run, agent_id="blackbird", phase="thread_reply",
+        response_text="CLEAN-TURN",
+        call_stats=[{
+            "seq": 1, "kind": "final", "max_tokens": 16000, "input_tokens": 900,
+            "output_tokens": 120, "thinking_tokens": None,
+            "stop_reason": "end_turn", "latency_ms": 1200.0,
+        }],
+    )
+    await db_session.flush()
+
+    html = (
+        await client.get(
+            f"/admin/activity/{run.id}/llm-calls", headers=auth_headers(admin.id)
+        )
+    ).text
+
+    # The badge's own class, for the same reason the max_tokens test counts it:
+    # "truncated" appears in prose elsewhere on this page.
+    assert html.count("bg-orange-100") == 1, (
+        "the refusal turn is badged and the end_turn turn is not"
+    )
+    assert "refusal" in html, "the title must name WHICH stop reason cut it off"
+
+
+def test_the_page_reads_the_truncation_predicate_rather_than_a_copy_of_it():
+    """The set `{refusal, max_tokens}` is defined once, in
+    `src/services/llm.py::is_truncated_stop`. The template is the last reader
+    that used to hand-copy half of it; it must now call the function, or a third
+    stop reason added to the predicate leaves this page disagreeing again.
+
+    Asserted on the Jinja environment that actually renders the page, not on the
+    template text: a template can name a test that was never registered, and
+    that failure is a silently empty selection rather than an error.
+    """
+    from src.routers.admin import templates as admin_templates
+    from src.services.llm import is_truncated_stop
+
+    assert admin_templates.env.tests.get("truncated_stop") is is_truncated_stop
