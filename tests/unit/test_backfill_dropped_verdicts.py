@@ -19,13 +19,18 @@ all any test needs.
 """
 
 import json
+import logging
+import subprocess
+import sys
 import uuid
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 from sqlalchemy import inspect as sa_inspect
 
 from scripts.backfill_dropped_verdicts import (
+    _build_arg_parser,
     _build_assessment_row,
     _derive_rubric_stamp,
     _existing_assessment_for,
@@ -40,6 +45,45 @@ OTHER_RUN_ID = uuid.uuid4()
 RUBRIC_VERSION = "2.0.0"
 RUBRIC_HASH = "e3ef75f84c48"
 T0 = datetime(2026, 8, 22, 12, 0, 0, tzinfo=UTC)
+
+
+def test_importing_the_module_does_not_configure_logging():
+    """Fix round 2, item 2 (FIX 7's logging half): `logging.basicConfig`
+    used to run at module level, so merely IMPORTING this script configured
+    the ROOT logger's handlers and level as a side effect. It now runs only
+    under `if __name__ == "__main__":`.
+
+    Run in a FRESH subprocess rather than asserting on THIS process's root
+    logger: pytest's own `_pytest.logging` plugin unconditionally attaches a
+    `_LiveLoggingNullHandler` to the root logger at session start (confirmed
+    directly — present even in complete isolation, one test, no other
+    plugins), so an in-process `logging.getLogger().handlers == []` fails
+    regardless of this module's own behaviour, for a reason that has nothing
+    to do with the fix. A subprocess has no such pollution: outside pytest,
+    confirmed directly, importing this module leaves `root.handlers == []`
+    and `root.level == 30` (WARNING, the untouched default) today, and would
+    NOT have before this fix — a fresh interpreter's root logger starts with
+    no handlers, so the old module-level `logging.basicConfig(level=INFO,
+    ...)` was free to actually attach one there (unlike inside pytest, where
+    pytest's own handler makes `basicConfig` a no-op even for the pre-fix
+    code — the in-process assertion would have been fully vacuous either
+    way).
+    """
+    repo_root = Path(__file__).resolve().parents[2]
+    result = subprocess.run(
+        [
+            sys.executable, "-c",
+            "import logging, scripts.backfill_dropped_verdicts\n"
+            "root = logging.getLogger()\n"
+            "print(len(root.handlers))\n"
+            "print(root.level)\n",
+        ],
+        cwd=str(repo_root), capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    handler_count, level = result.stdout.strip().splitlines()
+    assert handler_count == "0", "importing must not attach a handler to the root logger"
+    assert int(level) == logging.WARNING, "importing must not change the root logger's level"
 
 
 def _drop(**overrides) -> AssessmentDrop:
@@ -323,8 +367,22 @@ def test_a_null_thread_drop_still_finds_an_existing_threaded_row():
         ("markham", "markham", True),  # plain exact match still works
         # The one real pair that MUST be refused: a last-name collision
         # (first-initial-prefixed agents), not a naming variant of one PI.
+        # `epearce` also happens to catch an `endswith` loosening on its own
+        # ("epearce".endswith("pearce") is True), which is why it is grouped
+        # here with the other must-refuse, loosening-sensitive cases rather
+        # than left as a bare "different subject" example.
         ("epearce", "pearce", False),
         ("pearce", "epearce", False),
+        # Fix round 2, item 1: a same-lastname PI with extra trailing
+        # characters must be refused exactly like `epearce`/`pearce` is —
+        # `_subject_matches` mutated to `candidate_folded.startswith(drop_folded)`
+        # left all 39 tests (as of fix round 1) green, because none of them
+        # exercised a candidate that starts with, but is not equal to or the
+        # bot-name of, the drop's subject. Re-verified directly: mutating to
+        # `.startswith(...)` now turns this one case red.
+        ("leebottomley", "lee", False),  # catches a `startswith`/prefix loosening
+        ("mylee", "lee", False),  # catches an `endswith`/suffix loosening
+        ("bluelees", "lee", False),  # catches a middle `in` (substring) loosening
         ("weeraratna", "markham", False),  # a different PI outright
         (None, "pearce", False),
         ("pearce", None, False),
@@ -543,3 +601,30 @@ def test_rubric_stamp_derivation_ignores_no_run_rows():
     version, content_hash = _derive_rubric_stamp([])
 
     assert (version, content_hash) == (None, None)
+
+
+# ---------------------------------------------------------------------------
+# Fix round 2, item 3 — reject a non-positive --max-lookback-seconds
+# ---------------------------------------------------------------------------
+
+
+def test_max_lookback_seconds_rejects_non_positive_values():
+    """A non-positive lookback would make `delta > max_lookback_seconds` true
+    for every candidate (every delta is >= 0), silently excluding all of them
+    and reporting every llm_call_logs fallback drop unrecoverable with no
+    error at all. `_positive_seconds` (the argparse `type=`) turns this into
+    a usage error at parse time instead — tested against the parser alone,
+    with no database and no `main()` invocation.
+    """
+    parser = _build_arg_parser()
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--run", str(uuid.uuid4()), "--max-lookback-seconds", "0"])
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--run", str(uuid.uuid4()), "--max-lookback-seconds", "-5"])
+
+    # Control: a positive value still parses fine.
+    args = parser.parse_args(["--run", str(uuid.uuid4()), "--max-lookback-seconds", "10"])
+    assert args.max_lookback_seconds == 10.0
+

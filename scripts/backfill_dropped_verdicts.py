@@ -453,7 +453,28 @@ def _build_assessment_row(
     )
 
 
-async def main() -> int:
+def _positive_seconds(value: str) -> float:
+    """``type=`` for ``--max-lookback-seconds`` (fix round 2, item 3).
+
+    A non-positive lookback would silently exclude every candidate — every
+    delta is >= 0, so ``delta > max_lookback_seconds`` is true for all of
+    them — and report every ``llm_call_logs`` fallback drop unrecoverable,
+    with no error at all. Raising ``argparse.ArgumentTypeError`` here (rather
+    than checking ``args.max_lookback_seconds`` after ``parse_args()`` inside
+    ``main()``) is what lets this be unit-tested against the parser alone,
+    with no database: argparse converts this exception into the same
+    ``ap.error(...)`` usage-and-exit behaviour automatically.
+    """
+    parsed = float(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError(
+            f"must be positive (got {value!r}); a non-positive lookback "
+            "would silently exclude every llm_call_logs candidate"
+        )
+    return parsed
+
+
+def _build_arg_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser()
     ap.add_argument("--run", required=True, help="simulation_run_id to backfill")
     ap.add_argument("--dry-run", action="store_true")
@@ -472,10 +493,15 @@ async def main() -> int:
              "--rubric-version.",
     )
     ap.add_argument(
-        "--max-lookback-seconds", type=float, default=_MAX_LOOKBACK_SECONDS,
+        "--max-lookback-seconds", type=_positive_seconds, default=_MAX_LOOKBACK_SECONDS,
         help="How far back the llm_call_logs fallback may walk for a "
              "matching sidecar before giving up (default: %(default)s).",
     )
+    return ap
+
+
+async def main() -> int:
+    ap = _build_arg_parser()
     args = ap.parse_args()
     if (args.rubric_version is None) != (args.rubric_hash is None):
         ap.error("--rubric-version and --rubric-hash must be given together")
