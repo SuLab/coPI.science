@@ -361,6 +361,14 @@ class SimulationEngine:
         # LLM call log buffer
         self._llm_log_buffer: list[dict] = []
         self._llm_log_flush_size = 10
+        # Every fire-and-forget flush task `_on_llm_call` has spawned and that
+        # has not finished yet. `stop()` gathers these before its own final
+        # flush; without that, `asyncio.run` cancelled them at interpreter
+        # shutdown, and because `_flush_llm_logs` takes its batch OUT of the
+        # buffer before awaiting the commit, a cancelled task loses those rows
+        # from the buffer AND the database. Entries are discarded in
+        # `_on_flush_done`, so the set does not grow for the run's life.
+        self._flush_tasks: set[asyncio.Task] = set()
 
         # Channel ID map (populated during setup)
         self._channel_id_map: dict[str, str] = {}  # name -> id
@@ -831,153 +839,188 @@ class SimulationEngine:
         turn_count = 0
         consecutive_idle = 0
         while self._running and self.is_within_time_limit:
-            # Poll Slack for other bots' channel messages, mirroring them into
-            # the log. No-ops when Slack is off (NullTransport / no connected
-            # clients).
-            await self._poll_slack_for_bot_messages()
-
-            # DB-native inbound path: messages written by other processes
-            # (private-channel handover, and legacy human-authored rows). Runs
-            # regardless of Slack.
-            await self._poll_inbound_from_db()
-
-            # Sync any newly-created private channels from the web app.
-            # DB-driven, so a single tick picks it up.
-            await self._sync_private_channels_from_db()
-
-            # Pick up active/inactive flips (and newly-provisioned tokens) from
-            # the DB so the roster changes live, without a process restart.
-            await self._sync_roster_from_db()
-
-            # Pick up profile edits made from the web app (separate process).
-            self._sync_profiles_from_disk()
-
-            # Reply lane: service every (agent, thread) pair owing a reply,
-            # every tick, with no pacing at all — before the post lane's
-            # weighted draw runs. See docs/specs/2026-08-14-two-lane-
-            # concurrent-scheduler-design.md §2.1.
-            #
-            # Fix round 2 (task review): the blanket try/except that used to
-            # wrap this whole call is gone — `_dispatch_reply_lane` now
-            # isolates both one pair's servicing failure (fix round 1, C2)
-            # AND one agent's Phase-3-activation failure (fix round 2) from
-            # their siblings; what is left unguarded is a genuine failure in
-            # pair *selection* itself, which is a real bug that should
-            # surface rather than repeat one swallowed ERROR per tick forever
-            # while no interview progresses.
-            #
-            # "Did work" for the backoff below must reflect actual SPEND, not
-            # attempts (fix round 2, Critical): `_dispatch_reply_lane`'s
-            # return counts pairs ATTEMPTED, including ones the reservation
-            # limiter deferred with zero LLM calls and `has_pending_reply`
-            # left True — so the identical pair recurs every tick. Driving
-            # the backoff off the attempt count alone spun the main loop at
-            # native tick speed (measured ~2,800 iterations/s) whenever a
-            # pending pair was rate-limited: never sleeping, never yielding
-            # to _flush_persisted/_flush_llm_logs/_flush_pending_assessments,
-            # and hammering _poll_inbound_from_db /
-            # _sync_private_channels_from_db every iteration. Comparing the
-            # roster's total `api_call_count` across the call — mirroring
-            # what `_run_post_turn` already does with `api_calls_before` —
-            # answers "did anything actually get spent", not "was anything
-            # attempted".
-            calls_before_reply_lane = sum(
-                a.api_call_count for a in self.agents.values()
-            )
-            reply_lane_count = await self._dispatch_reply_lane()
-            if reply_lane_count:
-                logger.debug(
-                    "[reply-lane] serviced %d pair(s) this tick", reply_lane_count
-                )
-            reply_lane_did_work = (
-                sum(a.api_call_count for a in self.agents.values())
-                > calls_before_reply_lane
-            )
-
-            # Select agent (post lane — paced, one at a time)
-            agent = self._select_agent()
-            if agent is None:
-                # No agent is currently eligible. Throttling and the per-agent
-                # cooldown both lapse with time, so this is normally TRANSIENT:
-                # back off and retry rather than ending the run. Only
-                # _terminal_stall_reason's two permanent cases stop the loop.
-                reason = self._terminal_stall_reason()
-                if reason is not None:
-                    logger.info("No eligible agent: %s. Stopping.", reason)
-                    break
-                if reply_lane_did_work:
-                    # The reply lane made a real LLM call this tick even
-                    # though no post-lane agent was eligible right now. This
-                    # is not an idle tick — sleeping the idle backoff here
-                    # would pace the "unpaced" lane, delaying the next reply
-                    # sweep by up to 30s (fix round 1, I2).
-                    consecutive_idle = 0
-                    continue
-                consecutive_idle += 1
-                delay = self._idle_backoff(consecutive_idle)
-                logger.info(
-                    "No eligible agent (all throttled or cooling down) — "
-                    "retrying in %ds. Transient: the rate window slides and "
-                    "per-agent cooldowns expire. (stall streak: %d)",
-                    delay, consecutive_idle,
-                )
-                # The sleep is what keeps this a backoff rather than a hot spin,
-                # and it returns early on SIGTERM so shutdown stays prompt.
-                await self._sleep(delay)
-                continue
-
-            logger.info("=== Turn %d: %s ===", turn_count + 1, agent.agent_id)
-
-            # Run the post-lane turn (Phase 1 + Phase 5)
-            did_work = False
+            # EVERY exit from this iteration runs `_drain_and_flush`, which is
+            # why the whole body sits in a try/finally rather than ending with
+            # the four calls. The drain and the three flushes used to be the
+            # last statements in the body, and the two `continue`s in the
+            # no-eligible-agent branch below jumped straight over all four —
+            # the common case for a throttled roster and for a reply-only hub.
+            # Harness result over 5 productive ticks:
+            # {'flush_persisted': 0, 'flush_llm': 0, 'flush_assess': 0,
+            # 'drain': 0}, with 5 rows stranded in each buffer and the
+            # documented exit path a `docker stop` that can end in SIGKILL.
+            # `finally` also covers the terminal-stall `break` and an
+            # exception escaping the body, neither of which the old bottom-of-
+            # loop placement reached either.
             try:
-                did_work = await self._run_post_turn(agent)
-            except Exception:
-                logger.exception("Error during turn for %s", agent.agent_id)
+                # Poll Slack for other bots' channel messages, mirroring them into
+                # the log. No-ops when Slack is off (NullTransport / no connected
+                # clients).
+                await self._poll_slack_for_bot_messages()
 
-            # Update last_selected
-            agent.state.last_selected = time.time()
-            turn_count += 1
+                # DB-native inbound path: messages written by other processes
+                # (private-channel handover, and legacy human-authored rows). Runs
+                # regardless of Slack.
+                await self._poll_inbound_from_db()
 
-            # Idle backoff: if no LLM calls were made in EITHER lane this
-            # tick, delay before next turn. Reply-lane SPEND counts too (fix
-            # round 1, I2 / fix round 2, Critical) — the hub in particular
-            # has no post_types at all, so `did_work` alone is false on
-            # nearly every one of its ticks, and gating solely on it would
-            # pace the reply lane behind a 30s idle-backoff ceiling on every
-            # tick it only replied. Gating on ATTEMPTS rather than spend spun
-            # the loop instead — see the comment above `reply_lane_did_work`.
-            if did_work or reply_lane_did_work:
-                consecutive_idle = 0
-            else:
-                consecutive_idle += 1
+                # Sync any newly-created private channels from the web app.
+                # DB-driven, so a single tick picks it up.
+                await self._sync_private_channels_from_db()
 
-            if consecutive_idle > 0:
-                delay = self._idle_backoff(consecutive_idle)
-                logger.debug("Idle backoff: %ds (idle streak: %d)", delay, consecutive_idle)
-                await self._sleep(delay)
-            # turn_delay_seconds is NOT slept on here. It is a *per-agent* tempo
-            # throttle, enforced at selection time in _turn_eligible: the agent that
-            # just ran becomes ineligible for the delay while every other agent
-            # stays selectable. Sleeping the loop instead stalled Slack polling, DB
-            # ingestion and every other agent for one agent's cooldown.
-            # See .notes/cohort-system-v2.md §10.3.
+                # Pick up active/inactive flips (and newly-provisioned tokens) from
+                # the DB so the roster changes live, without a process restart.
+                await self._sync_roster_from_db()
 
-            # Deferred working-memory updates (audit finding 1): run OUTSIDE
-            # the reply lane's locks/semaphore. Before the flushes, so this
-            # tick's memory llm_call_logs rows land in this tick's flush.
-            if self._pending_memory_events:
-                await self._drain_memory_events()
+                # Pick up profile edits made from the web app (separate process).
+                self._sync_profiles_from_disk()
 
-            # Flush buffered message-log entries + LLM logs + any assessment
-            # rows that failed their first write, periodically
-            await self._flush_persisted()
-            if self._llm_log_buffer:
-                await self._flush_llm_logs()
-            if self._pending_assessments:
-                await self._flush_pending_assessments()
+                # Reply lane: service every (agent, thread) pair owing a reply,
+                # every tick, with no pacing at all — before the post lane's
+                # weighted draw runs. See docs/specs/2026-08-14-two-lane-
+                # concurrent-scheduler-design.md §2.1.
+                #
+                # Fix round 2 (task review): the blanket try/except that used to
+                # wrap this whole call is gone — `_dispatch_reply_lane` now
+                # isolates both one pair's servicing failure (fix round 1, C2)
+                # AND one agent's Phase-3-activation failure (fix round 2) from
+                # their siblings; what is left unguarded is a genuine failure in
+                # pair *selection* itself, which is a real bug that should
+                # surface rather than repeat one swallowed ERROR per tick forever
+                # while no interview progresses.
+                #
+                # "Did work" for the backoff below must reflect actual SPEND, not
+                # attempts (fix round 2, Critical): `_dispatch_reply_lane`'s
+                # return counts pairs ATTEMPTED, including ones the reservation
+                # limiter deferred with zero LLM calls and `has_pending_reply`
+                # left True — so the identical pair recurs every tick. Driving
+                # the backoff off the attempt count alone spun the main loop at
+                # native tick speed (measured ~2,800 iterations/s) whenever a
+                # pending pair was rate-limited: never sleeping, never yielding
+                # to _flush_persisted/_flush_llm_logs/_flush_pending_assessments,
+                # and hammering _poll_inbound_from_db /
+                # _sync_private_channels_from_db every iteration. Comparing the
+                # roster's total `api_call_count` across the call — mirroring
+                # what `_run_post_turn` already does with `api_calls_before` —
+                # answers "did anything actually get spent", not "was anything
+                # attempted".
+                calls_before_reply_lane = sum(
+                    a.api_call_count for a in self.agents.values()
+                )
+                reply_lane_count = await self._dispatch_reply_lane()
+                if reply_lane_count:
+                    logger.debug(
+                        "[reply-lane] serviced %d pair(s) this tick", reply_lane_count
+                    )
+                reply_lane_did_work = (
+                    sum(a.api_call_count for a in self.agents.values())
+                    > calls_before_reply_lane
+                )
+
+                # Select agent (post lane — paced, one at a time)
+                agent = self._select_agent()
+                if agent is None:
+                    # No agent is currently eligible. Throttling and the per-agent
+                    # cooldown both lapse with time, so this is normally TRANSIENT:
+                    # back off and retry rather than ending the run. Only
+                    # _terminal_stall_reason's two permanent cases stop the loop.
+                    reason = self._terminal_stall_reason()
+                    if reason is not None:
+                        logger.info("No eligible agent: %s. Stopping.", reason)
+                        break
+                    if reply_lane_did_work:
+                        # The reply lane made a real LLM call this tick even
+                        # though no post-lane agent was eligible right now. This
+                        # is not an idle tick — sleeping the idle backoff here
+                        # would pace the "unpaced" lane, delaying the next reply
+                        # sweep by up to 30s (fix round 1, I2).
+                        consecutive_idle = 0
+                        continue
+                    consecutive_idle += 1
+                    delay = self._idle_backoff(consecutive_idle)
+                    logger.info(
+                        "No eligible agent (all throttled or cooling down) — "
+                        "retrying in %ds. Transient: the rate window slides and "
+                        "per-agent cooldowns expire. (stall streak: %d)",
+                        delay, consecutive_idle,
+                    )
+                    # The sleep is what keeps this a backoff rather than a hot spin,
+                    # and it returns early on SIGTERM so shutdown stays prompt.
+                    await self._sleep(delay)
+                    continue
+
+                logger.info("=== Turn %d: %s ===", turn_count + 1, agent.agent_id)
+
+                # Run the post-lane turn (Phase 1 + Phase 5)
+                did_work = False
+                try:
+                    did_work = await self._run_post_turn(agent)
+                except Exception:
+                    logger.exception("Error during turn for %s", agent.agent_id)
+
+                # Update last_selected
+                agent.state.last_selected = time.time()
+                turn_count += 1
+
+                # Idle backoff: if no LLM calls were made in EITHER lane this
+                # tick, delay before next turn. Reply-lane SPEND counts too (fix
+                # round 1, I2 / fix round 2, Critical) — the hub in particular
+                # has no post_types at all, so `did_work` alone is false on
+                # nearly every one of its ticks, and gating solely on it would
+                # pace the reply lane behind a 30s idle-backoff ceiling on every
+                # tick it only replied. Gating on ATTEMPTS rather than spend spun
+                # the loop instead — see the comment above `reply_lane_did_work`.
+                if did_work or reply_lane_did_work:
+                    consecutive_idle = 0
+                else:
+                    consecutive_idle += 1
+
+                if consecutive_idle > 0:
+                    delay = self._idle_backoff(consecutive_idle)
+                    logger.debug("Idle backoff: %ds (idle streak: %d)", delay, consecutive_idle)
+                    await self._sleep(delay)
+                # turn_delay_seconds is NOT slept on here. It is a *per-agent* tempo
+                # throttle, enforced at selection time in _turn_eligible: the agent that
+                # just ran becomes ineligible for the delay while every other agent
+                # stays selectable. Sleeping the loop instead stalled Slack polling, DB
+                # ingestion and every other agent for one agent's cooldown.
+                # See .notes/cohort-system-v2.md §10.3.
+            finally:
+                await self._drain_and_flush()
 
         logger.info("Main loop exited after %d turns", turn_count)
+
+    async def _drain_and_flush(self) -> None:
+        """The per-tick durability step: drain queued memory work, then flush.
+
+        Hoisted out of the bottom of ``_run_main_loop``'s body so that every
+        exit from an iteration reaches it — see the comment at the top of that
+        loop for what the two ``continue`` statements used to skip.
+
+        Ordering is the pre-existing one and is load-bearing: the memory drain
+        makes real LLM calls, so it runs BEFORE the flushes and this tick's
+        ``llm_call_logs`` rows land in this tick's flush rather than the next
+        one's.
+
+        One deliberate behaviour change comes with the hoist: the drain now also
+        fires on ticks where the selector returned None because everything was
+        throttled. That is defensible rather than accidental — the events are
+        already queued (``_close_thread`` put them there), each is a real billed
+        call that is booked through ``Agent.record_api_call`` like any other,
+        and the alternative is a queue that only advances on ticks the scheduler
+        happened to find work for. It does mean a fully-throttled roster still
+        spends on memory synthesis; that spend is bounded by the queue, not by
+        the tick rate.
+        """
+        if self._pending_memory_events:
+            await self._drain_memory_events()
+
+        # Flush buffered message-log entries + LLM logs + any assessment
+        # rows that failed their first write.
+        await self._flush_persisted()
+        if self._llm_log_buffer:
+            await self._flush_llm_logs()
+        if self._pending_assessments:
+            await self._flush_pending_assessments()
 
     def request_stop(self) -> None:
         """Ask the main loop to exit — safe to call from a signal handler.
@@ -1029,6 +1072,23 @@ class SimulationEngine:
             )
             self._pending_memory_events.clear()
         set_call_log_callback(None)
+        # Await every flush task `_on_llm_call` spawned. Placement is exact:
+        #
+        # - AFTER `set_call_log_callback(None)` and after the memory drain
+        #   above, because the drain makes real LLM calls and so can spawn a
+        #   NEW flush task; gathering at the top of `stop()` would leave that
+        #   one orphaned, which is the bug this fixes.
+        # - BEFORE the final `_flush_llm_logs()`, so a batch that a gathered
+        #   task failed on and re-queued gets one more attempt here rather than
+        #   sitting in the buffer while the process exits.
+        # - `return_exceptions=True` because a CANCELLED task re-raises out of
+        #   `gather`, which would abort `stop()` before
+        #   `_flush_pending_assessments` — trading one lost buffer for two.
+        #   Failures are already reported by `_on_flush_done`.
+        pending = [t for t in self._flush_tasks if not t.done()]
+        if pending:
+            logger.info("Awaiting %d in-flight LLM log flush(es)", len(pending))
+            await asyncio.gather(*pending, return_exceptions=True)
         await self._flush_persisted(force_stats=True)
         await self._flush_llm_logs()
         await self._flush_pending_assessments()
@@ -6439,12 +6499,26 @@ class SimulationEngine:
             try:
                 loop = asyncio.get_running_loop()
                 task = loop.create_task(self._flush_llm_logs())
+                # Held in `_flush_tasks` for two reasons: `stop()` has to be able
+                # to await it (see there), and a bare `create_task` reference is
+                # otherwise only weakly held by the loop, so the task can be
+                # garbage-collected mid-flight.
+                self._flush_tasks.add(task)
                 task.add_done_callback(self._on_flush_done)
             except RuntimeError:
                 pass
 
-    @staticmethod
-    def _on_flush_done(task: asyncio.Task) -> None:
+    def _on_flush_done(self, task: asyncio.Task) -> None:
+        """Done-callback for a spawned `_flush_llm_logs`.
+
+        The cancelled-task guard is not defensive tidiness: ``task.exception()``
+        RE-RAISES ``CancelledError`` for a cancelled task, so the pre-fix
+        callback answered a batch lost to shutdown cancellation with a traceback
+        out of the done-callback that said nothing about the rows.
+        """
+        self._flush_tasks.discard(task)
+        if task.cancelled():
+            return
         if task.exception():
             logger.error("LLM log flush failed: %s", task.exception())
 
