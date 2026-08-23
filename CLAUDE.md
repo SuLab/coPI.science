@@ -58,6 +58,18 @@ container, no manual database, no env var needed. This is exactly what
 > than imported from `src`), and why `src/services/llm.py` clamps every
 > truncation retry to `NONSTREAMING_MAX_TOKENS` and raises on a call site above
 > it. See `tests/unit/test_llm_nonstreaming_ceiling.py`.
+>
+> **The SDK no longer enforces that ceiling for us, and has not since the 300 s
+> client timeout landed.** `Messages.create` applies
+> `_calculate_nonstreaming_timeout` only `if not stream and not
+> is_given(timeout) and self._client.timeout == DEFAULT_TIMEOUT`, and
+> `_client_for_key` now constructs its client with
+> `anthropic.Timeout(CLIENT_READ_TIMEOUT_SECONDS, connect=5.0)`
+> (`src/services/llm.py:41`, `:121`) — so that condition is permanently false
+> and the SDK will happily send a request the API rejects. `_acreate`'s own
+> check, which raises `NonStreamingMaxTokensError` (`:207`, raised at `:373`),
+> is now the ONLY enforcement in the process. Do not remove it on the grounds
+> that the SDK checks too; it does not.
 
 Running pytest **inside the container** (`docker compose exec blackbird-app
 python -m pytest ...`) does not currently work: the image installs with
@@ -68,7 +80,10 @@ a test-targeted variant of it) to install `.[dev]` instead.
 
 If that path is ever restored, `TEST_DATABASE_URL` becomes required again: the
 web container has no Docker socket, so without it every test that needs a
-database errors out (469 of them, measured 2026-08-04):
+database errors out (469 of them when that was measured on 2026-08-04 — treat
+it as a floor, not a current count: the 2026-08-22 correctness branch alone
+added 17 test files, many DB-backed, and the suite is now 183 `test_*.py`
+files):
 
 ```bash
 docker compose -f docker-compose.prod.yml exec -T \
@@ -113,6 +128,20 @@ the dev database.
 >   `blackbird-app`. `COMPOSE_PROJECT_NAME=copi-blackbird` in `.env` fixes the
 >   project name but *not* the file.
 > - **Never pass `--remove-orphans`** — it has killed org1's nginx + certbot.
+>
+> ⚠️ **Every `blackbird-app` command in this file depends on an UNCOMMITTED edit
+> to `docker-compose.prod.yml`.** The committed file still names the web service
+> `app` (`git show HEAD:docker-compose.prod.yml`); the host's working tree
+> renames it to `blackbird-app`, pins `container_name: copi-blackbird-app-1`,
+> attaches it to the shared `copi-edge` network, and swaps every `awslogs`
+> driver for `json-file`. The rename is not cosmetic — Compose adds the service
+> name as a network alias on every attached network, so an `app` on `copi-edge`
+> would collide with org1's `app` and org1's nginx upstream would resolve to
+> **this** container, breaking copi.science. So: never `git checkout`,
+> `git stash` or `git restore` that file, and on a fresh clone expect `service
+> "blackbird-app" is not defined` until the edit is reapplied. The `prompts/`
+> and `profiles/` bind mounts below are identical in both versions; only the
+> name, network, container_name and logging differ.
 
 The simulation runs in a one-off container named `blackbird-agent-run`:
 
@@ -122,21 +151,70 @@ DC="docker compose -f docker-compose.prod.yml"
 # Resume an existing run:
 $DC --profile agent run -d --name blackbird-agent-run agent python -m src.agent.main
 
-# Fresh run (wipes agent_messages/channels, keeps proposals):
+# Fresh run (mints a new simulation_run_id; DELETES NOTHING):
 $DC --profile agent run -d --name blackbird-agent-run agent python -m src.agent.main --fresh
 
 # With a time limit (minutes):
 $DC --profile agent run -d --name blackbird-agent-run agent python -m src.agent.main --max-runtime 60
 ```
 
+**`--fresh` deletes nothing.** It used to: three UNFILTERED deletes
+(`AgentMessage`, `AgentChannel`, `PiDmMessage`, no `simulation_run_id`
+predicate on any of them), so every previous run's conversation history went
+with it. Measured 2026-08-22, before the fix: `llm_call_logs` held 10 runs and
+`opportunity_assessments` 5, while `agent_messages` held **1** — run
+8b64a0e0's 1,354 messages were gone, 57 of 64 assessments carried a `slack_ts`
+that resolved to no message, and the assessment detail page's interview
+timeline was empty for 90% of the corpus. `_open_fresh_run`
+(`src/agent/main.py:99`) now only mints a new `SimulationRun` row: **the new
+`simulation_run_id` IS the isolation**, every startup and main-loop read is
+already run-scoped, and pre-run Slack history is skipped rather than
+re-imported (`_seed_slack_cursors_without_ingest` parks each polled channel's
+cursor at the newest message it can see, or at the wall clock for a channel it
+could not read at all — a "0" cursor made the live poller re-import the whole
+back catalogue on the first tick). Consequences for an operator: rows now
+**accumulate** across fresh runs, so pick the run you mean on the admin pages;
+and `profiles/memory/*` is still not reset, deliberately and as before.
+
 **`--budget` is deprecated.** It is a *cumulative* cap for the whole run, it is
 rebuilt from `llm_call_logs` on restart, and it therefore benches an agent
 permanently once crossed — a restart does not clear it. It defaults to 0 (off)
 and should stay there. Pacing and runaway protection are now handled by the
-sliding-window rate limiter, whose allowance scales with each agent's live
-conversational load (`llm_calls_per_load_per_window`, `llm_rate_window_seconds`).
-A hub bot in a star topology will hit any uniform cumulative cap long before any
-spoke does. See `docs/specs/2026-08-06-hub-budget-scheduler-design.md`.
+sliding-window rate limiter: `llm_calls_per_load_per_window` x the agent's live
+conversational load for a `pi_lab`, and the flat `hub_llm_calls_per_window`
+brake for the `scout_hub`, which sits on an unpaced lane
+(`SimulationEngine._allowance_for`). A hub bot in a star topology will hit any
+uniform cumulative cap long before any spoke does. See
+`docs/specs/2026-08-06-hub-budget-scheduler-design.md`.
+
+> ⚠️ **As of 2026-08-22 every one of those numbers counts REAL API CALLS, where
+> it used to count turns — and none of them has been re-tuned.**
+> `Agent.record_api_call` booked six sites but never the extra TOOL ROUNDS
+> inside `generate_with_tools`, so a turn that used three rounds before its
+> terminating text call made four billed calls and was metered as one. 78.6% of
+> stored `thread_reply` rows are 2+ calls. `_on_llm_call` now books the
+> unbooked `kind == "round"` entries live, and the restart rebuild moved with it
+> (`COALESCE(jsonb_array_length(call_stats), 1)`, steps 4 and 4b of
+> `_rebuild_agent_state`, `simulation.py:6569`) — otherwise every restart would
+> silently loosen the throttle by the calls-to-turns ratio. The COALESCE is
+> load-bearing, not tidiness: 4,650 of 5,771 stored rows have `call_stats IS
+> NULL` (the column arrived in `0032`) and NULL propagates through SUM.
+>
+> The practical effect: `llm_calls_per_load_per_window` is still **8**
+> (`src/config.py:412`) and `hub_llm_calls_per_window` still **600**
+> (`src/config.py:418`), but each now buys roughly 2-3x FEWER effective turns
+> for any agent whose turns use tool rounds — which is the hub, on essentially
+> every `thread_reply`. Expect the hub to be throttled sooner and to take fewer
+> turns per window than the pre-2026-08-22 calibration notes in `config.py`
+> describe. **Do not "fix" this by raising the setting on your own initiative**
+> — it is a tuning decision, and the numbers stand as measured until the owner
+> re-tunes them.
+>
+> `SimulationRun.total_api_calls` changes units with them and is **not
+> comparable with any run recorded before 2026-08-22**. The old per-turn figure
+> is recoverable for any run as `SELECT COUNT(*) FROM llm_call_logs WHERE
+> simulation_run_id = <run>`. The startup banner declares this (see step 6
+> below).
 
 **Before restarting**, always save logs and rebuild containers:
 
@@ -149,8 +227,7 @@ DC="docker compose -f docker-compose.prod.yml"
 #
 #    -t 420, NOT -t 30 (and not -t 180 or -t 300 either, as of the
 #    thread_reply max_tokens raise below). Measured 2026-08-19: a single
-#    `thread_reply` turn runs up to 134s (up to max_tool_rounds real API
-#    calls, each consult 25-40s), and `request_stop()` is cooperative — it
+#    `thread_reply` turn runs up to 134s, and `request_stop()` is cooperative — it
 #    flips a flag, and the flush in src/agent/main.py's finally-block only
 #    runs once the main loop RETURNS. At -t 30 and even -t 90, SIGKILL landed
 #    mid-turn and the flush never ran; 6 buffered llm_call_logs rows were
@@ -158,6 +235,16 @@ DC="docker compose -f docker-compose.prod.yml"
 #    tool rounds (`should_continue`), which bounds a stopping turn to the
 #    round already underway plus one final call — but the grace period must
 #    still exceed that.
+#
+#    How many real API calls a turn can be, corrected 2026-08-22: the loop is
+#    `range(max_tool_rounds + 1)` (src/services/llm.py:1346), so the setting
+#    UNDER-counts by one. A turn is 1..8 billed calls at the default
+#    `max_tool_rounds=5` — up to max_tool_rounds + 1 tool-capable calls, then a
+#    terminating or forced-final call, then at most one max_tokens retry. The
+#    comment on `_call_log_callback` said "1..7" until then, taking the
+#    setting's name at face value. Each specialist consult is 25-40s, and up to
+#    8 of them run concurrently (`_API_MAX_CONCURRENCY=8` on a 12-thread pool of
+#    llm.py's own, `_API_EXECUTOR_MAX_WORKERS`) rather than serially.
 #
 #    180 -> 420 for the 2026-08-21 thread_reply max_tokens raise (4000 ->
 #    16000, src/agent/simulation.py): a single 16000-token final call can run
@@ -170,8 +257,23 @@ DC="docker compose -f docker-compose.prod.yml"
 #    returns as soon as the container actually exits, so a larger `-t` costs
 #    nothing on the common path and is free insurance against the tail.
 #
-#    Verify it worked: exit code 0, and "Simulation stopping..." in the logs.
-#    Exit 137 means SIGKILL and a lost flush, NOT necessarily an OOM.
+#    Verify it worked by the LOG LINE, not the exit code: "Simulation
+#    stopping..." is logged by `SimulationEngine.stop()` as its LAST statement,
+#    after the bounded memory drain, after `_flush_tasks` are gathered, and
+#    after all three `final=True` flushes. If you see it, the buffers are on
+#    disk.
+#
+#    Exit 137 no longer implies a lost flush (corrected 2026-08-22). Two other
+#    changes moved that: `_drain_and_flush` now runs in the main loop's
+#    `finally`, so EVERY exit from an iteration flushes, and `_get_api_executor`
+#    returns a pool of llm.py's OWN that is deliberately never shut down — so
+#    `asyncio.run` can return and the flush can complete while an API request is
+#    still blocked in a thread, with the process then hanging at interpreter
+#    exit for up to CLIENT_READ_TIMEOUT_SECONDS (300s). So:
+#      * 137 WITHOUT "Simulation stopping..."  -> SIGKILL mid-turn; assume loss.
+#      * 137 WITH "Simulation stopping..."     -> an orphaned API thread held the
+#        process past the grace period. Data is safe; nothing to redo.
+#    Either way 137 is SIGKILL, NOT necessarily an OOM.
 docker stop -t 420 blackbird-agent-run
 docker inspect blackbird-agent-run --format 'exit={{.State.ExitCode}}'
 
@@ -180,15 +282,30 @@ docker logs blackbird-agent-run > logs/blackbird_run_$(date +%s).log 2>&1
 ls -t logs/blackbird_run_*.log | tail -n +11 | xargs -r rm -f
 docker rm blackbird-agent-run
 
-# 3. Rebuild the web tier AND the agent image (both bake src/ into the image)
-$DC up -d --build blackbird-app worker
+# 3. BUILD the web tier AND the agent image (both bake src/ into the image).
+#    BUILD ONLY — do NOT start anything yet. `up -d --build` builds and starts
+#    in one step, which serves the new code against the old schema; every
+#    migrate-before-serve box below exists because that direction breaks the
+#    live site. Splitting build from start is what makes step 4 possible at all.
+$DC build blackbird-app worker
 $DC --profile agent build agent
 
 # 4. Apply migrations — NOTHING ELSE DOES. See the warning below.
-$DC exec -T blackbird-app alembic upgrade head
-$DC exec -T blackbird-app alembic current   # confirm it matches `alembic heads`
+#    From a ONE-OFF container off the image you just built, not `exec`: a new
+#    revision only exists in the new image, so `exec` into the old running
+#    container cannot see it.
+$DC run --rm blackbird-app alembic upgrade head
+$DC run --rm blackbird-app alembic current   # confirm it matches `alembic heads`
 
-# 5. Start the new run
+# 5. Now start the web tier on the migrated schema
+$DC up -d blackbird-app worker
+
+# 6. Start the new run. Check the three-line startup banner:
+#      Starting simulation: N agents, ... max runtime, 0 budget/agent (resuming)
+#      Screening rubric: version X (content hash Y)
+#      API-call accounting: ... counts REAL API CALLS ... not turns, as of 2026-08-22
+#    All three come from src/agent/main.py; the third is `_log_api_call_units`
+#    and is the tell that you are on 2026-08-22-or-later code.
 $DC --profile agent run -d --name blackbird-agent-run agent python -m src.agent.main
 ```
 
@@ -197,9 +314,11 @@ $DC --profile agent run -d --name blackbird-agent-run agent python -m src.agent.
 > The prod web command is a bare `uvicorn` (`docker-compose.prod.yml`), there is
 > no `alembic upgrade` at startup, and no `create_all` anywhere in `src/main.py`
 > or `src/database.py`. So a rebuild + restart runs the **new code against the
-> old schema**, and the failure is silent rather than loud: writes that hit a
-> missing table or column raise, get swallowed by a best-effort `except`, and
-> leave one ERROR line in a log nobody is tailing.
+> old schema**, and the failure is either silent or total depending on where it
+> lands: an engine WRITE that hits a missing column raises, gets swallowed by a
+> best-effort `except`, and leaves one ERROR line in a log nobody is tailing,
+> while a web-tier READ of a newly-mapped column 500s the page outright (see the
+> `0028`/`0030`/`0036` boxes). That asymmetry is why step 3 is build-only.
 >
 > Measured 2026-08-06: production sat at `0024` while the branch head was `0025`.
 > Restarting without step 4 would have made every `_persist_assessment` fail on a
@@ -223,11 +342,14 @@ $DC --profile agent run -d --name blackbird-agent-run agent python -m src.agent.
 >
 > The `agent` service in `docker-compose.prod.yml` mounts only `./profiles`,
 > `./prompts` and `./data`. **`src/` is baked into the image at build time.** So
-> `$DC up -d --build blackbird-app worker` does *not* update the simulation — it
-> rebuilds the web tier only, and `docker compose run agent` then starts the
-> **previous** image. Measured 2026-08-06: a rebuild that skipped step 3's second
-> line launched a run on hours-old code, silently, with no error — the startup
-> banner (`Budget: N calls/agent`) was the only tell.
+> `$DC build blackbird-app worker` does *not* update the simulation — it builds
+> the web tier only, and `docker compose run agent` then starts the **previous**
+> image. Measured 2026-08-06: a rebuild that skipped step 3's second line
+> launched a run on hours-old code, silently, with no error — the startup banner
+> (`Starting simulation: N agents, ... budget/agent`) was the only tell. It now
+> has a third line (`API-call accounting: ...`, `_log_api_call_units`), which is
+> a sharper tell for the same mistake: its absence means the image predates
+> 2026-08-22.
 >
 > After any `src/` change, always run `$DC --profile agent build agent` before
 > starting a new run, and check the startup banner matches what you expect.
@@ -237,8 +359,10 @@ changes require rebuilding the image (above) and restarting the container. **Aft
 
 **`.env` changes need a container *recreate*, not a restart.** `env_file` is
 resolved when the container is created, so `docker restart` re-runs the old
-environment. Step 2 + step 4 above (rm, then `run`) is what actually picks up an
-edited `.env`.
+environment. Step 2 + step 6 above (rm, then `run`) is what actually picks up an
+edited `.env`. For the web tier the equivalent is `$DC up -d --force-recreate
+blackbird-app` — and one `.env` key now fails the site closed if it is wrong,
+see "The Origin guard" below.
 
 ## Adding New PIs
 
@@ -294,6 +418,50 @@ docker compose -f docker-compose.prod.yml exec blackbird-app python scripts/back
 (`.env` + `config.py get_slack_tokens()` remain a read fallback, but the DB column is
 authoritative.)
 
+## The Origin guard (every non-GET request, added 2026-08-22)
+
+`OriginGuardMiddleware` (`src/main.py:107`) refuses any request whose method is
+not GET/HEAD/OPTIONS unless it proves it came from our own origin. It is added
+LAST in `create_app` and is therefore the OUTERMOST middleware — a forged POST
+is refused before the session is even opened — and that position is pinned
+structurally by
+`tests/integration/test_origin_guard.py::test_the_guard_is_the_outermost_middleware`.
+It exists because `same_site="lax"` was the only defence and is void here: one
+nginx serves `blackbird.copi.science`, `copi.science` and `devel.copi.science`,
+SameSite is computed on the registrable domain, so a page on either sibling
+could auto-submit `POST /profile/delete-account` (cascades nine tables) or,
+against a signed-in admin, `POST /admin/users/{id}/role`.
+
+Three operator consequences, in order of how much they will cost you:
+
+1. ⚠️ **A wrong or missing `BASE_URL` fails the site CLOSED, site-wide.** The
+   expected origin is `normalized_origin(settings.base_url)`, and when that is
+   `None` the guard sets `allowed = False` unconditionally rather than comparing
+   equal to everything (`src/main.py:163-166`). Every login POST, every form,
+   every admin action 403s with `Cross-site request refused.` while GETs keep
+   rendering normally — so the site looks up. Production is
+   `BASE_URL=https://blackbird.copi.science` (`.env:31`); the *default* is
+   `http://localhost:8000` (`src/config.py:135`), which is a perfectly valid
+   origin and will therefore silently refuse everything in production. Ports are
+   normalised (`https://host:443` == `https://host`) and a trailing slash is
+   tolerated, so those are not the failure mode; a scheme/host mismatch is.
+2. **`curl -X POST` against the app now needs `-H "Origin: $BASE_URL"`.** Any
+   script, health check or one-off `curl` that POSTs will 403 without it.
+   `Sec-Fetch-Site: same-origin` works as an alternative (it is a forbidden
+   header name, so a browser will not let a page forge one). The single
+   exemption is `POST /settings/unsubscribe/{token}` (RFC 8058 one-click
+   unsubscribe, issued server-side by Gmail/Apple/Yahoo), and only when the
+   request carries **no** session cookie.
+3. **`/docs`, `/redoc` and `/openapi.json` now 404**, not 401 — `create_app`
+   passes `docs_url=None, redoc_url=None, openapi_url=None`, unregistering the
+   routes. They were publishing the whole route inventory to anonymous callers.
+   `application.openapi()` still builds the schema in-process, which is what
+   `tests/unit/test_reachability.py`'s route walk needs.
+
+Every refusal logs one WARNING naming the method, path, received origin,
+`Sec-Fetch-Site` and the expected origin — grep for `Refused cross-site` first
+when a form stops working after a deploy.
+
 ## Account Types (PI / manager / admin)
 
 **`users.user_role` is the single source of truth**, with values `pi`, `manager`,
@@ -301,8 +469,8 @@ authoritative.)
 `hybrid_property` over `user_role`, so it still works in both SQL
 (`select(User.is_admin)`) and Python, but **cannot be assigned**. Set the role
 instead. The physical `users.is_admin` column stays in the database, unmapped and
-defaulted. Dropping it is deferred to a separate later migration (`0031`+ — `0030` is
-now taken by `specialist_consults`), which **has not been written, let alone applied** —
+defaulted. Dropping it is deferred to a separate later migration (`0037`+ — `0031`
+through `0036` are all taken now), which **has not been written, let alone applied** —
 see the design doc's §8.
 
 > **Deploy order for `0028_add_user_role` — migrate BEFORE the new code serves.**
@@ -345,12 +513,20 @@ privilege escalation.
 the PI surfaces (`base.html` still offers them My Profile / My Agent), so a `!= 'pi'`
 guard locks admins out of their own account — `/profile` bounces an admin whose
 onboarding is incomplete to `/onboarding`, and only `POST /onboarding/save-profile` can
-ever clear that flag. The PI-write POSTs (`/onboarding/save-profile`,
-`/onboarding/retry`, `/profile/refresh`, `/agent/request`) are gated on
-**`get_pi_user`** in `src/dependencies.py`, which 403s a manager and lets an admin
-through. A read-only redirect is not enough there: `save-profile` writes
+ever clear that flag. The **five** PI-write POSTs — `/onboarding/save-profile`
+(`src/routers/onboarding.py:139`), `/onboarding/retry` (`:255`), `/profile/save`
+(`src/routers/profile.py:113`), `/profile/refresh` (`:141`) and `/agent/request`
+(`src/routers/agent_page.py:414`) — are gated on **`get_pi_user`** in
+`src/dependencies.py:177`, which 403s a manager and lets an admin through. A
+read-only redirect is not enough there: `save-profile` writes
 `onboarding_complete` and creates the profile, which is the whole gate on
 `/agent/request` — so an ungated pair is a manager with a lab bot.
+`POST /profile/save` was the fifth and was left on `get_current_user` when the
+other four were moved (fixed 2026-08-22, E1.3): it calls `apply_profile_edits`,
+so a manager could create a `ResearcherProfile` on their own account and rewrite
+`users.email` — the field delegate-invitation acceptance binds to. Managers keep
+`POST /manager/pis/{user_id}/profile`, which calls the same service function
+against a PI they name.
 
 Appoint from **/admin/users/{id} → Account Type**. The last admin cannot be demoted
 there (that guard counts only admins with `access_status='allowed'` — a denied admin
@@ -362,6 +538,20 @@ cannot log in, so counting one would just make demotion easier). If no admin can
 New managers are provisioned in two steps: they sign in with ORCID (landing on
 `/access-pending`), an admin approves them at `/admin/access-requests`, then sets their
 role. Between approval and role-setting the account behaves as a PI.
+
+**Revoking access now ends the session immediately** (`src/dependencies.py:72`,
+fixed 2026-08-22 as E1.2). Sessions are unkeyed signed cookies with a 30-day
+`max_age` and no server-side store, so `users.access_status` is the only
+revocation signal there is — and nothing read it after login, so
+`admin_deny_access` set the column and changed nothing the user could observe: a
+denied user's `GET /profile` returned 200 for up to thirty more days. The check
+now pops `user_id`, repopulates `pending_access` in the shape `auth.py` writes at
+login, and 302s to `/access-pending`. Two consequences: `/access-pending` and
+`POST /logout` must stay free of `get_current_user` or the bounce becomes a loop
+with no way out; and the check runs on the **session holder**, deliberately
+before the impersonation block, so **an admin can still impersonate a denied
+account** — that is a support path, not an oversight, and it is commented at the
+check.
 
 ## BlackbirdBot (the scout_hub role)
 
@@ -421,25 +611,128 @@ stay comparable.
 > relative to the restart. Details:
 > `docs/audits/2026-08-20-assessment-duplication/README.md`.
 
-**One interview yields exactly one assessment, and it comes from the reply that
-ENDS the interview.** `_capture_hub_assessment` stores a sidecar carried by a reply
-that concludes (ordinal 12) **or closes the thread** — the ⏸️ decline, decided by
-`_reply_closes_thread`, hoisted once in `_reply_to_thread` and passed down as
-`closes_thread` so the capture gate and `_check_thread_outcome` cannot disagree. It
-refuses one from a turn that does neither (`premature_sidecar`), and refuses a
-re-capture of a turn already stored or anything following a closing verdict
-(`duplicate_thread_verdict`) — recording every refusal in `assessment_drops` rather
-than logging it and moving on. **Gating on the ordinal alone destroys data:** every
-`pass` verdict is delivered as a ⏸️ decline, so its own reply closes the thread
-before ordinal 12 and no later turn exists to record it (run 076e80b6: 4 of 5
-`premature_sidecar` refusals were the thread's terminal message; all 23 `pass`
-sidecars ever emitted carried ⏸️). Gating on neither wrote three rows for a single
-pearce interview (ordinals 8, 10 and 12), because the `<assessment_json>` contract
-sits in the STATIC body of `phase4-thread-reply.md` and is therefore in front of the
-model on every phase-4 turn, not just the one asked for it. A later concluding or
-closing verdict **supersedes** an earlier provisional one — last write wins, and
+> **Deploy order for `0036_panel_owed_thread_id_truncated_and_repairs` — migrate
+> BEFORE the new code serves.** `0036` is five additive nullable columns, one
+> foreign-key rule corrected, and two data repairs, so *old code against the new
+> schema* is safe (nothing is backfilled, nothing is NOT NULL). The reverse
+> takes the live site down in pieces. The new code **maps
+> `opportunity_assessments.panel_owed` and `.thread_id`,
+> `specialist_consults.truncated`, and `llm_call_logs.cache_read_input_tokens` /
+> `.cache_creation_input_tokens`**, so against a pre-`0036` database:
+>
+> * `/admin/assessments` and `/manager/assessments` raise `UndefinedColumn` —
+>   both the `select(OpportunityAssessment)` at `src/services/directory.py:288`
+>   and the unvetted-panel banner COUNT, which names `panel_owed` through
+>   `unvetted_panel_filter()`;
+> * both assessment DETAIL pages raise — `select(OpportunityAssessment)` at
+>   `src/services/assessment_detail.py:503` and `select(SpecialistConsult)` at
+>   `:731`;
+> * `/admin/activity/{run_id}/llm-calls` raises — `select(LlmCallLog)` at
+>   `src/routers/admin.py:379`;
+> * on the engine side the LLM-log writer (`simulation.py:6987`) and the consult
+>   writer (`:4293`) name the new columns in their INSERTs, so every
+>   `llm_call_logs` flush and every `specialist_consults` row fails — the flush
+>   path will say LOST with a row count, which is the loud half; the consult
+>   write is best-effort and is the silent half.
+>
+> Build, migrate from a one-off container, then start — same ordering as `0028`
+> and `0030`:
+>
+>     DC="docker compose -f docker-compose.prod.yml"
+>     $DC build blackbird-app worker
+>     $DC run --rm blackbird-app alembic upgrade head
+>     $DC run --rm blackbird-app alembic current      # must equal `alembic heads`
+>     $DC up -d blackbird-app worker
+>
+> The agent image bakes `src/` in too and must be rebuilt separately
+> (`$DC --profile agent build agent`). Production was at `0035` and this branch
+> is `0036`, so this box applies to the next deploy, not to some hypothetical one.
+>
+> Four things to expect afterwards, none of them a regression:
+>
+> 1. **The unvetted-panel banner on `/admin/assessments` JUMPS** to include every
+>    row written before `0036` — 63 of them when the migration was written. Those
+>    rows have `panel_owed IS NULL`, which is deliberately never backfilled
+>    ("guessing would manufacture exactly the verification this column exists to
+>    stop asserting"), and NULL is one of the three states
+>    `unvetted_panel_filter()` counts. Staff read that page daily; the number
+>    going up on deploy day is the fix working, not a new problem.
+> 2. **`private_channel_members_user_id_fkey` is dropped and recreated ON DELETE
+>    CASCADE**, taking a brief ACCESS EXCLUSIVE lock on `private_channel_members`
+>    and `users`. It is free today (0 production rows) and only gets dearer. It
+>    fixes a real 500: under the old `SET NULL`, deleting a user who was a
+>    private-channel member drove both owner columns of the membership row to
+>    NULL, violated `CHECK ((agent_id IS NULL) <> (user_id IS NULL))`, and made
+>    **both** `POST /profile/delete-account` and the admin delete raise.
+>    `added_by_user_id` deliberately stays `SET NULL`.
+> 3. **Repair order inside the migration is load-bearing** and is already coded
+>    that way: repair (a) recovers 17 de-risking milestones the backfill script
+>    lost to a wrong sidecar key, and repair (b) is `0031`'s JSON-`null` → SQL
+>    NULL normalization applied to eleven more columns. `derisking_milestones` is
+>    one of the eleven, so running (b) first makes (a) match zero rows *while
+>    reporting success*. Do not reorder them, and do not run the statements by
+>    hand out of order.
+> 4. **The `truncated` column reads NULL as "not truncated"**, so the three
+>    known-truncated consults on run 8b64a0e0 keep crediting the specialist floor
+>    exactly as they do today. The alternative retroactively invalidates history
+>    on no evidence.
+
+**One interview yields exactly one assessment, and the row you end up with comes
+from the LAST verdict-bearing reply.** **A sidecar is now trusted on its own**
+(`_sidecar_refusal`, `src/agent/simulation.py:3765`): emitting one IS the hub
+saying "this is my verdict", so `_capture_hub_assessment` stores it whether or
+not the reply ends the interview. The only refusal left is a re-capture —
+`duplicate_thread_verdict`, for a turn already stored, for anything after a
+verdict whose reply CLOSED the interview, or for the same ordinal captured twice
+— and every refusal is recorded in `assessment_drops`, carrying the model's
+`raw_verdict` with it, rather than logged and forgotten. A non-terminal sidecar
+is stored as PROVISIONAL and superseded by any later one: last write wins, and
 `_retire_superseded_verdict` removes the earlier row (leaving a
 `duplicate_thread_verdict` drop as its trace) so the one-row invariant still holds.
+
+`premature_sidecar` is therefore **HISTORICAL ONLY as of 2026-08-22** — no new
+rows carry it. It used to mean "a sidecar arrived on a turn that neither
+concluded the interview nor closed the thread, so a later turn is still owed the
+verdict", and that promise was unbacked: nothing scheduled the later turn,
+nothing tracked the debt, and nothing kept the discarded JSON. Two rounds of
+evidence killed it. Gating on the ordinal alone destroyed every `pass`: a `pass`
+is delivered as a ⏸️ decline, which closes the thread 3-8 ms later in the same
+code path, so no ordinal-12 turn ever arrives (run 076e80b6: 4 of 5 refusals were
+the thread's terminal message; only 1 of 62 threads reached 12; all 23 `pass`
+sidecars ever emitted carried ⏸️). Adding `or closes_thread` rescued the declines
+and left the positives exposed, because `phase4-thread-reply.md` binds the two to
+MUTUALLY EXCLUSIVE outcomes — Outcome 1 is verdict + sidecar and NO ⏸️, Outcome 2
+is ⏸️ and "emit no sidecar" — so the only sidecar the code reliably accepted was
+one the prompt forbids. Run 8b64a0e0 measured it: the CONCLUDE door was offered
+once in 140 hub reply turns, 0 of 15 sidecars used it, all 13 stored verdicts came
+through the ⏸️ door, and the two refused at ordinal 10 included the run's
+highest-scoring idea (markham, 3.04, its only `route-to-incubation`) — refused six
+minutes before the run's timer ended the interview that was supposedly still owed
+a verdict. Gating on *neither* is not the answer either: that wrote three rows for
+a single pearce interview (ordinals 8, 10 and 12), because the `<assessment_json>`
+contract sits in the STATIC body of `phase4-thread-reply.md` and is therefore in
+front of the model on every phase-4 turn — which is what supersession, not
+refusal, now handles.
+
+`closes_thread` (the ⏸️ decline, decided by `_reply_closes_thread`, hoisted once
+in `_reply_to_thread` and passed down) still matters, just not for admission: with
+"is this the CONCLUDE ordinal" it decides whether a verdict is TERMINAL
+(`_verdict_is_terminal`), which marks the held record `final` so nothing later can
+re-capture it, and which is the only thing that releases the public
+`#assessments-summary` headline.
+
+**`_assessed_threads` survives a restart now**, via
+`opportunity_assessments.thread_id` (migration `0036`) and
+`_rehydrate_assessed_threads`. The map is process-local, so before that a restart
+left the engine blind to every verdict it had already written: the interview's own
+later turn looked like a FIRST verdict and landed a second row, and a lab bot
+⏸️-closing a thread that already held one produced a spurious
+`closed_before_verdict` drop. Rows with a NULL `thread_id` — every row written
+before `0036` — are skipped rather than guessed at, and the restored record uses
+`ordinal=0`, `announced=False` and a `final` DERIVED from `_closed_thread_ids`;
+each of those three is a deliberate choice about which way to fail, documented at
+the function.
+
 When writing a
 test that drives a concluding reply, seed the thread's history in the
 `MessageLog`: `_reply_to_thread` overwrites `ThreadState.message_count` from
@@ -491,7 +784,7 @@ fourth outright.
   `docs/audits/2026-08-22-run-8b64a0e0/rca-and-corrections.md` §1;
   `tests/unit/test_claude_md_disclosure_sync.py` is now the drift alarm.)
   As of the 2026-08-21 manager-PI-controls cycle
-  (`SimulationEngine._post_assessment_summary`, `src/agent/simulation.py`), every HELD
+  (`SimulationEngine._post_assessment_summary`, `src/agent/simulation.py`), a HELD
   verdict — pass or fail alike — does additionally trigger one genuinely top-level post,
   written by the ENGINE rather than the model and prefixed with that same `:mag:`: a
   headline-only line (PI/lab name, `company_or_project`, `recommendation`, band/score, and a
@@ -505,7 +798,17 @@ fourth outright.
   added to `SEEDED_CHANNELS` or any per-agent subscription, so no PI-lab bot is ever joined
   to it or polls it — it still never reaches a PI/lab **agent**'s own view of the
   simulation, only human staff who join the channel directly. The post fires synchronously
-  right after `_persist_assessment` returns HELD inside `_capture_hub_assessment`; a dropped
+  right after `_persist_assessment` returns HELD inside `_capture_hub_assessment` — but
+  only for a verdict that is **TERMINAL and not already announced** for that interview
+  (`announce = terminal and not already_announced`, `simulation.py:3236`). That
+  condition is not the same as "held", and the difference arrived with provisional
+  storage: since a non-terminal sidecar is now STORED rather than refused, one interview
+  can hold several verdicts in turn, and a headline is a public Slack post that cannot be
+  retracted when the row it described is superseded moments later. So a provisional verdict
+  is stored, visible to staff, and logged as `Provisional verdict stored ... no
+  #assessments-summary headline until the interview concludes` — announced only when a
+  terminal reply arrives. `announced` carries forward across supersession for the same
+  reason. A dropped
   or refused sidecar (an `AssessmentDrop` row, never an `opportunity_assessments` row) never
   posts (design D14), and a Slack failure in the post/permalink step is caught and logged,
   never raised into the calling turn (design D16) — see
@@ -518,11 +821,51 @@ fourth outright.
   `route-to-incubation`) comes straight from the model's verdict and the computed `band`
   comes straight from `weighted_score` — they are separate columns on
   `opportunity_assessments` and neither is derived from the other.
+  A fourth write-time fact joined them in `0036`: **`panel_owed`**, the specialist
+  floor's own answer to "was a panel owed here", computed once by `panel_is_owed` in
+  `_persist_assessment` (`simulation.py:3631`) and **replayed** by the read path rather
+  than recomputed. That is the point of the column. `assessment_detail.panel_state`
+  used to ask `panel_is_owed(recommendation, band)` at RENDER time, which answers a
+  different question — "would a panel be owed under TODAY's rules" — so every widening
+  of the predicate silently re-labelled every older row. It widened twice in 2026-08
+  alone, and 12 production rows written by the recommendation-only floor were re-read by
+  the band-aware page as completed audits; at least five had a demonstrable gap.
+  `panel_state` now returns **five** states — `gap`, `unverified`, `unrecorded`,
+  `not_owed`, `verified` — and reaches `verified` (the green box) ONLY via
+  `panel_owed is True`. `unrecorded` is `panel_owed IS NULL`: the row predates `0036`,
+  or was backfilled, or was hand-built by a test, and no claim is available for it.
+  `tests/unit/test_panel_state.py::test_the_read_path_never_re_derives_the_floor_s_decision`
+  fails if anyone puts `panel_is_owed` back in front of the column test.
 - **`gating` values are the tri-state strings** `"met"` / `"not_met"` / `"unconfirmed"`,
   never booleans — "the PI declined" and "we never asked" are different answers, and only
   the former can license discounting an idea.
+- **`AssessmentDrop.reason` gained `unwritable_row`** on 2026-08-22, and it is the one
+  reason that is not a GATE decision: the engine WANTED the row and the database refused
+  it, even alone, during `_recover_rows_individually`'s per-row retry after its batch
+  failed (`_flush_persisted`). The verdict was already concluded, parsed and assembled
+  into a row before it was lost, so the drop is its only surviving trace — `raw_verdict`
+  carries the verdict exactly as the row would have stored it and `detail` names the
+  database's own exception plus the channel/thread. Not retried (it already failed twice,
+  batch then alone), and recording it is itself best-effort, since a malformed row must
+  not take its batch's surviving verdicts down with it. `premature_sidecar` and
+  `specialist_floor` are the two HISTORICAL-ONLY reasons; the full list, with what each
+  one costs, is on the model (`src/models/opportunity.py`).
 - **`search_prior_art` is a TITLE-only search** on the USPTO Open Data Portal (PatentsView
   was decommissioned in its 2026-03-20 migration to api.uspto.gov). It backs off to the
   most specific terms when the full phrase misses — before that backoff existed, every
   production search ANDed in domain-generic words like "inhibitor" and returned zero hits,
   reported to PIs as clean novelty. An empty title search is never FTO.
+  **The query the model asks for is not always the query that is sent**, and as of
+  2026-08-22 every difference is disclosed to it. `_prepare` (`src/services/patents.py:169`)
+  NFKD-normalises and transliterates each whitespace chunk before tokenising: Greek is
+  spelled out (`Qβ` → `Qbeta`), Unicode dashes and combining marks are folded away, and a
+  chunk with no ASCII equivalent at all is DROPPED. `AND`/`OR`/`NOT` are dropped too —
+  they are query syntax, not title words, and the terms are ANDed for the caller anyway;
+  the tool description the model sees now says so outright. Each of those lands in
+  `PriorArtResult.dropped_or_rewritten` and is rendered into the tool result by
+  `tools.py::_rewrite_note`, alongside `.broadened` (the backoff fired, so hits may be
+  adjacent) and `.truncation_note` (`.hits` is one page, not the whole match set). The
+  disclosure has to be TOTAL: the first version fired only when the fold CHANGED a chunk,
+  so `π-π stacking` reached the model as "SCOPE: searched titles for stacking." with
+  `broadened` False — a term silently deleted and the note saying nothing had happened,
+  which is the same class of damage the transliteration exists to prevent.
