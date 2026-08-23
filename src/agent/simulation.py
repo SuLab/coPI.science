@@ -4019,6 +4019,16 @@ class SimulationEngine:
         Callers must never omit ``superseded.slack_ts`` — a ``None`` here would
         collapse the predicate to "this thread's rows", which is the trap above.
         The caller bails before reaching this.
+
+        The narrowing is DEFENCE IN DEPTH and is deliberately NOT pinned by a
+        test. Measured 2026-08-23: deleting the ``sa_or`` element below leaves
+        ``test_hub_assessment_capture_gate.py`` and
+        ``test_opportunity_assessment_persistence.py`` at 79 passed. That is
+        expected, not a coverage gap — ``slack_ts`` is already unique within a
+        ``(simulation_run_id, agent_id)`` pair, so no fixture can construct the
+        collision this guards against without first constructing a different bug.
+        Keep it anyway: it costs one OR and it is the only thing standing between
+        a same-ts row from another interview and a wrong retirement.
         """
         from sqlalchemy import or_ as sa_or
 
