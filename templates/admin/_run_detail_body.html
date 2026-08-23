@@ -14,9 +14,13 @@
         <div class="text-2xl font-bold text-gray-800">{{ run.total_messages }}</div>
         <div class="text-xs text-gray-500">Messages</div>
     </div>
+    {# total_api_calls counts REAL API calls (tool rounds + retries) as of
+       2026-08-22, not turns as it used to — see the column comment on
+       SimulationRun.total_api_calls and main.py's API_CALL_UNITS_NOTE. #}
     <div class="bg-white border rounded-lg p-4 text-center">
         <div class="text-2xl font-bold text-gray-800">{{ run.total_api_calls }}</div>
-        <div class="text-xs text-gray-500">API Calls</div>
+        <div class="text-xs text-gray-500"
+             title="Real API calls (tool rounds + retries), not turns, as of 2026-08-22. Not comparable with runs from before that date — the old per-turn figure is COUNT(*) over llm_call_logs for the run.">API Calls</div>
     </div>
     <div class="bg-white border rounded-lg p-4 text-center">
         <div class="text-2xl font-bold text-gray-800">{{ channels | length }}</div>

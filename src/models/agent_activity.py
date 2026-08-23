@@ -50,6 +50,18 @@ class SimulationRun(Base):
         nullable=False,
     )
     total_messages: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    #: As of 2026-08-22, this counts REAL API CALLS — every tool round and
+    #: truncation retry booked via `Agent.record_api_call` /
+    #: `SimulationEngine._unbooked_calls` — not turns, which is what it counted
+    #: before that date. It is NOT comparable across the boundary: 78.6% of
+    #: stored `thread_reply` rows are 2+ calls, so the number roughly doubles for
+    #: reasons that have nothing to do with the run. The old per-turn figure is
+    #: still recoverable for any run as `SELECT COUNT(*) FROM llm_call_logs
+    #: WHERE simulation_run_id = <run>` — one `LlmCallLog` row is written per
+    #: turn regardless of how many real API calls that turn made. See
+    #: `src/agent/main.py`'s `API_CALL_UNITS_NOTE` (surfaced in the startup
+    #: banner) and the comment above `RUN_STATS_UPDATE_INTERVAL` in
+    #: `src/agent/simulation.py` for the engine-side half of this note.
     total_api_calls: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     config: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
 
