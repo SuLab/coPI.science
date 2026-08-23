@@ -5926,12 +5926,18 @@ class SimulationEngine:
 
     def _report_flush_failure(
         self, *, what: str, requeue: list, exc: object, final: bool, log,
+        exc_info: bool = False,
     ) -> bool:
         """Say what actually happens to ``requeue`` — and say LOST when it is lost.
 
         ``stop()`` makes exactly ONE final attempt at each buffer, so "re-queued
         for retry" is a false statement on that path: nothing will ever drain the
         buffer again. Returns True when the caller should re-queue.
+
+        ``log`` is the caller's chosen level for the recoverable case (an
+        ``opportunity_assessments`` row is the product of the pipeline and stays
+        at ERROR where the other two are WARNING); the LOST case is ERROR for
+        everyone, because nothing is recoverable about it.
         """
         if not requeue:
             return False
@@ -5939,12 +5945,12 @@ class SimulationEngine:
             logger.error(
                 "SHUTDOWN FLUSH FAILED: %d %s row(s) LOST — this was the final "
                 "attempt and nothing will retry them: %s",
-                len(requeue), what, exc,
+                len(requeue), what, exc, exc_info=exc_info,
             )
             return False
         log(
             "Failed to flush %d %s row(s), re-queued for retry: %s",
-            len(requeue), what, exc,
+            len(requeue), what, exc, exc_info=exc_info,
         )
         return True
 
@@ -6143,7 +6149,7 @@ class SimulationEngine:
                 )
             if self._report_flush_failure(
                 what="assessment", requeue=requeue, exc=exc, final=final,
-                log=logger.error,
+                log=logger.error, exc_info=True,
             ):
                 self._pending_assessments[0:0] = requeue
 
