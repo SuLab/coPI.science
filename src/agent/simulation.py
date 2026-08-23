@@ -54,10 +54,51 @@ from src.services.cohorts import compute_gates, summarise_gates
 from src.services.llm import (
     generate_agent_response,
     generate_with_tools,
+    is_truncated_stop,
     set_call_log_callback,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _was_truncated(stop_reasons: list[str]) -> bool:
+    """Did the reply this turn is holding stop BEFORE the model finished it?
+
+    ``src/services/llm.py`` reports the terminating ``stop_reason`` through an
+    ``on_stop_reason`` callback and still RETURNS the partial text, because
+    whether a partial answer may be posted, persisted or credited differs per
+    call site. Every engine call site therefore collects the reason into a list
+    (``on_stop_reason=stop_reasons.append``, the idiom ``src/agent/tools.py``
+    already uses) and asks this.
+
+    ``is_truncated_stop`` rather than a ``refusal``-only test, and deliberately
+    not re-derived here: ``refusal`` is the classifier cutting the generation and
+    ``max_tokens`` is the ceiling doing it, the text in hand is equally partial,
+    and a reply that truncated, retried and truncated again reports
+    ``max_tokens`` — as does a fallthrough from the retry path whose first pass
+    was refused. Until 2026-08-22 ``on_stop_reason`` had NO reader in this module
+    at all, so a truncated hub reply was posted to Slack as complete and a
+    truncated synthesis overwrote a good working memory.
+
+    ``any`` rather than "the last one": the contract says the callback fires
+    exactly once, and a guard about incomplete text should not become a no-op if
+    that ever changes.
+    """
+    return any(is_truncated_stop(reason) for reason in stop_reasons)
+
+
+#: Appended to a hub/lab reply whose generation was cut off, so the PI reading
+#: the thread is not left to guess why it stops mid-sentence.
+#:
+#: The partial text is KEPT and posted. Discarding it looks safer and is not:
+#: `_reply_to_thread`'s next guard is "empty or unparseable", which increments
+#: `empty_response_count` and, on a second occurrence, backs off the thread and
+#: records an `empty_reply` drop — the interview abandoned, no verdict, no later
+#: turn. That is how a real interview died. A marked partial reply keeps the
+#: conversation alive and tells the truth about itself.
+TRUNCATION_NOTICE = (
+    "\n\n_(This reply was cut off before it finished — treat it as incomplete.)_"
+)
 
 
 def _visibility_permits(origin: str, current: str) -> bool:
@@ -672,6 +713,12 @@ class SimulationEngine:
         await self._rebuild_state_from_db()
         await self._restore_slack_state()
         await self._rebuild_agent_state()
+        # AFTER _rebuild_agent_state, not before: `_HeldVerdict.final` is derived
+        # from `_closed_thread_ids`, which the rebuild above populates from
+        # `thread_decisions`. Rehydrating first would mark every restored verdict
+        # non-final — including the ones whose interview is already over. See
+        # `_rehydrate_assessed_threads`.
+        await self._rehydrate_assessed_threads()
         # Rebuild advanced last_seen_cursor to max(all_messages), which can
         # overshoot messages in private channels (typically older than the
         # latest public chatter). Rewind member-bot cursors so later phases can
@@ -1862,6 +1909,11 @@ class SimulationEngine:
         # already_reserved=True: try_reserve just appended this exact call to
         # call_times — appending again here would double-book it (Ruling R5).
         agent.record_api_call(already_reserved=True)
+        # Filled by `on_stop_reason` below, then read once the reply is
+        # extracted. A list rather than a scalar for the same reason
+        # src/agent/tools.py uses one: the callback is a plain `append`, so the
+        # collection needs no closure and no nonlocal.
+        stop_reasons: list[str] = []
         try:
             raw_response = await generate_with_tools(
                 system_prompt=system_prompt,
@@ -1945,6 +1997,12 @@ class SimulationEngine:
                     "channel": thread.channel,
                 },
                 on_retry=agent.record_api_call,
+                # Was the reply the model handed back FINISHED? llm.py returns
+                # the partial text either way (see `_was_truncated`), and this
+                # is the site where posting it unmarked did the most damage: 4
+                # truncated hub replies went to Slack as complete in run
+                # 8b64a0e0, mid-sentence, with the PI left to guess.
+                on_stop_reason=stop_reasons.append,
                 # Cooperative shutdown. `request_stop()` only flips `_running`,
                 # and the durable flush runs in main.py's finally — which needs
                 # the main loop to RETURN. This is the longest await in the whole
@@ -2014,6 +2072,25 @@ class SimulationEngine:
                             ),
                         )
                 return
+
+            if _was_truncated(stop_reasons):
+                # MARKED, and still posted. The partial text is the only thing
+                # this turn produced and the PI is mid-conversation; dropping it
+                # would land on the empty-response branch above, which abandons
+                # the interview on its second occurrence. See TRUNCATION_NOTICE.
+                #
+                # Appended to `response_text` itself, not only to the posted
+                # copy, so the message log, Slack and `_check_thread_outcome`
+                # all see one string. Inert for every downstream reader: the ⏸️
+                # close test is a substring search, and `_capture_hub_assessment`
+                # parses the UNMARKED `raw_response` for its sidecar.
+                logger.warning(
+                    "[%s] Phase 4: reply to thread %s was TRUNCATED (%s) — "
+                    "posting the partial text with an explicit marker rather "
+                    "than as a finished reply",
+                    agent.agent_id, thread.thread_id, ", ".join(stop_reasons) or "?",
+                )
+                response_text = response_text.rstrip() + TRUNCATION_NOTICE
 
             # Post the reply
             posted = await self._post_message(
@@ -2682,6 +2759,8 @@ class SimulationEngine:
             # already_reserved=True: try_reserve just appended this exact call to
             # call_times — appending again here would double-book it (Ruling R5).
             agent.record_api_call(already_reserved=True)
+            # See `_was_truncated`; same collection idiom as the Phase-4 site.
+            stop_reasons: list[str] = []
             try:
                 response = await generate_agent_response(
                     system_prompt=system_prompt,
@@ -2713,7 +2792,23 @@ class SimulationEngine:
                         "call_id": llm_call_id,
                     },
                     on_retry=agent.record_api_call,
+                    on_stop_reason=stop_reasons.append,
                 )
+                if _was_truncated(stop_reasons):
+                    # SKIPPED, unlike the Phase-4 reply above, and the asymmetry
+                    # is the point: nothing is waiting on this. No thread is open,
+                    # no PI is mid-sentence, and no later turn is owed anything —
+                    # so a pitch the model did not finish is simply not made. A
+                    # half-written action envelope is also the shape most likely
+                    # to parse into a post nobody meant (`_parse_phase5_response`
+                    # sees a truncated JSON block), which is a workspace-visible
+                    # artifact that cannot be retracted.
+                    logger.warning(
+                        "[%s] Phase 5: response was TRUNCATED (%s) — skipping "
+                        "the post rather than publishing a half-written one",
+                        agent.agent_id, ", ".join(stop_reasons) or "?",
+                    )
+                    return
                 if not response or not response.strip():
                     logger.warning("[%s] Phase 5: Empty response from LLM, skipping", agent.agent_id)
                     return
@@ -3615,12 +3710,24 @@ class SimulationEngine:
         and ``assessment_drops`` is where every other lost verdict on this
         surface already appears.
 
+        **The drop keeps the verdict.** The refusal path in
+        ``_capture_hub_assessment`` passes ``raw_verdict`` under a comment saying
+        a refusal "is never a licence to destroy it"; supersession was the one
+        path that both DELETED a row and kept nothing, so the earlier verdict —
+        its scores, its rationale, its red flags — existed nowhere afterwards.
+        The row is read back BEFORE it is deleted (``_record_assessment_drop``
+        opens its own session, so the sequence is SELECT -> drop -> DELETE) using
+        the SAME predicate the DELETE uses: if the two diverged and a thread held
+        two rows mid-transition, the drop would preserve the WRONG verdict, which
+        is worse than preserving none because it looks authoritative.
+
         Best-effort in the same sense as every other write on this path: the
         concluding reply is already in Slack, so nothing here may raise. Two
         honest limits, both logged loudly rather than hidden:
-          * a superseded row with no ``slack_ts`` cannot be located again
-            (``opportunity_assessments`` carries no thread id), so it is left in
-            place and the duplicate is reported.
+          * a superseded row with no ``slack_ts`` cannot be located again. The
+            row now carries ``thread_id``, but that is NOT enough on its own —
+            see ``_superseded_row_filter`` — so it is left in place and the
+            duplicate is reported.
           * a copy still sitting on ``_pending_assessments`` is dropped from the
             queue first, because a retry that landed afterwards would recreate
             the duplicate this just removed. A flush already in flight holds its
@@ -3637,12 +3744,52 @@ class SimulationEngine:
             "[%s] Phase 4: superseded the earlier verdict for %s on thread %s — %s",
             agent_id, thread.other_agent_id or "?", thread.thread_id, detail,
         )
+        # Read the row BEFORE recording the drop, because the drop is what has to
+        # carry it and `_record_assessment_drop` commits in its own session.
+        retired_verdict = await self._superseded_raw_verdict(
+            agent_id, thread, superseded,
+        )
         await self._record_assessment_drop(
             agent_id, "duplicate_thread_verdict",
             subject_agent_id=thread.other_agent_id,
             thread_id=thread.thread_id,
             detail=detail,
+            raw_verdict=retired_verdict,
         )
+        # Prune the retry queue BEFORE the no-slack_ts bail below, and guard the
+        # match explicitly rather than relying on that bail to keep a `None` out
+        # of it. `row.get("slack_ts") == superseded.slack_ts` with `None` on the
+        # right matches EVERY queued row that never got a Slack ts — other
+        # interviews' verdicts included — and those rows would be dropped from
+        # the queue and never written. A rehydrated verdict
+        # (`_rehydrate_assessed_threads`) is exactly where a `None` comes from,
+        # so this is reachable rather than theoretical, and the guard has to live
+        # here rather than upstream: a later edit that moves the bail must not be
+        # able to re-open it.
+        if superseded.slack_ts:
+            queued = [
+                row for row in self._pending_assessments
+                if row.get("slack_ts") == superseded.slack_ts
+                and row.get("thread_id") == thread.thread_id
+            ]
+            if queued:
+                self._pending_assessments[:] = [
+                    row for row in self._pending_assessments
+                    if row not in queued
+                ]
+                logger.info(
+                    "[%s] Phase 4: dropped %d superseded verdict(s) from the "
+                    "assessment retry queue (thread=%s slack_ts=%s)",
+                    agent_id, len(queued), thread.thread_id, superseded.slack_ts,
+                )
+        elif self._pending_assessments:
+            logger.info(
+                "[%s] Phase 4: the superseded verdict on thread %s has no "
+                "slack_ts, so the assessment retry queue (%d row(s)) is left "
+                "untouched — a NULL match there would sweep every queued verdict "
+                "that has no Slack ts of its own",
+                agent_id, thread.thread_id, len(self._pending_assessments),
+            )
         if not superseded.slack_ts:
             logger.warning(
                 "[%s] Phase 4: the superseded verdict on thread %s has no "
@@ -3651,20 +3798,6 @@ class SimulationEngine:
                 agent_id, thread.thread_id,
             )
             return
-        queued = [
-            row for row in self._pending_assessments
-            if row.get("slack_ts") == superseded.slack_ts
-        ]
-        if queued:
-            self._pending_assessments[:] = [
-                row for row in self._pending_assessments
-                if row.get("slack_ts") != superseded.slack_ts
-            ]
-            logger.info(
-                "[%s] Phase 4: dropped %d superseded verdict(s) from the "
-                "assessment retry queue (slack_ts=%s)",
-                agent_id, len(queued), superseded.slack_ts,
-            )
         if not self.session_factory or not self.simulation_run_id:
             return
         try:
@@ -3673,9 +3806,7 @@ class SimulationEngine:
             async with self.session_factory() as db:
                 result = await db.execute(
                     sa_delete(OpportunityAssessment).where(
-                        OpportunityAssessment.simulation_run_id == self.simulation_run_id,
-                        OpportunityAssessment.agent_id == agent_id,
-                        OpportunityAssessment.slack_ts == superseded.slack_ts,
+                        *self._superseded_row_filter(agent_id, thread, superseded)
                     )
                 )
                 await db.commit()
@@ -3692,6 +3823,161 @@ class SimulationEngine:
                 "the drop row above says which is which",
                 agent_id, thread.thread_id, superseded.slack_ts, exc,
                 exc_info=True,
+            )
+
+    def _superseded_row_filter(
+        self, agent_id: str, thread: ThreadState, superseded: _HeldVerdict,
+    ) -> tuple:
+        """The predicate that identifies the row a supersession retires.
+
+        ONE definition, because two statements need it and they must not
+        disagree: the SELECT that copies the verdict onto its drop row, and the
+        DELETE that removes it. If they diverged and the thread held two rows
+        mid-transition, the drop would preserve a DIFFERENT verdict from the one
+        deleted — worse than preserving none, because it looks authoritative.
+
+        ``slack_ts`` is load-bearing and cannot be replaced by ``thread_id``.
+        ``_capture_hub_assessment`` reads ``superseded`` BEFORE
+        ``_persist_assessment`` writes the replacement and retires AFTER, so by
+        the time this runs the replacement is already committed on the same run,
+        the same agent and the SAME THREAD. A thread-keyed DELETE would match it
+        too and end every supersession with ZERO assessments while logging
+        success. ``slack_ts`` is the one field that differs.
+
+        ``thread_id`` is therefore an additional NARROWING predicate, never the
+        key: it stops a row from another interview that happens to carry the same
+        Slack ts. ``thread_id IS NULL`` is tolerated alongside it, because a row
+        written by an earlier build of this method (or by a caller with no
+        thread) has no thread on it and is still the row this is retiring.
+
+        Callers must never omit ``superseded.slack_ts`` — a ``None`` here would
+        collapse the predicate to "this thread's rows", which is the trap above.
+        The caller bails before reaching this.
+        """
+        from sqlalchemy import or_ as sa_or
+
+        return (
+            OpportunityAssessment.simulation_run_id == self.simulation_run_id,
+            OpportunityAssessment.agent_id == agent_id,
+            OpportunityAssessment.slack_ts == superseded.slack_ts,
+            sa_or(
+                OpportunityAssessment.thread_id == thread.thread_id,
+                OpportunityAssessment.thread_id.is_(None),
+            ),
+        )
+
+    async def _superseded_raw_verdict(
+        self, agent_id: str, thread: ThreadState, superseded: _HeldVerdict,
+    ) -> dict | None:
+        """The verdict about to be deleted, so its drop row can keep it.
+
+        ``None`` when there is nothing to read — no ``slack_ts`` to find the row
+        by, no database, no matching row, or a failed SELECT. Never raises: the
+        concluding reply is already in Slack, and a lookup that cannot answer
+        must cost the copy, not the supersession.
+        """
+        if not superseded.slack_ts:
+            return None
+        if not self.session_factory or not self.simulation_run_id:
+            return None
+        from sqlalchemy import select as sa_select
+
+        try:
+            async with self.session_factory() as db:
+                return (await db.execute(
+                    sa_select(OpportunityAssessment.raw_verdict).where(
+                        *self._superseded_row_filter(agent_id, thread, superseded)
+                    )
+                )).scalars().first()
+        except Exception as exc:  # noqa: BLE001 — a copy must not cost the retire
+            logger.error(
+                "[%s] Failed to read back the superseded verdict for thread %s "
+                "(slack_ts=%s): %s — the drop row will record the supersession "
+                "but not the verdict itself",
+                agent_id, thread.thread_id, superseded.slack_ts, exc,
+                exc_info=True,
+            )
+            return None
+
+    async def _rehydrate_assessed_threads(self) -> None:
+        """Rebuild ``_assessed_threads`` from this run's stored verdicts.
+
+        The map is process-local, so a restart used to leave the engine blind to
+        every verdict it had already written: the interview's own later turn
+        looked like a FIRST verdict and landed a second row, and a lab bot
+        ⏸️-closing a thread that already held one produced a spurious
+        ``closed_before_verdict`` drop. ``opportunity_assessments.thread_id``
+        (migration 0036, written by ``_persist_assessment``) is what makes this
+        answerable at all — before it the table did not record which interview a
+        verdict came from.
+
+        Every field of the restored record is a decision about which way to
+        fail, and three of them are not guesses:
+
+        * ``ordinal=0``. The table does not store the turn a verdict came from.
+          Any guess at or above the real ordinal makes ``_sidecar_refusal``
+          refuse the interview's legitimate LATER verdict
+          (``if ordinal <= held.ordinal``); zero costs at most a spurious
+          ``duplicate_thread_verdict`` drop if the very same turn is re-captured.
+        * ``announced=False``. ``True`` would suppress the
+          ``#assessments-summary`` headline for a verdict stored provisionally
+          before the restart — a silent D12 breach. ``False`` merely preserves
+          the behaviour of a process that never knew about the row at all.
+        * ``final`` is DERIVED, not defaulted: closing a thread writes a
+          ``ThreadDecision``, so ``thread_id in self._closed_thread_ids`` is the
+          real answer. This must therefore run AFTER ``_rebuild_agent_state``
+          populates that set. ``final=True`` as a "conservative" default would be
+          the worst of the three: ``_sidecar_refusal`` refuses EVERYTHING on a
+          final thread, so the interview's own concluding verdict would be
+          refused and only its ``raw_verdict`` would survive, on a drop row.
+
+        Rows with a NULL ``thread_id`` (every row written before 0036, and any
+        verdict whose thread could not be identified) are skipped: they cannot be
+        placed, and placing them under a guessed thread is how a real verdict
+        gets refused. Ordered oldest-first so that a thread carrying several
+        historical rows is represented by its NEWEST — the same last-write-wins
+        rule ``_retire_superseded_verdict`` applies.
+
+        Never raises: a failed read costs the de-duplication, not the run.
+        """
+        if not self.session_factory or not self.simulation_run_id:
+            return
+        from sqlalchemy import select as sa_select
+
+        try:
+            async with self.session_factory() as db:
+                rows = (await db.execute(
+                    sa_select(
+                        OpportunityAssessment.thread_id,
+                        OpportunityAssessment.slack_ts,
+                    )
+                    .where(
+                        OpportunityAssessment.simulation_run_id == self.simulation_run_id,
+                        OpportunityAssessment.thread_id.is_not(None),
+                    )
+                    .order_by(OpportunityAssessment.created_at)
+                )).all()
+        except Exception as exc:  # noqa: BLE001 — never fail startup over this
+            logger.warning(
+                "Failed to rehydrate the assessed-thread record: %s — this "
+                "process may store a SECOND verdict for an interview it already "
+                "assessed before the restart",
+                exc,
+            )
+            return
+        for thread_id, slack_ts in rows:
+            self._assessed_threads[thread_id] = _HeldVerdict(
+                ordinal=0,
+                final=thread_id in self._closed_thread_ids,
+                slack_ts=slack_ts,
+                announced=False,
+            )
+        if rows:
+            logger.info(
+                "Rehydrated %d assessed interview(s) from opportunity_assessments "
+                "— a verdict already stored for one of these threads will be "
+                "superseded rather than duplicated",
+                len(self._assessed_threads),
             )
 
     async def _record_assessment_drop(
@@ -6759,6 +7045,8 @@ Keep it concise — under 300 words.""",
             ]
 
             agent.record_api_call()
+            # See `_was_truncated`; same collection idiom as the two sites above.
+            stop_reasons: list[str] = []
             response = await generate_agent_response(
                 system_prompt=system_prompt,
                 messages=messages,
@@ -6780,7 +7068,26 @@ Keep it concise — under 300 words.""",
                 max_tokens=2600,
                 log_meta={"agent_id": agent.agent_id, "phase": "memory"},
                 on_retry=agent.record_api_call,
+                on_stop_reason=stop_reasons.append,
             )
+            if _was_truncated(stop_reasons):
+                # REFUSED outright — the strictest of the three answers, because
+                # this is the only site with something GOOD already in place. The
+                # guard below is "empty or blank", which a half-sentence sails
+                # past, so a truncated synthesis replaced the agent's working
+                # memory and was then carried into every later prompt with
+                # nothing in the logs to say the file had shrunk. Measured in run
+                # 8b64a0e0: a complete 1,977-character memory replaced by a
+                # 1,437-character one, twice (the file on disk and a
+                # `profile_revisions` row). A stale memory is strictly better
+                # than a truncated one; the next trigger writes a fresh one.
+                logger.warning(
+                    "[%s] Memory update: response was TRUNCATED (%s) — keeping "
+                    "the existing working memory rather than overwriting it "
+                    "with a partial synthesis",
+                    agent.agent_id, ", ".join(stop_reasons) or "?",
+                )
+                return
             if not response or not response.strip():
                 logger.warning("[%s] Memory update: empty response", agent.agent_id)
                 return

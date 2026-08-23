@@ -47,7 +47,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from src.agent.agent import Agent
 from src.agent.message_log import LogEntry
-from src.agent.simulation import SimulationEngine
+from src.agent.simulation import SimulationEngine, _HeldVerdict
 from src.agent.state import ThreadState
 from src.models import (
     AssessmentDrop,
@@ -553,6 +553,272 @@ async def test_supersession_also_retires_a_verdict_still_on_the_retry_queue(engi
         assert len(rows) == 1
         assert rows[0].slack_ts == "2.2", "the closing verdict is the one of record"
         assert sim._pending_assessments == [], "the superseded row left the queue"
+        assert [d.reason for d in await _drops(factory, run_id)] == [
+            "duplicate_thread_verdict"
+        ]
+    finally:
+        await _delete_run(factory, run_id)
+
+
+# ---------------------------------------------------------------------------
+# Supersession keeps what it deletes, and deletes only what it means to
+#
+# `_retire_superseded_verdict` DELETEs a row and records a
+# `duplicate_thread_verdict` drop. The refusal path a few lines above it passes
+# `raw_verdict` under a comment saying a refusal "is never a licence to destroy
+# it" — supersession was the one path that both deleted a row and kept nothing,
+# so the earlier verdict (its score, its rationale, its red flags) existed
+# nowhere afterwards. See `AssessmentDrop.raw_verdict`.
+#
+# The other half is what the DELETE must NOT match. `_capture_hub_assessment`
+# reads `superseded` BEFORE the replacement is persisted and retires AFTER, so
+# the replacement is already committed on the same run, agent and thread by the
+# time this runs. A DELETE keyed on the thread would take both and end the
+# interview with ZERO assessments while logging success; `slack_ts` is
+# load-bearing precisely because it is the one field that differs.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_superseded_verdict_is_recoverable_from_its_drop_row(engine):
+    """The drop is the only trace the retired row leaves, so it has to carry the
+    verdict itself — not just a sentence saying one was superseded.
+
+    The two verdicts differ in every dimension score (3s vs 4s), so recovering
+    the WRONG one is distinguishable from recovering none.
+    """
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    run_id = await _new_run(factory)
+    sim, agent = _hub(factory, run_id)
+    thread = _thread(_CONCLUDE_COUNT)
+    try:
+        await sim._capture_hub_assessment(
+            agent, thread, _reply_with_sidecar(3), "1.1", closes_thread=False,
+        )
+        thread.message_count += 2
+        await sim._capture_hub_assessment(
+            agent, thread, _reply_with_sidecar(4), "2.2", closes_thread=False,
+        )
+
+        rows = await _assessments(factory, run_id)
+        assert len(rows) == 1 and rows[0].slack_ts == "2.2"
+        drops = await _drops(factory, run_id)
+        assert [d.reason for d in drops] == ["duplicate_thread_verdict"]
+        assert drops[0].raw_verdict == _verdict(3), (
+            "the retired verdict must survive its own deletion, exactly as the "
+            "model emitted it — and it must be the EARLIER one, not the "
+            "replacement"
+        )
+    finally:
+        await _delete_run(factory, run_id)
+
+
+@pytest.mark.asyncio
+async def test_supersession_does_not_delete_the_replacement_row(engine):
+    """The trap in re-keying the DELETE on `thread_id`.
+
+    Both rows share the run, the agent AND the thread — the replacement is
+    already committed when the retire runs — so any predicate that does not
+    include `slack_ts` matches both and leaves the interview with nothing. This
+    asserts the surviving row positively rather than only counting rows: a
+    DELETE that took both would show `len(rows) == 0`, and one that took neither
+    would show 2.
+    """
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    run_id = await _new_run(factory)
+    sim, agent = _hub(factory, run_id)
+    thread = _thread(_CONCLUDE_COUNT)
+    try:
+        await sim._capture_hub_assessment(
+            agent, thread, _reply_with_sidecar(3), "1.1", closes_thread=False,
+        )
+        first = await _assessments(factory, run_id)
+        assert len(first) == 1 and first[0].thread_id == "t1", (
+            "the provisional row is written against this thread — which is what "
+            "makes a thread-keyed DELETE match it AND its replacement"
+        )
+
+        thread.message_count += 2
+        await sim._capture_hub_assessment(
+            agent, thread, _reply_with_sidecar(4), "2.2", closes_thread=True,
+        )
+
+        rows = await _assessments(factory, run_id)
+        assert len(rows) == 1, "the interview must never end holding zero verdicts"
+        assert rows[0].slack_ts == "2.2"
+        assert rows[0].thread_id == "t1"
+        assert rows[0].scores["differentiation"] == 4, "the LATER verdict survives"
+    finally:
+        await _delete_run(factory, run_id)
+
+
+@pytest.mark.asyncio
+async def test_a_null_slack_ts_does_not_poison_the_retry_queue_filter(engine):
+    """A held verdict with no `slack_ts` must not sweep the retry queue.
+
+    The queue filter matches `row.get("slack_ts") == superseded.slack_ts`. With
+    `None` on the right that matches EVERY queued assessment that has no Slack
+    ts of its own — other interviews' verdicts included — and those rows are
+    dropped from `_pending_assessments` and never written. Rehydrated verdicts
+    (`_rehydrate_assessed_threads`) are exactly where a `None` slack_ts comes
+    from, so this is reachable, not theoretical.
+
+    The unrelated queued row below belongs to a DIFFERENT thread and has no
+    slack_ts — the shape that used to be swept.
+    """
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    run_id = await _new_run(factory)
+    sim, agent = _hub(factory, run_id)
+    thread = _thread(_CONCLUDE_COUNT)
+    other_run_row = {
+        "simulation_run_id": run_id, "agent_id": "blackbird",
+        "subject_agent_id": "hart", "channel_name": "general",
+        "slack_ts": None, "thread_id": "t-elsewhere",
+    }
+    sim._pending_assessments.append(other_run_row)
+    # A verdict this process only knows about because it read it back off the
+    # table at startup: no slack_ts on the row, so none on the held record.
+    sim._assessed_threads["t1"] = _HeldVerdict(
+        ordinal=0, final=False, slack_ts=None, announced=False,
+    )
+    try:
+        thread.message_count += 2
+        await sim._capture_hub_assessment(
+            agent, thread, _reply_with_sidecar(4), "2.2", closes_thread=True,
+        )
+
+        assert sim._pending_assessments == [other_run_row], (
+            "another interview's queued verdict must survive a supersession it "
+            "has nothing to do with"
+        )
+        rows = await _assessments(factory, run_id)
+        assert len(rows) == 1 and rows[0].slack_ts == "2.2"
+        assert [d.reason for d in await _drops(factory, run_id)] == [
+            "duplicate_thread_verdict"
+        ]
+    finally:
+        await _delete_run(factory, run_id)
+
+
+# ---------------------------------------------------------------------------
+# `_assessed_threads` survives a restart
+#
+# The map is process-local, so before `thread_id` was stored the table could not
+# say WHICH interview a verdict came from and a restarted process started blind:
+# the interview's own later turn looked like a first verdict and landed a second
+# row, and a lab bot closing a thread that already held a verdict produced a
+# spurious `closed_before_verdict` drop.
+# ---------------------------------------------------------------------------
+
+
+async def _seed_assessment(factory, run_id, *, thread_id, slack_ts, subject="gordy"):
+    async with factory() as db:
+        db.add(OpportunityAssessment(
+            simulation_run_id=run_id, agent_id="blackbird",
+            subject_agent_id=subject, channel_name="single-cell-omics",
+            thread_id=thread_id, slack_ts=slack_ts,
+            recommendation="conditional",
+        ))
+        await db.commit()
+
+
+@pytest.mark.asyncio
+async def test_assessed_threads_is_rehydrated_after_a_restart(engine):
+    """Every field of the rehydrated record is a decision, and three of them are
+    decisions about which way to fail.
+
+    * `ordinal=0` — any guess at or above the real ordinal makes
+      `_sidecar_refusal` refuse the interview's legitimate later verdict
+      (`if ordinal <= held.ordinal`). Zero costs at most a spurious
+      `duplicate_thread_verdict` drop if the same turn is re-captured.
+    * `announced=False` — `True` would suppress the `#assessments-summary`
+      headline for a verdict stored provisionally before the restart, which is a
+      silent D12 breach. `False` merely repeats today's behaviour.
+    * `final` is DERIVED, not guessed: a closed thread has a `ThreadDecision`,
+      so `final = thread_id in self._closed_thread_ids`. `final=True` as a
+      "conservative" default would be the worst of the three — `_sidecar_refusal`
+      refuses everything on a final thread, so the interview's own concluding
+      verdict would be refused and only its `raw_verdict` would survive on a
+      drop row.
+    """
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    run_id = await _new_run(factory)
+    other_run_id = await _new_run(factory)
+    await _seed_assessment(factory, run_id, thread_id="t-open", slack_ts="1.1")
+    await _seed_assessment(factory, run_id, thread_id="t-closed", slack_ts="2.2")
+    await _seed_assessment(factory, run_id, thread_id=None, slack_ts="3.3")
+    await _seed_assessment(
+        factory, other_run_id, thread_id="t-other-run", slack_ts="4.4",
+    )
+    sim, _agent = _hub(factory, run_id)
+    # What `_rebuild_agent_state` leaves behind: closing a thread writes a
+    # `ThreadDecision`, and that set is the only evidence of it this method has.
+    sim._closed_thread_ids.add("t-closed")
+    try:
+        await sim._rehydrate_assessed_threads()
+
+        assert set(sim._assessed_threads) == {"t-open", "t-closed"}, (
+            "a row with no thread_id cannot be placed, and another run's rows "
+            "are not this run's interviews"
+        )
+        held = sim._assessed_threads["t-open"]
+        assert held.ordinal == 0
+        assert held.final is False
+        assert held.announced is False
+        assert held.slack_ts == "1.1"
+        assert sim._assessed_threads["t-closed"].final is True, (
+            "a thread with a ThreadDecision is closed; nothing may supersede it"
+        )
+    finally:
+        await _delete_run(factory, run_id)
+        await _delete_run(factory, other_run_id)
+
+
+def test_rehydration_runs_after_the_thread_decisions_are_loaded():
+    """`final` is derived from `_closed_thread_ids`, which `_rebuild_agent_state`
+    populates — so rehydrating first would mark every restored verdict
+    non-final, including the ones whose interview is already over.
+
+    Asserted on `SimulationEngine.start`'s source because the alternative is
+    booting the whole engine (Slack reconcile, message-log hydration, roster
+    sync) to observe an ordering that is a one-line invariant.
+    """
+    import inspect
+
+    source = inspect.getsource(SimulationEngine.start)
+    # The CALL expressions, not the bare names. Mutation-tested: deleting the
+    # `await self._rehydrate_assessed_threads()` line left this test GREEN when
+    # it matched on the name alone, because the comment ABOVE that line names
+    # the method too — so the assertion was satisfied by prose describing a call
+    # that no longer existed.
+    rebuild = "await self._rebuild_agent_state()"
+    rehydrate = "await self._rehydrate_assessed_threads()"
+    assert rebuild in source
+    assert rehydrate in source
+    assert source.index(rebuild) < source.index(rehydrate)
+
+
+@pytest.mark.asyncio
+async def test_a_rehydrated_verdict_is_superseded_rather_than_duplicated(engine):
+    """The behaviour rehydration exists for, end to end: a process that restarts
+    mid-interview and then reaches the concluding turn must end with ONE row —
+    the later one — instead of two."""
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    run_id = await _new_run(factory)
+    await _seed_assessment(factory, run_id, thread_id="t1", slack_ts="1.1")
+    sim, agent = _hub(factory, run_id)
+    thread = _thread(_CONCLUDE_COUNT)
+    try:
+        await sim._rehydrate_assessed_threads()
+        assert "t1" in sim._assessed_threads
+
+        await sim._capture_hub_assessment(
+            agent, thread, _reply_with_sidecar(4), "2.2", closes_thread=True,
+        )
+
+        rows = await _assessments(factory, run_id)
+        assert len(rows) == 1, "the pre-restart row was retired, not duplicated"
+        assert rows[0].slack_ts == "2.2"
         assert [d.reason for d in await _drops(factory, run_id)] == [
             "duplicate_thread_verdict"
         ]

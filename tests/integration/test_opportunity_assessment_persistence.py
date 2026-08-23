@@ -426,9 +426,25 @@ async def test_persist_assessment_failure_is_buffered_and_a_later_flush_persists
         agents=[], slack_clients={},
         session_factory=flaky_factory, simulation_run_id=run_id,
     )
-    # No `recommendation` key: _specialist_floor_gap only holds "advance"/
-    # "conditional" to the specialist panel, and this stub has consulted no
-    # one — a bare verdict like this reaches the DB write unconditionally.
+
+    # The flaky factory fails the FIRST session of the call, and this test needs
+    # that session to be the WRITE. `_persist_assessment` also opens one earlier,
+    # for `_seed_consults_from_db`'s read-back — which used to skip a verdict
+    # with no `recommendation` (the old `not in _PANEL_REQUIRED_FOR` gate) and
+    # now runs for it, because an unreadable recommendation fails CLOSED and IS
+    # owed a panel. That read would swallow the one scheduled failure and the
+    # write would succeed, so this test would pass its own premise by accident.
+    #
+    # Stubbed out rather than dodged by choosing an exempt verdict: the claim
+    # under test is about the retry queue, and it should not silently depend on
+    # how many sessions an unrelated fallback happens to open.
+    async def _no_seed(*_args, **_kwargs):
+        return None
+
+    stub._seed_consults_from_db = _no_seed
+
+    # No `recommendation` key: a sparse verdict, which is exactly the kind whose
+    # write is worth not losing.
     verdict = {"subject_agent_id": "wang", "scores": {"differentiation": 3}}
 
     await SimulationEngine._persist_assessment(stub, "blackbird", "general", verdict)
