@@ -92,7 +92,12 @@ class OpportunityAssessment(Base):
     # and keeps the warning; it does not mean the gap is acceptable.
     #
     # True means "we looked and found a gap". False does NOT mean "the panel
-    # was fine" on its own — read it together with `missing_domains` below.
+    # was fine" on its own — it needs BOTH columns below to become a finding:
+    # `missing_domains` to rule out the unverifiable `[]` case, and `panel_owed`
+    # to say whether any floor evaluated this verdict in the first place. Two of
+    # the three were not enough, which is how 12 rows came back green.
+    # `src/services/assessment_detail.panel_state` is the one reader that
+    # combines all three; nothing else should re-derive it.
     panel_incomplete: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("false")
     )
@@ -100,9 +105,11 @@ class OpportunityAssessment(Base):
     # `SimulationEngine._persist_assessment`:
     #   [names] — `panel_incomplete=True`. These domains were owed by the
     #             verdict's own content and never consulted in this interview.
-    #   NULL    — `panel_incomplete=False`, panel VERIFIED complete: the floor
-    #             was able to check, and found nothing owed and unconsulted
-    #             (including the `pass` verdicts no panel is owed for at all).
+    #   NULL    — `panel_incomplete=False`, NO GAP RECORDED. Read this column
+    #             ALONE and that is all it says: it does NOT mean "verified
+    #             complete". A NULL covers both "the floor evaluated this
+    #             verdict and found nothing owed and unconsulted" and "no floor
+    #             ever ran on it", and only `panel_owed` below separates the two.
     #   []      — `panel_incomplete=False`, panel UNVERIFIED: the floor could
     #             not check at all. Either the verdict named no
     #             `subject_agent_id`, or the process had recorded no consult
@@ -110,8 +117,19 @@ class OpportunityAssessment(Base):
     #             restart, and production's last exit was a SIGKILL. Not
     #             evidence of a gap, so it is not flagged; not evidence of a
     #             complete panel either, so it must never be counted as one.
-    # Rows written before 2026-08-19 have NULL for both the verified and the
-    # unverified case — that conflation is exactly what [] exists to end.
+    #
+    # This comment used to call NULL "panel VERIFIED complete", and that reading
+    # is the defect `panel_owed` exists to end: 12 production rows written by a
+    # floor that exempted them (storing "no panel was owed" as exactly this NULL)
+    # were later re-read as completed audits, at least five of them with a
+    # demonstrable gap. `src/services/assessment_detail.panel_state` is the one
+    # place the three columns are turned into a finding, and it reaches
+    # "verified" ONLY via `panel_owed is True`.
+    #
+    # Rows written before 2026-08-19 have NULL for both the "no gap found" and
+    # the unverified case — that conflation is what [] exists to end. Rows
+    # written before 0036 have NULL in `panel_owed` too, so for them the
+    # remaining split is not recoverable at all; they render `unrecorded`.
     #
     # `none_as_null=True` is load-bearing, not decoration. SQLAlchemy's JSON type
     # defaults it False, which persists Python `None` as the JSONB scalar `null`
@@ -130,7 +148,8 @@ class OpportunityAssessment(Base):
     # written? THREE states, and the third is the whole point of the column:
     #   True  — a panel was owed under the rules in force at write time, so the
     #           floor evaluated this verdict. `panel_incomplete`/`missing_domains`
-    #           above then say what it found; an empty gap here is a real finding.
+    #           above then say what it found; an empty gap here is a real finding,
+    #           and this is the ONLY combination that means "verified complete".
     #   False — no panel was owed (the floor determined this and recorded it).
     #   NULL  — the row was written before 0036. We do not know whether any floor
     #           ran at all, and saying "verified" for it is a claim nobody made.

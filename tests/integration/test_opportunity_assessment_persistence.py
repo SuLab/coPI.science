@@ -180,7 +180,7 @@ async def test_persist_assessment_recomputes_the_score_it_is_handed(engine):
     # A real (if agent-less) SimulationEngine rather than a bare SimpleNamespace:
     # _persist_assessment's specialist-floor gate calls self._specialist_floor_gap,
     # which in turn needs self._consulted_domains/self._specialist_consults/
-    # self._PANEL_REQUIRED_FOR — attributes a SimpleNamespace stub does not carry.
+    # self._specialist_consults — attributes a SimpleNamespace stub does not carry.
     stub = SimulationEngine(
         agents=[], slack_clients={}, session_factory=factory, simulation_run_id=run_id,
     )
@@ -277,7 +277,7 @@ async def test_persist_assessment_gating_drops_only_the_invalid_key(engine):
     # A real (if agent-less) SimulationEngine rather than a bare SimpleNamespace:
     # _persist_assessment's specialist-floor gate calls self._specialist_floor_gap,
     # which in turn needs self._consulted_domains/self._specialist_consults/
-    # self._PANEL_REQUIRED_FOR — attributes a SimpleNamespace stub does not carry.
+    # self._specialist_consults — attributes a SimpleNamespace stub does not carry.
     stub = SimulationEngine(
         agents=[], slack_clients={}, session_factory=factory, simulation_run_id=run_id,
     )
@@ -338,7 +338,7 @@ async def test_persist_assessment_gating_that_is_not_a_dict_is_dropped(engine):
     # A real (if agent-less) SimulationEngine rather than a bare SimpleNamespace:
     # _persist_assessment's specialist-floor gate calls self._specialist_floor_gap,
     # which in turn needs self._consulted_domains/self._specialist_consults/
-    # self._PANEL_REQUIRED_FOR — attributes a SimpleNamespace stub does not carry.
+    # self._specialist_consults — attributes a SimpleNamespace stub does not carry.
     stub = SimulationEngine(
         agents=[], slack_clients={}, session_factory=factory, simulation_run_id=run_id,
     )
@@ -430,7 +430,7 @@ async def test_persist_assessment_failure_is_buffered_and_a_later_flush_persists
     # The flaky factory fails the FIRST session of the call, and this test needs
     # that session to be the WRITE. `_persist_assessment` also opens one earlier,
     # for `_seed_consults_from_db`'s read-back — which used to skip a verdict
-    # with no `recommendation` (the old `not in _PANEL_REQUIRED_FOR` gate) and
+    # with no `recommendation` (the old recommendation-only gate, since deleted) and
     # now runs for it, because an unreadable recommendation fails CLOSED and IS
     # owed a panel. That read would swallow the one scheduled failure and the
     # write would succeed, so this test would pass its own premise by accident.
@@ -521,7 +521,7 @@ async def test_persist_assessment_tolerates_a_sparse_verdict(engine):
     # A real (if agent-less) SimulationEngine rather than a bare SimpleNamespace:
     # _persist_assessment's specialist-floor gate calls self._specialist_floor_gap,
     # which in turn needs self._consulted_domains/self._specialist_consults/
-    # self._PANEL_REQUIRED_FOR — attributes a SimpleNamespace stub does not carry.
+    # self._specialist_consults — attributes a SimpleNamespace stub does not carry.
     stub = SimulationEngine(
         agents=[], slack_clients={}, session_factory=factory, simulation_run_id=run_id,
     )
@@ -580,7 +580,7 @@ async def test_persist_assessment_bounds_oversized_short_string_fields(engine):
     # A real (if agent-less) SimulationEngine rather than a bare SimpleNamespace:
     # _persist_assessment's specialist-floor gate calls self._specialist_floor_gap,
     # which in turn needs self._consulted_domains/self._specialist_consults/
-    # self._PANEL_REQUIRED_FOR — attributes a SimpleNamespace stub does not carry.
+    # self._specialist_consults — attributes a SimpleNamespace stub does not carry.
     stub = SimulationEngine(
         agents=[], slack_clients={}, session_factory=factory, simulation_run_id=run_id,
     )
@@ -640,7 +640,7 @@ async def test_persist_assessment_empty_scores_dict_stores_null_score_and_band(e
     # A real (if agent-less) SimulationEngine rather than a bare SimpleNamespace:
     # _persist_assessment's specialist-floor gate calls self._specialist_floor_gap,
     # which in turn needs self._consulted_domains/self._specialist_consults/
-    # self._PANEL_REQUIRED_FOR — attributes a SimpleNamespace stub does not carry.
+    # self._specialist_consults — attributes a SimpleNamespace stub does not carry.
     stub = SimulationEngine(
         agents=[], slack_clients={}, session_factory=factory, simulation_run_id=run_id,
     )
@@ -694,7 +694,7 @@ async def test_persist_assessment_drops_non_string_text_fields_instead_of_dying(
     # A real (if agent-less) SimulationEngine rather than a bare SimpleNamespace:
     # _persist_assessment's specialist-floor gate calls self._specialist_floor_gap,
     # which in turn needs self._consulted_domains/self._specialist_consults/
-    # self._PANEL_REQUIRED_FOR — attributes a SimpleNamespace stub does not carry.
+    # self._specialist_consults — attributes a SimpleNamespace stub does not carry.
     stub = SimulationEngine(
         agents=[], slack_clients={}, session_factory=factory, simulation_run_id=run_id,
     )
@@ -2354,8 +2354,9 @@ async def test_a_verdict_with_no_subject_is_unverifiable_too(engine):
 async def test_a_pass_verdict_owes_no_panel_and_is_not_marked_unverified(engine):
     """`[]` must mean "we could not check", not "we did not need to".
 
-    A `pass` is not held to the panel at all (`_PANEL_REQUIRED_FOR`), so there
-    is nothing about it that failed to verify. If the sentinel leaked onto
+    A `pass` whose computed band agrees is not held to the panel at all
+    (`specialists.panel_is_owed`), so there is nothing about it that failed to
+    verify. If the sentinel leaked onto
     every declined idea it would drown the signal it exists to carry — and
     `pass` is the commonest verdict there is.
     """
@@ -2573,9 +2574,12 @@ async def test_persist_assessment_records_that_no_panel_was_owed(engine):
     finding ("we looked at the rules and none applied"); NULL is the absence of
     one, and the page renders them differently on purpose.
 
-    Both halves have to be unowed for the exemption to hold: `_VERDICT`-style
-    straight 3s band `conditional` on the investment scale, and the floor keys
-    on the COMPUTED band as well as the written recommendation.
+    Both halves have to be unowed for the exemption to hold, which is why the
+    scores below are straight 2s and not straight 3s. The floor keys on the
+    COMPUTED band as well as the written recommendation, and straight 3s band
+    `conditional` on the investment scale — which would make this verdict OWED a
+    panel and `panel_owed` True, inverting the claim. Straight 2s band `pass`,
+    so recommendation and band agree and the exemption holds.
     """
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -2606,10 +2610,11 @@ async def test_persist_assessment_records_that_no_panel_was_owed(engine):
         )
         rows = await _assessment_rows(factory, run_id)
         assert len(rows) == 1
+        # `is False`, not `is not None` and not falsy: NULL is a THIRD state
+        # ("we do not know"), the page renders it differently, and `is False`
+        # already excludes it — a follow-up `is not None` assertion cannot fail
+        # after it and only reads as coverage.
         assert rows[0].panel_owed is False
-        assert rows[0].panel_owed is not None, (
-            "NULL is 'we do not know', which is a different page state"
-        )
     finally:
         await _delete_run(factory, run_id)
 

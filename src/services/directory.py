@@ -16,7 +16,7 @@ import uuid
 from collections import Counter
 from typing import Any
 
-from sqlalchemy import case, func, or_, select
+from sqlalchemy import case, func, select
 from sqlalchemy import true as sa_true
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -32,7 +32,7 @@ from src.models import (
     ThreadDecision,
     User,
 )
-from src.services.assessment_detail import panel_state
+from src.services.assessment_detail import panel_state, unvetted_panel_filter
 from src.services.blackbird_rubric import (
     BANDING,
     BANDING_INCUBATION,
@@ -340,6 +340,12 @@ async def list_assessments(
     # The per-row `panel_state` attached below is what tells a reader WHICH of
     # the three a given row is; this number only says how many to look at.
     #
+    # The predicate itself is `assessment_detail.unvetted_panel_filter()`, not a
+    # hand-written `or_(...)` here: a COUNT cannot join to a Python function, so
+    # the rule exists in both forms, and they are kept in one module and bound by
+    # a row-for-row drift alarm rather than by a comment asking the next editor
+    # to remember. See that function.
+    #
     # Deliberately NOT narrowed by `lab`, unlike total_count above. This and
     # the dropped-verdict counts below are warnings, and the failure mode of a
     # warning is under-warning: a reader who filtered to one lab must still be
@@ -347,11 +353,7 @@ async def list_assessments(
     # problem, not a lab's. Over-reporting is visible and checkable; silently
     # narrowing a warning to the current filter is neither.
     incomplete_query = select(func.count()).select_from(OpportunityAssessment).where(
-        or_(
-            OpportunityAssessment.panel_incomplete.is_(True),
-            OpportunityAssessment.missing_domains.is_not(None),
-            OpportunityAssessment.panel_owed.is_(None),
-        )
+        unvetted_panel_filter()
     )
     if not show_all_runs and selected_run_id:
         incomplete_query = incomplete_query.where(

@@ -824,3 +824,79 @@ async def test_a_rehydrated_verdict_is_superseded_rather_than_duplicated(engine)
         ]
     finally:
         await _delete_run(factory, run_id)
+
+
+@pytest.mark.asyncio
+async def test_a_superseded_row_that_cannot_be_found_says_so(engine, caplog):
+    """"No row to copy" and "the SELECT never ran" must not look identical.
+
+    `_superseded_raw_verdict` returns None for four different reasons and only
+    one of them — an exception — was logged. On the single path whose stated
+    purpose is "never lose the retired verdict", a drop row with
+    `raw_verdict IS NULL` and a silent log leaves an operator unable to tell
+    whether the copy was attempted and found nothing or was skipped entirely.
+
+    Driven by holding a verdict whose `slack_ts` matches no stored row, which is
+    what a rehydrated record pointing at a row a later cleanup removed looks
+    like.
+    """
+    import logging
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    run_id = await _new_run(factory)
+    sim, agent = _hub(factory, run_id)
+    thread = _thread(_CONCLUDE_COUNT)
+    sim._assessed_threads["t1"] = _HeldVerdict(
+        ordinal=0, final=False, slack_ts="no-such-ts", announced=False,
+    )
+    try:
+        with caplog.at_level(logging.WARNING, logger="src.agent.simulation"):
+            await sim._capture_hub_assessment(
+                agent, thread, _reply_with_sidecar(4), "2.2", closes_thread=True,
+            )
+
+        drops = await _drops(factory, run_id)
+        assert [d.reason for d in drops] == ["duplicate_thread_verdict"]
+        assert drops[0].raw_verdict is None, "there was genuinely nothing to copy"
+        assert any(
+            "no stored row" in record.message or "no stored row" in record.getMessage()
+            for record in caplog.records
+        ), "the not-found branch must announce itself"
+    finally:
+        await _delete_run(factory, run_id)
+
+
+@pytest.mark.asyncio
+async def test_rehydration_logs_the_number_of_threads_it_restored(engine, caplog):
+    """The log said `len(self._assessed_threads)` where `len(rows)` was meant.
+
+    They are equal only while every thread has exactly one row — which is
+    precisely the invariant this whole mechanism exists because production
+    BROKE (one pearce interview held three). So the number diverges exactly when
+    an operator is reading the log to find out how bad the duplication is.
+    """
+    import logging
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    run_id = await _new_run(factory)
+    # Three rows, two threads: the historical duplication, reproduced.
+    await _seed_assessment(factory, run_id, thread_id="t-a", slack_ts="1.1")
+    await _seed_assessment(factory, run_id, thread_id="t-a", slack_ts="1.2")
+    await _seed_assessment(factory, run_id, thread_id="t-b", slack_ts="2.1")
+    sim, _agent = _hub(factory, run_id)
+    try:
+        with caplog.at_level(logging.INFO, logger="src.agent.simulation"):
+            await sim._rehydrate_assessed_threads()
+
+        assert len(sim._assessed_threads) == 2
+        messages = [r.getMessage() for r in caplog.records]
+        # Both numbers, and they must be the right way round: 3 rows read, 2
+        # interviews restored. Asserting the pair rather than just the row count
+        # is what stops the fix from being "swap the variable" and reintroducing
+        # the same ambiguity in the other direction.
+        assert any(
+            "Rehydrated 3 stored verdict(s) across 2 interview(s)" in m
+            for m in messages
+        ), f"expected 3 rows across 2 interviews; got {messages}"
+    finally:
+        await _delete_run(factory, run_id)

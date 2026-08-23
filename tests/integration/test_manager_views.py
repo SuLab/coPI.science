@@ -505,9 +505,10 @@ async def test_manager_assessments_renders_the_incomplete_panel_marker(client, d
     # template lines. The copy widened on 2026-08-22 when the count stopped
     # being demonstrated gaps only and became "every panel that is not verified
     # complete" — a gap, a floor that could not be checked, or a row that does
-    # not record whether a panel was owed.
+    # not record whether a panel was owed. All three are named in the headline;
+    # see test_assessment_queue_controls.py for why the third one has to be.
     assert (
-        "stored with an incomplete or unverified specialist panel"
+        "with an incomplete, unverified or unrecorded specialist panel"
         in " ".join(html.split())
     )
     assert "Gapped Panel Fixture Co" in html

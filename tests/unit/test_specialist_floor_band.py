@@ -22,9 +22,13 @@ uncontradicted by the computed band, buys the exemption. An unreadable
 recommendation must not.
 
 `required_domains_for` is the pure half; `SimulationEngine._specialist_floor_gap`
-is the caller, and it still returns early on its own `_PANEL_REQUIRED_FOR` test
-(WS-A / A1.7 wires the band through). Until it does, everything here is live in
-the module and dead in the engine — which is why it is pinned here.
+is the caller. That paragraph used to say the caller "still returns early on its
+own `_PANEL_REQUIRED_FOR` test", so everything here was "live in the module and
+dead in the engine". Both halves are false now: A1.7 wired the band through the
+floor, A2.1 wired it through `_seed_consults_from_db` — the last site testing the
+recommendation alone — and the `_PANEL_REQUIRED_FOR` alias on the engine has been
+deleted for want of readers. `panel_is_owed` is the single gate, and what is
+pinned here is live everywhere.
 """
 
 from src.agent.specialists import (

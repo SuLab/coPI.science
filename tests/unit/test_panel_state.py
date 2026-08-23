@@ -1,7 +1,8 @@
 """"No panel was owed" is not "the panel was verified complete" — and neither is
 "we have no idea whether a floor ever ran".
 
-`_panel_state` had three values and `missing_domains` has three states, so the
+`panel_state` (then `_panel_state`) had three values and `missing_domains` has
+three states, so the
 mapping looked total. It was not. NULL means "no gap recorded", and a verdict
 reaches that state two very different ways:
 
@@ -198,6 +199,13 @@ def test_the_read_path_never_re_derives_the_floor_s_decision():
     assert "panel_owed" in body
     # And the module must not carry the import either: an unused import here is
     # an invitation to re-introduce the call.
-    module_source = inspect.getsource(inspect.getmodule(panel_state))
-    assert "import PANEL_REQUIRED_FOR" not in module_source
-    assert "panel_is_owed," not in module_source
+    # Tightened after review: `"panel_is_owed," not in module_source` let a SOLE
+    # `from src.agent.specialists import panel_is_owed` — no trailing comma —
+    # through. The body assertion above still catches any USE, so this is
+    # belt-and-braces, but a belt with a hole in it is worse than no belt: it
+    # reads as coverage. Checked against the module's real symbol table instead
+    # of its text, which no import spelling can dodge.
+    module = inspect.getmodule(panel_state)
+    assert not hasattr(module, "panel_is_owed")
+    assert not hasattr(module, "PANEL_REQUIRED_FOR")
+    assert not hasattr(module, "PANEL_EXEMPT_RECOMMENDATIONS")

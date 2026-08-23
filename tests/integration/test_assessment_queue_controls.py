@@ -343,10 +343,19 @@ async def test_the_list_page_flags_an_unrecorded_panel(
     # Whitespace-normalized: the banner's number and its noun are on separate
     # template lines, so the rendered HTML carries a newline plus indentation
     # between them.
-    assert (
-        "3 verdicts stored with an incomplete or unverified specialist panel"
-        in " ".join(html.split())
+    flat = " ".join(html.split())
+    assert "3 verdicts" in flat
+    # The BOLD headline has to name all three classes it counts, not two of them
+    # with the third relegated to the unstyled sentence underneath. Today every
+    # one of the 64 historical rows is in that third class — `panel_owed IS
+    # NULL`, deliberately never backfilled — so a headline reading "incomplete or
+    # unverified" describes 64 rows as something zero of them are known to be.
+    headline = flat.split('<span class="font-semibold">', 1)[1].split("</span>", 1)[0]
+    assert "3 verdicts" in headline
+    assert "unrecorded" in headline, (
+        "the third class must be named where the reader actually reads"
     )
+    assert "incomplete" in headline and "unverified" in headline
 
 
 @pytest.mark.parametrize("base", ["/admin", "/manager"])

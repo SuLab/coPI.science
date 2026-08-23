@@ -7,6 +7,7 @@ a loud refusal into a silent, ordinary-looking row.
 import pytest
 
 from src.models.opportunity import OpportunityAssessment
+from src.services.assessment_detail import PANEL_STATES
 from src.services.directory import list_assessments
 from tests import factories
 
@@ -220,3 +221,118 @@ async def test_each_listed_row_carries_its_own_panel_state(db_session):
     view = await list_assessments(db_session, str(run.id))
     states = {a.company_or_project: a.panel_state for a in view["assessments"]}
     assert states == {"Gapped Co": "gap", "Unrecorded Co": "unrecorded"}
+
+
+# ---------------------------------------------------------------------------
+# The drift alarm: one definition of "unvetted", two representations
+#
+# `panel_state` is the Python-side state machine and `unvetted_panel_filter()`
+# is its SQL twin — the banner cannot join to a Python function, so the rule
+# necessarily exists twice. The first version of this change let the two drift
+# by construction: `PANEL_STATES_UNVETTED` sat in `assessment_detail` claiming
+# `directory.py` used it, while `directory.py` carried an independent, hand-
+# written `or_(...)` and never referenced the constant. Adding a sixth state to
+# the frozenset would have looked like it updated the banner and would have
+# changed nothing at all — the banner would have kept under-warning on exactly
+# the class of row the new state was invented to name.
+#
+# This walks the FULL matrix of the three columns the state machine reads and
+# asserts the two representations agree row for row, not merely in total.
+# ---------------------------------------------------------------------------
+
+_PANEL_MATRIX = [
+    (incomplete, domains, owed)
+    for incomplete in (True, False)
+    for domains in (None, [], ["chemistry"])
+    for owed in (True, False, None)
+]
+
+
+@pytest.mark.asyncio
+async def test_the_sql_unvetted_filter_matches_panel_state_row_for_row(db_session):
+    """`unvetted_panel_filter()` selects a row IFF `panel_state(row)` is in
+    `PANEL_STATES_UNVETTED` — over every combination of the three columns, not
+    just the ones production happens to hold today."""
+    from sqlalchemy import select
+
+    from src.services.assessment_detail import (
+        PANEL_STATES_UNVETTED,
+        panel_state,
+        unvetted_panel_filter,
+    )
+
+    run = await factories.make_simulation_run(db_session)
+    for index, (incomplete, domains, owed) in enumerate(_PANEL_MATRIX):
+        db_session.add(
+            OpportunityAssessment(
+                simulation_run_id=run.id, agent_id="blackbird",
+                subject_agent_id="gordy", channel_name="general",
+                # The combination, spelled into the row, so a mismatch names
+                # itself instead of printing two sets of UUIDs.
+                company_or_project=(
+                    f"[{index}] incomplete={incomplete} "
+                    f"domains={domains!r} owed={owed!r}"
+                ),
+                panel_incomplete=incomplete, missing_domains=domains,
+                panel_owed=owed,
+            )
+        )
+    await db_session.commit()
+
+    stored = (await db_session.execute(
+        select(OpportunityAssessment).where(
+            OpportunityAssessment.simulation_run_id == run.id
+        )
+    )).scalars().all()
+    assert len(stored) == len(_PANEL_MATRIX) == 18
+
+    # Computed from the rows as the DATABASE has them, so a storage-level
+    # surprise (the JSONB `null`-vs-SQL-NULL trap `none_as_null` exists for)
+    # cannot hide between the two sides of the comparison.
+    expected = {
+        row.company_or_project for row in stored
+        if panel_state(row) in PANEL_STATES_UNVETTED
+    }
+    actual = set((await db_session.execute(
+        select(OpportunityAssessment.company_or_project).where(
+            OpportunityAssessment.simulation_run_id == run.id,
+            unvetted_panel_filter(),
+        )
+    )).scalars().all())
+
+    assert actual == expected
+    # Non-degenerate: a filter that selected everything, or nothing, would agree
+    # with a state machine that did the same and prove nothing about either.
+    assert 0 < len(expected) < len(_PANEL_MATRIX)
+    # And every state really is exercised, so "the matrix covers the machine" is
+    # asserted rather than assumed.
+    assert {panel_state(row) for row in stored} == set(PANEL_STATES)
+
+
+@pytest.mark.asyncio
+async def test_the_banner_count_is_the_same_predicate(db_session):
+    """The count the page actually renders, over the same matrix. Binds the
+    warning a reader sees to the filter above — not just the filter to the state
+    machine."""
+    from src.services.assessment_detail import PANEL_STATES_UNVETTED, panel_state
+
+    run = await factories.make_simulation_run(db_session)
+    for index, (incomplete, domains, owed) in enumerate(_PANEL_MATRIX):
+        db_session.add(
+            OpportunityAssessment(
+                simulation_run_id=run.id, agent_id="blackbird",
+                subject_agent_id="gordy", channel_name="general",
+                company_or_project=f"row {index}",
+                panel_incomplete=incomplete, missing_domains=domains,
+                panel_owed=owed,
+            )
+        )
+    await db_session.commit()
+
+    view = await list_assessments(db_session, str(run.id))
+    expected = sum(
+        1 for row in view["assessments"]
+        if panel_state(row) in PANEL_STATES_UNVETTED
+    )
+    assert view["incomplete_panel_count"] == expected
+    assert 0 < expected < len(_PANEL_MATRIX)

@@ -389,10 +389,44 @@ PANEL_STATES: tuple[str, ...] = (
 )
 
 #: The states that are NOT a verified panel and NOT an exemption the floor
-#: itself recorded — i.e. every row a reader should not treat as vetted. Used by
-#: ``src/services/directory.py``'s run-level warning count so the banner and the
-#: per-row badge cannot disagree about what counts as unvetted.
+#: itself recorded — i.e. every row a reader should not treat as vetted.
+#:
+#: The Python half of a rule that unavoidably exists twice: a run-level COUNT
+#: cannot join to a Python function, so ``unvetted_panel_filter`` below is its
+#: SQL twin. The two are bound by
+#: ``tests/unit/test_directory_assessments.py::
+#: test_the_sql_unvetted_filter_matches_panel_state_row_for_row``, which walks
+#: every combination of the three columns ``panel_state`` reads and asserts they
+#: agree ROW FOR ROW. Without that alarm the coupling is only a comment: the
+#: first version of this constant claimed ``src/services/directory.py`` used it
+#: while ``directory.py`` carried its own hand-written predicate and never
+#: referenced it, so adding a sixth state here would have looked like it updated
+#: the banner and changed nothing.
 PANEL_STATES_UNVETTED: frozenset[str] = frozenset({"gap", "unverified", "unrecorded"})
+
+
+def unvetted_panel_filter():
+    """The SQL twin of ``panel_state(row) in PANEL_STATES_UNVETTED``.
+
+    Lives HERE, beside the state machine and the constant it mirrors, rather
+    than inline in ``src/services/directory.py`` where the banner is built: a
+    second copy of this rule in another module is exactly the drift this whole
+    change exists to end, and the three pieces have to be reviewable together.
+
+    Reads as the negation of the two states that HAVE an answer — ``verified``
+    (``panel_owed`` recorded True, no gap, checkable) and ``not_owed``
+    (``panel_owed`` recorded False, no gap) — so a row is unvetted when it
+    carries a demonstrated gap, or the ``[]`` sentinel meaning the floor could
+    not be checked, or no record of whether a panel was owed at all.
+
+    Returns a bare column expression with NO run scoping: the caller adds that,
+    because the warning deliberately follows the run and not the lab filter.
+    """
+    return or_(
+        OpportunityAssessment.panel_incomplete.is_(True),
+        OpportunityAssessment.missing_domains.is_not(None),
+        OpportunityAssessment.panel_owed.is_(None),
+    )
 
 
 def panel_state(assessment: OpportunityAssessment) -> str:

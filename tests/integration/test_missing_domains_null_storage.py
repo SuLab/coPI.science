@@ -12,7 +12,7 @@ written since 2026-08-19 had `jsonb_typeof(missing_domains) = 'null'` and
 One logical state, two physical encodings, in one column.
 
 Nothing was mis-rendering, because every consumer reads it in Python
-(`assessment_detail._panel_state` asks `is None`) or in Jinja (`or []`), and both
+(`assessment_detail.panel_state` asks `is None`) or in Jinja (`or []`), and both
 encodings deserialize to `None`. That is exactly what made it worth fixing: the
 documented contract says NULL, so the first SQL-level reader to be written
 against the docs — `WHERE missing_domains IS NULL`, the obvious way to count

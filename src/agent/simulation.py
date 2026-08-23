@@ -3875,6 +3875,15 @@ class SimulationEngine:
         by, no database, no matching row, or a failed SELECT. Never raises: the
         concluding reply is already in Slack, and a lookup that cannot answer
         must cost the copy, not the supersession.
+
+        Those four cases all produce a drop row with ``raw_verdict IS NULL``, so
+        the LOG is the only thing that can tell them apart — and on the one path
+        whose whole purpose is "never lose the retired verdict", "there was no
+        row to copy" must not be indistinguishable from "the copy was never
+        attempted". The not-found branch therefore warns explicitly; the two
+        early returns are ordinary, expected states with their own callers'
+        logging (the no-``slack_ts`` case is already reported loudly by the
+        caller, and a DB-less engine is a documented silent no-op everywhere).
         """
         if not superseded.slack_ts:
             return None
@@ -3884,11 +3893,11 @@ class SimulationEngine:
 
         try:
             async with self.session_factory() as db:
-                return (await db.execute(
+                rows = (await db.execute(
                     sa_select(OpportunityAssessment.raw_verdict).where(
                         *self._superseded_row_filter(agent_id, thread, superseded)
                     )
-                )).scalars().first()
+                )).scalars().all()
         except Exception as exc:  # noqa: BLE001 — a copy must not cost the retire
             logger.error(
                 "[%s] Failed to read back the superseded verdict for thread %s "
@@ -3898,6 +3907,16 @@ class SimulationEngine:
                 exc_info=True,
             )
             return None
+        if not rows:
+            logger.warning(
+                "[%s] Supersession on thread %s found no stored row for "
+                "slack_ts=%s — the drop row records that a verdict was "
+                "superseded but cannot carry the verdict itself, and the DELETE "
+                "below will match nothing either",
+                agent_id, thread.thread_id, superseded.slack_ts,
+            )
+            return None
+        return rows[0]
 
     async def _rehydrate_assessed_threads(self) -> None:
         """Rebuild ``_assessed_threads`` from this run's stored verdicts.
@@ -3973,11 +3992,17 @@ class SimulationEngine:
                 announced=False,
             )
         if rows:
+            # `len(rows)` — the number of stored verdicts read — NOT
+            # `len(self._assessed_threads)`. The two are equal only while every
+            # thread holds exactly one row, which is precisely the invariant this
+            # mechanism exists because production BROKE (one pearce interview
+            # held three), so the count diverged exactly when an operator was
+            # reading this line to size the damage.
             logger.info(
-                "Rehydrated %d assessed interview(s) from opportunity_assessments "
-                "— a verdict already stored for one of these threads will be "
-                "superseded rather than duplicated",
-                len(self._assessed_threads),
+                "Rehydrated %d stored verdict(s) across %d interview(s) from "
+                "opportunity_assessments — a verdict already stored for one of "
+                "these threads will be superseded rather than duplicated",
+                len(rows), len(self._assessed_threads),
             )
 
     async def _record_assessment_drop(

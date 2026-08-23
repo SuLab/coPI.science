@@ -83,9 +83,15 @@
     <div class="flex items-start gap-3">
         <span class="text-orange-600 text-xl leading-none">&#9873;</span>
         <div class="text-sm text-orange-900">
+            {# All THREE classes named in the BOLD line, not two with the third
+               left to the unstyled sentence below. Every one of the 64 rows
+               production holds today is in the third one (`panel_owed IS NULL`,
+               deliberately never backfilled), so a headline reading "incomplete
+               or unverified" would describe all of them as something none of
+               them is known to be. #}
             <span class="font-semibold">
                 {{ incomplete_panel_count }} verdict{{ '' if incomplete_panel_count == 1 else 's' }}
-                stored with an incomplete or unverified specialist panel{% if not show_all_runs %} in this run{% endif %}.
+                with an incomplete, unverified or unrecorded specialist panel{% if not show_all_runs %} in this run{% endif %}.
             </span>
             Either the required domains were never consulted, the floor could not
             be checked at all, or the row does not record whether a panel was

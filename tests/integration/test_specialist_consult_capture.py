@@ -1064,7 +1064,8 @@ async def test_the_consult_seed_runs_for_a_band_owed_verdict(engine):
     exactly the verdicts the floor holds to the panel.
 
     `_seed_consults_from_db` opened with `recommendation not in
-    _PANEL_REQUIRED_FOR` — the recommendation-only rule the floor abandoned. A
+    _PANEL_REQUIRED_FOR` (an engine alias since deleted for want of readers) —
+    the recommendation-only rule the floor abandoned. A
     verdict the model wrote `pass` on but that COMPUTES into the `conditional`
     band is owed a panel, so `_specialist_floor_gap` runs for it; the seed
     skipped it, so after a restart the map stayed empty, the floor found nothing
