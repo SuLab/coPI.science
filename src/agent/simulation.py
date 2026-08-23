@@ -10,6 +10,8 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any, NamedTuple
 
+from sqlalchemy.exc import DataError, IntegrityError
+
 from src.agent.agent import PROFILES_DIR, Agent
 from src.agent.channels import ASSESSMENTS_SUMMARY_CHANNEL, SEEDED_CHANNELS
 from src.agent.ids import WRITER_ENGINE, TsMinter
@@ -99,6 +101,27 @@ def _was_truncated(stop_reasons: list[str]) -> bool:
 TRUNCATION_NOTICE = (
     "\n\n_(This reply was cut off before it finished — treat it as incomplete.)_"
 )
+
+
+#: The DB errors that condemn ONE ROW rather than the connection, the session or
+#: the pool — and therefore the only ones a per-row retry can possibly help with.
+#:
+#: The gate matters more than the recovery. The commonest failure on every flush
+#: path here is the pool-checkout timeout `_persist_assessment`'s own comment
+#: names, and it is a property of the POOL: retrying the batch one row at a time
+#: issues N more sequential checkouts against a pool that is already exhausted.
+#: At ~15 rows and a 30 s checkout timeout that is 450 s inside `stop()`, which
+#: overruns the documented 420 s `docker stop` grace, gets the process SIGKILLed,
+#: and loses the batch PLUS everything not yet flushed. So: never `except
+#: Exception` into the fallback. Anything not in this tuple is transient by
+#: assumption and the batch is re-queued whole, exactly as before.
+_ROW_LEVEL_DB_ERRORS = (IntegrityError, DataError)
+
+#: Wall-clock ceiling on ONE per-row recovery pass, for the same reason: even a
+#: genuinely row-level error can arrive with a slow database behind it, and this
+#: code runs inside a bounded stop grace. Rows the deadline stops us attempting
+#: are re-queued, not dropped.
+PER_ROW_RECOVERY_DEADLINE_S = 30.0
 
 
 def _visibility_permits(origin: str, current: str) -> bool:
@@ -1089,9 +1112,12 @@ class SimulationEngine:
         if pending:
             logger.info("Awaiting %d in-flight LLM log flush(es)", len(pending))
             await asyncio.gather(*pending, return_exceptions=True)
-        await self._flush_persisted(force_stats=True)
-        await self._flush_llm_logs()
-        await self._flush_pending_assessments()
+        # `final=True`: this is the LAST attempt at each buffer. Nothing drains
+        # them after `stop()` returns, so a failure here must say LOST with the
+        # row count rather than the "re-queued for retry" the per-tick path says.
+        await self._flush_persisted(force_stats=True, final=True)
+        await self._flush_llm_logs(final=True)
+        await self._flush_pending_assessments(final=True)
 
         # A RATE test, not a zero test. The old `not counts.get("clear")` form
         # was silenced by a single outlier, and run 8b64a0e0 was the first run to
@@ -3574,7 +3600,14 @@ class SimulationEngine:
             simulation_run_id=self.simulation_run_id,
             agent_id=agent_id,
             subject_agent_id=subject_agent_id,
-            channel_name=channel,
+            # Bounded like its four siblings above. `channel_name` is
+            # String(100) NOT NULL and was passed raw, so an over-long channel
+            # name was the one string field left able to DataError the whole row
+            # out of existence. `or ""` because the column is NOT NULL and
+            # `_bounded_str` answers None for a non-string / empty value: an
+            # empty channel name is a degraded row, a missing verdict is a lost
+            # one.
+            channel_name=_bounded_str(channel, 100) or "",
             slack_ts=slack_ts,
             # The interview this verdict came out of. NULL for a caller with no
             # thread (direct callers, pre-existing tests) — never "", which
@@ -5769,7 +5802,99 @@ class SimulationEngine:
                 phase=r.phase,
             ))
 
-    async def _flush_persisted(self, force_stats: bool = False) -> None:
+    async def _recover_rows_individually(
+        self, rows: list, apply_one, *, what: str,
+    ) -> tuple[int, list, list]:
+        """Re-attempt a failed batch ONE ROW AT A TIME, isolating the poison row.
+
+        Returns ``(written, lost, unattempted)``:
+
+        - ``written``   — rows now durably in the database;
+        - ``lost``      — rows that failed on their own, with nothing else to
+          blame; retrying these forever would fail the whole batch forever, so
+          the caller drops them (loudly) rather than re-queueing;
+        - ``unattempted`` — rows the deadline (or a failure of the recovery pass
+          itself) stopped us writing; the caller re-queues these.
+
+        Two things here are not incidental:
+
+        - **A NEW session.** In all three flushers the ``except`` sits OUTSIDE
+          ``async with self.session_factory() as db:``, so by the time we get
+          here that session is closed and rolled back. Reusing it would raise
+          ``PendingRollbackError`` on the first row and lose the remainder — the
+          exact loss this is supposed to prevent.
+        - **A savepoint per row.** ``begin_nested`` means one row's failure rolls
+          back to the savepoint instead of poisoning the whole transaction, so
+          the rows after it still commit.
+
+        Callers must gate entry on ``_ROW_LEVEL_DB_ERRORS`` — see that constant.
+        """
+        lost: list = []
+        ok: list = []
+        unattempted: list = []
+        deadline = time.monotonic() + PER_ROW_RECOVERY_DEADLINE_S
+        try:
+            async with self.session_factory() as db:
+                for i, row in enumerate(rows):
+                    if time.monotonic() >= deadline:
+                        unattempted = list(rows[i:])
+                        logger.error(
+                            "Per-row recovery of %s hit its %.0fs deadline; "
+                            "re-queueing the %d row(s) not attempted",
+                            what, PER_ROW_RECOVERY_DEADLINE_S, len(unattempted),
+                        )
+                        break
+                    try:
+                        async with db.begin_nested():
+                            await apply_one(db, row)
+                        ok.append(row)
+                    except Exception as row_exc:  # noqa: BLE001
+                        lost.append(row)
+                        logger.error(
+                            "DROPPING one un-writable %s row: %s", what, row_exc,
+                        )
+                await db.commit()
+        except Exception as exc:  # noqa: BLE001
+            # The recovery pass itself died, so nothing it "accepted" is durable.
+            logger.error(
+                "Per-row recovery of %s failed outright (%s); re-queueing "
+                "%d row(s)", what, exc, len(ok) + len(unattempted),
+            )
+            return 0, lost, ok + unattempted
+        if ok:
+            logger.warning(
+                "Per-row recovery of %s salvaged %d of %d row(s)",
+                what, len(ok), len(rows),
+            )
+        return len(ok), lost, unattempted
+
+    def _report_flush_failure(
+        self, *, what: str, requeue: list, exc: object, final: bool, log,
+    ) -> bool:
+        """Say what actually happens to ``requeue`` — and say LOST when it is lost.
+
+        ``stop()`` makes exactly ONE final attempt at each buffer, so "re-queued
+        for retry" is a false statement on that path: nothing will ever drain the
+        buffer again. Returns True when the caller should re-queue.
+        """
+        if not requeue:
+            return False
+        if final:
+            logger.error(
+                "SHUTDOWN FLUSH FAILED: %d %s row(s) LOST — this was the final "
+                "attempt and nothing will retry them: %s",
+                len(requeue), what, exc,
+            )
+            return False
+        log(
+            "Failed to flush %d %s row(s), re-queued for retry: %s",
+            len(requeue), what, exc,
+        )
+        return True
+
+    async def _flush_persisted(
+        self, force_stats: bool = False, *, final: bool = False,
+    ) -> None:
         """Batch-upsert buffered message-log entries into agent_messages.
 
         Uses ON CONFLICT (simulation_run_id, message_ts) so it is safe to run
@@ -5786,10 +5911,15 @@ class SimulationEngine:
         # Dedup by canonical id within the batch — a single ON CONFLICT statement
         # cannot touch the same row twice.
         by_ts: dict[str, dict] = {}
+        # The LogEntry each row came from, so a per-row recovery can re-queue the
+        # ENTRIES (which is what `_pending_persist` holds) for the rows it did
+        # not manage to write.
+        by_entry: dict[str, LogEntry] = {}
         for e in entries:
             if not e.ts:
                 continue
             channel_id = self._channel_id_map.get(e.channel) or f"local:{e.channel}"
+            by_entry[e.ts] = e
             by_ts[e.ts] = {
                 "simulation_run_id": self.simulation_run_id,
                 "agent_id": e.sender_agent_id,
@@ -5826,38 +5956,41 @@ class SimulationEngine:
         from sqlalchemy import or_
         from sqlalchemy import select as sa_select
         from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+        def _upsert(batch: list[dict]):
+            stmt = pg_insert(AgentMessage.__table__).values(batch)
+            return stmt.on_conflict_do_update(
+                constraint="uq_agent_messages_run_ts",
+                set_={
+                    "content": stmt.excluded.content,
+                    "sender_name": stmt.excluded.sender_name,
+                    "is_bot": stmt.excluded.is_bot,
+                    "posted_at": stmt.excluded.posted_at,
+                    "message_length": stmt.excluded.message_length,
+                    "visibility": stmt.excluded.visibility,
+                    "thread_ts": stmt.excluded.thread_ts,
+                    "channel_id": stmt.excluded.channel_id,
+                    "channel_name": stmt.excluded.channel_name,
+                    "agent_id": stmt.excluded.agent_id,
+                    "slack_ts": stmt.excluded.slack_ts,
+                    "slack_channel_id": stmt.excluded.slack_channel_id,
+                    "slack_thread_ts": stmt.excluded.slack_thread_ts,
+                },
+                # M1a guard: never let a bot message clobber an existing human
+                # (PI) row on a cross-process canonical-id collision. Allow the
+                # update only when the existing row is itself a bot row, or the
+                # incoming row is human (re-flush of an ingested PI message /
+                # slack mirror). A blocked conflict is left untouched, like
+                # DO NOTHING for that row. See PR #19 review M1.
+                where=or_(
+                    AgentMessage.__table__.c.is_bot.is_(True),
+                    stmt.excluded.is_bot.is_(False),
+                ),
+            )
+
         try:
             async with self.session_factory() as db:
-                stmt = pg_insert(AgentMessage.__table__).values(rows)
-                stmt = stmt.on_conflict_do_update(
-                    constraint="uq_agent_messages_run_ts",
-                    set_={
-                        "content": stmt.excluded.content,
-                        "sender_name": stmt.excluded.sender_name,
-                        "is_bot": stmt.excluded.is_bot,
-                        "posted_at": stmt.excluded.posted_at,
-                        "message_length": stmt.excluded.message_length,
-                        "visibility": stmt.excluded.visibility,
-                        "thread_ts": stmt.excluded.thread_ts,
-                        "channel_id": stmt.excluded.channel_id,
-                        "channel_name": stmt.excluded.channel_name,
-                        "agent_id": stmt.excluded.agent_id,
-                        "slack_ts": stmt.excluded.slack_ts,
-                        "slack_channel_id": stmt.excluded.slack_channel_id,
-                        "slack_thread_ts": stmt.excluded.slack_thread_ts,
-                    },
-                    # M1a guard: never let a bot message clobber an existing human
-                    # (PI) row on a cross-process canonical-id collision. Allow the
-                    # update only when the existing row is itself a bot row, or the
-                    # incoming row is human (re-flush of an ingested PI message /
-                    # slack mirror). A blocked conflict is left untouched, like
-                    # DO NOTHING for that row. See PR #19 review M1.
-                    where=or_(
-                        AgentMessage.__table__.c.is_bot.is_(True),
-                        stmt.excluded.is_bot.is_(False),
-                    ),
-                )
-                await db.execute(stmt)
+                await db.execute(_upsert(rows))
                 # Refresh the run's cosmetic counters at most every
                 # RUN_STATS_UPDATE_INTERVAL (a full COUNT every flush is wasteful
                 # at scale — B1). The bulk upsert can't cheaply tell inserts from
@@ -5885,13 +6018,28 @@ class SimulationEngine:
             # would be gone for good. New entries may have been enqueued while we
             # were awaiting the (failed) commit; put the failed batch back in
             # front to preserve chronological order for the next flush attempt.
-            self._pending_persist[0:0] = entries
-            logger.warning(
-                "Failed to flush %d messages, re-queued for retry: %s",
-                len(rows), exc,
-            )
+            #
+            # ONE bad row used to take every good row beside it, forever: the
+            # re-queued batch fails identically on the next attempt. If (and only
+            # if) the error names a ROW rather than the pool or the connection,
+            # retry them individually so the poison row is the only casualty.
+            requeue = rows
+            if isinstance(exc, _ROW_LEVEL_DB_ERRORS):
+                async def _one(db, row):
+                    await db.execute(_upsert([row]))
 
-    async def _flush_pending_assessments(self) -> None:
+                _written, _lost, requeue = await self._recover_rows_individually(
+                    rows, _one, what="message",
+                )
+            if self._report_flush_failure(
+                what="message", requeue=requeue, exc=exc, final=final,
+                log=logger.warning,
+            ):
+                self._pending_persist[0:0] = [
+                    by_entry[r["message_ts"]] for r in requeue
+                ]
+
+    async def _flush_pending_assessments(self, *, final: bool = False) -> None:
         """Retry OpportunityAssessment rows queued by _persist_assessment.
 
         _persist_assessment attempts an immediate write; a failure there
@@ -5926,13 +6074,22 @@ class SimulationEngine:
             # Same re-queue-in-front reasoning as _flush_persisted: new
             # failures may have been appended to _pending_assessments while
             # we were awaiting the (failed) commit, so put this batch back in
-            # front to preserve retry order.
-            self._pending_assessments[0:0] = rows
-            logger.error(
-                "Failed to flush %d queued assessment(s), still queued for "
-                "retry: %s",
-                len(rows), exc, exc_info=True,
-            )
+            # front to preserve retry order. And, on a ROW-level error only,
+            # isolate the poison row first so the verdicts beside it survive —
+            # these rows are the actual product of the screening pipeline.
+            requeue = rows
+            if isinstance(exc, _ROW_LEVEL_DB_ERRORS):
+                async def _one(db, row):
+                    db.add(OpportunityAssessment(**row))
+
+                _written, _lost, requeue = await self._recover_rows_individually(
+                    rows, _one, what="assessment",
+                )
+            if self._report_flush_failure(
+                what="assessment", requeue=requeue, exc=exc, final=final,
+                log=logger.error,
+            ):
+                self._pending_assessments[0:0] = requeue
 
     def _enqueue_persist(self, entry: LogEntry) -> None:
         """MessageLog persist callback — buffer a new entry for the next flush."""
@@ -6522,7 +6679,41 @@ class SimulationEngine:
         if task.exception():
             logger.error("LLM log flush failed: %s", task.exception())
 
-    async def _flush_llm_logs(self) -> None:
+    def _llm_log_record(self, entry: dict) -> LlmCallLog:
+        """One ``llm_call_logs`` row from one buffered callback payload.
+
+        Extracted so the batch write and the per-row recovery build the row the
+        same way — a recovery that mapped the fields differently would silently
+        store a different row than the one that failed.
+        """
+        return LlmCallLog(
+            simulation_run_id=self.simulation_run_id,
+            agent_id=entry.get("agent_id", "unknown"),
+            phase=entry.get("phase", "unknown"),
+            channel=entry.get("channel"),
+            model=entry.get("model", ""),
+            system_prompt=entry.get("system_prompt", ""),
+            messages_json=entry.get("messages", []),
+            response_text=entry.get("response_text", ""),
+            input_tokens=entry.get("input_tokens", 0),
+            output_tokens=entry.get("output_tokens", 0),
+            latency_ms=entry.get("latency_ms", 0.0),
+            # The turn's real wall time, which `latency_ms` above is not — it
+            # carries only the LAST API call's latency, so summing that column
+            # understated true LLM wait by 25% on run 8b64a0e0. Default None
+            # rather than 0.0: a producer that supplied nothing means "not
+            # recorded", and 0.0 would read as an instantaneous turn.
+            wall_ms=entry.get("wall_ms"),
+            # Per-API-call breakdown (stop_reason, the requested max_tokens
+            # ceiling, thinking/text split) that the three cumulative columns
+            # above cannot carry. Default None, not [] — a producer that
+            # supplied nothing means "not recorded", and an empty array would
+            # read as "recorded, zero calls", which never happens.
+            call_stats=entry.get("call_stats"),
+            created_at=entry.get("completed_at"),
+        )
+
+    async def _flush_llm_logs(self, *, final: bool = False) -> None:
         """Write buffered LLM call logs to the database."""
         if not self._llm_log_buffer or not self.session_factory or not self.simulation_run_id:
             return
@@ -6531,35 +6722,7 @@ class SimulationEngine:
         try:
             async with self.session_factory() as db:
                 for entry in batch:
-                    record = LlmCallLog(
-                        simulation_run_id=self.simulation_run_id,
-                        agent_id=entry.get("agent_id", "unknown"),
-                        phase=entry.get("phase", "unknown"),
-                        channel=entry.get("channel"),
-                        model=entry.get("model", ""),
-                        system_prompt=entry.get("system_prompt", ""),
-                        messages_json=entry.get("messages", []),
-                        response_text=entry.get("response_text", ""),
-                        input_tokens=entry.get("input_tokens", 0),
-                        output_tokens=entry.get("output_tokens", 0),
-                        latency_ms=entry.get("latency_ms", 0.0),
-                        # The turn's real wall time, which `latency_ms` above is
-                        # not — it carries only the LAST API call's latency, so
-                        # summing that column understated true LLM wait by 25% on
-                        # run 8b64a0e0. Default None rather than 0.0: a producer
-                        # that supplied nothing means "not recorded", and 0.0
-                        # would read as an instantaneous turn.
-                        wall_ms=entry.get("wall_ms"),
-                        # Per-API-call breakdown (stop_reason, the requested
-                        # max_tokens ceiling, thinking/text split) that the three
-                        # cumulative columns above cannot carry. Default None,
-                        # not [] — a producer that supplied nothing means "not
-                        # recorded", and an empty array would read as "recorded,
-                        # zero calls", which never happens.
-                        call_stats=entry.get("call_stats"),
-                        created_at=entry.get("completed_at"),
-                    )
-                    db.add(record)
+                    db.add(self._llm_log_record(entry))
                 await db.commit()
             logger.debug("Flushed %d LLM call logs to DB", len(batch))
         except Exception as exc:
@@ -6567,12 +6730,21 @@ class SimulationEngine:
             # _flush_persisted does for its own buffer: new entries may have
             # been appended to _llm_log_buffer while we were awaiting the
             # (failed) commit, so put the failed batch back in front to
-            # preserve chronological order for the next flush attempt.
-            self._llm_log_buffer[0:0] = batch
-            logger.warning(
-                "Failed to flush %d LLM call logs, re-queued for retry: %s",
-                len(batch), exc,
-            )
+            # preserve chronological order for the next flush attempt. On a
+            # ROW-level error only, isolate the poison row first.
+            requeue = batch
+            if isinstance(exc, _ROW_LEVEL_DB_ERRORS):
+                async def _one(db, entry):
+                    db.add(self._llm_log_record(entry))
+
+                _written, _lost, requeue = await self._recover_rows_individually(
+                    batch, _one, what="LLM call log",
+                )
+            if self._report_flush_failure(
+                what="LLM call log", requeue=requeue, exc=exc, final=final,
+                log=logger.warning,
+            ):
+                self._llm_log_buffer[0:0] = requeue
 
     def _sync_profiles_from_disk(self) -> None:
         """Reload any agent whose public profile file changed on disk since last turn.

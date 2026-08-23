@@ -860,8 +860,8 @@ class TestGracefulShutdown:
         engine = SimulationEngine(agents=[], slack_clients={})
         flushed = []
 
-        async def fake_flush(force_stats=False):
-            flushed.append(force_stats)
+        async def fake_flush(force_stats=False, *, final=False):
+            flushed.append((force_stats, final))
             engine._pending_persist.clear()
 
         engine._flush_persisted = fake_flush
@@ -869,7 +869,10 @@ class TestGracefulShutdown:
 
         await engine.stop()
 
-        assert flushed == [True]  # forced final stats refresh
+        # forced final stats refresh, and `final=True` — the shutdown flush is
+        # the LAST attempt at this buffer, so a failure there must report LOST
+        # rather than "re-queued for retry" (A3.4).
+        assert flushed == [(True, True)]
         assert engine._pending_persist == []
         assert engine._running is False
 
