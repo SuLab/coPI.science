@@ -339,6 +339,11 @@ async def test_the_list_page_flags_an_unrecorded_panel(
     # Exactly three badges — the two answered states must not have picked one up.
     assert html.count("panel not recorded") == 1
     assert html.count("panel unverified") == 1
+    # ...and neither answered state fell through to the terminal fallback. This
+    # is the other half of the unknown-state test below: that one proves the
+    # fallback fires, this one proves it does not fire on a state the page can
+    # actually read.
+    assert "panel state unknown" not in html
     # And the run-level warning counts all three, not just the demonstrated gap.
     # Whitespace-normalized: the banner's number and its noun are on separate
     # template lines, so the rendered HTML carries a newline plus indentation
@@ -387,4 +392,60 @@ async def test_a_verified_panel_gets_no_badge_and_no_warning(
     assert "Only Verified Co" in html
     assert "panel not recorded" not in html
     assert "panel unverified" not in html
+    assert "panel state unknown" not in html
     assert "specialist panel" not in html
+
+
+@pytest.mark.parametrize("base", ["/admin", "/manager"])
+async def test_an_unknown_panel_state_is_never_left_unbadged(
+    client, db_session, base, admin, manager, monkeypatch
+):
+    """The list page enumerated its three badged states POSITIVELY, so a sixth
+    `panel_state` — a typo, a state added to `panel_state` and not here, a
+    future finding — fell off the end with no badge at all, which on this table
+    is exactly how `verified` renders.
+
+    The detail page's terminal `{% else %}` is deliberately the amber "not
+    recorded" box for this reason
+    (`test_an_unknown_panel_state_never_renders_green`); the two surfaces
+    defaulted in opposite directions. The fallback must be the claim that costs
+    nothing to make wrongly.
+
+    Forced through the real render path rather than read out of the template
+    source: what matters is the HTML a reader sees. The row is seeded in the
+    shape that renders `verified` — `test_a_verified_panel_gets_no_badge_and_no_
+    warning` above is the control proving that shape carries no badge — so any
+    badge here comes from the fallback and nothing else.
+    """
+    staff = admin if base == "/admin" else manager
+    run = await factories.make_simulation_run(db_session)
+    db_session.add(
+        OpportunityAssessment(
+            simulation_run_id=run.id, agent_id="blackbird",
+            subject_agent_id="gordy", channel_name="general",
+            company_or_project="Off Contract Co", recommendation="conditional",
+            weighted_score=4.0, band="advance",
+            panel_incomplete=False, missing_domains=None, panel_owed=True,
+        )
+    )
+    await db_session.flush()
+    monkeypatch.setattr(
+        "src.services.directory.panel_state",
+        lambda _assessment: "a_state_that_does_not_exist",
+    )
+
+    html = (
+        await client.get(
+            f"{base}/assessments?run_id={run.id}", headers=auth_headers(staff.id)
+        )
+    ).text
+
+    assert "Off Contract Co" in html
+    assert html.count("panel state unknown") == 1, (
+        "an unhandled panel state must not read like a verified one"
+    )
+    # And it must not have been quietly filed under one of the three answers
+    # the page does know how to make.
+    assert "panel not recorded" not in html
+    assert "panel unverified" not in html
+    assert "&#9873; panel" not in html and "⚑ panel" not in html

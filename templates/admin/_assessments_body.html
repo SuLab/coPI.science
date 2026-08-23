@@ -316,7 +316,19 @@
                        nothing at all both rendered as clean as a verified one — the
                        12 production rows this change exists for. `verified` and
                        `not_owed` are the two states that have an answer, and they
-                       stay unbadged. #}
+                       stay unbadged.
+
+                       BEING UNBADGED IS A CLAIM ON THIS TABLE, so the two states
+                       that make it are enumerated too and the terminal {% else %} is a
+                       badge. This list used to name only the three badged states, so
+                       a sixth `panel_state` — a typo, a state added to `panel_state`
+                       and not here — fell off the end and read exactly like
+                       `verified`. That is the same defect the detail page's panel box
+                       fixed by making green an explicit branch
+                       (admin/_assessment_detail_body.html), and the two surfaces were
+                       defaulting in opposite directions. Pinned by
+                       tests/integration/test_assessment_queue_controls.py::
+                       test_an_unknown_panel_state_is_never_left_unbadged. #}
                     {% if a.panel_state == 'gap' %}
                     <span class="ml-1 text-xs font-medium text-orange-700"
                           title="Missing: {{ (a.missing_domains or [])|join(', ') }}">&#9873; panel</span>
@@ -326,6 +338,13 @@
                     {% elif a.panel_state == 'unrecorded' %}
                     <span class="ml-1 text-xs font-medium text-amber-700"
                           title="This row does not record whether a specialist panel was owed, so nothing can be said about one either way.">panel not recorded</span>
+                    {% elif a.panel_state in ('verified', 'not_owed') %}
+                    {# The two states that have an answer. No badge, deliberately —
+                       and enumerated so that "no badge" is only ever reached on
+                       purpose. #}
+                    {% else %}
+                    <span class="ml-1 text-xs font-medium text-amber-700"
+                          title="This row's panel finding is not one this page knows how to read, so nothing can be said about it either way. Not a verification.">panel state unknown</span>
                     {% endif %}
                 </td>
                 <td class="px-4 py-3 text-xs text-gray-600">
