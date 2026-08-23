@@ -393,3 +393,124 @@ async def test_a_pi_still_cannot_reach_either_discussions_page(client, db_sessio
             path, headers=auth_headers(pi.id), follow_redirects=False
         )
         assert resp.status_code == 403, path
+
+
+# ---------------------------------------------------------------------------
+# A truncated consult is not an opinion (0036's `specialist_consults.truncated`)
+#
+# `src/services/thread_panel.py` never SELECTed the column, so both surfaces it
+# feeds — the expanded cards and the compact per-row indicator, which are one
+# query precisely so they cannot disagree — showed the parse default
+# (src/agent/specialists.py: `caution`) as a specialist's answer. This is the
+# page where a thread that never reached a verdict is read, so it is the only
+# place some truncated consults are ever seen at all.
+# ---------------------------------------------------------------------------
+
+CUT_OFF_DOMAIN = "translational"
+CUT_OFF_QUESTION = "PANEL-ASKED-ABOUT-REIMBURSEMENT"
+
+
+async def _thread_with_one_truncated_consult(db_session):
+    """Two consults, same signal, one of them cut off. The untruncated one is
+    the control: without it, "caution is absent" would pass on a blank page."""
+    run = await factories.make_simulation_run(db_session)
+    root_ts = f"{time.time():.6f}"
+    await factories.make_agent_message(
+        db_session,
+        run=run,
+        agent_id=SUBJECT,
+        channel_name=CHANNEL,
+        message_ts=root_ts,
+        thread_ts=None,
+        phase="new_post",
+        content="An interview whose panel was half cut off.",
+        posted_at=time.time(),
+    )
+    db_session.add(
+        SpecialistConsult(
+            simulation_run_id=run.id,
+            agent_id=HUB,
+            subject_agent_id=SUBJECT,
+            thread_id=root_ts,
+            channel_name=CHANNEL,
+            domain="scientific",
+            question=QUESTION_MARKER,
+            verdict_signal="caution",
+            confidence="moderate",
+            raw_opinion="a complete opinion",
+            truncated=False,
+            created_at=CONSULT_EARLIER,
+        )
+    )
+    db_session.add(
+        SpecialistConsult(
+            simulation_run_id=run.id,
+            agent_id=HUB,
+            subject_agent_id=SUBJECT,
+            thread_id=root_ts,
+            channel_name=CHANNEL,
+            domain=CUT_OFF_DOMAIN,
+            question=CUT_OFF_QUESTION,
+            verdict_signal="caution",
+            confidence="moderate",
+            raw_opinion="The reimbursement picture is complicated by",
+            truncated=True,
+            created_at=CONSULT_LATER,
+        )
+    )
+    await db_session.flush()
+    return run, root_ts
+
+
+async def test_a_truncated_consult_is_not_carded_as_a_caution_opinion(
+    client, db_session, admin
+):
+    run, _ = await _thread_with_one_truncated_consult(db_session)
+    html = (
+        await client.get(
+            f"/admin/discussions?run_id={run.id}", headers=auth_headers(admin.id)
+        )
+    ).text
+
+    assert html.count('class="panel-card') == 2, "both consults are still shown"
+    # The control: an untruncated `caution` keeps the amber signal chip.
+    assert "bg-amber-100 text-amber-700" in html
+    # Exactly one of the two chips is the amber one — the cut-off consult must
+    # not have got a second.
+    assert html.count("bg-amber-100 text-amber-700") == 1
+    # The card badge and the compact per-row indicator, which feed from the one
+    # query and must therefore agree.
+    assert html.count("panel-cut-off") == 2
+    assert CUT_OFF_QUESTION in html, "the consult happened, and is still shown"
+
+
+async def test_the_manager_discussions_page_marks_it_too(client, db_session, manager):
+    """Same query, same template, and a manager is the reader most likely to
+    take a panel card at face value (they get no LLM drill-down at all)."""
+    run, _ = await _thread_with_one_truncated_consult(db_session)
+    html = (
+        await client.get(
+            f"/manager/discussions?run_id={run.id}", headers=auth_headers(manager.id)
+        )
+    ).text
+
+    assert html.count("bg-amber-100 text-amber-700") == 1
+    assert html.count("panel-cut-off") == 2
+
+
+async def test_a_null_truncated_column_still_reads_as_an_opinion(
+    client, db_session, admin
+):
+    """NULL is "written before 0036", and the column's own comment says to read
+    it as not-truncated: three known-truncated consults credit the floor today,
+    and retroactively invalidating history on no evidence is the worse error.
+    The page must not start marking every pre-0036 consult as cut off."""
+    run, _ = await _thread_with_a_panel_and_no_decision(db_session)  # both NULL
+    html = (
+        await client.get(
+            f"/admin/discussions?run_id={run.id}", headers=auth_headers(admin.id)
+        )
+    ).text
+
+    assert html.count('class="panel-card') == 2
+    assert "panel-cut-off" not in html

@@ -241,9 +241,23 @@
     {% if panel_summary %}
         <div class="mt-2 flex flex-wrap gap-2">
             {% for entry in panel_summary %}
+            {% if entry.reply_truncated %}
+            {# The specialist's reply stopped before it finished, so
+               `verdict_signal` is src/agent/specialists.py's parse default
+               (`caution`) and NOT something anyone said. Printing it here would
+               make a cut-off consult read as an opinion in the one row of chips
+               that answers "was this verdict's panel real". Same neutral chip
+               the tool-chip macro above uses for a consult that returned
+               nothing — a non-answer is styled like a non-answer. #}
+            <span class="panel-cut-off px-2 py-0.5 rounded-full text-xs font-medium bg-gray-200 text-gray-600"
+                  title="This specialist's reply was cut off before it finished, so it has no signal — the stored one is a parse default. It does not count toward the specialist floor.">
+                {{ entry.domain }} &middot; reply cut off
+            </span>
+            {% else %}
             <span class="px-2 py-0.5 rounded-full text-xs font-medium {{ signal_chip.get(entry.verdict_signal, 'bg-gray-100 text-gray-600') }}">
                 {{ entry.domain }} &middot; {{ entry.verdict_signal }}
             </span>
+            {% endif %}
             {% endfor %}
         </div>
     {% endif %}
@@ -405,11 +419,30 @@
                 <div class="rounded-lg border border-dashed border-gray-300 bg-white p-3 ml-6">
                     <div class="flex items-center gap-2 text-xs mb-1">
                         <span class="font-semibold text-gray-700">panel &middot; {{ c.domain }}</span>
+                        {% if c.reply_truncated %}
+                        {# See the summary chips above: a cut-off reply has no
+                           signal, only the parser's default. `confidence` is
+                           suppressed with it for the same reason — it is the
+                           same default, and "moderate confidence" attached to
+                           nothing reads as an opinion held moderately. #}
+                        <span class="panel-cut-off px-2 py-0.5 rounded-full font-medium bg-gray-200 text-gray-600">
+                            reply cut off
+                        </span>
+                        {% else %}
                         <span class="px-2 py-0.5 rounded-full font-medium {{ signal_chip.get(c.verdict_signal, 'bg-gray-100 text-gray-600') }}">
                             {{ c.verdict_signal }}
                         </span>
                         {% if c.confidence %}<span class="text-gray-400">confidence: {{ c.confidence }}</span>{% endif %}
+                        {% endif %}
                     </div>
+                    {% if c.reply_truncated %}
+                    <div class="text-xs text-gray-600 mb-1">
+                        The specialist's reply stopped before it finished. Anything
+                        below is a partial answer, and this domain does NOT count
+                        toward the specialist floor — see
+                        <span class="font-mono">specialist_consults.truncated</span>.
+                    </div>
+                    {% endif %}
                     {% if c.question %}
                     <div class="text-xs text-gray-600 mb-1">
                         <span class="font-medium text-gray-500">Asked:</span> {{ c.question }}

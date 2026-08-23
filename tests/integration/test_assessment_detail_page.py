@@ -17,6 +17,7 @@ import uuid
 from datetime import UTC, datetime
 
 import pytest
+from sqlalchemy import select
 
 from src.models import (
     USER_ROLE_ADMIN,
@@ -943,3 +944,86 @@ async def test_retro_consult_count_excludes_turns_from_other_interviews(
     assert ctx["retro_consult_count"] == 1, (
         "only consults on turns placed in THIS interview count"
     )
+
+
+# ---------------------------------------------------------------------------
+# A truncated consult is not an opinion (0036's `specialist_consults.truncated`)
+#
+# The floor already refuses to credit one, the Slack panel note already skips
+# one, and the column already records one. This page was the surviving reader
+# that did not know: `_load_consults` SELECTed the whole row and dropped
+# `truncated` from the dict it projected, so the parse default
+# (src/agent/specialists.py — `caution`) was rendered as though a specialist had
+# said it, in the chips directly under the panel-state box.
+# ---------------------------------------------------------------------------
+
+TRUNCATED_DOMAIN = "translational"
+
+
+async def _seed_with_a_truncated_consult(db_session):
+    """`_seed`'s own consult is the control: `caution`, and NOT truncated. The
+    second is the same signal arrived at by the parser giving up."""
+    run, assessment = await _seed(db_session)
+    thread_id = (
+        await db_session.execute(
+            select(SpecialistConsult.thread_id).where(
+                SpecialistConsult.simulation_run_id == run.id
+            )
+        )
+    ).scalar_one()
+    db_session.add(
+        SpecialistConsult(
+            simulation_run_id=run.id,
+            agent_id=HUB,
+            subject_agent_id=SUBJECT,
+            thread_id=thread_id,
+            channel_name=CHANNEL,
+            domain=TRUNCATED_DOMAIN,
+            question="Does the reimbursement path survive?",
+            verdict_signal="caution",
+            confidence="moderate",
+            raw_opinion="The reimbursement picture is complicated by",
+            truncated=True,
+        )
+    )
+    await db_session.flush()
+    return run, assessment
+
+
+async def test_a_truncated_consult_is_not_rendered_as_a_caution_opinion(
+    client, db_session, admin
+):
+    _, assessment = await _seed_with_a_truncated_consult(db_session)
+    html = (
+        await client.get(
+            f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+        )
+    ).text
+
+    # The control proves the assertion below is not vacuous: an untruncated
+    # `caution` still reads as a `caution` in the same chip row.
+    assert "scientific &middot; caution" in html
+    # The truncated one must not. Its signal is what the parser defaults to
+    # when it cannot read a reply, not what anyone said.
+    assert f"{TRUNCATED_DOMAIN} &middot; caution" not in html
+    # Twice: the summary chip under the panel-state box, and the consult's own
+    # card in the timeline. Both are places a reader counts opinions.
+    assert html.count("panel-cut-off") == 2
+    assert TRUNCATED_DOMAIN in html, "the consult is still shown — it happened"
+
+
+async def test_the_truncated_marking_survives_a_manager_render(
+    client, db_session, manager
+):
+    """Managers read this page too, and they are the audience the panel-state
+    box was rewritten for. `raw_opinion` is the only admin/manager difference."""
+    _, assessment = await _seed_with_a_truncated_consult(db_session)
+    html = (
+        await client.get(
+            f"/manager/assessments/{assessment.id}", headers=auth_headers(manager.id)
+        )
+    ).text
+
+    assert "scientific &middot; caution" in html
+    assert f"{TRUNCATED_DOMAIN} &middot; caution" not in html
+    assert html.count("panel-cut-off") == 2

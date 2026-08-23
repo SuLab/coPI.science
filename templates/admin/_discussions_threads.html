@@ -86,7 +86,17 @@
                          title="{{ panel | length }} specialist consult{{ '' if panel | length == 1 else 's' }} recorded for this thread">
                         panel:
                         {%- for entry in panel %}
+                        {%- if entry.reply_truncated %}
+                        {# A cut-off reply has no signal — `verdict_signal` is
+                           src/agent/specialists.py's parse default — so it must
+                           not borrow the amber caution glyph. Its own glyph and
+                           its own colour, so a row of domains never overstates
+                           what the panel said. #}
+                        <span class="panel-cut-off text-gray-400"
+                              title="{{ entry.domain }}: the specialist's reply was cut off before it finished, so it has no signal and does not count toward the specialist floor.">{{ entry.domain }}&hellip;</span>{{ "" if loop.last else " " }}
+                        {%- else %}
                         <span class="{{ panel_color.get(entry.verdict_signal, 'text-gray-400') }}">{{ entry.domain }}{{ panel_glyph.get(entry.verdict_signal, '&bull;') | safe }}</span>{{ "" if loop.last else " " }}
+                        {%- endif %}
                         {%- endfor %}
                     </div>
                     {% endif %}
@@ -157,6 +167,17 @@
                         <div class="panel-card bg-white border border-gray-200 rounded-lg p-3 mb-2">
                             <div class="flex flex-wrap items-center gap-2">
                                 <span class="text-sm font-semibold text-gray-700">panel &middot; {{ c.domain }}</span>
+                                {% if c.reply_truncated %}
+                                {# No signal chip and no confidence: both are
+                                   src/agent/specialists.py's parse defaults on
+                                   a reply that never finished, and rendering
+                                   them makes a cut-off consult indistinguishable
+                                   from a real `caution`. The assessment detail
+                                   page's cards say the same thing the same way. #}
+                                <span class="panel-signal panel-cut-off px-2 py-0.5 rounded-full text-xs font-medium bg-gray-200 text-gray-600">
+                                    reply cut off
+                                </span>
+                                {% else %}
                                 <span class="panel-signal px-2 py-0.5 rounded-full text-xs font-medium
                                     {{ signal_chip.get(c.verdict_signal, 'bg-gray-100 text-gray-600') }}">
                                     {{ c.verdict_signal }}
@@ -164,10 +185,17 @@
                                 {% if c.confidence %}
                                 <span class="text-xs text-gray-400">confidence: {{ c.confidence }}</span>
                                 {% endif %}
+                                {% endif %}
                                 {% if c.created_at %}
                                 <span class="text-xs text-gray-400 ml-auto"><span data-utc="{{ c.created_at.isoformat() }}" data-utc-fmt="time">{{ c.created_at.strftime('%H:%M') }}</span></span>
                                 {% endif %}
                             </div>
+                            {% if c.reply_truncated %}
+                            <p class="mt-1 text-xs text-gray-600">The specialist's reply
+                            stopped before it finished. Anything below is a partial
+                            answer, and this domain does NOT count toward the
+                            specialist floor (<span class="font-mono">specialist_consults.truncated</span>).</p>
+                            {% endif %}
                             {% if c.question %}
                             <p class="mt-1 text-xs text-gray-500">Asked: {{ c.question }}</p>
                             {% endif %}

@@ -115,9 +115,10 @@ async def panel_cards_by_thread(
     was ever consulted here". Overflow is also reported rather than swallowed;
     see ``PanelRead.truncated``.
 
-    Each card carries ``domain`` and ``verdict_signal``, which is all the
-    indicator needs, so the indicator and the expanded cards are one query and
-    can never disagree.
+    Each card carries ``domain``, ``verdict_signal`` and ``reply_truncated``,
+    which is all the indicator needs, so the indicator and the expanded cards
+    are one query and can never disagree — including about whether a signal is
+    an opinion or the parser's default on a reply that stopped early.
 
     ``raw_opinion`` is present only when ``admin_view`` (Ruling R4) — it is not
     even SELECTed otherwise.
@@ -137,6 +138,13 @@ async def panel_cards_by_thread(
         SpecialistConsult.concerns,
         SpecialistConsult.questions_to_ask,
         SpecialistConsult.created_at,
+        # 0036's "this reply was cut off". SELECTed for every reader, admin or
+        # manager: `verdict_signal` is a PARSE DEFAULT (`caution`,
+        # src/agent/specialists.py) when the reply never finished, so without
+        # this column both surfaces below present a sentence that stopped
+        # mid-word as an opinion a specialist gave. Not drill-down — it
+        # qualifies the signal itself, and a manager gets no other way to tell.
+        SpecialistConsult.truncated,
     ]
     if admin_view:
         columns.append(SpecialistConsult.raw_opinion)
@@ -178,6 +186,18 @@ async def panel_cards_by_thread(
             "raw_opinion_truncated": bool(
                 raw_opinion and len(raw_opinion) > RAW_OPINION_CHARS
             ),
+            # THE THIRD "truncated" on this page, and the only one about the
+            # consult rather than about the rendering: `PanelRead.truncated` is
+            # the row cap biting, `raw_opinion_truncated` is this page clipping
+            # a long reply for display, and this one is the SPECIALIST's reply
+            # having stopped before it finished. Spelled `reply_truncated` so
+            # the three are never confused in a template, and matching the key
+            # `assessment_detail._load_consults` projects so the two card
+            # renderers read alike.
+            #
+            # `bool(...)`: NULL means "written before 0036" and the column's
+            # comment says to read it as not truncated.
+            "reply_truncated": bool(row.truncated),
         })
     # Back to chronological within each thread. The rows arrived newest-first
     # (that is what makes the cap shed the OLDEST consults), and each thread's

@@ -638,8 +638,16 @@ async def build_assessment_detail(
         "scale_provenance": scale.label,
         "rubric_version": RUBRIC_VERSION,
         "panel_state": panel_state(assessment),
+        # The chips under the panel-state box. `reply_truncated` rides along
+        # with the signal it qualifies: this row of chips is the compact answer
+        # to "was this verdict's panel real", so a chip whose opinion was never
+        # finished has to say so here, not only on the card further down.
         "panel_summary": [
-            {"domain": c["domain"], "verdict_signal": c["verdict_signal"]}
+            {
+                "domain": c["domain"],
+                "verdict_signal": c["verdict_signal"],
+                "reply_truncated": c["reply_truncated"],
+            }
             for c in consults
         ],
         "consult_count": len(consults),
@@ -750,6 +758,26 @@ async def _load_consults(
             # value that reaches the context reaches anyone who can read the
             # page source the moment a template edit prints it.
             "raw_opinion": row.raw_opinion if admin_view else None,
+            # Was this reply CUT OFF (0036's `specialist_consults.truncated`)?
+            # Carried, not dropped, because `verdict_signal` above is a PARSE
+            # DEFAULT on a truncated reply — `caution`, from
+            # src/agent/specialists.py — and a chip that says `caution` is
+            # indistinguishable from one a specialist actually gave. The
+            # specialist floor, the Slack panel note and the durable row all
+            # already know; this page was the last reader that did not, and it
+            # is the one a human reads to decide whether a verdict's panel was
+            # real.
+            #
+            # Named `reply_truncated`, not `truncated`: `thread_panel.py`'s
+            # card dicts carry the same key, and there "truncated" already
+            # means two other things (the row cap, and `raw_opinion` clipped
+            # for display). One name across both card renderers, and none of
+            # the three collide.
+            #
+            # NULL stays falsy on purpose — see the column's comment: NULL is
+            # "written before 0036", read as not-truncated, because
+            # retroactively invalidating history on no evidence is worse.
+            "reply_truncated": bool(row.truncated),
             "created_at": row.created_at,
         }
         for row in rows
