@@ -35,7 +35,7 @@ def _engine() -> SimulationEngine:
 
 def _slow_flusher(eng, events):
     """A `_flush_llm_logs` stand-in with the real one's take-then-commit shape."""
-    async def _slow_flush():
+    async def _slow_flush(*, final=False):
         batch = eng._llm_log_buffer[:]
         eng._llm_log_buffer.clear()
         if not batch:
@@ -140,7 +140,7 @@ async def test_a_completed_flush_task_is_discarded_from_the_tracking_set():
     eng = _engine()
     eng._llm_log_flush_size = 1
 
-    async def _quick_flush():
+    async def _quick_flush(*, final=False):
         eng._llm_log_buffer.clear()
 
     eng._flush_llm_logs = _quick_flush
@@ -166,7 +166,7 @@ async def test_a_failing_flush_task_does_not_abort_the_rest_of_stop():
     eng._llm_log_flush_size = 1
     seen: list[str] = []
 
-    async def _boom():
+    async def _boom(*, final=False):
         batch = eng._llm_log_buffer[:]
         eng._llm_log_buffer.clear()
         if not batch:
@@ -182,7 +182,7 @@ async def test_a_failing_flush_task_does_not_abort_the_rest_of_stop():
             raise RuntimeError("commit failed")
         seen.append("recovered")
 
-    async def _assessments():
+    async def _assessments(*, final=False):
         seen.append("assessments")
 
     eng._flush_llm_logs = _boom

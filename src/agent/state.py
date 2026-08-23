@@ -1,5 +1,6 @@
 """Per-agent state dataclasses for the turn-based simulation."""
 
+import time
 from collections import deque
 from dataclasses import dataclass, field
 
@@ -100,7 +101,25 @@ class AgentState:
     active_threads: dict[str, ThreadState] = field(default_factory=dict)  # thread_id -> ThreadState
     subscribed_channels: set[str] = field(default_factory=set)
     pending_proposals: list[ProposalRef] = field(default_factory=list)
-    last_selected: float = 0.0
+    # Anchored at CONSTRUCTION, not at the epoch, and not by the caller.
+    #
+    # `SimulationEngine._select_agent` weights on
+    # `max(now - last_selected, 1.0) * load`, so a `0.0` default scores a
+    # never-selected agent at ~1.79e9 against ~187 for one selected a tick ago
+    # — a 10^7 ratio that turns a weighted random draw into a shuffle WITHOUT
+    # replacement. `start()` used to paper over this with a one-shot loop over
+    # `self.agents`, which covered the startup roster and nothing else:
+    # `_sync_roster_from_db`'s ADD path constructs `Agent(...)` mid-run and
+    # never anchored it, so 3 new agents out of 13 took 100% of 2,000 draws on
+    # a harness, and in production (where the loop re-anchors on every
+    # selection) N additions take N CONSECUTIVE turns — 48 of them for the
+    # documented bulk provisioning case.
+    #
+    # Safe as a default because only RELATIVE staleness matters and every agent
+    # in one startup roster is constructed within milliseconds of the others.
+    # It also makes a brand-new agent the LEAST stale rather than the most,
+    # which is the right way round: it has no backlog to catch up on.
+    last_selected: float = field(default_factory=time.time)
     last_seen_cursor: float = 0.0  # for scanning new posts since last turn
 
     # Sliding-window LLM call ledger, maintained by Agent.record_api_call.

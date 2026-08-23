@@ -783,19 +783,13 @@ class SimulationEngine:
         # stays attributable to its configuration (v2 §13.1).
         await self._record_topology_snapshot()
 
-        # Start every agent's staleness clock at NOW, not at the epoch.
-        # `_select_agent` weights on `max(now - last_selected, 1.0) * load`, and
-        # `AgentState.last_selected` defaults to 0.0 — so a never-selected agent
-        # scored ~1.79e9 against ~187 for one selected a tick ago, a 10^7 ratio
-        # that turned a weighted random draw into a shuffle WITHOUT replacement.
-        # That is why run 8b64a0e0 gave 59 turns to 59 distinct agents and no
-        # agent a second turn: nobody could repeat until all 63 had run, and 63
-        # ticks did not fit in the budget. Anchoring here makes staleness a
-        # preference again rather than a veto; the first draw is then decided by
-        # `_agent_load` alone, which is what it is for.
-        _run_start = time.time()
-        for _agent in self.agents.values():
-            _agent.state.last_selected = _run_start
+        # NOTE: every agent's staleness clock is anchored at CONSTRUCTION, by
+        # `AgentState` itself — see the comment on that field. This used to be a
+        # one-shot loop here, which covered the startup roster and nothing else:
+        # `_sync_roster_from_db`'s add path builds an `Agent(...)` mid-run and
+        # never reached it, so a mid-run addition monopolised the scheduler.
+        # Do not re-add the loop; it would imply the anchor is a startup concern,
+        # which is the belief that let the roster-add path ship without one.
 
         await self._run_main_loop()
 
