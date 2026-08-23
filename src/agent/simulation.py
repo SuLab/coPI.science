@@ -6145,9 +6145,33 @@ class SimulationEngine:
         live poller reads the same top-level-only endpoint, and the only code
         that fetches replies works from a thread the run is already tracking —
         of which a fresh start has none.
+
+        **No channel this pass touches may end with a "0" cursor**, and there are
+        three ways it used to:
+
+        1. `AgentSlackClient.get_full_channel_history` CATCHES `SlackApiError`
+           and returns `[]`, so the `try/except` below never fires for the
+           commonest failure there is. The channel looked empty, the cursor
+           stayed "0", and the live poller — a different endpoint, which does
+           NOT swallow — re-imported the whole back catalogue on the first tick
+           (harness: 30 messages).
+        2. A genuinely empty read, indistinguishable from (1) from here.
+        3. `_client_for_channel(...) is None`: a private channel with no
+           connected member bot, previously a bare `continue`.
+
+        All three now fall back to a WALL-CLOCK ts. That is a deliberate, small
+        trade: it is derived from this process's clock rather than Slack's, so a
+        clock skew could hide a message posted in the same second as the seed.
+        Weighed against re-importing an entire channel's history into a run that
+        asked to start clean, and against the fact that this branch only runs
+        when we could not read the channel at all, that is the better failure.
         """
-        default_client = next(iter(self.slack_clients.values()), None)
-        if not default_client or not default_client.is_connected:
+        # `_next_poll_client()`, not `next(iter(self.slack_clients.values()))`:
+        # the latter picks whatever client happens to be first in the dict, and
+        # if THAT one is disconnected the whole seed was skipped — while the live
+        # poller, which does use `_next_poll_client`, kept polling happily.
+        default_client = self._next_poll_client()
+        if not default_client:
             logger.info("No Slack client available — skipping fresh-start cursor seed")
             return
 
@@ -6156,25 +6180,36 @@ class SimulationEngine:
             if ch_name in SEEDED_CHANNELS
             or self._channel_visibility.get(ch_name) == VISIBILITY_COLLAB_PRIVATE
         }
+        # One wall clock for the whole pass, so every unreadable channel gets the
+        # same baseline and the number is not a per-channel accident.
+        now_ts = f"{time.time():.6f}"
         channels = 0
         skipped = 0
+        unreadable = 0
+
+        def _fallback(ch_id: str) -> None:
+            if self._poll_cursors.get(ch_id, "0") == "0":
+                self._poll_cursors[ch_id] = now_ts
+
         for ch_name, ch_id in polled_ids.items():
             client = self._client_for_channel(ch_id, default_client)
             if client is None:
-                logger.debug(
-                    "Skipping fresh-start cursor seed for private channel #%s "
-                    "— no connected member bot", ch_name,
+                logger.warning(
+                    "Fresh-start cursor seed: no connected member bot for "
+                    "private channel #%s — parking its cursor at the wall clock "
+                    "rather than 0", ch_name,
                 )
+                _fallback(ch_id)
+                unreadable += 1
                 continue
             try:
                 messages = await client.aget_full_channel_history(ch_id)
             except Exception as exc:  # noqa: BLE001
-                # Best-effort: a channel we cannot read leaves its cursor at
-                # "0", which is the pre-fix behaviour for that one channel
-                # rather than a reason to abort the whole startup.
                 logger.warning(
                     "Fresh-start cursor seed failed for #%s: %s", ch_name, exc,
                 )
+                _fallback(ch_id)
+                unreadable += 1
                 continue
             newest = ""
             for msg in messages:
@@ -6189,10 +6224,17 @@ class SimulationEngine:
                 if newest > cur:
                     self._poll_cursors[ch_id] = newest
                 channels += 1
+            else:
+                # Empty, or an error the client swallowed into an empty list —
+                # from here they are the same observation, and only one of them
+                # is safe to leave at "0".
+                _fallback(ch_id)
+                unreadable += 1
         logger.info(
             "--fresh: ignoring %d pre-existing Slack message(s) across %d "
-            "channel(s); poll cursors advanced to the current head",
-            skipped, channels,
+            "channel(s); poll cursors advanced to the current head "
+            "(%d channel(s) unreadable or empty, parked at the wall clock)",
+            skipped, channels, unreadable,
         )
 
     async def _rebuild_state_from_slack(self) -> None:
@@ -6205,8 +6247,12 @@ class SimulationEngine:
         Reached via `_restore_slack_state`, which is what decides a resumed run
         wants this and a `--fresh` run does not.
         """
-        default_client = next(iter(self.slack_clients.values()), None)
-        if not default_client or not default_client.is_connected:
+        # `_next_poll_client()` for the same reason as the fresh-start seed: the
+        # old `next(iter(...))` skipped the whole reconcile whenever the first
+        # client in the dict happened to be disconnected, and a restart that
+        # skips the reconcile cannot recover its own in-flight interviews.
+        default_client = self._next_poll_client()
+        if not default_client:
             logger.info("No Slack client available — skipping Slack reconcile")
             return
 
