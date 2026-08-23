@@ -57,6 +57,53 @@ async def test_concurrent_waitlist_signups_do_not_500(engine, monkeypatch):
     assert count == 1
 
 
+class _ExistenceCheckGate:
+    """Two-party barrier: releases both waiters only once EACH has arrived.
+
+    `review_proposal` (src/routers/agent_page.py, ~487-494) runs a
+    pre-insert SELECT to check for an existing review before it INSERTs.
+    Two real, unsynchronised racers can interleave so that racer #1's SELECT
+    *and commit* both finish before racer #2 even reaches its own SELECT —
+    at which point racer #2 correctly finds the row and raises
+    HTTPException(400, "Already reviewed"). That is a real 400, not a bug,
+    but it is the wrong race: it never reaches the INSERT-level collision
+    (uq_proposal_reviews_decision_agent / IntegrityError) this test exists to
+    exercise. Gating both racers on this barrier right after their existence
+    SELECT returns forces the interleaving the test means to pin: both see
+    "no existing row" before either is allowed to proceed to INSERT/commit,
+    so the actual conflict is decided at the unique-constraint/IntegrityError
+    path inside review_proposal's try/except (rollback + redirect), which is
+    the thing under test.
+    """
+
+    def __init__(self, parties: int):
+        self._parties = parties
+        self._arrived = 0
+        self._condition = asyncio.Condition()
+
+    async def arrive_and_wait(self) -> None:
+        async with self._condition:
+            self._arrived += 1
+            if self._arrived >= self._parties:
+                self._condition.notify_all()
+            else:
+                await self._condition.wait_for(lambda: self._arrived >= self._parties)
+
+
+def _is_review_existence_check(statement) -> bool:
+    """True only for review_proposal's `select(ProposalReview).where(...)`
+    existence check — the sole Select along that call path whose only
+    selected entity is ProposalReview (the ThreadDecision lookup, the
+    AgentRegistry lookup in get_agent_with_access, and the
+    EmailEngagementTracker/EmailNotification lookups in record_engagement /
+    mark_notification_responded all select different entities)."""
+    try:
+        descriptions = statement.column_descriptions
+    except AttributeError:
+        return False
+    return len(descriptions) == 1 and descriptions[0].get("entity") is ProposalReview
+
+
 @pytest.mark.asyncio
 async def test_concurrent_proposal_reviews_do_not_500(engine):
     """Same race, on review_proposal's uq_proposal_reviews_decision_agent.
@@ -65,6 +112,13 @@ async def test_concurrent_proposal_reviews_do_not_500(engine):
     proposal at once. Pre-fix, the loser's commit raises IntegrityError out
     of the handler; post-fix it rolls back and redirects like a normal
     "already reviewed" outcome, same as the winner.
+
+    The two racers are pinned on `_ExistenceCheckGate` (see its docstring) so
+    both are guaranteed to pass the pre-insert existence check before either
+    is allowed to proceed to INSERT/commit — otherwise nothing forces that
+    interleaving, and the loser can instead (correctly, but besides the
+    point) 400 at its own existence check after the winner's commit has
+    already landed.
     """
     from src.routers.agent_page import review_proposal
 
@@ -94,8 +148,19 @@ async def test_concurrent_proposal_reviews_do_not_500(engine):
         agent_id, decision_id = agent.agent_id, decision.id
         run_id, agent_pk, pi_id = run.id, agent.id, pi.id
 
+    gate = _ExistenceCheckGate(parties=2)
+
     async def submit():
         async with factory() as db:
+            real_execute = db.execute
+
+            async def gated_execute(statement, *args, **kwargs):
+                result = await real_execute(statement, *args, **kwargs)
+                if _is_review_existence_check(statement):
+                    await gate.arrive_and_wait()
+                return result
+
+            db.execute = gated_execute
             try:
                 return await review_proposal(
                     agent_id, decision_id, _Req(), rating=3, comment="",
