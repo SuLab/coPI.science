@@ -88,17 +88,24 @@ NONSTREAMING_MAX_TOKENS = 21_333
 # setting's name at face value and under-counting the loop by one.
 #
 # `input_tokens`/`output_tokens` are
-# per-turn CUMULATIVE totals: correct for billing, and deliberately left that way
-# because SimulationEngine rebuilds `api_call_count` as a row COUNT and the rate
-# limiter's `call_times` as one entry per row, so splitting a turn into several
-# rows would inflate both after every restart.
+# per-turn CUMULATIVE totals: correct for billing, and deliberately left that
+# way. NOT because of the restart rebuild, which this comment used to cite and
+# which no longer says what it said: as of 68e35c6 `SimulationEngine` rebuilds
+# both `api_call_count` and the rate limiter's `call_times` PER CALL, summing
+# `COALESCE(jsonb_array_length(call_stats), 1)` per row, and live booking counts
+# real API calls rather than turns — so a row-per-call table would rebuild
+# correctly. The reasons the one-row-per-turn shape stays are the corpus of
+# turn-shaped rows already stored, the per-turn blobs a split would duplicate,
+# and `call_stats` already being the per-call breakdown; they are written out in
+# full on `LlmCallLog.input_tokens` in src/models/agent_activity.py.
 #
 # `latency_ms` is NOT one of those sums, despite being logged beside them. In
 # `generate_with_tools` it is ASSIGNED per call, not accumulated across rounds, so
 # a multi-round row carries the LAST call's latency plus any retry's — never the
 # wall time of the turn. The two only coincide in `generate_agent_response`, which
 # makes one call plus at most a retry. Per-call latency is recoverable from
-# `call_stats`; a multi-round turn's total wall time is recorded nowhere.
+# `call_stats`; a multi-round turn's total wall time is `wall_ms`, added to the
+# payload and to the table in 0035 (before that it was recorded nowhere).
 #
 # `call_stats` is what makes the row interpretable anyway: a list with one object
 # per real API call, in call order — see `_call_stat`. It is the only place
@@ -652,9 +659,11 @@ def _emit_call_log(
     ``tools.py``'s ``on_api_call`` had already fired for every one of them.
 
     That mattered more than the missing observability: ``SimulationEngine``
-    rebuilds ``api_call_count`` as a row COUNT and the rate limiter's
-    ``call_times`` ledger as one entry per row, so a refusal booked a throttle
-    slot in-process and then disappeared at restart. Logging these rows moves
+    rebuilds ``api_call_count`` and the rate limiter's ``call_times`` ledger
+    from exactly these rows — per CALL since 68e35c6, summing
+    ``COALESCE(jsonb_array_length(call_stats), 1)`` per row, not as the row
+    COUNT this docstring used to describe — so a refusal booked a throttle slot
+    in-process and then disappeared at restart. Logging these rows moves
     both counters TOWARDS the truth — and it does mean a restart now replays
     refusals into ``call_times`` that it previously ignored, which is the correct
     direction (they were real, billed calls) but is a real change in post-restart
@@ -1164,8 +1173,10 @@ async def generate_agent_response(
         # Both halves of what generate_with_tools' guard does. THE RECORD:
         # both calls of a retried turn are billed; without this the turn wrote
         # no row at all, and SimulationEngine rebuilds `api_call_count` and the
-        # rate limiter's `call_times` from these rows — so a failure here
-        # silently refunded the throttle at the next restart. The row carries
+        # rate limiter's `call_times` from these rows — per CALL, summing
+        # `COALESCE(jsonb_array_length(call_stats), 1)`, so a lost row refunds
+        # BOTH billed calls, not one. A failure here therefore silently refunded
+        # the throttle at the next restart. The row carries
         # the first pass's truncated text too: it is what the dropped-verdict
         # backfill regexes `llm_call_logs.response_text` for, and it was paid
         # for.
@@ -1667,8 +1678,9 @@ async def generate_with_tools(
         # Measured: an exception anywhere after the first call wrote
         # `rows written: 0` for a turn that had made 6 real API calls — and
         # `SimulationEngine` rebuilds `api_call_count` and the rate limiter's
-        # `call_times` ledger from exactly those rows, so the calls stopped
-        # existing at the next restart.
+        # `call_times` ledger from exactly those rows, per CALL (summing
+        # `COALESCE(jsonb_array_length(call_stats), 1)`), so all six calls
+        # stopped existing at the next restart, not one.
         #
         # The row is written for EVERY failure except the one request that was
         # never issued (`NonStreamingMaxTokensError`, raised by `_acreate`'s

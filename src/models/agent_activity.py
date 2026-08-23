@@ -202,24 +202,47 @@ class LlmCallLog(Base):
     system_prompt: Mapped[str] = mapped_column(Text, nullable=False)
     messages_json: Mapped[dict] = mapped_column(JSON, nullable=False)
     response_text: Mapped[str] = mapped_column(Text, nullable=False)
-    # PER-TURN CUMULATIVE, not per-API-call: one row is 1..7 real API calls (up
-    # to max_tool_rounds tool rounds, the terminating/forced-final call, and at
-    # most one max_tokens retry), and the two token columns are their sums.
-    # Correct as billing totals; useless for "which call truncated", which is
-    # what call_stats below exists to answer.
+    # PER-TURN CUMULATIVE, not per-API-call: one row is 1..8 real API calls at
+    # the default `max_tool_rounds=5` (up to max_tool_rounds + 1 tool-capable
+    # calls, the terminating/forced-final call, and at most one max_tokens
+    # retry), and the two token columns are their sums. Correct as billing
+    # totals; useless for "which call truncated", which is what call_stats below
+    # exists to answer.
     #
     # latency_ms is the exception and is NOT a sum: src/services/llm.py's
     # generate_with_tools ASSIGNS it per call rather than accumulating it, so a
     # multi-round row carries the last call's latency plus any retry's, not the
-    # turn's wall time. Read per-call latency out of call_stats instead; the
-    # turn's total wall time is not stored anywhere. Do NOT "fix" this column by
-    # summing it — the numbers already in the table would then mean two
-    # different things depending on when they were written. Do NOT split this
-    # table one row per API call either —
-    # SimulationEngine._rebuild_state reconstructs api_call_count as a row
-    # COUNT(*) and the sliding-window limiter's call_times as one entry per row,
-    # while live booking is one per turn (+1 on retry), so row-per-call would
-    # inflate both rebuilt ledgers and over-throttle every agent after a restart.
+    # turn's wall time. Read per-call latency out of call_stats, and the turn's
+    # wall time out of `wall_ms` below (0035 — before that column the turn's
+    # total really was stored nowhere). Do NOT "fix" latency_ms by summing it —
+    # the numbers already in the table would then mean two different things
+    # depending on when they were written.
+    #
+    # Do NOT split this table one row per API call either. THE ORIGINAL REASON
+    # NO LONGER HOLDS and must not be quoted: this comment used to say the
+    # restart rebuild counted ROWS while live booking counted TURNS, so a split
+    # would inflate both rebuilt ledgers. As of 68e35c6 neither half is true —
+    # `SimulationEngine._rebuild_state_from_db` sums
+    # `COALESCE(jsonb_array_length(call_stats), 1)` (simulation.py's
+    # `_CALLS_PER_LOG_ROW`) for BOTH api_call_count and the limiter's
+    # call_times, and live booking counts real API calls (`record_api_call`
+    # plus `_unbooked_calls` for the tool rounds). That expression is 1 for a
+    # single-call row, so a split corpus would in fact rebuild correctly.
+    #
+    # The prohibition stands anyway, on three different grounds:
+    #   * The rows already stored are TURNS and cannot be re-encoded (5,771 as
+    #     of 2026-08-22, 4,650 of them without call_stats at all). After a split
+    #     every column here means one thing on an old row and another on a new
+    #     one — the same objection the latency_ms paragraph above makes — and
+    #     the admin LLM-calls page reads these columns PER ROW, not as a SUM.
+    #   * system_prompt/messages_json/response_text belong to the turn, not to a
+    #     call. A row per call would duplicate the largest column in the table
+    #     (system_prompt — assessment_detail._load_tool_turns declines to SELECT
+    #     it for exactly that reason) once per round, byte-identical each time.
+    #   * call_stats already IS the per-call table, denormalized into the row;
+    #     that is what 0032 added it for. `jsonb_array_elements` answers the
+    #     per-call questions today, so a split buys nothing that is not already
+    #     available.
     input_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     output_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     latency_ms: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)

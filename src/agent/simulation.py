@@ -6802,9 +6802,12 @@ class SimulationEngine:
 
         # 4b. Rebuild the sliding-window call ledger from the same table.
         #
-        # Deliberately SEPARATE from step 4, which stays an all-time COUNT(*):
-        # api_call_count is lifetime accounting (run summary,
-        # SimulationRun.total_api_calls) while call_times is the live throttle.
+        # Deliberately SEPARATE from step 4. Both now sum `_CALLS_PER_LOG_ROW`
+        # (this comment said step 4 "stays an all-time COUNT(*)" until the
+        # per-call change landed), but they differ in WINDOW and in purpose:
+        # step 4 is all-time lifetime accounting (run summary,
+        # SimulationRun.total_api_calls) while call_times is the live throttle
+        # and reads only back to the rate window's cutoff.
         # Folding these together is the bug — it is what made an over-budget
         # agent over-budget again on every restart, forever. See design §4.2.
         if self.session_factory and self.simulation_run_id:
