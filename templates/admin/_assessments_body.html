@@ -53,6 +53,10 @@
                         &mdash; the model returned no usable reply twice in a row,
                         so the interview was abandoned before any verdict could be
                         written. Nothing was posted to Slack for these turns.
+                    {% elif reason == 'unwritable_row' %}
+                        &mdash; the verdict was fully formed but the database
+                        refused to store it, even individually after the batch it
+                        belonged to failed. This row is its only surviving trace.
                     {% endif %}
                 </li>
                 {% endfor %}

@@ -241,6 +241,20 @@ class AssessmentDrop(Base):
         Slack for the failing turns. Recorded at any ordinal, hub-only. Added
         2026-08-21 after run 076e80b6 measured 13 empty replies in 90 minutes
         and stranded a thread at message count 2.
+      * ``unwritable_row``       — a stored assessment row that the database
+        refused even ALONE, during ``_recover_rows_individually``'s per-row
+        retry after the whole batch it belonged to failed
+        (``_flush_persisted``). Unlike every reason above, this is not a GATE
+        decision — the engine wanted the row and the database would not take
+        it. The verdict was already fully formed (concluded, parsed, and
+        assembled into a row) before it was lost, so this drop is its ONLY
+        surviving trace; the verdict itself rides along in ``raw_verdict``
+        exactly as the row would have stored it, and ``detail`` names the
+        database's own exception plus the channel/thread it came from. Not
+        retried — the row already failed twice, batch then alone — and
+        recording it is itself best-effort, since a malformed row must not take
+        the surviving verdicts of its batch down with it. See
+        ``SimulationEngine._record_unwritable_assessment``. Added 2026-08-22.
     """
 
     __tablename__ = "assessment_drops"
