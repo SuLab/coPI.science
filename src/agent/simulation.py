@@ -2428,8 +2428,20 @@ class SimulationEngine:
 
         Cheap to call every main-loop tick — a single query returning a handful
         of rows. Idempotent: channels already known are skipped.
+
+        RUN-SCOPED, and that filter is load-bearing rather than tidy. It used to
+        be absent while the sibling ``AgentChannel`` read in
+        ``_persist_seeded_channels`` had one, so this query returned EVERY run's
+        private channels. That was survivable only because ``--fresh`` truncated
+        ``agent_channels`` outright; now that it deletes nothing
+        (``main._open_fresh_run``), an unfiltered select would hand a brand-new
+        run every previous run's private channels, write them into
+        ``_channel_id_map``/``_channel_visibility``, join its bots to them, and —
+        because ``_seed_slack_cursors_without_ingest`` and
+        ``_poll_slack_for_bot_messages`` both poll whatever is in those maps —
+        re-ingest their entire Slack back catalogue into this run.
         """
-        if not self.session_factory:
+        if not self.session_factory or not self.simulation_run_id:
             return
         try:
             from sqlalchemy import select as sa_select
@@ -2439,6 +2451,7 @@ class SimulationEngine:
             async with self.session_factory() as db:
                 priv_rows = (await db.execute(
                     sa_select(AgentChannel).where(
+                        AgentChannel.simulation_run_id == self.simulation_run_id,
                         AgentChannel.visibility == VISIBILITY_COLLAB_PRIVATE,
                         AgentChannel.archived_at.is_(None),
                     )
@@ -5870,8 +5883,10 @@ class SimulationEngine:
 
         A resumed run reconciles it (that is how a restart recovers its own
         in-flight interviews). A `--fresh` run must NOT: `main.py` has just
-        deleted this run's agent_messages, and re-importing the same
-        conversations from the transport puts them straight back — measured on
+        opened a NEW `simulation_run_id`, so this run's `agent_messages` are
+        empty by construction (it deletes nothing — see `main._open_fresh_run`),
+        and re-importing the same conversations from the transport files every
+        one of them under the new run id — measured on
         run 8b64a0e0, where `--fresh` wiped the tables and then appended 914
         messages across 86 threads, so 916 of that run's 1354 rows were
         actually posted before it began (oldest eight days earlier). Three of

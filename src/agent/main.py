@@ -3,13 +3,14 @@
 Usage:
     python -m src.agent.main                        # resume, run until stopped
     python -m src.agent.main --max-runtime 60       # resume, stop after 60 min
-    python -m src.agent.main --fresh                 # wipe + fresh start
+    python -m src.agent.main --fresh                 # start a NEW run (deletes nothing)
     python -m src.agent.main --fresh --max-runtime 60
 """
 
 import asyncio
 import logging
 import signal
+import uuid
 from datetime import datetime, timezone
 
 import typer
@@ -44,7 +45,15 @@ def main(
     ),
     mock: bool = typer.Option(False, "--mock", help="Run in mock mode without real Slack tokens"),
     no_db: bool = typer.Option(False, "--no-db", help="Skip database logging"),
-    fresh: bool = typer.Option(False, "--fresh", help="Wipe simulation data and start fresh"),
+    fresh: bool = typer.Option(
+        False, "--fresh",
+        help=(
+            "Start a NEW simulation run instead of resuming the latest. Deletes "
+            "nothing: a new simulation_run_id is what isolates the run, and "
+            "pre-run Slack history is skipped rather than re-imported. Does not "
+            "reset profiles/memory/*."
+        ),
+    ),
     reset_cursors: bool = typer.Option(False, "--reset-cursors", help="Reset scan cursors so agents re-read all posts"),
     all_agents: bool = typer.Option(False, "--all-agents", help="Run every AgentRegistry row regardless of status (default is status='active' only)"),
 ):
@@ -54,6 +63,44 @@ def main(
     # only for PI DM rows, so it takes the aux slot (R1).
     set_default_writer_id(WRITER_ENGINE_AUX)
     asyncio.run(_run_simulation(max_runtime, budget, mock, no_db, fresh, reset_cursors, all_agents))
+
+
+async def _open_fresh_run(session_factory, config: dict) -> uuid.UUID:
+    """Open a new ``SimulationRun`` row for a ``--fresh`` start. DELETES NOTHING.
+
+    ``--fresh`` used to answer "start clean" with three UNFILTERED deletes —
+    ``AgentMessage``, ``AgentChannel`` and ``PiDmMessage``, no
+    ``simulation_run_id`` predicate on any of them — so every previous run's
+    conversation history went with it. Measured 2026-08-22: ``llm_call_logs``
+    held 10 runs and ``opportunity_assessments`` 5, while ``agent_messages``
+    held **1**. Run 8b64a0e0's 1,354 messages were gone, 57 of 64 assessments
+    carried a ``slack_ts`` that resolved to no message, and the assessment
+    detail page's interview timeline was empty for 90% of the corpus.
+
+    The new ``simulation_run_id`` minted here is all the isolation a fresh run
+    needs — every ``AgentMessage`` read in the startup path and the main loop is
+    already run-scoped, ``uq_agent_messages_run_ts`` is
+    ``(simulation_run_id, message_ts)`` so re-seeing a Slack ts is a different
+    key, and ``agent_channels`` has no unique constraint beyond its PK so
+    per-run duplicate ``channel_name`` rows are fine. ``pi_dm_messages`` is a
+    dead table: nothing in ``src/`` writes it.
+
+    ONE read was not run-scoped and had to be fixed alongside this, or "delete
+    nothing" would be strictly worse than the bug: see
+    ``SimulationEngine._sync_private_channels_from_db``, which without its run
+    filter would hand a brand-new run every previous run's private channels.
+
+    Not reset, deliberately and as before: ``profiles/memory/*``. A ``--fresh``
+    run's agents still carry the working memory they synthesized in prior runs.
+    """
+    from src.models import SimulationRun
+
+    async with session_factory() as db:
+        run = SimulationRun(status="running", config=dict(config))
+        db.add(run)
+        await db.commit()
+        logger.info("Created new simulation run %s", run.id)
+        return run.id
 
 
 async def _run_simulation(
@@ -157,7 +204,7 @@ async def _run_simulation(
     if not no_db:
         from sqlalchemy import select
         from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-        from src.models import AgentChannel, AgentMessage, PiDmMessage, SimulationRun
+        from src.models import SimulationRun
         engine = create_async_engine(
             settings.database_url,
             pool_size=settings.db_pool_size,
@@ -166,34 +213,17 @@ async def _run_simulation(
         )
         session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
-        if fresh:
-            # Wipe simulation data for a clean start
-            # Preserve thread_decisions and proposal_reviews (PI-facing review data)
-            logger.info("--fresh: wiping simulation data (preserving proposals and reviews)...")
-            async with session_factory() as db:
-                await db.execute(AgentMessage.__table__.delete())
-                await db.execute(AgentChannel.__table__.delete())
-                await db.execute(PiDmMessage.__table__.delete())
-                await db.commit()
-            logger.info("Simulation data wiped.")
+        run_config = {
+            "max_runtime": max_runtime,
+            "budget_cap": budget,
+            "mock": mock,
+            "agent_count": len(agents),
+            "active_thread_threshold": settings.active_thread_threshold,
+            "max_thread_messages": settings.max_thread_messages,
+        }
 
-            # Create new simulation run
-            async with session_factory() as db:
-                run = SimulationRun(
-                    status="running",
-                    config={
-                        "max_runtime": max_runtime,
-                        "budget_cap": budget,
-                        "mock": mock,
-                        "agent_count": len(agents),
-                        "active_thread_threshold": settings.active_thread_threshold,
-                        "max_thread_messages": settings.max_thread_messages,
-                    },
-                )
-                db.add(run)
-                await db.commit()
-                simulation_run_id = run.id
-                logger.info("Created new simulation run %s", simulation_run_id)
+        if fresh:
+            simulation_run_id = await _open_fresh_run(session_factory, run_config)
         else:
             # Resume: find the latest simulation run
             async with session_factory() as db:
@@ -212,17 +242,7 @@ async def _run_simulation(
                     logger.info("Resuming simulation run %s", simulation_run_id)
                 else:
                     # No existing run — create one
-                    run = SimulationRun(
-                        status="running",
-                        config={
-                            "max_runtime": max_runtime,
-                            "budget_cap": budget,
-                            "mock": mock,
-                            "agent_count": len(agents),
-                            "active_thread_threshold": settings.active_thread_threshold,
-                            "max_thread_messages": settings.max_thread_messages,
-                        },
-                    )
+                    run = SimulationRun(status="running", config=run_config)
                     db.add(run)
                     await db.commit()
                     simulation_run_id = run.id
@@ -239,9 +259,11 @@ async def _run_simulation(
         simulation_run_id=simulation_run_id,
         reset_cursors=reset_cursors,
         slack_enabled=slack_enabled,
-        # The wipe above only clears the DB. Without this the engine would
-        # reconcile the same conversations straight back off Slack — see
-        # SimulationEngine._restore_slack_state.
+        # A new simulation_run_id isolates this run's DB reads (see
+        # _open_fresh_run, which deletes nothing). Slack has no such scoping:
+        # without this flag the engine would reconcile every previous run's
+        # conversations straight back off the transport and attribute them to
+        # this run — see SimulationEngine._restore_slack_state.
         fresh_start=fresh,
     )
 
