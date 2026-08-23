@@ -10,7 +10,7 @@ docs/audits/2026-08-22-correctness/README.md (§1.1, §1.3, §1.7, §2.10, §2.1
 
 ``opportunity_assessments.panel_owed`` exists because the assessment page's
 "Specialist panel: verified" box is currently a claim nobody checked.
-``_panel_state`` derives it by RE-EVALUATING ``panel_is_owed`` at read time, so a
+``panel_state`` derives it by RE-EVALUATING ``panel_is_owed`` at read time, so a
 verdict the floor never looked at renders identically to one it looked at and
 cleared — and the predicate has widened twice this month, which silently
 re-labels rows written under the older rule. Storing the fact at write time gives
