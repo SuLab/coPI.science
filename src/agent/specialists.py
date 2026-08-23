@@ -475,11 +475,20 @@ _ALWAYS: frozenset[str] = frozenset({"scientific", "talent"})
 #: / ``pass`` on both scales, so one set covers both sides of ``panel_is_owed``.
 #:
 #: Lives here, next to ``required_domains_for``, because two very different
-#: callers need the same answer and must not each keep their own copy: the engine
-#: decides whether to COMPUTE a gap (``_specialist_floor_gap``), and the admin
-#: detail page decides whether an empty gap means "verified" or merely "never
-#: evaluated" (``assessment_detail._panel_state``). When those two disagreed, the
-#: page claimed a verification the engine had never performed.
+#: callers needed the same answer and must not each keep their own copy: the
+#: engine decides whether to COMPUTE a gap (``_specialist_floor_gap``), and the
+#: admin detail page decides whether an empty gap means "verified" or merely
+#: "never evaluated" (``src.services.assessment_detail.panel_state``). When
+#: those two disagreed, the page claimed a verification the engine had never
+#: performed.
+#:
+#: They no longer answer it the same way, deliberately. ``panel_state`` was
+#: rewritten to REPLAY what the engine recorded — the ``panel_owed`` column
+#: ``_persist_assessment`` now writes — instead of re-deriving the floor's
+#: decision at render time, and its own test asserts that ``panel_is_owed`` and
+#: this set are absent from that module entirely
+#: (``tests/unit/test_panel_state.py``). A rule change would otherwise silently
+#: restate every historical row's verdict under today's rule.
 PANEL_REQUIRED_FOR: frozenset[str] = frozenset({"advance", "conditional"})
 
 #: The only recommendation that buys an exemption: a decline. Use
@@ -543,14 +552,19 @@ def panel_is_owed(recommendation: object, band: object = None) -> bool:
     exception would be caught and logged as "Failed to persist assessment"
     *after* the row had already been committed.
 
-    THREE call sites still test ``recommendation not in PANEL_REQUIRED_FOR``
-    directly and must migrate here, or the engine and the page will answer this
-    question differently — the exact drift ``PANEL_REQUIRED_FOR``'s own comment
-    records: ``SimulationEngine._specialist_floor_gap`` and
-    ``_floor_unverifiable_reason`` (both in src/agent/simulation.py, which is
-    where the computed band is in scope), and
-    ``assessment_detail._panel_state``, which has both columns on the row in
-    front of it (``assessment.recommendation``, ``assessment.band``).
+    NO call site tests ``recommendation not in PANEL_REQUIRED_FOR`` directly any
+    more; this function is the single gate, and the engine alias
+    ``_PANEL_REQUIRED_FOR`` has been deleted for want of readers. The two engine
+    callers — ``SimulationEngine._specialist_floor_gap`` and
+    ``_floor_unverifiable_reason``, both in src/agent/simulation.py, which is
+    where the computed band is in scope — ask this.
+
+    The READ path deliberately does not. ``src.services.assessment_detail
+    .panel_state`` replays the ``panel_owed`` column ``_persist_assessment``
+    recorded at write time rather than asking this at render time, so a change
+    to the rule here cannot silently restate what a stored verdict was held to.
+    ``tests/unit/test_panel_state.py`` fails if this function or
+    ``PANEL_REQUIRED_FOR`` reappears in that module.
     """
     if _normalized(band) in PANEL_REQUIRED_FOR:
         return True
