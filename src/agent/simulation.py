@@ -576,9 +576,12 @@ class SimulationEngine:
         # if a DB-origin message was later mirrored to Slack). Lets the Slack
         # reconcile skip a message it already has. See _rebuild_state_from_slack.
         self._known_slack_ts: set[str] = set()
-        # Wall-clock of the last cosmetic run-stats refresh (total_messages /
+        # Wall-clock of the last run-stats refresh (total_messages /
         # total_api_calls), throttled to RUN_STATS_UPDATE_INTERVAL. See
-        # _flush_persisted (B1).
+        # _flush_persisted (B1). `total_messages` is a display counter;
+        # `total_api_calls` stopped being one on 2026-08-22, when its UNITS
+        # changed from turns to real API calls — see the module comment on
+        # RUN_STATS_UPDATE_INTERVAL.
         self._last_run_stats_update: float = 0.0
         # Set by request_stop() (the signal handler's sync entry point) to both
         # end the main loop and cut short an in-progress idle-backoff sleep, so
@@ -6093,11 +6096,13 @@ class SimulationEngine:
         try:
             async with self.session_factory() as db:
                 await db.execute(_upsert(rows))
-                # Refresh the run's cosmetic counters at most every
+                # Refresh the run's counters at most every
                 # RUN_STATS_UPDATE_INTERVAL (a full COUNT every flush is wasteful
                 # at scale — B1). The bulk upsert can't cheaply tell inserts from
                 # updates, so total_messages is a recomputed count; slight
                 # staleness between refreshes is fine for a display counter.
+                # `total_api_calls`, four lines below, is NOT merely cosmetic any
+                # more — its units changed on 2026-08-22; see the comment there.
                 now = time.time()
                 if force_stats or now - self._last_run_stats_update >= RUN_STATS_UPDATE_INTERVAL:
                     self._last_run_stats_update = now
@@ -6235,17 +6240,33 @@ class SimulationEngine:
         transaction — and already swallows its own failures with an ERROR. The
         wrapper is for everything before that point (a malformed ``row``), so a
         bad row cannot take the surviving verdicts of its batch down with it.
+
+        THE HANDLER MUST NOT TOUCH ``row``. That is the whole failure it is
+        handling: an earlier version read ``row.get("thread_id")`` inside the
+        ``except`` and so raised WHILE HANDLING a row that had no ``.get`` —
+        and because the loop that calls this sits inside
+        ``_flush_pending_assessments``'s own ``except``, that escaped the
+        flusher entirely, skipping ``_report_flush_failure``, the re-queue, and
+        every later lost row's drop. Hence the two locals: bound to ``None``
+        BEFORE the ``try``, filled inside it, and read by the handler in place of
+        ``row``. Not reachable from production today (``_pending_assessments``
+        has one append site and it always appends a dict) — which is exactly why
+        the claim above needed a test rather than trust.
         """
+        thread_id = None
+        slack_ts = None
         try:
+            thread_id = row.get("thread_id")
+            slack_ts = row.get("slack_ts")
             await self._record_assessment_drop(
                 row.get("agent_id") or "unknown",
                 "unwritable_row",
                 subject_agent_id=row.get("subject_agent_id"),
-                thread_id=row.get("thread_id"),
+                thread_id=thread_id,
                 detail=(
                     f"the database refused this row: {type(exc).__name__}: {exc} "
                     f"(channel={row.get('channel_name')!r} "
-                    f"slack_ts={row.get('slack_ts')!r})"
+                    f"slack_ts={slack_ts!r})"
                 ),
                 raw_verdict=row.get("raw_verdict"),
             )
@@ -6254,7 +6275,7 @@ class SimulationEngine:
                 "Failed to record the drop for an un-writable assessment "
                 "(thread=%s slack_ts=%s): %s — the verdict AND its drop record "
                 "are both gone now",
-                row.get("thread_id"), row.get("slack_ts"), drop_exc,
+                thread_id, slack_ts, drop_exc,
                 exc_info=True,
             )
 

@@ -490,3 +490,73 @@ async def test_a_failing_drop_write_does_not_raise_into_the_flush(caplog):
     assert any(
         "the drops table is gone too" in r.getMessage() for r in caplog.records
     ), "a failed drop write must be loud, not silent"
+
+
+class _MappingWithoutGet:
+    """Unpacks with ``**`` (``keys``/``__getitem__``) but has NO ``.get``.
+
+    The shape that makes the error handler raise WHILE HANDLING. Not reachable
+    from production today — `_pending_assessments` has exactly one append site
+    (`_persist_assessment`) and it always appends a dict — which is precisely why
+    the claim in `_record_unwritable_assessment`'s docstring ("the wrapper is for
+    everything before that point, a malformed row") has to be pinned by a test
+    rather than trusted: nothing else can falsify it.
+    """
+
+    def __init__(self, data: dict):
+        self._d = data
+
+    def keys(self):
+        return self._d.keys()
+
+    def __getitem__(self, k):
+        return self._d[k]
+
+
+async def test_a_malformed_row_does_not_escape_the_drop_handler(caplog):
+    """The `except` must not touch `row` — it is handling `row` being unusable."""
+    eng = _engine(_FakeFactory([]))
+
+    with caplog.at_level(logging.ERROR, logger="src.agent.simulation"):
+        # Must not raise. Pre-fix the handler called `row.get("thread_id")`
+        # while handling the failure of `row.get("agent_id")`.
+        await eng._record_unwritable_assessment(
+            _MappingWithoutGet({"agent_id": "a"}), RuntimeError("refused"),
+        )
+
+    assert any(
+        "un-writable assessment" in r.getMessage() for r in caplog.records
+    ), "a row too broken to record must still be loud"
+
+
+async def test_a_malformed_row_does_not_abort_the_rest_of_the_flush():
+    """End to end: the handler's own failure must not escape `_flush_pending_assessments`.
+
+    The loop that calls `_record_unwritable_assessment` sits INSIDE that
+    flusher's `except`, so an exception there leaves the function entirely —
+    skipping `_report_flush_failure` and the re-queue, and taking every later
+    lost row's drop with it. The third row here is the discriminator: it is a
+    perfectly ordinary poison dict that is owed a drop, and pre-fix it never got
+    one because the second row aborted the loop.
+    """
+    store: list = []
+    factory = _FakeFactory(store, first_commit_error=IntegrityError(
+        "INSERT", {}, Exception("value too long")))
+    eng = _engine(factory)
+    eng._pending_assessments = [
+        _verdict_row("a", thread_id="t-a"),
+        _MappingWithoutGet(_verdict_row(POISON, thread_id="t-broken")),
+        _verdict_row(POISON, thread_id="t-ordinary"),
+    ]
+
+    await eng._flush_pending_assessments()
+
+    drops = [o for o in store if type(o).__name__ == "AssessmentDrop"]
+    assert [d.thread_id for d in drops] == ["t-ordinary"], (
+        "the malformed row's handler raised out of the flusher, so the NEXT "
+        f"lost verdict never got its drop row: {[d.thread_id for d in drops]}"
+    )
+    assert sorted(
+        o.agent_id for o in store if type(o).__name__ == "OpportunityAssessment"
+    ) == ["a"]
+    assert eng._pending_assessments == []
