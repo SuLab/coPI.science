@@ -283,6 +283,55 @@ async def test_call_times_rebuilds_from_the_window_and_api_call_count_stays_all_
     assert su.api_call_count == 4
 
 
+async def test_the_rebuild_counts_api_calls_not_rows(db_session, monkeypatch):
+    """Steps 4 and 4b must be per-CALL now that live booking is (A3.7).
+
+    `_on_llm_call` books the extra tool ROUNDS of a multi-round turn, so live
+    `api_call_count`/`call_times` are per-API-call. If the restart rebuild stayed
+    per-ROW, every restart would silently loosen the throttle by the exact ratio
+    of calls to turns (78.6% of stored `thread_reply` rows are 2+ calls).
+
+    And it must be `COALESCE(jsonb_array_length(call_stats), 1)`, not a bare
+    `jsonb_array_length`: 4,650 of the 5,771 stored rows have `call_stats IS
+    NULL` (the column arrived in migration 0032), and a NULL there collapses the
+    whole sum to NULL — loosening the throttle in the opposite direction.
+    """
+    run = await factories.make_simulation_run(db_session)
+    frozen_now = datetime(2026, 1, 1, tzinfo=UTC)
+    inside = frozen_now - timedelta(seconds=10)
+
+    # One four-call turn (3 rounds + final)...
+    await factories.make_llm_call_log(
+        db_session, run=run, agent_id="su", created_at=inside,
+        call_stats=[
+            {"seq": 1, "kind": "round"},
+            {"seq": 2, "kind": "round"},
+            {"seq": 3, "kind": "round"},
+            {"seq": 4, "kind": "final"},
+        ],
+    )
+    # ...and one pre-0032 row that records nothing, which is worth exactly 1.
+    await factories.make_llm_call_log(
+        db_session, run=run, agent_id="su", created_at=inside, call_stats=None,
+    )
+    await db_session.flush()
+
+    eng = _engine_for(db_session, run.id)
+    monkeypatch.setattr("src.agent.simulation.datetime", _FrozenClock(frozen_now))
+    await eng._rebuild_state_from_db()
+    await eng._rebuild_agent_state()
+
+    su = eng.agents["su"]
+    assert su.api_call_count == 5, (
+        "the lifetime rebuild counted ROWS (2) rather than calls (4 + 1): "
+        f"{su.api_call_count}"
+    )
+    assert len(su.state.call_times) == 5, (
+        "the window rebuild counted ROWS rather than calls, so a restart "
+        f"loosens the throttle: {list(su.state.call_times)}"
+    )
+
+
 async def test_a_second_rebuild_does_not_duplicate_call_times(db_session, monkeypatch):
     """Step 4b clears each agent's ledger before repopulating it.
 

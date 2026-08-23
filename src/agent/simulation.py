@@ -10,6 +10,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any, NamedTuple
 
+from sqlalchemy import func
 from sqlalchemy.exc import DataError, IntegrityError
 
 from src.agent.agent import PROFILES_DIR, Agent
@@ -122,6 +123,24 @@ _ROW_LEVEL_DB_ERRORS = (IntegrityError, DataError)
 #: code runs inside a bounded stop grace. Rows the deadline stops us attempting
 #: are re-queued, not dropped.
 PER_ROW_RECOVERY_DEADLINE_S = 30.0
+
+
+#: How many REAL API calls one ``llm_call_logs`` row represents.
+#:
+#: A row is one TURN; `call_stats` has one entry per billed API call, and 78.6%
+#: of stored `thread_reply` rows are 2+ calls. Live booking counts calls
+#: (`Agent.record_api_call` plus `SimulationEngine._unbooked_calls` for the tool
+#: rounds), so the restart rebuild has to as well or every restart silently
+#: loosens the throttle by the calls-to-turns ratio.
+#:
+#: The COALESCE is not defensive tidiness: 4,650 of the 5,771 stored rows have
+#: `call_stats IS NULL` (the column arrived in migration 0032), and NULL
+#: propagates through SUM — a bare `jsonb_array_length` collapses the lifetime
+#: rebuild to NULL and loosens the throttle in the OTHER direction. A row that
+#: recorded nothing is worth exactly the one call we know it made.
+_CALLS_PER_LOG_ROW = func.coalesce(
+    func.jsonb_array_length(LlmCallLog.call_stats), 1
+)
 
 
 def _visibility_permits(origin: str, current: str) -> bool:
@@ -6571,7 +6590,21 @@ class SimulationEngine:
             except Exception as exc:
                 logger.warning("Failed to rebuild proposals: %s", exc)
 
-        # 4. Rebuild api_call_count per agent from DB
+        # 4. Rebuild api_call_count per agent from DB.
+        #
+        # Per CALL, not per ROW. One `llm_call_logs` row is one TURN and a turn
+        # can be several real billed API calls — 78.6% of stored `thread_reply`
+        # rows are 2+. Live booking is per-call (`_on_llm_call` books the tool
+        # rounds; `record_api_call` books everything else), so a per-row rebuild
+        # would silently reset every restarted agent's lifetime count and window
+        # to a fraction of its real spend.
+        #
+        # `COALESCE(jsonb_array_length(call_stats), 1)`, never a bare
+        # `jsonb_array_length`: 4,650 of the 5,771 stored rows have `call_stats
+        # IS NULL` (the column arrived in migration 0032), and NULL propagates
+        # through SUM — collapsing the lifetime rebuild and loosening the
+        # throttle in the opposite direction. A row that recorded nothing is
+        # worth exactly the one call we know it made.
         if self.session_factory and self.simulation_run_id:
             try:
                 from sqlalchemy import func as sa_func
@@ -6580,7 +6613,7 @@ class SimulationEngine:
                     result = await db.execute(
                         sa_select(
                             LlmCallLog.agent_id,
-                            sa_func.count(LlmCallLog.id).label("count"),
+                            sa_func.sum(_CALLS_PER_LOG_ROW).label("count"),
                         )
                         .where(LlmCallLog.simulation_run_id == self.simulation_run_id)
                         .group_by(LlmCallLog.agent_id)
@@ -6588,7 +6621,7 @@ class SimulationEngine:
                     for r in result:
                         agent = self.agents.get(r.agent_id)
                         if agent:
-                            agent.api_call_count = r.count
+                            agent.api_call_count = int(r.count or 0)
             except Exception as exc:
                 logger.warning("Failed to rebuild api_call_count: %s", exc)
 
@@ -6610,7 +6643,11 @@ class SimulationEngine:
                 )
                 async with self.session_factory() as db:
                     result = await db.execute(
-                        sa_select(LlmCallLog.agent_id, LlmCallLog.created_at)
+                        sa_select(
+                            LlmCallLog.agent_id,
+                            LlmCallLog.created_at,
+                            _CALLS_PER_LOG_ROW.label("calls"),
+                        )
                         .where(
                             LlmCallLog.simulation_run_id == self.simulation_run_id,
                             LlmCallLog.created_at >= cutoff,
@@ -6642,7 +6679,16 @@ class SimulationEngine:
                 for r in rows:
                     agent = self.agents.get(r.agent_id)
                     if agent:
-                        agent.state.call_times.append(r.created_at.timestamp())
+                        # One ENTRY PER CALL, not per row — the same change as
+                        # step 4, and it has to move with it. Live booking is
+                        # per-call, so a per-row ledger would let a restarted
+                        # agent spend the ratio of calls-to-turns more than its
+                        # allowance. All of a turn's calls share the row's
+                        # timestamp; the window only cares about the boundary,
+                        # and the individual calls are seconds apart at most.
+                        stamp = r.created_at.timestamp()
+                        for _ in range(int(r.calls or 1)):
+                            agent.state.call_times.append(stamp)
             except Exception as exc:
                 logger.warning("Failed to rebuild call_times: %s", exc)
 
@@ -6689,8 +6735,45 @@ class SimulationEngine:
     # LLM call logging
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _unbooked_calls(call_stats: object) -> int:
+        """How many REAL API calls in this turn nothing has booked yet.
+
+        Every caller already books its own terminating call (the two reserved
+        sites via ``try_reserve`` + ``record_api_call(already_reserved=True)``,
+        consults via ``on_api_call``, the memory update directly) and every
+        truncation retry already books itself via ``on_retry``. What no site
+        books is the extra TOOL ROUNDS inside ``generate_with_tools``: a turn
+        that used three rounds before its final text call made four real billed
+        calls and was metered as one.
+
+        So this counts ``kind == "round"`` entries and nothing else. Counting
+        ``len(call_stats)`` instead — the obvious fix — double-books every retry
+        AND the reservation at the two reserved sites.
+
+        Defensive throughout: this runs inside a logging callback, where raising
+        would take a turn down over bookkeeping. A missing or malformed
+        ``call_stats`` books nothing extra, which is also exactly right for the
+        4,650 of 5,771 stored rows that predate the column.
+        """
+        if not isinstance(call_stats, list):
+            return 0
+        return sum(
+            1 for c in call_stats
+            if isinstance(c, dict) and c.get("kind") == "round"
+        )
+
     def _on_llm_call(self, data: dict) -> None:
         """Callback fired after each LLM API call."""
+        # Book the calls this turn made that nothing else booked, BEFORE the
+        # buffer append: the flush below can hand control to another coroutine,
+        # and the throttle should see the spend as soon as it is known.
+        extra = self._unbooked_calls(data.get("call_stats"))
+        if extra:
+            agent = self.agents.get(data.get("agent_id"))
+            if agent is not None:
+                for _ in range(extra):
+                    agent.record_api_call()
         self._llm_log_buffer.append(data)
         if len(self._llm_log_buffer) >= self._llm_log_flush_size:
             try:
