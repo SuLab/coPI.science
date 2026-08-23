@@ -260,11 +260,19 @@ PI_INBOX_LOOKBACK = timedelta(seconds=PI_INBOX_LOOKBACK_S)
 # Cursor value meaning "nothing seen yet" — every real created_at sorts after it.
 EPOCH_UTC = datetime.fromtimestamp(0, tz=UTC)
 
-# The run's total_messages / total_api_calls are cosmetic counters shown in the
+# The run's total_messages / total_api_calls are display counters shown in the
 # admin UI. Recomputing total_messages with a full COUNT(*) on every flush is
 # wasteful once a run accumulates many rows (B1), so refresh the run-stats row at
 # most this often (a final refresh is forced on shutdown). The message rows
 # themselves are still upserted every flush.
+#
+# "Cosmetic" was true of BOTH until 2026-08-22. It is no longer true of
+# `total_api_calls`: that column now counts REAL API CALLS (tool rounds and
+# retries included), where it used to count turns, so it is not comparable with
+# any run recorded before that date. See `Agent.record_api_call`,
+# `SimulationEngine._unbooked_calls` and `_CALLS_PER_LOG_ROW`. The old,
+# per-turn figure is still recoverable for any run as
+# `SELECT COUNT(*) FROM llm_call_logs WHERE simulation_run_id = ...`.
 RUN_STATS_UPDATE_INTERVAL = 30.0
 
 # How many queued working-memory updates stop() will still run. Each is a
@@ -1060,8 +1068,21 @@ class SimulationEngine:
         happened to find work for. It does mean a fully-throttled roster still
         spends on memory synthesis; that spend is bounded by the queue, not by
         the tick rate.
+
+        ``and self._running`` on the drain is NOT defensive tidiness. This drain
+        is UNBOUNDED, while ``stop()`` deliberately bounds its own with
+        ``MEMORY_EVENTS_MAX_AT_SHUTDOWN`` because "each is a real LLM call and
+        the stop grace period is finite". Hoisting into the ``finally`` put the
+        unbounded one on a path a SIGTERM reaches: ``docker stop -t 420`` lands
+        while the loop sits in the idle backoff, ``request_stop()`` clears
+        ``_running`` and wakes ``_sleep`` early, the branch ``continue``s — and
+        without this guard the ``finally`` then spends N x 10-40 s of real LLM
+        calls before the ``while`` condition is even re-tested. Nothing is lost
+        by skipping it: ``stop()``'s bounded drain runs moments later, on the
+        same queue. The FLUSHES still run — they are cheap DB writes, and
+        skipping them is the data loss this method exists to prevent.
         """
-        if self._pending_memory_events:
+        if self._pending_memory_events and self._running:
             await self._drain_memory_events()
 
         # Flush buffered message-log entries + LLM logs + any assessment
@@ -4004,19 +4025,27 @@ class SimulationEngine:
     ) -> dict | None:
         """The verdict about to be deleted, so its drop row can keep it.
 
-        ``None`` when there is nothing to read — no ``slack_ts`` to find the row
-        by, no database, no matching row, or a failed SELECT. Never raises: the
+        ``None`` when there is nothing to read, in FIVE distinct ways: no
+        ``slack_ts`` to find the row by, no database, no matching row, a failed
+        SELECT, or — the one this docstring used to omit — a row that IS found
+        but whose ``raw_verdict`` column is itself NULL. Never raises: the
         concluding reply is already in Slack, and a lookup that cannot answer
         must cost the copy, not the supersession.
 
-        Those four cases all produce a drop row with ``raw_verdict IS NULL``, so
-        the LOG is the only thing that can tell them apart — and on the one path
-        whose whole purpose is "never lose the retired verdict", "there was no
-        row to copy" must not be indistinguishable from "the copy was never
-        attempted". The not-found branch therefore warns explicitly; the two
-        early returns are ordinary, expected states with their own callers'
-        logging (the no-``slack_ts`` case is already reported loudly by the
-        caller, and a DB-less engine is a documented silent no-op everywhere).
+        All five produce a drop row with ``raw_verdict IS NULL``, so the LOG is
+        the only thing that can tell them apart — and on the one path whose whole
+        purpose is "never lose the retired verdict", "there was no verdict to
+        copy" must not be indistinguishable from "the copy was never attempted".
+        The not-found branch and the NULL-column branch therefore warn
+        explicitly; the two early returns are ordinary, expected states with
+        their own callers' logging (the no-``slack_ts`` case is already reported
+        loudly by the caller, and a DB-less engine is a documented silent no-op
+        everywhere).
+
+        The NULL-column case is not exotic: ``raw_verdict`` only arrived in
+        migration 0035, so EVERY row written before it stores NULL there. A
+        restart that rehydrates an older run hits this branch, not the
+        found-and-copied one.
         """
         if not superseded.slack_ts:
             return None
@@ -4046,6 +4075,15 @@ class SimulationEngine:
                 "slack_ts=%s — the drop row records that a verdict was "
                 "superseded but cannot carry the verdict itself, and the DELETE "
                 "below will match nothing either",
+                agent_id, thread.thread_id, superseded.slack_ts,
+            )
+            return None
+        if rows[0] is None:
+            logger.warning(
+                "[%s] Supersession on thread %s found the stored row for "
+                "slack_ts=%s but its raw_verdict is NULL (the column only "
+                "arrived in migration 0035) — the drop row records that a "
+                "verdict was superseded but cannot carry the verdict itself",
                 agent_id, thread.thread_id, superseded.slack_ts,
             )
             return None
@@ -5866,9 +5904,11 @@ class SimulationEngine:
         Returns ``(written, lost, unattempted)``:
 
         - ``written``   — rows now durably in the database;
-        - ``lost``      — rows that failed on their own, with nothing else to
-          blame; retrying these forever would fail the whole batch forever, so
-          the caller drops them (loudly) rather than re-queueing;
+        - ``lost``      — ``(row, exception)`` pairs that failed on their own,
+          with nothing else to blame; retrying these forever would fail the whole
+          batch forever, so the caller drops them (loudly) rather than
+          re-queueing. The exception rides along so a caller can record WHY —
+          `_flush_pending_assessments` writes it into an ``AssessmentDrop``;
         - ``unattempted`` — rows the deadline (or a failure of the recovery pass
           itself) stopped us writing; the caller re-queues these.
 
@@ -5905,7 +5945,7 @@ class SimulationEngine:
                             await apply_one(db, row)
                         ok.append(row)
                     except Exception as row_exc:  # noqa: BLE001
-                        lost.append(row)
+                        lost.append((row, row_exc))
                         logger.error(
                             "DROPPING one un-writable %s row: %s", what, row_exc,
                         )
@@ -6071,6 +6111,11 @@ class SimulationEngine:
                             )
                         )).scalar_one()
                         run.total_messages = total
+                        # UNITS: real API CALLS, not turns, since 2026-08-22 —
+                        # `api_call_count` books tool rounds and retries too, so
+                        # this column is NOT comparable with any earlier run.
+                        # The old per-turn figure is `COUNT(*)` over
+                        # `llm_call_logs` for the same run. See `_unbooked_calls`.
                         run.total_api_calls = sum(a.api_call_count for a in self.agents.values())
                 await db.commit()
         except Exception as exc:
@@ -6144,14 +6189,74 @@ class SimulationEngine:
                 async def _one(db, row):
                     db.add(OpportunityAssessment(**row))
 
-                _written, _lost, requeue = await self._recover_rows_individually(
+                _written, lost, requeue = await self._recover_rows_individually(
                     rows, _one, what="assessment",
                 )
+                # A row the database refuses outright is a SCREENING VERDICT
+                # discarded, and every other way of losing one writes an
+                # `AssessmentDrop`. Sequenced after `_recover_rows_individually`
+                # returns (so its session is already closed) rather than inside
+                # the per-row loop, which would nest a second checkout inside the
+                # recovery session on a pool that may already be under pressure.
+                for lost_row, lost_exc in lost:
+                    await self._record_unwritable_assessment(lost_row, lost_exc)
             if self._report_flush_failure(
                 what="assessment", requeue=requeue, exc=exc, final=final,
                 log=logger.error, exc_info=True,
             ):
                 self._pending_assessments[0:0] = requeue
+
+    async def _record_unwritable_assessment(
+        self, row: dict, exc: BaseException,
+    ) -> None:
+        """An assessment row the database refused, kept as an ``AssessmentDrop``.
+
+        The per-row recovery in ``_recover_rows_individually`` is a path A3.4
+        itself created: before it, a poison row lost its whole batch loudly and
+        re-queued; after it, ONE row is dropped. For an
+        ``opportunity_assessments`` row that means a screening verdict discarded
+        on a single log line — while every other way a verdict fails to land
+        (``missing_sidecar``, ``duplicate_thread_verdict``,
+        ``closed_before_verdict``, ...) writes a drop row. "Every way an
+        assessment can be lost is silent" is the exact defect ``AssessmentDrop``
+        exists to end.
+
+        ``reason='unwritable_row'`` — deliberately outside the existing
+        vocabulary, because this is the only reason that is not a GATE decision:
+        the engine wanted the row and the database refused it. The verdict itself
+        rides along in ``raw_verdict``, so the refusal is non-destructive like
+        every other.
+
+        Best-effort, and it may never raise into the flush path. It is not
+        retried: the row already failed twice (batch, then alone), and the drop
+        is the record OF that, not another attempt at it.
+        ``_record_assessment_drop`` already opens its own session — which
+        matters here, because the recovery session may be in an aborted
+        transaction — and already swallows its own failures with an ERROR. The
+        wrapper is for everything before that point (a malformed ``row``), so a
+        bad row cannot take the surviving verdicts of its batch down with it.
+        """
+        try:
+            await self._record_assessment_drop(
+                row.get("agent_id") or "unknown",
+                "unwritable_row",
+                subject_agent_id=row.get("subject_agent_id"),
+                thread_id=row.get("thread_id"),
+                detail=(
+                    f"the database refused this row: {type(exc).__name__}: {exc} "
+                    f"(channel={row.get('channel_name')!r} "
+                    f"slack_ts={row.get('slack_ts')!r})"
+                ),
+                raw_verdict=row.get("raw_verdict"),
+            )
+        except Exception as drop_exc:  # noqa: BLE001 — never cost the batch
+            logger.error(
+                "Failed to record the drop for an un-writable assessment "
+                "(thread=%s slack_ts=%s): %s — the verdict AND its drop record "
+                "are both gone now",
+                row.get("thread_id"), row.get("slack_ts"), drop_exc,
+                exc_info=True,
+            )
 
     def _enqueue_persist(self, entry: LogEntry) -> None:
         """MessageLog persist callback — buffer a new entry for the next flush."""

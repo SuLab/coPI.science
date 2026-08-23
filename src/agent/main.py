@@ -65,6 +65,37 @@ def main(
     asyncio.run(_run_simulation(max_runtime, budget, mock, no_db, fresh, reset_cursors, all_agents))
 
 
+#: What `SimulationRun.total_api_calls` counts, said where an operator will read
+#: it. The column is rendered to humans in three admin templates, and on
+#: 2026-08-22 its UNITS changed: `Agent.record_api_call` plus
+#: `SimulationEngine._unbooked_calls` now book every real API call (tool rounds
+#: and truncation retries included) where the column used to count turns, and the
+#: restart rebuild moved with it (`_CALLS_PER_LOG_ROW`). 78.6% of stored
+#: `thread_reply` rows are 2+ calls, so the number roughly doubles for reasons
+#: that have nothing to do with the run.
+#:
+#: This sits beside the rubric version/hash line for the same reason that one
+#: exists: a change of meaning that is invisible at read time is a change nobody
+#: can correct for afterwards.
+API_CALL_UNITS_NOTE = (
+    "API-call accounting: SimulationRun.total_api_calls counts REAL API CALLS "
+    "(tool rounds and truncation retries included), not turns, as of "
+    "2026-08-22. It is NOT comparable with any run recorded before that date. "
+    "The old per-turn figure is recoverable for any run as "
+    "SELECT COUNT(*) FROM llm_call_logs WHERE simulation_run_id = <run>."
+)
+
+
+def _log_api_call_units() -> None:
+    """Emit `API_CALL_UNITS_NOTE` into the startup banner.
+
+    A function rather than an inline `logger.info` so the content is assertable
+    without standing up a run — see
+    tests/unit/test_api_call_accounting.py::test_the_startup_banner_declares_the_api_call_units.
+    """
+    logger.info("%s", API_CALL_UNITS_NOTE)
+
+
 async def _open_fresh_run(session_factory, config: dict) -> uuid.UUID:
     """Open a new ``SimulationRun`` row for a ``--fresh`` start. DELETES NOTHING.
 
@@ -307,6 +338,7 @@ async def _run_simulation(
             "Screening rubric: version %s (content hash %s)",
             RUBRIC_VERSION, RUBRIC_CONTENT_HASH,
         )
+        _log_api_call_units()
         await sim_engine.start()
     except Exception:
         logger.exception("Simulation engine raised an exception")
@@ -332,13 +364,19 @@ async def _run_simulation(
                 if run:
                     run.status = "stopped"
                     run.ended_at = datetime.now(timezone.utc)
+                    # UNITS: real API CALLS, not turns, since 2026-08-22 —
+                    # see API_CALL_UNITS_NOTE above. NOT comparable with any
+                    # earlier run; the old per-turn figure is COUNT(*) over
+                    # llm_call_logs for the same simulation_run_id.
                     run.total_api_calls = sum(a.api_call_count for a in agents)
                     run.total_messages = sum(a.message_count for a in agents)
                     await db.commit()
 
         logger.info("Simulation stopped.")
         logger.info(
-            "Summary: %s",
+            # "api_calls" here is the same per-agent number that sums into
+            # SimulationRun.total_api_calls — real API calls, not turns.
+            "Summary (api_calls = real API calls, not turns): %s",
             {a.agent_id: {"messages": a.message_count, "api_calls": a.api_call_count}
              for a in agents},
         )

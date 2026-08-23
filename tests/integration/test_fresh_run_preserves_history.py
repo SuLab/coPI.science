@@ -26,7 +26,7 @@ from sqlalchemy import func, select
 from src.agent.agent import Agent
 from src.agent.main import _open_fresh_run
 from src.agent.simulation import SimulationEngine
-from src.models import AgentChannel, AgentMessage, SimulationRun
+from src.models import AgentChannel, AgentMessage, PiDmMessage, SimulationRun
 from src.visibility import VISIBILITY_COLLAB_PRIVATE
 from tests import factories
 
@@ -62,7 +62,17 @@ async def test_fresh_does_not_delete_another_runs_messages(db_session):
         db_session, run=old_run, message_ts="1700000001.000100",
     )
     kept_channel = await factories.make_agent_channel(db_session, run=old_run)
+    # No factory for this one — it is a dead table with no writer in `src/`.
+    db_session.add(PiDmMessage(
+        simulation_run_id=old_run.id, agent_id="agent1", pi_user_id="U_pi",
+        direction="outbound", content="a DM from a previous run",
+        ts="1700000001.000200",
+    ))
     await db_session.flush()
+    kept_dms = (await db_session.execute(
+        select(func.count(PiDmMessage.id))
+    )).scalar_one()
+    assert kept_dms >= 1, "setup: the pi_dm_messages fixture did not land"
 
     new_run_id = await _open_fresh_run(
         _FixtureSessionFactory(db_session), {"agent_count": 1},
@@ -81,6 +91,17 @@ async def test_fresh_does_not_delete_another_runs_messages(db_session):
     )).scalars().all()
     assert surviving_channels == [kept_channel.id], (
         "--fresh destroyed a previous run's agent_channels"
+    )
+    # The THIRD delete. `pi_dm_messages` is a dead table — nothing in `src/`
+    # writes it and prod holds 0 rows — so re-adding its delete alone leaves the
+    # two assertions above green and 131 integration tests green with it. It was
+    # one of the three unfiltered deletes the CRITICAL item was about, so it gets
+    # its own row and its own assertion rather than resting on the other two.
+    assert (await db_session.execute(
+        select(func.count(PiDmMessage.id))
+    )).scalar_one() == kept_dms, (
+        "--fresh truncated pi_dm_messages — a dead table today, but the delete "
+        "was table-wide and unfiltered like the other two"
     )
     assert (await db_session.execute(
         select(func.count(SimulationRun.id)).where(SimulationRun.id == new_run_id)

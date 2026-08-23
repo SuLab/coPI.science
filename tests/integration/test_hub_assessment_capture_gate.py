@@ -867,6 +867,50 @@ async def test_a_superseded_row_that_cannot_be_found_says_so(engine, caplog):
 
 
 @pytest.mark.asyncio
+async def test_a_superseded_row_with_a_null_verdict_says_so(engine, caplog):
+    """The FIFTH silent-None case: the row IS found, but `raw_verdict` is NULL.
+
+    `_superseded_raw_verdict`'s docstring listed four ways it answers `None` and
+    warned on the one that matters (not-found). It missed a fifth: a row that
+    matches the filter but stores a NULL `raw_verdict` makes `rows[0]` itself
+    `None`, and the function returned it with no log at all. That is the same
+    indistinguishability the not-found warning exists to end, on the same path
+    whose stated purpose is "never lose the retired verdict" — and it is the
+    SHAPE OF EVERY ROW WRITTEN BEFORE 0035, so it is the likely case on any
+    restart that rehydrates an older run.
+
+    `_seed_assessment` leaves `raw_verdict` NULL, which is exactly the fixture.
+    """
+    import logging
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    run_id = await _new_run(factory)
+    await _seed_assessment(factory, run_id, thread_id="t1", slack_ts="1.1")
+    sim, agent = _hub(factory, run_id)
+    thread = _thread(_CONCLUDE_COUNT)
+    try:
+        await sim._rehydrate_assessed_threads()
+        assert "t1" in sim._assessed_threads
+
+        with caplog.at_level(logging.WARNING, logger="src.agent.simulation"):
+            await sim._capture_hub_assessment(
+                agent, thread, _reply_with_sidecar(4), "2.2", closes_thread=True,
+            )
+
+        drops = await _drops(factory, run_id)
+        assert [d.reason for d in drops] == ["duplicate_thread_verdict"]
+        assert drops[0].raw_verdict is None
+        messages = [r.getMessage() for r in caplog.records]
+        assert any("raw_verdict" in m and "NULL" in m for m in messages), (
+            "a stored row with a NULL raw_verdict produced a drop row that "
+            "cannot carry the verdict, and said nothing about it: "
+            f"{messages}"
+        )
+    finally:
+        await _delete_run(factory, run_id)
+
+
+@pytest.mark.asyncio
 async def test_rehydration_logs_the_number_of_threads_it_restored(engine, caplog):
     """The log said `len(self._assessed_threads)` where `len(rows)` was meant.
 

@@ -149,3 +149,62 @@ def test_a_malformed_call_stats_payload_is_ignored(engine):
     for payload in ("not-a-list", [None, 3, "round"], [{"kind": None}], {}):
         engine._on_llm_call({"agent_id": "hub", "call_stats": payload})
     assert agent.api_call_count == 0
+
+
+# ----------------------------------------------------------------------
+# The units change has to reach a HUMAN. `SimulationRun.total_api_calls` is
+# rendered in three admin templates; a staff member comparing the next run
+# against 8b64a0e0 reads a number whose meaning silently changed.
+# ----------------------------------------------------------------------
+
+
+def test_the_startup_banner_declares_the_api_call_units(caplog):
+    """An operator reads the startup banner, not a source comment.
+
+    This sits beside `Screening rubric: version X (content hash Y)` for the same
+    reason that line exists: it is the one place a change of meaning is visible
+    to the person who has to interpret the numbers afterwards.
+    """
+    import logging
+
+    from src.agent.main import _log_api_call_units
+
+    with caplog.at_level(logging.INFO, logger="src.agent.main"):
+        _log_api_call_units()
+
+    text = "\n".join(r.getMessage() for r in caplog.records)
+    assert "total_api_calls" in text, f"the banner does not name the column: {text!r}"
+    assert "api call" in text.lower(), f"the banner does not say what it counts: {text!r}"
+    assert "turn" in text.lower(), (
+        f"the banner must say what the number STOPPED counting: {text!r}"
+    )
+    assert "not comparable" in text.lower(), (
+        f"the banner does not say the number broke comparability: {text!r}"
+    )
+    assert "llm_call_logs" in text and "COUNT(*)" in text, (
+        "the banner must say how to recover the OLD figure, or an operator "
+        f"cannot reconstruct a historical comparison: {text!r}"
+    )
+
+
+def test_the_banner_is_actually_logged_at_startup():
+    """Parsed, not grepped — a mention in a comment must not satisfy this.
+
+    Same lesson as `test_no_flusher_falls_back_on_a_bare_exception`: review
+    defeated a substring assertion with a comment carrying the same text.
+    """
+    import ast
+    import inspect
+    import textwrap
+
+    from src.agent import main as agent_main
+
+    src = textwrap.dedent(inspect.getsource(agent_main._run_simulation))
+    called = {
+        node.func.id for node in ast.walk(ast.parse(src))
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    assert "_log_api_call_units" in called, (
+        "_run_simulation never calls the units banner, so no operator ever "
+        "sees it"
+    )

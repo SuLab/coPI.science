@@ -135,6 +135,10 @@ class _FakeSession:
 def _is_poison(obj) -> bool:
     if isinstance(obj, dict):
         return obj.get("agent_id") == POISON
+    if type(obj).__name__ == "AssessmentDrop":
+        # A drop RECORDING the poison row carries the same agent_id but is a
+        # different write, on a different table, that must succeed.
+        return False
     return getattr(obj, "agent_id", None) == POISON
 
 
@@ -214,7 +218,13 @@ async def test_the_per_row_fallback_opens_a_new_session():
 
 
 async def test_a_pool_timeout_does_not_trigger_the_per_row_fallback():
-    """Trap 1. N sequential checkouts at a 30s timeout blows the stop grace."""
+    """Trap 1. N sequential checkouts at a 30s timeout blows the stop grace.
+
+    CONTROL, NOT A TDD CYCLE — this passed before the fix as well as after,
+    because the old code re-queued every failure unconditionally and so could not
+    fail it. Its teeth come from the mutation direction instead: widening the
+    gate to `except Exception` (which is the harmful "obvious" fix) turns it red.
+    """
     store: list = []
     factory = _FakeFactory(store, first_commit_error=OperationalError(
         "SELECT 1", {}, Exception("QueuePool limit ... connection timed out")))
@@ -269,7 +279,11 @@ async def test_the_assessment_flusher_isolates_its_poison_row():
 
     await eng._flush_pending_assessments()
 
-    kept = sorted(r.agent_id for r in store)
+    # Filtered by type: the store also holds the `AssessmentDrop` this loss now
+    # writes (FIX 6), whose agent_id is the poison row's by design.
+    kept = sorted(
+        r.agent_id for r in store if type(r).__name__ == "OpportunityAssessment"
+    )
     assert kept == ["a", "b"], f"the good assessments went with the bad one: {kept}"
     assert eng._pending_assessments == []
 
@@ -328,14 +342,151 @@ async def test_a_per_row_pass_that_exhausts_its_deadline_requeues_the_rest(
     "_flush_persisted", "_flush_llm_logs", "_flush_pending_assessments",
 ])
 def test_no_flusher_falls_back_on_a_bare_exception(flusher):
-    """A structural guard on trap 1, in case a future edit widens the gate."""
-    import inspect
+    """A structural guard on trap 1, in case a future edit widens the gate.
 
-    src = inspect.getsource(getattr(SimulationEngine, flusher))
-    assert "_recover_rows_individually" in src, (
-        f"{flusher} has no per-row recovery path at all"
+    Parsed with `ast`, not grepped. The first version of this test asserted
+    `"_ROW_LEVEL_DB_ERRORS" in inspect.getsource(...)`, and review defeated it
+    with `if isinstance(exc, Exception):  # _ROW_LEVEL_DB_ERRORS` — the mutation
+    stayed green because a COMMENT satisfied the substring. What is asserted now
+    is the shape of the actual call: every `isinstance(...)` that guards the
+    recovery must name `_ROW_LEVEL_DB_ERRORS` as its second argument, as a bare
+    Name. A comment cannot satisfy that, and neither can
+    `isinstance(exc, Exception)`.
+    """
+    import ast
+    import inspect
+    import textwrap
+
+    src = textwrap.dedent(inspect.getsource(getattr(SimulationEngine, flusher)))
+    tree = ast.parse(src)
+
+    calls = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name) and node.func.id == "isinstance"
+    ]
+    assert calls, (
+        f"{flusher} has no isinstance() gate at all — its per-row recovery is "
+        "either missing or entered on a bare `except Exception`, which re-arms "
+        "the pool-timeout storm"
     )
-    assert "_ROW_LEVEL_DB_ERRORS" in src, (
-        f"{flusher} does not gate its per-row recovery on the row-level error "
-        "tuple — a bare `except Exception` here re-arms the pool-timeout storm"
+    second_args = {
+        arg.id for call in calls
+        for arg in [call.args[1]] if isinstance(arg, ast.Name)
+    }
+    assert second_args == {"_ROW_LEVEL_DB_ERRORS"}, (
+        f"{flusher} gates its per-row recovery on {second_args or 'a non-Name'} "
+        "rather than _ROW_LEVEL_DB_ERRORS"
     )
+
+    called = {
+        node.func.attr for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+    }
+    assert "_recover_rows_individually" in called, (
+        f"{flusher} never CALLS the per-row recovery (a mention in a comment or "
+        "a docstring is not a call)"
+    )
+
+
+# ----------------------------------------------------------------------
+# FIX 6 — a verdict lost to per-row recovery must leave an AssessmentDrop.
+#
+# `_recover_rows_individually` logs "DROPPING one un-writable ... row" and, for
+# `what="assessment"`, that was a SCREENING VERDICT discarded on one log line —
+# while every OTHER way a verdict fails to land writes an `AssessmentDrop`. The
+# per-row path is one A3.4 itself created: before it, a poison row lost its whole
+# batch loudly and re-queued; after it, one row is dropped quietly.
+# ----------------------------------------------------------------------
+
+
+def _verdict_row(agent_id: str, **over) -> dict:
+    row = {
+        "simulation_run_id": "run-1",
+        "agent_id": agent_id,
+        "channel_name": "single-cell-omics",
+        "subject_agent_id": "gordy",
+        "thread_id": "t-1",
+        "slack_ts": "1700000001.000100",
+        "raw_verdict": {"recommendation": "advance", "weighted_score": 3.04},
+    }
+    row.update(over)
+    return row
+
+
+async def test_an_assessment_lost_to_per_row_recovery_leaves_a_drop():
+    store: list = []
+    factory = _FakeFactory(store, first_commit_error=IntegrityError(
+        "INSERT", {}, Exception("value too long for type character varying")))
+    eng = _engine(factory)
+    eng._pending_assessments = [
+        _verdict_row("a", thread_id="t-a"),
+        _verdict_row(POISON, thread_id="t-poison"),
+        _verdict_row("b", thread_id="t-b"),
+    ]
+
+    await eng._flush_pending_assessments()
+
+    drops = [o for o in store if type(o).__name__ == "AssessmentDrop"]
+    assert len(drops) == 1, (
+        "the verdict the database refused vanished on a single log line, while "
+        f"every other way of losing one writes a drop row: {drops}"
+    )
+    drop = drops[0]
+    assert drop.agent_id == POISON
+    assert drop.thread_id == "t-poison", "the drop must identify the interview"
+    assert drop.subject_agent_id == "gordy"
+    assert drop.raw_verdict == {"recommendation": "advance", "weighted_score": 3.04}, (
+        "the whole point of raw_verdict: a gate decision must not also destroy "
+        "the verdict"
+    )
+    assert drop.reason and drop.reason not in {
+        "specialist_floor", "unparseable_sidecar", "missing_sidecar",
+        "premature_sidecar", "closed_before_verdict", "duplicate_thread_verdict",
+        "empty_reply",
+    }, f"the reason must be distinguishable from the existing vocabulary: {drop.reason}"
+    # And the good rows still landed.
+    assert sorted(
+        o.agent_id for o in store if type(o).__name__ == "OpportunityAssessment"
+    ) == ["a", "b"]
+
+
+async def test_the_other_flushers_do_not_write_assessment_drops():
+    """A message or an LLM-log row is not a verdict; only assessments get drops."""
+    store: list = []
+    factory = _FakeFactory(store, first_commit_error=IntegrityError(
+        "INSERT", {}, Exception("null value in column")))
+    eng = _engine(factory)
+    eng._llm_log_buffer = [_log_entry("a"), _log_entry(POISON)]
+
+    await eng._flush_llm_logs()
+
+    assert [o for o in store if type(o).__name__ == "AssessmentDrop"] == []
+
+
+async def test_a_failing_drop_write_does_not_raise_into_the_flush(caplog):
+    """Best-effort, and loudly so — the flush must finish either way."""
+    store: list = []
+    factory = _FakeFactory(store, first_commit_error=IntegrityError(
+        "INSERT", {}, Exception("value too long")))
+    eng = _engine(factory)
+
+    async def _boom_drop(*a, **kw):
+        raise RuntimeError("the drops table is gone too")
+
+    eng._record_assessment_drop = _boom_drop
+    eng._pending_assessments = [
+        _verdict_row("a", thread_id="t-a"),
+        _verdict_row(POISON, thread_id="t-poison"),
+    ]
+
+    with caplog.at_level(logging.ERROR, logger="src.agent.simulation"):
+        await eng._flush_pending_assessments()
+
+    assert sorted(
+        o.agent_id for o in store if type(o).__name__ == "OpportunityAssessment"
+    ) == ["a"], "a failed drop write took the surviving verdict with it"
+    assert eng._pending_assessments == []
+    assert any(
+        "the drops table is gone too" in r.getMessage() for r in caplog.records
+    ), "a failed drop write must be loud, not silent"

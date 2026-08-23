@@ -111,7 +111,12 @@ async def test_every_loop_exit_flushes_its_buffers(monkeypatch):
     await eng._run_main_loop()
 
     assert len(sleeps) == ticks
-    assert counts == {"drain": ticks, "persist": ticks, "llm": ticks,
+    # `drain` is ticks-1, not ticks, and that is the FIX-1 guard working: the
+    # LAST tick is the one whose `_sleep` stub stops the engine, and a stopping
+    # tick must not enter the unbounded drain (see
+    # `test_a_shutdown_request_stops_the_hoisted_drain`). The FLUSHES still run
+    # on all five, which is the property this test is about.
+    assert counts == {"drain": ticks - 1, "persist": ticks, "llm": ticks,
                       "assess": ticks}, (
         "the idle-backoff `continue` jumped over the memory drain and all "
         f"three flushes: {counts}"
@@ -150,7 +155,9 @@ async def test_the_reply_lane_continue_also_flushes(monkeypatch):
     await eng._run_main_loop()
 
     assert len(dispatched) == ticks
-    assert counts == {"drain": ticks, "persist": ticks, "llm": ticks,
+    # ticks-1 drains for the same reason as the test above: the last tick is the
+    # one that stops the engine, and a stopping tick skips the unbounded drain.
+    assert counts == {"drain": ticks - 1, "persist": ticks, "llm": ticks,
                       "assess": ticks}, (
         "the reply-lane `continue` jumped over the memory drain and all three "
         f"flushes: {counts}"
@@ -185,7 +192,14 @@ async def test_a_terminal_stall_still_flushes_on_the_way_out(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_a_turn_that_raises_still_flushes(monkeypatch):
-    """A crashing turn is caught inside the loop, but the flush must not be skipped."""
+    """A crashing turn is caught inside the loop, but the flush must not be skipped.
+
+    CONTROL, NOT A TDD CYCLE — this passed before the fix as well as after.
+    `_run_post_turn`'s exception is caught *inside* the loop body, so the old
+    bottom-of-loop flushes were reached anyway. It is here to pin that the
+    `finally` did not make a previously-covered path worse, and it would catch a
+    future edit that let a turn's exception escape the body.
+    """
     eng, agent = _engine(monkeypatch)
     counts = _instrument(eng, monkeypatch)
     monkeypatch.setattr(eng, "_select_agent", lambda: agent)
@@ -208,6 +222,57 @@ async def test_a_turn_that_raises_still_flushes(monkeypatch):
 
     await eng._run_main_loop()
 
-    assert counts == {"drain": 1, "persist": 1, "llm": 1, "assess": 1}, (
+    # drain 0: `_boom` stops the engine before it raises, so this is also a
+    # stopping tick. The flushes are what this test is about.
+    assert counts == {"drain": 0, "persist": 1, "llm": 1, "assess": 1}, (
         f"a failed turn stranded the buffers: {counts}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_shutdown_request_stops_the_hoisted_drain(monkeypatch):
+    """The drain is UNBOUNDED; `stop()`'s is not. It must not run past a stop.
+
+    Hoisting the drain into the `finally` (A3.2) put an unbounded
+    `_drain_memory_events()` on a path a SIGTERM can reach: `docker stop -t 420`
+    lands while the loop sits in the idle backoff, `request_stop()` clears
+    `_running` and wakes `_sleep` early, the branch hits `continue` — and the
+    `finally` then runs N real LLM calls at 10-40s each BEFORE the `while`
+    condition is even re-tested. Pre-A3.2 that `continue` skipped the drain
+    entirely, so this path is one the fix opened.
+
+    `stop()` deliberately bounds its own drain with
+    `MEMORY_EVENTS_MAX_AT_SHUTDOWN` ("each is a real LLM call and the stop grace
+    period is finite"), and it runs immediately after the loop returns — so
+    skipping the drain here loses nothing, it just stops the loop from spending
+    the grace period the bounded drain was sized for.
+
+    The FLUSHES must still run: they are cheap, they are pure I/O against the DB,
+    and skipping them is exactly the data loss A3.2 exists to prevent.
+    """
+    eng, _agent = _engine(monkeypatch)
+    counts = _instrument(eng, monkeypatch)
+    monkeypatch.setattr(eng, "_select_agent", lambda: None)
+
+    async def _no_reply_lane():
+        return 0
+
+    monkeypatch.setattr(eng, "_dispatch_reply_lane", _no_reply_lane)
+
+    async def _sleep(delay):
+        # SIGTERM during the idle backoff: request_stop() flips _running and
+        # wakes the sleep, and the branch then `continue`s into the finally.
+        eng.request_stop()
+
+    monkeypatch.setattr(eng, "_sleep", _sleep)
+
+    await eng._run_main_loop()
+
+    assert counts["drain"] == 0, (
+        "a stop request did not stop the unbounded memory drain — N real LLM "
+        "calls now run inside the container's stop grace period, ahead of the "
+        "bounded drain stop() was sized for"
+    )
+    assert (counts["persist"], counts["llm"], counts["assess"]) == (1, 1, 1), (
+        f"the flushes must still run on the stopping tick: {counts}"
     )
