@@ -26,7 +26,6 @@ from src.agent.prompt_safety import delimit
 from src.agent.roles import load_role
 from src.agent.slack_client import SlackListingIncomplete, ThreadNotFound
 from src.agent.specialists import (
-    PANEL_REQUIRED_FOR,
     clear_rate_warning,
     format_panel_note,
     panel_is_owed,
@@ -3373,6 +3372,18 @@ class SimulationEngine:
 
         scores = verdict.get("scores") if isinstance(verdict.get("scores"), dict) else {}
         computed_score, computed_band = self._computed_score_and_band(verdict)
+        # Was a panel OWED here, as judged right now, by the same predicate the
+        # floor above just used? Computed once and stored, rather than left for
+        # the admin page to re-derive at render time — which is what it used to
+        # do, and which silently relabels every older row each time the
+        # predicate widens (twice in 2026-08 alone: 12 production rows written
+        # by the recommendation-only floor rendered a green "panel verified" box
+        # for a floor that never ran). See OpportunityAssessment.panel_owed and
+        # src/services/assessment_detail.panel_state.
+        #
+        # `verdict`, not `subject_view`: the two differ only in
+        # `subject_agent_id`, and neither field this reads comes from there.
+        panel_owed = panel_is_owed(verdict.get("recommendation"), computed_band)
         gating = _normalize_gating(verdict.get("gating"))
         red_flags = verdict.get("red_flags")
         milestones = verdict.get("suggested_derisking_milestones")
@@ -3397,6 +3408,13 @@ class SimulationEngine:
             subject_agent_id=subject_agent_id,
             channel_name=channel,
             slack_ts=slack_ts,
+            # The interview this verdict came out of. NULL for a caller with no
+            # thread (direct callers, pre-existing tests) — never "", which
+            # `WHERE thread_id IS NULL` would not match and which would collide
+            # across interviews. It is what lets a restarted process rehydrate
+            # `_assessed_threads` (see `_rehydrate_assessed_threads`) instead of
+            # treating the interview's own concluding verdict as a first one.
+            thread_id=(thread.thread_id if thread is not None else None) or None,
             company_or_project=_str_or_none(verdict.get("company_or_project")),
             funnel_stage=funnel_stage,
             recommendation=recommendation,
@@ -3432,6 +3450,14 @@ class SimulationEngine:
             # what keeps spec §10's panel-gap surface from reading every
             # post-restart verdict as a vetted one.
             missing_domains=sorted(gap) if gap else (None if floor_verifiable else []),
+            # The fourth state `missing_domains` alone cannot express. NULL there
+            # means "no gap recorded", which is a verification only if a floor
+            # ran at all — and that answer belongs to the moment of the write,
+            # not to whatever the predicate says on the day someone opens the
+            # page. Deliberately NOT nullable-by-omission: every row this method
+            # writes states a real boolean, so NULL in the column means exactly
+            # "written before 0036" (or backfilled, or hand-built by a test).
+            panel_owed=panel_owed,
         )
         try:
             async with self.session_factory() as db:
@@ -3815,6 +3841,7 @@ class SimulationEngine:
         domain: str,
         question: str,
         verdict_signal: str,
+        truncated: bool | None = None,
         **_withheld,
     ) -> None:
         """Post the one-line, signal-level trace of a successful consult into
@@ -3838,7 +3865,28 @@ class SimulationEngine:
         contract), and it means a field added to that contract later is
         withheld by DEFAULT rather than leaking the first time someone forgets.
         ``format_panel_note`` then takes only the three publishable values, so
-        there is no parameter through which the rest could reach Slack.
+        there is no parameter through which the rest could reach Slack. That
+        three-argument signature IS the enforcement and is deliberately not
+        widened.
+
+        ``truncated`` is the one field pulled back out of ``**_withheld``, and
+        for the opposite reason to the rest: it is not withheld from the note,
+        it CANCELS the note. A consult the API cut off mid-sentence parsed to
+        nothing, so ``verdict_signal`` is the schema's DEFAULT ``caution`` and
+        no specialist ever said it — and this note goes into the PI's own
+        interview thread, which every lab in the workspace can read. Publishing
+        a parse failure as `` caution`` states a panel opinion that does not
+        exist, and ``src/agent/tools.py`` has already refused to credit that
+        domain to the floor for exactly this reason; the note must agree with
+        the floor. It was absorbed silently by ``**_withheld`` until 2026-08-22,
+        which is why it is spelled out as a parameter rather than read out of
+        the catch-all: a named parameter is visible in the signature, a dict key
+        is not.
+
+        The DURABLE row is still written either way — it is the only evidence
+        the attempt happened, and it now carries ``truncated=True`` so the floor
+        keeps refusing it across a restart. Only the workspace-visible claim is
+        skipped.
 
         Best-effort, in exactly the sense ``_record_specialist_consult`` is:
         never raises, so it cannot cost the consult, the turn or the reply. It
@@ -3855,6 +3903,19 @@ class SimulationEngine:
         if not channel:
             # No channel, nowhere to post. A consult made outside a thread
             # (a direct tool call, a test) has no interview to annotate.
+            return
+        if truncated:
+            # See the docstring: the signal on a truncated consult is the
+            # schema default, not an opinion. Logged rather than silent — a note
+            # that does not appear is otherwise indistinguishable from
+            # `panel_notes_in_thread=false`.
+            logger.info(
+                "[%s] Panel note skipped for the %s consult (thread %s): the "
+                "opinion was truncated, so its signal is a parse default and "
+                "not something a specialist said. The durable row still stands "
+                "and the domain still does not count toward the floor.",
+                agent_id, domain, thread_ts or "?",
+            )
             return
         try:
             if not get_settings().panel_notes_in_thread:
@@ -3897,17 +3958,35 @@ class SimulationEngine:
           process that recorded anything for this interview stays authoritative
           for it — memory is written on the success path itself and cannot be
           behind a committed row that path also wrote.
-        * Only for a verdict that owes a panel at all; a ``pass`` is not held to
-          one, so querying for it would be a round trip whose answer nothing
-          reads.
+        * Only for a verdict that owes a panel at all, asked through
+          ``panel_is_owed`` — the SAME question ``_specialist_floor_gap`` asks,
+          on the same two inputs (the model's recommendation and the COMPUTED
+          band). This used to test ``recommendation not in
+          _PANEL_REQUIRED_FOR``, the recommendation-only rule the floor
+          abandoned, so it skipped rehydration for exactly the verdicts the new
+          floor holds to the panel: a verdict written ``pass`` that scores into
+          the ``conditional`` band is owed a panel, and the seed refused to look
+          for its consults. Production stamped such a verdict
+          ``panel_incomplete=true`` naming four domains, THREE of which were
+          recorded as consulted on that very thread.
         * Keyed on ``(run, subject, thread)``, the same triple the in-memory map
           uses. A different run's rows, or the same PI's OTHER interview, must
           not satisfy this interview's panel — the exact hole
           ``_specialist_floor_gap``'s docstring records.
-        * A row exists only for a SUCCESSFUL consult (see
-          ``_record_specialist_consult``), so this can only ever turn "we have
-          no record" into "here is the record". It cannot turn an unreachable
-          specialist into a consulted one.
+        * TRUNCATED consults are excluded. A row exists for every consult that
+          produced text, including one the API cut off mid-sentence — that row is
+          the only evidence the attempt happened, and ``src/agent/tools.py``
+          deliberately writes it while NOT crediting the domain in memory. Left
+          in this SELECT it would undo that refusal on the next restart, turning
+          an unread specialist into a consulted one. The filter is
+          ``truncated IS NOT TRUE``, never ``= False``: NULL is a third state
+          ("written before migration 0036"), and reading it as truncated would
+          invalidate every pre-migration row's credit on no evidence at all.
+          Rows written before 0036 therefore keep counting, which means three
+          known-truncated production consults still credit the floor —
+          unrecoverable from the table, and cheaper than the alternative.
+          Subject to that, this can only ever turn "we have no record" into
+          "here is the record".
 
         Arming the floor off these rows does not weaken
         ``ThreadState.floor_armed``'s latch. The latch exists to stop a
@@ -3920,7 +3999,9 @@ class SimulationEngine:
         Never raises: this runs inside ``_persist_assessment``, ahead of the
         write, and a failed SELECT must cost the fallback, not the verdict.
         """
-        if verdict.get("recommendation") not in self._PANEL_REQUIRED_FOR:
+        if not panel_is_owed(
+            verdict.get("recommendation"), self._computed_score_and_band(verdict)[1]
+        ):
             return
         subject = verdict.get("subject_agent_id")
         if not isinstance(subject, str) or not subject:
@@ -3939,6 +4020,10 @@ class SimulationEngine:
                         SpecialistConsult.simulation_run_id == self.simulation_run_id,
                         SpecialistConsult.subject_agent_id == subject,
                         SpecialistConsult.thread_id == thread_id,
+                        # IS NOT TRUE, not `== False`: NULL is "written before
+                        # 0036", and those rows must keep crediting the floor
+                        # exactly as they do today. See the docstring.
+                        SpecialistConsult.truncated.is_not(True),
                     )
                 )).scalars().all()
         except Exception as exc:  # noqa: BLE001 — never lose a verdict over a lookup
@@ -4110,10 +4195,13 @@ class SimulationEngine:
         interview we have no record of."""
         return frozenset(self._specialist_consults.get((pi_agent_id, thread_id), ()))
 
-    #: Alias for the one definition in src/agent/specialists.py, which the admin
-    #: detail page reads too (see PANEL_REQUIRED_FOR there). Kept as a class
-    #: attribute so every `self._PANEL_REQUIRED_FOR` reference below is unchanged.
-    _PANEL_REQUIRED_FOR = PANEL_REQUIRED_FOR
+    # `_PANEL_REQUIRED_FOR` used to alias `specialists.PANEL_REQUIRED_FOR` here,
+    # for call sites testing `recommendation in _PANEL_REQUIRED_FOR` directly.
+    # All of them now ask `panel_is_owed`, which weighs the COMPUTED band as
+    # well — the set alone answers a question this class no longer asks, and
+    # leaving the alias in place would let a future call site quietly re-adopt
+    # the abandoned rule. Removed 2026-08-22 with the last such site
+    # (`_seed_consults_from_db`).
 
     @staticmethod
     def _computed_score_and_band(verdict: dict) -> tuple[float | None, str | None]:
@@ -4148,10 +4236,21 @@ class SimulationEngine:
     ) -> set[str]:
         """Domains this verdict was obliged to consult but did not.
 
-        Empty means the verdict may be persisted. Only ``advance`` and
+        Empty means the verdict may be persisted. Whether a panel is owed at all
+        is ``specialists.panel_is_owed``'s question, not this method's, and it
+        weighs BOTH the model's written recommendation and the COMPUTED band:
+        either can pull a verdict into the panel and neither can pull it out,
+        and anything unreadable fails CLOSED.
+
+        This docstring used to state the abandoned rule — "only ``advance`` and
         ``conditional`` are held to the panel: a ``pass`` costs Blackbird
-        nothing, so requiring eight opinions to say no would burn calls on
-        exactly the ideas that do not warrant them.
+        nothing". Two things were wrong with it. A verdict that SCORES into
+        advance/conditional owed a panel however the hub chose to label it (3 of
+        the 4 conditional bands in the stored corpus are written ``pass``), and
+        ``route-to-incubation`` — the incubation grant Blackbird exists to award,
+        and the one recommendation that commits real money — was exempted as
+        though it were a decline. It is the last verdict that should go
+        unreviewed.
 
         ``thread``, when given, supplies ``floor_armed`` — whether
         ``_specialist_consults`` has been seen non-empty at any point in this

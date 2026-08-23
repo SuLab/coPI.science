@@ -181,17 +181,27 @@
     </div>
 </div>
 
-{# Panel status. FOUR states — see OpportunityAssessment.missing_domains and
-   assessment_detail._panel_state: named domains = a demonstrated gap, [] = the
-   floor could not check at all (typically a mid-interview restart), and NULL
-   splits by recommendation into "the floor checked and found none" and "this
-   verdict was never held to the floor at all". Rendering EITHER "unverified" or
-   "not required" as "fine" is how an unvetted verdict gets acted on. #}
+{# Panel status. FIVE states — see OpportunityAssessment.missing_domains /
+   .panel_owed and assessment_detail.panel_state: named domains = a demonstrated
+   gap, [] = the floor could not check at all (typically a mid-interview
+   restart), and the stored `panel_owed` splits NULL into "a panel was owed so
+   the floor evaluated this verdict" (verified), "none was owed" (not required)
+   and "the row does not say" (not recorded). Rendering ANY of the last four as
+   "fine" is how an unvetted verdict gets acted on.
+
+   GREEN IS AN EXPLICIT BRANCH, and the terminal {% else %} is deliberately the
+   neutral box. It used to be the other way round, which meant every state the
+   template did not enumerate — a typo, a state added to `panel_state` and not
+   here, a future sixth finding — silently rendered as a verified panel. The
+   fallback must be the claim that costs nothing to make wrongly. Pinned by
+   tests/integration/test_assessment_detail_page.py::
+   test_an_unknown_panel_state_never_renders_green. #}
 <div class="mb-6 rounded-xl border p-4 text-sm
     {% if panel_state == 'gap' %}border-orange-300 bg-orange-50 text-orange-900
     {% elif panel_state == 'unverified' %}border-gray-300 bg-gray-50 text-gray-700
     {% elif panel_state == 'not_owed' %}border-slate-300 bg-slate-50 text-slate-700
-    {% else %}border-green-200 bg-green-50 text-green-900{% endif %}">
+    {% elif panel_state == 'verified' %}border-green-200 bg-green-50 text-green-900
+    {% else %}border-amber-300 bg-amber-50 text-amber-900{% endif %}">
     <div class="font-semibold mb-1">
         {% if panel_state == 'gap' %}
             &#9873; Specialist panel incomplete
@@ -199,8 +209,10 @@
             Specialist panel unverified
         {% elif panel_state == 'not_owed' %}
             Specialist panel: not required
-        {% else %}
+        {% elif panel_state == 'verified' %}
             Specialist panel: no gap recorded
+        {% else %}
+            Specialist panel: not recorded
         {% endif %}
     </div>
     {% if panel_state == 'gap' %}
@@ -215,9 +227,16 @@
         is not held to the specialist floor, so no consult requirement was evaluated
         for it. Any consults below were made anyway — read them as what the panel
         happened to say, not as a completed panel. This is not a verification.
-    {% else %}
+    {% elif panel_state == 'verified' %}
         Nothing the verdict's own content owed a specialist was left unconsulted.
-        On rows written before 2026-08-19 this state also covers "not recorded".
+    {% else %}
+        {# Deliberately NOT "predates panel tracking": a backfilled row, a row
+           whose write path could not answer, and a hand-built fixture all land
+           here after the migration, so an age claim would be false for them. #}
+        This row does not record whether a specialist panel was owed, so nothing can
+        be said about one either way. Not evidence of a gap, and not a verification.
+        Any consults below were made anyway — read them as what the panel happened to
+        say, not as a completed panel.
     {% endif %}
     {% if panel_summary %}
         <div class="mt-2 flex flex-wrap gap-2">

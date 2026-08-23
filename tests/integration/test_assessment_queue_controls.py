@@ -262,3 +262,120 @@ async def test_the_manager_detail_page_has_no_llm_calls_link(
     assert "llm-calls" not in html
     assert "LLM calls for this interview" not in html
     assert "/admin/" not in html
+
+
+# ---------------------------------------------------------------------------
+# The panel badge in the table, on both surfaces
+#
+# The detail page's five-state panel box is one click away, and until now the
+# table gave a reader no reason to take that click: the badge gated on
+# `a.panel_incomplete` alone, so a verdict the floor could not check and a
+# verdict that records nothing about a floor at all looked exactly like a
+# verified one. Twelve production rows sat in that blind spot while the detail
+# page called them verified.
+#
+# Both partials below are included by the manager templates too, so every one of
+# these runs on /admin and /manager.
+# ---------------------------------------------------------------------------
+
+
+async def _seed_panel_states(db_session):
+    """One row per panel state that has a badge, plus the two that must not."""
+    run = await factories.make_simulation_run(db_session)
+    rows = {
+        "Gap Co": dict(
+            panel_incomplete=True, missing_domains=["chemistry"], panel_owed=True
+        ),
+        "Unverified Co": dict(
+            panel_incomplete=False, missing_domains=[], panel_owed=True
+        ),
+        "Unrecorded Co": dict(
+            panel_incomplete=False, missing_domains=None, panel_owed=None
+        ),
+        "Verified Co": dict(
+            panel_incomplete=False, missing_domains=None, panel_owed=True
+        ),
+        "Not Owed Co": dict(
+            panel_incomplete=False, missing_domains=None, panel_owed=False
+        ),
+    }
+    for index, (project, panel) in enumerate(rows.items()):
+        db_session.add(
+            OpportunityAssessment(
+                simulation_run_id=run.id, agent_id="blackbird",
+                subject_agent_id="gordy", channel_name="general",
+                company_or_project=project, recommendation="conditional",
+                weighted_score=4.0 - index * 0.1, band="advance",
+                **panel,
+            )
+        )
+    await db_session.flush()
+    return run
+
+
+@pytest.mark.parametrize("base", ["/admin", "/manager"])
+async def test_the_list_page_flags_an_unrecorded_panel(
+    client, db_session, base, admin, manager
+):
+    """A row that does not record whether a panel was owed must be visibly
+    distinct in the table — it is the state 12 production rows are in, and it is
+    never a verification.
+
+    The two states that DO have an answer (`verified`, `not_owed`) stay
+    unbadged: badging everything is the same as badging nothing.
+    """
+    staff = admin if base == "/admin" else manager
+    run = await _seed_panel_states(db_session)
+
+    html = (
+        await client.get(
+            f"{base}/assessments?run_id={run.id}", headers=auth_headers(staff.id)
+        )
+    ).text
+
+    assert "panel not recorded" in html
+    assert "panel unverified" in html
+    assert "&#9873; panel" in html or "⚑ panel" in html
+    # Exactly three badges — the two answered states must not have picked one up.
+    assert html.count("panel not recorded") == 1
+    assert html.count("panel unverified") == 1
+    # And the run-level warning counts all three, not just the demonstrated gap.
+    # Whitespace-normalized: the banner's number and its noun are on separate
+    # template lines, so the rendered HTML carries a newline plus indentation
+    # between them.
+    assert (
+        "3 verdicts stored with an incomplete or unverified specialist panel"
+        in " ".join(html.split())
+    )
+
+
+@pytest.mark.parametrize("base", ["/admin", "/manager"])
+async def test_a_verified_panel_gets_no_badge_and_no_warning(
+    client, db_session, base, admin, manager
+):
+    """The control: a run whose only verdict is a floor-checked, gap-free one
+    shows no banner and no badge. Without this, a badge rendered unconditionally
+    would satisfy every assertion above."""
+    staff = admin if base == "/admin" else manager
+    run = await factories.make_simulation_run(db_session)
+    db_session.add(
+        OpportunityAssessment(
+            simulation_run_id=run.id, agent_id="blackbird",
+            subject_agent_id="gordy", channel_name="general",
+            company_or_project="Only Verified Co", recommendation="conditional",
+            weighted_score=4.0, band="advance",
+            panel_incomplete=False, missing_domains=None, panel_owed=True,
+        )
+    )
+    await db_session.flush()
+
+    html = (
+        await client.get(
+            f"{base}/assessments?run_id={run.id}", headers=auth_headers(staff.id)
+        )
+    ).text
+
+    assert "Only Verified Co" in html
+    assert "panel not recorded" not in html
+    assert "panel unverified" not in html
+    assert "specialist panel" not in html

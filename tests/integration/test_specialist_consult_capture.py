@@ -206,9 +206,15 @@ async def _delete_run(factory, run_id):
             await cleanup.commit()
 
 
-async def _insert_consults(factory, run_id, domains, *, subject="gordy", thread_id="t1"):
+async def _insert_consults(
+    factory, run_id, domains, *, subject="gordy", thread_id="t1", truncated=False,
+):
     """Rows exactly as ``_record_specialist_consult`` writes them — the state a
-    restarted process finds waiting for it."""
+    restarted process finds waiting for it.
+
+    ``truncated`` defaults to ``False`` (a complete consult, the ordinary case).
+    ``None`` is the third state, "written before migration 0036".
+    """
     async with factory() as db:
         for domain in domains:
             db.add(SpecialistConsult(
@@ -219,6 +225,7 @@ async def _insert_consults(factory, run_id, domains, *, subject="gordy", thread_
                 verdict_signal="caution", confidence="moderate",
                 concerns=["a concern"], questions_to_ask=["a question"],
                 raw_opinion="the specialist's full reply",
+                truncated=truncated,
             ))
         await db.commit()
 
@@ -1049,3 +1056,151 @@ async def test_a_restart_does_not_resurrect_a_note_as_conversation(engine):
         assert sim.message_log.get_thread_message_count("100.1") == 2
     finally:
         await _delete_run(factory, run_id)
+
+
+@pytest.mark.asyncio
+async def test_the_consult_seed_runs_for_a_band_owed_verdict(engine):
+    """The seed has to ask the SAME question the floor asks, or it starves
+    exactly the verdicts the floor holds to the panel.
+
+    `_seed_consults_from_db` opened with `recommendation not in
+    _PANEL_REQUIRED_FOR` — the recommendation-only rule the floor abandoned. A
+    verdict the model wrote `pass` on but that COMPUTES into the `conditional`
+    band is owed a panel, so `_specialist_floor_gap` runs for it; the seed
+    skipped it, so after a restart the map stayed empty, the floor found nothing
+    recorded, and the row was stamped `panel_incomplete=true` naming domains that
+    ARE in `specialist_consults`. Reproduced in production: four named domains,
+    three of them recorded as consulted on that very thread.
+
+    Straight 3s band `conditional` on the investment scale, so this fixture is
+    owed a panel by its band alone.
+    """
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    run_id = await _new_run(factory)
+    await _insert_consults(factory, run_id, _REQUIRED)
+    sim = _restart_engine(factory, run_id)
+    thread = _restored_thread()
+    try:
+        await sim._persist_assessment(
+            "blackbird", "general",
+            {**_VERDICT, "recommendation": "pass"},
+            slack_ts="1.1", subject_agent_id_fallback="gordy", thread=thread,
+        )
+        rows = await _assessment_rows(factory, run_id)
+        assert len(rows) == 1
+        assert rows[0].panel_incomplete is False, (
+            "every required domain is recorded for this very thread; flagging a "
+            "gap here accuses the hub of skipping a panel it convened"
+        )
+        assert rows[0].missing_domains is None
+        assert sim._consulted_domains("gordy", "t1") == frozenset(_REQUIRED)
+    finally:
+        await _delete_run(factory, run_id)
+
+
+@pytest.mark.asyncio
+async def test_a_truncated_consult_does_not_satisfy_the_floor_after_a_restart(engine):
+    """The refusal has to survive a `docker stop`.
+
+    `src/agent/tools.py` declines to credit a truncated opinion in memory — the
+    text is a half-sentence and nothing read it — but it still writes the row,
+    because that row is the only evidence the attempt happened. Rehydration then
+    read every row as a consult, so the next restart quietly undid the refusal
+    and an unread specialist became a consulted one.
+
+    Four required domains: three complete, one truncated. Only the truncated
+    domain may come back as a gap.
+    """
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    run_id = await _new_run(factory)
+    await _insert_consults(factory, run_id, ("scientific", "talent", "chemistry"))
+    await _insert_consults(factory, run_id, ("technologic",), truncated=True)
+    sim = _restart_engine(factory, run_id)
+    thread = _restored_thread()
+    try:
+        await sim._persist_assessment(
+            "blackbird", "general", _VERDICT,
+            slack_ts="1.1", subject_agent_id_fallback="gordy", thread=thread,
+        )
+        rows = await _assessment_rows(factory, run_id)
+        assert len(rows) == 1
+        assert rows[0].panel_incomplete is True
+        assert rows[0].missing_domains == ["technologic"], (
+            "the truncated consult must not count; the three complete ones must"
+        )
+        assert sim._consulted_domains("gordy", "t1") == frozenset(
+            {"scientific", "talent", "chemistry"}
+        )
+    finally:
+        await _delete_run(factory, run_id)
+
+
+@pytest.mark.asyncio
+async def test_a_pre_migration_consult_still_satisfies_the_floor(engine):
+    """The other side of the same filter, and the reason it is `IS NOT TRUE`
+    rather than `= False`.
+
+    Every `specialist_consults` row written before migration 0036 carries NULL
+    in that column — "not stated" — and those consults really did happen and
+    really were read. A `truncated = False` filter would silently invalidate all
+    of them on no evidence whatever, turning a live production panel record into
+    a run of `panel_incomplete` accusations.
+    """
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    run_id = await _new_run(factory)
+    await _insert_consults(factory, run_id, _REQUIRED, truncated=None)
+    sim = _restart_engine(factory, run_id)
+    thread = _restored_thread()
+    try:
+        await sim._persist_assessment(
+            "blackbird", "general", _VERDICT,
+            slack_ts="1.1", subject_agent_id_fallback="gordy", thread=thread,
+        )
+        rows = await _assessment_rows(factory, run_id)
+        assert len(rows) == 1
+        assert rows[0].panel_incomplete is False
+        assert rows[0].missing_domains is None
+    finally:
+        await _delete_run(factory, run_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stop_reason", ["refusal", "max_tokens"])
+async def test_a_truncated_consult_posts_no_caution_note(
+    engine, monkeypatch, stop_reason,
+):
+    """The note is a claim, and a truncated consult has nothing to claim.
+
+    `_post_panel_note`'s signature ends in `**_withheld`, which is deliberate —
+    it means a field added to the consult-record contract is withheld from Slack
+    by DEFAULT. It also meant the new `truncated` flag was silently absorbed, so
+    the note kept publishing the DEFAULTED `⚠️ caution` signal — a parse failure
+    rendered as a specialist's opinion — into the PI's own interview thread,
+    where every lab in the workspace can read it.
+
+    The durable row is still written (it is the only evidence the attempt
+    happened); only the workspace-visible claim is skipped.
+    """
+    turn = await _drive_a_consult(
+        engine, monkeypatch, opinion=_TRUNCATED_OPINION, stop_reason=stop_reason,
+    )
+    try:
+        assert _notes(turn.client) == [], (
+            "a truncated opinion must not be published as a panel signal"
+        )
+        rows = await _consult_rows(turn.factory, turn.run_id)
+        assert len(rows) == 1 and rows[0].truncated is True, (
+            "the durable record still happens — only the note is skipped"
+        )
+    finally:
+        await _delete_run(turn.factory, turn.run_id)
+
+
+@pytest.mark.asyncio
+async def test_a_complete_consult_still_posts_its_note(engine, monkeypatch):
+    """The control for the test above: skipping every note would satisfy it."""
+    turn = await _drive_a_consult(engine, monkeypatch)
+    try:
+        assert _notes(turn.client) != []
+    finally:
+        await _delete_run(turn.factory, turn.run_id)

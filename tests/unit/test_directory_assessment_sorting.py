@@ -287,13 +287,19 @@ async def test_the_lab_filter_does_not_narrow_the_incomplete_panel_warning(db_se
         OpportunityAssessment(
             simulation_run_id=run.id, agent_id="blackbird", subject_agent_id="gordy",
             channel_name="general", company_or_project="Gapped Co",
-            panel_incomplete=True, missing_domains=["chemistry"],
+            panel_incomplete=True, missing_domains=["chemistry"], panel_owed=True,
         )
     )
     db_session.add(
+        # "Clean" now has to be SAID. The warning counts every row whose panel
+        # is not verified complete, and a row that leaves `panel_owed` at its
+        # default is `NULL` — "we do not know whether any floor ran" — which is
+        # one of the three states it counts. Leaving it unset would make this
+        # test about the widened count instead of about the lab filter.
         OpportunityAssessment(
             simulation_run_id=run.id, agent_id="blackbird", subject_agent_id="wang",
             channel_name="general", company_or_project="Clean Co",
+            panel_incomplete=False, missing_domains=None, panel_owed=True,
         )
     )
     await db_session.commit()

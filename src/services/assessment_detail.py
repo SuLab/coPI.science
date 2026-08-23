@@ -41,7 +41,11 @@ from typing import Any
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.agent.specialists import PANEL_REQUIRED_FOR, panel_is_owed, parse_opinion
+# `panel_is_owed`/`PANEL_REQUIRED_FOR` are deliberately NOT imported here. This
+# module reads what the floor RECORDED (`OpportunityAssessment.panel_owed`); it
+# must never re-derive the floor's decision from today's predicate. See
+# `panel_state`.
+from src.agent.specialists import parse_opinion
 from src.models import AgentMessage, LlmCallLog, OpportunityAssessment, SpecialistConsult
 from src.services.blackbird_rubric import (
     RUBRIC_VERSION,
@@ -377,46 +381,76 @@ def _message_at(message: AgentMessage) -> float:
     return float(message.posted_at or 0.0) or _epoch(message.created_at)
 
 
-def _panel_state(assessment: OpportunityAssessment) -> str:
-    """The FOUR findings the specialist floor can leave behind.
+#: Every value ``panel_state`` can return, most alarming first. Public because
+#: two templates and one aggregate query now branch on these strings, and a
+#: typo in any of them would land silently in the terminal ``{% else %}``.
+PANEL_STATES: tuple[str, ...] = (
+    "gap", "unverified", "unrecorded", "not_owed", "verified",
+)
+
+#: The states that are NOT a verified panel and NOT an exemption the floor
+#: itself recorded — i.e. every row a reader should not treat as vetted. Used by
+#: ``src/services/directory.py``'s run-level warning count so the banner and the
+#: per-row badge cannot disagree about what counts as unvetted.
+PANEL_STATES_UNVETTED: frozenset[str] = frozenset({"gap", "unverified", "unrecorded"})
+
+
+def panel_state(assessment: OpportunityAssessment) -> str:
+    """The FIVE findings the specialist floor can leave behind.
 
     Three come straight from ``OpportunityAssessment.missing_domains``: names = a
     demonstrated gap, ``[]`` = the floor could not be checked at all, NULL = no
-    gap recorded. Rows written before 2026-08-19 carry NULL for both of the last
-    two, so "verified" on an old row means "no gap recorded", which the page says.
+    gap recorded.
 
-    The fourth splits that NULL, because it was answering two questions with one
-    word. A NULL row is a real verification only if the verdict was held to the
-    floor in the first place, and ``PANEL_REQUIRED_FOR`` covers just
-    ``advance``/``conditional`` — for a ``pass`` or ``route-to-incubation``,
-    ``_specialist_floor_gap`` returns an empty set before it looks at a single
-    consult. Reporting that as "verified" claimed an audit that never ran:
-    production run 60c53424's pearce ``route-to-incubation`` row rendered the
-    green box while ``required_domains_for`` named ``clinical`` and no clinical
-    consult existed on that thread.
+    The other two split that NULL, because it was answering two questions with
+    one word: "the floor evaluated this verdict and found nothing owed and
+    unconsulted" and "this verdict never faced a floor at all". Reporting the
+    second as "verified" claimed an audit that never ran — production run
+    60c53424's pearce ``route-to-incubation`` row rendered the green box while
+    ``required_domains_for`` named ``clinical`` and no clinical consult existed
+    on that thread.
 
-    ``not_owed`` is the weakest claim of the four and yields to every other one.
-    A stored gap or a stored ``[]`` is evidence about this row, and evidence
-    outranks the exemption — otherwise reading a flagged exempt row (which
-    today's floor cannot produce, but historical rows and a future floor change
-    both can) would silently unflag it. An absent ``recommendation`` also lands
-    here: a verdict whose recommendation we cannot read cannot be shown to have
-    faced the floor.
+    **The split is READ FROM THE ROW, never re-derived here.** An earlier fix
+    asked ``panel_is_owed(recommendation, band)`` at render time, and that is a
+    different question — "would a panel be owed under TODAY's rules" — so every
+    time the predicate widens, every older row is silently relabelled. It widened
+    twice in 2026-08 alone, and 12 production rows written by the
+    recommendation-only floor (which stored "no panel was owed" as
+    ``panel_incomplete=False, missing_domains=NULL``) were re-read by the
+    band-aware page as completed audits; at least five had a demonstrable gap.
+    ``opportunity_assessments.panel_owed`` records what the floor decided AT
+    WRITE TIME, and this replays it — the same discipline
+    ``display_scale_for(assessment.rubric_version, …)`` applies to scoring.
+
+    Putting ``panel_is_owed`` back ahead of the column test re-arms that bug
+    exactly; ``tests/unit/test_panel_state.py``'s
+    ``test_the_read_path_never_re_derives_the_floor_s_decision`` fails if anyone
+    does.
+
+    Order of authority, strongest evidence first:
+
+    * ``gap`` — the floor looked and found domains owed and never consulted.
+    * ``unverified`` — the floor could not check at all (``[]``).
+    * ``verified`` — ``panel_owed is True``: a panel WAS owed, so the floor
+      evaluated this verdict, and the two states above say it found nothing.
+      This is the only state that has earned the green box.
+    * ``not_owed`` — ``panel_owed is False``: the floor determined no panel was
+      owed and recorded that. The weakest claim of the five, which is why it
+      sits below the two evidence states: a stored gap or a stored ``[]`` is
+      evidence about THIS row, and evidence outranks an exemption.
+    * ``unrecorded`` — ``panel_owed is None``: the row predates 0036, or was
+      backfilled, or was hand-built by a test. We do not know whether any floor
+      ran, so no claim is available. Never green.
     """
     if assessment.panel_incomplete:
         return "gap"
     if assessment.missing_domains is not None:
         return "unverified"
-    # Ask the same predicate the ENGINE's floor asks, not the bare
-    # `recommendation in PANEL_REQUIRED_FOR` test this used to. The floor now also
-    # owes a panel when the COMPUTED band is advance/conditional even though the
-    # model wrote `pass`, and it no longer exempts `route-to-incubation` — so
-    # keeping the old test here would make the page report `not_owed` for a row
-    # the engine had in fact held to the floor. That engine/page drift is exactly
-    # what PANEL_REQUIRED_FOR's own comment warns about.
-    if not panel_is_owed(assessment.recommendation, assessment.band):
+    if assessment.panel_owed is True:
+        return "verified"
+    if assessment.panel_owed is False:
         return "not_owed"
-    return "verified"
+    return "unrecorded"
 
 
 async def build_assessment_detail(
@@ -569,7 +603,7 @@ async def build_assessment_detail(
         "banding": scale.banding,
         "scale_provenance": scale.label,
         "rubric_version": RUBRIC_VERSION,
-        "panel_state": _panel_state(assessment),
+        "panel_state": panel_state(assessment),
         "panel_summary": [
             {"domain": c["domain"], "verdict_signal": c["verdict_signal"]}
             for c in consults

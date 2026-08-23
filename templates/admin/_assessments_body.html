@@ -67,10 +67,17 @@
 </div>
 {% endif %}
 
-{# Verdicts stored despite a gap in the specialist panel. Distinct from the
+{# Verdicts whose specialist panel is not VERIFIED complete. Distinct from the
    dropped-verdict banner above: nothing was lost here, but nothing was fully
    vetted either, and a triage queue that renders the two identically is how
-   an unvetted verdict gets acted on. #}
+   an unvetted verdict gets acted on.
+
+   Three states, one number (src/services/directory.py::list_assessments): a
+   demonstrated gap, a floor that could not be checked, and a row that does not
+   record whether a panel was owed at all. This used to count only the first,
+   which left the other two looking unremarkable here while the detail page one
+   click away called them verified. The per-row badge in the table says which
+   state a given row is in — see the Recommendation cell below. #}
 {% if incomplete_panel_count %}
 <div class="rounded-xl border border-orange-300 bg-orange-50 p-4 mb-6">
     <div class="flex items-start gap-3">
@@ -78,11 +85,13 @@
         <div class="text-sm text-orange-900">
             <span class="font-semibold">
                 {{ incomplete_panel_count }} verdict{{ '' if incomplete_panel_count == 1 else 's' }}
-                stored with an incomplete specialist panel{% if not show_all_runs %} in this run{% endif %}.
+                stored with an incomplete or unverified specialist panel{% if not show_all_runs %} in this run{% endif %}.
             </span>
-            The required domains were never consulted during the interview, so
-            the verdict is recorded but not fully vetted. Treat the score as
-            provisional.
+            Either the required domains were never consulted, the floor could not
+            be checked at all, or the row does not record whether a panel was
+            owed. The verdict is recorded but not fully vetted — treat the score
+            as provisional, and read each row's panel badge for which of the
+            three it is.
             {# Scope, stated. This count follows the RUN, never the lab filter:
                under-warning is the dangerous direction, and an unvetted verdict
                is the run's problem to fix, not the filtered lab's — so with a
@@ -285,16 +294,28 @@
                         } %}
                         <span class="px-2 py-0.5 rounded-full text-xs font-medium whitespace-nowrap {{ rec_chip.get(a.recommendation, 'bg-gray-100 text-gray-500') }}">{{ banding.pass_label if a.recommendation == 'pass' else a.recommendation }}</span>
                     {% else %}—{% endif %}
-                    {# `missing_domains` is three-state (see the column comment in
-                       src/models/opportunity.py): a list of names = the gap this badge
-                       reports, NULL = panel verified complete, [] = the floor could not
-                       be checked at all (post-restart). Only the first sets
-                       `panel_incomplete`, so the [] rows never reach the join below —
-                       and if one ever did it would render as an empty "Missing:", not
-                       as an error. #}
-                    {% if a.panel_incomplete %}
+                    {# The panel finding for THIS row, in the same five states the
+                       detail page renders — attached to the row by
+                       src/services/directory.py::list_assessments so both surfaces
+                       read one definition (assessment_detail.panel_state) and the
+                       table cannot drift from the drill-down.
+
+                       Three of the five get a badge. Gating on `a.panel_incomplete`
+                       alone (what this used to do) badged only the demonstrated gap,
+                       so a row the floor could not check and a row that records
+                       nothing at all both rendered as clean as a verified one — the
+                       12 production rows this change exists for. `verified` and
+                       `not_owed` are the two states that have an answer, and they
+                       stay unbadged. #}
+                    {% if a.panel_state == 'gap' %}
                     <span class="ml-1 text-xs font-medium text-orange-700"
                           title="Missing: {{ (a.missing_domains or [])|join(', ') }}">&#9873; panel</span>
+                    {% elif a.panel_state == 'unverified' %}
+                    <span class="ml-1 text-xs font-medium text-gray-600"
+                          title="The specialist floor could not be checked for this verdict (no consult was recorded for anyone, or it named no lab). Not a gap, and not a verification.">panel unverified</span>
+                    {% elif a.panel_state == 'unrecorded' %}
+                    <span class="ml-1 text-xs font-medium text-amber-700"
+                          title="This row does not record whether a specialist panel was owed, so nothing can be said about one either way.">panel not recorded</span>
                     {% endif %}
                 </td>
                 <td class="px-4 py-3 text-xs text-gray-600">

@@ -713,22 +713,33 @@ async def test_llm_calls_page_badges_a_consult_signal(client, db_session, admin)
 
 
 # ---------------------------------------------------------------------------
-# The panel banner's fourth state: no panel was OWED
+# The panel banner's last two states: no panel was OWED, and nobody recorded
 #
-# `pass` and `route-to-incubation` are exempt from the specialist floor
-# (src/agent/specialists.py::PANEL_REQUIRED_FOR, and the same exemption is
-# stated to the model in phase4-thread-reply.md), so `_specialist_floor_gap`
-# returns an empty set for them without consulting anything. That stored the
-# same `missing_domains=NULL` a genuine verification stores, and the page then
-# told the reader nothing owed had been skipped — a claim about an audit that
-# never ran. Production run 60c53424 rendered it on a route-to-incubation
-# verdict whose own content required a `clinical` consult that never happened.
+# A verdict the floor exempts stores the same `missing_domains=NULL` a genuine
+# verification stores, and the page used to tell the reader nothing owed had
+# been skipped — a claim about an audit that never ran. Production run 60c53424
+# rendered it on a route-to-incubation verdict whose own content required a
+# `clinical` consult that never happened.
+#
+# The first fix split that NULL by asking `panel_is_owed(recommendation, band)`
+# AT RENDER TIME, and that re-armed the same bug one level up: the predicate has
+# widened twice in one month, so every widening silently re-labels every row
+# written under the older rule. 12 production rows written by the
+# recommendation-only floor (which stored "no panel was owed" as
+# `panel_incomplete=False, missing_domains=NULL`) came back green under the
+# band-aware reader; at least five had a demonstrable gap. The page now replays
+# the stored `panel_owed` column and claims nothing when the row does not carry
+# one. See `src/services/assessment_detail.panel_state`.
 # ---------------------------------------------------------------------------
 
 
-async def _seed_exempt(db_session, recommendation: str):
-    """One verdict the floor never evaluated: no gap, no consults, exempt
-    recommendation — the exact shape production stored."""
+async def _seed_exempt(db_session, recommendation: str, *, panel_owed=None):
+    """One verdict with no gap and no consults recorded.
+
+    `panel_owed` defaults to None — the shape of every row production actually
+    holds, all of which predate migration 0036 — so a caller that wants the
+    floor's own recorded answer has to say so, exactly as the page does.
+    """
     run = await factories.make_simulation_run(db_session)
     assessment = OpportunityAssessment(
         simulation_run_id=run.id,
@@ -743,6 +754,7 @@ async def _seed_exempt(db_session, recommendation: str):
         scores={"differentiation": 3},
         panel_incomplete=False,
         missing_domains=None,
+        panel_owed=panel_owed,
     )
     db_session.add(assessment)
     await db_session.flush()
@@ -758,7 +770,7 @@ async def _seed_exempt(db_session, recommendation: str):
 async def test_an_exempt_verdict_does_not_claim_a_verified_panel(
     client, db_session, admin, recommendation
 ):
-    assessment = await _seed_exempt(db_session, recommendation)
+    assessment = await _seed_exempt(db_session, recommendation, panel_owed=False)
     resp = await client.get(
         f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
     )
@@ -776,15 +788,86 @@ async def test_an_exempt_verdict_does_not_claim_a_verified_panel(
 async def test_a_conditional_verdict_still_reports_a_verified_panel(
     client, db_session, admin
 ):
-    """The guard on the other side: `conditional` IS held to the floor, so an
-    empty gap there is a real verification and must keep saying so."""
+    """INVERTED 2026-08-22 — the old assertion is the headline defect itself.
+
+    This used to seed `panel_incomplete=False, missing_domains=None` and assert
+    the page reports "no gap recorded", on the reasoning that `conditional` IS
+    held to the floor so an empty gap must be a real verification. That
+    reasoning belongs to the ENGINE at write time; applied at read time it
+    invents a verification for every row written under a different rule, which
+    is precisely how 12 production rows came back green.
+
+    The fixture is unchanged (it is what production holds); only the claim the
+    page is allowed to make about it has changed. `panel_owed=True` — the floor
+    recording that it evaluated this verdict — is what buys the green box now,
+    and the companion test below pins that half.
+    """
     assessment = await _seed_exempt(db_session, "conditional")
     resp = await client.get(
         f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
     )
     assert resp.status_code == 200
-    assert "Specialist panel: no gap recorded" in resp.text
-    assert "Specialist panel: not required" not in resp.text
+    html = resp.text
+    assert "Specialist panel: not recorded" in html
+    assert "Specialist panel: no gap recorded" not in html
+    assert "Nothing the verdict's own content owed a specialist" not in html
+    # The copy must not blame the row's age: post-0036 rows land here too
+    # (backfills, hand-built fixtures), and "predates panel tracking" would be
+    # false for every one of them. (Narrowed to the phrase rather than the word
+    # — the rubric-provenance line legitimately says a row "predates rubric
+    # stamping", which is a different and checkable claim.)
+    assert "predates panel" not in html.lower()
+    # Never green, whatever else it says.
+    assert "bg-green-50" not in html
+
+
+async def test_a_floor_checked_verdict_reports_a_verified_panel(
+    client, db_session, admin
+):
+    """The guard on the other side, and the only route to the green box: the
+    floor recorded that a panel was owed, so it evaluated this verdict, and it
+    recorded no gap."""
+    assessment = await _seed_exempt(db_session, "conditional", panel_owed=True)
+    resp = await client.get(
+        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+    )
+    assert resp.status_code == 200
+    html = resp.text
+    assert "Specialist panel: no gap recorded" in html
+    assert "Specialist panel: not required" not in html
+    assert "Specialist panel: not recorded" not in html
+    assert "bg-green-50" in html
+
+
+async def test_an_unknown_panel_state_never_renders_green(
+    client, db_session, admin, monkeypatch
+):
+    """The template's terminal `{% else %}` used to BE the green box, so every
+    state the template did not enumerate — a typo, a state added to
+    `panel_state` and not to the template, a future sixth finding — rendered as
+    a verified panel. Green is the one claim that must be reached only
+    deliberately, so it is now an explicit `panel_state == 'verified'` branch and
+    the fallback is the neutral "not recorded" box.
+
+    Driven by forcing an off-contract state through the real render path rather
+    than by reading the template source: what matters is the HTML a reader sees.
+    `bg-green-50` appears exactly once in this template — on the panel box — so
+    it is a precise probe for "did this render green".
+    """
+    assessment = await _seed_exempt(db_session, "conditional", panel_owed=True)
+    monkeypatch.setattr(
+        "src.services.assessment_detail.panel_state",
+        lambda _assessment: "a_state_that_does_not_exist",
+    )
+    resp = await client.get(
+        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+    )
+    assert resp.status_code == 200
+    html = resp.text
+    assert "bg-green-50" not in html, (
+        "an unhandled panel state must never render as a verified panel"
+    )
+    assert "Nothing the verdict's own content owed a specialist" not in html
 
 
 # ---------------------------------------------------------------------------

@@ -2483,3 +2483,247 @@ async def test_admin_assessments_cards_count_recommendation_not_band(
     assert counts["Pass (decline)"] == 1
     assert counts["Advance"] == 0
     assert counts["Conditional"] == 0
+
+
+# ---------------------------------------------------------------------------
+# `panel_owed` and `thread_id` — the two durable facts the row used to omit
+#
+# `panel_owed` exists because the admin detail page used to re-derive "was this
+# verdict held to the floor?" at RENDER time, from a predicate that has widened
+# twice in one month — so every widening silently relabelled every older row.
+# 12 production rows rendered the green "panel verified" box for a floor that
+# never ran. The write path is what makes the read path's fix possible: without
+# a stored answer the page has nothing to replay. See
+# `src/services/assessment_detail.panel_state`.
+#
+# `thread_id` exists so the one-interview-one-verdict invariant is enforceable
+# and, above all, REHYDRATABLE: before it the table did not record which
+# interview a verdict came from, so a restarted process could not tell a first
+# verdict from a re-capture of a turn it had already stored.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_persist_assessment_records_that_a_panel_was_owed(engine):
+    """An `advance`/`conditional` verdict IS held to the floor, so the floor
+    evaluated it — and the row has to say so, because an empty `missing_domains`
+    only means "verified" on a row where a floor actually ran."""
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from src.agent.simulation import SimulationEngine
+    from src.services.blackbird_rubric import RUBRIC_WEIGHTS
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as setup:
+        run = SimulationRun()
+        setup.add(run)
+        await setup.commit()
+        run_id = run.id
+
+    stub = SimulationEngine(
+        agents=[], slack_clients={}, session_factory=factory, simulation_run_id=run_id,
+    )
+    for domain in ("scientific", "talent", "chemistry", "clinical", "technologic"):
+        stub._record_consult("gordy", domain)
+    try:
+        await SimulationEngine._persist_assessment(
+            stub, "blackbird", "general",
+            {
+                "subject_agent_id": "gordy",
+                "recommendation": "conditional",
+                "rationale": "A peptide-based platform for a tuberculosis indication.",
+                "scores": {k: 3 for k in RUBRIC_WEIGHTS},
+            },
+            slack_ts="1.1",
+            subject_agent_id_fallback="gordy",
+        )
+        rows = await _assessment_rows(factory, run_id)
+        assert len(rows) == 1
+        assert rows[0].panel_owed is True, (
+            "the floor was owed a panel and evaluated this verdict; storing "
+            "NULL here is what forced the page to guess"
+        )
+        # The pairing that makes the green box legitimate, asserted together so
+        # neither half can drift: owed AND no gap AND checkable.
+        assert rows[0].panel_incomplete is False
+        assert rows[0].missing_domains is None
+    finally:
+        await _delete_run(factory, run_id)
+
+
+@pytest.mark.asyncio
+async def test_persist_assessment_records_that_no_panel_was_owed(engine):
+    """A decline the floor exempted stores `False`, not NULL. `False` is a
+    finding ("we looked at the rules and none applied"); NULL is the absence of
+    one, and the page renders them differently on purpose.
+
+    Both halves have to be unowed for the exemption to hold: `_VERDICT`-style
+    straight 3s band `conditional` on the investment scale, and the floor keys
+    on the COMPUTED band as well as the written recommendation.
+    """
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from src.agent.simulation import SimulationEngine
+    from src.services.blackbird_rubric import RUBRIC_WEIGHTS
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as setup:
+        run = SimulationRun()
+        setup.add(run)
+        await setup.commit()
+        run_id = run.id
+
+    stub = SimulationEngine(
+        agents=[], slack_clients={}, session_factory=factory, simulation_run_id=run_id,
+    )
+    try:
+        await SimulationEngine._persist_assessment(
+            stub, "blackbird", "general",
+            {
+                "subject_agent_id": "gordy",
+                "recommendation": "pass",
+                "rationale": "Not differentiated enough to pursue.",
+                "scores": {k: 2 for k in RUBRIC_WEIGHTS},
+            },
+            slack_ts="1.1",
+            subject_agent_id_fallback="gordy",
+        )
+        rows = await _assessment_rows(factory, run_id)
+        assert len(rows) == 1
+        assert rows[0].panel_owed is False
+        assert rows[0].panel_owed is not None, (
+            "NULL is 'we do not know', which is a different page state"
+        )
+    finally:
+        await _delete_run(factory, run_id)
+
+
+@pytest.mark.asyncio
+async def test_persist_assessment_records_the_interview_thread(engine):
+    """The verdict's link back to the interview it came out of. Without it a
+    restarted process cannot rehydrate `_assessed_threads`, so the interview's
+    own concluding verdict looks like a first verdict and lands a second row."""
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from src.agent.simulation import SimulationEngine
+    from src.agent.state import ThreadState
+    from src.services.blackbird_rubric import RUBRIC_WEIGHTS
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as setup:
+        run = SimulationRun()
+        setup.add(run)
+        await setup.commit()
+        run_id = run.id
+
+    stub = SimulationEngine(
+        agents=[], slack_clients={}, session_factory=factory, simulation_run_id=run_id,
+    )
+    thread = ThreadState(
+        thread_id="1787151586.955459", channel="general", other_agent_id="gordy",
+        message_count=11,
+    )
+    try:
+        await SimulationEngine._persist_assessment(
+            stub, "blackbird", "general",
+            {
+                "subject_agent_id": "gordy",
+                "recommendation": "conditional",
+                "scores": {k: 3 for k in RUBRIC_WEIGHTS},
+            },
+            slack_ts="1.1",
+            subject_agent_id_fallback="gordy",
+            thread=thread,
+        )
+        rows = await _assessment_rows(factory, run_id)
+        assert len(rows) == 1
+        assert rows[0].thread_id == "1787151586.955459"
+    finally:
+        await _delete_run(factory, run_id)
+
+
+@pytest.mark.asyncio
+async def test_a_caller_with_no_thread_stores_a_null_thread_id(engine):
+    """Direct callers (and every pre-existing test) pass no thread. NULL is the
+    honest answer there — never the empty string, which `WHERE thread_id IS NULL`
+    would not match and which would collide across interviews."""
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from src.agent.simulation import SimulationEngine
+    from src.services.blackbird_rubric import RUBRIC_WEIGHTS
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as setup:
+        run = SimulationRun()
+        setup.add(run)
+        await setup.commit()
+        run_id = run.id
+
+    stub = SimulationEngine(
+        agents=[], slack_clients={}, session_factory=factory, simulation_run_id=run_id,
+    )
+    try:
+        await SimulationEngine._persist_assessment(
+            stub, "blackbird", "general",
+            {"subject_agent_id": "gordy", "recommendation": "pass",
+             "scores": {k: 2 for k in RUBRIC_WEIGHTS}},
+            slack_ts="1.1",
+        )
+        rows = await _assessment_rows(factory, run_id)
+        assert len(rows) == 1
+        assert rows[0].thread_id is None
+    finally:
+        await _delete_run(factory, run_id)
+
+
+@pytest.mark.asyncio
+async def test_the_retry_queue_carries_panel_owed_and_thread_id(engine):
+    """`_flush_pending_assessments` rebuilds the row from the SAME kwargs dict,
+    so a column added to the immediate write but not to that dict would be
+    silently NULL on exactly the rows a busy pool produced — the ones written
+    under load, which is when this instrumentation matters most."""
+    import uuid as _uuid
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from src.agent.simulation import SimulationEngine
+    from src.agent.state import ThreadState
+    from src.services.blackbird_rubric import RUBRIC_WEIGHTS
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as setup:
+        run = SimulationRun()
+        setup.add(run)
+        await setup.commit()
+        run_id = run.id
+
+    stub = SimulationEngine(
+        agents=[], slack_clients={}, session_factory=factory, simulation_run_id=run_id,
+    )
+    for domain in ("scientific", "talent", "chemistry", "clinical", "technologic"):
+        stub._record_consult("gordy", domain)
+    thread = ThreadState(
+        thread_id="t-queued", channel="general", other_agent_id="gordy",
+        message_count=11,
+    )
+    try:
+        # A run id that violates the FK: the insert raises and the row is queued,
+        # exactly as a pool-checkout timeout would leave it.
+        stub.simulation_run_id = _uuid.uuid4()
+        await SimulationEngine._persist_assessment(
+            stub, "blackbird", "general",
+            {"subject_agent_id": "gordy", "recommendation": "conditional",
+             "scores": {k: 3 for k in RUBRIC_WEIGHTS}},
+            slack_ts="1.1", subject_agent_id_fallback="gordy", thread=thread,
+        )
+        assert len(stub._pending_assessments) == 1
+        stub.simulation_run_id = run_id
+        stub._pending_assessments[0]["simulation_run_id"] = run_id
+        await stub._flush_pending_assessments()
+
+        rows = await _assessment_rows(factory, run_id)
+        assert len(rows) == 1
+        assert rows[0].panel_owed is True
+        assert rows[0].thread_id == "t-queued"
+    finally:
+        await _delete_run(factory, run_id)

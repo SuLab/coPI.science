@@ -16,7 +16,7 @@ import uuid
 from collections import Counter
 from typing import Any
 
-from sqlalchemy import case, func, select
+from sqlalchemy import case, func, or_, select
 from sqlalchemy import true as sa_true
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -32,6 +32,7 @@ from src.models import (
     ThreadDecision,
     User,
 )
+from src.services.assessment_detail import panel_state
 from src.services.blackbird_rubric import (
     BANDING,
     BANDING_INCUBATION,
@@ -317,14 +318,27 @@ async def list_assessments(
     # Surfaced because Task 3 stops the floor discarding a gapped verdict.
     # Storing it is only safe if the page distinguishes it from a vetted one.
     #
-    # Counts DEMONSTRATED gaps only. A row with `panel_incomplete=False` and
-    # `missing_domains=[]` is the third state (see
-    # OpportunityAssessment.missing_domains and
-    # SimulationEngine._floor_verifiable): the floor could not be checked at
-    # all, typically because the process restarted mid-interview. It is
-    # correctly NOT counted here — we have no evidence of a gap — but it is
-    # not evidence of a complete panel either, so this number is a floor on
-    # the problem, not a measure of it.
+    # Counts every row whose panel is NOT verified complete — the same three
+    # states `assessment_detail.panel_state` renders as `gap`, `unverified` and
+    # `unrecorded`, and no others. It used to count `panel_incomplete IS TRUE`
+    # alone, which excluded the other two BY CONSTRUCTION:
+    #
+    #   * `missing_domains=[]` — the floor could not be checked at all
+    #     (`SimulationEngine._floor_verifiable`), the ordinary state after a
+    #     restart, and production's normal exit is a SIGKILL.
+    #   * `panel_owed IS NULL` — the row does not record whether a panel was
+    #     owed at all (every row written before migration 0036, deliberately not
+    #     backfilled).
+    #
+    # Neither is evidence of a gap; neither is evidence of a complete panel
+    # either, and the banner exists to say "do not treat this score as vetted".
+    # Leaving them out made 12 production rows look unremarkable on this page
+    # while the detail page one click away called them verified. `not_owed` —
+    # the floor's own RECORDED exemption — is the one non-verified state that is
+    # genuinely fine, and it stays uncounted.
+    #
+    # The per-row `panel_state` attached below is what tells a reader WHICH of
+    # the three a given row is; this number only says how many to look at.
     #
     # Deliberately NOT narrowed by `lab`, unlike total_count above. This and
     # the dropped-verdict counts below are warnings, and the failure mode of a
@@ -333,7 +347,11 @@ async def list_assessments(
     # problem, not a lab's. Over-reporting is visible and checkable; silently
     # narrowing a warning to the current filter is neither.
     incomplete_query = select(func.count()).select_from(OpportunityAssessment).where(
-        OpportunityAssessment.panel_incomplete.is_(True)
+        or_(
+            OpportunityAssessment.panel_incomplete.is_(True),
+            OpportunityAssessment.missing_domains.is_not(None),
+            OpportunityAssessment.panel_owed.is_(None),
+        )
     )
     if not show_all_runs and selected_run_id:
         incomplete_query = incomplete_query.where(
@@ -348,6 +366,25 @@ async def list_assessments(
 
     result = await db.execute(query)
     assessments = result.scalars().all()
+
+    # The five-state panel finding, per row, computed by the ONE definition the
+    # detail page uses. Attached to each row rather than returned as a separate
+    # context key on purpose: `_assessments_body.html` is included by an admin
+    # template whose router allowlists every context key it forwards
+    # (src/routers/admin.py) and by a manager template whose router splats the
+    # whole view — so a new key would reach one surface and be Jinja `Undefined`
+    # (silently falsy, never an error) on the other. Riding on `assessments`,
+    # which both already forward, is the only shape that cannot half-arrive.
+    #
+    # `panel_state` is not a mapped column, so this writes an ordinary instance
+    # attribute and persists nothing; these rows are read-only and are handed
+    # straight to a template.
+    #
+    # Re-deriving the state in Jinja from the three columns was the alternative
+    # and is exactly the drift this whole change exists to end: two copies of
+    # the rule, one of which nobody updates.
+    for _row in assessments:
+        _row.panel_state = panel_state(_row)
 
     # Batched agent_id -> user_id lookup, so the template can link a row's
     # lab to that PI's profile. Only ever resolvable for a LIVE roster entry
