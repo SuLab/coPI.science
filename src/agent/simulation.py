@@ -218,6 +218,16 @@ _UNIVERSAL_CHANNELS = {"general"}
 # Slack poll throttles. Human channel messages are rare, so sub-turn latency is
 # unnecessary; polling every turn was saturating one bot token's rate limit.
 CHANNEL_POLL_INTERVAL = 15.0   # seconds between conversations.history sweeps
+
+#: How often ONE channel's poll failure may be reported at WARNING.
+#:
+#: The per-channel `except` in `_poll_slack_for_bot_messages` used to log at
+#: DEBUG, and production runs at INFO — so a channel failing on every tick for
+#: hours produced nothing an operator would ever see. Raising it to WARNING with
+#: no rate limit trades that for the opposite failure: the poller sweeps every
+#: CHANNEL_POLL_INTERVAL (15 s) and a broken channel fails every sweep, which is
+#: 240 identical lines an hour PER CHANNEL burying everything else.
+POLL_ERROR_LOG_INTERVAL = 300.0
 ROSTER_POLL_INTERVAL = 30.0    # seconds between AgentRegistry roster re-syncs
 
 # Distinguishes "role has no cached rate yet" from "role's cached rate is None
@@ -399,6 +409,10 @@ class SimulationEngine:
             a.bot_name.lower(): a.agent_id for a in agents
         }
         self.message_log.set_bot_name_map(self._bot_name_to_id)
+
+        # channel name -> when its poll failure was last reported at WARNING.
+        # See _log_poll_error / POLL_ERROR_LOG_INTERVAL.
+        self._poll_error_last_logged: dict[str, float] = {}
 
         # LLM call log buffer
         self._llm_log_buffer: list[dict] = []
@@ -5151,8 +5165,37 @@ class SimulationEngine:
                     if ts:
                         self._poll_cursors[ch_id] = ts
 
-            except Exception as exc:
-                logger.debug("Polling error for #%s: %s", ch_name, exc)
+            except Exception as exc:  # noqa: BLE001
+                # This block covers the WHOLE per-channel ingest — the API call,
+                # `float(ts)`, `ais_bot_user` and the append — so it is the only
+                # place a broken channel is ever reported.
+                self._log_poll_error(ch_name, exc)
+
+    def _log_poll_error(self, ch_name: str, exc: Exception) -> None:
+        """Report a channel's poll failure — visibly, but at most once per window.
+
+        WARNING rather than DEBUG (production runs at INFO), and once per
+        `POLL_ERROR_LOG_INTERVAL` per CHANNEL rather than once per sweep. Per
+        channel and not globally: one permanently-broken channel silencing the
+        first failure of a second one would hide exactly the event this exists
+        to surface. The suppressed repeats still log at DEBUG, so a debug-level
+        operator can still see the failure is ongoing rather than resolved.
+        """
+        now = time.time()
+        last = self._poll_error_last_logged.get(ch_name, 0.0)
+        if now - last < POLL_ERROR_LOG_INTERVAL:
+            logger.debug(
+                "Poll for #%s is still failing (warning suppressed for another "
+                "%.0fs): %s",
+                ch_name, POLL_ERROR_LOG_INTERVAL - (now - last), exc,
+            )
+            return
+        self._poll_error_last_logged[ch_name] = now
+        logger.warning(
+            "Polling error for #%s (further warnings for this channel "
+            "suppressed for %.0fs): %s",
+            ch_name, POLL_ERROR_LOG_INTERVAL, exc,
+        )
 
     async def _poll_inbound_from_db(self) -> None:
         """Ingest messages written to the DB by other processes.

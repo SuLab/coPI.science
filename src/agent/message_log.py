@@ -239,6 +239,15 @@ class MessageLog:
         check or interleave the two mutations. Always call this on the loop —
         fetch/post off it, then append back on it.
         """
+        if not entry.ts:
+            logger.warning(
+                "Refusing a MessageLog entry with no ts (channel=%s sender=%s): "
+                "'' is a single slot in _by_ts, so every ts-less message would "
+                "collapse into one, and _flush_persisted skips `if not e.ts` so "
+                "it would reach neither the log nor the database",
+                entry.channel, entry.sender_name,
+            )
+            return False
         if entry.ts in self._by_ts:
             return False
         self._record(entry)
@@ -252,6 +261,13 @@ class MessageLog:
         Used by the DB-rebuild path so rows just read from the DB are not
         re-persisted. Still idempotent on ts.
         """
+        if not entry.ts:
+            logger.warning(
+                "Refusing a restored MessageLog entry with no ts (channel=%s "
+                "sender=%s) — see append()",
+                entry.channel, entry.sender_name,
+            )
+            return
         if entry.ts in self._by_ts:
             return
         self._record(entry)
@@ -269,6 +285,27 @@ class MessageLog:
         ``_last_bot_in_channel`` update below exactly equivalent to the old full
         scan's ``>=`` tie rule.
         """
+        # NORMALISE a self-parented entry into the root it is, before any index
+        # sees it. Slack marks a parent that has replies with `thread_ts == ts`;
+        # `slack_client.normalize_inbound_message` strips that on the ingest
+        # paths, but `_rebuild_state_from_db` and `_hydrate_thread_from_db` copy
+        # the column verbatim out of the database.
+        #
+        # Left alone, such an entry lands in BOTH `_by_ts[ts]` and
+        # `_by_thread[ts]`, so `get_thread_history` returns it twice and
+        # `get_thread_message_count` answers 2 for one message — and that count
+        # is the interview's TURN BUDGET, so the interview burns it at 2x and
+        # concludes early.
+        #
+        # Deliberately NOT a guard on the `_by_thread` insertion below: the
+        # top-level indexes key on `thread_ts is None`, so a guard-only fix
+        # leaves the entry in NEITHER index — no longer double-counted, and
+        # invisible to `get_new_top_level_posts` and therefore to Phase 3.
+        # Mutating the entry here also fixes the PERSISTED row for free, because
+        # `append` fires the persist callback after this returns and
+        # `_flush_persisted` derives `phase` from `thread_ts`.
+        if entry.thread_ts is not None and entry.thread_ts == entry.ts:
+            entry.thread_ts = None
         seq = len(self._entries)
         self._entries.append(entry)
         self._by_ts[entry.ts] = entry
