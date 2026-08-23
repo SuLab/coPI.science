@@ -278,10 +278,20 @@ async def test_the_sql_unvetted_filter_matches_panel_state_row_for_row(db_sessio
             )
         )
     await db_session.commit()
+    run_id = run.id  # captured before expire_all() below expires `run` too
+
+    # `expire_on_commit=False` (tests/conftest.py) means the objects `stored`
+    # is about to fetch are still in the session's identity map, unexpired —
+    # without this, the query below would just hand back the SAME Python
+    # objects the loop above built, and `panel_state(row)` would read
+    # attributes the TEST assigned, never anything Postgres actually stored.
+    # `expire_all()` forces the next attribute access on every one of them to
+    # re-SELECT, so `stored` below is a genuine read-back.
+    db_session.expire_all()
 
     stored = (await db_session.execute(
         select(OpportunityAssessment).where(
-            OpportunityAssessment.simulation_run_id == run.id
+            OpportunityAssessment.simulation_run_id == run_id
         )
     )).scalars().all()
     assert len(stored) == len(_PANEL_MATRIX) == 18
@@ -295,7 +305,7 @@ async def test_the_sql_unvetted_filter_matches_panel_state_row_for_row(db_sessio
     }
     actual = set((await db_session.execute(
         select(OpportunityAssessment.company_or_project).where(
-            OpportunityAssessment.simulation_run_id == run.id,
+            OpportunityAssessment.simulation_run_id == run_id,
             unvetted_panel_filter(),
         )
     )).scalars().all())
