@@ -283,3 +283,81 @@ async def test_a_turn_with_a_truncated_call_is_badged_and_a_clean_one_is_not(
     # otherwise a total of an unknown number of addends.
     assert "2 calls" in html
     assert "1 call<" in html
+
+
+# ---------------------------------------------------------------------------
+# The cache-token columns (0036), which nothing in the unit suite can reach.
+#
+# `tests/unit/test_llm_call_stats.py` asserts the two counts on the PAYLOAD the
+# fake callback receives. That is the producer half. This is the consumer half,
+# and it had no test at all: `_llm_log_record` maps the payload key by key, so a
+# key the producer adds and the mapper does not read reaches the callback and
+# stops there — silently, with the column NULL forever and the data recoverable
+# only by digging back into `call_stats`. Both surfaces looked covered; the seam
+# between them was not.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_the_cache_counts_round_trip_through_the_buffered_flush(engine):
+    """The columns exist to be SUMmed: billable input volume is
+    `input_tokens + cache_read_input_tokens + cache_creation_input_tokens`
+    (see LlmCallLog's docstring), and that sum is unavailable while either
+    column is NULL on every row."""
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    run_id = await _new_run(factory)
+    try:
+        await _flush_one(
+            factory,
+            run_id,
+            _entry(
+                call_stats=_STATS,
+                cache_read_input_tokens=118_204,
+                cache_creation_input_tokens=30_512,
+            ),
+        )
+
+        async with factory() as db:
+            row = (await db.execute(
+                select(LlmCallLog).where(LlmCallLog.simulation_run_id == run_id)
+            )).scalar_one()
+            assert row.cache_read_input_tokens == 118_204
+            assert row.cache_creation_input_tokens == 30_512
+            # The uncached tail is a SEPARATE number, not a total — the whole
+            # reason there are three columns rather than one.
+            assert row.input_tokens == 26923
+
+            billable = (await db.execute(text(
+                "SELECT sum(input_tokens) AS uncached, "
+                "       sum(cache_read_input_tokens) AS cache_read, "
+                "       sum(cache_creation_input_tokens) AS cache_write "
+                "  FROM llm_call_logs WHERE simulation_run_id = :run"
+            ), {"run": str(run_id)})).one()
+        assert (billable.uncached, billable.cache_read, billable.cache_write) == (
+            26923, 118_204, 30_512
+        ), "the aggregate query the columns were added for must not return NULL"
+    finally:
+        await _delete_run(factory, run_id)
+
+
+@pytest.mark.asyncio
+async def test_an_entry_without_the_cache_counts_stores_null_not_zero(engine):
+    """`_sum_reported` yields None when no API call reported either field, and
+    None must reach the column as NULL. Zero would be a claim — "the cache was
+    read zero times" — that nothing measured."""
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    run_id = await _new_run(factory)
+    try:
+        await _flush_one(factory, run_id, _entry(call_stats=_STATS))  # no cache keys
+
+        async with factory() as db:
+            row = (await db.execute(
+                select(LlmCallLog).where(LlmCallLog.simulation_run_id == run_id)
+            )).scalar_one()
+            assert row.cache_read_input_tokens is None
+            assert row.cache_creation_input_tokens is None
+            # Everything else on the row is unaffected: an uninstrumented
+            # producer still writes a complete row.
+            assert (row.input_tokens, row.call_stats) == (26923, _STATS)
+    finally:
+        await _delete_run(factory, run_id)

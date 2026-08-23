@@ -7002,6 +7002,21 @@ class SimulationEngine:
             # rather than 0.0: a producer that supplied nothing means "not
             # recorded", and 0.0 would read as an instantaneous turn.
             wall_ms=entry.get("wall_ms"),
+            # The cached input this turn read and wrote, which `input_tokens`
+            # above EXCLUDES — `usage.input_tokens` counts only the uncached
+            # tail, so on a cached turn it can read 2 for a 30 KB prompt (see
+            # LlmCallLog's own comment). Billable input volume is the sum of the
+            # three columns, and that sum is unavailable while these two are
+            # NULL on every row. `.get`, not `[...]`: every other field here is
+            # read defensively and a producer that predates the keys (or a
+            # hand-built entry in a test) must still write a complete row.
+            #
+            # Default None, not 0, matching the nullable columns and
+            # `llm._sum_reported`: "no API call reported the field" and "the
+            # cache was read zero times" are different answers, and only the
+            # second licenses a conclusion.
+            cache_read_input_tokens=entry.get("cache_read_input_tokens"),
+            cache_creation_input_tokens=entry.get("cache_creation_input_tokens"),
             # Per-API-call breakdown (stop_reason, the requested max_tokens
             # ceiling, thinking/text split) that the three cumulative columns
             # above cannot carry. Default None, not [] — a producer that
