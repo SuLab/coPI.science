@@ -901,3 +901,57 @@ CORRECTION TO MY OWN REPORT TO THE USER — the rate-limiter mechanism I relayed
   to the user covers two settings, not one. The manual now distinguishes the lanes explicitly.
 CLAUDE.md agent also caught a stale banner tell in passing: the documented `Budget: N calls/agent`
   line does not exist; the real one is `Starting simulation: ... budget/agent`.
+FINAL CODE FIXES: all five done — 9f69a48 (F1 cache-token columns), 6900f93 (F2 truncated consults
+  on both human-facing pages), b483c4e (F3 the inverted prohibition), 725b6bd (F4 three stale
+  cross-task claims), 9034e2d (F5 panel badge default). Full suite 2795 passed / 93 skipped / 16
+  snapshots, ruff tests 0 / src 224 unchanged, 13 mutations all red.
+FINAL CODE FIXES: TENTH test-that-cannot-fail, caught by the implementer on its OWN fix. FIX 5's
+  mutation B — an ANSWERED state falling into the new fallback — would have passed the suite as
+  written, because the two existing controls only assert the ABSENCE of labels that predate the new
+  badge. It added `assert "panel state unknown" not in html` to both; without that the fix was
+  self-certifying.
+FINAL CODE FIXES: FIX 3's conclusion is better than the instruction. I asked it to decide whether
+  the prohibition still stands. It found the prohibition STANDS but the stated reason has reversed
+  in the direction that WEAKENS it (`COALESCE(jsonb_array_length(call_stats), 1)` is 1 for a
+  single-call row, so a split corpus would rebuild correctly). It replaced the reason with three
+  that hold — the stored corpus is turn-shaped and cannot be re-encoded, `system_prompt`/
+  `messages_json`/`response_text` would be duplicated once per round, and `call_stats` already IS
+  the per-call table — and LABELLED the old reason as reversed rather than deleting it, so it cannot
+  be re-quoted. It also found a sixth instance of the reversed premise at simulation.py:6803 that
+  nobody had listed.
+FINAL CODE FIXES: one carried caveat — FIX 1 fixes the CONSUMER (`_llm_log_record`, not
+  `_flush_llm_logs`; Task 1's snippet named a function that no longer builds the row). Whether any
+  PRODUCER bypasses `_emit_call_log` was not audited, and task-1's report flags a related un-fixed
+  defect in `generate_agent_response` as out of scope. Written down, not closed.
+NINTH-TEST EXPERIMENT RUN BY ME, and the reviewer's suspicion was CORRECT: deleting the `sa_or`
+  thread_id narrowing from `_superseded_row_filter` leaves test_hub_assessment_capture_gate.py +
+  test_opportunity_assessment_persistence.py at **79 passed**. Restored from a pre-mutation copy,
+  md5 identical (7201e970cc75b3ec1d3fc2c95b3bf833), `git diff` empty. Ruling: RECORD, do not test.
+  It is not a coverage gap — `slack_ts` is already unique within a (simulation_run_id, agent_id)
+  pair, so no fixture can construct the collision the narrowing guards against without first
+  constructing a different bug. Committed as 3545bb0: the docstring now states the measurement and
+  says keep the guard anyway, so the next reader does not read the silence as an oversight and
+  delete it.
+DOCS COMMITTED: cc1d32d (the plan, the plan's own audit, docs/audits/2026-08-22-correctness/),
+  88e16e3 (this ledger as execution-ledger.md, plus claude-md-drift.md — kept BECAUSE four of its
+  rows were wrong and the corrections are recorded against them).
+GATE RE-RUN started at HEAD=88e16e3 — the first gate run covered 3f9b6a5, and seven commits have
+  landed since (five code fixes, the CLAUDE.md rewrite, two docs commits, the docstring).
+GATE PASSED AGAIN at HEAD=88e16e3 (+ 3545bb0): exit 0, **2795 passed, 93 skipped in 502.27s**,
+  16 snapshots passed, branch coverage 81.16% against the 60% floor, alembic single-head + the
+  upgrade->downgrade->upgrade round trip green, ruff clean on tests and under the src ceiling.
+  This is the run that covers ALL of the work, including the five whole-branch fixes, the CLAUDE.md
+  rewrite and the docs commits.
+PLAN COMPLETE. 6 tasks, 13 fix rounds, 2 cleanup batches, 1 final code batch, 1 CLAUDE.md rewrite.
+  TEN tests-that-cannot-fail found across the plan: five by reviewers, five by implementers on their
+  own work — and the trend moved the right way, with the last three caught before the item was
+  claimed rather than after. THREE times an agent corrected a factual claim I had asserted
+  (message_log.py's ownership, the "capture before the try" instruction, and the rate-limiter lane).
+  FOUR rows of the final review's own drift table were wrong and were corrected before reaching the
+  manual.
+OPEN FOR THE USER, not decided by me: `llm_calls_per_load_per_window` (8) and
+  `hub_llm_calls_per_window` (600) both changed units from turns to real API calls and NEITHER was
+  re-tuned. Deciding them silently would be the same repricing mistake the finding is about.
+NOT DONE, DELIBERATELY: nothing deployed, no image built, no migration applied, no simulation
+  started. Production stays at 0035; the branch is at 0036. The backfill script must not run until
+  0036 is applied.
