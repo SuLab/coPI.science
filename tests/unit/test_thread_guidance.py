@@ -45,13 +45,17 @@ def test_scout_hub_never_asks_for_a_collaboration_proposal():
 
 
 def test_scout_hub_decide_phase_works_the_gating_criteria():
-    # 3-criteria gating contract (Baltimore location gating was dropped, dcc5212):
-    # credible technology source, freedom-to-operate, differentiation.
+    # 3-criteria gating contract as of rubric v2.1.0 (Baltimore location gating
+    # was dropped in dcc5212; FTO was demoted from gate to diligence in the
+    # 2026-08-24 revision): credible science, translational potential, and FTO
+    # named as the hub's OWN diligence — never a question for the lab.
     _, guidance, instructions = phase4_guidance("scout_hub", 5)
     blob = (guidance + instructions).lower()
-    assert "credible" in blob
-    assert "freedom-to-operate" in blob or "fto" in blob
-    assert "differentiation" in blob
+    assert "credible science" in blob
+    assert "translational potential" in blob
+    assert "freedom-to-operate is diligence, not a gate" in blob
+    assert "do not ask the lab about market size" in blob
+    assert "never a market, competitive, or ip question" in blob
     assert "baltimore" not in blob
     # Part C.4 of the rubric — the target-level scientific checklist.
     assert "proof of mechanism" in blob
@@ -76,9 +80,14 @@ def test_scout_hub_decide_phase_directs_the_panel():
 
 
 def test_scout_hub_conclude_warns_that_the_floor_bites_later():
+    # The floor flags rather than refuses since 2026-08-22 (see
+    # OpportunityAssessment.panel_incomplete) — the warning must say what
+    # actually happens, or the model is threatened with a consequence that
+    # never arrives and learns to discount the whole block.
     _, guidance, instructions = phase4_guidance("scout_hub", 12)
     both = (guidance + instructions).lower()
-    assert "refus" in both or "reject" in both
+    assert "flagged" in both
+    assert "unvetted" in both
 
 
 def test_pi_lab_guidance_is_untouched_by_the_panel():

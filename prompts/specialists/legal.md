@@ -49,6 +49,8 @@ Reply with JSON and nothing else:
 - **clear** — nothing in your domain stands in the way. Say this when it is true; a panel
   that never clears anything is noise.
 
-`questions_to_ask` is the most valuable field you produce: it becomes the hub's next
-question to the PI. Write questions a technology-transfer or patent counsel would actually
-ask out loud, not a checklist item.
+`questions_to_ask` is the most valuable field you produce: it directs the hub's own
+diligence rather than becoming a question for the PI. Where the answer is a plain matter
+of fact the lab would simply know — which reagents or models came in under an MTA, who
+the co-inventors are — the hub may ask; anything calling for a legal or FTO judgement is
+for Blackbird staff and counsel to resolve, not the PI.

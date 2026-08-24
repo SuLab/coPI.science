@@ -126,12 +126,27 @@ def test_characterization_incubation_banding_is_pinned():
     assert BANDING_INCUBATION["conditional_min"] < BANDING["conditional_min"]
 
 
+def test_characterization_gating_keys_name_translational_potential():
+    """v2.1.0 renames the third gate: freedom-to-operate is diligence, not a
+    gate, and the gate that replaces it — translational potential — takes over
+    the key. The JSON sidecar key renames with it (the drift alarm in
+    test_rubric_prompt_sync holds the two together); historical rows keep the
+    fto_achievable key they were written with, unrewritten."""
+    assert set(load_rubric().gating) == {
+        "life_sciences_domain",
+        "credible_tech_source",
+        "translational_potential",
+    }
+
+
 def test_version_and_content_hash_are_exported():
     rubric = load_rubric()
-    # Bumped from "1.0.0" for the v2.0.0 incubation re-baseline. The stamp is
-    # what keeps pre-/post-calibration rows separable in
+    # Bumped to "2.1.0" for the 2026-08-24 prose revision (gating rename, no
+    # weight/threshold changes — major stays 2 so scored_stage_aware still
+    # selects the stage-aware scales). The stamp is what keeps
+    # pre-/post-calibration rows separable in
     # opportunity_assessments.rubric_version, so it is pinned, not derived.
-    assert RUBRIC_VERSION == rubric.version == "2.0.0"
+    assert RUBRIC_VERSION == rubric.version == "2.1.0"
     assert RUBRIC_CONTENT_HASH == rubric.content_hash
     assert len(RUBRIC_CONTENT_HASH) == 12
     assert all(c in "0123456789abcdef" for c in RUBRIC_CONTENT_HASH)
@@ -233,7 +248,7 @@ def test_rejects_a_missing_incubation_banding_table(tmp_path):
 
 
 def test_rejects_missing_version(tmp_path):
-    path = _mutated_copy(tmp_path, 'version = "2.0.0"', 'version = ""')
+    path = _mutated_copy(tmp_path, 'version = "2.1.0"', 'version = ""')
     with pytest.raises(RubricError, match=r"\[meta\].version"):
         parse_rubric(path)
 
@@ -244,7 +259,7 @@ def test_rejects_version_longer_than_the_column_width(tmp_path):
     # fail loudly here, never truncate silently at the write site -- silent
     # truncation would let two distinct long versions stamp identically and
     # destroy pre/post-calibration comparability.
-    path = _mutated_copy(tmp_path, 'version = "2.0.0"', 'version = "2.0.0-twenty-one-chars"')
+    path = _mutated_copy(tmp_path, 'version = "2.1.0"', 'version = "2.1.0-twenty-one-chars"')
     with pytest.raises(RubricError, match=r"\[meta\].version.*20 char.*rubric_version"):
         parse_rubric(path)
 
@@ -328,7 +343,9 @@ def test_renderer_covers_the_whole_document():
     assert "### 6. Structured recommendation" in out
     assert '"unconfirmed"' in out
     assert "### One-line decision heuristic" in out
-    assert "credible staged exit" in out
+    # A phrase from the v2.1.0 heuristic — the funded-experiment logic that
+    # replaced the old "credible staged exit" checklist sentence.
+    assert "the grant is what buys the result" in out
 
 
 def test_specialist_ownership_is_declared_for_eight_dimensions():

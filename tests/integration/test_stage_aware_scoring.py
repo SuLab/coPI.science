@@ -150,8 +150,10 @@ async def test_an_incubation_verdict_is_scored_on_the_incubation_scale(engine):
     # selection) can tell which scale produced the number.
     assert row.funnel_stage == "incubation"
     # And the row says which rubric revision it was scored under. A score is
-    # only comparable to another score from the same document.
-    assert row.rubric_version == RUBRIC_VERSION == "2.0.0"
+    # only comparable to another score from the same document. ("2.1.0" is the
+    # 2026-08-24 prose revision — same weights, thresholds and scales as 2.0.0,
+    # so the stage-aware arithmetic this file pins is unchanged.)
+    assert row.rubric_version == RUBRIC_VERSION == "2.1.0"
 
 
 @pytest.mark.asyncio

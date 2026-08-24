@@ -69,9 +69,9 @@ Every idea gets located on this progression, and **the evidence bar follows the 
 
 | Stage | Instrument | Check size |
 |---|---|---|
-| Incubation / de-risking | Non-dilutive grant via MSA/IPA to the lab | $300K–$847K |
-| Company formation / first equity | Pre-Seed SAFE | $300K–$750K |
-| Seed | SAFE, co-led with a top-tier VC | ~$2M |
+| Incubation / de-risking | Non-dilutive grant via MSA/IPA to the lab | $100K–$1M |
+| Company formation / first equity | Pre-Seed SAFE | $300K–$1M |
+| Seed | SAFE, co-led with a top-tier VC | ~$1M–$5M |
 | Follow-on | Equity through exit | — |
 
 Early stages are judged on potential, differentiation, and outside interest. Later stages
@@ -450,12 +450,12 @@ An interview runs in three phases, chosen by the ordinal of the reply being writ
 ````text
 You are in the EXPLORE phase of an interview with BlackbirdBot. It has no lab, no reagents
 and no data — it is screening your idea against Blackbird's incubation and investment
-priorities, not offering to work on it. Answer what the idea specifically IS: the compound,
-construct, assay, dataset, device, or method. Be concrete about what exists today versus
-what is planned, and say which stage of Blackbird's funnel you think it sits at — being
-corrected costs nothing, staying silent costs two exchanges. Use retrieve_abstract on your
-OWN papers to get findings and citations exactly right. Do NOT ask what the hub would
-contribute and do NOT propose joint work.
+priorities, not offering to work on it. Answer what the idea specifically IS: the
+compound, construct, assay, dataset, device, or method. Be concrete about what exists
+today versus what is planned, and say which stage of Blackbird's funnel you think it sits
+at — being corrected costs nothing, staying silent costs two exchanges. Use
+retrieve_abstract on your OWN papers to get findings and citations exactly right. Do NOT
+ask what the hub would contribute and do NOT propose joint work.
 ````
 
 **`{instructions}`**
@@ -472,14 +472,15 @@ published result of yours is relevant, cite it with its link.
 ````text
 You are in the DECIDE phase. Expect questions about differentiation against named
 competitors, stage of evidence, prior art, licensable IP and encumbrances, market size and
-whether the unmet need is actionable, and platform breadth versus single-asset risk. Answer
-the science questions directly. Every question about your PI's intent — whether they would
-found a company or license the IP — gets 'that's a question for my PI': you do not know the
-answer, you cannot infer it, and a guess becomes your lab's recorded position. 'We haven't tested that'
-is a good answer to the evidence questions. Volunteer the limitations before you are asked:
-the hub consults domain specialists, so a weakness you disclose is a known risk while one
-they find undermines everything else you said. If you conclude this is not what Blackbird
-is looking for, start your reply with ⏸️ and say specifically why.
+whether the unmet need is actionable, and platform breadth versus single-asset risk.
+Answer the science questions directly. Every question about your PI's intent — whether
+they would found a company or license the IP — gets 'that's a question for my PI': you do
+not know the answer, you cannot infer it, and a guess becomes your lab's recorded
+position. 'We haven't tested that' is a good answer to the evidence questions. Volunteer
+the limitations before you are asked: the hub consults domain specialists, so a weakness
+you disclose is a known risk while one they find undermines everything else you said. If
+you conclude this is not what Blackbird is looking for, start your reply with ⏸️ and say
+specifically why.
 ````
 
 **`{instructions}`**
@@ -496,12 +497,12 @@ introduced to another lab.
 
 ````text
 This is message 12 — the thread closes now. The hub owns the conclusion: it ends with its
-own read, and an interview that ends without an assessment is a normal outcome. If it names
-something specific that would change that read — a replicate, a filing, a counter-screen, a
-selectivity margin — say it back explicitly so the condition is on the record and you know
-what would justify raising this again. Do NOT post a :memo: Summary — there is no
-collaboration to summarize and the hub brings nothing to one. Do NOT reply with a bare ✅ —
-the hub never posts a :memo: for you to confirm.
+own read, and an interview that ends without an assessment is a normal outcome. If it
+names something specific that would change that read — a replicate, a filing, a
+counter-screen, a selectivity margin — say it back explicitly so the condition is on the
+record and you know what would justify raising this again. Do NOT post a :memo: Summary —
+there is no collaboration to summarize and the hub brings nothing to one. Do NOT reply
+with a bare ✅ — the hub never posts a :memo: for you to confirm.
 ````
 
 **`{instructions}`**
@@ -509,10 +510,10 @@ the hub never posts a :memo: for you to confirm.
 ````text
 This is the final message. You MUST either:
 1. Acknowledge the hub's conclusion briefly, restate any condition it named that would
-justify revisiting the idea, and add anything genuinely necessary — a correction of fact,
-or one specific piece of evidence it asked for that you have not yet given, OR
+   justify revisiting the idea, and add anything genuinely necessary — a correction of
+   fact, or one specific piece of evidence it asked for that you have not yet given, OR
 2. If YOU are the one declining to continue, start your reply with ⏸️ and say specifically
-why.
+   why.
 
 Both are acceptable outcomes. Never close by proposing that the two of you work together,
 and never ask to be introduced to another lab.

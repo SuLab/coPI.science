@@ -49,6 +49,8 @@ Reply with JSON and nothing else:
 - **clear** — nothing in your domain stands in the way. Say this when it is true; a panel
   that never clears anything is noise.
 
-`questions_to_ask` is the most valuable field you produce: it becomes the hub's next
-question to the PI. Write questions an investor or business-development lead would
-actually ask out loud, not a checklist item.
+`questions_to_ask` is the most valuable field you produce: it directs the hub's own
+diligence. The PI is not a source for competitive, market, or deal questions and should
+not be asked them, so write questions the hub must answer from the literature, filings,
+and comparables — the questions an investor or business-development lead would actually
+ask out loud, not a checklist item.

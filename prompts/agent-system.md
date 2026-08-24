@@ -52,9 +52,9 @@ Every idea gets located on this progression, and **the evidence bar follows the 
 
 | Stage | Instrument | Check size |
 |---|---|---|
-| Incubation / de-risking | Non-dilutive grant via MSA/IPA to the lab | $300K–$847K |
-| Company formation / first equity | Pre-Seed SAFE | $300K–$750K |
-| Seed | SAFE, co-led with a top-tier VC | ~$2M |
+| Incubation / de-risking | Non-dilutive grant via MSA/IPA to the lab | $100K–$1M |
+| Company formation / first equity | Pre-Seed SAFE | $300K–$1M |
+| Seed | SAFE, co-led with a top-tier VC | ~$1M–$5M |
 | Follow-on | Equity through exit | — |
 
 Early stages are judged on potential, differentiation, and outside interest. Later stages

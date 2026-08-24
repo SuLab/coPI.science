@@ -81,7 +81,14 @@ _EXPECTED_DIMENSION_COUNT = 13
 # of the `<assessment_json>` skeleton's `gating` object and of the
 # `opportunity_assessments.gating` column, so the document may reword their
 # titles/descriptions but must define exactly these three.
-_REQUIRED_GATING_KEYS = ("life_sciences_domain", "credible_tech_source", "fto_achievable")
+# v2.1.0 renamed the third gate: freedom-to-operate is diligence, not a gate,
+# and translational potential took over the key (sidecar, TOML table and this
+# tuple all rename together — tests/unit/test_rubric_prompt_sync.py holds them).
+# Historical rows keep the `fto_achievable` key they were written with; the
+# gating column is JSONB and the read paths render its keys generically.
+_REQUIRED_GATING_KEYS = (
+    "life_sciences_domain", "credible_tech_source", "translational_potential",
+)
 
 
 class RubricError(RuntimeError):

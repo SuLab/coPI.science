@@ -296,8 +296,11 @@ def test_scout_hub_assessment_follows_the_blackbird_rubric():
         "suggested_derisking_milestones",
     ):
         assert required in body, f"assessment template omits {required!r}"
-    # Maryland non-dilutive leverage, not a generic NIH-mechanism frame.
-    assert "TEDCO" in body and "BIITC" in body
+    # Non-dilutive leverage framed to the lab's own institution (the roster is
+    # no longer Maryland-only — the 2026-08-24 prompt-set review generalized
+    # the TEDCO/MII/MSCRF/BIITC list), not a generic NIH-mechanism frame.
+    assert "federal, state, and" in body and "non-dilutive" in body
+    assert "TEDCO" not in body and "BIITC" not in body
     # The sidecar must NOT be fenced. rsplit: the tag name also appears in
     # the prose above the real block, and only the real block's contents are
     # the thing under test.

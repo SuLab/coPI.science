@@ -8,9 +8,9 @@ hub has asked you one question about one opportunity. Answer only within your do
 Scope against Blackbird's actual funding vehicles and durations:
 
 - **Band fit.** Does the proposed scope and cost fit inside one of Blackbird's actual
-  funding bands — incubation grant ($300K–$847K), pre-seed ($300K–$750K), or seed
-  (~$2M) — or does it implicitly require more capital than the vehicle being discussed can
-  provide?
+  funding bands — incubation grant ($100K–$1M), pre-seed ($300K–$1M), or seed
+  (~$1M–$5M) — or does it implicitly require more capital than the vehicle being discussed
+  can provide?
 - **Duration realism.** Is the workplan achievable within Blackbird's standard 12–24 month
   funding horizon, or does it quietly assume a longer runway without saying so?
 - **Capital efficiency.** Does each dollar requested map to a specific, decision-relevant

@@ -469,8 +469,8 @@ when a form stops working after a deploy.
 `hybrid_property` over `user_role`, so it still works in both SQL
 (`select(User.is_admin)`) and Python, but **cannot be assigned**. Set the role
 instead. The physical `users.is_admin` column stays in the database, unmapped and
-defaulted. Dropping it is deferred to a separate later migration (`0037`+ — `0031`
-through `0036` are all taken now), which **has not been written, let alone applied** —
+defaulted. Dropping it is deferred to a separate later migration (`0038`+ — `0031`
+through `0037` are all taken now), which **has not been written, let alone applied** —
 see the design doc's §8.
 
 > **Deploy order for `0028_add_user_role` — migrate BEFORE the new code serves.**
@@ -647,6 +647,24 @@ stay comparable.
 > The agent image bakes `src/` in too and must be rebuilt separately
 > (`$DC --profile agent build agent`). Production was at `0035` and this branch
 > is `0036`, so this box applies to the next deploy, not to some hypothetical one.
+
+> **Deploy order for `0037_recommended_next_experiment` — migrate BEFORE the new
+> code serves.** `0037` is one additive nullable Text column
+> (`opportunity_assessments.recommended_next_experiment`, sidecar item 10 of
+> rubric v2.1.0 — the single experiment Blackbird should fund next), so *old
+> code against the new schema* is safe. The reverse is not: the new code **maps
+> the column**, so against a pre-`0037` database every
+> `select(OpportunityAssessment)` — both assessment list pages, both detail
+> pages — raises `UndefinedColumn`, and on the engine side `_persist_assessment`
+> names it in the INSERT, so every verdict write fails too. Build, migrate from
+> a one-off container, then start — same ordering as `0028`/`0030`/`0036`. NULL
+> on every pre-`0037` row, deliberately never backfilled: old verdicts were
+> never asked to name one, and `raw_verdict` keeps what they did emit. The same
+> 2026-08-24 change set RENAMED the third gating key
+> (`fto_achievable` → `translational_potential`, rubric v2.1.0): needs no DDL —
+> `gating` is JSONB and old rows keep their `fto_achievable` key, unrewritten —
+> but the agent image must be rebuilt or the running hub keeps emitting the old
+> contract while the rubric banner claims 2.1.0.
 >
 > Four things to expect afterwards, none of them a regression:
 >
@@ -750,7 +768,9 @@ longer a per-deploy chore) — the diff is recorded in
 delta was a fourth **`baltimore_commitment`** gating criterion, deliberately absent from
 the tracked rubric: the three gating keys are structural (the sidecar's JSON keys and the
 `opportunity_assessments.gating` keys), and `blackbird_rubric.py`'s validator rejects a
-fourth outright.
+fourth outright. (Since 2026-08-24 / rubric v2.1.0 the third key is
+`translational_potential`, not `fto_achievable` — FTO was demoted from gate to diligence,
+the key renamed with the criterion, and rows written before the rename keep the old key.)
 
 - **Interview guidance is per-role Python**, not a prompt: `src/agent/thread_guidance.py`.
   The `pi_lab` strings there are byte-identical to the pre-refactor literals and are pinned

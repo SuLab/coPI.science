@@ -314,6 +314,38 @@ def test_unconfirmed_fto_does_not_require_legal():
     assert "legal" not in required_domains_for(v)
 
 
+def test_a_high_ip_fto_score_requires_legal():
+    """Since the third gate's rename (fto_achievable -> translational_potential,
+    rubric v2.1.0) new verdicts carry no FTO gating key at all, so the legal
+    trigger re-anchors on the score: claiming a strong IP position (ip_fto >= 4)
+    is a legal assertion and must be sourced — the same shape as platform >= 4
+    summoning technologic."""
+    v = {"recommendation": "advance", "scores": {"ip_fto": 4}}
+    assert "legal" in required_domains_for(v)
+
+
+def test_a_low_ip_fto_score_alone_does_not_require_legal():
+    v = {"recommendation": "advance", "scores": {"ip_fto": 3}}
+    assert "legal" not in required_domains_for(v)
+
+
+def test_an_fto_claim_in_text_requires_legal():
+    """FTO talk in the verdict's own prose summons legal even when the score
+    stays modest — a rationale resting on freedom-to-operate is a legal claim."""
+    v = {
+        "recommendation": "advance",
+        "rationale": "Freedom-to-operate looks clean; no blocking filings found.",
+    }
+    assert "legal" in required_domains_for(v)
+
+
+def test_translational_potential_met_does_not_require_legal():
+    """The renamed third gate is a scientific judgement, not an FTO claim —
+    marking it met must not summon counsel."""
+    v = {"recommendation": "advance", "gating": {"translational_potential": "met"}}
+    assert "legal" not in required_domains_for(v)
+
+
 def test_a_platform_claim_requires_technologic():
     v = {"scores": {"platform": 5}, "rationale": "A reusable editing platform."}
     assert "technologic" in required_domains_for(v)
@@ -463,13 +495,16 @@ def test_the_platform_condition_that_requires_technologic_is_stated():
     assert "platform" in block
 
 
-def test_the_fto_condition_that_requires_legal_is_stated():
-    """required_domains_for adds 'legal' when gating.fto_achievable == 'met'."""
-    verdict = {"recommendation": "advance", "gating": {"fto_achievable": "met"}}
+def test_the_legal_conditions_are_stated():
+    """required_domains_for adds 'legal' on ip_fto >= 4 or FTO language — the
+    post-rename triggers — and the prompt block states both, so the model can
+    aim at the floor it is graded against."""
+    verdict = {"recommendation": "advance", "scores": {"ip_fto": 4}}
     assert "legal" in required_domains_for(verdict)
     block = _mandatory_block()
     assert "legal" in block
-    assert "fto_achievable" in block
+    assert "ip_fto" in block
+    assert "freedom-to-operate" in block
 
 
 def test_the_cue_driven_domains_are_stated():

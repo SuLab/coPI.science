@@ -462,6 +462,19 @@ _BUDGET_CUES = (
     "workplan", "work plan", "budget", "timeline", "burn rate",
     "capital efficien", "runway", "cost",
 )
+
+# `legal` gained a cue tier with the v2.1.0 gating rename (fto_achievable ->
+# translational_potential): new verdicts carry no FTO gating key, so the old
+# trigger — gating.fto_achievable == "met" — can never fire on them, and
+# without a replacement `legal` would be unrequirable on any post-rename
+# verdict (the same hole M7 closed for commercial/budget). Narrow on the same
+# inverted cost model as _COMMERCIAL_CUES. "patent" and "prior art" are absent
+# by decision, not oversight: the hub is REQUIRED to report its prior-art
+# searches in rationale, so either would fire on nearly every verdict — a
+# requirement that is always on is `_ALWAYS` with extra steps.
+_LEGAL_CUES = (
+    "freedom-to-operate", "freedom to operate", "fto", "encumb", "co-own",
+)
 # "milestone" is NOT here on purpose. `_haystack` folds in every
 # `suggested_derisking_milestones` entry, and a verdict at advance/conditional
 # essentially always carries some, so the cue would fire on nearly every verdict
@@ -587,7 +600,7 @@ def panel_is_owed(recommendation: object, band: object = None) -> bool:
 # whose stems are that common is exactly what this tier is for. "costs" is
 # still reached, by the plural rule.
 _WORD_ONLY_CUES: frozenset[str] = frozenset({
-    "als", "aso", "hit", "adc", "compound", "cost",
+    "als", "aso", "hit", "adc", "compound", "cost", "fto",
 })
 
 
@@ -683,11 +696,28 @@ def required_domains_for(
     if any(_cue_matches(cue, text) for cue in _BUDGET_CUES):
         required.add("budget")
 
+    scores = verdict.get("scores")
+
+    # Legal has three routes in, deliberately additive across the v2.1.0
+    # gating rename (fto_achievable -> translational_potential):
+    #   - the historical gate: a verdict written under the old contract (or by
+    #     an old image) that marks gating.fto_achievable "met" is claiming
+    #     freedom-to-operate, and that claim must be sourced;
+    #   - the score: ip_fto >= 4 claims a strong IP position — the same shape
+    #     as platform >= 4 summoning technologic;
+    #   - the prose: FTO/encumbrance language in the verdict's own text.
     gating = verdict.get("gating")
-    if isinstance(gating, dict) and gating.get("fto_achievable") == "met":
+    fto_gate_claimed = (
+        isinstance(gating, dict) and gating.get("fto_achievable") == "met"
+    )
+    ip_scored = isinstance(scores, dict) and isinstance(
+        scores.get("ip_fto"), (int, float)
+    ) and scores.get("ip_fto", 0) >= 4
+    if fto_gate_claimed or ip_scored or any(
+        _cue_matches(cue, text) for cue in _LEGAL_CUES
+    ):
         required.add("legal")
 
-    scores = verdict.get("scores")
     platform_scored = isinstance(scores, dict) and isinstance(
         scores.get("platform"), (int, float)
     ) and scores.get("platform", 0) >= 4
