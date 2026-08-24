@@ -509,6 +509,7 @@ def weighted_score(scores: dict[str, object] | None, stage: object = None) -> fl
         key.strip().lower(): value for key, value in scores.items() if isinstance(key, str)
     }
     total = 0.0
+    clamped: dict[str, float] = {}
     for key, weight in weights.items():
         raw = normalized.get(key)
         if isinstance(raw, bool) or not isinstance(raw, (int, float)):
@@ -521,7 +522,23 @@ def weighted_score(scores: dict[str, object] | None, stage: object = None) -> fl
             # min()/max() clamp below, where NaN comparisons are always False
             # and silently produce a perfect 5.0.
             continue
+        if not _MIN_SCORE <= value <= _MAX_SCORE:
+            clamped[key] = value
         total += max(_MIN_SCORE, min(_MAX_SCORE, value)) * weight
+
+    if clamped:
+        # Same policy as `unmatched` below: diagnosable, not fatal. The clamp
+        # keeps an out-of-contract number from poisoning the mean, but it also
+        # means the STORED score no longer equals the score that was counted —
+        # run ee419dd3 stored three explicit 0s on the 1-5 scale that were
+        # silently counted as 1s, and an audit averaging the stored JSONB got
+        # per-dimension means that matched nothing the computation ever saw.
+        # (NaN/inf take the unscorable branch above, which counts as 0, and
+        # are deliberately not reported as clamped — they were not.)
+        logger.warning(
+            "weighted_score: score(s) outside the %s-%s scale were clamped "
+            "into range: %s", _MIN_SCORE, _MAX_SCORE, clamped,
+        )
 
     unmatched = sorted(set(normalized) - weights.keys())
     if unmatched:

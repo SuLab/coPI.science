@@ -410,9 +410,15 @@ def clear_rate_warning(counts: dict[str, int] | None) -> str | None:
     if rate >= MIN_CLEAR_RATE:
         return None
     return (
-        f"[specialists] {clears} of {total} consults this run returned 'clear' "
-        f"({rate:.1%}, floor {MIN_CLEAR_RATE:.0%}). A panel that clears almost "
-        f"nothing cannot discriminate — check persona calibration."
+        # "counted", because the tally is smaller than the run's
+        # `specialist_consults` row count whenever a consult TRUNCATED: those
+        # are recorded durably but deliberately never tallied (tools.py — an
+        # unread specialist has cleared nothing). Run ee419dd3's 228-vs-229
+        # went to an audit as an unexplained discrepancy because the message
+        # did not say which basis it was counting on.
+        f"[specialists] {clears} of {total} counted consults this run returned "
+        f"'clear' ({rate:.1%}, floor {MIN_CLEAR_RATE:.0%}). A panel that clears "
+        f"almost nothing cannot discriminate — check persona calibration."
     )
 
 

@@ -113,6 +113,18 @@ def test_phase4_states_the_dimension_count_the_document_defines():
     )
 
 
+def test_phase4_says_the_skeleton_zeros_are_placeholders_not_scores():
+    """The skeleton pre-fills every dimension score with 0 while the scale is
+    1-5, and "a key you omit scores zero" frames 0 as the no-evidence value —
+    so run ee419dd3 stored three explicit 0s, which weighted_score silently
+    clamped UP to 1 (a present-0 outscores an omitted key). The prompt must
+    close the ambiguity it created: the 0s are placeholders, never a
+    submittable score."""
+    body = _norm(_phase4_text())
+    assert "placeholders, not scores" in body
+    assert "never submit a 0" in body
+
+
 # ---------------------------------------------------------------------------
 # specialists.py vs. the document
 # ---------------------------------------------------------------------------

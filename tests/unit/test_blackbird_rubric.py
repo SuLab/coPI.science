@@ -138,6 +138,28 @@ def test_unrecognized_key_is_logged_and_still_scores_as_zero(caplog):
     assert "not in the thirteen" in caplog.text
 
 
+def test_out_of_scale_scores_are_logged_when_clamped(caplog):
+    # An explicit 0 is out of contract (the scale is 1-5) and clamps UP to 1,
+    # so the stored score no longer equals the score that was counted. Run
+    # ee419dd3 stored three such 0s and nothing said so — the clamp must be
+    # diagnosable, same policy as the unrecognized-key warning above.
+    scores = dict.fromkeys(RUBRIC_WEIGHTS, 3)
+    scores["chemistry_dc_path"] = 0
+    weighted_score(scores)
+    assert "chemistry_dc_path" in caplog.text
+    assert "clamped" in caplog.text
+
+
+def test_in_range_and_non_numeric_scores_do_not_log_a_clamp(caplog):
+    # In-range values need no diagnosis, and a non-numeric value takes the
+    # unscorable path (counts as 0 without ever reaching the clamp) — warning
+    # "clamped" there would misdescribe what happened.
+    weighted_score(dict.fromkeys(RUBRIC_WEIGHTS, 3))
+    weighted_score({"differentiation": "high"})
+    weighted_score(dict.fromkeys(RUBRIC_WEIGHTS, float("nan")))
+    assert "clamped" not in caplog.text
+
+
 def test_bool_dimension_values_count_as_zero_not_as_one_or_zero():
     # isinstance(True, int) is True in Python, so without an explicit bool
     # guard a True score would be silently accepted as 1 (and False as 0,

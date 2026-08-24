@@ -231,8 +231,10 @@ of it may appear anywhere in `<slack_message>` above:
 If you're missing information for one of these, say so in `rationale` and mark the
 relevant gating criterion *unconfirmed* — never skip it silently and never guess.
 
-Score each dimension 1–5 (5 = strongly meets Blackbird's bar). Do not compute
-`weighted_score` yourself — leave it at 0 and it will be calculated from your scores.
+Score each dimension 1–5 (5 = strongly meets Blackbird's bar). The `0`s in the skeleton
+below are placeholders, not scores — never submit a 0 for any dimension. If you genuinely
+cannot assess one, score it 1 and say why in `rationale`. Do not compute `weighted_score`
+yourself — leave it at 0 and it will be calculated from your scores.
 
 Every one of the thirteen keys is required. `weighted_score` is computed server-side from
 these; a key you omit scores zero. Which weights apply follows from the `funnel_stage` you

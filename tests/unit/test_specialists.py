@@ -820,6 +820,20 @@ def test_the_clear_rate_floor_is_pinned():
     assert MIN_CLEAR_RATE == 0.05
 
 
+def test_the_alarm_names_its_denominator_as_counted_consults():
+    """The tally excludes TRUNCATED consults — recorded durably, deliberately
+    never counted (tools.py: an unread specialist has cleared nothing) — so
+    `specialist_consults` can hold more rows for a run than the alarm's total.
+    Run ee419dd3 measured the gap: 229 rows, "2 of 228" in the alarm, and the
+    one-row mismatch was written up as an unexplained open question. The
+    message must say "counted consults" so an operator reconciling it against
+    the table knows the difference is by design, not a lost count."""
+    # ee419dd3's exact counted shape: 202 caution + 24 blocking + 2 clear.
+    message = clear_rate_warning({"caution": 202, "blocking": 24, "clear": 2})
+    assert message is not None
+    assert "2 of 228 counted consults" in message
+
+
 def test_nothing_but_the_three_publishable_fields_can_reach_a_note():
     """The privacy rule is enforced by the SIGNATURE, not by discipline at the
     call site: an interview thread is visible to every lab in the workspace, so

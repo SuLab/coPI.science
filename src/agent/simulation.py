@@ -1175,6 +1175,13 @@ class SimulationEngine:
         # silence it: 141 caution / 26 blocking / 1 clear out of 168, and that
         # one `clear` is the only one in the database's entire history. The alarm
         # existed precisely for that distribution and could not fire.
+        #
+        # `specialist_consults` can hold MORE rows for the run than this tally:
+        # a TRUNCATED consult is recorded durably but never tallied (tools.py —
+        # an unread specialist has cleared nothing, and the floor refuses the
+        # row too). So an alarm-vs-table mismatch like ee419dd3's 228-vs-229 is
+        # by design, not a lost count — the message says "counted consults" for
+        # exactly this reason.
         alarm = clear_rate_warning(self._consult_signal_counts)
         if alarm:
             logger.warning("%s", alarm)
