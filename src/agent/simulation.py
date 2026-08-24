@@ -3680,6 +3680,12 @@ class SimulationEngine:
                 milestones if isinstance(milestones, list) else None
             ),
             rationale=_str_or_none(verdict.get("rationale")),
+            # Sidecar item 10 (rubric v2.1.0): the single experiment Blackbird
+            # should fund next. Degrades to None on a wrong type like its Text
+            # siblings; raw_verdict keeps the original either way.
+            recommended_next_experiment=_str_or_none(
+                verdict.get("recommended_next_experiment")
+            ),
             raw_verdict=verdict,
             # WHICH rubric produced this row. The weights, thresholds and
             # prompt text all come from one document now

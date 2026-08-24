@@ -71,7 +71,7 @@ EXIT_OK = 0
 EXIT_BLOCKED = 1
 EXIT_WARN = 2
 
-DEFAULT_TARGET = "0036"
+DEFAULT_TARGET = "0037"
 #: Revisions this migration path has been exercised from.
 #:
 #: 0020 and 0021 are here because origin/main's own alembic head is 0021 (PR19). A
@@ -95,7 +95,9 @@ DEFAULT_TARGET = "0036"
 #: this tuple, a database stamped 0033 is neither current == target nor a supported
 #: start, so revision_status() BLOCKS the very migration (0034) this task adds. Adding it
 #: here is the fix. 0035 is here for exactly that reason: production is stamped 0035, so
-#: it is the starting point for 0036.
+#: it is the starting point for 0036. 0036 joins for the same reason the comment above
+#: predicts every time DEFAULT_TARGET moves: with the target at 0037, a database stamped
+#: 0036 must be a supported start, not a BLOCK.
 #:
 #: Starting at 0020/0021 is strictly safer than starting at 0018: uq_agent_messages_run_ts
 #: already exists, so duplicates cannot be present and there is no 0019 index build to
@@ -111,7 +113,7 @@ DEFAULT_TARGET = "0036"
 #: tables, no backfill).
 SUPPORTED_START_REVISIONS = (
     "0018", "0019", "0020", "0021", "0023", "0024", "0025", "0026", "0027", "0028", "0029",
-    "0030", "0031", "0032", "0033", "0034", "0035",
+    "0030", "0031", "0032", "0033", "0034", "0035", "0036",
 )
 
 #: Start revisions at which migration 0019 has already run, so the expensive
@@ -312,7 +314,7 @@ PLANNED_OBJECTS: tuple[PlannedObject, ...] = (
 
 REVISION_ORDER = (
     "0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027", "0028",
-    "0029", "0030", "0031", "0032", "0033", "0034", "0035", "0036",
+    "0029", "0030", "0031", "0032", "0033", "0034", "0035", "0036", "0037",
 )
 
 

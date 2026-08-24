@@ -27,7 +27,9 @@ async def test_container_is_migrated(engine):
         #      llm_call_logs.cache_read_input_tokens/.cache_creation_input_tokens,
         #      private_channel_members.user_id FK SET NULL -> CASCADE,
         #      plus two data repairs (milestones, JSON null -> SQL NULL)
-        assert v == "0036"
+        # 0037 opportunity_assessments.recommended_next_experiment (sidecar
+        #      item 10 of rubric v2.1.0, additive nullable Text)
+        assert v == "0037"
 
 
 async def test_writes_are_rolled_back_part1(db_session):

@@ -730,6 +730,67 @@ async def test_persist_assessment_drops_non_string_text_fields_instead_of_dying(
                 await cleanup.commit()
 
 
+@pytest.mark.asyncio
+async def test_persist_assessment_stores_the_recommended_next_experiment(engine):
+    """Item 10 of the sidecar contract: the single experiment Blackbird should
+    fund next is a first-class column staff can read on the detail pages, not
+    something they dig out of raw_verdict. A non-string value degrades to None
+    per-field, like its Text siblings company_or_project and rationale."""
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from src.agent.simulation import SimulationEngine
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as setup:
+        run = SimulationRun()
+        setup.add(run)
+        await setup.commit()
+        run_id = run.id
+
+    stub = SimulationEngine(
+        agents=[], slack_clients={}, session_factory=factory, simulation_run_id=run_id,
+    )
+    await SimulationEngine._persist_assessment(stub, "blackbird", "general", {
+        "subject_agent_id": "wang",
+        "recommendation": "advance",
+        "recommended_next_experiment": (
+            "EXPERIMENT-MARKER: 384-well selectivity panel; pass = >30-fold margin"
+        ),
+    })
+    await SimulationEngine._persist_assessment(stub, "blackbird", "general", {
+        "subject_agent_id": "hart",
+        "recommendation": "advance",
+        "recommended_next_experiment": {"summary": "structured, not prose"},
+    })
+
+    try:
+        async with factory() as check:
+            rows = (await check.execute(
+                select(OpportunityAssessment).where(
+                    OpportunityAssessment.simulation_run_id == run_id
+                )
+            )).scalars().all()
+            by_subject = {r.subject_agent_id: r for r in rows}
+            assert by_subject["wang"].recommended_next_experiment == (
+                "EXPERIMENT-MARKER: 384-well selectivity panel; pass = >30-fold margin"
+            )
+            # Wrong type degrades to None without sinking the row; the original
+            # survives verbatim in raw_verdict for audit.
+            assert by_subject["hart"].recommended_next_experiment is None
+            assert by_subject["hart"].raw_verdict["recommended_next_experiment"] == {
+                "summary": "structured, not prose"
+            }
+    finally:
+        async with factory() as cleanup:
+            stale = (await cleanup.execute(
+                select(SimulationRun).where(SimulationRun.id == run_id)
+            )).scalar_one_or_none()
+            if stale is not None:
+                await cleanup.delete(stale)
+                await cleanup.commit()
+
+
 # --- Phase 4 wiring: the real Option A relocation, not the
 # _persist_assessment stub (Task 11 fix round 1, Finding 2; relocated by the
 # reply-only-hub reconciliation, Task 6) -------------------------------------

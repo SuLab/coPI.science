@@ -312,6 +312,16 @@
 </div>
 {% endif %}
 
+{# Sidecar item 10 (rubric v2.1.0) — the line staff act on, so it sits above
+   the milestones it is distilled from. NULL on every row written before 0037,
+   which is why the whole block is conditional rather than showing "none". #}
+{% if a.recommended_next_experiment %}
+<div class="bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6">
+    <h3 class="text-sm font-semibold text-gray-700 uppercase mb-2">Recommended next experiment</h3>
+    <p class="assessment-next-experiment text-sm text-gray-700 whitespace-pre-line">{{ a.recommended_next_experiment }}</p>
+</div>
+{% endif %}
+
 {% if a.derisking_milestones %}
 <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6">
     <h3 class="text-sm font-semibold text-gray-700 uppercase mb-2">De-risking milestones</h3>

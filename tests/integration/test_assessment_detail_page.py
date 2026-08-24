@@ -211,6 +211,34 @@ async def test_admin_detail_page_renders_the_whole_verdict(client, db_session, a
     assert 'href="/admin/assessments"' in html
 
 
+async def test_detail_page_renders_the_recommended_next_experiment(
+    client, db_session, admin, manager
+):
+    """Sidecar item 10 is the line Blackbird staff act on, so it renders as its
+    own labelled block on BOTH surfaces — the shared body template — and only
+    when the column holds something (rows written before 0037 are NULL)."""
+    run = await factories.make_simulation_run(db_session)
+    assessment = OpportunityAssessment(
+        simulation_run_id=run.id,
+        agent_id=HUB,
+        subject_agent_id=SUBJECT,
+        channel_name=CHANNEL,
+        recommendation="advance",
+        recommended_next_experiment="NEXT-EXPERIMENT-MARKER-SELECTIVITY-PANEL",
+    )
+    db_session.add(assessment)
+    await db_session.flush()
+
+    for path, user in (
+        (f"/admin/assessments/{assessment.id}", admin),
+        (f"/manager/assessments/{assessment.id}", manager),
+    ):
+        resp = await client.get(path, headers=auth_headers(user.id))
+        assert resp.status_code == 200
+        assert "NEXT-EXPERIMENT-MARKER-SELECTIVITY-PANEL" in resp.text
+        assert "Recommended next experiment" in resp.text
+
+
 async def test_admin_detail_page_shows_the_panel_and_the_tool_activity(
     client, db_session, admin
 ):

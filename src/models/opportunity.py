@@ -78,6 +78,14 @@ class OpportunityAssessment(Base):
         JSONB(none_as_null=True), nullable=True
     )
     rationale: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Sidecar item 10 (rubric v2.1.0): the single experiment Blackbird should
+    # fund next — the line staff act on, so it is a first-class column rather
+    # than a raw_verdict spelunk. NULL for every row written before 0037 (never
+    # backfilled: old verdicts were not asked for one) and for a verdict that
+    # names none.
+    recommended_next_experiment: Mapped[str | None] = mapped_column(
+        Text, nullable=True
+    )
     # The verdict exactly as emitted, so a schema change never loses the original.
     raw_verdict: Mapped[dict | None] = mapped_column(
         JSONB(none_as_null=True), nullable=True
