@@ -712,11 +712,9 @@ async def test_a_crash_after_partial_work_leaves_a_retryable_job(wk, monkeypatch
     A pipeline that gets partway (profile row added and flushed) and then raises must
     not leave the job 'completed'. It must be retryable.
 
-    NOTE — observed side effect, reported not fixed: `process_job`'s except branch
-    commits the *same* session the pipeline was using, so the pipeline's partial writes
-    are committed alongside the failure record instead of being rolled back. This test
-    pins that behaviour rather than asserting the behaviour we would prefer; see the
-    task report.
+    NOTE: `process_job`'s except branch now rolls back before its bookkeeping writes,
+    so the pipeline's partial writes are discarded rather than committed alongside the
+    failure record — the retry starts clean.
 
     Control: the identical pipeline without the raise completes and is not retried.
     """
@@ -750,30 +748,28 @@ async def test_a_crash_after_partial_work_leaves_a_retryable_job(wk, monkeypatch
     assert (await wk.job_state(jid2)).status == "completed"
     assert await wk.profile_count(uid2) == 1
 
-    # Characterization of the partial write described above.
-    assert leaked == 1, (
-        "the partial profile write was rolled back — good, but the docstring and the "
-        "T5 report describing the except-branch commit are now out of date"
+    assert leaked == 0, (
+        "the pipeline's partial writes were committed alongside the failure "
+        "record — the except branch must roll back before its bookkeeping"
     )
 
 
-async def test_a_database_error_in_the_pipeline_orphans_the_job_in_processing(wk, monkeypatch):
-    """T5.3/T5.4 — the one crash `process_job`'s error handling does not survive.
+async def test_a_database_error_in_the_pipeline_is_recorded_and_retried(wk, monkeypatch):
+    """T5.3/T5.4 — a failure that poisons the transaction is recorded and retried too.
 
-    Every other failure is caught, recorded and retried. A failure that poisons the
-    transaction is different: `process_job`'s except branch writes `last_error` and
-    commits *the same session*, and that commit raises in turn. The exception escapes
-    `process_job`, no status is written, and because `claim_job` only ever looks at
-    'pending' rows the job is stranded in 'processing' with nothing in the system to
-    reap it. `run_worker`'s outer handler keeps the worker alive, so this is silent.
+    Every failure is caught, recorded and retried, including one that poisons the
+    transaction: `process_job`'s except branch now rolls back before its bookkeeping
+    writes, so a failed commit from the pipeline no longer prevents `last_error` and
+    `status` from being written. The job is claimable again on the next round instead
+    of being stranded in 'processing' with nothing in the system to reap it.
 
     The real pipeline reaches this shape at step 6 — `db.add(ResearcherProfile(...))`
     then `flush()`, with `researcher_profiles.user_id` unique and no try/except — if two
     generate_profile jobs for one user are ever in flight together.
 
-    Characterization, reported not fixed. Control: the same claim/process pair with a
-    plain Python error does record 'pending' and is retried, so "stranded in processing"
-    is a property of the database error and not of the harness.
+    Control: the same claim/process pair with a plain Python error does record
+    'pending' and is retried, so this is a property of the fixed except branch and not
+    of the harness.
     """
     uid = await wk.new_user("T5 db error")
     async with wk.factory() as db:
@@ -787,17 +783,26 @@ async def test_a_database_error_in_the_pipeline_orphans_the_job_in_processing(wk
 
     monkeypatch.setattr(worker_main, "run_profile_pipeline", duplicate_profile)
 
-    claimed = await _one_round_expecting_escape(wk.factory)
+    claimed = await _one_round(wk.factory)
     assert claimed is not None and claimed.id == jid
 
     state = await wk.job_state(jid)
-    assert state.status == "processing", (
-        f"the job is {state.status!r}; if the error handler now survives a database "
-        "error this test should assert 'pending' and the bug report is stale"
+    assert state.status == "pending", (
+        f"the job is {state.status!r}; a database error must be recorded and "
+        "retried like any other failure (deletion audit F10 / D8)"
     )
-    assert (await wk.job(jid)).last_error is None, (
-        "the failure reason reached the row after all — the handler's commit succeeded"
+    assert "duplicate key" in ((await wk.job(jid)).last_error or ""), (
+        "the failure reason never reached the row"
     )
+
+    # Retire this job before the control section: it is now legitimately 'pending'
+    # (the fix under test), and `claim_job` orders by `enqueued_at`, so left alone it
+    # would out-race jid2 for the very next claim. Under the old defective handler this
+    # never came up — the job was stuck 'processing' and excluded from the claim query
+    # by construction. Marking it terminal here is test cleanup, not a new assertion.
+    async with wk.factory() as db:
+        await db.execute(text("UPDATE jobs SET status = 'dead' WHERE id = :id"), {"id": jid})
+        await db.commit()
 
     # CONTROL: a non-database error through the identical path is recorded and retried.
     uid2 = await wk.new_user("T5 db error control")
@@ -812,19 +817,6 @@ async def test_a_database_error_in_the_pipeline_orphans_the_job_in_processing(wk
     state2 = await wk.job_state(jid2)
     assert state2.status == "pending"
     assert "a plain error (T5 control)" in ((await wk.job(jid2)).last_error or "")
-
-
-async def _one_round_expecting_escape(factory) -> Job | None:
-    """`_one_round`, asserting that `process_job` raises rather than handling it."""
-    async with factory() as db:
-        job = await worker_main.claim_job(db)
-    assert job is not None
-    with pytest.raises(Exception) as exc:  # noqa: B017 - the type is the finding
-        await worker_main.process_job(job.id, job.type, job.attempts, job.max_attempts, factory)
-    assert "PendingRollbackError" in type(exc.value).__name__ or "rollback" in str(exc.value), (
-        f"process_job raised {type(exc.value).__name__}: {exc.value}"
-    )
-    return job
 
 
 # ---------------------------------------------------------------------------

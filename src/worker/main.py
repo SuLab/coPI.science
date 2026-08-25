@@ -78,11 +78,23 @@ async def execute_monthly_refresh(job: Job, db: AsyncSession) -> None:
 
 
 async def process_job(job_id: uuid.UUID, job_type: str, job_attempts: int, job_max_attempts: int, session_factory: async_sessionmaker) -> None:
-    """Process a single job. Handles errors and updates job status."""
+    """Process a single job. Handles errors and updates job status.
+
+    The jobs row can vanish at any await: jobs.user_id is ON DELETE CASCADE,
+    so an account deletion mid-run takes the row with it (deletion audit F10).
+    Both the initial re-fetch and the failure bookkeeping tolerate that — the
+    account is gone, so there is no state anyone still needs updated.
+    """
     async with session_factory() as db:
         # Re-fetch the job in this session so SQLAlchemy tracks changes
         result = await db.execute(select(Job).where(Job.id == job_id))
-        job = result.scalar_one()
+        job = result.scalar_one_or_none()
+        if job is None:
+            logger.info(
+                "Job %s no longer exists (user deleted between claim and "
+                "processing); skipping", job_id,
+            )
+            return
 
         try:
             if job.type == "generate_profile":
@@ -98,17 +110,34 @@ async def process_job(job_id: uuid.UUID, job_type: str, job_attempts: int, job_m
             logger.info("Job %s completed", job.id)
 
         except Exception as exc:
-            logger.error("Job %s failed: %s", job.id, exc, exc_info=True)
+            logger.error("Job %s failed: %s", job_id, exc, exc_info=True)
+            # The pipeline may have left the transaction aborted (e.g. an FK
+            # violation after a concurrent user delete) — clear it before the
+            # bookkeeping writes, then re-check the row still exists.
+            await db.rollback()
+            result = await db.execute(select(Job).where(Job.id == job_id))
+            job = result.scalar_one_or_none()
+            if job is None:
+                logger.info(
+                    "Job %s row is gone (user deleted mid-run); "
+                    "dropping the result", job_id,
+                )
+                return
             job.last_error = str(exc)[:2000]
 
             if job.attempts >= job.max_attempts:
                 job.status = "dead"
-                logger.warning("Job %s marked as dead after %d attempts", job.id, job.attempts)
+                logger.warning("Job %s marked as dead after %d attempts", job_id, job.attempts)
             else:
                 job.status = "pending"  # Will be retried
 
             job.completed_at = datetime.now(timezone.utc)
-            await db.commit()
+            try:
+                await db.commit()
+            except Exception:
+                # Lost a second race on the same delete; nothing left to save.
+                await db.rollback()
+                logger.info("Job %s vanished during failure bookkeeping", job_id)
 
 
 async def run_worker():

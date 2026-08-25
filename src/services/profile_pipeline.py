@@ -549,6 +549,16 @@ async def run_profile_pipeline(
     # it gates file export and revision here.
     agent_id = agent_reg.agent_id if agent_reg else None
 
+    # A concurrent account deletion can commit while this pipeline is between
+    # flushes (the worker holds no lock on the users row). Re-check before the
+    # export below: it is a plain filesystem write outside any transaction, so
+    # without this it would recreate profiles/public/{agent_id}.md for an
+    # account that no longer exists (deletion audit 2026-08-25, F10).
+    if await db.scalar(select(User.id).where(User.id == user.id)) is None:
+        raise ValueError(
+            f"User {user.id} was deleted mid-pipeline; aborting before export"
+        )
+
     # Export to markdown for agent consumption (include publications).
     # The export list is tenure-filtered EXPLICITLY (JHU R2's export rule):
     # storage is full-career, and exporting the raw top-20 is exactly how
