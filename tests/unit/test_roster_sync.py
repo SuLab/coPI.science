@@ -247,12 +247,14 @@ async def test_pending_and_inactive_rows_are_excluded_by_the_real_query(
     db_session, monkeypatch
 ):
     _patch_client(monkeypatch)
+    user = await factories.make_user(db_session)  # liveone is pi_lab: needs a linked user (F1/D7)
     for agent_id, status in [
         ("liveone", "active"), ("waiting", "pending"), ("parked", "inactive"),
     ]:
         await factories.make_agent(
             db_session, agent_id=agent_id, bot_name=f"{agent_id}Bot",
             status=status, slack_bot_token="xoxb-real-token",
+            user=user if agent_id == "liveone" else None,
         )
     await db_session.flush()
 

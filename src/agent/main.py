@@ -159,12 +159,15 @@ async def _run_simulation(
     try:
         _sf = _asm(_engine, expire_on_commit=False)
         async with _sf() as _db:
-            _stmt = _select(
-                _AR.agent_id, _AR.bot_name, _AR.pi_name, _AR.slack_bot_token, _AR.role
-            )
-            if not all_agents:
-                _stmt = _stmt.where(_AR.status == "active")
-            _rows = (await _db.execute(_stmt.order_by(_AR.agent_id))).all()
+            if all_agents:
+                _stmt = _select(
+                    _AR.agent_id, _AR.bot_name, _AR.pi_name,
+                    _AR.slack_bot_token, _AR.role,
+                ).order_by(_AR.agent_id)
+            else:
+                from src.agent.roster_query import active_roster_select
+                _stmt = active_roster_select()
+            _rows = (await _db.execute(_stmt)).all()
     finally:
         await _engine.dispose()
 
@@ -177,13 +180,16 @@ async def _run_simulation(
     if not agents:
         logger.error(
             "No agents in roster (filter=%s) — nothing to run; exiting.",
-            "all statuses (--all-agents)" if all_agents else "status='active'",
+            "all statuses (--all-agents)" if all_agents
+            else "status='active', pi_lab linked to a user",
         )
         return
 
     logger.info(
         "Roster: %d agents (%s)",
-        len(agents), "all statuses" if all_agents else "status='active'",
+        len(agents),
+        "all statuses (--all-agents)" if all_agents
+        else "status='active', pi_lab linked to a user",
     )
 
     # Resolve whether Slack is enabled. --mock forces it off; an explicit

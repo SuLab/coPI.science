@@ -7147,22 +7147,12 @@ class SimulationEngine:
         self._last_roster_poll = now
 
         try:
-            from sqlalchemy import select as sa_select
-
+            from src.agent.roster_query import active_roster_select
             from src.agent.slack_client import AgentSlackClient
-            from src.models import AgentRegistry
             from src.services.slack_tokens import env_token, is_valid_token
 
             async with self.session_factory() as db:
-                rows = (await db.execute(
-                    sa_select(
-                        AgentRegistry.agent_id,
-                        AgentRegistry.bot_name,
-                        AgentRegistry.pi_name,
-                        AgentRegistry.slack_bot_token,
-                        AgentRegistry.role,
-                    ).where(AgentRegistry.status == "active")
-                )).all()
+                rows = (await db.execute(active_roster_select())).all()
 
             desired = {r.agent_id: r for r in rows}
 
