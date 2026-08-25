@@ -577,6 +577,43 @@ before the impersonation block, so **an admin can still impersonate a denied
 account** — that is a support path, not an oversight, and it is commented at the
 check.
 
+## Deleting a PI
+
+**All deletion goes through `src/services/user_deletion.py::delete_user_account`**
+(both `POST /profile/delete-account` and `POST /admin/users/{id}/delete`).
+Never `db.delete(user)` directly — before 2026-08-25 that was the whole
+process, and it left the deleted PI's agent RUNNING: `agents.user_id` is SET
+NULL, the roster sync loads by status alone, and the agent reads its persona
+from `profiles/public/{agent_id}.md`, not from the users table. See
+`docs/audits/2026-08-25-pi-deletion/README.md`.
+
+What the teardown does: suspends the linked agent (`status='suspended'` — the
+one state a manager unmute cannot undo), purges `profile_revisions` (full
+profile snapshots), the agent's `pi_dm_messages`, the
+`jhu_tenure_start:{user_id}` app_settings key, the on-disk
+`profiles/public/{agent_id}.md` and `profiles/memory/{agent_id}` artifacts,
+and revokes the Slack bot token (post-commit, best-effort — a failed
+revocation is logged loudly and leaves the token in the DB column for manual
+revocation; the agent is suspended either way). The agent ROW is kept: it is
+the record behind old messages and assessments, and its `agent_id` slug stays
+reserved. Deliberately retained: `agent_messages`, `llm_call_logs`,
+assessments, and everything already posted to Slack — both confirmation pages
+say so.
+
+Guards: an impersonating admin cannot trigger the self-service delete (403);
+the last loginable admin cannot self-delete; the admin form has a
+default-checked "also remove from the access allowlist" checkbox — without it
+a deleted allowlisted ORCID can sign straight back in as `allowed`. Related:
+the allowlist promotes only `pending` users at login; a `denied` user stays
+denied (`src/routers/auth.py`).
+
+The roster criterion lives in `src/agent/roster_query.py` and excludes
+`pi_lab` rows with `user_id IS NULL` (hub/specialists are exempt). Both the
+startup load and `_sync_roster_from_db` use it; `--all-agents` bypasses it.
+One consequence to know before touching **/admin/agents → Link**: UNLINKING an
+active `pi_lab` agent (submitting the link form with an empty user) now evicts
+it from the running roster within ~30s — the same invariant, applied live.
+
 ## BlackbirdBot (the scout_hub role)
 
 BlackbirdBot screens PI ideas against `data/Blackbird_initial_priorities-criteria_v1.pdf`.
