@@ -26,6 +26,7 @@ from src.models import (
     ThreadDecision,
     User,
 )
+from src.services.agent_identity import derive_agent_identity
 from src.services.profile_export import export_profile_to_markdown
 from src.services.validators import is_valid_email
 
@@ -383,30 +384,6 @@ def _user_slack_id_in_list(user: User, slack_ids: list[str]) -> bool:
 # --------------------------------------------------------------------------
 
 
-async def derive_agent_identity(
-    db: AsyncSession, full_name: str
-) -> tuple[str, str]:
-    """Return ``(agent_id, bot_name)`` for a PI's display name.
-
-    Both values are derived here, together, because they must agree: the
-    collision prefix used to be applied to agent_id at one line and bot_name
-    rebuilt from the bare last name four lines later, so Peng Wu got
-    ``pwu`` / ``WuBot`` — colliding with Chunlei Wu's bot while the ids differed.
-    CLAUDE.md documents ``pwu`` / ``PWuBot``.
-    """
-    last_name = full_name.split()[-1]
-    stem = "".join(c for c in last_name.lower() if c.isalpha())
-    display = last_name
-
-    collision = await db.execute(
-        select(AgentRegistry).where(AgentRegistry.agent_id == stem)
-    )
-    if collision.scalar_one_or_none():
-        initial = full_name[0]
-        return f"{initial.lower()}{stem}", f"{initial.upper()}{display}Bot"
-    return stem, f"{display}Bot"
-
-
 @router.post("/request")
 async def request_agent(
     request: Request,
@@ -430,7 +407,9 @@ async def request_agent(
     if existing.scalar_one_or_none():
         return RedirectResponse(url="/agent", status_code=302)
 
-    agent_id, bot_name = await derive_agent_identity(db, current_user.name)
+    agent_id, bot_name = await derive_agent_identity(
+        db, current_user.name, orcid=current_user.orcid
+    )
 
     agent = AgentRegistry(
         agent_id=agent_id,
