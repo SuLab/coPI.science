@@ -129,3 +129,95 @@ async def test_allowlist_removed_only_when_asked(db_session):
     )
     assert kept is not None
     assert gone is None
+
+
+async def test_files_are_deleted_post_commit(db_session, monkeypatch, tmp_path):
+    pub = tmp_path / "pub"
+    mem = tmp_path / "mem"
+    monkeypatch.setattr("src.services.user_deletion._PUBLIC_DIR", pub)
+    monkeypatch.setattr("src.services.user_deletion._MEMORY_DIR", mem)
+    user, agent = await _seed_pi_with_agent(db_session)
+    slug = agent.agent_id
+    pub.mkdir()
+    (pub / f"{slug}.md").write_text("profile")
+    (mem / slug / "private").mkdir(parents=True)
+    (mem / f"{slug}.md").write_text("legacy memory")
+    (mem / slug / "public.md").write_text("memory")
+    (mem / slug / "private" / "C1.md").write_text("private memory")
+
+    report = await delete_user_account(db_session, user)
+
+    assert not (pub / f"{slug}.md").exists()
+    assert not (mem / f"{slug}.md").exists()
+    assert not (mem / slug).exists()
+    assert len(report.files_deleted) == 3
+    assert report.errors == []
+
+
+async def test_unsafe_agent_id_skips_files_but_reports(db_session, monkeypatch, tmp_path):
+    monkeypatch.setattr("src.services.user_deletion._PUBLIC_DIR", tmp_path / "pub")
+    monkeypatch.setattr("src.services.user_deletion._MEMORY_DIR", tmp_path / "mem")
+    user = await factories.make_user(db_session)
+    await factories.make_agent(
+        db_session, user=user, agent_id="../escape", status="active"
+    )
+
+    report = await delete_user_account(db_session, user)
+
+    assert report.files_deleted == []
+    assert any("unsafe agent_id" in e for e in report.errors)
+
+
+async def test_token_revoked_and_cleared_on_success(db_session, monkeypatch, tmp_path):
+    monkeypatch.setattr("src.services.user_deletion._PUBLIC_DIR", tmp_path / "pub")
+    monkeypatch.setattr("src.services.user_deletion._MEMORY_DIR", tmp_path / "mem")
+    calls = []
+
+    async def _fake_revoke(token):
+        calls.append(token)
+        return True
+
+    monkeypatch.setattr(
+        "src.services.user_deletion.revoke_token_async", _fake_revoke
+    )
+    user = await factories.make_user(db_session)
+    agent = await factories.make_agent(
+        db_session, user=user, status="active", slack_bot_token="xoxb-live"
+    )
+    agent_pk = agent.id
+
+    report = await delete_user_account(db_session, user)
+
+    assert calls == ["xoxb-live"]
+    assert report.slack_token_revoked is True
+    refreshed = await db_session.get(AgentRegistry, agent_pk)
+    await db_session.refresh(refreshed)
+    assert refreshed.slack_bot_token is None
+
+
+async def test_token_kept_when_revocation_fails(db_session, monkeypatch, tmp_path):
+    monkeypatch.setattr("src.services.user_deletion._PUBLIC_DIR", tmp_path / "pub")
+    monkeypatch.setattr("src.services.user_deletion._MEMORY_DIR", tmp_path / "mem")
+
+    async def _fake_revoke(token):
+        raise RuntimeError("slack is down")
+
+    monkeypatch.setattr(
+        "src.services.user_deletion.revoke_token_async", _fake_revoke
+    )
+    user = await factories.make_user(db_session)
+    agent = await factories.make_agent(
+        db_session, user=user, status="active", slack_bot_token="xoxb-live"
+    )
+    agent_pk = agent.id
+
+    report = await delete_user_account(db_session, user)
+
+    assert report.slack_token_revoked is False
+    assert any("slack revoke" in e for e in report.errors)
+    refreshed = await db_session.get(AgentRegistry, agent_pk)
+    await db_session.refresh(refreshed)
+    # Failure keeps the token recorded so an operator can revoke it manually.
+    assert refreshed.slack_bot_token == "xoxb-live"
+    # The agent is still suspended — the state that actually stops activity.
+    assert refreshed.status == "suspended"
