@@ -21,30 +21,48 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.models import Job, Publication, ResearcherProfile, User
+from src.models import AgentRegistry, Job, Publication, ResearcherProfile, User
+from src.services.corpus import (
+    DEFAULT_CAP,
+    EXCLUDED_TYPES,  # noqa: F401 — re-exported; tests and callers import it from here
+    resolve_corpus,
+)
+from src.services.jhu_rules import (
+    derive_employment_start,
+    derive_start_from_papers,
+    get_tenure_start,
+    set_tenure_start,
+    tenure_filter,
+)
 from src.services.llm import synthesize_profile
-from src.services.orcid import fetch_orcid_grants, fetch_orcid_profile, fetch_orcid_works
+from src.services.orcid import fetch_orcid_grants, fetch_orcid_profile
 from src.services.pubmed import (
-    convert_dois_to_pmids,
     convert_pmids_to_pmcids,
     fetch_pmc_methods,
-    fetch_pubmed_records,
     reconcile_pub_doi,
 )
 
 logger = logging.getLogger(__name__)
 
-# Non-research article types to exclude from profile synthesis
-EXCLUDED_TYPES = {
-    "editorial",
-    "comment",
-    "letter",
-    "news",
-    "published erratum",
-    "retraction of publication",
-    "correction",
-    "biography",
-}
+# The stored-corpus cap (coverage design §4.1; applied LAST, after ranking).
+CORPUS_CAP = DEFAULT_CAP
+
+
+def append_job_progress(job: Job, step: str, detail: str = "") -> None:
+    """Append a progress entry so it actually reaches the database.
+
+    ``Job.payload`` is a plain JSON column with no mutation tracking: an
+    in-place append is only written if the attribute happens to be dirty for
+    another reason. The old closure reassigned the payload on its FIRST call
+    only, so every append after the pipeline's first ``db.flush()`` was
+    silently dropped at commit. Reassigning a fresh dict on every call marks
+    the attribute dirty each time.
+    """
+    payload = dict(job.payload or {})
+    progress = list(payload.get("progress") or [])
+    progress.append({"step": step, "detail": detail})
+    payload["progress"] = progress
+    job.payload = payload
 
 
 async def run_profile_pipeline(
@@ -59,10 +77,7 @@ async def run_profile_pipeline(
 
     def update_progress(step: str, detail: str = ""):
         if job:
-            if "progress" not in job.payload:
-                job.payload = dict(job.payload)
-                job.payload["progress"] = []
-            job.payload["progress"].append({"step": step, "detail": detail})
+            append_job_progress(job, step, detail)
             logger.info("[pipeline] %s %s", step, detail)
 
     # Load user
@@ -97,149 +112,211 @@ async def run_profile_pipeline(
         logger.warning("Step 2 failed: %s", exc)
         grant_titles = []
 
-    # Step 3: Fetch ORCID works
-    update_progress("step3", "Fetching publication list from ORCID...")
-    # When this lookup FAILS we do not know how many works the researcher has, so
-    # step 9 must not record "0 identifiers" — that reads as "nothing to fetch"
-    # (a genuinely publication-less researcher) when it means "we could not ask".
-    works_lookup_failed = False
-    try:
-        orcid_works = await fetch_orcid_works(orcid_id)
-    except Exception as exc:
-        logger.warning("Step 3 failed: %s", exc)
-        orcid_works = []
-        works_lookup_failed = True
+    # The agent row (may be None) is needed EARLY now: the legacy tenure map
+    # is keyed by agent_id, and step 9's export/revision use it too.
+    agent_result = await db.execute(
+        select(AgentRegistry).where(AgentRegistry.user_id == user.id)
+    )
+    agent_reg = agent_result.scalar_one_or_none()
 
-    # Extract PMIDs for works that have them
-    pmids = [w["pmid"] for w in orcid_works if w.get("pmid")]
-
-    # Build PMID → ORCID DOI map so we can prefer ORCID DOIs over PubMed DOIs.
-    # PubMed's ArticleId DOIs are sometimes wrong (stale or from a different article).
-    pmid_to_orcid_doi: dict[str, str] = {}
-    for w in orcid_works:
-        if w.get("pmid") and w.get("doi"):
-            pmid_to_orcid_doi[w["pmid"]] = w["doi"]
-
-    # Resolve DOIs → PMIDs for works that only have DOIs
-    doi_only_works = [w for w in orcid_works if not w.get("pmid") and w.get("doi")]
-    if doi_only_works:
-        # Deduplicate DOIs (ORCID often lists the same work multiple times)
-        seen_dois: set[str] = set()
-        unique_doi_works: list[dict] = []
-        for w in doi_only_works:
-            if w["doi"] not in seen_dois:
-                seen_dois.add(w["doi"])
-                unique_doi_works.append(w)
-        doi_only_works = unique_doi_works
-
-        update_progress(
-            "doi_resolve",
-            f"Resolving {len(doi_only_works)} DOIs to PMIDs...",
+    # Steps 3+4: resolve the corpus — S1 ORCID works, S2 OpenAlex, S3 PubMed
+    # {orcid}[auid], S4 name+affiliation, identity-gated, ranked year-DESC,
+    # capped LAST (coverage design §4.1). A stage failure RAISES so the job
+    # retries rather than storing a thin ORCID-only corpus (defect D1/D2).
+    update_progress(
+        "step3",
+        "Resolving publication corpus (ORCID + OpenAlex + PubMed)...",
+    )
+    corpus_result = await resolve_corpus(
+        orcid_id, user.name, user.institution, cap=CORPUS_CAP
+    )
+    update_progress(
+        "step4",
+        f"Corpus resolved: kept {len(corpus_result.kept)} "
+        f"(stages {corpus_result.stage_counts}, dropped {corpus_result.dropped})",
+    )
+    if corpus_result.flagged:
+        sample = ", ".join(
+            str(f.get("pmid")) for f in corpus_result.flagged[:10]
         )
-        try:
-            dois = [w["doi"] for w in doi_only_works]
-            doi_to_pmid = await convert_dois_to_pmids(dois)
-            for w in doi_only_works:
-                resolved_pmid = doi_to_pmid.get(w["doi"])
-                if resolved_pmid:
-                    w["pmid"] = resolved_pmid
-                    pmids.append(resolved_pmid)
-                    # Track the ORCID DOI that resolved to this PMID
-                    pmid_to_orcid_doi[resolved_pmid] = w["doi"]
-            logger.info(
-                "DOI→PMID resolution: %d/%d resolved",
-                len(doi_to_pmid), len(doi_only_works),
+        update_progress(
+            "corpus_flagged",
+            f"{len(corpus_result.flagged)} records withheld for review "
+            f"(no individual author match): {sample}",
+        )
+    if len(corpus_result.kept) < 5:
+        update_progress(
+            "sparse_corpus",
+            f"Only {len(corpus_result.kept)} publications resolved across "
+            "ORCID, OpenAlex and PubMed.",
+        )
+
+    # JHU tenure window (R2): recorded value, else ORCID employment, else the
+    # earliest paper the PI herself wrote at Hopkins. Derived values are
+    # persisted with provenance — and only ever from a COMPLETE corpus, since
+    # resolve_corpus raises on any stage failure before this point runs
+    # (audit H1: the worker COMMITS mid-pipeline state when a job fails, so a
+    # year derived from partial data must never be flushed).
+    tenure_start = await get_tenure_start(
+        db, user_id, agent_id=agent_reg.agent_id if agent_reg else None
+    )
+    if tenure_start is None:
+        tenure_start = derive_employment_start(
+            orcid_profile.get("employments") or []
+        )
+        if tenure_start is not None:
+            await set_tenure_start(
+                user_id, tenure_start, "orcid_employment", db=db
             )
-        except Exception as exc:
-            logger.warning("DOI→PMID resolution failed: %s", exc)
-
-    if len(pmids) < 5:
+            update_progress(
+                "tenure_derived",
+                f"JHU tenure start {tenure_start} (ORCID employment).",
+            )
+    if tenure_start is None:
+        tenure_start = derive_start_from_papers(corpus_result.kept)
+        if tenure_start is not None:
+            await set_tenure_start(
+                user_id, tenure_start, "earliest_hopkins_paper", db=db
+            )
+            update_progress(
+                "tenure_derived",
+                f"JHU tenure start {tenure_start} "
+                "(earliest Hopkins-affiliated paper).",
+            )
+    if tenure_start is None:
         update_progress(
-            "sparse_orcid",
-            f"Only {len(pmids)} publications found on ORCID. "
-            "For better matching, please update your ORCID profile at orcid.org.",
+            "tenure_unknown",
+            "No JHU tenure start could be derived (no current Hopkins ORCID "
+            "employment, no Hopkins-affiliated paper in the corpus); the "
+            "profile is FULL-CAREER scope until a year is set on the manager "
+            "Edit Profile form.",
         )
 
-    # Step 4: Fetch PubMed abstracts
-    update_progress("step4", f"Fetching abstracts for {len(pmids)} publications...")
-    pubmed_records: list[dict[str, Any]] = []
-    if pmids:
-        try:
-            pubmed_records = await fetch_pubmed_records(pmids)
-        except Exception as exc:
-            logger.warning("Step 4 failed: %s", exc)
-
-    # Determine author position for each record using orcid_works data
-    # (PubMed records have author count but not which one is ours)
-    orcid_works_by_pmid = {w["pmid"]: w for w in orcid_works if w.get("pmid")}
-
-    # Store publications in DB
-    # First, get existing publications for this user
+    # Store publications. Storage is FULL-CAREER (the tenure filter applies at
+    # synthesis and export, not storage — R2: "the full verified corpus stays
+    # stored"), so both cohorts' rows mean the same thing and a tenure-year
+    # correction is recoverable without a re-fetch.
     existing_result = await db.execute(
         select(Publication).where(Publication.user_id == user_id)
     )
     existing_pubs = {p.pmid: p for p in existing_result.scalars().all() if p.pmid}
 
     new_publications: list[Publication] = []
-    pubs_for_synthesis: list[dict[str, Any]] = []
 
-    for rec in pubmed_records:
+    def _reconcile(rec: dict[str, Any]) -> str | None:
+        # The ORCID-curated DOI is preferred as the candidate, but it must
+        # agree with the DOI PubMed has on file for this exact PMID
+        # (reconcile_pub_doi treats the PubMed record's DOI as authoritative).
         pmid = rec.get("pmid")
-        if not pmid:
-            continue
-
-        # Skip non-research articles for synthesis
-        pub_types_lower = [t.lower() for t in rec.get("pub_types", [])]
-        is_research = not any(exc_type in pub_types_lower for exc_type in EXCLUDED_TYPES)
-
-        # DOI assignment + validation gate. The ORCID-curated DOI is preferred
-        # as the candidate, but it must agree with the DOI PubMed has on file
-        # for this exact PMID — otherwise the candidate points at a different
-        # paper (the failure mode behind the bad-link incident). reconcile_pub_doi
-        # treats rec["doi"] (this PMID's PubMed record) as authoritative: on a
-        # verifiable mismatch it returns the authoritative DOI rather than
-        # persisting a wrong one, and it canonicalizes format drift on a match.
-        assigned_doi = pmid_to_orcid_doi.get(pmid) or rec.get("doi")
+        assigned_doi = corpus_result.orcid_dois.get(pmid) or rec.get("doi")
         doi, doi_action = reconcile_pub_doi(assigned_doi, rec.get("doi"))
         if doi_action == "corrected":
             logger.warning(
-                "[doi-gate] pmid=%s: candidate DOI %r disagrees with PubMed record "
-                "DOI %r; using authoritative",
+                "[doi-gate] pmid=%s: candidate DOI %r disagrees with PubMed "
+                "record DOI %r; using authoritative",
                 pmid, assigned_doi, doi,
             )
+        return doi
 
-        if pmid in existing_pubs:
-            pub = existing_pubs[pmid]
-            # Apply the validated DOI if it changed.
-            if doi and pub.doi != doi:
-                pub.doi = doi
-        else:
-            pub = Publication(
-                user_id=user_id,
-                pmid=pmid,
-                pmcid=rec.get("pmcid"),
-                doi=doi,
-                title=rec.get("title", ""),
-                abstract=rec.get("abstract", ""),
-                journal=rec.get("journal"),
-                year=rec.get("year"),
+    def _store(rec: dict[str, Any]) -> None:
+        pub = Publication(
+            user_id=user_id,
+            pmid=rec.get("pmid"),
+            pmcid=rec.get("pmcid"),
+            doi=_reconcile(rec),
+            title=rec.get("title", ""),
+            abstract=rec.get("abstract", ""),
+            journal=rec.get("journal"),
+            year=rec.get("year"),
+        )
+        db.add(pub)
+        new_publications.append(pub)
+
+    if not existing_pubs:
+        # New PI: the resolved corpus IS the stored corpus.
+        for rec in corpus_result.kept:
+            if rec.get("pmid"):
+                _store(rec)
+    else:
+        # A PI with a pre-existing corpus — for the 62 audited ones the rows
+        # carry per-paper human verification this run cannot reproduce, so:
+        # never delete; add only ORCID-anchored finds (S1/S3); flag S2/S4-only
+        # candidates for review instead of storing them; respect the cap
+        # (audit M4 — the "leung at 53" defect class must not return).
+        for rec in corpus_result.kept:
+            pmid = rec.get("pmid")
+            if pmid in existing_pubs:
+                doi = _reconcile(rec)
+                if doi and existing_pubs[pmid].doi != doi:
+                    existing_pubs[pmid].doi = doi
+        new_recs = [
+            r for r in corpus_result.kept
+            if r.get("pmid") and r["pmid"] not in existing_pubs
+        ]
+        anchored = [
+            r for r in new_recs if set(r.get("stages") or []) & {"s1", "s3"}
+        ]
+        review_only = [
+            r for r in new_recs
+            if not (set(r.get("stages") or []) & {"s1", "s3"})
+        ]
+        budget = max(0, CORPUS_CAP - len(existing_pubs))
+        to_store, over_cap = anchored[:budget], anchored[budget:]
+        for rec in to_store:
+            _store(rec)
+        if to_store:
+            update_progress(
+                "corpus_additions",
+                f"Added {len(to_store)} ORCID-anchored publications: "
+                + ", ".join(str(r.get("pmid")) for r in to_store[:10]),
             )
-            db.add(pub)
-            new_publications.append(pub)
-
-        if is_research and rec.get("abstract"):
-            pubs_for_synthesis.append(rec)
+        if over_cap:
+            update_progress(
+                "corpus_cap_reached",
+                f"{len(over_cap)} newly found publications NOT stored: the "
+                f"corpus is at the {CORPUS_CAP}-publication cap.",
+            )
+        if review_only:
+            update_progress(
+                "corpus_addition_review",
+                f"{len(review_only)} candidates without an ORCID anchor "
+                "(found by OpenAlex or name+affiliation search only) were NOT "
+                "stored; review: "
+                + ", ".join(str(r.get("pmid")) for r in review_only[:10]),
+            )
 
     await db.flush()
 
+    # Synthesis basis: the STORED corpus (both cohorts — additions included,
+    # audited rows the resolver missed included too), tenure-filtered (R2).
+    # Ordered newest-first so the abstracts hash is deterministic across runs.
+    stored_result = await db.execute(
+        select(Publication)
+        .where(Publication.user_id == user_id)
+        .order_by(
+            Publication.year.desc().nullslast(), Publication.pmid.desc()
+        )
+    )
+    corpus_records: list[dict[str, Any]] = [
+        {
+            "pmid": p.pmid,
+            "pmcid": p.pmcid,
+            "title": p.title,
+            "abstract": p.abstract,
+            "journal": p.journal,
+            "year": p.year,
+        }
+        for p in stored_result.scalars().all()
+    ]
+    in_tenure = tenure_filter(corpus_records, tenure_start)
+    pubs_for_synthesis = [r for r in in_tenure if r.get("abstract")]
+
     # Step 5: Deep mining — PMC methods sections
     update_progress("step5", "Fetching methods sections from PMC...")
-    all_pmids_with_records = [r["pmid"] for r in pubmed_records if r.get("pmid")]
-
-    # Get PMCIDs for papers that don't already have them
+    # Get PMCIDs for the synthesis papers that don't already have them
     pmids_needing_conversion = [
         r["pmid"]
-        for r in pubmed_records
+        for r in pubs_for_synthesis
         if r.get("pmid") and not r.get("pmcid")
     ]
 
@@ -251,7 +328,7 @@ async def run_profile_pipeline(
             logger.warning("Step 5 PMCID conversion failed: %s", exc)
 
     # Fill in PMCIDs from conversion
-    for rec in pubmed_records:
+    for rec in pubs_for_synthesis:
         if rec.get("pmid") and not rec.get("pmcid") and rec["pmid"] in pmcid_map:
             rec["pmcid"] = pmcid_map[rec["pmid"]]
 
@@ -370,13 +447,14 @@ async def run_profile_pipeline(
     # describe the stored profile.
     profile.raw_abstracts_hash = abstracts_hash
 
-    # What the pipeline should have been able to fetch, and what actually reached
-    # the prompt. Both zero means there was nothing to fetch; the first non-zero
-    # with the second zero means the fetch failed and whatever the model wrote is
-    # ungrounded. None for the first means step 3 could not even enumerate the
-    # works, so "nothing to fetch" cannot be claimed. See
-    # ResearcherProfile.evidence_state.
-    evidence_pmid_count = None if works_lookup_failed else len(set(pmids))
+    # What the pipeline had in scope, and what actually reached the prompt.
+    # Both zero means there was nothing in the tenure window to synthesize
+    # from; the first non-zero with the second zero means the in-scope papers
+    # had no abstracts and whatever the model wrote is ungrounded. (The old
+    # None-when-lookup-failed case is gone: a corpus stage failure now RAISES
+    # and the job retries, so this line is only reached with a complete
+    # corpus.) See ResearcherProfile.evidence_state.
+    evidence_pmid_count = len(in_tenure)
     evidence_pub_count = len(pubs_for_synthesis)
 
     if synthesized:
@@ -467,20 +545,23 @@ async def run_profile_pipeline(
 
     await db.flush()
 
-    # Look up agent_id (gates file export and revision)
-    from src.models import AgentRegistry
-    agent_result = await db.execute(
-        select(AgentRegistry).where(AgentRegistry.user_id == user.id)
-    )
-    agent_reg = agent_result.scalar_one_or_none()
+    # agent_reg was loaded before step 3 (the tenure map needed it);
+    # it gates file export and revision here.
     agent_id = agent_reg.agent_id if agent_reg else None
 
-    # Export to markdown for agent consumption (include publications)
+    # Export to markdown for agent consumption (include publications).
+    # The export list is tenure-filtered EXPLICITLY (JHU R2's export rule):
+    # storage is full-career, and exporting the raw top-20 is exactly how
+    # pre-tenure papers reached 9 agents' prompts on 2026-08-14 (audit H3).
     from src.services.profile_export import export_profile_to_markdown
     pub_result = await db.execute(
         select(Publication).where(Publication.user_id == user.id)
     )
     user_pubs = pub_result.scalars().all()
+    if tenure_start is not None:
+        user_pubs = [
+            p for p in user_pubs if p.year and p.year >= tenure_start
+        ]
     exported_path = export_profile_to_markdown(
         user, profile, agent_id, publications=user_pubs
     )
