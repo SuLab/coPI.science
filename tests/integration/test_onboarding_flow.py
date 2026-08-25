@@ -1417,7 +1417,20 @@ async def test_no_logged_in_user_can_read_or_write_another_users_data(client, db
             "negative assertions above are not testing anything"
         )
     else:
-        assert control_after != control_before, (
-            "the copi-impersonate cookie is inert even for an admin, so the "
-            "negative assertions above are not testing anything"
-        )
+        if ep.method == "POST" and ep.path == "/profile/delete-account":
+            # The deletion impersonation guard (deletion audit F8) refuses
+            # this one mutation outright. The 403 is still positive proof the
+            # cookie was honoured: the guard fires on _is_impersonated, which
+            # only get_current_user's impersonation path sets — an inert
+            # cookie would have self-deleted the admin with a 302.
+            assert r2.status_code == 403, (
+                "the delete-account impersonation guard did not fire for an admin"
+            )
+            assert control_after == control_before, (
+                "the refused delete still changed the victim's data"
+            )
+        else:
+            assert control_after != control_before, (
+                "the copi-impersonate cookie is inert even for an admin, so the "
+                "negative assertions above are not testing anything"
+            )

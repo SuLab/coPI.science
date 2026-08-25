@@ -2,16 +2,18 @@
 
 import logging
 
-from fastapi import APIRouter, Depends, Form, Request
+from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.database import get_db
 from src.dependencies import get_current_user, get_pi_user
 from src.models import Job, Publication, ResearcherProfile, User
+from src.models.user import USER_ROLE_ADMIN
 from src.services.profile_edit import apply_profile_edits
+from src.services.user_deletion import delete_user_account
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -176,12 +178,39 @@ async def delete_account(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Delete user account after confirmation."""
+    """Delete the user's own account after confirmation.
+
+    Refuses impersonated sessions: an admin viewing an account through
+    impersonation is on a support path, and account deletion is the one
+    action there that cannot be undone (2026-08-22 audit §2.13; deletion
+    audit F8). Admins delete accounts through /admin/users/{id}/delete,
+    which logs the actor.
+    """
+    if getattr(current_user, "_is_impersonated", False):
+        raise HTTPException(
+            status_code=403,
+            detail="Account deletion is disabled while impersonating.",
+        )
+
     if confirm.lower() != "delete":
         return RedirectResponse(url="/profile/delete-account?error=1", status_code=302)
 
-    await db.delete(current_user)
-    await db.commit()
+    # The same "at least one admin can still log in" invariant the role
+    # route defends (src/routers/admin.py) — deletion is the other door out
+    # of adminhood, and it had no guard (deletion audit F7).
+    if current_user.user_role == USER_ROLE_ADMIN:
+        admin_count = await db.scalar(
+            select(func.count(User.id)).where(
+                User.user_role == USER_ROLE_ADMIN,
+                User.access_status == "allowed",
+            )
+        )
+        if (admin_count or 0) <= 1:
+            return RedirectResponse(
+                url="/profile/delete-account?error=last_admin", status_code=302
+            )
+
+    await delete_user_account(db, current_user)
 
     request.session.clear()
     response = RedirectResponse(url="/login?deleted=1", status_code=302)
