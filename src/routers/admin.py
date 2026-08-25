@@ -55,8 +55,11 @@ from src.services.directory import (
     load_user_detail,
 )
 from src.services.llm import is_truncated_stop
+from src.services.agent_activation import activation_blockers
+from src.services.jhu_rules import get_tenure_start
 from src.services.pi_onboarding import find_or_create_pi_by_orcid
 from src.services.thread_panel import panel_cards_by_thread
+from src.services.user_deletion import delete_user_account
 from src.services.validators import csv_safe_cell
 
 logger = logging.getLogger(__name__)
@@ -179,10 +182,11 @@ async def admin_user_detail(
 async def admin_delete_user(
     user_id: uuid.UUID,
     request: Request,
+    remove_from_allowlist: str = Form(""),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_admin_user),
 ):
-    """Delete a user account (admin only)."""
+    """Delete a user account (admin only) — through the full teardown."""
     result = await db.execute(select(User).where(User.id == user_id))
     user = result.scalar_one_or_none()
     if not user:
@@ -191,9 +195,13 @@ async def admin_delete_user(
         raise HTTPException(status_code=400, detail="Cannot delete your own account")
 
     name = user.name
-    await db.delete(user)
-    await db.commit()
-    logger.info("Admin %s deleted user %s (%s)", current_user.name, name, user_id)
+    report = await delete_user_account(
+        db, user, remove_from_allowlist=bool(remove_from_allowlist)
+    )
+    logger.info(
+        "Admin %s deleted user %s (%s): %s",
+        current_user.name, name, user_id, report.summary(),
+    )
     return RedirectResponse(url="/admin/users", status_code=302)
 
 
@@ -839,6 +847,34 @@ async def admin_agent_detail(
         u_result = await db.execute(select(User).where(User.id == agent.user_id))
         linked_user = u_result.scalar_one_or_none()
 
+    # Evidence panel + gate preview (audit H4/FD-7): what stands behind this
+    # lab, shown beside the Approve button — profile groundedness, the newest
+    # generation job, the JHU tenure entry, and the exact blockers the gate
+    # would refuse activation for.
+    profile = None
+    latest_gen_job = None
+    tenure_start = None
+    if agent.user_id:
+        profile = (
+            await db.execute(
+                select(ResearcherProfile).where(
+                    ResearcherProfile.user_id == agent.user_id
+                )
+            )
+        ).scalar_one_or_none()
+        latest_gen_job = (
+            await db.execute(
+                select(Job)
+                .where(Job.user_id == agent.user_id, Job.type == "generate_profile")
+                .order_by(Job.enqueued_at.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        tenure_start = await get_tenure_start(
+            db, agent.user_id, agent_id=agent.agent_id
+        )
+    blockers = await activation_blockers(db, agent)
+
     return templates.TemplateResponse(
         request,
         "admin/agent_detail.html",
@@ -848,6 +884,11 @@ async def admin_agent_detail(
             active_admin="agents",
             agent=agent,
             linked_user=linked_user,
+            profile=profile,
+            latest_gen_job=latest_gen_job,
+            tenure_start=tenure_start,
+            blockers=blockers,
+            activation_blocked=request.query_params.get("activation_blocked"),
             valid_statuses=VALID_AGENT_STATUSES,
             available_roles=available_roles(),
             slack_error=request.query_params.get("slack_error"),
@@ -865,6 +906,7 @@ async def admin_approve_agent(
     bot_name: str = Form(...),
     slack_bot_token: str = Form(""),
     agent_status: str = Form(None),
+    activation_override: str = Form(""),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_admin_user),
 ):
@@ -875,6 +917,15 @@ async def admin_approve_agent(
     approved, the edit form's status dropdown drives ``status`` — letting an
     admin park (``inactive``), ``suspended``, or re-``active``ate it. A running
     simulation picks the change up live via ``_sync_roster_from_db``.
+
+    ACTIVATION IS GATED (audit H4 / coverage plan P3): flipping any pi_lab
+    agent to ``active`` — through either branch — is refused when its profile
+    is missing or ungrounded or its newest generation job is dead, unless the
+    explicit (logged) override checkbox was posted. Auto-created pending rows
+    (the manager Add-PI flow) made "pending" stop implying "profile exists",
+    and an active agent with no exported profile is the Kavran-class failure.
+    A refusal applies NO edits at all — the form's slug/name/token changes
+    roll back with it, so what the admin sees stays what the DB holds.
     """
     result = await db.execute(
         select(AgentRegistry).where(AgentRegistry.id == agent_id)
@@ -882,6 +933,26 @@ async def admin_approve_agent(
     agent = result.scalar_one_or_none()
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
+
+    activating = agent.status == "pending" or (
+        agent.status != "active" and agent_status == "active"
+    )
+    if activating:
+        blockers = await activation_blockers(db, agent)
+        if blockers and not activation_override.strip():
+            logger.warning(
+                "Refused activation of agent %s (%s): %s",
+                agent.agent_id, agent.id, "; ".join(blockers),
+            )
+            return RedirectResponse(
+                url=f"/admin/agents/{agent_id}?activation_blocked=1",
+                status_code=302,
+            )
+        if blockers:
+            logger.warning(
+                "Activation OVERRIDE by admin %s for agent %s (%s) despite: %s",
+                current_user.id, agent.agent_id, agent.id, "; ".join(blockers),
+            )
 
     agent.agent_id = agent_slug.strip().lower()
     agent.bot_name = bot_name.strip()

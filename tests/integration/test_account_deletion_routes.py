@@ -126,3 +126,68 @@ async def test_pi_delete_routes_through_teardown(client, db_session):
     refreshed = await db_session.get(AgentRegistry, agent_pk)
     await db_session.refresh(refreshed)
     assert refreshed.status == "suspended"
+
+
+async def test_admin_delete_removes_allowlist_when_asked(client, db_session):
+    from src.models import AccessAllowlist
+
+    admin = await factories.make_user(
+        db_session, user_role="admin", access_status="allowed"
+    )
+    pi = await factories.make_user(db_session, access_status="allowed")
+    db_session.add(AccessAllowlist(orcid=pi.orcid))
+    await db_session.flush()
+    orcid = pi.orcid
+
+    r = await client.post(
+        f"/admin/users/{pi.id}/delete",
+        headers=_auth(admin.id),
+        data={"remove_from_allowlist": "1"},
+    )
+    assert r.status_code == 302
+    assert (
+        await db_session.scalar(
+            select(AccessAllowlist).where(AccessAllowlist.orcid == orcid)
+        )
+    ) is None
+
+
+async def test_admin_delete_keeps_allowlist_by_default(client, db_session):
+    from src.models import AccessAllowlist
+
+    admin = await factories.make_user(
+        db_session, user_role="admin", access_status="allowed"
+    )
+    pi = await factories.make_user(db_session, access_status="allowed")
+    db_session.add(AccessAllowlist(orcid=pi.orcid))
+    await db_session.flush()
+    orcid = pi.orcid
+
+    r = await client.post(
+        f"/admin/users/{pi.id}/delete", headers=_auth(admin.id), data={}
+    )
+    assert r.status_code == 302
+    assert (
+        await db_session.scalar(
+            select(AccessAllowlist).where(AccessAllowlist.orcid == orcid)
+        )
+    ) is not None
+
+
+async def test_admin_delete_suspends_linked_agent(client, db_session):
+    from src.models import AgentRegistry
+
+    admin = await factories.make_user(
+        db_session, user_role="admin", access_status="allowed"
+    )
+    pi = await factories.make_user(db_session, access_status="allowed")
+    agent = await factories.make_agent(db_session, user=pi, status="active")
+    agent_pk = agent.id
+
+    r = await client.post(
+        f"/admin/users/{pi.id}/delete", headers=_auth(admin.id), data={}
+    )
+    assert r.status_code == 302
+    refreshed = await db_session.get(AgentRegistry, agent_pk)
+    await db_session.refresh(refreshed)
+    assert refreshed.status == "suspended"

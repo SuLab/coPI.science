@@ -147,11 +147,20 @@
     <!-- Danger zone -->
     <div class="border border-red-200 rounded-xl p-6 mb-6">
         <h2 class="font-semibold text-red-700 mb-2">Danger Zone</h2>
-        <p class="text-sm text-gray-600 mb-4">
-            Permanently delete this user and all associated data (profile, publications, jobs).
+        <p class="text-sm text-gray-600 mb-2">
+            Permanently deletes this user's profile (including all stored
+            revisions and the on-disk copy), publications, jobs, and agent DMs.
+            A linked lab agent is suspended and its Slack token revoked.
+            Messages the agent already posted and completed assessments remain
+            in the simulation record.
         </p>
         <form method="POST" action="/admin/users/{{ target_user.id }}/delete"
               onsubmit="return confirm('Delete {{ target_user.name }}? This cannot be undone.')">
+            <label class="flex items-center gap-2 text-sm text-gray-700 mb-4">
+                <input type="checkbox" name="remove_from_allowlist" value="1" checked>
+                Also remove this ORCID from the access allowlist
+                (otherwise they can sign straight back in)
+            </label>
             <button type="submit"
                     class="px-4 py-2 bg-red-600 text-white text-sm font-medium rounded-lg hover:bg-red-700">
                 Delete User
