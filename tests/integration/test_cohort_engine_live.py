@@ -36,6 +36,7 @@ from src.models import (
     CohortAuditEvent,
     CohortMembership,
     SimulationRun,
+    User,
 )
 from src.visibility import VISIBILITY_COLLAB_PRIVATE, VISIBILITY_PUBLIC
 
@@ -53,13 +54,20 @@ async def live(engine, monkeypatch):
     """
     factory = async_sessionmaker(engine, expire_on_commit=False)
     run_id = uuid.uuid4()
+    user_ids = []
 
     async with factory() as db:
         db.add(SimulationRun(id=run_id, status="running"))
         for aid in AGENT_IDS:
+            # pi_lab rows need a linked user: active_roster_select() (F1/D7)
+            # excludes an orphaned pi_lab row even when status='active'.
+            user = User(name=f"PI {aid}", orcid=str(uuid.uuid4()))
+            db.add(user)
+            await db.flush()
+            user_ids.append(user.id)
             db.add(AgentRegistry(
                 agent_id=aid, bot_name=f"{aid.capitalize()}Bot",
-                pi_name=f"PI {aid}", status="active",
+                pi_name=f"PI {aid}", status="active", user_id=user.id,
             ))
         await db.commit()
 
@@ -71,6 +79,7 @@ async def live(engine, monkeypatch):
         await db.execute(delete(Cohort))
         await db.execute(delete(AgentMessage).where(AgentMessage.simulation_run_id == run_id))
         await db.execute(delete(AgentRegistry).where(AgentRegistry.agent_id.in_(AGENT_IDS)))
+        await db.execute(delete(User).where(User.id.in_(user_ids)))
         await db.execute(delete(SimulationRun).where(SimulationRun.id == run_id))
         await db.commit()
 
@@ -162,13 +171,20 @@ async def live20(engine):
     """20 active agents, same contract as `live`."""
     factory = async_sessionmaker(engine, expire_on_commit=False)
     run_id = uuid.uuid4()
+    user_ids = []
 
     async with factory() as db:
         db.add(SimulationRun(id=run_id, status="running"))
         for aid in AGENT_IDS_20:
+            # pi_lab rows need a linked user: active_roster_select() (F1/D7)
+            # excludes an orphaned pi_lab row even when status='active'.
+            user = User(name=f"PI {aid}", orcid=str(uuid.uuid4()))
+            db.add(user)
+            await db.flush()
+            user_ids.append(user.id)
             db.add(AgentRegistry(
                 agent_id=aid, bot_name=f"{aid.capitalize()}Bot",
-                pi_name=f"PI {aid}", status="active",
+                pi_name=f"PI {aid}", status="active", user_id=user.id,
             ))
         await db.commit()
 
@@ -180,6 +196,7 @@ async def live20(engine):
         await db.execute(delete(Cohort))
         await db.execute(delete(AgentMessage).where(AgentMessage.simulation_run_id == run_id))
         await db.execute(delete(AgentRegistry).where(AgentRegistry.agent_id.in_(AGENT_IDS_20)))
+        await db.execute(delete(User).where(User.id.in_(user_ids)))
         await db.execute(delete(SimulationRun).where(SimulationRun.id == run_id))
         await db.commit()
 
