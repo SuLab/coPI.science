@@ -143,7 +143,11 @@ audit-trail design — retained on purpose.
   user_id IS NULL AND status='active';` — relink survivors or accept eviction.
 - **D8 — worker hardening.** Tolerate a vanished job row at re-fetch; rollback
   then re-fetch in the except path; re-check user existence immediately before
-  the markdown export.
+  the markdown export. Accepted residual, recorded 2026-08-25: the pipeline's
+  job-progress autoflush holds the jobs-row lock, so a deletion issued while a
+  generate_profile job for that user is mid-run can block until the pipeline
+  finishes (minutes) — the delete still commits afterwards; refusing or
+  lock-timing-out was judged not worth the UX change for so rare a window.
 - **D9 — no schema migration.** Every fix is code/templates/docs; nothing in
   this plan touches DDL.
 

@@ -7129,7 +7129,7 @@ class SimulationEngine:
                 )
 
     async def _sync_roster_from_db(self) -> None:
-        """Re-sync the live agent roster from AgentRegistry (status=='active').
+        """Re-sync the live agent roster from AgentRegistry (active_roster_select: status=='active', pi_lab linked to a user).
 
         Adds agents that have just been activated (and have a usable token) and
         removes agents that have been inactivated/suspended — all without a

@@ -191,3 +191,24 @@ async def test_admin_delete_suspends_linked_agent(client, db_session):
     refreshed = await db_session.get(AgentRegistry, agent_pk)
     await db_session.refresh(refreshed)
     assert refreshed.status == "suspended"
+
+
+async def test_admin_delete_is_refused_while_impersonating(client, db_session):
+    """Admin-on-admin impersonation must not reach the admin delete route:
+    the self-delete guard and the actor log line both key on current_user,
+    which impersonation substitutes (final-review Important #2)."""
+    real_admin = await factories.make_user(
+        db_session, user_role="admin", access_status="allowed"
+    )
+    other_admin = await factories.make_user(
+        db_session, user_role="admin", access_status="allowed"
+    )
+    pi = await factories.make_user(db_session, access_status="allowed")
+
+    r = await client.post(
+        f"/admin/users/{pi.id}/delete",
+        headers=_auth_as(real_admin.id, other_admin.id),
+        data={},
+    )
+    assert r.status_code == 403
+    assert (await db_session.get(User, pi.id)) is not None

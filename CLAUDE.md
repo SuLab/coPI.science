@@ -605,11 +605,16 @@ the last loginable admin cannot self-delete; the admin form has a
 default-checked "also remove from the access allowlist" checkbox — without it
 a deleted allowlisted ORCID can sign straight back in as `allowed`. Related:
 the allowlist promotes only `pending` users at login; a `denied` user stays
-denied (`src/routers/auth.py`).
+denied (`src/routers/auth.py`). The admin delete route refuses impersonated
+sessions the same way. Known accepted residual: a deletion issued while that
+user's generate_profile job is mid-run can block on the jobs-row lock until
+the pipeline finishes; the delete still commits.
 
 The roster criterion lives in `src/agent/roster_query.py` and excludes
 `pi_lab` rows with `user_id IS NULL` (hub/specialists are exempt). Both the
-startup load and `_sync_roster_from_db` use it; `--all-agents` bypasses it.
+startup load and `_sync_roster_from_db` use it; `--all-agents` bypasses it at
+startup only — the ~30s live sync still applies the criterion and evicts
+non-matching rows on its first tick.
 One consequence to know before touching **/admin/agents → Link**: UNLINKING an
 active `pi_lab` agent (submitting the link form with an empty user) now evicts
 it from the running roster within ~30s — the same invariant, applied live.

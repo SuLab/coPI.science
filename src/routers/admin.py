@@ -187,6 +187,16 @@ async def admin_delete_user(
     current_user: User = Depends(get_admin_user),
 ):
     """Delete a user account (admin only) — through the full teardown."""
+    if getattr(current_user, "_is_impersonated", False):
+        # Same guard as POST /profile/delete-account (deletion audit F8/D6):
+        # under impersonation `current_user` is the impersonated admin, so the
+        # self-delete check below compares against the WRONG identity and the
+        # log line would attribute the deletion to someone who never acted.
+        # Drop impersonation first; then delete.
+        raise HTTPException(
+            status_code=403,
+            detail="Account deletion is disabled while impersonating.",
+        )
     result = await db.execute(select(User).where(User.id == user_id))
     user = result.scalar_one_or_none()
     if not user:

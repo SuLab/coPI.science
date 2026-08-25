@@ -146,8 +146,9 @@ async def _run_simulation(
     settings = get_settings()
 
     # The roster is sourced entirely from the AgentRegistry table (the DB is the
-    # single source of truth). By default we run status=='active' agents; pass
-    # --all-agents to include every row regardless of status (the token gate
+    # single source of truth). By default we run the active_roster_select
+    # criterion (status=='active', pi_lab linked to a user); pass --all-agents
+    # to include every row regardless of status (the token gate
     # below still drops anyone without a valid bot token). The roster read runs
     # even under --no-db (it is independent of event logging).
     from sqlalchemy import select as _select
