@@ -451,6 +451,16 @@ async def review_proposal(
 
     agent, is_owner = await get_agent_with_access(agent_id, db, current_user)
 
+    if agent.user_id is None:
+        # Orphaned agent (deletion audit F9): save would build
+        # ResearcherProfile(user_id=None) and review/reopen would build
+        # ProposalReview(user_id=None) — both NOT NULL columns. Refuse loudly;
+        # replaying a POST as a redirect would just hide the state.
+        raise HTTPException(
+            status_code=409,
+            detail="This lab is no longer linked to a PI account",
+        )
+
     if agent.status not in ("active", "inactive"):
         raise HTTPException(status_code=403, detail="Agent is not active")
 
@@ -548,6 +558,16 @@ async def reopen_proposal(
         raise HTTPException(status_code=400, detail="Guidance text is required")
 
     agent, is_owner = await get_agent_with_access(agent_id, db, current_user)
+
+    if agent.user_id is None:
+        # Orphaned agent (deletion audit F9): save would build
+        # ResearcherProfile(user_id=None) and review/reopen would build
+        # ProposalReview(user_id=None) — both NOT NULL columns. Refuse loudly;
+        # replaying a POST as a redirect would just hide the state.
+        raise HTTPException(
+            status_code=409,
+            detail="This lab is no longer linked to a PI account",
+        )
 
     # Blocked while the agent is inactive, matching every other write path that
     # touches a live agent's workspace. Reactivate the agent to reopen
@@ -863,6 +883,11 @@ async def view_public_profile(
     if agent.status != "active":
         return RedirectResponse(url="/agent", status_code=302)
 
+    if agent.user_id is None:
+        # Orphaned agent — its PI account was deleted before the teardown
+        # service existed (deletion audit F9). There is no PI profile here.
+        return RedirectResponse(url="/agent", status_code=302)
+
     # Load the PI's profile (not the delegate's)
     profile_result = await db.execute(
         select(ResearcherProfile).where(ResearcherProfile.user_id == agent.user_id)
@@ -894,6 +919,11 @@ async def edit_public_profile(
     """Edit agent's public profile."""
     agent, is_owner = await get_agent_with_access(agent_id, db, current_user)
     if agent.status != "active":
+        return RedirectResponse(url="/agent", status_code=302)
+
+    if agent.user_id is None:
+        # Orphaned agent — its PI account was deleted before the teardown
+        # service existed (deletion audit F9). There is no PI profile here.
         return RedirectResponse(url="/agent", status_code=302)
 
     profile_result = await db.execute(
@@ -931,6 +961,16 @@ async def save_public_profile(
     agent, is_owner = await get_agent_with_access(agent_id, db, current_user)
     if agent.status != "active":
         return RedirectResponse(url="/agent", status_code=302)
+
+    if agent.user_id is None:
+        # Orphaned agent (deletion audit F9): save would build
+        # ResearcherProfile(user_id=None) and review/reopen would build
+        # ProposalReview(user_id=None) — both NOT NULL columns. Refuse loudly;
+        # replaying a POST as a redirect would just hide the state.
+        raise HTTPException(
+            status_code=409,
+            detail="This lab is no longer linked to a PI account",
+        )
 
     # Update the PI's profile
     profile_result = await db.execute(
