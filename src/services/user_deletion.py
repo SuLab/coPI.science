@@ -193,13 +193,27 @@ async def delete_user_account(
             )
         if report.slack_token_revoked:
             # The token is dead; stop storing it. Separate tiny transaction on
-            # purpose — the user delete above must not wait on Slack.
-            await db.execute(
-                sa_update(AgentRegistry)
-                .where(AgentRegistry.agent_id == report.agent_id)
-                .values(slack_bot_token=None)
-            )
-            await db.commit()
+            # purpose — the user delete above must not wait on Slack. Best-
+            # effort like every other post-commit step: a failure here must
+            # not raise out of delete_user_account — the token itself is
+            # already revoked (dead at Slack), so the only thing lost is
+            # that we keep a dead value around locally.
+            try:
+                await db.execute(
+                    sa_update(AgentRegistry)
+                    .where(AgentRegistry.agent_id == report.agent_id)
+                    .values(slack_bot_token=None)
+                )
+                await db.commit()
+            except Exception as exc:
+                await db.rollback()
+                report.errors.append(f"token clear: {exc}")
+                logger.error(
+                    "Deletion teardown: bot token for %s was revoked (dead at "
+                    "Slack) but the stored value could NOT be cleared: %s",
+                    report.agent_id,
+                    exc,
+                )
 
     logger.info("Account %s deleted: %s", report.user_id, report.summary())
     return report
