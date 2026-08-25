@@ -6,6 +6,7 @@ import pytest
 
 from src.agent.simulation import SimulationEngine
 from src.services import slack_tokens
+from tests import factories
 
 # ---------------------------------------------------------------
 # Token resolution helpers (src.services.slack_tokens)
@@ -221,3 +222,48 @@ class TestAdminProvisioning:
         db = _FakeDB([])  # no SlackAppProvision row matches the state
         with pytest.raises(ProvisioningError):
             await complete_provisioning(db, state="bogus", code="abc")
+
+
+# ---------------------------------------------------------------
+# Real-database exclusion pin (integration): the fake DB above ignores the
+# WHERE clause, so nothing here proved a PENDING row is actually excluded.
+# Pending rows are common now — the manager Add-PI flow auto-creates one per
+# PI — and "pending is inert" is the whole safety story for auto-creation.
+# ---------------------------------------------------------------
+
+class _RealSessionCtx:
+    def __init__(self, session):
+        self._session = session
+
+    async def __aenter__(self):
+        return self._session
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+@pytest.mark.integration
+async def test_pending_and_inactive_rows_are_excluded_by_the_real_query(
+    db_session, monkeypatch
+):
+    _patch_client(monkeypatch)
+    for agent_id, status in [
+        ("liveone", "active"), ("waiting", "pending"), ("parked", "inactive"),
+    ]:
+        await factories.make_agent(
+            db_session, agent_id=agent_id, bot_name=f"{agent_id}Bot",
+            status=status, slack_bot_token="xoxb-real-token",
+        )
+    await db_session.flush()
+
+    engine = SimulationEngine(
+        agents=[], slack_clients={},
+        session_factory=lambda: _RealSessionCtx(db_session),
+    )
+    engine._build_lab_directories = lambda: None
+    await engine._sync_roster_from_db()
+
+    assert set(engine.agents) == {"liveone"}, (
+        "only status='active' may reach the engine; a pending (auto-created) "
+        "or inactive (muted) row must stay inert"
+    )
