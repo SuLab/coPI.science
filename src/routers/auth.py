@@ -244,8 +244,10 @@ async def auth_callback(
             user.department = profile_data["department"]
         if not user.email and resolved_email:
             user.email = resolved_email
-        # Allowlist can promote an existing pending user to allowed
-        if is_allowlisted and user.access_status != "allowed":
+        # Allowlist can promote an existing PENDING user to allowed.
+        # 'denied' is an explicit admin decision and must not be overruled
+        # by a seed list (deletion audit 2026-08-25, F6).
+        if is_allowlisted and user.access_status == "pending":
             user.access_status = "allowed"
             from src.models import ResearcherProfile
             profile_check = await db.execute(
