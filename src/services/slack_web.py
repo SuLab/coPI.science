@@ -70,6 +70,8 @@ __all__ = [
     "lookup_user_by_email_async",
     "post_message",
     "post_message_async",
+    "revoke_token",
+    "revoke_token_async",
 ]
 
 
@@ -248,6 +250,23 @@ def post_message(
     return posted
 
 
+def revoke_token(token: str) -> bool:
+    """Revoke a bot token (auth.revoke). True when the token is dead
+    afterwards — including when it already was: a token that is
+    ``token_revoked``/``invalid_auth``/``account_inactive`` cannot post, which
+    is the outcome revocation exists to guarantee. Exists for the account-
+    deletion teardown (docs/audits/2026-08-25-pi-deletion, D3); the app stays
+    installed, only this token dies.
+    """
+    try:
+        result = _call(_client(token), "auth_revoke")
+    except SlackApiError as exc:
+        if _error_code(exc) in {"token_revoked", "invalid_auth", "account_inactive"}:
+            return True
+        raise
+    return bool(result.get("revoked"))
+
+
 # ---------------------------------------------------------------------------
 # Async wrappers — the entry point for every FastAPI route handler.
 #
@@ -298,3 +317,8 @@ async def post_message_async(
     """``post_message`` off the event loop."""
     return await asyncio.to_thread(
         post_message, token, channel, text, thread_ts=thread_ts)
+
+
+async def revoke_token_async(token: str) -> bool:
+    """``revoke_token`` off the event loop."""
+    return await asyncio.to_thread(revoke_token, token)
