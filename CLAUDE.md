@@ -372,6 +372,30 @@ edit. A running `agent-run` re-syncs the roster from the DB every ~30s
 (`_sync_roster_from_db`), so flipping an agent to `status='active'` (with a token on
 its row) makes it go live **without a restart**.
 
+**The one-step path (2026-08-24): the manager PIs tab.** `POST /manager/pis`
+(the "Add a PI by ORCID iD" form on `/manager/pis`) now does, in ONE commit:
+create the User, enqueue the `generate_profile` job, mint a **pending**
+`AgentRegistry` row (inert — the roster sync loads only `status='active'`),
+and record the ORCID-employment-derived JHU tenure start. The atomicity is
+deliberate: the job and the agent row commit together, so the worker can never
+run the pipeline before the row exists — the old seed-then-create-row order
+lost the markdown export and revision every time (that is what
+`scripts/backfill_agents.py` repairs). The profile job runs the **corpus
+pipeline** (`src/services/corpus.py`: ORCID + OpenAlex + PubMed-by-ORCID +
+name-affiliation search, identity-gated, consortium-excluded, year-ranked,
+50-cap last) and the synthesis/export are tenure-filtered
+(`src/services/jhu_rules.py`; per-user `app_settings` keys, legacy agent_id
+map still read as fallback — `scripts/migrate_tenure_map.py` migrates the 62
+curated entries). A wrong or missing tenure year is correctable on the manager
+Edit Profile form ("JHU tenure start"). A corpus-stage failure FAILS the job
+(retry ×3 → dead, visible on /admin/jobs and the PI detail page) instead of
+storing a thin ORCID-only profile. **Activation is gated**: `admin_approve_agent`
+refuses to flip a `pi_lab` agent to `active` — through the approve button OR
+the status dropdown — when its profile is missing/ungrounded or its newest
+generation job is dead, unless the logged "activate anyway" override is
+checked (`src/services/agent_activation.py`). The CLI `seed-profiles` path
+below still works but creates NO agent row and derives NO tenure entry.
+
 ### 1. Create user records and generate profiles
 
 Look up each PI's ORCID ID (search orcid.org or the ORCID public API). Add them to `orcids.txt` with a comment line, then seed:
