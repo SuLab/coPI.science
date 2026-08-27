@@ -47,9 +47,29 @@ async def fetch_orcid_profile(orcid_id: str) -> dict[str, Any]:
         .get("employments", {})
         .get("affiliation-group", [])
     )
+    # Full employment list (org, start year, current) — the tenure derivation
+    # in src/services/jhu_rules.py needs every stint, ended ones included.
+    all_employments: list[dict[str, Any]] = []
     current_employments: list[dict[str, Any]] = []
     for grp in employments:
-        for summaries in grp.get("summaries", []):
+        summaries_list = grp.get("summaries", [])
+        if summaries_list:
+            emp = summaries_list[0].get("employment-summary", {})
+            start_year = None
+            year_val = ((emp.get("start-date") or {}).get("year") or {}).get("value")
+            if year_val:
+                try:
+                    start_year = int(year_val)
+                except (TypeError, ValueError):
+                    start_year = None
+            all_employments.append(
+                {
+                    "organization": (emp.get("organization") or {}).get("name"),
+                    "start_year": start_year,
+                    "current": emp.get("end-date") is None,
+                }
+            )
+        for summaries in summaries_list:
             emp = summaries.get("employment-summary", {})
             if emp.get("end-date") is None:  # Current employment
                 current_employments.append(emp)
@@ -63,6 +83,7 @@ async def fetch_orcid_profile(orcid_id: str) -> dict[str, Any]:
         dept = emp.get("department-name")
         if dept:
             result["department"] = dept
+    result["employments"] = all_employments
 
     # Researcher URLs (lab website)
     urls = record.get("person", {}).get("researcher-urls", {}).get("researcher-url", [])

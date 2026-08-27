@@ -25,6 +25,29 @@
                     Mute
                 </button>
             </form>
+        {% elif target_user.agent and target_user.agent.status == 'pending' %}
+            {# Job-state-aware copy: a dead generation job must not read as
+               "ready to install" — the activation gate will refuse it. #}
+            {% set gen_jobs = jobs | selectattr('type', 'equalto', 'generate_profile') | list %}
+            {% set latest_job = gen_jobs[0] if gen_jobs else None %}
+            <div class="text-right max-w-xs">
+                {% if latest_job and latest_job.status == 'dead' %}
+                    <span class="text-xs text-red-600 font-medium">
+                        Agent pending — profile generation failed after {{ latest_job.attempts }} attempts.
+                        An admin can retry (impersonate → Try Again, or CLI seed-profile) before Slack install.
+                    </span>
+                {% elif latest_job and latest_job.status in ('pending', 'processing') %}
+                    <span class="text-xs text-gray-500">Agent pending — Profile generating…</span>
+                {% else %}
+                    <span class="text-xs text-gray-500">Agent pending — Awaiting Slack install.</span>
+                {% endif %}
+                {% if current_user.is_admin %}
+                    <a href="/admin/agents/{{ target_user.agent.id }}"
+                       class="text-xs text-indigo-600 hover:underline block mt-1">Provision on /admin/agents →</a>
+                {% else %}
+                    <span class="text-xs text-gray-400 block mt-1">Slack install is admin-only — ask an admin.</span>
+                {% endif %}
+            </div>
         {% elif target_user.agent %}
             <span class="text-xs text-gray-400">
                 Agent is {{ target_user.agent.status }} — mute is only available for an active or already-muted agent.
@@ -37,6 +60,7 @@
         <p class="text-red-800 text-sm">
             {% if request.query_params.get('error') == 'invalid_email' %}Please enter a valid email address.
             {% elif request.query_params.get('error') == 'email_taken' %}That email address is already in use by another account.
+            {% elif request.query_params.get('error') == 'invalid_tenure_year' %}JHU tenure start must be a 4-digit year (or blank to leave unchanged).
             {% else %}Something went wrong saving changes.{% endif %}
         </p>
     </div>
@@ -133,6 +157,18 @@
                 <label class="block text-sm font-medium text-gray-700 mb-1">Keywords (comma-separated)</label>
                 <input type="text" name="keywords" value="{{ (profile.keywords or []) | join(', ') if profile else '' }}"
                        class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">JHU tenure start (year)</label>
+                <input type="text" name="jhu_tenure_start" value="{{ tenure_start or '' }}"
+                       placeholder="e.g. 2016"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+                <p class="text-xs text-gray-400 mt-1">
+                    Publications from this year onward ground the profile and the agent's
+                    exported publication list (JHU scope). Auto-derived from ORCID employment
+                    or the earliest Hopkins-affiliated paper; correct it here if wrong.
+                    Blank = leave unchanged; never set = full career.
+                </p>
             </div>
         </div>
         <button type="submit" class="bg-indigo-600 text-white px-6 py-2 rounded-lg hover:bg-indigo-700 font-medium">

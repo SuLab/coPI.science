@@ -2,6 +2,18 @@
 
 **Status:** approved design, not yet planned/implemented.
 
+> **Amended 2026-08-24 (manager Add-PI auto-flow):** `POST /manager/pis` now also
+> creates a PENDING `AgentRegistry` row for the new PI and persists an
+> ORCID-employment-derived JHU tenure entry, in the same commit as the User +
+> Job. This is a scope note on D1, not a new write route — the allowlist test
+> still pins exactly four POST paths. D7 (one lab per user; managers never
+> acquire one) is unaffected: the row belongs to the created PI. The
+> `/pis/{user_id}/profile` form gained an optional `jhu_tenure_start` field
+> (blank = unchanged). Provisioning/activation stays admin-only, and
+> `admin_approve_agent` now gates activation of pi_lab agents (profile
+> missing/ungrounded/dead job ⇒ refuse unless a logged override is checked).
+> See `docs/plans/2026-08-24-manager-add-pi-autoflow-plan.md`.
+
 **Context:** three requested features, bundled because they share the PI/assessment
 data model even though they touch different surfaces:
 

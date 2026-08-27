@@ -117,17 +117,92 @@
                 </div>
             </div>
 
+            {% if agent.role == 'pi_lab' %}
+            <div class="mt-6 pt-4 border-t border-gray-200 text-sm">
+                <h3 class="font-medium text-gray-700 mb-2">What stands behind this lab</h3>
+                <dl class="grid grid-cols-2 gap-2 text-xs">
+                    <div>
+                        <dt class="text-gray-500">Profile evidence</dt>
+                        <dd class="font-medium {{ 'text-green-700' if profile and profile.evidence_state == 'grounded' else 'text-red-600' }}">
+                            {% if profile %}{{ profile.evidence_state }}
+                                ({{ profile.evidence_pub_count if profile.evidence_pub_count is not none else '?' }} abstracts /
+                                 {{ profile.evidence_pmid_count if profile.evidence_pmid_count is not none else '?' }} identifiers)
+                            {% else %}no profile{% endif %}
+                        </dd>
+                    </div>
+                    <div>
+                        <dt class="text-gray-500">JHU tenure start</dt>
+                        <dd class="font-medium">{{ tenure_start or 'unknown (full-career scope)' }}</dd>
+                    </div>
+                    <div>
+                        <dt class="text-gray-500">Latest generation job</dt>
+                        <dd class="font-medium {{ 'text-red-600' if latest_gen_job and latest_gen_job.status == 'dead' else '' }}">
+                            {{ latest_gen_job.status if latest_gen_job else '—' }}
+                        </dd>
+                    </div>
+                    {% if spoke_state %}
+                    <div>
+                        <dt class="text-gray-500">Star spoke (hub-and-spoke cohort)</dt>
+                        <dd class="font-medium {{ 'text-green-700' if spoke_state == 'present' else 'text-red-600' }}">
+                            {{ spoke_state }}
+                            {% if spoke_state == 'missing' %}
+                            <button form="ensure-spoke-form" type="submit"
+                                    class="ml-2 px-2 py-0.5 bg-amber-600 hover:bg-amber-700 text-white rounded text-xs">
+                                Wire spoke
+                            </button>
+                            {% endif %}
+                        </dd>
+                    </div>
+                    {% endif %}
+                </dl>
+                {% if spoke_ok %}
+                <div class="bg-green-50 border border-green-200 rounded-lg p-3 mt-3">
+                    <p class="text-green-800 text-xs font-medium">✅ Star spoke wired — this lab can reach the hub.</p>
+                </div>
+                {% endif %}
+                {% if spoke_error %}
+                <div class="bg-red-50 border border-red-200 rounded-lg p-3 mt-3">
+                    <p class="text-red-800 text-xs font-medium">⚠ Star spoke: {{ spoke_error }}</p>
+                </div>
+                {% endif %}
+                {% if activation_blocked %}
+                <div class="bg-red-50 border border-red-200 rounded-lg p-3 mt-3">
+                    <p class="text-red-800 text-xs font-medium">Activation refused — nothing was saved.</p>
+                </div>
+                {% endif %}
+                {% if blockers %}
+                <ul class="mt-3 space-y-1">
+                    {% for b in blockers %}
+                    <li class="text-xs text-red-600">⚠ {{ b }}</li>
+                    {% endfor %}
+                </ul>
+                {% endif %}
+            </div>
+            {% endif %}
+
             <div class="flex items-center gap-3 mt-6 pt-4 border-t border-gray-200">
                 <button type="submit"
                         class="px-5 py-2 bg-green-600 text-white text-sm font-medium rounded-lg hover:bg-green-700">
                     {% if agent.status == 'pending' %}Approve & Activate{% else %}Save Changes{% endif %}
                 </button>
+                {% if blockers %}
+                <label class="flex items-center gap-2 text-xs text-red-700">
+                    <input type="checkbox" name="activation_override" value="1">
+                    Activate anyway (logged override — the warnings above stand)
+                </label>
+                {% endif %}
             </div>
         </form>
 
         <!-- Separate form for the Provision button (can't nest inside the approve form). -->
         <form id="provision-slack-form" method="POST"
               action="/admin/agents/{{ agent.id }}/slack/provision"></form>
+
+        <!-- Same pattern for the Wire-spoke button in the evidence panel. -->
+        {% if spoke_state == 'missing' %}
+        <form id="ensure-spoke-form" method="POST"
+              action="/admin/agents/{{ agent.id }}/ensure-spoke"></form>
+        {% endif %}
 
         <form method="POST" action="/admin/agents/{{ agent.id }}/role"
               class="mt-3 pt-4 border-t border-gray-200 flex items-end gap-2">

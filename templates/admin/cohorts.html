@@ -28,6 +28,24 @@
 <div class="mb-4 rounded-md bg-green-50 border border-green-200 px-4 py-3 text-sm text-green-800">{{ notice }}</div>
 {% endif %}
 
+{% if spokes_missing %}
+<div class="mb-4 rounded-md bg-amber-50 border border-amber-200 px-4 py-3 text-sm text-amber-800 flex items-center justify-between gap-4">
+    <span>
+        <b>{{ spokes_missing }}</b> lab agent(s) are missing their hub-and-spoke cohort
+        (<code>hub-&lt;lab&gt;</code> with the lab and BlackbirdBot) — a simulation
+        started now would refuse startup for any of them that is active.
+    </span>
+    <form method="POST" action="/admin/cohorts/ensure-star-spokes">
+        <button type="submit"
+                class="text-sm bg-amber-600 hover:bg-amber-700 text-white font-medium px-4 py-2 rounded whitespace-nowrap">
+            Wire star spokes
+        </button>
+    </form>
+</div>
+{% elif spokes_missing == 0 %}
+<p class="mb-4 text-xs text-gray-500">All lab agents have their hub-and-spoke cohort.</p>
+{% endif %}
+
 {% include "admin/_cohort_gate_banner.html" %}
 
 <form id="new-cohort-form" method="POST" action="/admin/cohorts/create"

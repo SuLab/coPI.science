@@ -54,3 +54,54 @@ async def test_a_fetch_failure_raises_instead_of_creating_a_stub_user(db_session
         select(User).where(User.orcid == "0000-0002-0000-0000")
     )).scalars().all()
     assert count == []
+
+
+async def test_rejects_a_malformed_orcid_before_any_network_call(db_session):
+    fetch = AsyncMock()
+    with patch("src.services.pi_onboarding.fetch_orcid_profile", new=fetch):
+        with pytest.raises(ValueError, match="Invalid ORCID"):
+            await find_or_create_pi_by_orcid(
+                db_session, "0000-0001; DROP[Affiliation]"
+            )
+    fetch.assert_not_awaited()
+
+
+async def test_creation_persists_an_employment_derived_tenure_start(db_session):
+    from src.services.jhu_rules import get_tenure_start
+
+    with patch(
+        "src.services.pi_onboarding.fetch_orcid_profile",
+        new=AsyncMock(return_value={
+            "name": "New Hire", "email": "nh@example.edu",
+            "institution": "Johns Hopkins University", "department": "Neuro",
+            "employments": [
+                {"organization": "Johns Hopkins University",
+                 "start_year": 2016, "current": True},
+            ],
+        }),
+    ):
+        user = await find_or_create_pi_by_orcid(db_session, "0000-0006-1111-2222")
+
+    assert await get_tenure_start(db_session, user.id) == 2016
+
+
+async def test_create_pending_agent_for_is_idempotent_and_inert(db_session):
+    from src.models import AgentRegistry
+    from src.services.pi_onboarding import create_pending_agent_for
+
+    user = await factories.make_user(
+        db_session, orcid="0000-0006-3333-4444", name="Mary McCarthy",
+    )
+    agent = await create_pending_agent_for(db_session, user)
+    assert (agent.agent_id, agent.bot_name) == ("mccarthy", "McCarthyBot")
+    assert agent.status == "pending"
+    assert agent.user_id == user.id
+    assert agent.slack_bot_token is None
+
+    again = await create_pending_agent_for(db_session, user)
+    assert again.id == agent.id, "a second call must return the existing row"
+
+    rows = (await db_session.execute(
+        select(AgentRegistry).where(AgentRegistry.user_id == user.id)
+    )).scalars().all()
+    assert len(rows) == 1

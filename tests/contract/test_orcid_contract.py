@@ -75,7 +75,51 @@ async def test_fetch_orcid_profile_parses_all_fields():
         "institution": "Brown University",
         "department": "Psychoceramics",
         "lab_website": "https://lab.example.edu",
+        "employments": [
+            {"organization": "Brown University", "start_year": None, "current": True},
+        ],
     }
+
+
+@respx.mock
+async def test_fetch_orcid_profile_extracts_every_employment_with_start_years():
+    """The tenure derivation (src/services/jhu_rules.py) needs org name,
+    start year and whether the employment is current — for ALL employments,
+    not just the primary current one the institution field uses."""
+    record = {
+        "person": {"name": {"given-names": {"value": "A"}, "family-name": {"value": "B"}}},
+        "activities-summary": {
+            "employments": {
+                "affiliation-group": [
+                    {"summaries": [{"employment-summary": {
+                        "end-date": None,
+                        "display-index": "0",
+                        "organization": {"name": "Johns Hopkins University"},
+                        "start-date": {"year": {"value": "2011"}},
+                    }}]},
+                    {"summaries": [{"employment-summary": {
+                        "end-date": {"year": {"value": "2009"}},
+                        "display-index": "1",
+                        "organization": {"name": "Stanford University"},
+                        "start-date": {"year": {"value": "2004"}},
+                    }}]},
+                    {"summaries": [{"employment-summary": {
+                        "end-date": None,
+                        "display-index": "2",
+                        "organization": {"name": "HHMI"},
+                        "start-date": None,
+                    }}]},
+                ]
+            }
+        },
+    }
+    respx.get(f"{BASE}/{OID}/record").mock(return_value=httpx.Response(200, json=record))
+    prof = await orcid.fetch_orcid_profile(OID)
+    assert prof["employments"] == [
+        {"organization": "Johns Hopkins University", "start_year": 2011, "current": True},
+        {"organization": "Stanford University", "start_year": 2004, "current": False},
+        {"organization": "HHMI", "start_year": None, "current": True},
+    ]
 
 
 @respx.mock

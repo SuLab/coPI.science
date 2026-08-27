@@ -1,7 +1,16 @@
 # JHU instance rules: corpus and profile policies specific to this deployment
 
 **Status:** DEPLOYED at the data level (all rules below are live in prod's data as of
-2026-08-13/14); NOT yet enforced in pipeline code — see the companion plan.
+2026-08-13/14). **Partially enforced in pipeline code as of 2026-08-24** (the
+new-PI vertical slice, `docs/plans/2026-08-24-manager-add-pi-autoflow-plan.md`):
+`src/services/jhu_rules.py` (tenure map read/write, now user_id-keyed with an
+agent_id legacy fallback + `scripts/migrate_tenure_map.py`), `tenure_filter`
+applied at synthesis AND both export sites (R2's export rule), R1's
+individual-author/consortium gates and R3's excluded-types rule inside
+`src/services/corpus.py`, and tenure auto-derivation (ORCID employment at
+add time; PI-author-only earliest-Hopkins-paper fallback in the pipeline,
+persisted only from a fully resolved corpus). Still NOT implemented: J5/J6
+coverage_suspect persistence, the R5 re-audit machinery.
 **Companion plan:** `docs/plans/2026-08-13-jhu-instance-rules-plan.md` (the *how*).
 **Parent spec:** `docs/specs/2026-08-13-pi-profile-coverage-design.md` — the general
 coverage design. This document layers *instance policy* on top of it: what this

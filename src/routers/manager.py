@@ -22,6 +22,7 @@ from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.database import get_db
@@ -37,7 +38,11 @@ from src.services.directory import (
     list_runs_overview,
     load_user_detail,
 )
-from src.services.pi_onboarding import find_or_create_pi_by_orcid
+from src.services.jhu_rules import get_tenure_start
+from src.services.pi_onboarding import (
+    create_pending_agent_for,
+    find_or_create_pi_by_orcid,
+)
 from src.services.profile_edit import apply_profile_edits
 from src.services.thread_panel import panel_cards_by_thread
 
@@ -132,6 +137,10 @@ async def manager_pi_detail(
     detail = await load_user_detail(db, user_id)
     if detail is None or detail["user"].user_role != USER_ROLE_PI:
         raise HTTPException(status_code=404, detail="PI not found")
+    agent = detail["user"].agent
+    tenure_start = await get_tenure_start(
+        db, user_id, agent_id=agent.agent_id if agent else None
+    )
     return templates.TemplateResponse(
         request,
         "manager/pi_detail.html",
@@ -143,8 +152,23 @@ async def manager_pi_detail(
             profile=detail["profile"],
             publications=detail["publications"],
             jobs=detail["jobs"],
+            tenure_start=tenure_start,
         ),
     )
+
+
+def _create_pi_error_code(exc: ValueError) -> str:
+    """Map service failures to canned codes — the raw exception text used to
+    be interpolated into the redirect Location unescaped (it embeds the
+    submitted ORCID string and upstream httpx internals; audit L1)."""
+    text = str(exc)
+    if "Invalid ORCID" in text:
+        return "invalid_orcid"
+    if "already exists" in text:
+        return "exists"
+    if "Could not fetch" in text:
+        return "fetch_failed"
+    return "create_failed"
 
 
 @router.post("/pis")
@@ -155,13 +179,36 @@ async def manager_create_pi(
 ):
     """Create a PI via the ORCID pipeline (design D5/D6) — no manual profile
     form exists anywhere in the app; every profile is ORCID/publication
-    derived. Rejects if the ORCID already belongs to anyone, any role."""
+    derived. Rejects if the ORCID already belongs to anyone, any role.
+
+    2026-08-24 auto-flow: one POST creates the User, the generate_profile
+    Job, a PENDING (inert) AgentRegistry row and the employment-derived JHU
+    tenure entry, in ONE commit — so the worker can never claim the job
+    before the agent row exists (the ordering gap that silently skipped
+    exports/revisions for seeded PIs; scripts/backfill_agents.py repairs it
+    after the fact). The pending row is provisioned and activated by an
+    admin on /admin/agents, never here (D1: no new manager write route; D7:
+    the row belongs to the new PI, never the manager)."""
     try:
         pi = await find_or_create_pi_by_orcid(db, orcid)
+        await create_pending_agent_for(db, pi)
         await db.commit()
     except ValueError as exc:
         return RedirectResponse(
-            url=f"/manager/pis?error={exc}", status_code=302
+            url=f"/manager/pis?error={_create_pi_error_code(exc)}",
+            status_code=302,
+        )
+    except IntegrityError:
+        # Two managers adding same-surname PIs can race the identity
+        # derivation's SELECT-then-INSERT; the loser rolls the WHOLE creation
+        # back (User + Job + agent together — the atomicity is the feature).
+        await db.rollback()
+        logger.warning(
+            "Add-PI race on agent identity for ORCID %r; rolled back",
+            orcid.strip()[:40],
+        )
+        return RedirectResponse(
+            url="/manager/pis?error=agent_conflict", status_code=302
         )
     return RedirectResponse(url=f"/manager/pis/{pi.id}", status_code=302)
 
@@ -179,11 +226,13 @@ async def manager_edit_pi_profile(
     disease_areas: str = Form(""),
     key_targets: str = Form(""),
     keywords: str = Form(""),
+    jhu_tenure_start: str = Form(""),
     db: AsyncSession = _DB,
     current_user: User = _STAFF,
 ):
     """Edit a PI's profile fields (design D8) — same fields as the PI's own
-    /profile/save, attributed to the acting manager via changed_by_user_id."""
+    /profile/save, attributed to the acting manager via changed_by_user_id,
+    plus the JHU tenure-start year (manager-only field; blank = unchanged)."""
     detail = await load_user_detail(db, user_id)
     if detail is None or detail["user"].user_role != USER_ROLE_PI:
         raise HTTPException(status_code=404, detail="PI not found")
@@ -194,6 +243,7 @@ async def manager_edit_pi_profile(
         research_summary=research_summary, techniques=techniques,
         experimental_models=experimental_models, disease_areas=disease_areas,
         key_targets=key_targets, keywords=keywords,
+        jhu_tenure_start=jhu_tenure_start,
     )
     if error:
         return RedirectResponse(url=f"/manager/pis/{user_id}?error={error}", status_code=302)

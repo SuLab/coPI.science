@@ -4,12 +4,14 @@ profile changes; changed_by_user_id is who made the change — they differ
 exactly when a manager edits a PI's profile, and create_revision's existing
 changed_by_user_id parameter already supports that attribution without any
 schema change."""
+import re
 import uuid
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.models import Publication, ResearcherProfile, User
+from src.services.jhu_rules import get_tenure_start, set_tenure_start
 from src.services.validators import is_valid_email
 
 
@@ -22,7 +24,18 @@ async def apply_profile_edits(
     name: str, email: str, institution: str, department: str,
     research_summary: str, techniques: str, experimental_models: str,
     disease_areas: str, key_targets: str, keywords: str,
+    jhu_tenure_start: str | None = None,
 ) -> str | None:
+    # Optional JHU tenure-start correction (manager form only; the PI's own
+    # /profile/save never sends the field). Blank = leave unchanged.
+    tenure_field = (jhu_tenure_start or "").strip()
+    if tenure_field:
+        if not re.fullmatch(r"\d{4}", tenure_field):
+            return "invalid_tenure_year"
+        await set_tenure_start(
+            target_user.id, int(tenure_field), "manual", db=db
+        )
+
     email_clean = (email or "").strip().lower()
     if email_clean != (target_user.email or ""):
         if email_clean:
@@ -81,6 +94,16 @@ async def apply_profile_edits(
         select(Publication).where(Publication.user_id == target_user.id)
     )
     user_pubs = list(pub_result.scalars().all())
+    # JHU R2's export rule, applied at THIS export site too (audit H3):
+    # storage is full-career, and an unfiltered top-20 is exactly how
+    # pre-tenure papers reached 9 agents' prompts on 2026-08-14.
+    tenure_start_year = await get_tenure_start(
+        db, target_user.id, agent_id=agent_id_for_export
+    )
+    if tenure_start_year is not None:
+        user_pubs = [
+            p for p in user_pubs if p.year and p.year >= tenure_start_year
+        ]
     exported_path = export_profile_to_markdown(
         target_user, profile, agent_id_for_export, publications=user_pubs
     )

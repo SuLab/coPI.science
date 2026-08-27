@@ -39,6 +39,16 @@ def normalize_doi(doi: str | None) -> str | None:
     return d or None
 
 
+def _doi_fold(doi: str) -> str:
+    """Comparison key for two spellings of the same DOI.
+
+    DOIs are case-insensitive (DOI Handbook §2.4) and may arrive with or
+    without a ``doi:``/``https://doi.org/`` prefix, so equality checks fold
+    both away. Never use this as a STORED form — ``normalize_doi`` preserves
+    case on purpose (the publisher-registered form often carries it)."""
+    return (normalize_doi(doi) or doi).casefold()
+
+
 def reconcile_pub_doi(
     assigned_doi: str | None, authoritative_doi: str | None
 ) -> tuple[str | None, str]:
@@ -319,15 +329,20 @@ def _parse_pubmed_xml(xml_text: str) -> list[dict[str, Any]]:
                     record["doi"] = eloc.text
                     break
 
-        # Title
+        # Title. itertext(), not .text: .text ends at the FIRST inline child
+        # element, so an <i>/<sup>/<b> inside the title truncated the stored
+        # field (112 production titles were repaired for this on 2026-08-13;
+        # coverage plan Task 1 is this fix).
         title_el = article.find(".//ArticleTitle")
-        record["title"] = (title_el.text or "") if title_el is not None else ""
+        record["title"] = (
+            "".join(title_el.itertext()) if title_el is not None else ""
+        )
 
-        # Abstract
+        # Abstract (same truncation hazard as the title)
         abstract_parts = []
         for abstract_el in article.findall(".//AbstractText"):
             label = abstract_el.get("Label")
-            text = abstract_el.text or ""
+            text = "".join(abstract_el.itertext())
             if label:
                 abstract_parts.append(f"{label}: {text}")
             else:
@@ -354,8 +369,30 @@ def _parse_pubmed_xml(xml_text: str) -> list[dict[str, Any]]:
         ]
         record["pub_types"] = pub_types
 
-        # Authors to determine position
-        authors = article.findall(".//Author")
+        # Authors: names, affiliations and collectives — the corpus resolver's
+        # identity gates (src/services/corpus.py) need the surname/forename
+        # pair, consortium detection, and the PI's OWN affiliation strings.
+        authors: list[dict[str, Any]] = []
+        for author in article.findall(".//Author"):
+            last_el = author.find("LastName")
+            fore_el = author.find("ForeName")
+            init_el = author.find("Initials")
+            coll_el = author.find("CollectiveName")
+            affiliations = [
+                text
+                for aff in author.findall(".//AffiliationInfo/Affiliation")
+                if (text := "".join(aff.itertext()).strip())
+            ]
+            authors.append(
+                {
+                    "last": last_el.text if last_el is not None else None,
+                    "fore": fore_el.text if fore_el is not None else None,
+                    "initials": init_el.text if init_el is not None else None,
+                    "collective": coll_el.text if coll_el is not None else None,
+                    "affiliations": affiliations,
+                }
+            )
+        record["authors"] = authors
         record["author_count"] = len(authors)
 
         results.append(record)
@@ -363,20 +400,58 @@ def _parse_pubmed_xml(xml_text: str) -> list[dict[str, Any]]:
     return results
 
 
+async def search_pmids(
+    term: str, retmax: int = 200, sort: str = "pub date"
+) -> list[str]:
+    """PubMed ESearch → PMIDs, newest first.
+
+    RAISES on transport or parse failure rather than returning ``[]`` — for
+    the corpus resolver a silent empty result is a thin corpus stored as if it
+    were the answer (coverage design D1/D2; audit M5 says raise and let the
+    job retry).
+    """
+    params = {
+        "db": "pubmed",
+        "term": term,
+        "retmode": "json",
+        "retmax": retmax,
+        "sort": sort,
+    }
+    resp = await _ncbi_get(f"{EUTILS_BASE}/esearch.fcgi", params)
+    try:
+        data = resp.json()
+    except ValueError as exc:
+        raise PubMedParseError(f"ESearch response was not JSON: {exc}") from exc
+    return list(data.get("esearchresult", {}).get("idlist", []))
+
+
 async def convert_dois_to_pmids(dois: list[str]) -> dict[str, str]:
     """
     Convert DOIs to PMIDs. First tries NCBI ID converter (batch, but PMC-only),
     then falls back to PubMed ESearch for unresolved DOIs.
-    Returns dict of {doi: pmid}.
+    Returns dict of {doi: pmid}, keyed by the CALLER's DOI form — every key is
+    an element of ``dois``, never the resolver's own spelling of one.
     """
     if not dois:
         return {}
 
     mapping = {}
 
-    # Phase 1: NCBI ID converter (batch — only finds PMC-indexed papers)
+    # Phase 1: NCBI ID converter (batch — only finds PMC-indexed papers).
+    # The converter echoes each DOI in ITS canonical casing (lowercased), not
+    # the caller's: ORCID records often carry the publisher's uppercase form
+    # (10.1039/D0RA08249J), and keying the result by the echo handed
+    # resolve_corpus a mapping key its doi_pool never held — the bare KeyError
+    # that killed the Konig and Slusher generate_profile jobs three attempts
+    # each (2026-08-25). Fold the echo back to the requested form; an echo
+    # matching no request even case-folded is dropped, and that input then
+    # falls through to the ESearch phase, which round-trip-verifies before
+    # accepting anything.
     for i in range(0, len(dois), 200):
         batch = dois[i : i + 200]
+        requested_by_fold: dict[str, str] = {}
+        for d in batch:
+            requested_by_fold.setdefault(_doi_fold(d), d)
         try:
             params = {"ids": ",".join(batch), "format": "json"}
             resp = await _ncbi_get(IDCONV_BASE, params)
@@ -386,8 +461,17 @@ async def convert_dois_to_pmids(dois: list[str]) -> dict[str, str]:
                     continue
                 doi = record.get("doi")
                 pmid = record.get("pmid")
-                if doi and pmid:
-                    mapping[doi] = str(pmid)
+                if not (doi and pmid):
+                    continue
+                requested_doi = requested_by_fold.get(_doi_fold(doi))
+                if requested_doi is None:
+                    logger.warning(
+                        "ID converter echoed DOI %r, which matches no "
+                        "requested DOI even case-folded; dropping the record",
+                        doi,
+                    )
+                    continue
+                mapping[requested_doi] = str(pmid)
         except Exception as exc:
             logger.warning("Failed batch DOI→PMID via ID converter: %s", exc)
 
@@ -405,8 +489,35 @@ async def convert_dois_to_pmids(dois: list[str]) -> dict[str, str]:
                 resp = await _ncbi_get(f"{EUTILS_BASE}/esearch.fcgi", params)
                 data = resp.json()
                 id_list = data.get("esearchresult", {}).get("idlist", [])
-                if id_list:
-                    mapping[doi] = id_list[0]
+                # D4b (coverage design §7): a multi-hit DOI ESearch is a MISS,
+                # not a hit. Taking idlist[0] unchecked resolved one Research
+                # Square DOI to four unrelated PMIDs and stored the first —
+                # the same wrong paper landed on six PIs' rows.
+                if len(id_list) != 1:
+                    if len(id_list) > 1:
+                        logger.warning(
+                            "ESearch for DOI %s returned %d PMIDs; treating "
+                            "as a miss (D4b)", doi, len(id_list),
+                        )
+                    continue
+                pmid = id_list[0]
+                # Round-trip verify: the PMID's authoritative DOI must equal
+                # the queried DOI, or the single hit is still the wrong paper.
+                records = await fetch_pubmed_records([pmid])
+                authoritative = normalize_doi(records[0].get("doi")) if records else None
+                queried = normalize_doi(doi)
+                if (
+                    authoritative
+                    and queried
+                    and authoritative.lower() == queried.lower()
+                ):
+                    mapping[doi] = pmid
+                else:
+                    logger.warning(
+                        "ESearch hit for DOI %s (PMID %s) failed round-trip "
+                        "verification (authoritative DOI %r); treating as a "
+                        "miss (D4b)", doi, pmid, authoritative,
+                    )
             except Exception as exc:
                 logger.debug("ESearch DOI lookup failed for %s: %s", doi, exc)
 

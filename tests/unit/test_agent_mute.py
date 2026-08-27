@@ -78,3 +78,17 @@ async def test_muting_a_suspended_agent_is_a_no_op(db_session):
     assert ok is False
     await db_session.refresh(agent)
     assert agent.status == "suspended"
+
+
+async def test_unmuting_a_pending_agent_cannot_activate_it(db_session):
+    """Pending rows are common now (the manager Add-PI flow auto-creates
+    them), and unmute writes status='active' — this pin is what keeps the
+    manager's unmute button from becoming a side door around the admin
+    activation gate."""
+    pi = await factories.make_user(db_session, orcid="0000-0021-0000-0001")
+    agent = await factories.make_agent(db_session, user=pi, status="pending")
+    changed = await set_agent_mute_state(
+        db_session, agent=agent, muted=False, actor_user_id=pi.id,
+    )
+    assert changed is False
+    assert agent.status == "pending"

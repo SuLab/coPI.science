@@ -231,3 +231,24 @@ async def test_a_stage_failure_raises_instead_of_shipping_a_thin_corpus(monkeypa
         await resolve_corpus(
             "0000-0001-2345-6789", "Rachel Green", "Johns Hopkins University"
         )
+
+
+async def test_a_mapping_key_the_pool_never_held_is_skipped_not_a_crash(
+    monkeypatch, caplog
+):
+    # 2026-08-25: convert_dois_to_pmids keyed Phase-1 hits by the ID
+    # converter's lowercased echo, this resolver looked them up in doi_pool
+    # with brackets, and the bare KeyError killed the whole generate_profile
+    # job — three attempts each for two PIs. The converter now keys by the
+    # caller's form; this pins the resolver's own defence (skip + loud
+    # warning, never a crash) should that contract ever break again.
+    _wire(
+        monkeypatch,
+        orcid_works=[{"pmid": None, "doi": "10.1039/D0RA08249J"}],
+        doi_map={"10.1039/d0ra08249j": "33777357"},
+    )
+    result = await resolve_corpus(
+        "0000-0001-2345-6789", "Rachel Green", "Johns Hopkins University"
+    )
+    assert result.kept == []
+    assert "not a doi_pool key" in caplog.text

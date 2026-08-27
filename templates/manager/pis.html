@@ -18,7 +18,22 @@
         Add PI
     </button>
     {% if request.query_params.get('error') %}
-        <span class="text-sm text-red-600">{{ request.query_params.get('error') }}</span>
+        {% set _err = request.query_params.get('error') %}
+        <span class="text-sm text-red-600">
+            {%- if _err == 'invalid_orcid' -%}
+                That doesn't look like an ORCID iD (expected 0000-0000-0000-0000).
+            {%- elif _err == 'exists' -%}
+                A user with that ORCID already exists.
+            {%- elif _err == 'fetch_failed' -%}
+                Could not fetch that ORCID record — check the iD and try again.
+            {%- elif _err == 'agent_conflict' -%}
+                Another PI was added at the same moment — please try again.
+            {%- elif _err == 'create_failed' -%}
+                Could not create the PI — see the server log.
+            {%- else -%}
+                {{ _err }}
+            {%- endif -%}
+        </span>
     {% endif %}
 </form>
 

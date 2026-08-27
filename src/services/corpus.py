@@ -273,7 +273,20 @@ async def resolve_corpus(
             "doi_resolution", convert_dois_to_pmids(list(doi_pool))
         )
         for doi, pmid in mapping.items():
-            _add(pmid, doi_pool[doi])
+            stage = doi_pool.get(doi)
+            if stage is None:
+                # convert_dois_to_pmids guarantees its keys are the caller's
+                # own forms; when that contract broke (the converter echoed
+                # lowercase, 2026-08-25) a bracket lookup here killed the
+                # whole profile job. Losing one attribution must never cost
+                # the corpus — skip it loudly instead.
+                logger.warning(
+                    "doi_resolution returned %r, which is not a doi_pool "
+                    "key; skipping it",
+                    doi,
+                )
+                continue
+            _add(pmid, stage)
             if doi in orcid_doi_only:
                 orcid_dois[str(pmid)] = doi
 

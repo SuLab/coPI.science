@@ -1,7 +1,19 @@
 # PI profile coverage: audit findings, backfill design, and prevention
 
-**Status:** PROPOSED. Nothing in here has been applied. No code and no database row was
-changed to produce it.
+**Status:** PROPOSED 2026-08-13; data repairs deployed 2026-08-13/14. **Core
+pipeline tasks implemented 2026-08-24** as part of the manager Add-PI auto-flow
+(`docs/plans/2026-08-24-manager-add-pi-autoflow-plan.md`): Task 1 (pubmed
+itertext parse), the D4b ESearch-DOI rule (unique idlist + round-trip verify,
+now inside `convert_dois_to_pmids`), `src/services/corpus.py` (S1 ORCID + S2
+OpenAlex + S3 auid + S4 name+affiliation with mandatory disambiguation;
+rank year-DESC; 50-cap LAST; stage failure raises for job retry), and the
+pipeline integration (storage full-career capped, synthesis/export
+tenure-filtered). NOT implemented: P2's coverage_suspect column and the full
+Task 6 activation gate (a no-migration subset ships instead:
+`src/services/agent_activation.py` refuses activating a pi_lab agent whose
+profile is missing/ungrounded or whose newest job is dead, both
+admin_approve_agent branches, logged override), and Task 8's historical
+backfill machinery.
 **Written:** 2026-08-13, against `blackbird` @ `22dd952`.
 **Revised:** 2026-08-13, after an adversarial audit. The audit re-verified the headline
 claims against the production database over SSH (read-only): 62 active `pi_lab` agents;

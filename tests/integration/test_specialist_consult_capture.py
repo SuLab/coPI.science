@@ -1058,6 +1058,92 @@ async def test_a_restart_does_not_resurrect_a_note_as_conversation(engine):
         await _delete_run(factory, run_id)
 
 
+# --- 7b. clip-rate drift bookkeeping (specialists.clip_rate_warning) --------
+#
+# `_post_panel_note` is also where the note's question gets clipped to
+# `PANEL_NOTE_QUESTION_CHARS`, so it is where the engine has to notice when
+# that calibration has decayed. These drive `_post_panel_note` directly, on
+# the same `sim`/`agent`/`thread` a real consult already exercised above, to
+# pile up enough posts to cross `clip_rate_warning`'s sample floor without
+# re-running the whole tool-call machinery per note.
+
+_LONG_QUESTION = "Is the animal model encumbered by a third-party licence? " * 20
+
+
+@pytest.mark.asyncio
+async def test_the_clip_counters_increment_on_every_successful_note(
+    engine, monkeypatch,
+):
+    """The counters `clip_rate_warning` is judged against are driven from
+    what `_post_panel_note` actually posted — not re-derived — so they can
+    never disagree with the note in the thread."""
+    turn = await _drive_a_consult(engine, monkeypatch)
+    try:
+        assert turn.sim._panel_notes_posted == 1, "the fixture's own consult"
+        assert turn.sim._panel_notes_clipped == 0, "the fixture question is short"
+
+        await turn.sim._post_panel_note(
+            "blackbird", channel="general", thread_ts="t1", domain="legal",
+            question=_LONG_QUESTION, verdict_signal="blocking",
+        )
+        assert turn.sim._panel_notes_posted == 2
+        assert turn.sim._panel_notes_clipped == 1
+
+        # A note that never posts (no channel) must not count either way.
+        await turn.sim._post_panel_note(
+            "blackbird", channel=None, thread_ts="t1", domain="legal",
+            question=_LONG_QUESTION, verdict_signal="blocking",
+        )
+        assert turn.sim._panel_notes_posted == 2
+        assert turn.sim._panel_notes_clipped == 1
+    finally:
+        await _delete_run(turn.factory, turn.run_id)
+
+
+@pytest.mark.asyncio
+async def test_the_clip_rate_warning_logs_exactly_once_past_the_threshold(
+    engine, monkeypatch, caplog,
+):
+    """`clip_rate_warning` stays quiet below its 20-note floor and its 10%
+    ceiling (see tests/unit/test_specialists.py); this crosses both through
+    the engine's own counters and checks the log fires exactly once even
+    though further clipped notes keep the rate crossed."""
+    turn = await _drive_a_consult(engine, monkeypatch)
+    try:
+        # 1 short (unclipped) note already posted by the fixture. 18 more
+        # short notes clear the sample floor (19 total) while keeping the
+        # rate at 0%.
+        for _ in range(18):
+            await turn.sim._post_panel_note(
+                "blackbird", channel="general", thread_ts="t1", domain="legal",
+                question=_QUESTION, verdict_signal="blocking",
+            )
+        assert turn.sim._panel_notes_posted == 19
+        assert turn.sim._panel_note_clip_warned is False
+
+        caplog.clear()
+        # 5 clipped notes: the 3rd (22 total, 3 clipped, 13.6%) is the first
+        # to clear the 10% ceiling; the 4th and 5th keep it crossed.
+        for _ in range(5):
+            await turn.sim._post_panel_note(
+                "blackbird", channel="general", thread_ts="t1", domain="legal",
+                question=_LONG_QUESTION, verdict_signal="blocking",
+            )
+        assert turn.sim._panel_notes_posted == 24
+        assert turn.sim._panel_notes_clipped == 5
+
+        decay_warnings = [
+            r for r in caplog.records if "calibration has decayed" in r.getMessage()
+        ]
+        assert len(decay_warnings) == 1, (
+            "logs once per run even though the rate stays past the ceiling"
+        )
+        assert "22" in decay_warnings[0].getMessage(), "the first crossing's own tally"
+        assert turn.sim._panel_note_clip_warned is True
+    finally:
+        await _delete_run(turn.factory, turn.run_id)
+
+
 @pytest.mark.asyncio
 async def test_the_consult_seed_runs_for_a_band_owed_verdict(engine):
     """The seed has to ask the SAME question the floor asks, or it starves

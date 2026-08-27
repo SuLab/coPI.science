@@ -102,38 +102,6 @@
     'unvalidated_in_progress': True,
   })
 # ---
-# name: test_profile_pipeline_orcid_works_failure_is_not_reported_as_no_works
-  dict({
-    'evidence_pmid_count': None,
-    'evidence_pub_count': 0,
-    'evidence_state': 'evidence_lost',
-    'profile_version': 1,
-  })
-# ---
-# name: test_profile_pipeline_pubmed_outage_on_rerun_keeps_the_grounded_profile
-  dict({
-    'evidence_pub_count': 2,
-    'evidence_state': 'grounded',
-    'first_version': 1,
-    'generated_at_untouched': True,
-    'rejected_in_progress': True,
-    'second_version': 1,
-  })
-# ---
-# name: test_profile_pipeline_pubmed_outage_stores_a_profile_marked_evidence_lost
-  dict({
-    'context_has_publications_section': False,
-    'evidence_pmid_count': 2,
-    'evidence_pub_count': 0,
-    'evidence_state': 'evidence_lost',
-    'profile_version': 1,
-    'publication_rows': 0,
-    'summary_is_set': True,
-    'synthesis_validated': True,
-    'ungrounded_in_progress': True,
-    'validator_accepts_it': True,
-  })
-# ---
 # name: test_profile_pipeline_rerun_increments_version_and_updates_pubs
   dict({
     'evidence_pmid_count': 2,

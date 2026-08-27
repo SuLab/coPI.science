@@ -21,7 +21,9 @@ import pytest
 from sqlalchemy import select
 
 from src.models import Job, Publication, ResearcherProfile
+from src.services import corpus as corpus_module
 from src.services import profile_pipeline
+from src.services.corpus import CorpusStageError
 from tests import factories
 from tests.fakes import FakeAnthropic
 
@@ -88,6 +90,11 @@ def _install_fakes(monkeypatch):
     async def fake_fetch_orcid_grants(orcid_id):
         return ["Difference Engine Program", "Analytical Engine Grant"]
 
+    _ADA = [{
+        "last": "Lovelace", "fore": "Ada", "initials": "A",
+        "collective": None, "affiliations": ["Analytical Engine Institute"],
+    }]
+
     async def fake_fetch_orcid_works(orcid_id):
         # Both works carry a PMID, so the DOI->PMID resolution branch is skipped.
         return [
@@ -95,11 +102,18 @@ def _install_fakes(monkeypatch):
             {"pmid": "1002", "doi": "10.1000/bbb", "title": "Notes on Bernoulli", "year": 1842},
         ]
 
+    async def fake_fetch_works_by_orcid(orcid_id):
+        return []  # S2 (OpenAlex) finds nothing new
+
+    async def fake_search_pmids(term, retmax=200):
+        return []  # S3/S4 find nothing new
+
     async def fake_convert_dois_to_pmids(dois):
         return {}
 
     async def fake_fetch_pubmed_records(pmids):
         # Authoritative DOIs match the ORCID-assigned DOIs -> reconcile returns "ok".
+        # Authors are present so the REAL resolve_corpus keeps both records.
         return [
             {
                 "pmid": "1001",
@@ -110,6 +124,7 @@ def _install_fakes(monkeypatch):
                 "year": 1843,
                 "pub_types": ["Journal Article"],
                 "pmcid": None,
+                "authors": list(_ADA),
             },
             {
                 "pmid": "1002",
@@ -120,6 +135,7 @@ def _install_fakes(monkeypatch):
                 "year": 1842,
                 "pub_types": ["Journal Article"],
                 "pmcid": None,
+                "authors": list(_ADA),
             },
         ]
 
@@ -129,11 +145,15 @@ def _install_fakes(monkeypatch):
     async def fake_fetch_pmc_methods(pmcid):
         return ""
 
+    # Retrieval seams live in the CORPUS module now; resolve_corpus itself is
+    # left REAL so its gates/ranking/cap run in every characterization test.
     monkeypatch.setattr(profile_pipeline, "fetch_orcid_profile", fake_fetch_orcid_profile)
     monkeypatch.setattr(profile_pipeline, "fetch_orcid_grants", fake_fetch_orcid_grants)
-    monkeypatch.setattr(profile_pipeline, "fetch_orcid_works", fake_fetch_orcid_works)
-    monkeypatch.setattr(profile_pipeline, "convert_dois_to_pmids", fake_convert_dois_to_pmids)
-    monkeypatch.setattr(profile_pipeline, "fetch_pubmed_records", fake_fetch_pubmed_records)
+    monkeypatch.setattr(corpus_module, "fetch_orcid_works", fake_fetch_orcid_works)
+    monkeypatch.setattr(corpus_module, "fetch_works_by_orcid", fake_fetch_works_by_orcid)
+    monkeypatch.setattr(corpus_module, "search_pmids", fake_search_pmids)
+    monkeypatch.setattr(corpus_module, "convert_dois_to_pmids", fake_convert_dois_to_pmids)
+    monkeypatch.setattr(corpus_module, "fetch_pubmed_records", fake_fetch_pubmed_records)
     monkeypatch.setattr(profile_pipeline, "convert_pmids_to_pmcids", fake_convert_pmids_to_pmcids)
     monkeypatch.setattr(profile_pipeline, "fetch_pmc_methods", fake_fetch_pmc_methods)
 
@@ -231,7 +251,7 @@ async def test_profile_pipeline_llm_failure_leaves_fields_unset(db_session, monk
     monkeypatch.setattr("src.services.llm.get_anthropic_client", lambda: _BoomClient())
 
     user = await factories.make_user(
-        db_session, name="Grace Hopper", orcid="0000-0002-1825-0098",
+        db_session, name="Ada Lovelace", orcid="0000-0002-1825-0098",
     )
     profile = await profile_pipeline.run_profile_pipeline(user.id, db_session)
 
@@ -271,6 +291,12 @@ async def test_profile_pipeline_doi_correction_stores_authoritative(
         # ORCID lists a DOI that points at the WRONG paper for this PMID.
         return [{"pmid": "2001", "doi": "10.1000/orcid-wrong", "title": "T", "year": 1843}]
 
+    async def fake_fetch_works_by_orcid(orcid_id):
+        return []
+
+    async def fake_search_pmids(term, retmax=200):
+        return []
+
     async def fake_convert_dois_to_pmids(dois):
         return {}
 
@@ -286,6 +312,10 @@ async def test_profile_pipeline_doi_correction_stores_authoritative(
                 "year": 1843,
                 "pub_types": ["Journal Article"],
                 "pmcid": None,
+                "authors": [{
+                    "last": "Lovelace", "fore": "Ada", "initials": "A",
+                    "collective": None, "affiliations": ["Analytical Engine Institute"],
+                }],
             }
         ]
 
@@ -297,9 +327,11 @@ async def test_profile_pipeline_doi_correction_stores_authoritative(
 
     monkeypatch.setattr(profile_pipeline, "fetch_orcid_profile", fake_fetch_orcid_profile)
     monkeypatch.setattr(profile_pipeline, "fetch_orcid_grants", fake_fetch_orcid_grants)
-    monkeypatch.setattr(profile_pipeline, "fetch_orcid_works", fake_fetch_orcid_works)
-    monkeypatch.setattr(profile_pipeline, "convert_dois_to_pmids", fake_convert_dois_to_pmids)
-    monkeypatch.setattr(profile_pipeline, "fetch_pubmed_records", fake_fetch_pubmed_records)
+    monkeypatch.setattr(corpus_module, "fetch_orcid_works", fake_fetch_orcid_works)
+    monkeypatch.setattr(corpus_module, "fetch_works_by_orcid", fake_fetch_works_by_orcid)
+    monkeypatch.setattr(corpus_module, "search_pmids", fake_search_pmids)
+    monkeypatch.setattr(corpus_module, "convert_dois_to_pmids", fake_convert_dois_to_pmids)
+    monkeypatch.setattr(corpus_module, "fetch_pubmed_records", fake_fetch_pubmed_records)
     monkeypatch.setattr(profile_pipeline, "convert_pmids_to_pmcids", fake_convert_pmids_to_pmcids)
     monkeypatch.setattr(profile_pipeline, "fetch_pmc_methods", fake_fetch_pmc_methods)
     fake_llm = FakeAnthropic([json.dumps(_VALID_PROFILE)])
@@ -583,86 +615,48 @@ async def test_profile_pipeline_rerun_that_fails_validation_keeps_the_stored_pro
     assert second.synthesis_validated is True
 
 
-async def test_profile_pipeline_pubmed_outage_stores_a_profile_marked_evidence_lost(
-    db_session, monkeypatch, snapshot
+async def test_profile_pipeline_pubmed_outage_raises_instead_of_fabricating(
+    db_session, monkeypatch
 ):
-    """PubMed unreachable, ORCID and the LLM fine: the profile is fabricated from
-    a name and a department, and now says so.
+    """PubMed unreachable, ORCID and the LLM fine: the run RAISES.
 
-    Every ingredient of the defect is reproduced: ORCID lists two works with
-    PMIDs, `fetch_pubmed_records` raises, so `pubs_for_synthesis` is empty, the
-    synthesis context contains no publication at all, ZERO Publication rows are
-    written — and the model still returns a profile that PASSES _validate_profile
-    (the fixture is the same valid one the happy path uses, which is exactly what
-    a real model does: it writes plausible prose from the name).
-
-    Onboarding must still complete (asserted), so the discriminator cannot be a
-    refusal to store. It is the pair of evidence counts: 2 identifiers in hand, 0
-    abstracts in the prompt -> evidence_lost.
+    This test used to pin the old policy — proceed, store a profile invented
+    from a name and a department, and mark it evidence_lost. The 2026-08-24
+    corpus change (audit M5) replaced that: a corpus-stage failure raises
+    CorpusStageError, process_job retries up to 3 times, and a dead job is
+    visible on /admin/jobs and the manager PI page — because a "profile"
+    with zero abstracts behind it is exactly the Kavran-class fabrication
+    the coverage design exists to prevent, and the activation gate now
+    refuses to activate an agent whose newest job died.
     """
     _install_fakes(monkeypatch)
 
     async def pubmed_is_down(pmids):
         raise ConnectionError("simulated PubMed outage")
 
-    monkeypatch.setattr(profile_pipeline, "fetch_pubmed_records", pubmed_is_down)
+    monkeypatch.setattr(corpus_module, "fetch_pubmed_records", pubmed_is_down)
     fake_llm = FakeAnthropic([json.dumps(_VALID_PROFILE)])
     monkeypatch.setattr("src.services.llm.get_anthropic_client", lambda: fake_llm)
-
-    # Observe the prompt without replacing it: the claim "no publication reached
-    # the model" is about the real context builder's output.
-    contexts: list[str] = []
-    real_ctx = profile_pipeline._build_synthesis_context
-
-    def recording_ctx(**kwargs):
-        out = real_ctx(**kwargs)
-        contexts.append(out)
-        return out
-
-    monkeypatch.setattr(profile_pipeline, "_build_synthesis_context", recording_ctx)
 
     user = await factories.make_user(
         db_session, name="Ada Lovelace", orcid="0000-0002-1825-0104",
     )
-    job = await _make_job(db_session, user)
-    profile = await profile_pipeline.run_profile_pipeline(user.id, db_session, job=job)
+    with pytest.raises(CorpusStageError):
+        await profile_pipeline.run_profile_pipeline(user.id, db_session)
 
     pubs = (
         await db_session.execute(select(Publication).where(Publication.user_id == user.id))
     ).scalars().all()
-
-    result = {
-        # Onboarding completed: there is a profile and it has a summary.
-        "profile_version": profile.profile_version,
-        "summary_is_set": bool(profile.research_summary),
-        # ...and it passed the shape validator, which is the whole problem:
-        # validation cannot see grounding.
-        "synthesis_validated": profile.synthesis_validated,
-        "validator_accepts_it": profile_pipeline._validate_profile(
-            {
-                "research_summary": profile.research_summary,
-                "techniques": profile.techniques,
-                "disease_areas": profile.disease_areas,
-            }
-        ),
-        # The discriminator.
-        "evidence_pmid_count": profile.evidence_pmid_count,
-        "evidence_pub_count": profile.evidence_pub_count,
-        "evidence_state": profile.evidence_state,
-        "publication_rows": len(pubs),
-        "context_has_publications_section": "## Publications" in contexts[0],
-        "ungrounded_in_progress": "ungrounded" in _progress_steps(job),
-    }
-    assert result == snapshot
-    # The crux: a fabricated profile is no longer indistinguishable from a real
-    # one. Both explicit, because either alone can be satisfied by accident —
-    # `evidence_pub_count == 0` also holds for a researcher with no papers, and
-    # only the PMID count separates "we lost it" from "there was none".
-    assert profile.evidence_pub_count == 0 and profile.evidence_pmid_count == 2
-    assert profile.evidence_state == "evidence_lost"
-    assert len(pubs) == 0, (
-        "Publication rows were written while PubMed was unreachable — they came "
-        "from somewhere other than PubMed and the count above means nothing"
+    profiles = (
+        await db_session.execute(
+            select(ResearcherProfile).where(ResearcherProfile.user_id == user.id)
+        )
+    ).scalars().all()
+    assert pubs == [] and profiles == [], (
+        "an outage run must leave nothing behind for the retry to trip over"
+    )
+    assert len(fake_llm.calls) == 0, (
+        "the LLM was called during a PubMed outage — the fabrication path is back"
     )
 
 
@@ -683,7 +677,7 @@ async def test_profile_pipeline_researcher_with_no_works_is_not_reported_as_evid
     async def no_works(orcid_id):
         return []
 
-    monkeypatch.setattr(profile_pipeline, "fetch_orcid_works", no_works)
+    monkeypatch.setattr(corpus_module, "fetch_orcid_works", no_works)
     fake_llm = FakeAnthropic([json.dumps(_VALID_PROFILE)])
     monkeypatch.setattr("src.services.llm.get_anthropic_client", lambda: fake_llm)
 
@@ -714,45 +708,37 @@ async def test_profile_pipeline_researcher_with_no_works_is_not_reported_as_evid
     )
 
 
-async def test_profile_pipeline_orcid_works_failure_is_not_reported_as_no_works(
-    db_session, monkeypatch, snapshot
+async def test_profile_pipeline_orcid_works_failure_raises(
+    db_session, monkeypatch
 ):
-    """The inverse mistake: ORCID's works lookup FAILS, so the pipeline does not
-    know how many publications exist. Recording 0 identifiers would read as "this
-    researcher has no papers"; the count is left NULL and the state is
-    evidence_lost, which is the honest answer and the actionable one."""
+    """ORCID's works lookup FAILS: the run raises (audit M5) rather than
+    recording anything. The old behavior (proceed with evidence_pmid_count
+    NULL, state evidence_lost) is gone with the works_lookup_failed flag —
+    the honest answer is now a failed job the operator can see and retry."""
     _install_fakes(monkeypatch)
 
     async def orcid_works_down(orcid_id):
         raise ConnectionError("simulated ORCID outage")
 
-    monkeypatch.setattr(profile_pipeline, "fetch_orcid_works", orcid_works_down)
+    monkeypatch.setattr(corpus_module, "fetch_orcid_works", orcid_works_down)
     fake_llm = FakeAnthropic([json.dumps(_VALID_PROFILE)])
     monkeypatch.setattr("src.services.llm.get_anthropic_client", lambda: fake_llm)
 
     user = await factories.make_user(
         db_session, name="Ada Lovelace", orcid="0000-0002-1825-0106",
     )
-    profile = await profile_pipeline.run_profile_pipeline(user.id, db_session)
-
-    result = {
-        "profile_version": profile.profile_version,
-        "evidence_pmid_count": profile.evidence_pmid_count,
-        "evidence_pub_count": profile.evidence_pub_count,
-        "evidence_state": profile.evidence_state,
-    }
-    assert result == snapshot
-    assert profile.evidence_pmid_count is None and profile.evidence_state == "evidence_lost"
+    with pytest.raises(CorpusStageError):
+        await profile_pipeline.run_profile_pipeline(user.id, db_session)
+    assert len(fake_llm.calls) == 0
 
 
 async def test_profile_pipeline_pubmed_outage_on_rerun_keeps_the_grounded_profile(
-    db_session, monkeypatch, snapshot
+    db_session, monkeypatch
 ):
-    """The refresh case of the same defect: a monthly refresh that runs during a
-    PubMed outage must not replace a profile grounded in real abstracts with one
-    invented from a name. Both syntheses pass validation, so only the evidence
-    counts can tell the second one is worse — which is the reason they are
-    persisted rather than merely logged."""
+    """A monthly refresh that runs during a PubMed outage must not replace a
+    profile grounded in real abstracts. Under the 2026-08-24 corpus policy the
+    refresh RAISES before synthesis, so the stored profile — version, summary,
+    evidence counts, generated_at — is untouched."""
     _install_fakes(monkeypatch)
     fake_llm = FakeAnthropic(
         [json.dumps(_VALID_PROFILE), json.dumps(_VALID_PROFILE)]
@@ -769,20 +755,15 @@ async def test_profile_pipeline_pubmed_outage_on_rerun_keeps_the_grounded_profil
     async def pubmed_is_down(pmids):
         raise ConnectionError("simulated PubMed outage")
 
-    monkeypatch.setattr(profile_pipeline, "fetch_pubmed_records", pubmed_is_down)
-    job = await _make_job(db_session, user)
-    second = await profile_pipeline.run_profile_pipeline(user.id, db_session, job=job)
+    monkeypatch.setattr(corpus_module, "fetch_pubmed_records", pubmed_is_down)
+    with pytest.raises(CorpusStageError):
+        await profile_pipeline.run_profile_pipeline(user.id, db_session)
 
-    result = {
-        "first_version": first_version,
-        "second_version": second.profile_version,
-        "evidence_pub_count": second.evidence_pub_count,
-        "evidence_state": second.evidence_state,
-        "generated_at_untouched": second.profile_generated_at == first_generated_at,
-        "rejected_in_progress": "validation_rejected" in _progress_steps(job),
-    }
-    assert result == snapshot
-    assert second.evidence_pub_count == 2 and second.profile_version == 1, (
-        "a refresh during a PubMed outage replaced a profile grounded in 2 "
-        "abstracts with one grounded in none"
+    await db_session.refresh(first)
+    assert first.profile_version == first_version == 1
+    assert first.research_summary == _VALID_PROFILE["research_summary"]
+    assert first.profile_generated_at == first_generated_at
+    assert first.evidence_pub_count == 2, (
+        "a refresh during a PubMed outage degraded a profile grounded in 2 abstracts"
     )
+    assert len(fake_llm.calls) == 1
