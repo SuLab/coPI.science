@@ -35,11 +35,8 @@ from src.models import (
 from src.services.assessment_detail import panel_state, unvetted_panel_filter
 from src.services.blackbird_rubric import (
     BANDING,
-    BANDING_INCUBATION,
     RUBRIC_VERSION,
     RUBRIC_WEIGHTS,
-    RUBRIC_WEIGHTS_INCUBATION,
-    display_scale_for,
 )
 
 # Hard cap on rows fetched for one render of the triage queue (B1). Scoped to
@@ -406,19 +403,6 @@ async def list_assessments(
             r.agent_id: str(r.user_id) for r in rows if r.user_id is not None
         }
 
-    # Per-row display scale, keyed by assessment id — gated the same way the
-    # detail page is (blackbird_rubric.display_scale_for): incubation weights
-    # only for a row that was BOTH scored by a stage-aware (v2+) document AND
-    # named an incubation funnel_stage. The 34 pre-v2 rows (29 NULL
-    # rubric_version, 5 "1.0.0") were scored on the investment weights
-    # unconditionally, so their chips must show those weights even when
-    # funnel_stage says "incubation" — the template must not pick a scale from
-    # funnel_stage alone, or it would show weights that never scored the row.
-    row_scales = {
-        row.id: display_scale_for(row.rubric_version, row.funnel_stage)
-        for row in assessments
-    }
-
     # Per-dimension distribution. Four dimensions (external_signals, ip_fto,
     # exit_thesis, chemistry_dc_path) never exceeded 2 across the 18
     # assessments of run 1787010946 — 23 of 100 weight points pinned near
@@ -451,12 +435,6 @@ async def list_assessments(
         dimension_stats.append({
             "dimension": dimension,
             "weight": weight,
-            # The same dimension's weight on the OTHER scale. Both are shown
-            # because the population is incubation-stage but the table's mean
-            # is pooled over whatever stages the filter caught, so "is this
-            # dimension worth 1% or 8% of the rows I am looking at" is not
-            # answerable from one column.
-            "weight_incubation": RUBRIC_WEIGHTS_INCUBATION.get(dimension),
             "specialist": specialist_for.get(dimension),
             "n": len(values),
             "mean": round(sum(values) / len(values), 2) if values else None,
@@ -491,25 +469,9 @@ async def list_assessments(
 
     return {
         "assessments": assessments,
-        # Passed so the detail row can render the thirteen dimensions in
-        # descending rubric weight rather than dict order, and can show an
-        # unscored dimension as a gap. An unscored dimension counts as zero
-        # in the weighted score (src/services/blackbird_rubric.py), so a
-        # reader needs to see which ones were never answered.
-        "rubric_weights": RUBRIC_WEIGHTS,
-        # The other scale, for the same reason plus one more: which weight set
-        # scored a row follows from that ROW's funnel_stage (rubric v2.0.0), so
-        # the template picks per row rather than per page. Same dict shape and
-        # same key order as `rubric_weights`, so the chips stay in one order
-        # whichever set a row uses.
-        "rubric_weights_incubation": RUBRIC_WEIGHTS_INCUBATION,
-        # Per-row selected scale (DisplayScale: .weights/.banding/.incubation/
-        # .label), keyed by assessment id — see the comment where it's built
-        # above. This is what the per-row "Scores:" chips must key off of,
-        # NOT funnel_stage alone: gating only on funnel_stage would show the
-        # 34 pre-v2 rows against incubation weights they were never scored
-        # with, just because their stage happens to say "incubation".
-        "row_scales": row_scales,
+        # (The per-row score chips, and the rubric_weights / row_scales keys
+        # that fed them, left this view with the inline detail rows on
+        # 2026-08-27 — per-dimension scores are detail-page content.)
         # The band thresholds and the decline label the page's legend states,
         # read from the rubric document rather than typed into the template.
         # The legend used to hard-code "≥4.0 / 3.0–3.9 / <3.0"; the moment
@@ -517,11 +479,6 @@ async def list_assessments(
         # whole point of it being a document) those literals become a page
         # that confidently states the wrong thresholds.
         "banding": BANDING,
-        # Both scales are stated in the legend, and the incubation one is the
-        # one that matters here: the screened population is ~100%
-        # incubation-stage, so a legend quoting only the investment lines
-        # explains none of the bands actually in the table.
-        "banding_incubation": BANDING_INCUBATION,
         # Which rubric revision the reader is looking at. Per-row stamps live
         # on the assessment itself (rubric_version/rubric_content_hash); this
         # is the CURRENT document, which is what a row with no stamp is being

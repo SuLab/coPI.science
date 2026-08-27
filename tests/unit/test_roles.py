@@ -289,24 +289,25 @@ def test_scout_hub_assessment_follows_the_blackbird_rubric():
     body = (Path("prompts/roles/scout_hub") / "phase4-thread-reply.md").read_text(
         encoding="utf-8"
     )
-    # C.1 gating, C.2 funnel, C.3 scores, C.5 red flags, C.6 verdict.
+    # Gating, scores, red flags, and the verdict contract.
     for required in (
-        "Funnel stage", "Gating criteria", "Red flags", "Recommendation",
-        "route-to-incubation", "<assessment_json>", "weighted_score",
-        "suggested_derisking_milestones",
+        "Gating criteria", "Red flags", "Recommendation",
+        "route-to-incubation", "<assessment_json>",
+        "recommended_next_experiment",
     ):
         assert required in body, f"assessment template omits {required!r}"
-    # Non-dilutive leverage framed to the lab's own institution (the roster is
-    # no longer Maryland-only — the 2026-08-24 prompt-set review generalized
-    # the TEDCO/MII/MSCRF/BIITC list), not a generic NIH-mechanism frame.
-    assert "federal, state, and" in body and "non-dilutive" in body
+    # Non-dilutive leverage is framed institution-agnostically (the roster is
+    # not Maryland-only): the instrument question stays in phase 4, and the
+    # state/regional leverage framing lives in the rubric document's
+    # fundable_experiment anchor, never a hardcoded program list here.
+    assert "non-dilutive incubation grant, or equity" in " ".join(body.split())
     assert "TEDCO" not in body and "BIITC" not in body
     # The sidecar must NOT be fenced. rsplit: the tag name also appears in
     # the prose above the real block, and only the real block's contents are
     # the thing under test.
     sidecar = body.rsplit("<assessment_json>", 1)[1].split("</assessment_json>")[0]
     assert "```" not in sidecar
-    assert '"funnel_stage"' in sidecar
+    assert '"recommendation"' in sidecar
     # The real Phase-4 renderer's scaffolding (build_phase4_prompt's
     # substitution tokens) is pinned separately by
     # test_scout_hub_phase4_override_renders_and_drops_the_tool_it_lacks —
@@ -318,10 +319,10 @@ def test_visible_body_hides_the_verdict_the_sidecar_still_carries():
     """F5: the bot is a member of every lab's cohort, so a :mag: Opportunity
     Assessment (a top-level post) is a workspace-wide broadcast, not a private
     note. The visible `<slack_message>` must therefore read as a courtesy
-    summary and never carry the funnel stage, the four gating statuses, the
-    red-flag list, or the advance/conditional/pass/route-to-incubation
-    recommendation — those belong only in the staff-only `<assessment_json>`
-    sidecar, which must still require all of them so staff lose nothing.
+    summary and never carry the gating statuses, the red-flag list, or the
+    advance/conditional/pass/route-to-incubation recommendation — those belong
+    only in the staff-only `<assessment_json>` sidecar, which must still
+    require all of them so staff lose nothing.
     """
     from pathlib import Path
 
@@ -345,7 +346,7 @@ def test_visible_body_hides_the_verdict_the_sidecar_still_carries():
     # The PI-facing instructions must not ask for (or even name) the internal
     # verdict machinery.
     for forbidden in (
-        "Funnel stage", "Gating criteria", "Red flags", "route-to-incubation",
+        "Gating criteria", "Red flags", "route-to-incubation",
         "not_met", "not met",
     ):
         assert forbidden not in visible_instructions, (
@@ -360,7 +361,7 @@ def test_visible_body_hides_the_verdict_the_sidecar_still_carries():
     # The sidecar instructions must still require every one of them — staff
     # must lose nothing.
     for required in (
-        "Funnel stage", "Gating criteria", "Red flags", "route-to-incubation",
+        "Gating criteria", "Red flags", "route-to-incubation",
         "not_met",
     ):
         assert required in sidecar_instructions, (

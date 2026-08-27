@@ -50,19 +50,10 @@
 <p class="text-sm text-gray-500 mb-2">
     BlackbirdBot's screening verdicts against the Blackbird investment rubric
     {% if rubric_version %}(<span class="font-mono text-xs">{{ rubric_version }}</span>){% endif %}.
-    Weighted score is computed from the thirteen dimension scores — not taken from the
+    Weighted score is computed from the six dimension scores — not taken from the
     model. Bands: &ge;{{ banding.advance_min }} advance,
     {{ banding.conditional_min }}&ndash;&lt;{{ banding.advance_min }} conditional,
     &lt;{{ banding.conditional_min }} {{ banding.pass_label }}.
-    {# Both scales, because which one scored a row follows from that row's funnel
-       stage — and the screened population is almost entirely incubation-stage,
-       so the investment lines alone explain none of the bands in the table. The
-       investment sentence above is kept first and unchanged: it is what
-       test_the_assessments_legend_states_the_rubric_thresholds pins. #}
-    On the <strong>incubation</strong> scale (rows whose funnel stage is incubation)
-    the weights and lines differ: &ge;{{ banding_incubation.advance_min }} advance,
-    {{ banding_incubation.conditional_min }}&ndash;&lt;{{ banding_incubation.advance_min }} conditional,
-    &lt;{{ banding_incubation.conditional_min }} {{ banding_incubation.pass_label }}.
     A band of "pass" means <em>pass on the deal</em> (decline) — the PDF's deal
     vocabulary, not "passed the screen".
     <strong>Recommendation</strong> is the model's own judgement (it can also say
@@ -99,9 +90,9 @@
    macros included, into an {% include %}).
 
    The class name deliberately avoids the substring "assessment-detail":
-   test_admin_assessments_page_omits_detail_row_when_empty asserts a page of
-   sparse verdicts contains no such string anywhere. #}
-{% macro assessment_link(a) %}<a class="assessment-open-link underline text-indigo-600 hover:text-indigo-800 whitespace-nowrap" href="/admin/assessments/{{ a.id }}" onclick="event.stopPropagation()" title="Full verdict and interview timeline">detail &rarr;</a>{% endmacro %}
+   test_admin_assessments_page_renders_no_inline_detail_rows asserts the page
+   contains no such string anywhere. #}
+{% macro assessment_link(a) %}<a class="assessment-open-link underline text-indigo-600 hover:text-indigo-800 whitespace-nowrap" href="/admin/assessments/{{ a.id }}" title="Full verdict and interview timeline">detail &rarr;</a>{% endmacro %}
 {# Same reasoning as assessment_link above, applied to the Lab cell: a link to
    the PI's own profile has to be a literal /admin/users/{id} URL for
    test_reachability's _link_credits to see it, so it is defined here as a

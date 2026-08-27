@@ -51,14 +51,12 @@ class SpecialistSpec:
     somewhere to land — empty where the specialist informs judgement without
     owning any dimension.
 
-    A tuple, not one dimension. It was 1:1 until 2026-08-22, when a census found
-    5 of the 13 dimensions with no owning specialist at all — 25% of the
-    incubation weight, and including ``mechanism_validation`` (10) and
-    ``toxicity_selectivity`` (8), which are the two most-cited rejection reasons
-    in the stakeholder document that justified building the panel. Both are
-    squarely inside an existing persona's remit (mechanism belongs to
-    scientific, in-family selectivity to chemistry), so the fix is a second
-    dimension each, not a ninth specialist nobody would consult.
+    A tuple, not one dimension: ``commercial`` owns two of the six dimensions
+    (differentiation_unmet_need and venture_potential). Clinical, legal and
+    technologic inform judgement without owning a dimension — their consults
+    are still required by the cue tiers below, they just have no single
+    dimension that is "theirs" at the consolidated grain
+    (docs/plans/2026-08-27-rubric-v3-consolidation.md).
 
     Order matters only to a reader: the first entry is the dimension the persona
     file was written against. No dimension may appear twice across the table —
@@ -81,55 +79,52 @@ SPECIALIST_DOMAINS: dict[str, SpecialistSpec] = {
             "experimental rigor, controls, statistical power, interpretability, "
             "mouse-to-human translatability",
             "any experimental claim, any animal-model result, any 'we showed that'",
-            maps_to_dimensions=("experimental_rigor", "mechanism_validation"),
+            maps_to_dimensions=("scientific_credibility",),
         ),
         SpecialistSpec(
             "chemistry", "Chemistry Specialist",
             "path to a development candidate, medicinal-chemistry tractability, "
             "tolerability, in-family off-target liability",
             "chemical matter, a compound series, or a choice of modality",
-            maps_to_dimensions=("chemistry_dc_path", "toxicity_selectivity"),
+            maps_to_dimensions=("translational_path",),
         ),
         SpecialistSpec(
             "clinical", "Clinical Specialist",
             "unmet need against the current standard of care, indication choice, "
             "patient numbers, the clinical development path",
             "any disease or indication claim",
-            maps_to_dimensions=("market_unmet_need",),
         ),
         SpecialistSpec(
             "commercial", "Commercial Specialist",
             "competitive landscape, named competing programs, deal comparables, "
             "investor sentiment",
             "any differentiation or first/best-in-class claim",
-            maps_to_dimensions=("differentiation",),
+            maps_to_dimensions=("differentiation_unmet_need", "venture_potential"),
         ),
         SpecialistSpec(
             "legal", "Legal Specialist",
             "freedom to operate, licensing, research-tool and animal-model "
             "encumbrance, co-ownership",
             "any IP claim, or reliance on third-party materials",
-            maps_to_dimensions=("ip_fto",),
         ),
         SpecialistSpec(
             "technologic", "Technologic Specialist",
             "platform feasibility, and whether the proposed work would actually "
             "test that feasibility",
             "any platform or novel-technology claim",
-            maps_to_dimensions=("platform",),
         ),
         SpecialistSpec(
             "talent", "Talent Specialist",
             "probability the team completes the work, conflicts of interest, "
             "over-commitment across projects",
             "always, before concluding an interview",
-            maps_to_dimensions=("team",),
+            maps_to_dimensions=("team_executability",),
         ),
         SpecialistSpec(
             "budget", "Budget Specialist",
             "scope against Blackbird's grant bands and 12-24 month durations",
             "any workplan, cost, or timeline claim",
-            maps_to_dimensions=("workplan_capital_efficiency",),
+            maps_to_dimensions=("fundable_experiment",),
         ),
     )
 }
@@ -162,11 +157,16 @@ _PANEL_NOTE_SIGNAL_EMOJI: dict[str, str] = {
 # free text in the note and is model-written, so it is clipped — long enough to
 # be recognisable in a thread, short enough not to become a second transcript.
 #
-# 600, not 200: a production measurement (n=134 consults, 2026-08-20) found
-# the SHORTEST hub question was 241 chars, median 398, p90 552, max 814 — so
-# 200 truncated every single note mid-sentence. 600 renders 95% of observed
-# questions complete and clips only the tail of the 814-char worst case.
-PANEL_NOTE_QUESTION_CHARS = 600
+# 850, recalibrated 2026-08-26 (was 600, calibrated 2026-08-20 on n=134:
+# median 398, p90 552, max 814 — "95% complete"). The hub's questions grew
+# under rubric v2.x: measured over every consult since 2026-08-24 (n=374),
+# p90 605 / p95 670 / p99 811 / max 1029, so 600 had decayed to clipping
+# ~10-15% of notes. 850 covers p99 of the current distribution. This is a
+# point-in-time calibration of a distribution that moves with every rubric
+# or model change — clip_rate_warning below is the drift signal that says
+# when it has decayed again; recalibrate from specialist_consults question
+# lengths, do not guess.
+PANEL_NOTE_QUESTION_CHARS = 850
 
 
 def format_panel_note(*, domain: str, verdict_signal: str, question: str) -> str:
@@ -210,6 +210,46 @@ def clip_question(question: str, limit: int = PANEL_NOTE_QUESTION_CHARS) -> str:
     if cut <= 0:
         return head.rstrip() + "…"
     return head[:cut].rstrip() + "…"
+
+
+#: Smallest number of panel notes the alarm will speak on. Below this, one or
+#: two long questions could be ordinary variance rather than
+#: PANEL_NOTE_QUESTION_CHARS having aged out from under the hub's questions —
+#: mirrors MIN_CONSULTS_FOR_CLEAR_RATE's reasoning, at a smaller floor because
+#: a note is posted on every successful consult, not just a subset of them.
+_CLIP_RATE_MIN_NOTES = 20
+
+#: The clip rate a run may run at before the alarm speaks. Not zero:
+#: PANEL_NOTE_QUESTION_CHARS is itself calibrated to a p99 of a real
+#: distribution (see the constant's comment above), so clipping the
+#: occasional outlier question is the calibration working as intended. North
+#: of one note in ten clipped is the calibration falling behind the
+#: distribution it was set against.
+_CLIP_RATE_WARN_FRACTION = 0.10
+
+
+def clip_rate_warning(clipped: int, total: int) -> str | None:
+    """The warning to log about panel-note clipping drift, or None if there
+    is none.
+
+    Mirrors ``clear_rate_warning``'s idiom: returns the MESSAGE rather than
+    logging it, so the sample it judges and the logger it speaks through both
+    stay the caller's — the engine counts panel notes posted across a run;
+    this module does not know a run exists. Never raises and never divides by
+    zero.
+    """
+    if total < _CLIP_RATE_MIN_NOTES:
+        return None
+    rate = clipped / total
+    if rate <= _CLIP_RATE_WARN_FRACTION:
+        return None
+    return (
+        f"[specialists] {clipped} of {total} panel notes this run had their "
+        f"question clipped ({rate:.1%}, ceiling {_CLIP_RATE_WARN_FRACTION:.0%}) "
+        f"at PANEL_NOTE_QUESTION_CHARS={PANEL_NOTE_QUESTION_CHARS}. The "
+        f"calibration has decayed — recalibrate PANEL_NOTE_QUESTION_CHARS "
+        f"from specialist_consults question lengths, do not guess."
+    )
 
 
 def persona_path(domain: str) -> Path:
@@ -469,11 +509,8 @@ _BUDGET_CUES = (
     "capital efficien", "runway", "cost",
 )
 
-# `legal` gained a cue tier with the v2.1.0 gating rename (fto_achievable ->
-# translational_potential): new verdicts carry no FTO gating key, so the old
-# trigger — gating.fto_achievable == "met" — can never fire on them, and
-# without a replacement `legal` would be unrequirable on any post-rename
-# verdict (the same hole M7 closed for commercial/budget). Narrow on the same
+# `legal` is cue-required: there is no FTO gating key and no IP dimension key,
+# so language in the verdict's own text is the one route in. Narrow on the same
 # inverted cost model as _COMMERCIAL_CUES. "patent" and "prior art" are absent
 # by decision, not oversight: the hub is REQUIRED to report its prior-art
 # searches in rationale, so either would fire on nearly every verdict — a
@@ -481,11 +518,11 @@ _BUDGET_CUES = (
 _LEGAL_CUES = (
     "freedom-to-operate", "freedom to operate", "fto", "encumb", "co-own",
 )
-# "milestone" is NOT here on purpose. `_haystack` folds in every
-# `suggested_derisking_milestones` entry, and a verdict at advance/conditional
-# essentially always carries some, so the cue would fire on nearly every verdict
-# the floor is checked against — a requirement that is always on is not a
-# requirement, it is `_ALWAYS` with extra steps.
+# "milestone" is NOT here on purpose: an advance/conditional verdict's
+# rationale essentially always names go/no-go milestones (the contract asks
+# for them there), so the cue would fire on nearly every verdict the floor is
+# checked against — a requirement that is always on is not a requirement, it
+# is `_ALWAYS` with extra steps.
 
 _ALWAYS: frozenset[str] = frozenset({"scientific", "talent"})
 
@@ -528,13 +565,10 @@ PANEL_REQUIRED_FOR: frozenset[str] = frozenset({"advance", "conditional"})
 #:   corpus carry ``recommendation='pass'``. So a verdict could score into
 #:   ``conditional`` and exempt itself from the panel by writing one word.
 #:
-#: The prompt still tells the model the old rule
-#: (``prompts/roles/scout_hub/phase4-thread-reply.md``: "`pass` and
-#: `route-to-incubation` verdicts require no panel at all"), and it also does not
-#: name ``commercial`` or ``budget`` under "Mandatory consults". Closing that gap
-#: is a prompt change with its own sign-off; until it lands, a hub that follows
-#: its prompt can be marked ``panel_incomplete`` for a rule it was never given.
-#: That is a flag on a stored row, not a lost verdict — see
+#: The prompt states the same rule
+#: (``prompts/roles/scout_hub/phase4-thread-reply.md``, "Mandatory consults
+#: before any verdict except a clean `pass`"), and a verdict that skips a
+#: required domain is stored and flagged, never refused — see
 #: ``_persist_assessment``'s ``panel_incomplete=bool(gap)``.
 PANEL_EXEMPT_RECOMMENDATIONS: frozenset[str] = frozenset({"pass"})
 
@@ -646,14 +680,13 @@ def _cue_matches(cue: str, text: str) -> bool:
 def _haystack(verdict: dict) -> str:
     """Every free-text field of a verdict, lowercased, for cue matching."""
     parts: list[str] = []
-    for key in ("company_or_project", "rationale", "funnel_stage", "recommendation"):
+    for key in ("company_or_project", "rationale", "recommendation"):
         value = verdict.get(key)
         if isinstance(value, str):
             parts.append(value)
-    for key in ("red_flags", "suggested_derisking_milestones"):
-        value = verdict.get(key)
-        if isinstance(value, list):
-            parts.extend(str(v) for v in value)
+    red_flags = verdict.get("red_flags")
+    if isinstance(red_flags, list):
+        parts.extend(str(v) for v in red_flags)
     return " ".join(parts).lower()
 
 
@@ -702,32 +735,15 @@ def required_domains_for(
     if any(_cue_matches(cue, text) for cue in _BUDGET_CUES):
         required.add("budget")
 
-    scores = verdict.get("scores")
-
-    # Legal has three routes in, deliberately additive across the v2.1.0
-    # gating rename (fto_achievable -> translational_potential):
-    #   - the historical gate: a verdict written under the old contract (or by
-    #     an old image) that marks gating.fto_achievable "met" is claiming
-    #     freedom-to-operate, and that claim must be sourced;
-    #   - the score: ip_fto >= 4 claims a strong IP position — the same shape
-    #     as platform >= 4 summoning technologic;
-    #   - the prose: FTO/encumbrance language in the verdict's own text.
-    gating = verdict.get("gating")
-    fto_gate_claimed = (
-        isinstance(gating, dict) and gating.get("fto_achievable") == "met"
-    )
-    ip_scored = isinstance(scores, dict) and isinstance(
-        scores.get("ip_fto"), (int, float)
-    ) and scores.get("ip_fto", 0) >= 4
-    if fto_gate_claimed or ip_scored or any(
-        _cue_matches(cue, text) for cue in _LEGAL_CUES
-    ):
+    # `legal` and `technologic` are cue-required from the verdict's own text:
+    # FTO/encumbrance/co-ownership language summons legal, platform/pipeline
+    # language summons technologic. There is deliberately no score trigger for
+    # either — no dimension key names IP or platform alone, and language is
+    # what a verdict leaning on either actually contains (D7,
+    # docs/plans/2026-08-27-rubric-v3-consolidation.md).
+    if any(_cue_matches(cue, text) for cue in _LEGAL_CUES):
         required.add("legal")
-
-    platform_scored = isinstance(scores, dict) and isinstance(
-        scores.get("platform"), (int, float)
-    ) and scores.get("platform", 0) >= 4
-    if platform_scored or any(_cue_matches(cue, text) for cue in _PLATFORM_CUES):
+    if any(_cue_matches(cue, text) for cue in _PLATFORM_CUES):
         required.add("technologic")
 
     return frozenset(required)

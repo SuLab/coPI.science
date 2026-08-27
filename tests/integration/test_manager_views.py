@@ -21,7 +21,6 @@ from tests.integration.test_manager_access import auth_headers
 from tests.integration.test_opportunity_assessment_persistence import (
     _band_label,
     _gating_state_for,
-    _score_cell,
 )
 
 pytestmark = pytest.mark.integration
@@ -305,9 +304,12 @@ async def test_admin_impersonating_a_manager_sees_the_manager_nav_link(client, d
     the real admin's own is_staff. Once c6cca1e set the banner (to give the
     admin a Stop-impersonating button), that same clause flipped false and
     hid the nav link exactly while impersonating — the one time it's needed.
-    The fix gates on the *effective* user's is_staff instead, with no
+    The fix gates on the *effective* user instead, with no
     impersonation-banner clause at all, so both the link and the Stop form
-    must be present together here — that pairing is exactly what regressed."""
+    must be present together here — that pairing is exactly what regressed.
+    (2026-08-27: the gate narrowed from is_staff to is_manager, which an
+    impersonated manager still satisfies; the plain-admin half of that change
+    is test_a_plain_admin_has_no_manager_nav_link below.)"""
     admin = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN, name="Adm Nav")
     mgr = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER, name="Mgr Nav")
     headers = auth_headers(admin.id)
@@ -342,11 +344,31 @@ async def test_admin_impersonating_a_pi_has_no_manager_nav_link(client, db_sessi
 
 async def test_a_plain_manager_sees_the_manager_nav_link(client, db_session):
     """Not impersonated at all: the effective-user rule must reduce to the
-    real user's own is_staff, same as before this hotfix."""
+    real user's own role, same as before this hotfix."""
     mgr = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER, name="Plain Mgr Nav")
     r = await client.get("/manager/pis", headers=auth_headers(mgr.id))
     assert r.status_code == 200
     assert 'href="/manager"' in r.text
+
+
+async def test_a_plain_admin_has_no_manager_nav_link(client, db_session):
+    """2026-08-27: the top-bar Manager link is gated on is_manager, not
+    is_staff — an admin's entry point is the Admin panel, so the link must
+    not render for a non-impersonating admin. Deliberately NARROWER than the
+    access gate: the admin still reaches /manager/* by URL (get_staff_user),
+    and this test pins that too, so hiding the link stays a navigation
+    decision rather than an access change. Read off /settings, the one page
+    every logged-in role can always reach (same choice as the
+    impersonated-PI nav test above)."""
+    adm = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN, name="Plain Adm Nav")
+
+    r = await client.get("/settings", headers=auth_headers(adm.id))
+    assert r.status_code == 200
+    assert 'href="/manager"' not in r.text
+    assert 'href="/admin/users"' in r.text  # the Admin link is still offered
+
+    r2 = await client.get("/manager/pis", headers=auth_headers(adm.id), follow_redirects=False)
+    assert r2.status_code == 200  # access unchanged — only the link is gone
 
 
 async def test_a_non_impersonating_manager_sees_no_banner(client, db_session):
@@ -385,11 +407,11 @@ async def test_manager_assessments_renders_a_populated_verdict_row(client, db_se
     only prove the static wrapper (title, empty-state) renders through
     ``/manager``. The verdict table itself — the whole point of the shared
     partial — sits behind ``{% if assessments %}``
-    (``templates/admin/_assessments_body.html``) and is the only consumer of
-    ``rubric_weights``/``runs_by_id``; a manager route that dropped either key
-    from its ``**view`` splat would still 200 with a clean empty state and
-    every other test here would keep passing. This drives one row through the
-    real table markup and asserts on content that can only come from it:
+    (``templates/admin/_assessments_body.html``); a manager route that dropped
+    a table-only key from its ``**view`` splat would still 200 with a clean
+    empty state and every other test here would keep passing. This drives one
+    row through the real table markup and asserts on content that can only
+    come from it:
 
     * the project name — a literal fixture string, present nowhere else on
       the page.
@@ -403,17 +425,18 @@ async def test_manager_assessments_renders_a_populated_verdict_row(client, db_se
       not a bare substring check, because the gating legend paragraph above
       the table already prints the words "met" and "unconfirmed" while
       explaining the glyphs, on every page render including the empty state.
-    * a scored dimension's label/value/weight and the omitted dimension's
-      em-dash placeholder, via ``_score_cell``, scoped to the per-row
-      ``score-<key>`` class — this class only exists inside a detail row, so
-      it cannot be satisfied by the tooltip text or intro prose either.
 
-    All three helpers are imported from
+    Both helpers are imported from
     ``test_opportunity_assessment_persistence`` (the suite that already
     proves this same markup renders correctly on ``/admin/assessments``)
     rather than reimplemented, so a future template change that broke one of
     these scoped matchers would show up as a failure in both suites, not a
     silently-diverged regex in this one.
+
+    (The score-chip assertions this test carried, via ``_score_cell``, left
+    with the inline detail rows on 2026-08-27 — per-dimension scores are
+    detail-page content now, covered by
+    tests/integration/test_assessment_detail_page.py.)
     """
     mgr = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
     run = SimulationRun()
@@ -431,23 +454,7 @@ async def test_manager_assessments_renders_a_populated_verdict_row(client, db_se
             band="advance",
             gating={
                 "life_sciences_domain": "met",
-                "fto_achievable": "unconfirmed",
-            },
-            scores={
-                "differentiation": 4,
-                "market_unmet_need": 4,
-                "team": 4,
-                "ip_fto": 2,
-                "platform": 3,
-                "dev_regulatory_feasibility": 3,
-                "workplan_capital_efficiency": 3,
-                "exit_thesis": 2,
-                "mechanism_validation": 4,
-                "toxicity_selectivity": 3,
-                "experimental_rigor": 4,
-                "chemistry_dc_path": 2,
-                # external_signals deliberately omitted: must render as a
-                # gap ("—"), not indistinguishable from a scored 0.
+                "translational_potential": "unconfirmed",
             },
         )
     )
@@ -460,9 +467,7 @@ async def test_manager_assessments_renders_a_populated_verdict_row(client, db_se
     assert "Manager View Fixture Co" in html
     assert _band_label(html) == "advance"
     assert _gating_state_for(html, "life sciences domain") == "met"
-    assert _gating_state_for(html, "fto achievable") == "unconfirmed"
-    assert _score_cell(html, "differentiation") == "differentiation 4 /15%"
-    assert _score_cell(html, "external_signals") == "external signals — /8%"
+    assert _gating_state_for(html, "translational potential") == "unconfirmed"
 
 
 async def test_manager_assessments_renders_the_incomplete_panel_marker(client, db_session):

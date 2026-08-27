@@ -19,7 +19,7 @@ Recommendation: route-to-incubation. [Speculative]
   "subject_agent_id": "wang",
   "funnel_stage": "incubation",
   "gating": {"baltimore_commitment": "unconfirmed", "life_sciences_domain": "met",
-             "credible_tech_source": "met", "fto_achievable": "not_met"},
+             "credible_science": "met", "translational_potential": "not_met"},
   "scores": {"differentiation": 4, "market_unmet_need": 4, "team": 4,
              "external_signals": 1, "ip_fto": 2, "platform": 3,
              "dev_regulatory_feasibility": 3, "workplan_capital_efficiency": 3,
@@ -42,7 +42,7 @@ def test_extracts_the_sidecar_verdict():
     # Tri-state string, never a bare boolean (F11) — "the PI declined"
     # (not_met) and "we never asked" (unconfirmed) are different facts.
     assert verdict["gating"]["baltimore_commitment"] == "unconfirmed"
-    assert verdict["gating"]["fto_achievable"] == "not_met"
+    assert verdict["gating"]["translational_potential"] == "not_met"
     assert verdict["scores"]["differentiation"] == 4
     assert verdict["recommendation"] == "route-to-incubation"
 
@@ -132,7 +132,7 @@ Recommendation: route-to-incubation. [Speculative]
   "subject_agent_id": "wang",
   "funnel_stage": "incubation",
   "gating": {"baltimore_commitment": "unconfirmed", "life_sciences_domain": "met",
-             "credible_tech_source": "met", "fto_achievable": "not_met"},
+             "credible_science": "met", "translational_potential": "not_met"},
   "scores": {"differentiation": 4},
   "weighted_score": 0,
   "recommendation": "route-to-incubation",

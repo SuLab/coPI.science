@@ -32,8 +32,7 @@ So the STORED COLUMN is now the sole authority for green.
 `opportunity_assessments.panel_owed` records what the floor decided AT WRITE TIME
 (see that column's comment: True = a panel was owed so the floor evaluated this
 verdict, False = none was owed, NULL = the row predates 0036 and nobody knows),
-and `panel_state` replays it instead of re-deriving it — the same discipline
-`display_scale_for(assessment.rubric_version, …)` already applies to scoring.
+and `panel_state` replays it instead of re-deriving it.
 `panel_is_owed` is deliberately absent from the read path; putting it back ahead
 of the column test re-arms this exact bug the next time the predicate widens.
 

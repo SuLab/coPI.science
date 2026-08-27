@@ -15,10 +15,8 @@ still restate parts of it and can therefore drift out of sync with it silently:
 * ``src/agent/specialists.py`` — each specialist's ``maps_to_dimensions``, which
   is where a blocking specialist signal lands. A dimension renamed in the
   document leaves that mapping pointing at nothing.
-* the prose percentages in the phase-4 prompt and in the document's own scoring
-  preamble ("the four scientific dimensions are 40% ... and 34% on the
-  incubation scale"), which are hand-written restatements of the weights — now
-  of BOTH weight sets, so a re-cut of either one forces the prose update.
+* the prose percentages in the document's own scoring preamble ("carry 35% of
+  the total"), which are hand-written restatements of the weights.
 
 These tests are the drift alarm for all three, plus the wiring itself: that
 agent-system.md carries the placeholder rather than a stale copy of the table,
@@ -34,9 +32,7 @@ from src.agent.agent import Agent
 from src.agent.specialists import SPECIALIST_DOMAINS
 from src.services.blackbird_rubric import (
     BANDING,
-    BANDING_INCUBATION,
     RUBRIC_WEIGHTS,
-    RUBRIC_WEIGHTS_INCUBATION,
     load_rubric,
     render_rubric_markdown,
 )
@@ -46,14 +42,12 @@ HUB_PROMPTS = ROOT / "prompts/roles/scout_hub"
 SYSTEM_PROMPT = HUB_PROMPTS / "agent-system.md"
 PHASE4_PROMPT = HUB_PROMPTS / "phase4-thread-reply.md"
 
-# The four scientific dimensions added by the 2026-08 weight re-cut. Named here
-# rather than derived, because "which dimensions are the scientific ones" is
-# exactly the fact the phase-4 prose asserts a percentage about.
+# The two scientific dimensions. Named here rather than derived, because
+# "which dimensions are the scientific ones" is exactly the fact the scoring
+# preamble asserts a percentage about.
 SCIENCE_DIMENSIONS = (
-    "mechanism_validation",
-    "toxicity_selectivity",
-    "experimental_rigor",
-    "chemistry_dc_path",
+    "scientific_credibility",
+    "translational_path",
 )
 
 
@@ -100,9 +94,9 @@ def test_skeleton_gating_keys_are_exactly_the_documents_gating_criteria():
 
 
 def test_phase4_states_the_dimension_count_the_document_defines():
-    """"Every one of the thirteen keys is required" is a hand-written count of
+    """"Every one of the six keys is required" is a hand-written count of
     the document's dimensions. Adding or removing one must update it."""
-    words = {13: "thirteen", 12: "twelve", 14: "fourteen"}
+    words = {5: "five", 6: "six", 7: "seven"}
     count = len(RUBRIC_WEIGHTS)
     assert count in words, f"add the number word for {count} to this test"
     assert f"every one of the {words[count]} keys is required" in _norm(
@@ -123,6 +117,16 @@ def test_phase4_says_the_skeleton_zeros_are_placeholders_not_scores():
     body = _norm(_phase4_text())
     assert "placeholders, not scores" in body
     assert "never submit a 0" in body
+
+
+def test_phase4_states_the_single_scale_and_has_no_funnel_stage():
+    """The prompt must tell the model what the scorer does — one scale, one
+    evidence bar — and the funnel-stage classification removed in v3.1.0 must
+    stay removed: not in the skeleton, not in the prose."""
+    body = _norm(_phase4_text()).lower()
+    assert "there is one scale" in body
+    assert "funnel" not in body
+    assert "funnel_stage" not in _skeleton()
 
 
 # ---------------------------------------------------------------------------
@@ -157,53 +161,20 @@ def test_document_specialist_fields_name_real_specialist_domains():
 # The prose percentages vs. the weights
 # ---------------------------------------------------------------------------
 
-def test_science_weights_sum_to_forty_and_the_prose_says_so():
-    """The commercial/scientific split is asserted in prose in two places — the
-    phase-4 prompt and the document's own scoring preamble — and computed from
-    the weights here, so a weight change forces the prose update.
-
-    Both scales, because the claim is now stage-qualified: the share is 60/40 on
-    the investment scale and 66/34 on the incubation one. A single unqualified
-    "40%" would be wrong for the stage almost every real verdict is at, which is
-    what this assertion exists to prevent recurring.
-    """
+def test_science_weights_sum_to_thirty_five_and_the_prose_says_so():
+    """The commercial/scientific split is asserted in prose in the document's
+    scoring preamble and computed from the weights here, so a weight change
+    forces the prose update."""
     science_total = sum(RUBRIC_WEIGHTS[k] for k in SCIENCE_DIMENSIONS)
     commercial_total = sum(
         w for k, w in RUBRIC_WEIGHTS.items() if k not in SCIENCE_DIMENSIONS
     )
-    science_incubation = sum(
-        RUBRIC_WEIGHTS_INCUBATION[k] for k in SCIENCE_DIMENSIONS
-    )
-    commercial_incubation = sum(
-        w for k, w in RUBRIC_WEIGHTS_INCUBATION.items() if k not in SCIENCE_DIMENSIONS
-    )
-    assert science_total == 40
-    assert commercial_total == 60
-    assert science_incubation == 34
-    assert commercial_incubation == 66
-
-    phase4 = _norm(_phase4_text())
-    # Both numbers, derived — and the phrase that ties them to the field the
-    # model actually sets, so the prose cannot state two percentages without
-    # saying which one applies when.
-    assert (
-        f"the four scientific dimensions are {science_total}% of the total on the "
-        f"investment scale (pre-seed and later) and {science_incubation}% on the "
-        "incubation scale"
-    ) in phase4, (
-        "phase4-thread-reply.md's scientific-share claim no longer matches the "
-        f"document's weights ({science_total}% investment / "
-        f"{science_incubation}% incubation)"
-    )
-    assert "follows from the `funnel_stage` you" in phase4
+    assert science_total == 35
+    assert commercial_total == 65
 
     preamble = _norm(load_rubric().scoring_preamble)
-    assert f"Commercial dimensions carry {commercial_total}% of the total" in preamble
-    assert f"the four scientific dimensions below carry {science_total}%" in preamble
-    assert (
-        f"On the incubation scale that split is {commercial_incubation}% / "
-        f"{science_incubation}%"
-    ) in preamble
+    assert f"carry {science_total}% of the total" in preamble
+    assert f"the four commercial dimensions carry {commercial_total}%" in preamble
 
 
 # ---------------------------------------------------------------------------
@@ -215,7 +186,7 @@ def test_scout_hub_system_prompt_carries_the_placeholder_not_a_copy():
     copy of the table is exactly the drift this extraction removes."""
     body = SYSTEM_PROMPT.read_text(encoding="utf-8")
     assert "{rubric}" in body, "scout_hub agent-system.md lost the {rubric} placeholder"
-    assert "| 1 | Commercialization" not in body, (
+    assert "| 1 | Differentiation" not in body, (
         "scout_hub agent-system.md has a literal dimension table again — the rubric "
         "belongs in prompts/rubric/blackbird-rubric.toml"
     )
@@ -225,8 +196,8 @@ def test_scout_hub_system_prompt_carries_the_placeholder_not_a_copy():
 
 def test_composed_hub_prompt_contains_the_whole_rendered_rubric(tmp_path, monkeypatch):
     """End-to-end: the hub's real system prompt, composed the way a turn
-    composes it, carries every dimension (title + weight), both band
-    thresholds, and the decision heuristic.
+    composes it, carries every dimension (title + anchor + weight on one row),
+    both band thresholds, the evidence lists, and the decision heuristic.
 
     PROFILES_DIR is redirected at tmp_path so the assertions do not depend on
     whatever a real run last wrote into profiles/ (same reason as the
@@ -242,42 +213,31 @@ def test_composed_hub_prompt_contains_the_whole_rendered_rubric(tmp_path, monkey
 
     rubric = load_rubric()
     for i, dim in enumerate(rubric.dimensions, start=1):
-        # Title, both anchor sets and both weights asserted on the SAME row: a
-        # table that lists every dimension and every weight but pairs them up
-        # wrongly — including pairing an investment anchor with an incubation
-        # weight — would pass any set of independent substring checks.
-        assert (
-            f"| {i} | {dim.title} | {dim.anchors} | {dim.weight}% | "
-            f"{dim.anchors_incubation} | {dim.weight_incubation}% |"
-        ) in prompt, (
-            f"dimension {dim.key} is missing its row (title/anchors/weights, both "
-            "scales) in the composed prompt"
+        # Title, anchor and weight asserted on the SAME row: a table that lists
+        # every dimension and every weight but pairs them up wrongly would pass
+        # any set of independent substring checks.
+        assert f"| {i} | {dim.title} | {dim.anchors} | {dim.weight}% |" in prompt, (
+            f"dimension {dim.key} is missing its row (title/anchors/weight) in the "
+            "composed prompt"
         )
-        assert dim.weight_incubation == RUBRIC_WEIGHTS_INCUBATION[dim.key]
 
-    # One Banding line per scale, each carrying that scale's own two thresholds
-    # and NOT the other's — a single line quoting all four numbers would be
-    # unreadable and unfalsifiable.
-    for label, banding in (
-        ("investment", BANDING), ("incubation", BANDING_INCUBATION),
-    ):
-        prefix = f"**Banding ({label} scale):**"
-        banding_line = next(
-            line for line in prompt.splitlines() if line.startswith(prefix)
-        )
-        for threshold in (banding["advance_min"], banding["conditional_min"]):
-            assert f"{threshold:.1f}" in banding_line, (
-                f"band threshold {threshold} is not stated in the prompt's "
-                f"{label} Banding line"
-            )
-        other = BANDING_INCUBATION if banding is BANDING else BANDING
-        assert f"{other['advance_min']:.1f}" not in banding_line, (
-            f"the {label} Banding line also quotes the other scale's advance line"
+    # The one Banding line carries both thresholds.
+    banding_line = next(
+        line for line in prompt.splitlines() if line.startswith("**Banding:**")
+    )
+    for threshold in (BANDING["advance_min"], BANDING["conditional_min"]):
+        assert f"{threshold:.1f}" in banding_line, (
+            f"band threshold {threshold} is not stated in the prompt's Banding line"
         )
 
     assert _norm(rubric.heuristic) in _norm(prompt)
-    assert _norm(rubric.checklist[0]) in _norm(prompt)
+    # The evidence lists render in full — first item of each as a spot check,
+    # with the full coverage asserted in test_rubric_document's renderer test.
+    for dim in rubric.dimensions:
+        if dim.evidence:
+            assert _norm(dim.evidence[0]) in _norm(prompt)
     assert _norm(rubric.red_flags[0]) in _norm(prompt)
+    assert _norm(rubric.red_flags_intro) in _norm(prompt)
     for gate in rubric.gating.values():
         assert gate["title"] in prompt
 
@@ -290,4 +250,4 @@ def test_pi_lab_prompt_never_carries_the_rubric(tmp_path, monkeypatch):
     prompt = Agent(agent_id="su", bot_name="SuBot", pi_name="Andrew Su").build_system_prompt()
     assert "{rubric}" not in prompt
     assert "Blackbird's Screening Rubric" not in prompt
-    assert "| 1 | Commercialization" not in prompt
+    assert "| 1 | Differentiation" not in prompt

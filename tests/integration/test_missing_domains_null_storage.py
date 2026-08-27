@@ -90,7 +90,7 @@ async def test_a_verified_panel_stores_a_real_sql_null(engine):
     # Exactly what `required_domains_for` asks of this verdict: the two always-
     # required domains, plus chemistry (the "peptide" cue), technologic
     # (platform scored 4), and legal (ip_fto scored 4 — the trigger that
-    # replaced gating.fto_achievable when the gate renamed, rubric v2.1.0).
+    # the third gating key since rubric v2.1.0).
     for domain in ("scientific", "talent", "chemistry", "technologic", "legal"):
         sim._record_consult("gordy", domain, "t1")
     thread = ThreadState(

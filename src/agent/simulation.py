@@ -30,6 +30,8 @@ from src.agent.roles import load_role
 from src.agent.slack_client import SlackListingIncomplete, ThreadNotFound
 from src.agent.specialists import (
     clear_rate_warning,
+    clip_question,
+    clip_rate_warning,
     format_panel_note,
     panel_is_owed,
     required_domains_for,
@@ -520,6 +522,23 @@ class SimulationEngine:
         # deployment where every pitch is rejected on (e.g.) a tagged_agent
         # spelling slip is otherwise only visible by grepping logs.
         self._post_type_rejections: dict[str, int] = {}
+
+        # Panel-note clipping drift (see specialists.clip_rate_warning): every
+        # successful consult that posts a note counts toward the denominator,
+        # and every one whose question got clipped to PANEL_NOTE_QUESTION_CHARS
+        # counts toward the numerator. `_panel_note_clip_warned` makes the log
+        # line fire once per run/process rather than once per note once the
+        # threshold is crossed. The latch is deliberately conservative: one
+        # crossing means the calibration was exceeded on a real sample and is
+        # worth one look. The rate DOES un-cross back below the floor mid-run
+        # (observed: 3 clipped of 22 latches, then 100 unclipped notes later
+        # sitting at 2.5%) — but re-warning or un-warning as it oscillates
+        # would turn a drift signal into a ticker, so the latch stays latched.
+        # The logged tally is the FIRST crossing's counts, not the run's
+        # final rate.
+        self._panel_notes_posted: int = 0
+        self._panel_notes_clipped: int = 0
+        self._panel_note_clip_warned: bool = False
 
         # Wall-clock throttles for Slack pollers + round-robin cursor over
         # connected clients, so one agent's token doesn't carry all poll load.
@@ -3375,9 +3394,8 @@ class SimulationEngine:
 
             scores = verdict.get("scores") if isinstance(verdict.get("scores"), dict) else {}
             if scores:
-                stage = verdict.get("funnel_stage")
-                score = rubric_weighted_score(scores, stage)
-                band = rubric_band(score, stage)
+                score = rubric_weighted_score(scores)
+                band = rubric_band(score)
                 score_part = f" (band: {band}, score: {score:.1f})"
             else:
                 score_part = ""
@@ -4437,7 +4455,7 @@ class SimulationEngine:
         try:
             if not get_settings().panel_notes_in_thread:
                 return
-            await self._post_message(
+            posted = await self._post_message(
                 agent_id,
                 channel,
                 format_panel_note(
@@ -4448,6 +4466,22 @@ class SimulationEngine:
                 thread_ts=thread_ts,
                 phase=PHASE_PANEL_NOTE,
             )
+            if posted:
+                # Definitional consistency with what was actually posted: the
+                # note's question is exactly what `clip_question` returns, so
+                # asking whether IT changed the text (rather than re-deriving
+                # a length test here) can never drift from what shipped.
+                was_clipped = clip_question(question) != (question or "").strip()
+                self._panel_notes_posted += 1
+                if was_clipped:
+                    self._panel_notes_clipped += 1
+                if not self._panel_note_clip_warned:
+                    alarm = clip_rate_warning(
+                        self._panel_notes_clipped, self._panel_notes_posted,
+                    )
+                    if alarm:
+                        logger.warning("%s", alarm)
+                        self._panel_note_clip_warned = True
         except Exception as exc:  # noqa: BLE001 — a note must not cost the opinion
             logger.error(
                 "[%s] Failed to post the %s panel note to #%s (thread %s): %s — "
@@ -4734,19 +4768,13 @@ class SimulationEngine:
         are nullable for exactly this case; leave them unset rather than record a
         verdict nobody rendered.
 
-        Stage-aware since rubric v2.0.0: an incubation-stage verdict is scored on
-        the incubation weights and banded on the incubation lines, every other
-        stage (and a missing one) on the investment scale. The RAW ``funnel_stage``
-        goes in — normalizing it is ``blackbird_rubric``'s job. Both calls take
-        the same stage: a score computed on one scale and banded against the
-        other's lines is meaningless.
+        One scale, one evidence bar (src/services/blackbird_rubric.py).
         """
         scores = verdict.get("scores") if isinstance(verdict.get("scores"), dict) else {}
         if not scores:
             return None, None
-        stage = verdict.get("funnel_stage")
-        score = rubric_weighted_score(scores, stage)
-        return score, rubric_band(score, stage)
+        score = rubric_weighted_score(scores)
+        return score, rubric_band(score)
 
     def _specialist_floor_gap(
         self, verdict: dict, *, thread: ThreadState | None = None,

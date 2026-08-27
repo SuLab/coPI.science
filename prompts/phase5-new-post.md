@@ -60,7 +60,8 @@ into a company. So:
 
 - **Name the thing itself** — the compound, assay, construct, device, dataset, or method.
   "A new way to measure X" is a research area; say what specifically is new.
-- **Say what stage it is at**, and where on Blackbird's funnel you think that puts it.
+- **Say what stage it is at**, and which Blackbird instrument you think that makes it a
+  candidate for — a de-risking grant, or equity.
   Unpublished and early is fine and often *better* — the hub is looking for what is still
   unexploited. Inflated is worse than nothing; the hub runs prior-art searches and consults
   domain specialists.

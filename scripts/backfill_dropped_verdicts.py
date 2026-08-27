@@ -137,9 +137,11 @@ def _score_and_band(verdict: dict) -> tuple[float | None, str | None]:
     scores = verdict.get("scores") if isinstance(verdict.get("scores"), dict) else {}
     if not scores:
         return None, None
-    stage = verdict.get("funnel_stage")
-    score = rubric_weighted_score(scores, stage)
-    return score, rubric_band(score, stage)
+    # Scores on the CURRENT document's single scale (rubric v3+). This script's
+    # one historical use predates that regime; rerunning it against old-contract
+    # verdicts would score their 13 legacy keys as unset.
+    score = rubric_weighted_score(scores)
+    return score, rubric_band(score)
 
 
 def _subject_matches(candidate_subject: object, drop_subject: str | None) -> bool:

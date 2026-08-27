@@ -16,6 +16,7 @@ from src.agent.specialists import (
     VERDICT_SIGNALS,
     clear_rate_warning,
     clip_question,
+    clip_rate_warning,
     format_panel_note,
     has_usable_content,
     parse_opinion,
@@ -44,20 +45,14 @@ def test_every_domain_declares_when_to_consult_it():
         assert spec.title.strip(), domain
 
 
-def test_the_two_missing_personas_map_to_new_dimensions():
-    """Scientific and Chemistry are the personas with no representation in the
-    old rubric, and the reason the panel exists. Each must land somewhere.
-
-    Both now own two dimensions rather than one — see
-    `test_every_dimension_above_5_percent_incubation_weight_has_an_owning_specialist`
-    for why. The first entry stays the original 1:1 mapping so a reader can
-    still tell which dimension the persona was written against.
-    """
+def test_the_science_personas_own_the_science_dimensions():
+    """Scientific and Chemistry are the personas the panel was built around —
+    each must land on the dimension its concerns score."""
     assert SPECIALIST_DOMAINS["scientific"].maps_to_dimensions == (
-        "experimental_rigor", "mechanism_validation",
+        "scientific_credibility",
     )
     assert SPECIALIST_DOMAINS["chemistry"].maps_to_dimensions == (
-        "chemistry_dc_path", "toxicity_selectivity",
+        "translational_path",
     )
 
 
@@ -75,34 +70,19 @@ def test_no_dimension_has_two_owning_specialists():
             seen[dimension] = domain
 
 
-def test_every_dimension_above_5_percent_incubation_weight_has_an_owning_specialist():
+def test_every_dimension_has_an_owning_specialist():
     """A dimension with no owner is a dimension no specialist can be required
-    for, so a bad score there is never sourced to an opinion.
-
-    Measured 2026-08-22: 5 of 13 dimensions were unowned — 25% of the
-    incubation weight — including `mechanism_validation` (10) and
-    `toxicity_selectivity` (8), which are the two most-cited rejection reasons
-    in the stakeholder document that justified the panel in the first place
-    (mechanism validation 5 of 15 rejections, toxicity/selectivity 4).
-
-    The bar is *above* 5, not "all thirteen": `external_signals` (2),
-    `dev_regulatory_feasibility` (3) and `exit_thesis` (2) are deliberately
-    left unowned — inventing a specialist for a 2-point dimension would buy a
-    required consult, and a `panel_incomplete` risk, for nothing.
-    """
-    from src.services.blackbird_rubric import RUBRIC_WEIGHTS_INCUBATION
+    for, so a bad score there is never sourced to an opinion. At the six-
+    dimension grain every dimension is heavy enough to deserve one."""
+    from src.services.blackbird_rubric import RUBRIC_WEIGHTS
 
     owned = {
         dimension
         for spec in SPECIALIST_DOMAINS.values()
         for dimension in spec.maps_to_dimensions
     }
-    unowned = sorted(
-        dimension
-        for dimension, weight in RUBRIC_WEIGHTS_INCUBATION.items()
-        if weight > 5 and dimension not in owned
-    )
-    assert unowned == [], f"heavy dimensions with no owning specialist: {unowned}"
+    unowned = sorted(set(RUBRIC_WEIGHTS) - owned)
+    assert unowned == [], f"dimensions with no owning specialist: {unowned}"
 
 
 def test_persona_path_is_under_prompts_specialists():
@@ -303,29 +283,10 @@ def test_a_disease_claim_requires_clinical():
     assert "clinical" in required_domains_for(v)
 
 
-def test_met_fto_requires_legal():
-    """Claiming FTO is achievable is a legal assertion; it must be sourced."""
-    v = {"gating": {"fto_achievable": "met"}}
-    assert "legal" in required_domains_for(v)
-
-
-def test_unconfirmed_fto_does_not_require_legal():
-    v = {"gating": {"fto_achievable": "unconfirmed"}}
-    assert "legal" not in required_domains_for(v)
-
-
-def test_a_high_ip_fto_score_requires_legal():
-    """Since the third gate's rename (fto_achievable -> translational_potential,
-    rubric v2.1.0) new verdicts carry no FTO gating key at all, so the legal
-    trigger re-anchors on the score: claiming a strong IP position (ip_fto >= 4)
-    is a legal assertion and must be sourced — the same shape as platform >= 4
-    summoning technologic."""
-    v = {"recommendation": "advance", "scores": {"ip_fto": 4}}
-    assert "legal" in required_domains_for(v)
-
-
-def test_a_low_ip_fto_score_alone_does_not_require_legal():
-    v = {"recommendation": "advance", "scores": {"ip_fto": 3}}
+def test_a_gating_map_alone_does_not_require_legal():
+    """Gating values are tri-state records, not triggers: legal is summoned by
+    FTO language in the verdict's own text, nothing else."""
+    v = {"gating": {"translational_potential": "met"}}
     assert "legal" not in required_domains_for(v)
 
 
@@ -486,9 +447,10 @@ def test_every_always_required_domain_is_named_as_always_required():
 
 
 def test_the_platform_condition_that_requires_technologic_is_stated():
-    """required_domains_for adds 'technologic' when scores.platform >= 4 — so a
-    STRONGER verdict needs strictly more consults than a weak one."""
-    verdict = {"recommendation": "advance", "scores": {"platform": 4}}
+    """required_domains_for adds 'technologic' on platform/pipeline language —
+    so a verdict describing a platform needs strictly more consults than one
+    that does not."""
+    verdict = {"recommendation": "advance", "rationale": "A reusable platform."}
     assert "technologic" in required_domains_for(verdict)
     block = _mandatory_block()
     assert "technologic" in block
@@ -496,14 +458,16 @@ def test_the_platform_condition_that_requires_technologic_is_stated():
 
 
 def test_the_legal_conditions_are_stated():
-    """required_domains_for adds 'legal' on ip_fto >= 4 or FTO language — the
-    post-rename triggers — and the prompt block states both, so the model can
-    aim at the floor it is graded against."""
-    verdict = {"recommendation": "advance", "scores": {"ip_fto": 4}}
+    """required_domains_for adds 'legal' on FTO/encumbrance/co-ownership
+    language, and the prompt block states the trigger, so the model can aim at
+    the floor it is graded against."""
+    verdict = {
+        "recommendation": "advance",
+        "rationale": "Freedom-to-operate looks clean here.",
+    }
     assert "legal" in required_domains_for(verdict)
     block = _mandatory_block()
     assert "legal" in block
-    assert "ip_fto" in block
     assert "freedom-to-operate" in block
 
 
@@ -517,8 +481,8 @@ def test_the_cue_driven_domains_are_stated():
 def _verdict(text, **over):
     v = {
         "recommendation": "advance", "subject_agent_id": "x",
-        "rationale": text, "company_or_project": "", "funnel_stage": "",
-        "red_flags": [], "suggested_derisking_milestones": [],
+        "rationale": text, "company_or_project": "",
+        "red_flags": [],
     }
     v.update(over)
     return v
@@ -647,23 +611,19 @@ def test_only_the_documented_domains_are_reachable():
         "disease patient indication clinical therapeutic cancer tumor",
         "platform pipeline reusable multiple shots",
         "commercial competitor landscape deal comps investor budget cost timeline",
+        "freedom-to-operate encumbered co-owned fto",
         "",
     ]
     for r in range(len(cue_texts) + 1):
         for combo in itertools.combinations(cue_texts, r):
             text = " ".join(combo)
-            for fto in ("met", "not_met", "unconfirmed", None):
-                for platform in (1, 3, 4, 5, None):
-                    reachable |= required_domains_for(
-                        _verdict(
-                            text,
-                            company_or_project=text,
-                            red_flags=[text],
-                            suggested_derisking_milestones=[text],
-                            gating={"fto_achievable": fto},
-                            scores={"platform": platform},
-                        )
-                    )
+            reachable |= required_domains_for(
+                _verdict(
+                    text,
+                    company_or_project=text,
+                    red_flags=[text],
+                )
+            )
 
     assert reachable == set(SPECIALIST_DOMAINS), (
         "every one of the eight domains must be reachable by some input; the "
@@ -731,16 +691,27 @@ def test_an_unknown_signal_renders_bare_rather_than_reassuringly():
     assert "✅" not in note
 
 
-def test_the_panel_note_question_clip_is_600_chars():
+def test_the_panel_note_question_clip_is_850_chars():
     """Pinned literally, not just derived from the constant, so a silent
     future change to ``PANEL_NOTE_QUESTION_CHARS`` fails a test instead of
     just reshaping notes in production. See the constant's comment for the
-    production measurement (n=134 consults) that set this value."""
-    assert PANEL_NOTE_QUESTION_CHARS == 600
+    2026-08-26 recalibration (n=374 consults since 2026-08-24) that set this
+    value, up from the 600 calibrated 2026-08-20 on n=134."""
+    assert PANEL_NOTE_QUESTION_CHARS == 850
+
+
+def test_an_800_char_question_renders_unchanged():
+    """The recalibration point: 800 chars is under the current 850-char limit
+    but over the old 600-char one, so this exact case is what motivated the
+    change — it FAILS (clips a question that should render whole) against
+    the old constant, and only passes once the limit is raised to 850."""
+    question = ("Is the animal model encumbered " * 40)[:800]
+    assert len(question) == 800
+    assert clip_question(question) == question
 
 
 def test_the_question_is_clipped_on_a_word_boundary():
-    question = "Is the animal model encumbered " * 25  # 800 chars
+    question = ("Is the animal model encumbered " * 40)[:1000]  # 1000 chars
     note = format_panel_note(domain="legal", verdict_signal="clear", question=question)
     quoted = note.split('asked: "', 1)[1].rstrip('"')
     assert quoted.endswith("…")
@@ -756,10 +727,66 @@ def test_a_short_question_is_untouched():
 
 def test_a_single_unbroken_token_is_still_bounded():
     """A word-boundary search that finds nothing must not return the whole
-    string — the bound has to hold whatever the text looks like."""
-    clipped = clip_question("x" * 5000)
-    assert len(clipped) == PANEL_NOTE_QUESTION_CHARS + 1
-    assert clipped.endswith("…")
+    string — the bound has to hold whatever the text looks like. Checked both
+    close to the current limit (1000, a single token with no spaces at all)
+    and far past it (5000), so the fallback is known to hold at both scales."""
+    for length in (1000, 5000):
+        clipped = clip_question("x" * length)
+        assert len(clipped) == PANEL_NOTE_QUESTION_CHARS + 1
+        assert clipped.endswith("…")
+
+
+# ---------------------------------------------------------------
+# clip_rate_warning — the panel-note clipping-drift alarm. Mirrors
+# clear_rate_warning's idiom: PANEL_NOTE_QUESTION_CHARS is a point-in-time
+# calibration of a distribution that moves with every rubric or model change,
+# and this is what says out loud when it has decayed again.
+# ---------------------------------------------------------------
+
+
+def test_no_notes_posted_is_silent():
+    assert clip_rate_warning(0, 0) is None
+
+
+def test_the_alarm_stays_quiet_below_its_sample_floor_even_at_a_high_rate():
+    """3 of 19 is 15.8% — well past the warn fraction — but 19 notes is below
+    the sample floor, so a couple of unlucky long questions must not speak."""
+    assert clip_rate_warning(3, 19) is None
+
+
+def test_exactly_ten_percent_does_not_warn():
+    """The fraction is a ceiling the rate must exceed, not reach: 2 of 20 is
+    exactly 10%, and 10% is not > 10%."""
+    assert clip_rate_warning(2, 20) is None
+
+
+def test_just_over_the_floor_and_the_fraction_warns():
+    assert clip_rate_warning(3, 20) is not None
+
+
+def test_a_larger_sample_past_the_fraction_warns():
+    assert clip_rate_warning(50, 400) is not None
+
+
+def test_the_warning_names_the_count_and_the_limit():
+    message = clip_rate_warning(3, 20)
+    assert message is not None
+    assert "3" in message
+    assert "20" in message
+    assert str(PANEL_NOTE_QUESTION_CHARS) in message
+
+
+def test_the_warning_says_the_calibration_decayed_and_how_to_fix_it():
+    message = clip_rate_warning(50, 400)
+    assert message is not None
+    assert "recalibrate" in message.lower()
+    assert "specialist_consults" in message
+    assert "PANEL_NOTE_QUESTION_CHARS" in message
+
+
+def test_the_clip_rate_alarm_never_divides_by_zero():
+    for clipped, total in ((0, 0), (5, 0)):
+        assert clip_rate_warning(clipped, total) is None
 
 
 # ---------------------------------------------------------------

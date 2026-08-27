@@ -647,7 +647,7 @@ async def test_supersession_does_not_delete_the_replacement_row(engine):
         assert len(rows) == 1, "the interview must never end holding zero verdicts"
         assert rows[0].slack_ts == "2.2"
         assert rows[0].thread_id == "t1"
-        assert rows[0].scores["differentiation"] == 4, "the LATER verdict survives"
+        assert rows[0].scores["differentiation_unmet_need"] == 4, "the LATER verdict survives"
     finally:
         await _delete_run(factory, run_id)
 

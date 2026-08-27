@@ -766,25 +766,11 @@ async def admin_assessments(
             current_user,
             active_admin="assessments",
             assessments=view["assessments"],
-            rubric_weights=view["rubric_weights"],
-            # Both weight sets: rubric v2.0.0 scores an incubation-stage verdict
-            # on its own weights, so the detail row picks per ROW from its
-            # funnel_stage and needs both here (the allowlist below is why this
-            # is not automatic).
-            rubric_weights_incubation=view["rubric_weights_incubation"],
-            # Per-row selected scale (weights/banding/label), gated on each
-            # row's OWN rubric_version, not on funnel_stage alone — see
-            # list_assessments' comment. The per-row "Scores:" chips key off
-            # this rather than reimplementing the funnel_stage/version rule.
-            row_scales=view["row_scales"],
             # The band thresholds and the decline label the legend states, from
             # the rubric document rather than as template literals — the page
             # and the scorer must never be able to disagree about where the
-            # "advance" line sits. Both scales, for the same reason: the legend
-            # has to explain the bands the table actually contains, and this
-            # population's rows are banded on the incubation lines.
+            # "advance" line sits.
             banding=view["banding"],
-            banding_incubation=view["banding_incubation"],
             rubric_version=view["rubric_version"],
             runs=view["runs"],
             runs_by_id=view["runs_by_id"],
@@ -885,6 +871,26 @@ async def admin_agent_detail(
         )
     blockers = await activation_blockers(db, agent)
 
+    # Star-spoke state for the evidence panel: "missing" means a run started
+    # with this agent active would fail _validate_star_topology at startup.
+    spoke_state = None
+    if agent.role == "pi_lab" and agent.status != "suspended":
+        from src.services.star_topology import ensure_star_spokes
+
+        try:
+            plan = await ensure_star_spokes(
+                db, apply=False, only={agent.agent_id}
+            )
+            spoke_state = (
+                "missing"
+                if (plan.created_cohorts or plan.added_members)
+                else "present"
+            )
+        except ValueError:
+            # No single scout_hub on the roster — the wire buttons will refuse
+            # too; the panel says so rather than 500ing the page.
+            spoke_state = "unknown"
+
     return templates.TemplateResponse(
         request,
         "admin/agent_detail.html",
@@ -904,7 +910,59 @@ async def admin_agent_detail(
             slack_error=request.query_params.get("slack_error"),
             slack_ok=request.query_params.get("slack_ok"),
             role_error=request.query_params.get("role_error"),
+            spoke_state=spoke_state,
+            spoke_ok=request.query_params.get("spoke_ok"),
+            spoke_error=request.query_params.get("spoke_error"),
         ),
+    )
+
+
+@router.post("/agents/{agent_id}/ensure-spoke")
+async def admin_ensure_agent_spoke(
+    agent_id: uuid.UUID,
+    request: Request,
+    db: AsyncSession = _DB,
+    current_user: User = _ADMIN,
+):
+    """Wire ONE lab into the hub-and-spoke topology (the per-agent button).
+
+    Scoped twin of POST /admin/cohorts/ensure-star-spokes; the click is
+    attributed to the acting admin in cohort_audit_events.
+    """
+    from urllib.parse import quote
+
+    from src.services.star_topology import ensure_star_spokes
+
+    result = await db.execute(
+        select(AgentRegistry).where(AgentRegistry.id == agent_id)
+    )
+    agent = result.scalar_one_or_none()
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    if agent.role != "pi_lab":
+        return RedirectResponse(
+            url=f"/admin/agents/{agent_id}?spoke_error="
+            + quote("Only pi_lab agents have star spokes."),
+            status_code=302,
+        )
+    try:
+        report = await ensure_star_spokes(
+            db, apply=True, actor=current_user, only={agent.agent_id}
+        )
+    except ValueError as exc:
+        return RedirectResponse(
+            url=f"/admin/agents/{agent_id}?spoke_error={quote(str(exc)[:200])}",
+            status_code=302,
+        )
+    await db.commit()
+    if report.anomalies:
+        return RedirectResponse(
+            url=f"/admin/agents/{agent_id}?spoke_error="
+            + quote("; ".join(report.anomalies)[:300]),
+            status_code=302,
+        )
+    return RedirectResponse(
+        url=f"/admin/agents/{agent_id}?spoke_ok=1", status_code=302
     )
 
 
@@ -1518,6 +1576,20 @@ async def admin_cohorts(
         for u in u_result.scalars().all():
             creator_map[str(u.id)] = u.name
 
+    # Dry-run the star-spoke maintainer so the page can offer the wire-up
+    # button exactly when a pi_lab is missing its hub-and-spoke cohort (the
+    # state that fails _validate_star_topology at run startup).
+    from src.services.star_topology import ensure_star_spokes
+
+    try:
+        spoke_plan = await ensure_star_spokes(db, apply=False)
+        spokes_missing = len(
+            set(spoke_plan.created_cohorts)
+            | {name for name, _ in spoke_plan.added_members}
+        )
+    except ValueError:
+        spokes_missing = None  # no single scout_hub; the button would refuse too
+
     return templates.TemplateResponse(
         request,
         "admin/cohorts.html",
@@ -1527,6 +1599,7 @@ async def admin_cohorts(
             active_admin="cohorts",
             cohorts=cohorts,
             creator_map=creator_map,
+            spokes_missing=spokes_missing,
             error=request.query_params.get("error"),
             notice=request.query_params.get("notice"),
             gate=await _cohort_gate_context(db),
@@ -1738,6 +1811,42 @@ async def admin_cohort_topology_save(
         url=f"/admin/cohorts/topology?notice={added}+added,+{removed}+removed",
         status_code=302,
     )
+
+
+@router.post("/cohorts/ensure-star-spokes")
+async def admin_ensure_star_spokes(
+    request: Request,
+    db: AsyncSession = _DB,
+    current_user: User = _ADMIN,
+):
+    """One click: wire every pi_lab into the hub-and-spoke topology.
+
+    Same service the CLI (scripts/ensure_star_spokes.py) drives, with the
+    click attributed to the acting admin in cohort_audit_events. Registered
+    before /cohorts/{cohort_id} so the literal path is matched, not parsed as
+    a UUID. Additive only — anomalies (lab-to-lab contamination, overlong
+    slugs) are surfaced in the banner, never "fixed" by deletion.
+    """
+    from urllib.parse import quote
+
+    from src.services.star_topology import ensure_star_spokes
+
+    try:
+        report = await ensure_star_spokes(db, apply=True, actor=current_user)
+    except ValueError as exc:
+        return RedirectResponse(
+            url=f"/admin/cohorts?error={quote(str(exc)[:200])}", status_code=302
+        )
+    await db.commit()
+    notice = (
+        f"Star spokes: {len(report.created_cohorts)} cohort(s) created, "
+        f"{len(report.added_members)} membership(s) added, "
+        f"{len(report.complete)} already complete"
+    )
+    url = f"/admin/cohorts?notice={quote(notice)}"
+    if report.anomalies:
+        url += "&error=" + quote("; ".join(report.anomalies)[:300])
+    return RedirectResponse(url=url, status_code=302)
 
 
 @router.get("/cohorts/{cohort_id}", response_class=HTMLResponse)

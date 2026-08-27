@@ -114,7 +114,6 @@
             </h2>
             <div class="text-sm text-gray-500 mt-1">
                 Lab: <span class="font-medium text-gray-700">{{ pi_link(a) }}</span>
-                &middot; Stage: {{ a.funnel_stage or "—" }}
                 &middot; Screened by {{ a.agent_id }}
                 &middot; <span data-utc="{{ a.created_at.isoformat() }}" data-utc-fmt="short">{{ a.created_at.strftime('%Y-%m-%d %H:%M') }}</span>
                 &middot; #{{ a.channel_name }}
@@ -171,13 +170,6 @@
             not recorded. The current document is
             <span class="font-mono">{{ rubric_version }}</span>.
         {% endif %}
-        {# The legend and the dimension bars below both reflect THIS row's own
-           scale (src/services/assessment_detail.py::display_scale_for), which
-           is not necessarily what its funnel_stage alone would suggest: a
-           verdict scored before rubric v2 was stamped on the investment scale
-           regardless of stage, so it renders here on the scale it was
-           actually scored on, not the one its stage name might imply. #}
-        Displayed on the <span class="font-mono">{{ scale_provenance }}</span>.
     </div>
 </div>
 
@@ -322,16 +314,12 @@
 </div>
 {% endif %}
 
-{% if a.derisking_milestones %}
-<div class="bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6">
-    <h3 class="text-sm font-semibold text-gray-700 uppercase mb-2">De-risking milestones</h3>
-    <ul class="assessment-derisking list-disc list-inside text-sm text-gray-700 space-y-1">
-        {% for milestone in a.derisking_milestones %}<li>{{ milestone }}</li>{% endfor %}
-    </ul>
-</div>
-{% endif %}
+{# derisking_milestones left the sidecar contract in rubric v3.2.0 (go/no-go
+   criteria live in rationale); the column is retained as tolerant passthrough
+   but is deliberately not rendered — every stored row post-purge is v3.2.0+
+   and carries none. #}
 
-{# The thirteen dimensions as weighted bars, in RUBRIC_WEIGHTS order (heaviest
+{# The dimensions as weighted bars, in RUBRIC_WEIGHTS order (heaviest
    first) so what actually moved the score reads first. Bar length is the score
    on the 1-{{ scale_max }} scale; the weight is printed beside it, because a 5
    at 3% and a 2 at 15% look identical as bars and are not remotely the same
@@ -341,7 +329,6 @@
 <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6">
     <h3 class="text-sm font-semibold text-gray-700 uppercase mb-3">
         Dimension scores
-        <span class="normal-case font-normal text-gray-400">&middot; weights shown: {{ scale_provenance }}</span>
     </h3>
     <div class="space-y-1.5">
         {% for d in dimensions %}
@@ -363,7 +350,7 @@
     </div>
     <p class="text-xs text-gray-400 mt-3">
         Bars are the score on the 1&ndash;{{ scale_max }} scale. The weighted score
-        above is computed from these thirteen values and their weights
+        above is computed from these dimension values and their weights
         (src/services/blackbird_rubric.py) — an unscored dimension drags it down.
     </p>
 </div>

@@ -42,7 +42,7 @@ ANCHOR = "a PI or another lab sees"
 # Slack message. Written out rather than parsed out of the prose — the guidance
 # is English, not a schema — but every entry is asserted to still appear in that
 # guidance below, so the list cannot quietly drift away from its source of truth.
-INLINE_FIELDS = ("funnel stage", "gating", "recommendation", "red flags", "confidence")
+INLINE_FIELDS = ("gating", "recommendation", "red flags", "confidence")
 
 # The sidecar-only half. CLAUDE.md is free — and correct — to say these never
 # reach Slack, so they must NOT be in INLINE_FIELDS, and the guidance must never

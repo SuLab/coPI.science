@@ -152,8 +152,8 @@ async def _seed(db_session, *, with_messages: bool = True, with_consult: bool = 
         confidence="Moderate",
         weighted_score=3.20,
         band="conditional",
-        gating={"life_sciences_domain": "met", "fto_achievable": "unconfirmed"},
-        scores={"differentiation": 4, "ip_fto": 2},
+        gating={"life_sciences_domain": "met", "translational_potential": "unconfirmed"},
+        scores={"differentiation_unmet_need": 4, "venture_potential": 2},
         red_flags=["RED-FLAG-NO-EXTERNAL-VALIDATION"],
         derisking_milestones=["MILESTONE-MOUSE-RESCUE"],
         rationale=RATIONALE_MARKER,
@@ -195,14 +195,18 @@ async def test_admin_detail_page_renders_the_whole_verdict(client, db_session, a
 
     assert "Detail Page Fixture Co" in html
     assert "[Moderate]" in html and "[[Moderate]]" not in html
-    assert SUBJECT in html and "incubation" in html
+    assert SUBJECT in html
     assert RATIONALE_MARKER in html
     assert "RED-FLAG-NO-EXTERNAL-VALIDATION" in html
-    assert "MILESTONE-MOUSE-RESCUE" in html
-    # All thirteen dimensions, scored or not: an unscored one counts as zero in
+    # funnel_stage and derisking_milestones are tolerant-passthrough COLUMNS
+    # (the fixture sets both) but left the contract in v3.1.0/v3.2.0 and are
+    # deliberately not rendered anywhere.
+    assert "MILESTONE-MOUSE-RESCUE" not in html
+    assert "Stage:" not in html
+    # All six dimensions, scored or not: an unscored one counts as zero in
     # the weighted score, so it has to be visibly distinguishable from a low one.
-    assert 'class="score-differentiation' in html
-    assert 'class="score-external_signals' in html
+    assert 'class="score-differentiation_unmet_need' in html
+    assert 'class="score-scientific_credibility' in html
     assert "not scored" in html
     # The panel gap, named.
     assert "Specialist panel incomplete" in html
@@ -417,11 +421,9 @@ async def test_admin_detail_page_survives_a_wiped_transcript(client, db_session,
     assert RATIONALE_MARKER in resp.text
 
 
-async def _seed_scale_fixture(db_session, *, rubric_version, funnel_stage):
-    """A bare-bones assessment for exercising ``display_scale_for``'s two
-    inputs directly, without the thread/consult apparatus ``_seed`` builds —
-    the display decision reads only ``rubric_version`` and ``funnel_stage``.
-    """
+async def _seed_scale_fixture(db_session, *, funnel_stage):
+    """A bare-bones assessment for exercising the banding/weights render,
+    without the thread/consult apparatus ``_seed`` builds."""
     run = await factories.make_simulation_run(db_session)
     assessment = OpportunityAssessment(
         simulation_run_id=run.id,
@@ -430,83 +432,34 @@ async def _seed_scale_fixture(db_session, *, rubric_version, funnel_stage):
         channel_name=CHANNEL,
         company_or_project="Scale Fixture Co",
         funnel_stage=funnel_stage,
-        rubric_version=rubric_version,
+        rubric_version="3.0.0",
         recommendation="conditional",
         weighted_score=3.20,
         band="conditional",
-        scores={"differentiation": 4, "exit_thesis": 2},
+        scores={"differentiation_unmet_need": 4, "venture_potential": 2},
     )
     db_session.add(assessment)
     await db_session.flush()
     return assessment
 
 
-async def test_detail_page_v2_incubation_row_renders_the_incubation_scale(
+async def test_detail_page_renders_the_documents_banding_and_weights(
     client, db_session, admin
 ):
-    """rubric_version="2.0.0" + funnel_stage="incubation": the row was scored
-    on the incubation scale, and the legend and the dimension bars must show
-    it — the incubation band lines (3.4/2.7) and the incubation weight column
-    (differentiation 16%, not the investment 15%)."""
-    assessment = await _seed_scale_fixture(
-        db_session, rubric_version="2.0.0", funnel_stage="incubation"
-    )
+    """The legend and the dimension bars come from the rubric document — the
+    band lines (3.4/2.8) and the weight beside each bar (differentiation &
+    unmet need at 25%) — whatever the row's funnel stage says, since one scale
+    scores every verdict."""
+    assessment = await _seed_scale_fixture(db_session, funnel_stage="incubation")
     html = (
         await client.get(
             f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
         )
     ).text
     assert "&ge;3.4 advance" in html
-    assert "&lt;2.7" in html
-    assert "&ge;4.0 advance" not in html
-    assert "16% weight" in html  # differentiation, incubation weight
-    assert "15% weight" not in html
-    assert "incubation scale (rubric v2)" in html
-
-
-async def test_detail_page_legacy_row_stays_on_the_investment_scale(
-    client, db_session, admin
-):
-    """rubric_version NULL + funnel_stage="incubation" -- the 29-row legacy
-    shape (34 total with the 5 "1.0.0" rows). These were scored on the
-    investment weights unconditionally, so the page must render that scale
-    even though funnel_stage names incubation — not the scale its stage
-    would otherwise suggest."""
-    assessment = await _seed_scale_fixture(
-        db_session, rubric_version=None, funnel_stage="incubation"
-    )
-    html = (
-        await client.get(
-            f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
-        )
-    ).text
-    assert "&ge;4.0 advance" in html
-    assert "&lt;3.0" in html
-    assert "&ge;3.4 advance" not in html
-    assert "15% weight" in html  # differentiation, investment weight
-    assert "16% weight" not in html
-    assert "investment scale" in html
-    assert "incubation scale" not in html
-
-
-async def test_detail_page_v2_seed_row_renders_the_investment_scale(
-    client, db_session, admin
-):
-    """rubric_version="2.0.0" but funnel_stage="seed": stage-aware scoring
-    applied, but the stage itself is not incubation, so this is the other
-    half of the AND in display_scale_for -- still the investment scale."""
-    assessment = await _seed_scale_fixture(
-        db_session, rubric_version="2.0.0", funnel_stage="seed"
-    )
-    html = (
-        await client.get(
-            f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
-        )
-    ).text
-    assert "&ge;4.0 advance" in html
-    assert "15% weight" in html
-    assert "investment scale" in html
-    assert "incubation scale" not in html
+    assert "&lt;2.8" in html
+    assert "25% weight" in html  # differentiation_unmet_need
+    assert "10% weight" in html  # team_executability, unscored but listed
 
 
 async def test_admin_detail_page_404s_on_an_unknown_id(client, db_session, admin):

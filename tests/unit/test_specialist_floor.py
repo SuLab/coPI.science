@@ -440,16 +440,15 @@ def test_a_conditional_band_with_a_pass_recommendation_still_owes_a_panel():
     """
     eng = _engine(_hub())
     eng._specialist_consults = {"gill": {"scientific"}}
-    # Scores chosen to band `conditional` on the incubation lines (>= 2.7).
+    # Scores chosen to band above the conditional line (all 4s -> 4.0).
     verdict = {
         "recommendation": "pass",
         "subject_agent_id": "gill",
         "funnel_stage": "incubation",
         "scores": {k: 4 for k in (
-            "differentiation", "market_unmet_need", "team", "external_signals",
-            "ip_fto", "platform", "dev_regulatory_feasibility",
-            "workplan_capital_efficiency", "exit_thesis", "mechanism_validation",
-            "toxicity_selectivity", "experimental_rigor", "chemistry_dc_path",
+            "differentiation_unmet_need", "scientific_credibility",
+            "translational_path", "fundable_experiment", "venture_potential",
+            "team_executability",
         )},
     }
     _, band = eng._computed_score_and_band(verdict)

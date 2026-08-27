@@ -78,7 +78,7 @@ async def test_assessment_row_round_trips(db_session):
         # and _normalize_gating): "not_met" (the PI declined) and "unconfirmed" (nobody
         # asked) are different answers, never a boolean.
         gating={"baltimore_commitment": "not_met", "life_sciences_domain": "met",
-                "credible_tech_source": "met", "fto_achievable": "unconfirmed"},
+                "credible_science": "met", "translational_potential": "unconfirmed"},
         scores={"differentiation": 4, "external_signals": 1},
         red_flags=["No external validation yet"],
         derisking_milestones=["TDP-43 mouse rescue"],
@@ -93,7 +93,7 @@ async def test_assessment_row_round_trips(db_session):
     assert row.band == "conditional"
     assert row.gating == {
         "baltimore_commitment": "not_met", "life_sciences_domain": "met",
-        "credible_tech_source": "met", "fto_achievable": "unconfirmed",
+        "credible_science": "met", "translational_potential": "unconfirmed",
     }
     assert row.red_flags == ["No external validation yet"]
     assert row.created_at is not None
@@ -161,9 +161,13 @@ async def test_simulation_run_delete_cascades_to_opportunity_assessment(engine):
 
 @pytest.mark.asyncio
 async def test_persist_assessment_recomputes_the_score_it_is_handed(engine):
-    """The model is told to leave weighted_score at 0, and it will sometimes fill in
-    a flattering number anyway. The stored score must be computed from its own
-    dimension scores, with the original verdict kept verbatim in raw_verdict."""
+    """Since rubric v3.2.0 the sidecar has no weighted_score key at all, but a
+    model (or an old image) may still emit one — a stray, flattering number
+    that must be ignored. The stored score must be computed from the verdict's
+    own dimension scores, with the original verdict kept verbatim in
+    raw_verdict. (`suggested_derisking_milestones` left the contract in the
+    same revision; the engine still stores a stray one as passthrough, which
+    this fixture also covers.)"""
     import uuid as _uuid
 
     from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -192,16 +196,14 @@ async def test_persist_assessment_recomputes_the_score_it_is_handed(engine):
         "confidence": "Speculative",
         "weighted_score": 4.8,  # the model's inflated claim — must be ignored
         "scores": {
-            "differentiation": 4, "market_unmet_need": 4, "team": 4,
-            "external_signals": 1, "ip_fto": 2, "platform": 3,
-            "dev_regulatory_feasibility": 3, "workplan_capital_efficiency": 3,
-            "exit_thesis": 2, "mechanism_validation": 4, "toxicity_selectivity": 3,
-            "experimental_rigor": 4, "chemistry_dc_path": 2,
+            "differentiation_unmet_need": 4, "scientific_credibility": 3,
+            "translational_path": 3, "fundable_experiment": 4,
+            "venture_potential": 2, "team_executability": 4,
         },
         # Tri-state strings — the current contract (see corrections to Task 11:
         # the prompt emits "met"/"not_met"/"unconfirmed", never booleans).
-        "gating": {"baltimore_commitment": "unconfirmed", "life_sciences_domain": "met",
-                   "credible_tech_source": "met", "fto_achievable": "not_met"},
+        "gating": {"life_sciences_domain": "met",
+                   "credible_science": "met", "translational_potential": "not_met"},
         "red_flags": ["No external validation yet"],
         "suggested_derisking_milestones": ["TDP-43 mouse rescue"],
         "rationale": "Differentiated metabolic angle.",
@@ -214,21 +216,14 @@ async def test_persist_assessment_recomputes_the_score_it_is_handed(engine):
                     OpportunityAssessment.simulation_run_id == run_id
                 )
             )).scalar_one()
-            # Hand-computed under the thirteen-dimension rubric (see
+            # Hand-computed under the six-dimension rubric (see
             # test_a_real_verdict_scores_as_hand_computed in
-            # tests/unit/test_blackbird_rubric.py for the same fixture and math).
-            #
-            # Re-baselined for rubric v2.0.0 (docs/specs/2026-08-20-rubric-v2-
-            # incubation-rebaseline-proposal.md §4): this verdict's funnel_stage
-            # is "incubation", so it is scored on the incubation weight column
-            # (3.42, band "advance") where v1 scored every stage on the
-            # investment one (3.28, "conditional"). Same fixture, same
-            # arithmetic, different weights — the claim under test is unchanged,
-            # that the stored score is COMPUTED and not the model's flattering
-            # 4.8. The stage selection itself is covered end-to-end in
-            # tests/integration/test_stage_aware_scoring.py.
-            assert row.weighted_score == pytest.approx(3.42)  # computed, not 4.8
-            assert row.band == "advance"
+            # tests/unit/test_blackbird_rubric.py for the same fixture and
+            # math: 100 + 60 + 45 + 60 + 30 + 40 = 335 / 100). The claim under
+            # test: the stored score is COMPUTED, never the model's flattering
+            # 4.8.
+            assert row.weighted_score == pytest.approx(3.35)  # computed, not 4.8
+            assert row.band == "conditional"
             assert row.subject_agent_id == "wang"
             assert row.agent_id == "blackbird"
             assert row.channel_name == "general"
@@ -236,8 +231,8 @@ async def test_persist_assessment_recomputes_the_score_it_is_handed(engine):
             assert row.derisking_milestones == ["TDP-43 mouse rescue"]
             # Tri-state gating strings round-trip unchanged.
             assert row.gating == {
-                "baltimore_commitment": "unconfirmed", "life_sciences_domain": "met",
-                "credible_tech_source": "met", "fto_achievable": "not_met",
+                "life_sciences_domain": "met",
+                "credible_science": "met", "translational_potential": "not_met",
             }
             # The original verdict survives verbatim for audit.
             assert row.raw_verdict["weighted_score"] == 4.8
@@ -284,8 +279,8 @@ async def test_persist_assessment_gating_drops_only_the_invalid_key(engine):
     original_gating = {
         "baltimore_commitment": False,  # legacy boolean — the one bad key
         "life_sciences_domain": "met",
-        "credible_tech_source": "met",
-        "fto_achievable": "not_met",
+        "credible_science": "met",
+        "translational_potential": "not_met",
     }
     verdict = {
         "subject_agent_id": "wang",
@@ -303,8 +298,8 @@ async def test_persist_assessment_gating_drops_only_the_invalid_key(engine):
             )).scalar_one()
             assert row.gating == {
                 "life_sciences_domain": "met",
-                "credible_tech_source": "met",
-                "fto_achievable": "not_met",
+                "credible_science": "met",
+                "translational_potential": "not_met",
             }
             assert "baltimore_commitment" not in row.gating  # not guessed, omitted
             assert row.raw_verdict["gating"] == original_gating
@@ -1257,7 +1252,11 @@ async def test_admin_assessments_page_lists_verdicts(client, db_session, admin):
     assert "DBT / BCAA-autophagy axis" in resp.text
     assert "route-to-incubation" in resp.text
     assert "3.05" in resp.text
-    assert "No external validation yet" in resp.text
+    # Red flags surface as a count badge only — the flag text itself is
+    # detail-page content since the inline detail rows were removed 2026-08-27
+    # (test_admin_assessments_page_renders_no_inline_detail_rows).
+    assert "1 flag" in resp.text
+    assert "No external validation yet" not in resp.text
     # band must be legible as text, not just a font colour on the score.
     assert _band_label(resp.text) == "conditional"
 
@@ -1358,8 +1357,8 @@ async def test_admin_assessments_page_distinguishes_gating_tri_state(client, db_
         gating={
             "baltimore_commitment": "not_met",
             "life_sciences_domain": "met",
-            "credible_tech_source": "met",
-            "fto_achievable": "unconfirmed",
+            "credible_science": "met",
+            "translational_potential": "unconfirmed",
         },
     ))
     await db_session.flush()
@@ -1370,7 +1369,7 @@ async def test_admin_assessments_page_distinguishes_gating_tri_state(client, db_
 
     met_state = _gating_state_for(html, "life sciences domain")
     not_met_state = _gating_state_for(html, "baltimore commitment")
-    unconfirmed_state = _gating_state_for(html, "fto achievable")
+    unconfirmed_state = _gating_state_for(html, "translational potential")
 
     assert met_state == "met"
     assert not_met_state == "not_met"
@@ -1413,233 +1412,56 @@ async def test_admin_assessments_page_handles_null_and_unrecognized_gating(
     assert _gating_state_for(resp.text, "baltimore commitment") == "unknown"
 
 
-def _score_cell(html: str, key: str) -> str:
-    """The rendered detail-row cell for one rubric dimension.
-
-    Scoped to the `score-<key>` class rather than searching the whole page: the
-    dimension names also appear in the page's intro prose and in tooltips, so a
-    bare substring check would pass against a template that renders no scores at
-    all.
-    """
-    m = re.search(
-        rf'<span class="score-{re.escape(key)}[^"]*"[^>]*>(.*?)</span>\s*</span>',
-        html,
-        re.DOTALL,
-    )
-    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", m.group(1))).strip() if m else ""
-
-
 @pytest.mark.asyncio
-async def test_admin_assessments_page_renders_rationale_and_scores(
+async def test_admin_assessments_page_renders_no_inline_detail_rows(
     client, db_session, admin
 ):
-    """A triage row without the basis for its number is a scoreboard, not a
-    triage tool. The reviewer has to be able to read WHY, and has to be able to
-    tell a dimension that scored low from one that was never answered — an
-    unscored dimension counts as zero in the weighted score, so the two are very
-    different findings that produce the same digit.
-    """
+    """The expandable per-row detail (rationale + thirteen score chips +
+    red-flag list + milestones, toggled by an onclick on the triage row) was
+    removed 2026-08-27: the triage table is scan-only, and a verdict's full
+    content lives on the detail page behind each row's "detail →" link —
+    test_admin_detail_page_renders_the_whole_verdict
+    (tests/integration/test_assessment_detail_page.py) pins that page rendering
+    all four fields, and its scale tests pin the version/stage weight gate the
+    chips used to exercise here. Even the richest possible verdict must render
+    none of the old machinery, while the link out survives. The blanket
+    "assessment-detail" not-in check also keeps the wrapper macros' class name
+    honest (templates/admin/assessments.html deliberately avoids that
+    substring)."""
     run = SimulationRun()
     db_session.add(run)
     await db_session.flush()
-    db_session.add(OpportunityAssessment(
+    assessment = OpportunityAssessment(
         simulation_run_id=run.id, agent_id="blackbird", subject_agent_id="wang",
-        channel_name="general", company_or_project="DBT / BCAA-autophagy axis",
+        channel_name="general", company_or_project="Rich verdict fixture",
         weighted_score=3.05, band="conditional",
-        rationale="Differentiated metabolic angle; needs mammalian in vivo rescue.",
-        # external_signals deliberately omitted — must render as a gap, not a 0.
-        scores={
-            "differentiation": 4, "market_unmet_need": 4, "team": 4,
-            "ip_fto": 2, "platform": 3, "dev_regulatory_feasibility": 3,
-            "workplan_capital_efficiency": 3, "exit_thesis": 2,
-            "mechanism_validation": 4, "toxicity_selectivity": 3,
-            "experimental_rigor": 4, "chemistry_dc_path": 2,
-        },
-    ))
-    await db_session.flush()
-
-    resp = await client.get("/admin/assessments", headers=_auth(admin.id))
-    assert resp.status_code == 200
-    html = resp.text
-
-    assert "Differentiated metabolic angle" in html, "rationale not rendered"
-
-    # Scored dimensions carry their value and their weight.
-    assert _score_cell(html, "differentiation") == "differentiation 4 /15%"
-    assert _score_cell(html, "exit_thesis") == "exit thesis 2 /1%"
-
-    # The omitted dimension is still listed, as a gap rather than a zero.
-    assert _score_cell(html, "external_signals") == "external signals — /8%"
-
-    # All thirteen appear, in RUBRIC_WEIGHTS order (the template renders
-    # `rubric_weights.items()` verbatim) — commercial dimensions first, then
-    # the four scientific ones.
-    order = [
-        m.group(1)
-        for m in re.finditer(r'<span class="score-([a-z_]+)', html)
-    ]
-    assert order == [
-        "differentiation", "market_unmet_need", "team", "external_signals",
-        "ip_fto", "platform", "dev_regulatory_feasibility",
-        "workplan_capital_efficiency", "exit_thesis",
-        "mechanism_validation", "toxicity_selectivity", "experimental_rigor",
-        "chemistry_dc_path",
-    ], order
-
-
-@pytest.mark.asyncio
-async def test_admin_assessments_page_score_chips_gate_on_rubric_version_not_stage_alone(
-    client, db_session, admin
-):
-    """34 rows in production (29 NULL rubric_version, 5 "1.0.0") predate the
-    incubation re-baseline and were scored on the investment weights no matter
-    what their funnel_stage says. A legacy row whose funnel_stage happens to
-    be "incubation" must still show its chips against the INVESTMENT weight
-    column — the same weights that actually scored it — not the incubation
-    one a funnel_stage-only check would pick.
-    """
-    run = SimulationRun()
-    db_session.add(run)
-    await db_session.flush()
-    db_session.add(OpportunityAssessment(
-        simulation_run_id=run.id, agent_id="blackbird", subject_agent_id="wang",
-        channel_name="general", company_or_project="Legacy incubation-stage fixture",
-        # rubric_version deliberately omitted (None) -- the pre-stamping shape.
-        funnel_stage="incubation",
-        scores={"differentiation": 4, "exit_thesis": 2},
-    ))
-    await db_session.flush()
-
-    resp = await client.get("/admin/assessments", headers=_auth(admin.id))
-    assert resp.status_code == 200
-    html = resp.text
-
-    # Investment weights (15% / 1%), NOT the incubation ones (16% / 2%) that a
-    # funnel_stage-only gate would have shown for this row.
-    assert _score_cell(html, "differentiation") == "differentiation 4 /15%"
-    assert _score_cell(html, "exit_thesis") == "exit thesis 2 /1%"
-    assert "investment scale" in html
-
-
-@pytest.mark.asyncio
-async def test_admin_assessments_page_score_chips_use_incubation_weights_for_a_v2_row(
-    client, db_session, admin
-):
-    """The other half of the gate: a row genuinely stamped by the stage-aware
-    (v2+) document AND scored incubation-stage must show the incubation
-    weight column (16% / 2%), not the investment one (15% / 1%)."""
-    run = SimulationRun()
-    db_session.add(run)
-    await db_session.flush()
-    db_session.add(OpportunityAssessment(
-        simulation_run_id=run.id, agent_id="blackbird", subject_agent_id="wang",
-        channel_name="general", company_or_project="V2 incubation-stage fixture",
-        rubric_version="2.0.0",
-        funnel_stage="incubation",
-        scores={"differentiation": 4, "exit_thesis": 2},
-    ))
-    await db_session.flush()
-
-    resp = await client.get("/admin/assessments", headers=_auth(admin.id))
-    assert resp.status_code == 200
-    html = resp.text
-
-    assert _score_cell(html, "differentiation") == "differentiation 4 /16%"
-    assert _score_cell(html, "exit_thesis") == "exit thesis 2 /2%"
-    assert "incubation scale (rubric v2)" in html
-
-
-@pytest.mark.asyncio
-async def test_admin_assessments_page_omits_detail_row_when_empty(
-    client, db_session, admin
-):
-    """A sparse verdict is stored deliberately rather than lost, so the page must
-    tolerate one without rendering an empty grey band under it."""
-    run = SimulationRun()
-    db_session.add(run)
-    await db_session.flush()
-    db_session.add(OpportunityAssessment(
-        simulation_run_id=run.id, agent_id="blackbird", channel_name="general",
-        company_or_project="Sparse verdict",
-    ))
-    await db_session.flush()
-
-    resp = await client.get("/admin/assessments", headers=_auth(admin.id))
-    assert resp.status_code == 200
-    assert "Sparse verdict" in resp.text
-    assert "assessment-detail" not in resp.text
-    assert "assessment-rationale" not in resp.text
-
-
-@pytest.mark.asyncio
-async def test_admin_assessments_page_renders_derisking_milestones(
-    client, db_session, admin
-):
-    """derisking_milestones is persisted (src/agent/simulation.py) but was
-    never rendered on the triage page — the concrete next results that would
-    unlock the next funnel stage, arguably the most actionable field in the
-    whole verdict (Finding B2).
-    """
-    run = SimulationRun()
-    db_session.add(run)
-    await db_session.flush()
-    db_session.add(OpportunityAssessment(
-        simulation_run_id=run.id, agent_id="blackbird", subject_agent_id="wang",
-        channel_name="general", company_or_project="Milestones fixture",
-        rationale="Differentiated angle; needs a second-species rescue.",
-        derisking_milestones=[
-            "In vivo rescue in a second species",
-            "Signed MTA with a pharma partner",
-        ],
-    ))
-    await db_session.flush()
-
-    resp = await client.get("/admin/assessments", headers=_auth(admin.id))
-    assert resp.status_code == 200
-    html = resp.text
-    assert "De-risking milestones" in html
-    assert "In vivo rescue in a second species" in html
-    assert "Signed MTA with a pharma partner" in html
-
-    # Rendered as list items, in the order stored — not sorted, not reversed.
-    block_match = re.search(
-        r'<div class="assessment-derisking.*?</div>', html, re.S
+        rationale="RATIONALE-ONLY-ON-THE-DETAIL-PAGE",
+        red_flags=["FLAG-ONLY-ON-THE-DETAIL-PAGE"],
+        derisking_milestones=["MILESTONE-ONLY-ON-THE-DETAIL-PAGE"],
+        scores={"differentiation": 4},
     )
-    assert block_match, "no derisking-milestones block rendered"
-    block = block_match.group(0)
-    assert block.find("In vivo rescue") < block.find("Signed MTA")
-
-
-@pytest.mark.asyncio
-async def test_admin_assessments_page_handles_null_and_empty_derisking_milestones(
-    client, db_session, admin
-):
-    """None (never asked / not applicable) and [] (asked, nothing to report)
-    must both render as nothing — no heading, no empty list, and never the
-    literal string "None" (Finding B2)."""
-    run = SimulationRun()
-    db_session.add(run)
-    await db_session.flush()
-    db_session.add(OpportunityAssessment(
-        simulation_run_id=run.id, agent_id="blackbird", subject_agent_id="wang",
-        channel_name="general", company_or_project="Null milestones fixture",
-        derisking_milestones=None,
-    ))
-    db_session.add(OpportunityAssessment(
-        simulation_run_id=run.id, agent_id="blackbird", subject_agent_id="fu",
-        channel_name="general", company_or_project="Empty milestones fixture",
-        derisking_milestones=[],
-    ))
+    db_session.add(assessment)
     await db_session.flush()
 
     resp = await client.get("/admin/assessments", headers=_auth(admin.id))
     assert resp.status_code == 200
     html = resp.text
-    assert "Null milestones fixture" in html
-    assert "Empty milestones fixture" in html
-    assert "De-risking milestones" not in html
-    assert "assessment-derisking" not in html
-    assert "None" not in html
+    assert "Rich verdict fixture" in html
+
+    # None of the removed machinery, even for a row with every detail field.
+    assert "assessment-detail" not in html
+    assert "Expand all" not in html and "Collapse all" not in html
+    assert "Click for rationale" not in html
+
+    # The detail fields themselves stay off the triage page — the flag count
+    # badge is their only trace here.
+    assert "RATIONALE-ONLY-ON-THE-DETAIL-PAGE" not in html
+    assert "FLAG-ONLY-ON-THE-DETAIL-PAGE" not in html
+    assert "MILESTONE-ONLY-ON-THE-DETAIL-PAGE" not in html
+    assert "1 flag" in html
+
+    # The one remaining route to that content: the per-row detail link.
+    assert f'href="/admin/assessments/{assessment.id}"' in html
 
 
 async def _two_runs_with_one_assessment_each(db_session):
@@ -1811,8 +1633,8 @@ async def test_engine_known_subject_overrides_the_models_guess(engine):
                 "recommendation": "advance",
                 "confidence": "Speculative",
                 "scores": {"differentiation": 4, "platform": 2},
-                "gating": {"life_sciences_domain": "met", "credible_tech_source": "met",
-                           "fto_achievable": "unconfirmed"},
+                "gating": {"life_sciences_domain": "met", "credible_science": "met",
+                           "translational_potential": "unconfirmed"},
             },
             subject_agent_id_fallback="wang",
         )
@@ -1949,7 +1771,7 @@ async def test_a_persisted_verdict_records_no_drop(engine):
                 "company_or_project": "Good thing",
                 "recommendation": "advance",
                 "scores": {"differentiation": 4, "platform": 2},
-                "gating": {"fto_achievable": "unconfirmed"},
+                "gating": {"translational_potential": "unconfirmed"},
             },
             subject_agent_id_fallback="wang",
         )
@@ -2460,16 +2282,16 @@ async def test_a_pass_verdict_owes_no_panel_and_is_not_marked_unverified(engine)
 
 @pytest.mark.asyncio
 async def test_admin_assessments_page_triage_restructure(client, db_session, admin):
-    """The 2026-08-20 triage restructure, pinned end to end:
+    """The 2026-08-20 triage restructure, pinned end to end (minus the inline
+    detail rows, removed 2026-08-27 — the per-row "detail →" link is now the
+    only route to rationale, flags and scores; see
+    test_admin_assessments_page_renders_no_inline_detail_rows):
 
-    * detail rows render COLLAPSED (class ``hidden``) with a per-row toggle
-      and an Expand all / Collapse all control — the always-expanded
-      rationale + 13 scores under every row was the page's text wall;
     * the recommendation renders as a chip whose ``pass`` value is labelled
       "pass (decline)" — the PDF's deal vocabulary means the decline, and a
       bare "pass" reads as its opposite;
-    * red flags collapse to a count badge in the triage row, with the full
-      list inside the detail row;
+    * red flags collapse to a count badge in the triage row — the full list
+      is detail-page content;
     * the headline cards count by RECOMMENDATION (route-to-incubation is the
       designed positive outcome for incubation-stage ideas and lives inside
       the <3.0 band, so band-only cards read "everything failed").
@@ -2495,25 +2317,15 @@ async def test_admin_assessments_page_triage_restructure(client, db_session, adm
     assert resp.status_code == 200
     html = resp.text
 
-    # Detail row: present, collapsed, and toggled by its own triage row.
-    detail = re.search(
-        r'<tr id="(assessment-detail-\d+)" class="assessment-detail hidden">', html
-    )
-    assert detail, "detail row must render collapsed by default"
-    assert f"getElementById('{detail.group(1)}')" in html, (
-        "the triage row's onclick must target its own detail row"
-    )
-    assert "Expand all" in html and "Collapse all" in html
-
     # Recommendation chip: pass is labelled with its meaning; the routed row
     # keeps its verbatim value.
     assert "pass (decline)" in html
     assert "route-to-incubation" in html
 
-    # Red flags: count badge in the triage row, full list in the detail row.
+    # Red flags: count badge only — the list itself lives on the detail page.
     assert "2 flags" in html
-    assert "No external validation" in html
-    assert "Single-shot asset" in html
+    assert "No external validation" not in html
+    assert "Single-shot asset" not in html
 
     # Headline cards count recommendations, not bands: both fixtures band
     # "pass", but one is a positive routing and must be counted as one.

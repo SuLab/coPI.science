@@ -44,16 +44,10 @@
 <p class="text-sm text-gray-500 mb-2">
     BlackbirdBot's screening verdicts against the Blackbird investment rubric
     {% if rubric_version %}(<span class="font-mono text-xs">{{ rubric_version }}</span>){% endif %}.
-    Weighted score is computed from the thirteen dimension scores — not taken from the
+    Weighted score is computed from the six dimension scores — not taken from the
     model. Bands: &ge;{{ banding.advance_min }} advance,
     {{ banding.conditional_min }}&ndash;&lt;{{ banding.advance_min }} conditional,
     &lt;{{ banding.conditional_min }} {{ banding.pass_label }}.
-    {# The manager surface's own copy of the two-scale legend — see the twin
-       comment in templates/admin/assessments.html. #}
-    On the <strong>incubation</strong> scale (rows whose funnel stage is incubation)
-    the weights and lines differ: &ge;{{ banding_incubation.advance_min }} advance,
-    {{ banding_incubation.conditional_min }}&ndash;&lt;{{ banding_incubation.advance_min }} conditional,
-    &lt;{{ banding_incubation.conditional_min }} {{ banding_incubation.pass_label }}.
     A band of "pass" means <em>pass on the deal</em> (decline) — the PDF's deal
     vocabulary, not "passed the screen".
     <strong>Recommendation</strong> is the model's own judgement (it can also say
@@ -83,7 +77,7 @@
    parameterised into the shared body. A live-looking control that 403s on
    click is worse than no control (F6), so this points at /manager, never
    /admin: test_manager_assessments_never_links_into_admin pins that. #}
-{% macro assessment_link(a) %}<a class="assessment-open-link underline text-indigo-600 hover:text-indigo-800 whitespace-nowrap" href="/manager/assessments/{{ a.id }}" onclick="event.stopPropagation()" title="Full verdict and interview timeline">detail &rarr;</a>{% endmacro %}
+{% macro assessment_link(a) %}<a class="assessment-open-link underline text-indigo-600 hover:text-indigo-800 whitespace-nowrap" href="/manager/assessments/{{ a.id }}" title="Full verdict and interview timeline">detail &rarr;</a>{% endmacro %}
 {# The manager surface's own copy of pi_link — see the twin comment in
    templates/admin/assessments.html. Points at /manager/pis, never /admin, for
    the same F6 reason as assessment_link above: test_manager_assessments_never_links_into_admin

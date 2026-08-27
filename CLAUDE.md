@@ -623,8 +623,13 @@ it from the running roster within ~30s — the same invariant, applied live.
 
 BlackbirdBot screens PI ideas against `data/Blackbird_initial_priorities-criteria_v1.pdf`.
 **The rubric criteria live in one document, `prompts/rubric/blackbird-rubric.toml`** —
-weights, band thresholds, the 1–5 scale, gating criteria, checklist, red flags, the
-heuristic. `src/services/blackbird_rubric.py` loads it once at import (fail-fast on an
+weights, band thresholds, the 1–5 scale, gating criteria, per-dimension evidence lists,
+red flags, the heuristic. Since regime 3.0.0 (2026-08-27,
+docs/plans/2026-08-27-rubric-v3-consolidation.md) that is SIX single-scale dimensions —
+the 13-dimension dual-scale (investment/incubation) machinery, the standalone
+target-level checklist, and the stage-selected scoring are all gone, and the operator
+directed that no legacy-verdict compatibility be kept: pre-v3 rows are not carried over,
+and the read paths render every row against the live document. `src/services/blackbird_rubric.py` loads it once at import (fail-fast on an
 invalid document) and renders it into the `{rubric}` placeholder of
 `prompts/roles/scout_hub/agent-system.md` at prompt-composition time, so the prompt the
 hub reads and the score the code computes cannot drift apart. The `<assessment_json>`
@@ -835,13 +840,18 @@ delta was a fourth **`baltimore_commitment`** gating criterion, deliberately abs
 the tracked rubric: the three gating keys are structural (the sidecar's JSON keys and the
 `opportunity_assessments.gating` keys), and `blackbird_rubric.py`'s validator rejects a
 fourth outright. (Since 2026-08-24 / rubric v2.1.0 the third key is
-`translational_potential`, not `fto_achievable` — FTO was demoted from gate to diligence,
-the key renamed with the criterion, and rows written before the rename keep the old key.)
+`translational_potential`, not `fto_achievable` — FTO was demoted from gate to diligence —
+and since v3.0.0 / 2026-08-27 the second key is `credible_science`, not
+`credible_tech_source`; pre-rename rows kept their old keys and are not carried over.)
 
 - **Interview guidance is per-role Python**, not a prompt: `src/agent/thread_guidance.py`.
-  The `pi_lab` strings there are byte-identical to the pre-refactor literals and are pinned
-  by `tests/characterization/__snapshots__/test_agent_turn_gm.ambr` — do not reword them,
-  and never run `pytest --snapshot-update` to make a mismatch go away.
+  The `pi_lab` strings there are pinned by
+  `tests/characterization/__snapshots__/test_agent_turn_gm.ambr` — do not reword them,
+  and never run `pytest --snapshot-update` to make a mismatch go away. (One reviewed
+  regeneration has occurred: 2026-08-27, funnel→instrument rewording across the pi_lab
+  prompts and `_PI_LAB[EXPLORE]` for rubric v3.x, executed at the operator's direction
+  with the `.ambr` diff audited hunk-by-hunk — every changed line belonged to that one
+  rewrite. Any future pi_lab change takes the same reviewed-diff path.)
 - **Inside an interview thread the hub is reply-only — it never makes a top-level post
   there.** An Opportunity Assessment is not a post type: it is an `<assessment_json>`
   sidecar carried inside the hub's CONCLUDING reply in the interview thread (bare JSON, *no*
@@ -850,11 +860,13 @@ the key renamed with the criterion, and rows written before the rename keep the 
   the sidecar and is never a post label it may write
   (`prompts/roles/scout_hub/agent-system.md`); it never appears on anything a PI or another
   lab sees. **What is confidential is the sidecar, not the verdict.** The hub's concluding
-  reply is *required* to state its verdict inline in the visible `<slack_message>` — funnel
-  stage, gating status, recommendation, red flags, confidence label — by
+  reply is *required* to state its verdict inline in the visible `<slack_message>` —
+  gating status, recommendation, red flags, confidence label — by
   `src/agent/thread_guidance.py`'s `_SCOUT_HUB[CONCLUDE]` (both strings), by
   `prompts/roles/scout_hub/agent-system.md` and by `phase4-thread-reply.md`: four places,
-  all naming those same five things. An interview that ended saying nothing would be the
+  all naming those same four things. (The funnel-stage classification was removed in
+  rubric v3.1.0 — zero measured entropy at this system's pipeline position; the
+  `opportunity_assessments.funnel_stage` column survives, unwritten by new verdicts.) An interview that ended saying nothing would be the
   defect, and when a sidecar is never stored the visible prose is the only surviving record
   of the verdict. What never reaches Slack is the sidecar and what only it carries —
   `raw_verdict`, the computed `weighted_score`, the `band`, and the per-dimension rubric
@@ -922,6 +934,14 @@ the key renamed with the criterion, and rows written before the rename keep the 
   or was backfilled, or was hand-built by a test, and no claim is available for it.
   `tests/unit/test_panel_state.py::test_the_read_path_never_re_derives_the_floor_s_decision`
   fails if anyone puts `panel_is_owed` back in front of the column test.
+- **Panel notes and consult truncation:** Panel notes clip the hub's question
+  at `PANEL_NOTE_QUESTION_CHARS` (src/agent/specialists.py, recalibrated 850
+  on 2026-08-26), and `clip_rate_warning` logs once per run when >10% of >=20
+  posted notes clip — that WARNING means the calibration has decayed again;
+  remeasure from `specialist_consults` question lengths. Truncated-consult
+  cause (refusal vs max_tokens ceiling) is derivable per call from
+  `llm_call_logs.call_stats[].stop_reason` — see
+  docs/audits/2026-08-26-specialist-truncation-rca/README.md.
 - **`gating` values are the tri-state strings** `"met"` / `"not_met"` / `"unconfirmed"`,
   never booleans — "the PI declined" and "we never asked" are different answers, and only
   the former can license discounting an idea.

@@ -176,20 +176,13 @@
     </summary>
     <table class="mt-3 w-full text-xs">
         <thead class="text-gray-400 text-left">
-            {# Two weight columns: which one applied to a given verdict follows
-               from that verdict's funnel stage, and the rows summarised here are
-               pooled across stages. A dimension worth 1 point on the investment
-               scale and 8 on the incubation one (workplan_capital_efficiency) is
-               a completely different finding depending on which column you read,
-               so neither can be the only one shown. #}
-            <tr><th>Dimension</th><th>Wt (inv)</th><th>Wt (inc)</th><th>Specialist</th><th>n</th><th>Mean</th><th>Min</th><th>Max</th></tr>
+            <tr><th>Dimension</th><th>Weight</th><th>Specialist</th><th>n</th><th>Mean</th><th>Min</th><th>Max</th></tr>
         </thead>
         <tbody>
         {% for d in dimension_stats %}
             <tr class="border-t border-gray-100 {% if d.max is not none and d.max <= 2 %}bg-amber-50{% endif %}">
                 <td class="py-1 font-mono">{{ d.dimension }}</td>
                 <td>{{ d.weight }}</td>
-                <td class="{% if d.weight_incubation is not none and d.weight is not none and d.weight_incubation != d.weight %}font-semibold text-indigo-700{% else %}text-gray-500{% endif %}">{{ d.weight_incubation if d.weight_incubation is not none else "&mdash;"|safe }}</td>
                 <td class="text-gray-500">{{ d.specialist or "&mdash;"|safe }}</td>
                 <td>{{ d.n }}</td>
                 <td>{{ d.mean if d.mean is not none else "&mdash;"|safe }}</td>
@@ -203,36 +196,18 @@
 {% endif %}
 
 {% if assessments %}
-{# Detail rows render collapsed (class "hidden") and toggle per row — the
-   rationale + 13 scores under every row made the page an unreadable wall of
-   text. Inline onclick handlers, matching _discussions_threads.html; this
-   repo has no JS framework. The controls only render when at least one row
-   actually has a detail row: dead buttons aside, a page of sparse verdicts
-   must stay free of the "assessment-detail" selector entirely (pinned by
-   test_admin_assessments_page_omits_detail_row_when_empty). #}
-{% set any_detail = (assessments | selectattr("rationale") | list | length)
-    + (assessments | selectattr("scores") | list | length)
-    + (assessments | selectattr("derisking_milestones") | list | length)
-    + (assessments | selectattr("red_flags") | list | length) > 0 %}
-{% if any_detail %}
-<div class="flex justify-end mb-2 gap-3 text-xs text-gray-500">
-    <button type="button" class="underline hover:text-gray-700"
-            onclick="document.querySelectorAll('.assessment-detail').forEach(function(r){r.classList.remove('hidden')})">
-        Expand all
-    </button>
-    <button type="button" class="underline hover:text-gray-700"
-            onclick="document.querySelectorAll('.assessment-detail').forEach(function(r){r.classList.add('hidden')})">
-        Collapse all
-    </button>
-</div>
-{% endif %}
+{# Scan-only triage table (the inline expandable detail rows were removed
+   2026-08-27): rationale, red flags, milestones and the per-dimension score chips
+   are detail-page content, reached through each row's "detail →" link — the
+   page must stay free of the "assessment-detail" selector and of every one of
+   those fields (pinned by
+   test_admin_assessments_page_renders_no_inline_detail_rows). #}
 <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
     <table class="min-w-full divide-y divide-gray-200">
         <thead class="bg-gray-50">
             <tr>
                 <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Project</th>
                 <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Lab</th>
-                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Stage</th>
                 <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Score</th>
                 <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Recommendation</th>
                 <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Gating</th>
@@ -243,11 +218,7 @@
         </thead>
         <tbody class="divide-y divide-gray-100">
         {% for a in assessments %}
-            {# red_flags included: a verdict whose only detail is its flags still
-               needs a detail row, or the count badge would point at nothing. #}
-            {% set has_detail = a.rationale or a.scores or a.derisking_milestones or a.red_flags %}
-            <tr {% if has_detail %}class="hover:bg-gray-50 cursor-pointer" title="Click for rationale, scores and red flags"
-                onclick="document.getElementById('assessment-detail-{{ loop.index }}').classList.toggle('hidden')"{% endif %}>
+            <tr>
                 <td class="px-4 py-3 text-sm text-gray-900">
                     {{ a.company_or_project or "—" }}
                     {% if a.confidence %}
@@ -262,7 +233,6 @@
                     {% endif %}
                 </td>
                 <td class="px-4 py-3 text-sm text-gray-600">{{ pi_link(a) }}</td>
-                <td class="px-4 py-3 text-sm text-gray-600">{{ a.funnel_stage or "—" }}</td>
                 <td class="px-4 py-3 text-sm">
                     <span class="font-semibold
                         {% if a.band == 'advance' %}text-green-600
@@ -368,7 +338,7 @@
                     {% endif %}
                 </td>
                 <td class="px-4 py-3 text-xs">
-                    {# Count only — the full list lives in the detail row. A
+                    {# Count only — the full list lives on the detail page. A
                        column of multi-line flag prose was a third of the
                        page's text wall. #}
                     {% if a.red_flags %}
@@ -392,97 +362,16 @@
                     {% endif %}
                 </td>
                 <td class="px-4 py-3 text-xs">
-                    {# A dedicated link cell, NOT a row click: the row's own
-                       onclick toggles the inline detail row, so one control
-                       would shadow the other. stopPropagation on the anchor
-                       (see the macro) keeps a click here from also toggling.
-                       The href is built by the `assessment_link` macro each
-                       wrapper defines — this file must stay free of absolute
-                       /admin and /manager URLs; see the header comment. #}
+                    {# The only route to the verdict's full content — rationale,
+                       red flags, milestones and the per-dimension score chips all
+                       live on the detail page (the inline detail rows were
+                       removed 2026-08-27). The href is built by the
+                       `assessment_link` macro each wrapper defines — this file
+                       must stay free of absolute /admin and /manager URLs; see
+                       the header comment. #}
                     {{ assessment_link(a) }}
                 </td>
             </tr>
-            {# Detail row. The triage row above answers "which of these deserves
-               attention"; this one answers "on what basis", which is the
-               difference between a triage queue and a scoreboard. Kept as a
-               spanning row rather than extra columns because the table is
-               already nine wide. Omitted entirely when there is nothing to
-               show, so a sparse verdict does not leave an empty band.
-               Collapsed ("hidden") by default — the triage row toggles it;
-               the id must match that row's onclick above. #}
-            {% if has_detail %}
-            <tr id="assessment-detail-{{ loop.index }}" class="assessment-detail hidden">
-                <td colspan="9" class="px-4 py-3 text-xs text-gray-600 bg-gray-50">
-                    {% if a.rationale %}
-                        <div class="assessment-rationale mb-1">
-                            <span class="font-medium text-gray-500">Rationale:</span>
-                            {{ a.rationale }}
-                        </div>
-                    {% endif %}
-                    {% if a.red_flags %}
-                        {# The full list backing the triage row's count badge. #}
-                        <div class="assessment-red-flags mb-1">
-                            <span class="font-medium text-gray-500">Red flags:</span>
-                            <ul class="list-disc list-inside">
-                                {% for flag in a.red_flags %}
-                                    <li>{{ flag }}</li>
-                                {% endfor %}
-                            </ul>
-                        </div>
-                    {% endif %}
-                    {% if a.derisking_milestones %}
-                        {# The concrete next results that would unlock the next
-                           funnel stage — the most actionable content in the
-                           verdict, so it belongs next to the rationale rather
-                           than buried after the score breakdown. None and []
-                           both skip this block entirely (never an empty
-                           heading, never the literal "None"). #}
-                        <div class="assessment-derisking mb-1">
-                            <span class="font-medium text-gray-500">De-risking milestones:</span>
-                            <ul class="list-disc list-inside">
-                                {% for milestone in a.derisking_milestones %}
-                                    <li>{{ milestone }}</li>
-                                {% endfor %}
-                            </ul>
-                        </div>
-                    {% endif %}
-                    {% if a.scores %}
-                        {# Weight order, not dict order, so the dimensions that
-                           actually move the score read first. Every one of the
-                           thirteen is listed even when unscored: an unscored
-                           dimension counts as ZERO in the weighted score
-                           (src/services/blackbird_rubric.py), so a reader has to
-                           be able to tell "scored low" from "never answered".
-
-                           The "/N%" annotation must come from the weight set
-                           that actually scored THIS row — which is NOT simply
-                           whatever its funnel_stage says: a row scored before
-                           rubric v2 was stamped on the investment weights no
-                           matter what its funnel_stage names, so gating on
-                           funnel_stage alone would show 34 historical rows
-                           against incubation weights that never scored them.
-                           `row_scales` (src/services/directory.py, built via
-                           blackbird_rubric.display_scale_for) already applies
-                           that gate per row — do not reimplement the
-                           version/stage rule here. #}
-                        {% set row_scale = row_scales.get(a.id) %}
-                        {% set row_weights = row_scale.weights if row_scale else rubric_weights %}
-                        <div class="assessment-scores flex flex-wrap gap-x-3 gap-y-1">
-                            <span class="font-medium text-gray-500">Scores:</span>
-                            {% for key, weight in row_weights.items() %}
-                                {% set val = a.scores.get(key) %}
-                                <span class="score-{{ key }}{% if val is none %} text-gray-400{% endif %}"
-                                      title="{{ key.replace('_', ' ') }} — {{ weight }}% of the weighted score on the {{ row_scale.label if row_scale else "investment scale" }}{% if val is none %} (not scored: counts as zero){% endif %}">
-                                    {{ key.replace("_", " ") }}
-                                    <span class="font-semibold">{% if val is none %}—{% else %}{{ val }}{% endif %}</span>
-                                    <span class="text-gray-400">/{{ weight }}%</span>
-                                </span>
-                            {% endfor %}
-                        </div>
-                    {% endif %}
-                </td>
-            </tr>
-            {% endif %}
         {% endfor %}
         </tbody>
     </table>

@@ -117,14 +117,13 @@ def test_the_gate_is_case_and_whitespace_tolerant():
 
 
 def test_the_band_set_is_the_band_names_the_rubric_can_produce():
-    """`band()` returns exactly advance/conditional/pass on both scales, so the
-    gate's band side needs no vocabulary of its own."""
+    """`band()` returns exactly advance/conditional/pass, so the gate's band
+    side needs no vocabulary of its own."""
     from src.services.blackbird_rubric import band
 
     produced = {
-        band(score, stage)
+        band(score)
         for score in (1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0)
-        for stage in (None, "incubation")
     }
     assert PANEL_REQUIRED_FOR <= produced
     assert produced - PANEL_REQUIRED_FOR == {"pass"}, (

@@ -54,8 +54,8 @@ unexploited behind it is a fine thing to say out loud.
 ## Available tools
 
 - `retrieve_profile(agent_id)` — another agent's public profile. Blackbird's own is worth
-  reading: it states the funnel, the check sizes, and the priorities you are being screened
-  against.
+  reading: it states the instruments, the check sizes, and the priorities you are being
+  screened against.
 - `retrieve_abstract(pmid_or_doi)` — a paper abstract from PubMed
 - `retrieve_full_text(pmid_or_doi)` — full text from PubMed Central (use sparingly)
 

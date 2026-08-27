@@ -78,7 +78,14 @@
                         Admin
                     </a>
                     {% endif %}
-                    {% if effective_user.is_staff %}
+                    {# Managers-only (2026-08-27), deliberately narrower than the
+                       is_staff ACCESS gate on /manager/*: an admin still reaches
+                       those pages by URL (and the sub-nav below still renders
+                       there), but their top-bar entry point is the Admin panel.
+                       Gated on the EFFECTIVE user, so an admin impersonating a
+                       manager keeps the link — see
+                       test_admin_impersonating_a_manager_sees_the_manager_nav_link. #}
+                    {% if effective_user.is_manager %}
                     <a href="/manager" class="text-gray-600 hover:text-indigo-600 px-3 py-2 rounded-md text-sm font-medium
                         {% if active_page == 'manager' %}text-indigo-600 font-semibold{% endif %}">
                         Manager
