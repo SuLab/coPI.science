@@ -783,4 +783,16 @@ async def _execute_consult_specialist(
             f"does not count as consulted — consult {domain} again before you "
             f"conclude. The partial text follows, unparsed:\n\n{opinion.raw}"
         )
-    return f"{spec.title} — signal: {opinion.verdict_signal}\n\n{opinion.raw}"
+    # Label AFTER the body, deliberately. This used to be
+    # f"{spec.title} — signal: {signal}\n\n{raw}", which put a verdict word
+    # ahead of the evidence in the hub's context — the worst position for it.
+    # Anchoring on a score already in context reaches Cohen's d = 0.71 and is
+    # not removable by instruction (arXiv:2608.25869); generating evidence
+    # before rating is worth +6 to +11 accuracy points (arXiv:2305.17926).
+    # `read: parsed` is stated so the hub can tell a read opinion from one whose
+    # signal was defaulted — the same distinction `read_state` draws for the
+    # panel note.
+    return (
+        f"{spec.title}\n\n{opinion.raw}\n\n"
+        f"— signal: {opinion.verdict_signal} (read: {read_state})"
+    )

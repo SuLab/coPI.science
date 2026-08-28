@@ -18,7 +18,7 @@ from src.agent.agent import Agent
 from src.agent.simulation import SimulationEngine
 from src.agent.state import ThreadState
 from src.agent.tools import _execute_consult_specialist
-from tests.fakes import FakeSlackClient
+from tests.fakes import FakeAnthropic, FakeSlackClient
 
 _OPINION = """VERDICT SIGNAL: proceed
 CONFIDENCE: moderate
@@ -413,3 +413,40 @@ async def test_a_consult_whose_stop_reason_never_arrives_is_credited(monkeypatch
         on_consult=lambda domain, signal: consulted.append(domain),
     )
     assert consulted == ["chemistry"]
+
+
+# --- label placement --------------------------------------------------------
+#
+# Task 6: the label ("<Title> — signal: X") must follow the opinion body, not
+# precede it, in the string the hub reads. A verdict word already in context
+# anchors the hub's own subsequent reasoning: anchoring on a score already in
+# context reaches Cohen's d = 0.71 and is NOT removable by instruction
+# (arXiv:2608.25869), while generating evidence before rating is worth +6 to
+# +11 accuracy points (arXiv:2305.17926).
+
+
+@pytest.mark.asyncio
+async def test_the_hub_reads_the_opinion_before_it_reads_the_label(monkeypatch):
+    """Pin placement on a marker unique to the LABEL ("— signal:"), not on the
+    bare verdict word "blocking": the specialist's own raw JSON already names
+    its ``verdict_signal`` near the top of ``opinion.raw`` (schema order, not
+    this function's doing), so a bare "blocking" shows up early in the string
+    either way this function assembles it. What actually moves between the
+    old and new implementation is the em-dash label itself — this is why the
+    assertion below compares `unscalable` (a body word) against `"— signal:"`
+    (the label's own marker), not against `blocking`."""
+    fake = FakeAnthropic([
+        '{"verdict_signal": "blocking", "concerns": ["the route is unscalable"],'
+        ' "questions_to_ask": [], "confidence": "high"}'
+    ])
+    monkeypatch.setattr("src.services.llm.get_anthropic_client", lambda: fake)
+
+    out = await _execute_consult_specialist(
+        "chemistry", "is the route scalable?", "PI: we have one gram.",
+        agent_id="blackbird",
+    )
+
+    assert out.index("unscalable") < out.index("— signal:"), (
+        "the label must come after the body"
+    )
+    assert "read: parsed" in out
