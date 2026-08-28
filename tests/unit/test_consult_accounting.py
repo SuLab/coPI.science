@@ -15,6 +15,7 @@ mandatory-consult rules mean a strong verdict pulls in more consults, not fewer.
 import pytest
 
 from src.agent.agent import Agent
+from src.agent.message_log import LogEntry
 from src.agent.simulation import SimulationEngine
 from src.agent.state import ThreadState
 from src.agent.tools import _execute_consult_specialist
@@ -37,6 +38,16 @@ def _hub_engine():
     engine = SimulationEngine(
         agents=[hub], slack_clients={"blackbird": FakeSlackClient(agent_id="blackbird")}
     )
+    # Root the thread: the orphan-eviction guard in `_reply_to_thread` (added
+    # 2026-08-28) evicts any thread whose root is absent from the log instead
+    # of replying to it. No test in this file asserts on `client.posted`, so
+    # `slack_ts` is not needed here — this is a no-session-factory engine
+    # (never wires a persist callback), so `.append()` triggers no DB write.
+    engine.message_log.append(LogEntry(
+        ts="t1", channel="general", sender_agent_id="wang",
+        sender_name="WangBot", content="the lab's post", thread_ts=None,
+        posted_at=1.0,
+    ))
     return engine, hub, thread
 
 

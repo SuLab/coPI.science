@@ -198,6 +198,7 @@ async def test_phase4_reply_budget_fits_the_assessment_sidecar(monkeypatch):
     one response still truncated after the 2x retry.
     """
     from src.agent.agent import Agent
+    from src.agent.message_log import LogEntry
     from src.agent.simulation import SimulationEngine
     from src.agent.state import ThreadState
     from tests.fakes import FakeSlackClient
@@ -213,6 +214,15 @@ async def test_phase4_reply_budget_fits_the_assessment_sidecar(monkeypatch):
     engine = SimulationEngine(
         agents=[hub], slack_clients={"blackbird": FakeSlackClient(agent_id="blackbird")}
     )
+    # Root the thread: the orphan-eviction guard in `_reply_to_thread` (added
+    # 2026-08-28) evicts any thread whose root is absent from the log instead
+    # of replying to it, and this test needs the reply to actually be
+    # attempted so `generate_with_tools`'s `max_tokens` kwarg can be captured.
+    engine.message_log.append(LogEntry(
+        ts="t1", channel="general", sender_agent_id="wang",
+        sender_name="WangBot", content="the lab's post", thread_ts=None,
+        posted_at=1.0,
+    ))
 
     seen: dict = {}
 
