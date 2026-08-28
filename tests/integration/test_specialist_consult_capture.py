@@ -31,7 +31,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from src.agent.agent import Agent
-from src.agent.message_log import PHASE_PANEL_NOTE, MessageLog
+from src.agent.message_log import PHASE_PANEL_NOTE, LogEntry, MessageLog
 from src.agent.simulation import SimulationEngine
 from src.agent.state import ThreadState
 from src.config import get_settings
@@ -162,6 +162,19 @@ async def _drive_a_consult(
 
     monkeypatch.setattr("src.agent.tools.generate_agent_response", _fake_opinion)
     monkeypatch.setattr("src.agent.simulation.generate_with_tools", _fake_reply)
+
+    # slack_ts == ts is pure-Slack-on mode (matching every sibling
+    # `_reply_to_thread` harness's seeded root): without it the seeded root has
+    # no Slack presence, `_slack_parent_ts` returns None, and every panel-note
+    # post in this file is silently kept DB-only instead of mirrored to the
+    # FakeSlackClient the assertions read from. load_entry (not append): this
+    # root predates the turn under test — it is not a new post this fixture's
+    # own persist callback should enqueue, and .append() would add a spurious
+    # extra `agent_messages` row the row-count assertions below don't expect.
+    sim.message_log.load_entry(LogEntry(
+        ts="t1", channel=channel, sender_agent_id="wang", sender_name="WangBot",
+        content="the lab's post", thread_ts=None, posted_at=1.0, slack_ts="t1",
+    ))
 
     await sim._reply_to_thread(agent, thread)
     return SimpleNamespace(
@@ -922,13 +935,16 @@ async def test_no_agent_can_see_the_note_it_just_posted(engine, monkeypatch):
     turn = await _drive_a_consult(engine, monkeypatch)
     try:
         log = turn.sim.message_log
-        # Both messages really are in the log — this is an exclusion at the
-        # read, not a decision not to record.
-        assert len(log) == 2
+        # The fixture's seeded root, the note and the reply really are all in
+        # the log — this is an exclusion at the read, not a decision not to
+        # record.
+        assert len(log) == 3
 
         history = log.get_thread_history("t1")
-        assert [e.content for e in history] == ["Thanks — one more question."]
-        assert log.get_thread_message_count("t1") == 1
+        assert [e.content for e in history] == [
+            "the lab's post", "Thanks — one more question.",
+        ]
+        assert log.get_thread_message_count("t1") == 2
 
         # The note came FIRST (from inside the tool rounds) and the reply
         # second, which is the point of posting at consult time — but it also
@@ -939,7 +955,11 @@ async def test_no_agent_can_see_the_note_it_just_posted(engine, monkeypatch):
         # in tests/unit/test_simulation_logic.py drives the same claim through
         # `_pending_reply_pairs`, where it actually decides a turn.)
         note_entry = next(e for e in log._entries if e.phase == PHASE_PANEL_NOTE)
-        reply_entry = next(e for e in log._entries if e.phase is None)
+        # Exclude the fixture's seeded root ("t1", phase=None too): the reply
+        # under test is the hub's own turn output, not the lab's original post.
+        reply_entry = next(
+            e for e in log._entries if e.phase is None and e.ts != "t1"
+        )
         assert note_entry.posted_at < reply_entry.posted_at
         assert log.has_new_reply_from_other("t1", "wang", 0.0) is True, (
             "the hub's actual reply still counts"

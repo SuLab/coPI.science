@@ -1954,6 +1954,27 @@ class SimulationEngine:
 
         # Get thread history from message log
         history_entries = self.message_log.get_thread_history(thread.thread_id)
+
+        # A thread whose ROOT is absent from this run's log is not ours to
+        # continue. The only way to get here is a reply ingested into a thread
+        # this run never saw — e.g. another workspace bot's thread_broadcast
+        # reply landing in a PREVIOUS run's interview (conversations.history
+        # returns broadcasts, and the poller mirrors every bot message,
+        # thread_ts included). Replying would restart that interview at
+        # ordinal 2 with a one-message "history"; get_thread_allowed_agents
+        # cannot block it because a missing root reads as "open to anyone".
+        # Evict, and pin the id closed so Phase 3's tag/reply scans (which all
+        # check _closed_thread_ids) cannot re-activate it on the next tick.
+        if self.message_log.get_entry(thread.thread_id) is None:
+            logger.warning(
+                "[%s] Phase 4: evicting thread %s in #%s — no root in this "
+                "run's log (reply into a previous run's thread?)",
+                agent.agent_id, thread.thread_id, thread.channel,
+            )
+            agent.state.active_threads.pop(thread.thread_id, None)
+            self._closed_thread_ids.add(thread.thread_id)
+            return
+
         thread_history = [
             {"sender": e.sender_name, "content": e.content}
             for e in history_entries
@@ -5877,7 +5898,9 @@ class SimulationEngine:
         # would just bloat RAM and startup. A PI reopening an old closed thread
         # hydrates it on demand (_hydrate_thread_from_db).
         recent_floor = time.time() - REBUILD_WINDOW_S
-        closed_thread_ids_subq = sa_select(ThreadDecision.thread_id)
+        closed_thread_ids_subq = sa_select(ThreadDecision.thread_id).where(
+            ThreadDecision.simulation_run_id == self.simulation_run_id
+        )
         try:
             async with self.session_factory() as db:
                 result = await db.execute(
@@ -6701,11 +6724,15 @@ class SimulationEngine:
         # Rebuild active_threads per agent.
         # Get all closed thread IDs and prior thread summaries from thread_decisions
         closed_thread_ids: set[str] = set()
-        if self.session_factory:
+        if self.session_factory and self.simulation_run_id:
             try:
                 from sqlalchemy import select as sa_select
                 async with self.session_factory() as db:
-                    result = await db.execute(sa_select(ThreadDecision))
+                    result = await db.execute(
+                        sa_select(ThreadDecision).where(
+                            ThreadDecision.simulation_run_id == self.simulation_run_id
+                        )
+                    )
                     all_decisions = result.scalars().all()
                     for td in all_decisions:
                         closed_thread_ids.add(td.thread_id)
@@ -6811,21 +6838,34 @@ class SimulationEngine:
                 )
 
         # 3. Rebuild pending_proposals per agent
-        if self.session_factory:
+        if self.session_factory and self.simulation_run_id:
             try:
                 from sqlalchemy import select as sa_select
                 async with self.session_factory() as db:
                     proposals_result = await db.execute(
                         sa_select(ThreadDecision).where(
-                            ThreadDecision.outcome == "proposal"
+                            ThreadDecision.outcome == "proposal",
+                            ThreadDecision.simulation_run_id == self.simulation_run_id,
                         )
                     )
                     proposals = proposals_result.scalars().all()
 
+                    # ProposalReview has no simulation_run_id column
+                    # (src/models/agent_registry.py) — scope it through its
+                    # decision. Reviews of other runs' decisions can never
+                    # match the filtered `proposals` keys anyway; the subquery
+                    # keeps the read honest and small.
                     reviewed_result = await db.execute(
                         sa_select(
                             ProposalReview.thread_decision_id,
                             ProposalReview.agent_id,
+                        ).where(
+                            ProposalReview.thread_decision_id.in_(
+                                sa_select(ThreadDecision.id).where(
+                                    ThreadDecision.simulation_run_id
+                                    == self.simulation_run_id
+                                )
+                            )
                         )
                     )
                     reviewed_set = {

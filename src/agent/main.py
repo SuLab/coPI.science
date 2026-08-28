@@ -114,7 +114,9 @@ async def _open_fresh_run(session_factory, config: dict) -> uuid.UUID:
     ``(simulation_run_id, message_ts)`` so re-seeing a Slack ts is a different
     key, and ``agent_channels`` has no unique constraint beyond its PK so
     per-run duplicate ``channel_name`` rows are fine. ``pi_dm_messages`` is a
-    dead table: nothing in ``src/`` writes it.
+    dead table: nothing in ``src/`` writes it. ``thread_decisions`` and
+    ``proposal_reviews`` reads were the exception until 2026-08-28 and are now
+    filtered too.
 
     ONE read was not run-scoped and had to be fixed alongside this, or "delete
     nothing" would be strictly worse than the bug: see
