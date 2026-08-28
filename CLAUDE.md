@@ -493,9 +493,11 @@ when a form stops working after a deploy.
 `hybrid_property` over `user_role`, so it still works in both SQL
 (`select(User.is_admin)`) and Python, but **cannot be assigned**. Set the role
 instead. The physical `users.is_admin` column stays in the database, unmapped and
-defaulted. Dropping it is deferred to a separate later migration (`0038`+ — `0031`
-through `0037` are all taken now), which **has not been written, let alone applied** —
-see the design doc's §8.
+defaulted. Dropping it is deferred to a separate later migration (`0039`+ — `0031`
+through `0038` are all taken now: `0038` went to
+`specialist_consults`'s `read_state`/`established`/rubric stamp instead, see the
+box below), which **has not been written, let alone applied** — see the design
+doc's §8.
 
 > **Deploy order for `0028_add_user_role` — migrate BEFORE the new code serves.**
 > `0028` is additive and gives `is_admin` a server default, so *old code against the
@@ -765,6 +767,41 @@ stay comparable.
 >    known-truncated consults on run 8b64a0e0 keep crediting the specialist floor
 >    exactly as they do today. The alternative retroactively invalidates history
 >    on no evidence.
+
+> **Deploy order for `0038_specialist_consult_read_state_and_stamp` — migrate
+> BEFORE the new code serves.** `0038` is four additive nullable columns on
+> `specialist_consults` (`read_state`, `established`, `rubric_version`,
+> `rubric_content_hash`), so *old code against the new schema* is safe. The
+> reverse is not: the new code **maps all four**, so against a pre-`0038`
+> database `select(SpecialistConsult)` at `src/services/assessment_detail.py`
+> — read by both assessment detail pages, admin's and manager's — raises
+> `UndefinedColumn`, and on the engine side `_record_specialist_consult`'s
+> INSERT (`src/agent/simulation.py:4366`) names all four, so every
+> `specialist_consults` write fails too. (The discussions panel cards at
+> `src/services/thread_panel.py` select an explicit column list that names
+> none of the four, so that page is unaffected either way — the migration's
+> own docstring originally overclaimed this and has been corrected.) Build,
+> migrate from a one-off container, then start — same ordering as
+> `0028`/`0030`/`0036`/`0037`:
+>
+>     DC="docker compose -f docker-compose.prod.yml"
+>     $DC build blackbird-app worker
+>     $DC run --rm blackbird-app alembic upgrade head
+>     $DC run --rm blackbird-app alembic current      # must equal `alembic heads`
+>     $DC up -d blackbird-app worker
+>
+> The agent image bakes `src/` in too and must be rebuilt separately
+> (`$DC --profile agent build agent`). Production is stamped `0037`, so this
+> box applies to the next deploy, not to some hypothetical one.
+>
+> **`established` is knowingly unwritten.** The column exists from this
+> migration on, but nothing populates it yet — that is Phase B of
+> `docs/specs/2026-08-28-specialist-verdict-vocabulary-design.md` (§3.2, §8
+> step 5/6), not this deploy. A NULL there means "never asked", not "the
+> specialist established nothing" — do not read it as the latter on any row,
+> including rows written well after this migration. `read_state`, by contrast,
+> IS written on every new consult from this deploy forward
+> (`read_state_for`, `src/agent/specialists.py`).
 
 **One interview yields exactly one assessment, and the row you end up with comes
 from the LAST verdict-bearing reply.** **A sidecar is now trusted on its own**

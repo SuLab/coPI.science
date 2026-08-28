@@ -25,13 +25,18 @@ table there is no way to tell which rubric — or, after the stage-bar change,
 which bars — a stored consult was judged against. NULL on every pre-0038 row.
 
 Deploy order: additive and nullable, so OLD code against the NEW schema is safe.
-The reverse is not — the new code maps all four, so every
-``select(SpecialistConsult)`` (the discussions panel cards at
-src/services/thread_panel.py, both assessment detail pages at
-src/services/assessment_detail.py, the admin router) and the engine's
-``_record_specialist_consult`` INSERT raise ``UndefinedColumn`` against a
-pre-0038 database. Build, migrate from a one-off container, then start — the
-same ordering as 0028/0030/0036/0037 (see CLAUDE.md).
+The reverse is not — the new code maps all four, so ``select(SpecialistConsult)``
+at src/services/assessment_detail.py (read by both assessment detail pages,
+admin's and manager's) and the engine's ``_record_specialist_consult`` INSERT
+(src/agent/simulation.py) raise/fail against a pre-0038 database. Build,
+migrate from a one-off container, then start — the same ordering as
+0028/0030/0036/0037 (see CLAUDE.md).
+
+NOT affected: the discussions panel cards at src/services/thread_panel.py
+select an explicit column list rather than the whole mapped class, and that
+list does not name any of these four columns, so that page keeps working
+against either schema. (An earlier draft of this docstring claimed it would
+raise too; verified against the actual query and corrected.)
 """
 from typing import Sequence, Union
 
