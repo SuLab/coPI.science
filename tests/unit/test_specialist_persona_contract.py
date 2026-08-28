@@ -23,7 +23,7 @@ def test_the_verdict_field_comes_first(domain):
     measured the reorder doing real harm:
 
         verdict LAST   pooled R 0.281-0.312, top label 0-10 of 48
-        verdict FIRST  pooled R 0.594,       top label 20 of 48
+        verdict FIRST  pooled R 0.531-0.594,  top label 20 of 48 (2 runs)
         (baseline before any change: 0.625, 7 of 48)
 
     With the verdict first, all eight domains can reach the top label; with it

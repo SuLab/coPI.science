@@ -178,7 +178,7 @@ unpublished. This is MODERATE evidence, and the ladder must validate it.
 > |---|---|---|
 > | verdict FIRST (baseline, before any change) | 0.625 | 7 of 48, 4 domains |
 > | verdict LAST | 0.281 – 0.469 | 0 – 10 of 48, 0 – 5 domains |
-> | **verdict FIRST (restored, keeping every other change)** | **0.594** | **20 of 48, all 8 domains** |
+> | **verdict FIRST (restored, keeping every other change)** | **0.531 - 0.594** (2 runs, pooled 0.5625) | **20 of 48, all 8 domains** (both runs) |
 >
 > With the verdict last, two consecutive runs could not reach the top label **at all**,
 > and pooled construct sensitivity fell to less than half of baseline. Moving the key
