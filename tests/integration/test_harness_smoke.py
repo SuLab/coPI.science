@@ -29,7 +29,10 @@ async def test_container_is_migrated(engine):
         #      plus two data repairs (milestones, JSON null -> SQL NULL)
         # 0037 opportunity_assessments.recommended_next_experiment (sidecar
         #      item 10 of rubric v2.1.0, additive nullable Text)
-        assert v == "0037"
+        # 0038 specialist_consults.read_state/.established/.rubric_version/
+        #      .rubric_content_hash (read-state split from verdict_signal, the
+        #      positive-evidence field, and the first rubric stamp on consults)
+        assert v == "0038"
 
 
 async def test_writes_are_rolled_back_part1(db_session):

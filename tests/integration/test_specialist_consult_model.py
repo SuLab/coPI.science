@@ -155,3 +155,74 @@ async def test_assessment_rubric_stamp_is_nullable_for_preexisting_rows(db_sessi
     ).scalar_one()
     assert row.rubric_version is None
     assert row.rubric_content_hash is None
+
+
+# --- 0038: read_state, established, and the first rubric stamp on consults --
+#
+# `read_state` NULL means "written before 0038", which is a third state and
+# not "unread" — the same reasoning `truncated`'s comment records for 0036.
+
+
+@pytest.mark.asyncio
+async def test_the_four_new_columns_round_trip(db_session):
+    run = SimulationRun()
+    db_session.add(run)
+    await db_session.flush()
+
+    row = SpecialistConsult(
+        simulation_run_id=run.id, agent_id="blackbird", domain="legal",
+        question="q", verdict_signal="caution", confidence="low",
+        raw_opinion="{}", truncated=False,
+        read_state="defaulted",
+        established=["the assignment chain is clean"],
+        rubric_version="3.2.0", rubric_content_hash="42aec0479ac6",
+    )
+    db_session.add(row)
+    await db_session.commit()
+
+    got = (await db_session.execute(select(SpecialistConsult))).scalars().one()
+    assert got.read_state == "defaulted"
+    assert got.established == ["the assignment chain is clean"]
+    assert got.rubric_version == "3.2.0"
+    assert got.rubric_content_hash == "42aec0479ac6"
+
+
+@pytest.mark.asyncio
+async def test_all_four_are_nullable_so_old_rows_still_load(db_session):
+    run = SimulationRun()
+    db_session.add(run)
+    await db_session.flush()
+
+    row = SpecialistConsult(
+        simulation_run_id=run.id, agent_id="blackbird", domain="legal",
+        question="q", verdict_signal="caution", confidence="low",
+        raw_opinion="{}", truncated=False,
+    )
+    db_session.add(row)
+    await db_session.commit()
+    got = (await db_session.execute(select(SpecialistConsult))).scalars().one()
+    assert got.read_state is None
+    assert got.established is None
+
+
+@pytest.mark.asyncio
+async def test_established_none_lands_as_sql_null_not_the_json_null_scalar(
+    db_session,
+):
+    """Same reasoning as `concerns`: two physical encodings of "absent" is a
+    bug `WHERE established IS NULL` cannot see. See migration 0031."""
+    run = SimulationRun()
+    db_session.add(run)
+    await db_session.flush()
+
+    row = SpecialistConsult(
+        simulation_run_id=run.id, agent_id="blackbird", domain="legal",
+        question="q", verdict_signal="caution", confidence="low",
+        raw_opinion="{}", truncated=False, established=None,
+    )
+    db_session.add(row)
+    await db_session.commit()
+    found = (await db_session.execute(
+        select(SpecialistConsult).where(SpecialistConsult.established.is_(None))
+    )).scalars().all()
+    assert len(found) == 1

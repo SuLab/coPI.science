@@ -94,6 +94,26 @@ class SpecialistConsult(Base):
     # consulted", above) is only true once a truncated row can say so.
     truncated: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
 
+    # Which of specialists.READ_STATES this consult's reply was in: parsed,
+    # defaulted, or truncated. NULL means "written before 0038" — a third
+    # state, not "parsed". Derived in code by `read_state_for`, never asked of
+    # the model: it is a fact about the reply, not a judgement about the idea.
+    read_state: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    # The specialist contract's positive-evidence field: what the record DOES
+    # establish in this domain. `none_as_null=True` for the same reason
+    # `concerns` above has it — see migration 0031. Written starting with a
+    # later task (0038 only adds the column); NULL on every row until then.
+    established: Mapped[list | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
+    # Which rubric — and therefore which stage bars — this consult was judged
+    # against. Assessments have carried this since 0030; consults never have,
+    # which is why no pre-2026-08-28 consult can be compared with a later one.
+    rubric_version: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    rubric_content_hash: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

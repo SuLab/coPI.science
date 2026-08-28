@@ -4318,14 +4318,14 @@ class SimulationEngine:
         questions_to_ask: list | None,
         raw_opinion: str,
         truncated: bool | None = None,
-        # Accepted and unused: no column exists yet to put it in. Migration
-        # 0038 (a later task) adds one and this parameter starts being stored
-        # then. Declared now so `tools.py` can start sending it without this
-        # writer raising `TypeError: unexpected keyword argument` — the other
-        # fan-out target of the same `record_consult` closure, `_post_panel_note`,
-        # tolerates unknown kwargs via `**_withheld`; this function has no such
-        # catch-all, so the parameter has to be named explicitly here too.
+        # `read_state` is stored as of 0038. Defaults to None so a caller
+        # written before this parameter existed keeps recording "not stated"
+        # rather than asserting a read that was never checked.
         read_state: str | None = None,
+        # The specialist contract's positive-evidence field. No call site
+        # produces it yet — that starts with a later task — so this is always
+        # None today and the column stays NULL until then.
+        established: list | None = None,
     ) -> None:
         """Write one successful consult to ``specialist_consults``.
 
@@ -4378,6 +4378,10 @@ class SimulationEngine:
                     questions_to_ask=questions_to_ask,
                     raw_opinion=raw_opinion,
                     truncated=truncated,
+                    read_state=read_state,
+                    established=list(established) if established else None,
+                    rubric_version=RUBRIC_VERSION,
+                    rubric_content_hash=RUBRIC_CONTENT_HASH,
                 ))
                 await db.commit()
         except Exception as exc:  # noqa: BLE001 — a record must not cost the opinion
