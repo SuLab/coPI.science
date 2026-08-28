@@ -1,0 +1,28 @@
+issuing 48 consults (concurrency 4)...
+
+tier      framing       blocking     caution       clear
+WEAK      PROD                 6           2           0
+WEAK      NEUTRAL              8           0           0
+MEDIUM    PROD                 2           6           0
+MEDIUM    NEUTRAL              3           5           0
+STRONG    PROD                 0           5           3
+STRONG    NEUTRAL              0           4           4
+  R WEAK->MEDIUM [PROD]: 4/8 = 0.500
+  R WEAK->MEDIUM [NEUTRAL]: 5/8 = 0.625
+  R MEDIUM->STRONG [PROD]: 5/8 = 0.625
+  R MEDIUM->STRONG [NEUTRAL]: 6/8 = 0.750
+  S WEAK: 6/8 = 0.750
+  S MEDIUM: 7/8 = 0.875
+  S STRONG: 7/8 = 0.875
+
+per-domain signal by (tier, framing):
+  scientific   blocking    blocking    caution     caution     clear       clear       
+  chemistry    blocking    blocking    blocking    blocking    caution     caution     
+  clinical     caution     blocking    caution     blocking    caution     caution     
+  commercial   blocking    blocking    caution     caution     caution     caution     
+  legal        caution     blocking    caution     caution     caution     caution     
+  technologic  blocking    blocking    blocking    blocking    caution     clear       
+  talent       blocking    blocking    caution     caution     clear       clear       
+  budget       blocking    blocking    caution     caution     clear       clear       
+
+full results -> docs/audits/2026-08-27-consult-persona-calibration/ladder-baseline-preB.json
