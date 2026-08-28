@@ -933,8 +933,11 @@ and since v3.0.0 / 2026-08-27 the second key is `credible_science`, not
 - **Interview guidance is per-role Python**, not a prompt: `src/agent/thread_guidance.py`.
   The `pi_lab` strings there are pinned by
   `tests/characterization/__snapshots__/test_agent_turn_gm.ambr` — do not reword them,
-  and never run `pytest --snapshot-update` to make a mismatch go away. (One reviewed
-  regeneration has occurred: 2026-08-27, funnel→instrument rewording across the pi_lab
+  and never run `pytest --snapshot-update` to make a mismatch go away. (THREE reviewed
+  regenerations have occurred, each operator-directed with the diff audited: 2026-08-28
+  the PI-bot redline integration (181 hunks, +1144/-614, every changed line machine-traced
+  to the four edited files); 2026-08-28 the pi-doc funnel-replacement combine (7 hunks);
+  and 2026-08-27, funnel→instrument rewording across the pi_lab
   prompts and `_PI_LAB[EXPLORE]` for rubric v3.x, executed at the operator's direction
   with the `.ambr` diff audited hunk-by-hunk — every changed line belonged to that one
   rewrite. Any future pi_lab change takes the same reviewed-diff path.)

@@ -66,7 +66,6 @@ So:
   Unpublished and early is fine and often *better* — novelty is what the hub screens for,
   and unexploited work is usually where it sits. Inflated is worse than nothing; the hub
   runs prior-art searches and consults domain specialists.
-- **Say whether it is a platform or a single asset**, if you can tell.
 - **Say what would have to happen next** for it to reach the next stage: name the single
   experiment or project that would decide it, what it reads out, and what result would say
   stop.
