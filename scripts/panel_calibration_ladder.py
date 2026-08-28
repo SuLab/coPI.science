@@ -30,6 +30,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.agent.specialists import (  # noqa: E402
     SPECIALIST_DOMAINS,
+    VERDICT_SIGNALS,
     construct_sensitivity,
     invariance,
 )
@@ -289,9 +290,40 @@ async def _one(tier: str, framing: str, domain: str, sem: asyncio.Semaphore) -> 
             "signal": m.group(1).lower() if m else "UNPARSED", "raw": out}
 
 
+def _is_real_signal(signal: str) -> bool:
+    """Whether ``signal`` is an actual verdict signal rather than an
+    ``ERROR:``/``UNPARSED`` sentinel stored by ``_one``.
+
+    R (``construct_sensitivity``) and S (``invariance``) both work by comparing
+    signal STRINGS for equality across a pair of observations. A sentinel is
+    never equal to a real signal (and, for ``ERROR:{exc}``, never equal to
+    another sentinel either, since the exception type varies), so feeding one
+    into either metric is not a neutral no-op: against any real signal it
+    always reads as "moved" (inflating R) and never as "held" (deflating S). A
+    run that happened to drop a handful of calls to a flaky API would then
+    look MORE sensitive and LESS invariant than a clean run of the very same
+    panel — backwards, and dangerous given a later gate in this plan compares
+    a measured R against a floor. So callers must exclude sentinels from the
+    R/S observation sets, while still surfacing them in the per-cell table and
+    the raw results JSON — an operator needs to see that calls failed.
+
+    Deliberately checks membership in ``VERDICT_SIGNALS`` rather than a
+    hardcoded ``{"blocking", "caution", "clear"}`` literal: the verdict
+    vocabulary is scheduled to change later in this plan, and a hardcoded list
+    here would silently stop recognising the new words as real signals the
+    day the rename ships, quietly corrupting every ladder run after it.
+    """
+    return signal in VERDICT_SIGNALS
+
+
 def report(results: list[dict]) -> None:
     """Per-cell counts, then R and S. Both metrics always, never one: a
-    constant judge scores perfectly on invariance alone."""
+    constant judge scores perfectly on invariance alone.
+
+    ERROR/UNPARSED cells are kept in the per-cell table below (that visibility
+    is the point — an operator needs to see that calls failed) but excluded
+    from the R/S observation sets built further down, via ``_is_real_signal``.
+    """
     labels = sorted({r["signal"] for r in results})
     print(f"\n{'tier':<10}{'framing':<10}" + "".join(f"{s:>12}" for s in labels))
     for tier in CONTEXTS:
@@ -302,12 +334,21 @@ def report(results: list[dict]) -> None:
             )
             print(f"{tier:<10}{framing:<10}{counts}")
 
+    real = [r for r in results if _is_real_signal(r["signal"])]
+    excluded = len(results) - len(real)
+    if excluded:
+        print(
+            f"\n{excluded} of {len(results)} cells excluded from the R/S computation "
+            "below (ERROR/UNPARSED sentinels are not real verdict signals — see "
+            "_is_real_signal)."
+        )
+
     tiers = list(CONTEXTS)
     for a, b in zip(tiers, tiers[1:]):
         for framing in FRAMINGS:
             obs = {
                 (r["tier"], r["domain"]): r["signal"]
-                for r in results
+                for r in real
                 if r["tier"] in (a, b) and r["framing"] == framing
             }
             moved, total = construct_sensitivity(obs)
@@ -316,7 +357,7 @@ def report(results: list[dict]) -> None:
     for tier in CONTEXTS:
         obs = {
             (r["framing"], r["domain"]): r["signal"]
-            for r in results if r["tier"] == tier
+            for r in real if r["tier"] == tier
         }
         held, total = invariance(obs)
         rate = f"{held / total:.3f}" if total else "n/a"
