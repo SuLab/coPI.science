@@ -460,28 +460,41 @@ def test_a_conditional_band_with_a_pass_recommendation_still_owes_a_panel():
     )
 
 
-# --- clear-rate monitor (Task 9) --------------------------------------------
+# --- signal-mix report & domain-flatness warning (Task 5, 2026-08-28) ------
 #
-# The monitor is the ONLY thing that surfaces "142/142 consults returned
-# caution/blocking, never once clear" without a human running an audit — so an
-# untested monitor is exactly the failure class this whole plan exists to fix.
-# These pin the tally, the threshold, and the "at least one clear" escape
-# hatch directly, rather than relying on the branch merely executing (as the
+# The clear-rate monitor (Task 9) is RETIRED. It asserted that a low `clear`
+# share meant the panel could not discriminate; a 48-consult positive control
+# falsified that (blocking 87.5% -> 0% across a quality ladder, p = 5.1e-07),
+# and its floor sat ABOVE the rate a correct panel produces on this
+# population. `signal_mix_report` replaces it with an unconditional INFO
+# report of the run's mix at n>=50 (same sample floor, renamed reasoning) —
+# there is no replacement threshold, because the optimal operating point for a
+# screening instrument is a likelihood ratio, not a fixed floor on the output
+# rate. `domain_flatness_warning` is the only piece that still stays quiet for
+# a healthy (varied) domain, and it is worded as a prompt to measure, never a
+# verdict — see docs/audits/2026-08-27-consult-persona-calibration/.
+#
+# These pin the tally, the sample floor, and the unconditional-vs-quiet split
+# directly, rather than relying on the branch merely executing (as the
 # pre-existing `total == 0` coverage in test_simulation_logic.py's
 # TestGracefulShutdown did).
 
-# A substring of the message `specialists.clear_rate_warning` builds. It used to
-# be "NOT ONE returned", from when the alarm was a ZERO test. That mattered more
-# than a wording change: once the alarm became a rate test, an assertion looking
-# for the old string passed *vacuously* on the "does not warn" cases — the new
-# warning fired and the test could not see it. Anchor on the invariant part of
-# the sentence, not on the tally.
-_CLEAR_RATE_WARNING = "cannot discriminate"
+# Substrings of the messages `specialists.signal_mix_report` and
+# `specialists.domain_flatness_warning` build, kept distinct so a mix-report
+# assertion cannot be satisfied by a flatness line or vice versa. The retired
+# alarm's own marker went through exactly this failure once already — it used
+# to be "NOT ONE returned", from when the alarm was a ZERO test, and once it
+# became a rate test an assertion looking for that old string passed
+# *vacuously* on the "does not warn" cases, because the new warning fired and
+# the test could not see it. Anchor on the invariant part of each message, not
+# on the tally.
+_MIX_REPORT_MARKER = "signal mix over"
+_FLATNESS_WARNING_MARKER = "one-sided domain"
 
 
 def test_note_consult_records_the_domain_and_tallies_the_signal():
-    """`_note_consult` is a thin wrapper: it must do BOTH things `_record_consult`
-    and the tally each do alone, not just one of them."""
+    """`_note_consult` is a thin wrapper: it must do all three things
+    `_record_consult` and the two tallies each do alone, not just one of them."""
     eng = _engine(_hub())
     eng._note_consult("wang", "legal", "caution", thread_id="t1")
 
@@ -490,55 +503,74 @@ def test_note_consult_records_the_domain_and_tallies_the_signal():
         "_record_consult"
     )
     assert eng._consult_signal_counts == {"caution": 1}
+    assert eng._consult_signal_counts_by_domain == {"legal": {"caution": 1}}
 
     # A second call, same signal, different domain: the floor gains a domain,
-    # the tally accumulates rather than overwrites.
+    # both tallies accumulate rather than overwrite.
     eng._note_consult("wang", "scientific", "caution", thread_id="t1")
     assert eng._consulted_domains("wang", "t1") == frozenset({"legal", "scientific"})
     assert eng._consult_signal_counts == {"caution": 2}
+    assert eng._consult_signal_counts_by_domain == {
+        "legal": {"caution": 1},
+        "scientific": {"caution": 1},
+    }
 
 
 @pytest.mark.asyncio
-async def test_stop_warns_when_fifty_or_more_consults_never_clear(caplog):
+async def test_stop_reports_the_signal_mix_at_fifty_or_more_consults(caplog):
+    """Premise of the retired alarm dies here: "never clears" is no longer a
+    warning at all. `stop()` now REPORTS the mix, at INFO, once the sample
+    floor is met — unconditionally, on whatever the mix turns out to be. This
+    exact tally (no `clear` at all) used to be the alarm's own trigger case;
+    it is now simply reported like any other."""
     eng = _engine(_hub())
     eng._consult_signal_counts = {"caution": 30, "blocking": 20}  # 50 total, no clear
 
-    with caplog.at_level(logging.WARNING, logger="src.agent.simulation"):
+    with caplog.at_level(logging.INFO, logger="src.agent.simulation"):
         await eng.stop()
 
-    assert _CLEAR_RATE_WARNING in caplog.text
+    assert _MIX_REPORT_MARKER in caplog.text
+    assert "50" in caplog.text, "the operator needs the denominator"
 
 
 @pytest.mark.asyncio
-async def test_stop_does_not_warn_when_the_panel_actually_clears_things(caplog):
+async def test_stop_does_not_warn_of_flatness_for_a_domain_with_real_variance(caplog):
+    """This IS the retired concept, relocated rather than deleted:
+    `clear_rate_warning` used to stay silent for a panel with real variance.
+    The mix report now fires regardless (see above), so the only thing that
+    still stays quiet for a healthy panel is the per-domain flatness warning
+    — and it must stay quiet for a domain that is genuinely discriminating
+    (33% blocking here), not just for one that has cleared something."""
     eng = _engine(_hub())
-    # >= 50 total and clearing 10% of them — a panel with real variance, which
-    # is what the monitor exists NOT to shout about.
     eng._consult_signal_counts = {"caution": 25, "blocking": 20, "clear": 5}
+    eng._consult_signal_counts_by_domain = {
+        "chemistry": {"caution": 55, "blocking": 27},
+    }
 
     with caplog.at_level(logging.WARNING, logger="src.agent.simulation"):
         await eng.stop()
 
-    assert _CLEAR_RATE_WARNING not in caplog.text
+    assert _FLATNESS_WARNING_MARKER not in caplog.text
 
 
 @pytest.mark.asyncio
-async def test_a_single_clear_no_longer_silences_the_monitor(caplog):
-    """The regression this alarm was rebuilt for.
-
-    Under the old zero test, ONE `clear` bought silence no matter how many
-    consults surrounded it. Run 8b64a0e0 supplied exactly that: 1 clear in 168
-    consults (0.6%) — and it was the only `clear` in the database across every
-    run ever — so the first run whose panel demonstrably could not discriminate
-    was also the first run the monitor stayed quiet for.
+async def test_the_mix_report_states_the_clear_share_however_small(caplog):
+    """The regression the retired alarm was rebuilt for is moot now: there is
+    no threshold left to silence. Under the old zero test, ONE `clear` bought
+    silence no matter how many consults surrounded it — run 8b64a0e0 supplied
+    exactly that, 1 clear in 168 consults (0.6%), the only `clear` in the
+    database across every run ever. The mix report does not need an escape
+    hatch for that case because it never goes quiet on account of the mix: it
+    STATES the clear share, however small, alongside every other label.
     """
     eng = _engine(_hub())
     eng._consult_signal_counts = {"caution": 29, "blocking": 20, "clear": 1}
 
-    with caplog.at_level(logging.WARNING, logger="src.agent.simulation"):
+    with caplog.at_level(logging.INFO, logger="src.agent.simulation"):
         await eng.stop()
 
-    assert _CLEAR_RATE_WARNING in caplog.text
+    assert _MIX_REPORT_MARKER in caplog.text
+    assert "clear 1" in caplog.text
     assert "2.0%" in caplog.text
 
 
@@ -550,7 +582,7 @@ async def test_stop_does_not_warn_below_the_threshold(caplog):
     with caplog.at_level(logging.WARNING, logger="src.agent.simulation"):
         await eng.stop()
 
-    assert _CLEAR_RATE_WARNING not in caplog.text
+    assert _MIX_REPORT_MARKER not in caplog.text
 
 
 @pytest.mark.asyncio
@@ -559,8 +591,10 @@ async def test_stop_is_safe_with_an_empty_tally(caplog):
     stop() must still complete cleanly and must not warn."""
     eng = _engine(_hub())
     assert eng._consult_signal_counts == {}
+    assert eng._consult_signal_counts_by_domain == {}
 
     with caplog.at_level(logging.WARNING, logger="src.agent.simulation"):
         await eng.stop()
 
-    assert _CLEAR_RATE_WARNING not in caplog.text
+    assert _MIX_REPORT_MARKER not in caplog.text
+    assert _FLATNESS_WARNING_MARKER not in caplog.text

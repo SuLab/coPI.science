@@ -10,20 +10,20 @@ import logging
 from pathlib import Path
 
 from src.agent.specialists import (
-    MIN_CLEAR_RATE,
     PANEL_NOTE_QUESTION_CHARS,
     READ_STATES,
     SPECIALIST_DOMAINS,
     VERDICT_SIGNALS,
-    clear_rate_warning,
     clip_question,
     clip_rate_warning,
+    domain_flatness_warning,
     format_panel_note,
     has_usable_content,
     parse_opinion,
     persona_path,
     read_state_for,
     required_domains_for,
+    signal_mix_report,
 )
 
 
@@ -740,7 +740,7 @@ def test_a_single_unbroken_token_is_still_bounded():
 
 # ---------------------------------------------------------------
 # clip_rate_warning — the panel-note clipping-drift alarm. Mirrors
-# clear_rate_warning's idiom: PANEL_NOTE_QUESTION_CHARS is a point-in-time
+# signal_mix_report's idiom: PANEL_NOTE_QUESTION_CHARS is a point-in-time
 # calibration of a distribution that moves with every rubric or model change,
 # and this is what says out loud when it has decayed again.
 # ---------------------------------------------------------------
@@ -792,75 +792,65 @@ def test_the_clip_rate_alarm_never_divides_by_zero():
 
 
 # ---------------------------------------------------------------
-# clear_rate_warning — the panel-discrimination alarm.
-#
-# It used to be `total >= 50 and not counts.get("clear")`: a ZERO test. Run
-# 8b64a0e0 returned 141 caution / 26 blocking / 1 clear over 168 consults and
-# was the first run ever to silence it — that single `clear` is the only one in
-# the whole database. A zero-test is silenced by one outlier; a rate test is
-# not.
+# The clear-rate FLOOR was retired 2026-08-28. It asserted that a low clear
+# share meant the panel could not discriminate; a 48-consult positive control
+# falsified that (blocking 87.5% -> 0% across a quality ladder, p = 5.1e-07),
+# and the floor sat ABOVE the rate a correct panel produces on this population.
+# There is no replacement threshold: the optimal operating point for a screen is
+# a likelihood ratio, so a fixed floor on the output rate is the wrong shape of
+# constraint. See docs/audits/2026-08-27-consult-persona-calibration/.
 # ---------------------------------------------------------------
 
 
-def test_a_single_clear_does_not_silence_the_discrimination_alarm():
-    """The exact production shape, minus the blocking column: 167 caution and
-    one clear must still warn."""
-    message = clear_rate_warning({"caution": 167, "clear": 1})
-    assert message is not None
-    assert "clear" in message
-    assert "168" in message, "the operator needs the denominator, not just the rate"
+def test_the_report_states_the_mix_and_never_diagnoses_a_cause():
+    msg = signal_mix_report({"caution": 143, "blocking": 16, "clear": 4})
+    assert msg is not None
+    assert "163" in msg, "the operator needs the denominator"
+    assert "clear 4" in msg and "2.5%" in msg
+    assert "cannot discriminate" not in msg, "the retired false assertion"
+    assert "persona calibration" not in msg, "it pointed at the wrong thing"
+    assert "panel_calibration_ladder" in msg, "point at the instrument instead"
 
 
-def test_the_run_that_motivated_the_change_still_warns():
-    assert clear_rate_warning({"caution": 141, "blocking": 26, "clear": 1}) is not None
+def test_the_report_is_quiet_below_its_sample_floor():
+    """Unchanged from the retired alarm: at n<50 a mix report is noise."""
+    assert signal_mix_report({"caution": 49}) is None
+    assert signal_mix_report({"caution": 50}) is not None
 
 
-def test_a_panel_that_never_clears_anything_still_warns():
-    """The original zero case must not regress out of coverage."""
-    assert clear_rate_warning({"caution": 100, "blocking": 60}) is not None
+def test_the_report_never_divides_by_zero():
+    for counts in ({}, None, {"caution": 0}):
+        assert signal_mix_report(counts) is None
 
 
-def test_a_discriminating_panel_is_silent():
-    """A panel clearing comfortably above the floor is the whole point; it must
-    not produce a warning nobody can act on."""
-    clears = 40
-    assert clear_rate_warning({"caution": 100, "blocking": 20, "clear": clears}) is None
-    assert clears / 160 > MIN_CLEAR_RATE
+def test_a_domain_stuck_on_one_label_is_named():
+    per_domain = {
+        "technologic": {"caution": 141, "blocking": 3},
+        "chemistry": {"caution": 55, "blocking": 27},
+    }
+    warnings = domain_flatness_warning(per_domain)
+    assert len(warnings) == 1
+    assert "technologic" in warnings[0]
+    assert "chemistry" not in warnings[0], "33% blocking is discrimination, not flatness"
 
 
-def test_the_alarm_stays_quiet_below_its_sample_floor():
-    """Fifty is the smallest sample the alarm has ever spoken on, and it is kept
-    deliberately: at n=10 a zero `clear` rate is ordinary luck, and an alarm
-    that cries at the start of every run is an alarm that gets muted."""
-    assert clear_rate_warning({"caution": 49}) is None
-    assert clear_rate_warning({"caution": 50}) is not None
+def test_flatness_is_reported_as_a_prompt_to_measure_not_a_verdict():
+    """`legal` never clears in production and is the domain this warning exists
+    to surface. A modal-share number must never convict a domain on its own —
+    that is the mistake the retired alarm made — so even a domain crossing the
+    flatness threshold gets a prompt to measure, not a verdict of miscalibration.
+    (91 total / 95.6% modal is chosen to actually CROSS the threshold below —
+    `technologic`'s real 97.9% would too, but a same-shape number for `legal`
+    keeps this test from silently passing on an empty warnings list.)"""
+    warnings = domain_flatness_warning({"legal": {"caution": 87, "blocking": 4}})
+    assert warnings, "the input was chosen to cross the flatness threshold"
+    for w in warnings:
+        assert "miscalibrat" not in w.lower()
+        assert "panel_calibration_ladder" in w
 
 
-def test_the_alarm_never_divides_by_zero():
-    for counts in ({}, {"caution": 0}, {"clear": 0}):
-        assert clear_rate_warning(counts) is None
-
-
-def test_the_clear_rate_floor_is_pinned():
-    """Pinned literally so a future loosening is a diff, not a drift. 5% is the
-    first floor this alarm has ever had: run 8b64a0e0's 0.6% (1 of 168) is an
-    order of magnitude under it, while a genuinely selective panel clearing one
-    idea in twenty stays silent."""
-    assert MIN_CLEAR_RATE == 0.05
-
-
-def test_the_alarm_names_its_denominator_as_counted_consults():
-    """The tally excludes TRUNCATED consults — recorded durably, deliberately
-    never counted (tools.py: an unread specialist has cleared nothing) — so
-    `specialist_consults` can hold more rows for a run than the alarm's total.
-    Run ee419dd3 measured the gap: 229 rows, "2 of 228" in the alarm, and the
-    one-row mismatch was written up as an unexplained open question. The
-    message must say "counted consults" so an operator reconciling it against
-    the table knows the difference is by design, not a lost count."""
-    # ee419dd3's exact counted shape: 202 caution + 24 blocking + 2 clear.
-    message = clear_rate_warning({"caution": 202, "blocking": 24, "clear": 2})
-    assert message is not None
-    assert "2 of 228 counted consults" in message
+def test_flatness_is_quiet_on_a_small_per_domain_sample():
+    assert domain_flatness_warning({"legal": {"caution": 19}}) == []
 
 
 def test_nothing_but_the_three_publishable_fields_can_reach_a_note():

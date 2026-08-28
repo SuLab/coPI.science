@@ -222,7 +222,7 @@ def clip_question(question: str, limit: int = PANEL_NOTE_QUESTION_CHARS) -> str:
 #: Smallest number of panel notes the alarm will speak on. Below this, one or
 #: two long questions could be ordinary variance rather than
 #: PANEL_NOTE_QUESTION_CHARS having aged out from under the hub's questions —
-#: mirrors MIN_CONSULTS_FOR_CLEAR_RATE's reasoning, at a smaller floor because
+#: mirrors MIN_CONSULTS_FOR_MIX_REPORT's reasoning, at a smaller floor because
 #: a note is posted on every successful consult, not just a subset of them.
 _CLIP_RATE_MIN_NOTES = 20
 
@@ -239,7 +239,7 @@ def clip_rate_warning(clipped: int, total: int) -> str | None:
     """The warning to log about panel-note clipping drift, or None if there
     is none.
 
-    Mirrors ``clear_rate_warning``'s idiom: returns the MESSAGE rather than
+    Mirrors ``signal_mix_report``'s idiom: returns the MESSAGE rather than
     logging it, so the sample it judges and the logger it speaks through both
     stay the caller's — the engine counts panel notes posted across a run;
     this module does not know a run exists. Never raises and never divides by
@@ -454,50 +454,90 @@ def has_usable_content(raw: str) -> bool:
 # engine owns only the counting (``SimulationEngine._consult_signal_counts``)
 # and the logging.
 
-#: Smallest number of consults the alarm will speak on. At n=10 a zero `clear`
-#: rate is ordinary luck, and an alarm that cries at the start of every run is
-#: an alarm that gets muted. Unchanged from the original zero-test.
-MIN_CONSULTS_FOR_CLEAR_RATE = 50
+#: Smallest number of consults the report will speak on. At n=10 a lopsided
+#: mix is ordinary luck, and a report that speaks at the start of every run is
+#: a report that gets muted. Unchanged from the original zero-test's floor
+#: (renamed 2026-08-28 from `MIN_CONSULTS_FOR_CLEAR_RATE` when the clear-rate
+#: floor it gated was retired — see `signal_mix_report`).
+MIN_CONSULTS_FOR_MIX_REPORT = 50
 
-#: The `clear` share below which the panel is not discriminating. 5% is the
-#: first floor this alarm has ever had; it replaced a ZERO test
-#: (``total >= 50 and not counts.get("clear")``), which run 8b64a0e0 silenced
-#: with a single `clear` in 168 consults — 0.6%, and the only `clear` in the
-#: whole database across every run. A zero-test is silenced by one outlier; a
-#: rate test is not. Set an order of magnitude above the observed 0.6% and well
-#: below a genuinely selective panel clearing one idea in twenty.
-MIN_CLEAR_RATE = 0.05
+#: Smallest per-domain sample the flatness note will speak on.
+_MIN_CONSULTS_FOR_FLATNESS = 20
+
+#: Modal share above which a domain is worth MEASURING. Not a verdict: a domain
+#: can be legitimately one-sided (`budget` has never blocked in 67 consults and
+#: is not broken), and `technologic` sat at 97.9% modal share while being fully
+#: quality-sensitive on the ladder.
+_FLATNESS_MODAL_SHARE = 0.95
 
 
-def clear_rate_warning(counts: dict[str, int] | None) -> str | None:
-    """The warning to log about panel discrimination, or None if there is none.
+def signal_mix_report(counts: dict[str, int] | None) -> str | None:
+    """The run's signal mix, or None below the sample floor.
+
+    Reports, and deliberately does not diagnose. Its predecessor
+    (``clear_rate_warning``, retired 2026-08-28) asserted that a low `clear`
+    share meant the panel could not discriminate and told the operator to
+    check persona calibration. A 48-consult positive control falsified both
+    halves: the panel moved from 87.5% `blocking` on a weak record to 0% on a
+    strong one (Fisher exact p = 5.1e-07), and the clear rate turned out to
+    measure the POPULATION, not the instrument — `chemistry` is the most
+    informative domain in the panel (0.914 bits) and has never cleared once.
 
     Returns the MESSAGE rather than logging it, so the sample it judges and the
     logger it speaks through both stay the caller's (the engine counts consults
     across a run; this module does not know a run exists). Never raises and
     never divides by zero — it runs in ``SimulationEngine.stop``, after the
     durable flushes, where an exception would be the last thing a shutdown does.
+
+    "counted", because the tally excludes TRUNCATED consults: recorded durably,
+    deliberately never counted (tools.py — an unread specialist has cleared
+    nothing).
     """
     if not counts:
         return None
     total = sum(v for v in counts.values() if isinstance(v, int))
-    if total < MIN_CONSULTS_FOR_CLEAR_RATE:
+    if total < MIN_CONSULTS_FOR_MIX_REPORT:
         return None
-    clears = counts.get("clear") or 0
-    rate = clears / total
-    if rate >= MIN_CLEAR_RATE:
-        return None
-    return (
-        # "counted", because the tally is smaller than the run's
-        # `specialist_consults` row count whenever a consult TRUNCATED: those
-        # are recorded durably but deliberately never tallied (tools.py — an
-        # unread specialist has cleared nothing). Run ee419dd3's 228-vs-229
-        # went to an audit as an unexplained discrepancy because the message
-        # did not say which basis it was counting on.
-        f"[specialists] {clears} of {total} counted consults this run returned "
-        f"'clear' ({rate:.1%}, floor {MIN_CLEAR_RATE:.0%}). A panel that clears "
-        f"almost nothing cannot discriminate — check persona calibration."
+    parts = ", ".join(
+        f"{label} {counts.get(label, 0)} ({counts.get(label, 0) / total:.1%})"
+        for label in sorted(counts)
     )
+    return (
+        f"[specialists] signal mix over {total} counted consults this run: "
+        f"{parts}. A low share of the top label is EXPECTED for an early-stage "
+        f"population and is not evidence of miscalibration. Discrimination is "
+        f"measured by scripts/panel_calibration_ladder.py, not by this ratio — "
+        f"see docs/audits/2026-08-27-consult-persona-calibration/."
+    )
+
+
+def domain_flatness_warning(
+    per_domain: dict[str, dict[str, int]] | None,
+) -> list[str]:
+    """One line per domain that returned essentially one label all run.
+
+    A PROMPT TO MEASURE, never a verdict — worded so it cannot be read as the
+    retired clear-rate alarm was. `legal` is the domain this exists to
+    surface: 0 of 91 `clear` all-time and unmoved across every tier of the
+    ladder.
+    """
+    out: list[str] = []
+    for domain in sorted(per_domain or {}):
+        counts = per_domain[domain]
+        total = sum(v for v in counts.values() if isinstance(v, int))
+        if total < _MIN_CONSULTS_FOR_FLATNESS:
+            continue
+        modal = max(counts.values())
+        if modal / total < _FLATNESS_MODAL_SHARE:
+            continue
+        label = max(counts, key=lambda k: counts[k])
+        out.append(
+            f"[specialists] {domain} returned {label!r} on {modal} of {total} "
+            f"consults ({modal / total:.1%}). A one-sided domain may be correct "
+            f"— run scripts/panel_calibration_ladder.py and check whether it "
+            f"moves across quality tiers before changing anything."
+        )
+    return out
 
 
 def _paired(observations: dict[tuple[str, str], str]) -> list[tuple[str, str]]:

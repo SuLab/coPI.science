@@ -29,12 +29,13 @@ from src.agent.prompt_safety import delimit
 from src.agent.roles import load_role
 from src.agent.slack_client import SlackListingIncomplete, ThreadNotFound
 from src.agent.specialists import (
-    clear_rate_warning,
     clip_question,
     clip_rate_warning,
+    domain_flatness_warning,
     format_panel_note,
     panel_is_owed,
     required_domains_for,
+    signal_mix_report,
 )
 from src.agent.state import ProposalRef, ThreadState
 from src.agent.thread_guidance import CONCLUDE, phase4_guidance
@@ -409,6 +410,10 @@ class SimulationEngine:
         # cleared anything; a signal with no variance carries no information,
         # and it took an audit to notice. Tallied so the run says so itself.
         self._consult_signal_counts: dict[str, int] = {}
+
+        # signal counts per DOMAIN, for domain_flatness_warning. The run-level
+        # tally above cannot see a single stuck domain.
+        self._consult_signal_counts_by_domain: dict[str, dict[str, int]] = {}
 
         self._start_time: datetime | None = None
         self._running = False
@@ -1189,21 +1194,31 @@ class SimulationEngine:
         await self._flush_llm_logs(final=True)
         await self._flush_pending_assessments(final=True)
 
-        # A RATE test, not a zero test. The old `not counts.get("clear")` form
-        # was silenced by a single outlier, and run 8b64a0e0 was the first run to
-        # silence it: 141 caution / 26 blocking / 1 clear out of 168, and that
-        # one `clear` is the only one in the database's entire history. The alarm
-        # existed precisely for that distribution and could not fire.
+        # The clear-rate FLOOR was retired 2026-08-28. It asserted that a low
+        # `clear` share meant the panel could not discriminate; a 48-consult
+        # positive control falsified that (blocking 87.5% -> 0% across a
+        # quality ladder, p = 5.1e-07), and the floor sat ABOVE the rate a
+        # correct panel produces on this population. There is no replacement
+        # threshold on the run-level mix: the optimal operating point for a
+        # screen is a likelihood ratio, which depends on the population's base
+        # rate, so a fixed floor on the output rate is the wrong shape of
+        # constraint. `signal_mix_report` REPORTS the mix (INFO — it is not a
+        # problem) rather than diagnosing one; `domain_flatness_warning` is the
+        # one thing that still stays quiet for a healthy panel, and is worded
+        # as a prompt to measure, never a verdict. See
+        # docs/audits/2026-08-27-consult-persona-calibration/.
         #
-        # `specialist_consults` can hold MORE rows for the run than this tally:
-        # a TRUNCATED consult is recorded durably but never tallied (tools.py —
-        # an unread specialist has cleared nothing, and the floor refuses the
-        # row too). So an alarm-vs-table mismatch like ee419dd3's 228-vs-229 is
-        # by design, not a lost count — the message says "counted consults" for
-        # exactly this reason.
-        alarm = clear_rate_warning(self._consult_signal_counts)
-        if alarm:
-            logger.warning("%s", alarm)
+        # `specialist_consults` can hold MORE rows for the run than either
+        # tally: a TRUNCATED consult is recorded durably but never tallied
+        # (tools.py — an unread specialist has cleared nothing, and the floor
+        # refuses the row too). So a report-vs-table mismatch like ee419dd3's
+        # 228-vs-229 is by design, not a lost count — the mix message says
+        # "counted consults" for exactly this reason.
+        mix = signal_mix_report(self._consult_signal_counts)
+        if mix:
+            logger.info(mix)
+        for line in domain_flatness_warning(self._consult_signal_counts_by_domain):
+            logger.warning(line)
 
         logger.info("Simulation stopping...")
 
@@ -4763,12 +4778,15 @@ class SimulationEngine:
 
         Two concerns, deliberately kept apart: `_record_consult` answers "does
         the floor consider this domain covered", which is per-interview; the
-        tally answers "is this panel discriminating at all", which is per-run.
+        tallies answer "what is this panel's signal mix" (run-level) and "is
+        any one domain stuck on one label" (per-domain).
         """
         self._record_consult(pi_agent_id, domain, thread_id)
         self._consult_signal_counts[signal] = (
             self._consult_signal_counts.get(signal, 0) + 1
         )
+        by_domain = self._consult_signal_counts_by_domain.setdefault(domain, {})
+        by_domain[signal] = by_domain.get(signal, 0) + 1
 
     def _consulted_domains(
         self, pi_agent_id: str, thread_id: str | None = None,
