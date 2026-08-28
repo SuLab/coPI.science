@@ -462,6 +462,44 @@ def clear_rate_warning(counts: dict[str, int] | None) -> str | None:
     )
 
 
+def _paired(observations: dict[tuple[str, str], str]) -> list[tuple[str, str]]:
+    """Every domain observed under exactly two conditions, as (a, b) signal
+    pairs. A domain seen under one condition only is DROPPED rather than
+    counted: it cannot be compared, and counting it as agreement would inflate
+    invariance and deflate sensitivity — the two errors that would make a
+    compressed panel look discriminating."""
+    by_domain: dict[str, dict[str, str]] = {}
+    for (condition, domain), signal in observations.items():
+        by_domain.setdefault(domain, {})[condition] = signal
+    pairs: list[tuple[str, str]] = []
+    for conditions in by_domain.values():
+        if len(conditions) != 2:
+            continue
+        a, b = (conditions[k] for k in sorted(conditions))
+        pairs.append((a, b))
+    return pairs
+
+
+def construct_sensitivity(
+    observations: dict[tuple[str, str], str],
+) -> tuple[int, int]:
+    """``(moved, comparable)`` — how often the verdict CHANGED when the input's
+    real quality changed. Higher is better. Published LLM judges average 0.319
+    (arXiv:2608.24419); this panel measured 0.594 at one quality rung on
+    2026-08-28."""
+    pairs = _paired(observations)
+    return sum(1 for a, b in pairs if a != b), len(pairs)
+
+
+def invariance(observations: dict[tuple[str, str], str]) -> tuple[int, int]:
+    """``(held, comparable)`` — how often the verdict was UNCHANGED under an
+    edit that did not change the construct. Higher is better, but it trades
+    against sensitivity: a constant judge scores 1.0 here and 0.0 there, which
+    is why both are always reported."""
+    pairs = _paired(observations)
+    return sum(1 for a, b in pairs if a == b), len(pairs)
+
+
 # Cues that make a domain required. Matched via `_cue_matches` below, not raw
 # substring containment — see `_WORD_ONLY_CUES` and `_cue_pattern` for how a
 # cue like "compound" is kept from firing on "compounding".
