@@ -37,10 +37,10 @@ Reply with JSON and nothing else:
 
 ```
 {
+  "verdict_signal": "blocking | gap | adequate",
   "established": ["what the record DOES support in your domain"],
   "concerns": ["one specific concern per entry"],
   "questions_to_ask": ["a question the hub should put to the PI, in the PI's language"],
-  "verdict_signal": "blocking | gap | adequate",
   "confidence": "high | moderate | low"
 }
 ```

@@ -1,6 +1,12 @@
 # Specialist verdict vocabulary: stage bars, read-state, and the retirement of the clear-rate floor
 
-**Status:** design approved in conversation 2026-08-28. **Phase A is implemented**
+**Status:** design approved in conversation 2026-08-28. **Phase A and Phase B are both
+implemented**, and §3.2's field-ordering decision was subsequently **REVERSED by the
+ladder measurement it required** — see the box in §3.2. Phase B landed in `46d9a99`
+(stage bars, the vocabulary rename, and a nine-item audit fix wave) with the ordering
+revert on top. Original Phase A note follows.
+
+**Phase A is implemented**
 (§8 steps 1-5, plus the migration), in commits `fd12e5e..6970488` on the
 `blackbird` branch: the harness (§7.1, `scripts/panel_calibration_ladder.py`),
 the retirement of the clear-rate floor and the alarm/display/hub-label
@@ -156,6 +162,43 @@ order-agnostic, and no test pins key order (verified).
 
 *Honest limit:* the clean A/B of "score then justify" versus "justify then score" is
 unpublished. This is MODERATE evidence, and the ladder must validate it.
+
+> ### ❌ REVERSED BY MEASUREMENT (2026-08-28). This section's decision did not survive.
+>
+> The ladder was asked to validate this and **invalidated it.** `verdict_signal` is back
+> at the FRONT of the contract; `confidence` stays at the end. This is the spec working
+> as designed — the honest limit above named the risk, and the instrument it demanded
+> settled it — so the section is left standing rather than rewritten.
+>
+> Seven 48-consult ladder runs (336 consults), one variable isolated per arm against a
+> pre-registered design (`docs/audits/2026-08-27-consult-persona-calibration/
+> 05-isolation-series-design.md`):
+>
+> | contract | pooled R | top label reached |
+> |---|---|---|
+> | verdict FIRST (baseline, before any change) | 0.625 | 7 of 48, 4 domains |
+> | verdict LAST | 0.281 – 0.469 | 0 – 10 of 48, 0 – 5 domains |
+> | **verdict FIRST (restored, keeping every other change)** | **0.594** | **20 of 48, all 8 domains** |
+>
+> With the verdict last, two consecutive runs could not reach the top label **at all**,
+> and pooled construct sensitivity fell to less than half of baseline. Moving the key
+> back recovered it to within one paired comparison of baseline while nearly tripling
+> top-label reach.
+>
+> **Why the cited warrant did not transfer.** The +6-to-+11 MEC figure is **k = 6
+> ensembling on PAIRWISE judging**, not a k = 1 reorder of one key in one schema, and the
+> same review grades the opposite finding — chain-of-thought narrowing the criterion — as
+> STRONG. The d = 0.71 anchoring result is an EXTERNAL-anchor effect, not a
+> self-generated-token one. Both citations were qualified in place in the source comments
+> that relied on them.
+>
+> **Mechanism, as far as it is understood.** `concerns` is a REQUIRED negative-valence
+> array. A verdict written after it is chosen with a freshly-authored list of problems
+> adjacent in context, and self-consistency pressure compresses the scale toward the
+> middle — `blocking` fell to 0 of 48 and the top label became unreachable. Ordering the
+> rating after the evidence ordered it after *negative* evidence. Everything else in this
+> spec — `established`, the stage bars, the `blocking`/`gap`/`adequate` vocabulary,
+> `read_state` — was measured to be worth keeping; only the key's POSITION was costly.
 
 ### 3.3 Read-state comes out of the judgment axis
 

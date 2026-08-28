@@ -10,14 +10,39 @@ from src.agent.specialists import SPECIALIST_DOMAINS, persona_path
 
 
 @pytest.mark.parametrize("domain", sorted(SPECIALIST_DOMAINS))
-def test_the_verdict_field_comes_after_the_evidence_fields(domain):
-    """A model generates left to right, so a schema that names the verdict first
-    commits to a label before writing any evidence. Evidence-before-rating is
-    worth +6 to +11 accuracy points (arXiv:2305.17926)."""
+def test_the_verdict_field_comes_first(domain):
+    """``verdict_signal`` is the FIRST key — a measured decision that REVERSED
+    this plan's original design. Do not "fix" it back.
+
+    The contract shipped on 2026-08-28 with the verdict LAST, on an
+    evidence-before-rating rationale. Two things then undermined that. The
+    warrant was misapplied: the "+6 to +11 accuracy points" figure is k=6
+    ensembling on PAIRWISE judging, not a k=1 reorder of one key in one schema,
+    and the same review grades the opposite (chain-of-thought narrowing the
+    criterion) as STRONG. And a seven-run, 336-consult quality-ladder series
+    measured the reorder doing real harm:
+
+        verdict LAST   pooled R 0.281-0.312, top label 0-10 of 48
+        verdict FIRST  pooled R 0.594,       top label 20 of 48
+        (baseline before any change: 0.625, 7 of 48)
+
+    With the verdict first, all eight domains can reach the top label; with it
+    last, three to five could, and for two runs none could at all.
+
+    Mechanism, as far as it is understood: ``concerns`` is a REQUIRED
+    negative-valence array, so a verdict written after it is chosen with a
+    freshly-authored list of problems adjacent in context, and self-consistency
+    pressure compresses the scale toward the middle. Ordering the rating after
+    the evidence ordered it after NEGATIVE evidence.
+
+    Evidence: docs/audits/2026-08-27-consult-persona-calibration/
+    05-isolation-series-design.md (pre-registered before the arms were run).
+    Restoring the old order needs a ladder run that beats the numbers above.
+    """
     text = persona_path(domain).read_text(encoding="utf-8")
-    assert text.index('"established"') < text.index('"verdict_signal"')
-    assert text.index('"concerns"') < text.index('"verdict_signal"')
-    assert text.index('"questions_to_ask"') < text.index('"verdict_signal"')
+    assert text.index('"verdict_signal"') < text.index('"established"')
+    assert text.index('"verdict_signal"') < text.index('"concerns"')
+    assert text.index('"verdict_signal"') < text.index('"questions_to_ask"')
 
 
 @pytest.mark.parametrize("domain", sorted(SPECIALIST_DOMAINS))
