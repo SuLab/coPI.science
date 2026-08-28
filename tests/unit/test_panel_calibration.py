@@ -44,3 +44,37 @@ def test_both_ignore_domains_present_in_only_one_condition():
 @pytest.mark.parametrize("fn", [construct_sensitivity, invariance])
 def test_neither_divides_by_zero_on_empty_input(fn):
     assert fn({}) == (0, 0)
+
+
+@pytest.mark.parametrize("fn", [construct_sensitivity, invariance])
+def test_three_conditions_for_one_domain_raise_rather_than_measuring_nothing(fn):
+    """A domain under THREE conditions has no pair to pick, and the old
+    behaviour was to drop it through the same branch that drops a domain seen
+    ONCE. So a caller handing in all three quality tiers at once — the obvious
+    mistake — got `(0, 0)` back and the report printed `n/a`: a total
+    measurement loss dressed as a formatting quirk. Loud instead.
+    """
+    obs = {
+        ("WEAK", "legal"): "blocking",
+        ("MEDIUM", "legal"): "gap",
+        ("STRONG", "legal"): "adequate",
+    }
+    with pytest.raises(ValueError, match="at most two conditions per domain"):
+        fn(obs)
+
+
+@pytest.mark.parametrize("fn", [construct_sensitivity, invariance])
+def test_one_over_full_domain_does_not_take_the_comparable_ones_with_it(fn):
+    """The raise is about the CALL, not about salvage: it fires even when other
+    domains in the same observation set are perfectly comparable, because a
+    partial answer computed over a filtered subset the caller did not choose is
+    worse than an error."""
+    obs = {
+        ("WEAK", "legal"): "blocking",
+        ("MEDIUM", "legal"): "gap",
+        ("STRONG", "legal"): "adequate",
+        ("WEAK", "budget"): "blocking",
+        ("STRONG", "budget"): "adequate",
+    }
+    with pytest.raises(ValueError, match="'legal' was observed under 3"):
+        fn(obs)

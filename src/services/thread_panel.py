@@ -118,7 +118,11 @@ async def panel_cards_by_thread(
     Each card carries ``domain``, ``verdict_signal`` and ``reply_truncated``,
     which is all the indicator needs, so the indicator and the expanded cards
     are one query and can never disagree — including about whether a signal is
-    an opinion or the parser's default on a reply that stopped early.
+    an opinion or the parser's default on a reply that stopped early. It also
+    carries ``read_state`` and ``concern_count``, which the indicator does not
+    use: both exist because a signal alone overstates itself. ``adequate``
+    (2026-08-28) means "meets the bar for THIS STAGE", not "no concerns", and
+    the count is what stops a reader taking it for the latter.
 
     ``raw_opinion`` is present only when ``admin_view`` (Ruling R4) — it is not
     even SELECTed otherwise.
@@ -139,12 +143,19 @@ async def panel_cards_by_thread(
         SpecialistConsult.questions_to_ask,
         SpecialistConsult.created_at,
         # 0036's "this reply was cut off". SELECTed for every reader, admin or
-        # manager: `verdict_signal` is a PARSE DEFAULT (`caution`,
+        # manager: `verdict_signal` is a PARSE DEFAULT (`gap`,
         # src/agent/specialists.py) when the reply never finished, so without
         # this column both surfaces below present a sentence that stopped
         # mid-word as an opinion a specialist gave. Not drill-down — it
         # qualifies the signal itself, and a manager gets no other way to tell.
         SpecialistConsult.truncated,
+        # 0038's read-state. Generalises `truncated`: a reply that arrived
+        # COMPLETE and failed to parse is not truncated and is just as unread,
+        # and `read_state` is the one field that says which of the two (or
+        # neither) happened. NULL on every pre-0038 row — "never recorded",
+        # not "parsed" — so the template must not read a missing value as a
+        # clean read.
+        SpecialistConsult.read_state,
     ]
     if admin_view:
         columns.append(SpecialistConsult.raw_opinion)
@@ -198,6 +209,19 @@ async def panel_cards_by_thread(
             # `bool(...)`: NULL means "written before 0036" and the column's
             # comment says to read it as not truncated.
             "reply_truncated": bool(row.truncated),
+            # 0038's `read_state`, carried verbatim INCLUDING None — None means
+            # "written before 0038", which is a third state and not "parsed".
+            # Deciding that here would put the guess in the service; the
+            # template shows it only when it has one.
+            "read_state": row.read_state,
+            # How many concerns this specialist filed, alongside its signal.
+            # The point of the 2026-08-28 rename: `adequate` means "meets the
+            # bar for THIS STAGE", NOT "no concerns" — every `clear` opinion
+            # ever emitted carried 4-9 of them, and the label's predecessor read
+            # as a clean bill of health because nothing beside it said
+            # otherwise. Staff-only, like the lists it counts: `format_panel_note`
+            # still cannot carry it to Slack (spec D7).
+            "concern_count": len(_items(row.concerns)),
         })
     # Back to chronological within each thread. The rows arrived newest-first
     # (that is what makes the cap shed the OLDEST consults), and each thread's

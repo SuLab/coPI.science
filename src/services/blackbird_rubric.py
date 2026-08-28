@@ -103,6 +103,18 @@ class RubricDimension:
 
 
 @dataclass(frozen=True)
+class StageBar:
+    """One domain's "what is adequate at incubation stage", condensed from the
+    clause named in ``source``. ``source`` is not decoration: it is what makes
+    the condensation auditable and what
+    tests/unit/test_stage_bars.py validates against the real keys."""
+
+    domain: str
+    source: str
+    text: str
+
+
+@dataclass(frozen=True)
 class Rubric:
     """The parsed, validated rubric document."""
 
@@ -126,6 +138,15 @@ class Rubric:
     red_flags: tuple[str, ...]
     recommendation: str
     heuristic: str
+    # Keyed by specialist domain (src/agent/specialists.py's SPECIALIST_DOMAINS).
+    # The key set is deliberately NOT validated against that module here — this
+    # one stays free of any src.agent import, the same way the panel roster
+    # stays free of the rubric — so the two are held together by
+    # tests/unit/test_stage_bars.py instead.
+    stage_bars: dict[str, StageBar]
+    # The single global sentence prepended to every domain bar. Its own
+    # StageBar so it carries a `source` and stays as auditable as the rest.
+    stage_bar_global: StageBar
 
 
 def _require_str(value: object, where: str) -> str:
@@ -307,6 +328,52 @@ def parse_rubric(path: Path) -> Rubric:
     if not isinstance(red_flags_table, dict):
         raise RubricError("rubric document: missing [red_flags] table")
 
+    # Per-domain stage bars. `source` names the clause each bar condenses and is
+    # validated against the document's OWN keys — the point of the field is that
+    # a reviewer can check the condensation against the original, and a source
+    # naming nothing means the bar has drifted from the text it claims to quote.
+    # `red_flags` and `scoring_preamble` are the two non-keyed sections a bar may
+    # legitimately quote (both carry incubation-stage policy that belongs to no
+    # single dimension).
+    valid_sources = (
+        {d.key for d in dimensions} | set(gating) | {"red_flags", "scoring_preamble"}
+    )
+    global_raw = data.get("stage_bar_global")
+    if not isinstance(global_raw, dict):
+        raise RubricError("rubric document: missing [stage_bar_global] table")
+    global_source = _require_str(global_raw.get("source"), "[stage_bar_global].source")
+    for named in (part.strip() for part in global_source.split(",")):
+        if named not in valid_sources:
+            raise RubricError(
+                f"rubric document: stage_bar_global names unknown source {named!r}"
+            )
+    stage_bar_global = StageBar(
+        domain="*",
+        source=global_source,
+        text=_require_str(global_raw.get("text"), "[stage_bar_global].text"),
+    )
+    stage_bars_raw = data.get("stage_bar")
+    if not isinstance(stage_bars_raw, dict):
+        raise RubricError("rubric document: missing [stage_bar.*] tables")
+    stage_bars: dict[str, StageBar] = {}
+    for domain, entry in stage_bars_raw.items():
+        if not isinstance(entry, dict):
+            raise RubricError(f"rubric document: [stage_bar.{domain}] is not a table")
+        source = _require_str(entry.get("source"), f"[stage_bar.{domain}].source")
+        for named in (part.strip() for part in source.split(",")):
+            if named not in valid_sources:
+                raise RubricError(
+                    f"rubric document: stage_bar.{domain} names unknown source "
+                    f"{named!r} — a bar's `source` must name a dimension key, a "
+                    "gating key, `red_flags` or `scoring_preamble`, so the "
+                    f"condensation stays checkable ({sorted(valid_sources)})"
+                )
+        stage_bars[domain] = StageBar(
+            domain=domain,
+            source=source,
+            text=_require_str(entry.get("text"), f"[stage_bar.{domain}].text"),
+        )
+
     return Rubric(
         version=version,
         date=_require_str(meta.get("date"), "[meta].date"),
@@ -334,6 +401,8 @@ def parse_rubric(path: Path) -> Rubric:
         red_flags=_require_str_list(red_flags_table.get("items"), "[red_flags].items"),
         recommendation=_section_text("recommendation"),
         heuristic=_section_text("heuristic"),
+        stage_bars=stage_bars,
+        stage_bar_global=stage_bar_global,
     )
 
 
@@ -490,6 +559,31 @@ def _format_threshold(value: float) -> str:
     4.0 -> "4.0", 3.9 -> "3.9", 3.25 -> "3.25"."""
     text = f"{value:.2f}"
     return text[:-1] if text.endswith("0") else text
+
+
+def render_stage_bar_markdown(domain: str) -> str:
+    """The stage-bar section a specialist persona carries.
+
+    Fills the ``{stage_bar}`` placeholder in prompts/specialists/<domain>.md,
+    exactly as ``render_rubric_markdown`` fills ``{rubric}`` for the hub — so
+    the bar a specialist judges against and the anchors the hub scores against
+    cannot drift apart. Raises for an unknown domain rather than rendering
+    nothing: a silently bar-less persona is the defect this function exists to
+    end.
+    """
+    bar = _RUBRIC.stage_bars.get(domain)
+    if bar is None:
+        raise RubricError(f"rubric document: no stage_bar for domain {domain!r}")
+    return "\n".join([
+        "## The bar at this stage",
+        "",
+        _RUBRIC.stage_bar_global.text,
+        "",
+        bar.text,
+        "",
+        f"(Source: {bar.source}, rubric {_RUBRIC.version} / "
+        f"{_RUBRIC.content_hash[:12]}.)",
+    ])
 
 
 def render_rubric_markdown() -> str:

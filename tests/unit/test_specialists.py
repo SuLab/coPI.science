@@ -9,7 +9,11 @@ import json
 import logging
 from pathlib import Path
 
+import pytest
+
 from src.agent.specialists import (
+    DEFAULTED_TALLY_LABEL,
+    HISTORICAL_VERDICT_SIGNALS,
     PANEL_NOTE_QUESTION_CHARS,
     READ_STATES,
     SPECIALIST_DOMAINS,
@@ -96,7 +100,7 @@ def test_persona_path_is_under_prompts_specialists():
 
 def _raw(**over):
     body = {
-        "verdict_signal": "caution",
+        "verdict_signal": "gap",
         "concerns": ["in-family off-target risk at SK2"],
         "questions_to_ask": ["What selectivity margin over SK2 have you measured?"],
         "confidence": "moderate",
@@ -108,7 +112,7 @@ def _raw(**over):
 def test_parse_reads_the_contract():
     op = parse_opinion(_raw(), domain="chemistry")
     assert op.domain == "chemistry"
-    assert op.verdict_signal == "caution"
+    assert op.verdict_signal == "gap"
     assert op.concerns == ("in-family off-target risk at SK2",)
     assert op.questions_to_ask == (
         "What selectivity margin over SK2 have you measured?",
@@ -126,20 +130,20 @@ def test_parse_of_prose_is_an_opinion_not_a_failure():
     """A specialist that answers in prose has still answered. Only a FAILED
     call must not satisfy the floor — see the engine, not here."""
     op = parse_opinion("The chemistry here is not close to a DC.", domain="chemistry")
-    assert op.verdict_signal == "caution"
+    assert op.verdict_signal == "gap"
     assert op.concerns == ()
     assert op.raw == "The chemistry here is not close to a DC."
 
 
-def test_parse_of_an_unknown_signal_degrades_to_caution():
+def test_parse_of_an_unknown_signal_degrades_to_gap():
     op = parse_opinion(_raw(verdict_signal="catastrophic"), domain="chemistry")
-    assert op.verdict_signal == "caution"
+    assert op.verdict_signal == "gap"
 
 
 def test_parse_of_a_fenced_block_still_works():
     """Models fence JSON by reflex. Do not let that be a parse failure."""
     op = parse_opinion("```json\\n" + _raw() + "\\n```", domain="chemistry")
-    assert op.verdict_signal == "caution"
+    assert op.verdict_signal == "gap"
 
 
 def test_every_signal_in_the_enum_round_trips():
@@ -163,7 +167,8 @@ def test_non_list_concerns_degrade_to_empty():
 def test_json_with_trailing_prose_keeps_its_blocking_signal():
     """The chute/scientific consult, in the shape it actually arrived.
 
-    Before the tolerant extractor this parsed as `caution`/`low`/no concerns —
+    Before the tolerant extractor this parsed as `caution`/`low`/no concerns
+    (`caution` was the default label until the 2026-08-28 rename) —
     and `caution` is what was published into the PI's own thread, as ⚠️, for a
     specialist who had said ⛔ with high confidence. The inversion is the whole
     reason this test exists; a merely-lost signal would have been survivable.
@@ -172,7 +177,7 @@ def test_json_with_trailing_prose_keeps_its_blocking_signal():
         _raw(verdict_signal="blocking", confidence="high",
              concerns=["A single-antibody ICC cannot establish translocation"],
              questions_to_ask=[])
-        + "\n\nNote: I have marked this blocking rather than caution because the "
+        + "\n\nNote: I have marked this blocking rather than a gap because the "
           "claim rests entirely on that one stain."
     )
     op = parse_opinion(raw, domain="scientific")
@@ -186,18 +191,18 @@ def test_a_fenced_object_with_trailing_prose_parses():
     """`_strip_fence` anchors the closing fence at the end of the string, so a
     model that adds one sentence after the fence defeats it. Two of the six."""
     raw = (
-        "```json\n" + _raw(verdict_signal="clear", confidence="high") + "\n```\n\n"
+        "```json\n" + _raw(verdict_signal="adequate", confidence="high") + "\n```\n\n"
         "Happy to go deeper on selectivity if that would help."
     )
     op = parse_opinion(raw, domain="chemistry")
-    assert op.verdict_signal == "clear"
+    assert op.verdict_signal == "adequate"
     assert op.confidence == "high"
 
 
-def test_a_truncated_object_still_falls_back_to_caution():
-    """The `refusal` half: unrecoverable, and it must stay `caution`.
+def test_a_truncated_object_still_falls_back_to_the_conservative_default():
+    """The `refusal` half: unrecoverable, and it must stay at `_DEFAULT_SIGNAL`.
 
-    `clear` here would turn a specialist we could not read into an approval —
+    `adequate` here would turn a specialist we could not read into an approval —
     the exact failure `has_usable_content` was written to prevent. The floor,
     not the parser, is what must refuse to credit this consult.
     """
@@ -205,7 +210,7 @@ def test_a_truncated_object_still_falls_back_to_caution():
         '{"verdict_signal": "blocking", "concerns": ["The dose-response is not',
         domain="scientific",
     )
-    assert op.verdict_signal == "caution"
+    assert op.verdict_signal == "gap"
     assert op.confidence == "low"
     assert op.concerns == ()
 
@@ -218,8 +223,8 @@ def test_a_fenced_braceless_blocking_opinion_is_not_laundered():
     drops the opening brace inside the fence" — and it tests for the ```json
     fence that `_strip_fence` had already removed. So this reply parsed
     correctly from `raw` and RAISED after stripping, landing on the
-    `caution`/`low`/no-concerns default: the same laundering the branch exists
-    to prevent, reintroduced by the call that was meant to help it.
+    `_DEFAULT_SIGNAL`/`low`/no-concerns default: the same laundering the branch
+    exists to prevent, reintroduced by the call that was meant to help it.
     """
     raw = (
         '```json\n'
@@ -389,12 +394,13 @@ def test_no_orphan_persona_files():
 
 def test_every_persona_states_the_opinion_contract():
     """Each persona must ask for the structured fields, or parse_opinion
-    degrades every answer to caution/low and the panel is decoration."""
+    degrades every answer to gap/low — the conservative default since the
+    2026-08-28 rename — and the panel is decoration."""
     for domain in SPECIALIST_DOMAINS:
         body = persona_path(domain).read_text(encoding="utf-8")
         for field in ("verdict_signal", "concerns", "questions_to_ask", "confidence"):
             assert field in body, f"{domain} persona omits {field}"
-        for signal in ("blocking", "caution", "clear"):
+        for signal in ("blocking", "gap", "adequate"):
             assert signal in body, f"{domain} persona omits the {signal} signal"
 
 
@@ -681,11 +687,11 @@ def test_every_signal_has_its_own_emoji():
         emoji = note.split(" — ")[1].split(" ")[0]
         assert emoji not in seen, f"{signal} and {seen.get(emoji)} share {emoji!r}"
         seen[emoji] = signal
-    assert seen == {"⛔": "blocking", "⚠️": "caution", "✅": "clear"}
+    assert seen == {"⛔": "blocking", "⚠️": "gap", "☑️": "adequate"}
 
 
 def test_an_unknown_signal_renders_bare_rather_than_reassuringly():
-    """`parse_opinion` already degrades an unreadable signal to "caution", so
+    """`parse_opinion` already degrades an unreadable signal to "gap", so
     this is belt-and-braces — but if something ever reaches here off-contract,
     the note must not dress it up with a ✅."""
     note = format_panel_note(domain="legal", verdict_signal="probably fine", question="q?")
@@ -714,7 +720,7 @@ def test_an_800_char_question_renders_unchanged():
 
 def test_the_question_is_clipped_on_a_word_boundary():
     question = ("Is the animal model encumbered " * 40)[:1000]  # 1000 chars
-    note = format_panel_note(domain="legal", verdict_signal="clear", question=question)
+    note = format_panel_note(domain="legal", verdict_signal="adequate", question=question)
     quoted = note.split('asked: "', 1)[1].rstrip('"')
     assert quoted.endswith("…")
     assert len(quoted) <= PANEL_NOTE_QUESTION_CHARS + 1  # + the ellipsis
@@ -871,6 +877,91 @@ def test_flatness_is_quiet_on_a_small_per_domain_sample():
     assert domain_flatness_warning({"legal": {"caution": 19}}) == []
 
 
+# ---------------------------------------------------------------
+# Defaulted consults are a FAILED READ, not a verdict. Both alarms above were
+# fed from `on_consult`, which fires for a defaulted opinion too, so every
+# unread consult used to be tallied at the label it defaulted to — already the
+# modal label in production. The ladder has excluded unread cells from R and S
+# since it was written (`_is_real_signal`); these are the same exclusion in the
+# production alarms.
+# ---------------------------------------------------------------
+
+
+def test_the_mix_report_excludes_defaulted_consults_from_the_denominator():
+    """The label a defaulted signal lands on is `_DEFAULT_SIGNAL`, so averaging
+    it in states that specialists said `gap` when in fact we could not read
+    them. 60 readable consults plus 40 unread is a mix over 60, disclosed."""
+    msg = signal_mix_report(
+        {"blocking": 20, "gap": 20, "adequate": 20, DEFAULTED_TALLY_LABEL: 40}
+    )
+    assert msg is not None
+    assert "60 counted consults" in msg
+    assert "blocking 20 (33.3%)" in msg, "shares are over the READ consults"
+    assert DEFAULTED_TALLY_LABEL not in msg.split("counted consults")[1].split(".")[0], (
+        "the failed reads must not appear as one of the mix's labels"
+    )
+    assert "40 further consult(s) were EXCLUDED" in msg
+    assert "40.0% of 100" in msg, "the loss is disclosed as a share of attempts"
+
+
+def test_the_mix_report_speaks_when_nearly_everything_was_unreadable():
+    """The case the exclusion would otherwise silence. 55 unread consults and 3
+    readable ones is not "no consults happened", and it is not a cautious
+    panel either — it is the output-shape contract failing."""
+    msg = signal_mix_report({"gap": 3, DEFAULTED_TALLY_LABEL: 55})
+    assert msg is not None
+    assert "55 consults" in msg and "could NOT BE READ" in msg
+    assert "signal mix over" not in msg, "there is no mix to report"
+    assert "parse/output-shape failure" in msg
+
+
+def test_a_domain_whose_replies_stopped_parsing_is_not_accused_of_flatness():
+    """The false-accusation direction. 20 unread consults are 100% modal share
+    at `gap` if you count them, so the persona gets blamed for a parse
+    failure — and the operator is sent to the ladder, which cannot see the
+    problem either (it excludes the same cells)."""
+    lines = domain_flatness_warning({"legal": {DEFAULTED_TALLY_LABEL: 20}})
+    assert len(lines) == 1
+    assert "could NOT BE READ" in lines[0]
+    assert "one-sided domain" not in lines[0], (
+        "flatness is a claim about a persona; this is a claim about the parser"
+    )
+    assert "output-shape contract" in lines[0]
+
+
+def test_a_domain_that_stopped_being_readable_is_not_missed():
+    """The inverse direction, and the one that used to go entirely unnoticed:
+    15 unread plus 5 genuine `blocking` reads as 75% modal share — healthy
+    variance — while three quarters of the domain's replies were unreadable."""
+    lines = domain_flatness_warning(
+        {"chemistry": {"blocking": 5, DEFAULTED_TALLY_LABEL: 15}}
+    )
+    assert len(lines) == 1
+    assert "15 of 20" in lines[0] and "75.0%" in lines[0]
+
+
+def test_a_few_unread_consults_do_not_trip_the_alarm_but_are_disclosed():
+    """The ceiling is not zero: an occasional off-contract reply is ordinary,
+    and `parse_opinion`'s recovery branches exist for the recoverable ones. A
+    domain under the ceiling that IS otherwise flat still gets its flatness
+    line, with the excluded count named so the denominator is checkable."""
+    lines = domain_flatness_warning(
+        {"legal": {"gap": 87, "blocking": 4, DEFAULTED_TALLY_LABEL: 2}}
+    )
+    assert len(lines) == 1, "2 of 93 is under the ceiling, so no read alarm"
+    assert "one-sided domain" in lines[0]
+    assert "87 of 91 READ consults" in lines[0]
+    assert "2 further consult(s) went unread" in lines[0]
+
+
+def test_the_tally_label_cannot_be_mistaken_for_a_verdict():
+    """It is deliberately the same word `read_state` uses, and it must not
+    collide with any label a specialist can emit — live or historical."""
+    assert DEFAULTED_TALLY_LABEL == "defaulted"
+    assert DEFAULTED_TALLY_LABEL in READ_STATES
+    assert DEFAULTED_TALLY_LABEL not in VERDICT_SIGNALS | HISTORICAL_VERDICT_SIGNALS
+
+
 def test_nothing_but_the_three_publishable_fields_can_reach_a_note():
     """The privacy rule is enforced by the SIGNATURE, not by discipline at the
     call site: an interview thread is visible to every lab in the workspace, so
@@ -897,11 +988,11 @@ def test_a_reply_that_parsed_reports_its_signal_as_read():
     assert read_state_for(truncated=False, opinion=op) == "parsed"
 
 
-def test_an_unreadable_reply_is_marked_defaulted_not_merely_cautious():
+def test_an_unreadable_reply_is_marked_defaulted_not_merely_a_gap():
     """The 15 defaulted rows in production are byte-indistinguishable from
-    genuine cautious ones. This is the field that separates them."""
+    genuine ones at the same label. This is the field that separates them."""
     op = parse_opinion("this is prose, not an object", domain="chemistry")
-    assert op.verdict_signal == "caution"
+    assert op.verdict_signal == "gap"
     assert op.signal_was_defaulted is True
     assert read_state_for(truncated=False, opinion=op) == "defaulted"
 
@@ -930,7 +1021,7 @@ def test_truncation_outranks_a_clean_parse():
 
 def test_every_read_state_returned_is_in_the_declared_set():
     for truncated in (True, False):
-        for raw in (_raw(verdict_signal="clear"), "prose"):
+        for raw in (_raw(verdict_signal="adequate"), "prose"):
             op = parse_opinion(raw, domain="legal")
             assert read_state_for(truncated=truncated, opinion=op) in READ_STATES
 
@@ -938,7 +1029,7 @@ def test_every_read_state_returned_is_in_the_declared_set():
 def test_established_is_parsed_when_present():
     op = parse_opinion(
         '{"established": ["assignment chain is clean"], "concerns": [],'
-        ' "questions_to_ask": [], "verdict_signal": "clear", "confidence": "high"}',
+        ' "questions_to_ask": [], "verdict_signal": "adequate", "confidence": "high"}',
         domain="legal",
     )
     assert op.established == ("assignment chain is clean",)
@@ -946,5 +1037,168 @@ def test_established_is_parsed_when_present():
 
 def test_established_defaults_to_empty_when_absent():
     """Every pre-change reply omits it; absence must not be an error."""
-    op = parse_opinion(_raw(verdict_signal="caution"), domain="legal")
+    op = parse_opinion(_raw(verdict_signal="gap"), domain="legal")
     assert op.established == ()
+
+
+# ---------------------------------------------------------------
+# The 2026-08-28 vocabulary rename: blocking / caution / clear ->
+# blocking / gap / adequate. `blocking` is the only one of the three
+# that survives the boundary with its meaning intact.
+# ---------------------------------------------------------------
+
+
+def test_the_live_vocabulary_is_pinned():
+    """Pinned literally so a future change is a diff, not a drift — the same
+    discipline the retired clear-rate floor had."""
+    assert VERDICT_SIGNALS == frozenset({"blocking", "gap", "adequate"})
+
+
+def test_the_conservative_default_is_gap_never_adequate():
+    """An unread specialist must not read as approval. This is the safety
+    property `_DEFAULT_SIGNAL = "caution"` was protecting."""
+    op = parse_opinion("prose, not an object", domain="legal")
+    assert op.verdict_signal == "gap"
+
+
+def test_historical_values_are_still_renderable():
+    """1,192 stored rows carry caution/clear. The read path must render them;
+    only `blocking` survives the boundary with its meaning intact."""
+    assert HISTORICAL_VERDICT_SIGNALS == frozenset({"caution", "clear"})
+    for old in HISTORICAL_VERDICT_SIGNALS:
+        note = format_panel_note(domain="legal", verdict_signal=old, question="q")
+        assert old in note
+
+
+def test_a_retro_reader_reads_a_historical_signal_rather_than_defaulting_it():
+    """The retro read paths RE-PARSE stored text: `admin_llm_calls` runs
+    `parse_opinion` over every `consult_*` response on the LLM-calls page, and
+    `assessment_detail.consult_opinion_from_result` does the same for every
+    interview that predates `specialist_consults`. If `caution`/`clear`
+    degraded to the default there, the whole pre-rename corpus would re-render
+    as `gap` — a silent rewrite of 1,192 rows, one WARNING per row, and a
+    stored `clear` reported as a shortfall nobody found.
+
+    `allow_historical=True` is what buys that, and it is per-call BY DESIGN —
+    see the test below for the direction that must NOT have it."""
+    for old in HISTORICAL_VERDICT_SIGNALS:
+        op = parse_opinion(
+            _raw(verdict_signal=old), domain="legal", allow_historical=True,
+        )
+        assert op.verdict_signal == old
+        assert op.signal_was_defaulted is False
+        assert read_state_for(truncated=False, opinion=op) == "parsed"
+
+
+def test_the_default_parse_refuses_a_historical_signal():
+    """The other direction, and the load-bearing one: `parse_opinion` is not
+    only the retro reader, it is also the LIVE consult writer
+    (`src/agent/tools.py`). While the historical widening was unconditional, a
+    specialist reply emitting `clear` was accepted as `parsed`, stored in
+    `specialist_consults.verdict_signal`, tallied into the run mix, and posted
+    into the PI's own workspace-visible interview thread as `✅ clear` — a
+    label this system no longer defines. Strict by default is what restores the
+    pre-rename guarantee: an off-contract label degrades to the conservative
+    `gap` and `read_state != "parsed"` cancels the note.
+    """
+    for retired in sorted(HISTORICAL_VERDICT_SIGNALS):
+        op = parse_opinion(_raw(verdict_signal=retired), domain="legal")
+        assert op.verdict_signal == "gap", retired
+        assert op.signal_was_defaulted is True, retired
+        assert read_state_for(truncated=False, opinion=op) == "defaulted", retired
+
+
+@pytest.mark.parametrize(
+    ("stated", "expected"),
+    [
+        ("Blocking", "blocking"),
+        ("BLOCKING", "blocking"),
+        (" gap ", "gap"),
+        ("\tAdequate\n", "adequate"),
+    ],
+)
+def test_a_case_or_whitespace_variant_of_a_live_label_is_still_read(stated, expected):
+    """A reply saying "Blocking" has plainly answered.
+
+    Unnormalised, it was not in `VERDICT_SIGNALS`, so it was DEFAULTED: the most
+    severe verdict a specialist can give was laundered to `gap`, the
+    workspace-visible panel note was cancelled (`read_state='defaulted'`), and
+    the cell was excluded from the calibration ladder's R/S — so the harness
+    could not even see the domain doing it. All of that on nothing worse than a
+    capital letter.
+    """
+    op = parse_opinion(_raw(verdict_signal=stated), domain="legal")
+    assert op.verdict_signal == expected
+    assert op.signal_was_defaulted is False
+    assert read_state_for(truncated=False, opinion=op) == "parsed"
+
+
+@pytest.mark.parametrize("stated", [["blocking"], {"signal": "blocking"}, 3, None, True])
+def test_a_non_string_signal_defaults_instead_of_raising(stated):
+    """`parse_opinion` is documented never to raise, and the membership test is
+    against a frozenset — so an UNHASHABLE value (`{"verdict_signal": []}`, which
+    a model can emit) used to raise `TypeError: unhashable type` straight out of
+    it: on the live consult path, and on both retro read paths, where it is a 500
+    on a staff page rather than a defaulted signal."""
+    op = parse_opinion(_raw(verdict_signal=stated), domain="legal")
+    assert op.verdict_signal == "gap"
+    assert op.signal_was_defaulted is True
+
+
+def test_normalisation_does_not_rescue_a_genuinely_off_contract_label():
+    """The bound on the fix above: normalise CASE and WHITESPACE, nothing else.
+    "Probably fine" is not a verdict signal in any casing."""
+    op = parse_opinion(_raw(verdict_signal="  Probably Fine "), domain="legal")
+    assert op.verdict_signal == "gap"
+    assert op.signal_was_defaulted is True
+
+
+def test_the_defaulted_warning_quotes_what_the_model_actually_wrote(caplog):
+    """The normalised form would be a misleading thing to log: an operator
+    grepping for the string the persona emitted must find it verbatim."""
+    with caplog.at_level(logging.WARNING, logger="src.agent.specialists"):
+        parse_opinion(_raw(verdict_signal=" Clear "), domain="legal")
+    assert "' Clear '" in caplog.text, caplog.text
+
+
+def test_adequate_does_not_render_as_a_bare_approval_tick():
+    """All nine `clear` opinions ever emitted carried 4-9 concerns; one listed
+    "Succession risk is high as described" under a ✅. The label means "meets the
+    bar for this stage", not "no concerns"."""
+    note = format_panel_note(
+        domain="budget", verdict_signal="adequate", question="does it fit the band?"
+    )
+    assert "adequate for stage" in note
+    assert "✅" not in note
+
+
+def test_the_panel_note_still_cannot_carry_opinion_content():
+    """The narrow signature IS the enforcement (spec D7). Concern counts go to
+    staff surfaces only."""
+    import inspect
+    params = set(inspect.signature(format_panel_note).parameters)
+    assert params == {"domain", "verdict_signal", "question"}
+
+
+def test_no_persona_still_offers_a_retired_label():
+    """The drift this rename exists to prevent: a persona left offering
+    `caution`/`clear` in its answer-format enum, or still defining one as a
+    bullet, would keep the panel emitting a vocabulary nothing renders as live.
+
+    Checks the two SHAPES a label takes in a persona rather than the bare word:
+    "clear" is also ordinary English in these files ("show the effect more
+    clearly", "a clear killer application"), and a bare-substring test would
+    fail on prose that has nothing to do with the verdict enum.
+    """
+    for domain in SPECIALIST_DOMAINS:
+        body = persona_path(domain).read_text(encoding="utf-8")
+        assert '"verdict_signal": "blocking | gap | adequate",' in body, (
+            f"{domain} persona does not offer the live enum"
+        )
+        for retired in sorted(HISTORICAL_VERDICT_SIGNALS):
+            assert f"**{retired}**" not in body, (
+                f"{domain} persona still defines the retired {retired!r} label"
+            )
+            assert f"| {retired}" not in body and f"{retired} |" not in body, (
+                f"{domain} persona still offers {retired!r} in an enum"
+            )

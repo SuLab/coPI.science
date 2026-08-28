@@ -113,14 +113,20 @@
                 {# The consult's verdict signal, parsed server-side in
                    admin_llm_calls (src/routers/admin.py). Without it the only way
                    to see whether a specialist blocked something was to open the row
-                   and read the JSON. An unreadable reply degrades to "caution", the
-                   same way the engine's own parse does — never to "clear". #}
+                   and read the JSON. An unreadable reply degrades to "gap", the
+                   same way the engine's own parse does — never to "adequate".
+
+                   FIVE values, not three. `gap`/`adequate` are the live
+                   vocabulary (2026-08-28) and `caution`/`clear` are what every
+                   row logged before it says; this page re-parses stored text,
+                   so both appear here forever. Historical rows keep the colour
+                   they always had. #}
                 {% set signal = (consult_signals or {}).get(log.id | string) %}
                 {% if signal %}
                 <span class="consult-signal px-2 py-0.5 rounded-full text-xs font-medium
                     {% if signal == 'blocking' %}bg-red-100 text-red-700
-                    {% elif signal == 'caution' %}bg-amber-100 text-amber-700
-                    {% elif signal == 'clear' %}bg-green-100 text-green-700
+                    {% elif signal in ('gap', 'caution') %}bg-amber-100 text-amber-700
+                    {% elif signal in ('adequate', 'clear') %}bg-green-100 text-green-700
                     {% else %}bg-gray-100 text-gray-600{% endif %}">
                     {{ signal }}
                 </span>

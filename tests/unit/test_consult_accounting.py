@@ -16,6 +16,7 @@ import pytest
 
 from src.agent.agent import Agent
 from src.agent.simulation import SimulationEngine
+from src.agent.specialists import DEFAULTED_TALLY_LABEL
 from src.agent.state import ThreadState
 from src.agent.tools import _execute_consult_specialist
 from tests.fakes import FakeAnthropic, FakeSlackClient
@@ -77,14 +78,14 @@ async def test_the_on_consult_closure_forwards_the_signal_into_the_run_tally(mon
     """The `on_consult` closure built inside `_reply_to_thread` (Task 9) takes
     TWO arguments now — domain and the parsed verdict_signal — and must land
     both in `_note_consult`: the domain into the per-interview floor map, and
-    the signal into the per-run `_consult_signal_counts` tally the clear-rate
-    monitor in `stop()` reads. A one-argument closure (the pre-Task-9 shape)
+    the signal into the per-run `_consult_signal_counts` tally the mix report
+    in `stop()` reads. A one-argument closure (the pre-Task-9 shape)
     would TypeError the moment `execute_tool` calls it with two arguments."""
     engine, hub, thread = _hub_engine()
 
     async def _fake_opinion(**kwargs):
         return (
-            '{"verdict_signal": "clear", "concerns": [], '
+            '{"verdict_signal": "adequate", "concerns": [], '
             '"questions_to_ask": [], "confidence": "high"}'
         )
 
@@ -93,7 +94,7 @@ async def test_the_on_consult_closure_forwards_the_signal_into_the_run_tally(mon
             "consult_specialist",
             {"domain": "legal", "question": "q", "context": "c"},
         )
-        return "<slack_message>Thanks — that clears it up.</slack_message>"
+        return "<slack_message>Thanks — that settles it.</slack_message>"
 
     monkeypatch.setattr(hub, "build_phase4_prompt", lambda **kw: ("sys", []))
     monkeypatch.setattr("src.agent.simulation.generate_with_tools", _fake_reply)
@@ -102,7 +103,74 @@ async def test_the_on_consult_closure_forwards_the_signal_into_the_run_tally(mon
     await engine._reply_to_thread(hub, thread)
 
     assert engine._consulted_domains("wang", thread.thread_id) == frozenset({"legal"})
-    assert engine._consult_signal_counts == {"clear": 1}
+    assert engine._consult_signal_counts == {"adequate": 1}
+    assert engine._consult_signal_counts_by_domain == {"legal": {"adequate": 1}}
+
+
+@pytest.mark.asyncio
+async def test_the_live_path_refuses_a_retired_verdict_label(monkeypatch):
+    """A live specialist reply saying `clear` must NOT be read as a verdict.
+
+    This test used to assert the opposite — same fixture, `_consult_signal_counts
+    == {"clear": 1}` — and it passed, which is how the defect stayed invisible.
+    `parse_opinion` accepted `caution`/`clear` unconditionally so that the two
+    RETRO readers could re-render the 1,192 stored pre-rename rows, but it is
+    also the LIVE consult writer (`src/agent/tools.py`). So a retired label
+    reached `specialist_consults.verdict_signal`, the run tally, and the PI's own
+    workspace-visible interview thread as `✅ clear` — a label this system no
+    longer defines. Historical acceptance is now an explicit
+    `allow_historical=True` that only the two retro readers pass.
+
+    All three consequences of the refusal are asserted here, because each was a
+    separate pre-rename guarantee: the signal degrades to the conservative
+    default, the read is recorded as `defaulted` rather than `parsed`, and the
+    panel note is CANCELLED rather than published.
+    """
+    engine, hub, thread = _hub_engine()
+
+    async def _fake_opinion(**kwargs):
+        return (
+            '{"verdict_signal": "clear", "concerns": [], '
+            '"questions_to_ask": [], "confidence": "high"}'
+        )
+
+    recorded = []
+    real_record = engine._record_specialist_consult
+
+    async def _spy(*args, **fields):
+        recorded.append(fields)
+        return await real_record(*args, **fields)
+
+    async def _fake_reply(**kwargs):
+        await kwargs["tool_executor"](
+            "consult_specialist",
+            {"domain": "legal", "question": "q", "context": "c"},
+        )
+        return "<slack_message>Thanks — that settles it.</slack_message>"
+
+    monkeypatch.setattr(hub, "build_phase4_prompt", lambda **kw: ("sys", []))
+    monkeypatch.setattr(engine, "_record_specialist_consult", _spy)
+    monkeypatch.setattr("src.agent.simulation.generate_with_tools", _fake_reply)
+    monkeypatch.setattr("src.agent.tools.generate_agent_response", _fake_opinion)
+
+    await engine._reply_to_thread(hub, thread)
+
+    # 1. The signal is the conservative default, not the retired label.
+    assert len(recorded) == 1
+    assert recorded[0]["verdict_signal"] == "gap"
+    # 2. Recorded as a failed READ, not as a verdict — so the tally counts it
+    #    under `DEFAULTED_TALLY_LABEL` and the mix report excludes it.
+    assert recorded[0]["read_state"] == "defaulted"
+    assert engine._consult_signal_counts == {DEFAULTED_TALLY_LABEL: 1}
+    assert "clear" not in engine._consult_signal_counts
+    # 3. Nothing about a verdict nobody gave reaches Slack. (The floor's own
+    #    decision is unchanged and deliberately not asserted as correct here —
+    #    the domain still counts, exactly as it did before the rename.)
+    notes = [
+        p for p in engine.slack_clients["blackbird"].posted
+        if p["text"].startswith("🧪 Panel")
+    ]
+    assert notes == [], f"a cancelled note still posted: {notes}"
 
 
 @pytest.mark.asyncio
@@ -311,7 +379,7 @@ async def test_a_max_tokens_truncated_consult_is_not_credited(monkeypatch):
             # The retry ran, doubled max_tokens and truncated again: llm.py
             # returns the retry's text and reports the RETRY's stop_reason.
             on_stop_reason("max_tokens")
-        return '{"verdict_signal": "clear", "confidence": "high", "concerns": ['
+        return '{"verdict_signal": "adequate", "confidence": "high", "concerns": ['
 
     async def _record(**fields):
         recorded.append(fields)
@@ -354,7 +422,7 @@ async def test_a_truncated_consult_is_marked_on_the_record(
         on_stop_reason = kwargs.get("on_stop_reason")
         if on_stop_reason is not None and stop_reason is not None:
             on_stop_reason(stop_reason)
-        return '{"verdict_signal": "clear", "confidence": "high"}'
+        return '{"verdict_signal": "adequate", "confidence": "high"}'
 
     async def _record(**fields):
         recorded.append(fields)
@@ -381,7 +449,7 @@ async def test_a_complete_consult_that_stopped_on_end_turn_is_still_credited(mon
         on_stop_reason = kwargs.get("on_stop_reason")
         if on_stop_reason is not None:
             on_stop_reason("end_turn")
-        return '{"verdict_signal": "clear", "confidence": "high"}'
+        return '{"verdict_signal": "adequate", "confidence": "high"}'
 
     monkeypatch.setattr("src.agent.tools.generate_agent_response", _complete)
 
@@ -403,7 +471,7 @@ async def test_a_consult_whose_stop_reason_never_arrives_is_credited(monkeypatch
     consulted = []
 
     async def _no_signal(**kwargs):
-        return '{"verdict_signal": "clear", "confidence": "high"}'
+        return '{"verdict_signal": "adequate", "confidence": "high"}'
 
     monkeypatch.setattr("src.agent.tools.generate_agent_response", _no_signal)
 

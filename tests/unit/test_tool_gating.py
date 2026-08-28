@@ -90,7 +90,12 @@ async def test_a_successful_consult_reports_the_domain(monkeypatch):
     from src.agent import tools as tools_mod
 
     async def _fake(**kwargs):
-        return '{"verdict_signal": "clear", "concerns": [], ' \
+        # A LIVE label. `clear` here read as a successful consult only because
+        # the tool result echoes `opinion.raw`, so the assertion below passed on
+        # the specialist's own text while `parse_opinion` had defaulted the
+        # signal — see test_consult_accounting's
+        # `test_the_live_path_refuses_a_retired_verdict_label`.
+        return '{"verdict_signal": "adequate", "concerns": [], ' \
                '"questions_to_ask": [], "confidence": "high"}'
 
     monkeypatch.setattr(tools_mod, "generate_agent_response", _fake)
@@ -102,7 +107,7 @@ async def test_a_successful_consult_reports_the_domain(monkeypatch):
         on_consult=lambda domain, signal: seen.append(domain),
     )
     assert seen == ["legal"]
-    assert "clear" in out
+    assert "adequate" in out
 
 
 async def test_a_failed_llm_call_does_not_report_a_consult(monkeypatch):
@@ -189,7 +194,7 @@ async def test_a_consult_without_context_still_runs(monkeypatch):
 
     async def _fake(**kwargs):
         seen.append(kwargs["messages"][0]["content"])
-        return '{"verdict_signal": "caution", "confidence": "moderate"}'
+        return '{"verdict_signal": "gap", "confidence": "moderate"}'
 
     monkeypatch.setattr(tools_mod, "generate_agent_response", _fake)
     out = await tools_mod.execute_tool(
@@ -200,7 +205,7 @@ async def test_a_consult_without_context_still_runs(monkeypatch):
 
     assert seen, "the consult must still reach the model"
     assert "Is the series tractable?" in seen[0]
-    assert "caution" in out
+    assert "gap" in out
     assert "missing required" not in out
 
 

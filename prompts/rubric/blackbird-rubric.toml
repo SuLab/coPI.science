@@ -32,13 +32,28 @@
 # unique keys, integer weights summing to 100, both thresholds on the 0.01 grid
 # with advance_min > conditional_min, non-empty titles/anchors/prose, optional
 # per-dimension evidence lists of non-empty strings, [red_flags] intro + items,
-# version present.
+# version present, and every [stage_bar.*] carrying a non-empty text plus a
+# `source` naming only real dimension keys, gating keys, `red_flags` or
+# `scoring_preamble`.
 
 [meta]
-version = "3.2.0"
-date = "2026-08-27"
+version = "3.3.0"
+date = "2026-08-28"
 source = "data/Blackbird_initial_priorities-criteria_v1.pdf (Blackbird's investment priorities and screening criteria, synthesized from its Project and Target Rubrics and four worked deal memoranda); consolidated to six single-scale dimensions per docs/plans/2026-08-27-rubric-v3-consolidation.md"
 changelog = """
+3.3.0 (2026-08-28): per-domain stage bars added ([stage_bar.*] below), rendered
+into the eight specialist personas through the {stage_bar} placeholder
+(src/agent/tools.py). NO weight, threshold, dimension, gating key, band
+semantic or red flag changes — this release adds one new table and nothing
+else. Every bar is a condensation of the clause its `source` names, so the
+release authors no new policy: it only moves policy the document already
+states from in front of the HUB (where render_rubric_markdown has always put
+it) to in front of the SPECIALISTS, who read their persona file raw and had
+never seen any of it. The measured cost of that gap: `legal` judged against
+"FTO secured", which this document disclaims three times, and cleared 0 of 91
+consults. Version bumped (not a patch) because the stamp on
+opportunity_assessments.rubric_version is what keeps pre-/post-change consult
+distributions separable.
 3.2.0 (2026-08-27): four ceremonial elements removed after the v3 content
 audit. (1) `weighted_score` leaves the sidecar skeleton — it existed only to
 be ignored (the model was told to leave it 0; the server computes it;
@@ -305,3 +320,66 @@ need in an indication (must have) and target class or modality that pharma and i
 are actually funding, and capable of being spun out and syndicated. Company creation is
 the endpoint; the grant is what buys the result that makes the decision possible.
 """
+
+# ---------------------------------------------------------------------------
+# Per-domain stage bars, rendered into prompts/specialists/*.md via the
+# {stage_bar} placeholder. EXTRACTED, not authored: every `text` condenses the
+# clause named in `source`, so a reviewer can check it against the original and
+# tests/unit/test_stage_bars.py can assert the source exists.
+#
+# Why this table exists at all: render_rubric_markdown() puts the rubric in
+# front of the HUB (src/agent/agent.py) and the specialists were never included
+# (src/agent/tools.py reads the persona raw). For the panel's entire history it
+# judged against standards this document explicitly disclaims — `legal` says
+# three separate times that unresolved FTO is the normal starting condition, and
+# `legal` has never cleared once in 91 consults.
+#
+# `source` names dimension keys, gating keys, `red_flags` or `scoring_preamble`;
+# parse_rubric rejects anything else, and tests/unit/test_stage_bars.py holds
+# the domain set against src/agent/specialists.py's SPECIALIST_DOMAINS. Bars
+# deliberately avoid the words `caution` and `clear` — the verdict vocabulary was
+# renamed to blocking/gap/adequate on 2026-08-28 and only `blocking` survived
+# unchanged, so a bar naming either of the other two would already be stale.
+# ---------------------------------------------------------------------------
+
+# The one global sentence every specialist carries, ahead of its own domain bar.
+# EXTRACTED, like the per-domain bars: it is `scoring.preamble`'s own first
+# sentence, verbatim. It stops there deliberately -- the rest of that preamble is
+# HUB-facing (it instructs the reader to write `rationale`, to score dimensions,
+# and it discloses the 35/65 weighting), none of which a specialist has a schema
+# slot for or should be anchored by.
+[stage_bar_global]
+source = "scoring_preamble"
+text = "Screen at the incubation grain: the bar is scientific robustness plus translational potential — never the replicated data, filed IP, or identified syndicate a later-stage deal would show."
+
+[stage_bar.scientific]
+source = "scientific_credibility, credible_science"
+text = "Adequate here is a credible, testable mechanism whose key EXISTING results can be believed — controls, replication, interpretation. Judge the evidence they have, not evidence the stage hasn't produced: animal rescue is a 5, not the bar for a 4. IP is not required at this stage."
+
+[stage_bar.chemistry]
+source = "translational_path"
+text = "Adequate here is a plausible modality and starting point with an articulable route toward a development candidate — tractability, not progress. Liabilities identified with a plan to test them early is adequate: ignorance of a risk scores low, but absence of data at this stage does not."
+
+[stage_bar.clinical]
+source = "differentiation_unmet_need"
+text = "Adequate here is a differentiated approach against an actionable, quantifiable need: a real clinical decision point with a downstream intervention, not an incremental improvement in an undemanding setting. Quantifiable, not precisely quantified — order-of-magnitude prevalence or TAM suffices, actionability over precision, so precise patient numbers are not the bar."
+
+[stage_bar.commercial]
+source = "differentiation_unmet_need, venture_potential, scoring_preamble"
+text = "Adequate here is a differentiated mechanism aimed at an actionable need, and — if the science works — a company or license a VC or pharma would plausibly want. A named syndicate is not the bar at this stage."
+
+[stage_bar.legal]
+source = "venture_potential, translational_potential, red_flags"
+text = "Adequate here is a clean PATH to ownable IP: a disclosure filed or filable, no known encumbrance or hostile co-ownership, and a plausible university license path. 'FTO secured' is NOT the bar — freedom to operate is diligence, not a gate, and unresolved FTO on unpublished academic science is the normal starting condition, not a disqualifier. Reserve blocking for IP genuinely unresolvable: key rights co-owned by an uncooperative third party with no plausible license path."
+
+[stage_bar.technologic]
+source = "venture_potential"
+text = "Adequate here is a claim whose reach is stated honestly. A reusable platform generating a pipeline scores above one shot on goal, but a SINGLE ASSET IS THE NORMAL SHAPE of a de-risking grant — mark it down only where a clean result would still leave nothing worth building. Absence of independent validation at this stage is expected and scores nothing down on its own."
+
+[stage_bar.talent]
+source = "team_executability"
+text = "Adequate here is PI credibility and lab capability to execute the de-risking plan in 12–24 months, with complementary expertise IDENTIFIED, not necessarily hired."
+
+[stage_bar.budget]
+source = "fundable_experiment"
+text = "Adequate here is a scope where a $100K–$1M grant over 12–24 months could buy a DECISIVE de-risking result. Below the bar is no articulable experiment, scope far beyond an incubation grant, or key data unreplicable for under a $200K budget and a reasonable timeline."

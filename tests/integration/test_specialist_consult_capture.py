@@ -308,7 +308,7 @@ async def test_a_prose_opinion_still_records_with_the_degraded_defaults(
     """Prose IS an opinion (``has_usable_content``/``parse_opinion``), so it
     counts for the floor and must therefore also produce a row. What it cannot
     supply — a signal, a confidence — arrives already degraded from
-    ``parse_opinion`` ("caution"/"low", never "clear"), and the row stores that
+    ``parse_opinion`` ("gap"/"low", never "adequate"), and the row stores that
     rather than inventing anything."""
     turn = await _drive_a_consult(
         engine, monkeypatch,
@@ -317,7 +317,7 @@ async def test_a_prose_opinion_still_records_with_the_degraded_defaults(
     try:
         rows = await _consult_rows(turn.factory, turn.run_id)
         assert len(rows) == 1
-        assert rows[0].verdict_signal == "caution"
+        assert rows[0].verdict_signal == "gap"
         assert rows[0].confidence == "low"
         assert rows[0].concerns == []
         assert rows[0].raw_opinion.startswith("The mouse line")

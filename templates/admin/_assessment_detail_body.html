@@ -21,8 +21,14 @@
    here. #}
 
 {% set a = assessment %}
+{# FIVE values. The live vocabulary is `blocking`/`gap`/`adequate` (2026-08-28);
+   `caution`/`clear` are what every consult stored before that date holds, and
+   no row was rewritten — so both vocabularies render here, historical ones in
+   the colour they always had. #}
 {% set signal_chip = {
     'blocking': 'bg-red-100 text-red-700',
+    'gap': 'bg-amber-100 text-amber-700',
+    'adequate': 'bg-green-100 text-green-700',
     'caution': 'bg-amber-100 text-amber-700',
     'clear': 'bg-green-100 text-green-700',
 } %}
@@ -50,11 +56,16 @@
                     <span class="px-1.5 rounded bg-indigo-100 text-indigo-700">panel consult</span>
                     {% if chip.opinion %}
                         <span class="px-2 py-0.5 rounded-full font-medium {{ signal_chip.get(chip.opinion.verdict_signal, 'bg-gray-100 text-gray-600') }}">{{ chip.opinion.verdict_signal }}</span>
+                        {# Same reason as the recorded cards below: the label
+                           alone overstates itself, and this is the COLLAPSED
+                           view — the concerns list is inside the details. #}
+                        <span class="panel-concern-count text-gray-400">{{ chip.opinion.concern_count }} concern{{ '' if chip.opinion.concern_count == 1 else 's' }}</span>
                         {% if chip.opinion.confidence %}<span class="text-gray-400">confidence: {{ chip.opinion.confidence }}</span>{% endif %}
                     {% else %}
                         {# No signal line in the result: the consult FAILED
                            (unknown domain, missing persona, API error, empty
-                           reply). It must never read as a clear. #}
+                           reply). It must never read as an opinion, and least
+                           of all as an `adequate`. #}
                         <span class="px-2 py-0.5 rounded-full bg-gray-200 text-gray-600">no opinion returned</span>
                     {% endif %}
                 {% endif %}
@@ -236,7 +247,7 @@
             {% if entry.reply_truncated %}
             {# The specialist's reply stopped before it finished, so
                `verdict_signal` is src/agent/specialists.py's parse default
-               (`caution`) and NOT something anyone said. Printing it here would
+               (`gap`) and NOT something anyone said. Printing it here would
                make a cut-off consult read as an opinion in the one row of chips
                that answers "was this verdict's panel real". Same neutral chip
                the tool-chip macro above uses for a consult that returned
@@ -429,7 +440,25 @@
                         <span class="px-2 py-0.5 rounded-full font-medium {{ signal_chip.get(c.verdict_signal, 'bg-gray-100 text-gray-600') }}">
                             {{ c.verdict_signal }}
                         </span>
+                        {# Beside the label, not only as the list below:
+                           `adequate` (2026-08-28) means "meets the bar for THIS
+                           STAGE", not "no concerns". Every `clear` opinion ever
+                           emitted carried 4-9 concerns, one of them "Succession
+                           risk is high as described" under a ✅. #}
+                        <span class="panel-concern-count text-gray-400"
+                              title="Concerns filed by this specialist. A signal is not a concern count: `adequate` means the record meets the bar for this stage, not that nothing was raised.">
+                            {{ c.concern_count }} concern{{ '' if c.concern_count == 1 else 's' }}
+                        </span>
                         {% if c.confidence %}<span class="text-gray-400">confidence: {{ c.confidence }}</span>{% endif %}
+                        {% if c.read_state and c.read_state != 'parsed' %}
+                        {# Written from 0038 on; NULL means "never recorded",
+                           which is why a missing value shows nothing rather
+                           than claiming a clean read. #}
+                        <span class="panel-read-state text-gray-500"
+                              title="How this reply stood relative to being READ (specialist_consults.read_state). Anything but `parsed` means the signal is a default, not something the specialist said.">
+                            read: {{ c.read_state }}
+                        </span>
+                        {% endif %}
                         {% endif %}
                     </div>
                     {% if c.reply_truncated %}

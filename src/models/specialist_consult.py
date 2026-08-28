@@ -18,9 +18,18 @@ be indistinguishable from a complete one once written down, so it satisfied the
 floor again on every restart; see the column's own comment below.
 
 ``verdict_signal``/``confidence`` are the parsed fields of
-``src/agent/specialists.py::parse_opinion`` (``blocking``/``caution``/``clear``
+``src/agent/specialists.py::parse_opinion`` (``blocking``/``gap``/``adequate``
 and ``high``/``moderate``/``low``, already defaulted upstream on an unreadable
 reply — no DB enum, same reasoning as ``OpportunityAssessment.band``).
+
+**This column holds TWO vocabularies and always will.** The 2026-08-28 rename
+(``caution`` -> ``gap``, ``clear`` -> ``adequate``; ``blocking`` unchanged)
+rewrote no rows, deliberately: a stored signal is what a specialist said under
+the definitions it was shown, and restating 1,192 of them under definitions
+they never saw would be a fabrication, not a migration. So expect
+``caution``/``clear`` on every row written before that date and never after it —
+``VERDICT_SIGNALS`` is the live set, ``HISTORICAL_VERDICT_SIGNALS`` the retired
+one, and every read path renders both.
 ``raw_opinion`` keeps the reply exactly as the specialist wrote it, so parsing
 changes never lose the original.
 """
@@ -101,8 +110,12 @@ class SpecialistConsult(Base):
     read_state: Mapped[str | None] = mapped_column(String(10), nullable=True)
     # The specialist contract's positive-evidence field: what the record DOES
     # establish in this domain. `none_as_null=True` for the same reason
-    # `concerns` above has it — see migration 0031. Written starting with a
-    # later task (0038 only adds the column); NULL on every row until then.
+    # `concerns` above has it — see migration 0031. Written on every consult
+    # since the 2026-08-28 persona-contract change (0038 only added the
+    # column, and rows written before the contract change are NULL). NULL is
+    # "never asked"; `[]` is "asked, nothing came back" and covers both "named
+    # no positives" and "ignored the key", since `_str_tuple` cannot tell a
+    # missing key from an empty list. Only a non-empty list carries evidence.
     established: Mapped[list | None] = mapped_column(
         JSONB(none_as_null=True), nullable=True
     )

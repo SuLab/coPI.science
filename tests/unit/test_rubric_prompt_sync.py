@@ -21,6 +21,13 @@ still restate parts of it and can therefore drift out of sync with it silently:
 These tests are the drift alarm for all three, plus the wiring itself: that
 agent-system.md carries the placeholder rather than a stale copy of the table,
 and that composing the hub's system prompt actually yields the rendered rubric.
+
+Since rubric 3.3.0 the eight specialist personas are on the same wiring —
+``{stage_bar}``, filled by ``render_stage_bar_markdown`` in
+``src/agent/tools.py`` — so a persona that loses the placeholder is a fourth way
+to drift out of the document, and is checked here too. What each bar SAYS, and
+that its ``source`` still names something the document contains, is
+tests/unit/test_stage_bars.py.
 """
 import json
 import re
@@ -29,7 +36,7 @@ from pathlib import Path
 import pytest
 
 from src.agent.agent import Agent
-from src.agent.specialists import SPECIALIST_DOMAINS
+from src.agent.specialists import SPECIALIST_DOMAINS, persona_path
 from src.services.blackbird_rubric import (
     BANDING,
     RUBRIC_WEIGHTS,
@@ -144,6 +151,14 @@ def test_specialist_maps_to_a_real_rubric_dimension(domain):
             f"specialists.py maps {domain!r} to dimension {mapped!r}, which is not in "
             "prompts/rubric/blackbird-rubric.toml"
         )
+
+
+@pytest.mark.parametrize("domain", sorted(SPECIALIST_DOMAINS))
+def test_every_persona_carries_the_stage_bar_placeholder(domain):
+    """A persona without the placeholder silently keeps its bar-less behaviour —
+    which is the defect this whole change exists to fix, reintroduced by a
+    forgotten file."""
+    assert "{stage_bar}" in persona_path(domain).read_text(encoding="utf-8")
 
 
 def test_document_specialist_fields_name_real_specialist_domains():

@@ -80,8 +80,16 @@
                 <td class="px-4 py-3 text-sm">
                     #{{ t.channel_name }}
                     {% if panel %}
-                    {% set panel_glyph = {'blocking': '&#9940;', 'caution': '&#9888;', 'clear': '&#10003;'} %}
-                    {% set panel_color = {'blocking': 'text-red-600', 'caution': 'text-amber-600', 'clear': 'text-green-600'} %}
+                    {# FIVE values. `blocking`/`gap`/`adequate` are the live
+                       vocabulary (2026-08-28); `caution`/`clear` are what every
+                       row written before it holds, rendered with the glyph and
+                       colour they always had, because a stored signal is what
+                       that specialist said under the definitions it was shown.
+                       `adequate` takes ☑ rather than `clear`'s ✓ for the same
+                       reason the Slack note does: it means "meets the bar for
+                       THIS STAGE", not "no concerns". #}
+                    {% set panel_glyph = {'blocking': '&#9940;', 'gap': '&#9888;', 'adequate': '&#9745;', 'caution': '&#9888;', 'clear': '&#10003;'} %}
+                    {% set panel_color = {'blocking': 'text-red-600', 'gap': 'text-amber-600', 'adequate': 'text-green-600', 'caution': 'text-amber-600', 'clear': 'text-green-600'} %}
                     <div class="thread-panel text-xs text-gray-500 mt-0.5 whitespace-nowrap"
                          title="{{ panel | length }} specialist consult{{ '' if panel | length == 1 else 's' }} recorded for this thread">
                         panel:
@@ -89,7 +97,7 @@
                         {%- if entry.reply_truncated %}
                         {# A cut-off reply has no signal — `verdict_signal` is
                            src/agent/specialists.py's parse default — so it must
-                           not borrow the amber caution glyph. Its own glyph and
+                           not borrow the amber `gap` glyph. Its own glyph and
                            its own colour, so a row of domains never overstates
                            what the panel said. #}
                         <span class="panel-cut-off text-gray-400"
@@ -154,8 +162,12 @@
                        split). Signal colours match that page's cards, so a
                        blocking specialist looks the same wherever it appears. #}
                     {% if panel %}
+                    {# Live three first, then the two retired 2026-08-28. A
+                       pre-rename row keeps the colour it always had. #}
                     {% set signal_chip = {
                         'blocking': 'bg-red-100 text-red-700',
+                        'gap': 'bg-amber-100 text-amber-700',
+                        'adequate': 'bg-green-100 text-green-700',
                         'caution': 'bg-amber-100 text-amber-700',
                         'clear': 'bg-green-100 text-green-700',
                     } %}
@@ -172,7 +184,7 @@
                                    src/agent/specialists.py's parse defaults on
                                    a reply that never finished, and rendering
                                    them makes a cut-off consult indistinguishable
-                                   from a real `caution`. The assessment detail
+                                   from a real `gap`. The assessment detail
                                    page's cards say the same thing the same way. #}
                                 <span class="panel-signal panel-cut-off px-2 py-0.5 rounded-full text-xs font-medium bg-gray-200 text-gray-600">
                                     reply cut off
@@ -182,8 +194,28 @@
                                     {{ signal_chip.get(c.verdict_signal, 'bg-gray-100 text-gray-600') }}">
                                     {{ c.verdict_signal }}
                                 </span>
+                                {# The concern count beside the label, not only
+                                   as the list below. `adequate` (2026-08-28)
+                                   means "meets the bar for THIS STAGE" and NOT
+                                   "no concerns" — every `clear` opinion ever
+                                   emitted carried 4-9 of them — so the label
+                                   read alone overstates itself. #}
+                                <span class="panel-concern-count text-xs text-gray-400"
+                                      title="Concerns filed by this specialist. A signal is not a concern count: `adequate` means the record meets the bar for this stage, not that nothing was raised.">
+                                    {{ c.concern_count }} concern{{ '' if c.concern_count == 1 else 's' }}
+                                </span>
                                 {% if c.confidence %}
                                 <span class="text-xs text-gray-400">confidence: {{ c.confidence }}</span>
+                                {% endif %}
+                                {% if c.read_state and c.read_state != 'parsed' %}
+                                {# `read_state` is recorded from 0038 on; NULL
+                                   means "never recorded", which is why a
+                                   missing value shows nothing rather than
+                                   claiming a clean read. #}
+                                <span class="panel-read-state text-xs text-gray-500"
+                                      title="How this reply stood relative to being READ (specialist_consults.read_state). Anything but `parsed` means the signal is a default, not something the specialist said.">
+                                    read: {{ c.read_state }}
+                                </span>
                                 {% endif %}
                                 {% endif %}
                                 {% if c.created_at %}

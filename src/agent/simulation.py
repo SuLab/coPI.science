@@ -1214,6 +1214,14 @@ class SimulationEngine:
         # refuses the row too). So a report-vs-table mismatch like ee419dd3's
         # 228-vs-229 is by design, not a lost count — the mix message says
         # "counted consults" for exactly this reason.
+        #
+        # A DEFAULTED consult is tallied, but under
+        # `specialists.DEFAULTED_TALLY_LABEL` rather than under the label it
+        # defaulted to, and both functions below exclude that bucket from the
+        # mix and report it separately. Otherwise a parse failure is
+        # indistinguishable from a specialist saying `gap`, which let the
+        # flatness alarm accuse a persona for a broken output shape and go quiet
+        # for a domain that had stopped being readable.
         mix = signal_mix_report(self._consult_signal_counts)
         if mix:
             logger.info("%s", mix)
@@ -4383,14 +4391,17 @@ class SimulationEngine:
                     raw_opinion=raw_opinion,
                     truncated=truncated,
                     read_state=read_state,
-                    # `[]` and NULL are different answers here, exactly as they
-                    # are for `concerns` above: an empty list is "the
-                    # specialist was asked and named nothing", NULL is "never
-                    # asked". Collapsing `[]` to NULL was harmless while no
-                    # call site produced the field, but `tools.py` now always
-                    # sends a real list, so collapsing it would relabel every
-                    # zero-positive opinion as unasked — the one reading the
-                    # column's own documentation rules out.
+                    # `[]` and NULL are different answers here, exactly as
+                    # they are for `concerns` above: NULL is "never asked",
+                    # `[]` is "asked, nothing came back". Collapsing `[]` to
+                    # NULL was harmless while no call site produced the field,
+                    # but `tools.py` now always sends a real list, so
+                    # collapsing it would relabel every zero-positive opinion
+                    # as unasked. `[]` is NOT "named nothing" specifically:
+                    # `_str_tuple` yields the empty tuple for a missing key
+                    # too, so it also covers a persona that ignored the key.
+                    # That ambiguity is accepted; conflating it with NULL is
+                    # not.
                     established=None if established is None else list(established),
                     rubric_version=RUBRIC_VERSION,
                     rubric_content_hash=RUBRIC_CONTENT_HASH,
@@ -4448,10 +4459,10 @@ class SimulationEngine:
         ``**_withheld``, and for the opposite reason to the rest: they are not
         withheld from the note, they CANCEL it. ``truncated`` was the original
         special case — a consult the API cut off mid-sentence parsed to
-        nothing, so ``verdict_signal`` is the schema's DEFAULT ``caution`` and
+        nothing, so ``verdict_signal`` is the schema's DEFAULT ``gap`` and
         no specialist ever said it — and this note goes into the PI's own
         interview thread, which every lab in the workspace can read. Publishing
-        a parse failure as `` caution`` states a panel opinion that does not
+        a parse failure as ``gap`` states a panel opinion that does not
         exist, and ``src/agent/tools.py`` has already refused to credit that
         domain to the floor for exactly this reason; the note must agree with
         the floor. It was absorbed silently by ``**_withheld`` until 2026-08-22,
@@ -4461,7 +4472,7 @@ class SimulationEngine:
 
         ``read_state`` (``src/agent/specialists.py::read_state_for``)
         generalises that same reasoning to a reply that arrived COMPLETE and
-        simply failed to parse — not truncated, but just as unread: ``caution``
+        simply failed to parse — not truncated, but just as unread: ``gap``
         there is also a parse default, not something a specialist said. Any
         ``read_state`` other than ``"parsed"`` cancels the note the same way
         ``truncated`` does. ``read_state=None`` is treated as "post it" rather
@@ -4497,7 +4508,7 @@ class SimulationEngine:
         # the original special case and its reasoning was right — "no
         # specialist ever said it" — but it covered only an API cut-off. A
         # reply that arrived COMPLETE and failed to parse is not truncated,
-        # and posted a workspace-visible "caution" for a verdict `parse_opinion`
+        # and posted a workspace-visible "gap" for a verdict `parse_opinion`
         # had defaulted. `read_state` is the general predicate; `truncated` is
         # kept beside it so a caller that supplies only one still fails closed.
         if truncated or (read_state is not None and read_state != "parsed"):
@@ -4796,6 +4807,14 @@ class SimulationEngine:
         the floor consider this domain covered", which is per-interview; the
         tallies answer "what is this panel's signal mix" (run-level) and "is
         any one domain stuck on one label" (per-domain).
+
+        `signal` is whatever the caller passes, and `src/agent/tools.py` passes
+        `specialists.DEFAULTED_TALLY_LABEL` rather than a verdict label for a
+        consult whose signal could not be READ — so the tallies carry the read
+        failures as their own bucket and `signal_mix_report` /
+        `domain_flatness_warning` exclude them from the mix they judge. The
+        floor is unaffected: `_record_consult` runs first and takes only the
+        domain.
         """
         self._record_consult(pi_agent_id, domain, thread_id)
         self._consult_signal_counts[signal] = (

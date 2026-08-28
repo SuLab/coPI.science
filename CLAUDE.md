@@ -794,14 +794,32 @@ stay comparable.
 > (`$DC --profile agent build agent`). Production is stamped `0037`, so this
 > box applies to the next deploy, not to some hypothetical one.
 >
-> **`established` is knowingly unwritten.** The column exists from this
-> migration on, but nothing populates it yet — that is Phase B of
-> `docs/specs/2026-08-28-specialist-verdict-vocabulary-design.md` (§3.2, §8
-> step 5/6), not this deploy. A NULL there means "never asked", not "the
-> specialist established nothing" — do not read it as the latter on any row,
-> including rows written well after this migration. `read_state`, by contrast,
-> IS written on every new consult from this deploy forward
-> (`read_state_for`, `src/agent/specialists.py`).
+> **`established` IS written, as of the 2026-08-28 persona-contract change.**
+> This box previously said it was "knowingly unwritten"; that stopped being
+> true when all eight personas gained an `established` key and `tools.py`
+> began forwarding it on every consult. Read the three states carefully,
+> because two of them are easy to conflate:
+>
+> * **NULL** — never asked. The row predates the contract change, or the
+>   consult was never recorded. Never read it as "the specialist established
+>   nothing".
+> * **`[]`** — asked, and nothing came back. This is genuinely ambiguous and
+>   deliberately not disambiguated: it covers both "the specialist named no
+>   positives" and "the specialist ignored the key", because
+>   `_str_tuple(data.get("established"))` yields the empty tuple for a missing
+>   key and for an empty list alike. Do not report `[]` as a specialist finding.
+> * **a non-empty list** — the only case that carries evidence.
+>
+> `read_state` is written on every new consult too (`read_state_for`,
+> `src/agent/specialists.py`).
+>
+> ⚠️ **After editing anything under `prompts/` or the `_PI_LAB`/`_SCOUT_HUB`
+> guidance, run `.venv-test/bin/python scripts/sync_prompt_set_docs.py`.**
+> `docs/specs/2026-08-07-{pi,hub}-bot-prompts.md` embed every prompt file
+> verbatim and `tests/unit/test_doc_prompt_sync.py` asserts it, so skipping the
+> sync turns one prompt edit into a fistful of CI failures on the next full run
+> rather than an error at the point of the edit. `--check` reports drift without
+> writing.
 
 **One interview yields exactly one assessment, and the row you end up with comes
 from the LAST verdict-bearing reply.** **A sidecar is now trusted on its own**
@@ -971,6 +989,20 @@ and since v3.0.0 / 2026-08-27 the second key is `credible_science`, not
   or was backfilled, or was hand-built by a test, and no claim is available for it.
   `tests/unit/test_panel_state.py::test_the_read_path_never_re_derives_the_floor_s_decision`
   fails if anyone puts `panel_is_owed` back in front of the column test.
+- **The specialist vocabulary is `blocking` / `gap` / `adequate`** (renamed from
+  `blocking` / `caution` / `clear` on 2026-08-28; only `blocking` survived). The write set
+  and the read set are deliberately DIFFERENT sizes, and that asymmetry is load-bearing:
+  `VERDICT_SIGNALS` (the three live labels) is what a persona may offer and what the
+  calibration ladder admits, while `_READABLE_SIGNALS = VERDICT_SIGNALS |
+  HISTORICAL_VERDICT_SIGNALS` is what `parse_opinion` will READ. Two paths re-parse
+  *stored* reply text — `/admin/activity/{run}/llm-calls` and the retro assessment-detail
+  parse — so reading against the live three alone would re-render all ~1,192 pre-rename
+  consults as a defaulted `gap` and log a WARNING per row per page view. This is not
+  "legacy-verdict compatibility" in the sense the rubric section rules out: nothing writes
+  a retired label, no persona offers one, and no verdict is carried over — only historical
+  text stays readable. The admin templates keep colour/glyph branches for the retired pair
+  for the same reason, and `adequate` takes ☑ where `clear` took ✓ so the two are
+  distinguishable on sight.
 - **Panel notes and consult truncation:** Panel notes clip the hub's question
   at `PANEL_NOTE_QUESTION_CHARS` (src/agent/specialists.py, recalibrated 850
   on 2026-08-26), and `clip_rate_warning` logs once per run when >10% of >=20

@@ -154,7 +154,15 @@ def visible_body(response_text: str) -> str:
 # FAILED consult is told apart from an opinion: an unknown domain, a missing
 # persona file, an API error and an empty reply all return prose with no signal
 # line, and none of them may be shown as if a specialist had cleared anything.
-_CONSULT_SIGNAL_RE = re.compile(r"signal:\s*(blocking|caution|clear)\b", re.IGNORECASE)
+# Five values, not three: `gap`/`adequate` are the live vocabulary (2026-08-28)
+# and `caution`/`clear` are what the pre-rename corpus this regex exists to read
+# actually says. Dropping the historical pair would make every interview that
+# predates `specialist_consults` — the only ones this parse is used for — report
+# its consults as FAILED, which is precisely the "shown as if a specialist had
+# cleared anything" error inverted.
+_CONSULT_SIGNAL_RE = re.compile(
+    r"signal:\s*(blocking|gap|adequate|caution|clear)\b", re.IGNORECASE
+)
 
 CONSULT_TOOL_NAME = "consult_specialist"
 
@@ -225,6 +233,17 @@ def consult_opinion_from_result(result: str, *, domain: str) -> dict[str, Any] |
     None means the call did not produce an opinion (refused domain, missing
     persona, API error, empty reply) — a state that must never render as a
     verdict signal.
+
+    ``concern_count`` rides alongside ``concerns`` because the chip renders the
+    signal and not the list: after the 2026-08-28 rename ``adequate`` means
+    "meets the bar for THIS STAGE", not "no concerns", and a bare label is
+    exactly how its predecessor came to read as a clean bill of health.
+
+    A RETRO reader, and one of only two that pass ``allow_historical=True``:
+    ``result`` is a stored tool log, so a consult logged before the rename says
+    ``caution``/``clear`` and must render as what it said. The live consult path
+    shares ``parse_opinion`` and must NOT opt in — see ``_READABLE_SIGNALS`` in
+    src/agent/specialists.py.
     """
     text = result or ""
     match = _CONSULT_SIGNAL_RE.search(text)
@@ -238,13 +257,15 @@ def consult_opinion_from_result(result: str, *, domain: str) -> dict[str, Any] |
             "verdict_signal": match.group(1).lower(),
             "confidence": None,
             "concerns": [],
+            "concern_count": 0,
             "questions_to_ask": [],
         }
-    opinion = parse_opinion(text[brace:], domain=domain)
+    opinion = parse_opinion(text[brace:], domain=domain, allow_historical=True)
     return {
         "verdict_signal": opinion.verdict_signal,
         "confidence": opinion.confidence,
         "concerns": list(opinion.concerns),
+        "concern_count": len(opinion.concerns),
         "questions_to_ask": list(opinion.questions_to_ask),
     }
 
@@ -739,6 +760,12 @@ async def _load_consults(
             "confidence": row.confidence,
             "question": row.question,
             "concerns": list(row.concerns or []),
+            # Alongside the list, because the chip row shows the signal only.
+            # `adequate` (2026-08-28) means "meets the bar for THIS STAGE" and
+            # NOT "no concerns" — every `clear` opinion ever emitted carried 4-9
+            # of them, one of which read "Succession risk is high as described"
+            # under a ✅. The count is what keeps the label honest at a glance.
+            "concern_count": len(list(row.concerns or [])),
             "questions_to_ask": list(row.questions_to_ask or []),
             # ADMIN ONLY (plan decision 2). Managers get the signal and the
             # structured lists; the specialist's verbatim text is drill-down,
@@ -748,8 +775,8 @@ async def _load_consults(
             "raw_opinion": row.raw_opinion if admin_view else None,
             # Was this reply CUT OFF (0036's `specialist_consults.truncated`)?
             # Carried, not dropped, because `verdict_signal` above is a PARSE
-            # DEFAULT on a truncated reply — `caution`, from
-            # src/agent/specialists.py — and a chip that says `caution` is
+            # DEFAULT on a truncated reply — `gap`, from
+            # src/agent/specialists.py — and a chip that says `gap` is
             # indistinguishable from one a specialist actually gave. The
             # specialist floor, the Slack panel note and the durable row all
             # already know; this page was the last reader that did not, and it
@@ -766,6 +793,13 @@ async def _load_consults(
             # "written before 0036", read as not-truncated, because
             # retroactively invalidating history on no evidence is worse.
             "reply_truncated": bool(row.truncated),
+            # 0038's `read_state`, carried verbatim INCLUDING None. None means
+            # "written before 0038" — a third state, not "parsed" — so the
+            # decision about what to show for it stays in the template rather
+            # than being guessed at here. Same key and same rule as
+            # `thread_panel.py`'s card dicts, so the two card renderers still
+            # read alike.
+            "read_state": row.read_state,
             "created_at": row.created_at,
         }
         for row in rows

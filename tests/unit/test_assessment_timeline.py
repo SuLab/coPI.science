@@ -237,6 +237,10 @@ def test_consult_opinion_falls_back_to_the_prefix_signal_for_a_prose_reply():
         "verdict_signal": "blocking",
         "confidence": None,
         "concerns": [],
+        # Explicitly 0, not absent: the chip renders the count beside the
+        # signal, and a missing key would render as blank rather than as the
+        # honest "this prose reply filed no concerns we could read".
+        "concern_count": 0,
         "questions_to_ask": [],
     }
 

@@ -530,7 +530,12 @@ async def test_stop_reports_the_signal_mix_at_fifty_or_more_consults(caplog):
         await eng.stop()
 
     assert _MIX_REPORT_MARKER in caplog.text
-    assert "50" in caplog.text, "the operator needs the denominator"
+    # The whole phrase, not a bare "50": any incidental 50 anywhere in the
+    # captured log satisfied that, including a timestamp or a token count.
+    # Same shape as `test_the_report_names_its_denominator_as_counted_consults`.
+    assert "signal mix over 50 counted consults" in caplog.text, (
+        "the operator needs the denominator, on the basis the report counts"
+    )
 
 
 @pytest.mark.asyncio

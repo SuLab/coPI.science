@@ -22,13 +22,20 @@ What is actually worth pinning is that the CODE adds no sibling state of its
 own on top of whatever the caller passed — no other specialist's verdict, no
 computed score, no run-level panel tally. So this drives the consult with
 CLEAN inputs (a question and context containing no verdict words and no
-numbers) and pins the exact SHAPE of what is sent: the persona file, byte for
-byte, as `system`, and exactly one user message whose content is exactly the
-two labelled sections built from the caller's own question and context —
-nothing else present that could carry sibling state.
+numbers) and pins the exact SHAPE of what is sent: the persona file as
+`system` with exactly one substitution applied to it — `{stage_bar}`, filled
+from the rubric document (rubric 3.3.0) — and exactly one user message whose
+content is exactly the two labelled sections built from the caller's own
+question and context — nothing else present that could carry sibling state.
+
+The stage-bar substitution is not a loosening of the invariant: the expected
+`system` string is still compared for exact equality, just built the way
+`tools.py` builds it, and the bar is a function of the DOMAIN alone — the same
+text on every `legal` consult in every run and every thread, naming no other
+specialist's verdict and no score for the opportunity under review.
 
 Note what this test does NOT check: the persona files themselves legitimately
-contain the words "verdict_signal", "blocking", "caution" and "clear" — as
+contain the words "verdict_signal", "blocking", "gap" and "adequate" — as
 the ANSWER-FORMAT instructions telling the specialist how to shape its OWN
 reply (see e.g. prompts/specialists/legal.md's "Answer format" section). That
 is not sibling state, so this test does not scan the persona for those words;
@@ -48,6 +55,7 @@ import pytest
 
 from src.agent.specialists import VERDICT_SIGNALS, persona_path
 from src.agent.tools import _execute_consult_specialist
+from src.services.blackbird_rubric import render_stage_bar_markdown
 from tests.fakes import FakeAnthropic
 
 _SCORE = re.compile(r"\b\d\.\d{1,2}\b")
@@ -56,7 +64,7 @@ _SCORE = re.compile(r"\b\d\.\d{1,2}\b")
 @pytest.mark.asyncio
 async def test_the_prompt_sent_to_a_specialist_carries_no_sibling_state(monkeypatch):
     fake = FakeAnthropic([
-        '{"verdict_signal": "caution", "concerns": [], '
+        '{"verdict_signal": "gap", "concerns": [], '
         '"questions_to_ask": [], "confidence": "low"}'
     ])
     monkeypatch.setattr("src.services.llm.get_anthropic_client", lambda: fake)
@@ -88,11 +96,29 @@ async def test_the_prompt_sent_to_a_specialist_carries_no_sibling_state(monkeypa
     else:
         system_text = system_sent
 
-    # The persona must reach the model byte-for-byte, unmodified — proof
-    # nothing (a sibling verdict, a running tally) was appended to it.
+    # The persona must reach the model with EXACTLY one substitution applied —
+    # `{stage_bar}` filled from the rubric document (rubric 3.3.0; see
+    # render_stage_bar_markdown and tests/unit/test_stage_bars.py) — and nothing
+    # else. Still an exact-equality check, so a sibling verdict or a running
+    # tally appended anywhere in the persona still fails it; what changed is
+    # that the expected string is now built the way tools.py builds it.
+    #
+    # A stage bar is not sibling state on any of the three axes this file cares
+    # about: it is a function of the DOMAIN alone (identical on every consult of
+    # legal, in any run, in any thread), it names no other specialist's verdict,
+    # and it carries no computed score for the opportunity under review.
     persona = persona_path("legal").read_text(encoding="utf-8")
-    assert system_text == persona, (
-        "the code must send the persona unmodified — no sibling state appended"
+    expected_system = persona.replace(
+        "{stage_bar}", render_stage_bar_markdown("legal")
+    )
+    assert expected_system != persona, (
+        "prompts/specialists/legal.md lost its {stage_bar} placeholder — this "
+        "assertion would then degrade to the pre-3.3.0 byte-for-byte check and "
+        "stop proving the substitution happens at all"
+    )
+    assert system_text == expected_system, (
+        "the code must send the persona with only the stage-bar substitution "
+        "applied — no sibling state appended"
     )
 
     # Exactly one message, and its content is EXACTLY the two labelled

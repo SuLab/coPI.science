@@ -36,11 +36,46 @@ logger = logging.getLogger(__name__)
 PROMPTS_DIR = Path("prompts")
 SPECIALISTS_DIR = PROMPTS_DIR / "specialists"
 
-VERDICT_SIGNALS: frozenset[str] = frozenset({"blocking", "caution", "clear"})
+#: The live vocabulary. `blocking` is unchanged across the 2026-08-28 rename —
+#: it carried all of the panel's measured information (chemistry is the most
+#: informative domain at 0.914 bits and discriminates entirely through it), so
+#: its 161 stored rows stay interpretable. `gap` and `adequate` replace
+#: `caution` and `clear`, which are retained in HISTORICAL_VERDICT_SIGNALS
+#: because 1,192 rows carry them and none was rewritten.
+VERDICT_SIGNALS: frozenset[str] = frozenset({"blocking", "gap", "adequate"})
 
-# Unknown or missing signals degrade here rather than to "clear": a specialist
-# whose answer we could not read has NOT cleared anything.
-_DEFAULT_SIGNAL = "caution"
+#: Pre-2026-08-28 values. Renderable, never emitted. `caution` was "a real
+#: weakness that changes how much weight the result carries" — no materiality
+#: threshold, so it absorbed 85.7% of all consults; `clear` was "nothing in your
+#: domain stands in the way", a universal negative over a whole domain that six
+#: of eight domains never once reached.
+HISTORICAL_VERDICT_SIGNALS: frozenset[str] = frozenset({"caution", "clear"})
+
+#: What a RETRO reader accepts — `parse_opinion(..., allow_historical=True)`
+#: and nothing else. The union exists because `parse_opinion` runs over STORED
+#: text on two read paths: `admin_llm_calls` re-parses every `consult_*`
+#: response on the LLM-calls page (src/routers/admin.py), and
+#: `assessment_detail.consult_opinion_from_result` re-parses the tool log for
+#: every interview that predates `specialist_consults`. Accepting only the live
+#: three THERE would re-render the entire pre-rename corpus as the default
+#: `gap`, log one WARNING per row while doing it, and report a stored `clear` as
+#: a shortfall no specialist ever found.
+#:
+#: It is deliberately NOT the default, and that is the load-bearing half. This
+#: set was the unconditional acceptance set for four commits, and
+#: `parse_opinion` is not only the retro reader — it is also the LIVE writer
+#: (src/agent/tools.py). So a specialist reply emitting `clear` was accepted as
+#: `parsed`, stored in `specialist_consults.verdict_signal`, tallied, and
+#: posted into the PI's own workspace-visible interview thread as `✅ clear` —
+#: a label this system no longer defines. Before the rename that same reply
+#: degraded to the conservative default and `read_state != "parsed"` cancelled
+#: the note. Widening the READ must not widen what a live reply may SAY, and
+#: only an explicit opt-in per call site keeps those two directions apart.
+_READABLE_SIGNALS: frozenset[str] = VERDICT_SIGNALS | HISTORICAL_VERDICT_SIGNALS
+
+# Unknown or missing signals degrade here rather than to "adequate": a
+# specialist whose answer we could not read has NOT met any bar.
+_DEFAULT_SIGNAL = "gap"
 _CONFIDENCES: frozenset[str] = frozenset({"high", "moderate", "low"})
 
 
@@ -162,9 +197,22 @@ class SpecialistOpinion:
 
 _PANEL_NOTE_SIGNAL_EMOJI: dict[str, str] = {
     "blocking": "⛔",
+    "gap": "⚠️",
+    # ☑️ not ✅: every `clear` opinion ever emitted carried 4-9 concerns, and
+    # a tick reads as "no concerns" to the humans watching the thread. The
+    # label means "meets the bar for THIS STAGE", which is what the text says.
+    "adequate": "☑️",
+    # Historical, still rendered for stored rows. Same glyphs the pre-rename
+    # notes carried, so an old thread reads the way it did when it was written.
     "caution": "⚠️",
     "clear": "✅",
 }
+
+#: Signals whose note text is not simply the bare label. Only `adequate` needs
+#: one: on its own the word invites the "no concerns" reading a ✅ would, and
+#: the whole point of the rename is that it means "meets the bar for THIS
+#: STAGE".
+_PANEL_NOTE_SIGNAL_LABEL: dict[str, str] = {"adequate": "adequate for stage"}
 
 # How much of the hub's question the note carries. The question is the only
 # free text in the note and is model-written, so it is clipped — long enough to
@@ -198,10 +246,14 @@ def format_panel_note(*, domain: str, verdict_signal: str, question: str) -> str
     An unrecognised signal renders as the bare word with no emoji rather than
     being mapped to something reassuring — the same rule
     ``parse_opinion``'s ``_DEFAULT_SIGNAL`` follows, for the same reason: a
-    signal we could not read has not cleared anything.
+    signal we could not read has not met any bar. A HISTORICAL signal
+    (``caution``/``clear``) is not unrecognised: it renders exactly as it did
+    before the 2026-08-28 rename, because a note written for a stored row must
+    say what that row says.
     """
     emoji = _PANEL_NOTE_SIGNAL_EMOJI.get(verdict_signal, "")
-    signal = f"{emoji} {verdict_signal}".strip()
+    wording = _PANEL_NOTE_SIGNAL_LABEL.get(verdict_signal, verdict_signal)
+    signal = f"{emoji} {wording}".strip()
     return (
         f"🧪 Panel · {domain} — {signal} — "
         f'asked: "{clip_question(question)}"'
@@ -290,7 +342,9 @@ def _str_tuple(value: object) -> tuple[str, ...]:
     return tuple(str(v) for v in value if isinstance(v, str) and v.strip())
 
 
-def parse_opinion(raw: str, *, domain: str) -> SpecialistOpinion:
+def parse_opinion(
+    raw: str, *, domain: str, allow_historical: bool = False,
+) -> SpecialistOpinion:
     """Parse a specialist's reply. Never raises.
 
     Prose is a valid opinion — a specialist that answers in sentences has still
@@ -304,8 +358,9 @@ def parse_opinion(raw: str, *, domain: str) -> SpecialistOpinion:
     branch ("Claude sometimes drops the opening brace inside the fence") tests
     for the very fence ``_strip_fence`` had just removed. A fenced brace-less
     ``blocking``/``high`` opinion therefore parsed from ``raw`` and RAISED after
-    stripping, landing on the ``caution``/``low``/``()`` default below — the
-    exact laundering that branch exists to prevent, reintroduced by the call
+    stripping, landing on the ``_DEFAULT_SIGNAL``/``low``/``()`` default below
+    (``caution`` when this was measured; ``gap`` since the 2026-08-28 rename) —
+    the exact laundering that branch exists to prevent, reintroduced by the call
     that was meant to help it. ``extract_json(raw)`` dominates
     ``extract_json(_strip_fence(raw))`` across every measured shape.
     ``_strip_fence`` stays load-bearing in ``has_usable_content``, where a
@@ -320,14 +375,37 @@ def parse_opinion(raw: str, *, domain: str) -> SpecialistOpinion:
     commentary (in one case after the closing fence, which is why ``_strip_fence``
     alone could not save it); ``json_extract`` recovers all three. The other
     three were cut mid-array by a ``refusal`` and are not recoverable by anyone —
-    keeping THOSE at ``caution`` is the point, not a shortfall. See
+    keeping THOSE at ``_DEFAULT_SIGNAL`` is the point, not a shortfall. See
     docs/audits/2026-08-22-run-8b64a0e0/rca-and-corrections.md, H5.
 
-    ``_DEFAULT_SIGNAL`` stays ``caution`` and must: ``clear`` would turn a
-    specialist we could not read into an approval, which is the exact failure
-    ``has_usable_content`` exists to prevent. The remaining defence against a
-    laundered opinion is the WARNING below plus the caller's refusal to credit a
-    truncated consult (``_execute_consult_specialist``).
+    ``_DEFAULT_SIGNAL`` is the CONSERVATIVE end of the scale and must be:
+    ``adequate`` would turn a specialist we could not read into an approval,
+    which is the exact failure ``has_usable_content`` exists to prevent. (It was
+    ``caution`` until the 2026-08-28 rename and is ``gap`` after it; the
+    property is the same one.) The remaining defence against a laundered opinion
+    is the WARNING below plus the caller's refusal to credit a truncated consult
+    (``_execute_consult_specialist``).
+
+    Reads against ``VERDICT_SIGNALS`` BY DEFAULT, and only a caller that opts
+    in with ``allow_historical=True`` also accepts ``caution``/``clear``. Two
+    callers do, both of them re-parsing STORED text — ``admin_llm_calls``
+    (src/routers/admin.py) and ``consult_opinion_from_result``
+    (src/services/assessment_detail.py) — because a stored pre-rename reply
+    saying ``caution`` WAS read, and re-parsing it into the default would
+    rewrite the whole pre-2026-08-28 corpus on every page view. The LIVE consult
+    path (src/agent/tools.py) must NOT: this function is both the retro reader
+    and the live writer, so an unconditional widening let a live reply emit a
+    retired label straight into ``specialist_consults`` and into the PI's own
+    interview thread. See ``_READABLE_SIGNALS``.
+
+    ``verdict_signal`` is case- and whitespace-normalised before it is
+    validated. Without that, ``"Blocking"`` or ``" gap "`` — a reply that
+    plainly answered — was defaulted, which laundered the most severe verdict a
+    specialist can give into ``gap``, cancelled the workspace-visible panel
+    note, and excluded the cell from the calibration ladder's R/S, all on
+    nothing worse than a capital letter. The WARNING below quotes what the model
+    actually wrote, not the normalised form, so a genuinely off-contract value
+    is still recognisable in the log.
     """
     data: object = None
     try:
@@ -346,13 +424,22 @@ def parse_opinion(raw: str, *, domain: str) -> SpecialistOpinion:
             signal_was_defaulted=True,
         )
 
-    signal = data.get("verdict_signal")
-    signal_defaulted = signal not in VERDICT_SIGNALS
+    stated = data.get("verdict_signal")
+    # `None` for any non-string, deliberately, and it is the never-raises
+    # contract that requires it: the membership test below is against a
+    # frozenset, so an UNHASHABLE value — `{"verdict_signal": []}`, which a model
+    # can emit — used to raise `TypeError: unhashable type` out of a function
+    # documented never to raise, on the live consult path AND on both retro read
+    # paths (a 500 on the LLM-calls page). Every label is a string; anything else
+    # is off-contract and defaults, with `stated` still quoted in the WARNING.
+    signal = stated.strip().lower() if isinstance(stated, str) else None
+    readable = _READABLE_SIGNALS if allow_historical else VERDICT_SIGNALS
+    signal_defaulted = signal not in readable
     if signal_defaulted:
         _warn_defaulted(
             domain,
-            f"the object parsed but its verdict_signal was {signal!r}, not one of "
-            f"{sorted(VERDICT_SIGNALS)}",
+            f"the object parsed but its verdict_signal was {stated!r}, not one of "
+            f"{sorted(readable)}",
         )
         signal = _DEFAULT_SIGNAL
     confidence = data.get("confidence")
@@ -477,6 +564,37 @@ _MIN_CONSULTS_FOR_FLATNESS = 20
 #: quality-sensitive on the ladder.
 _FLATNESS_MODAL_SHARE = 0.95
 
+#: The tally key a consult whose signal was DEFAULTED rather than read is
+#: counted under, kept OUT of the verdict labels by both functions below.
+#:
+#: `on_consult` fires for a defaulted opinion (the floor's own decision, and
+#: unchanged here), so every such consult used to be tallied as a real verdict
+#: at the label it defaulted to — which is `_DEFAULT_SIGNAL`, already the modal
+#: label in production. Two failures followed from that, in opposite
+#: directions. `domain_flatness_warning` could accuse a persona of flatness
+#: when the PARSE was what failed (20 unread consults read as 100% `gap`), and
+#: it could MISS a domain that had stopped being readable altogether (15 unread
+#: `gap` plus 5 genuine `blocking` reads as healthy 75% variance). The
+#: calibration ladder already excludes unread cells from R and S for exactly
+#: this reason (`_is_real_signal`, scripts/panel_calibration_ladder.py); the
+#: production alarms that replaced the retired clear-rate floor did not.
+#:
+#: Deliberately the same word `read_state` uses, so a log line and a stored row
+#: name the condition identically. It cannot collide with a verdict label:
+#: VERDICT_SIGNALS | HISTORICAL_VERDICT_SIGNALS is
+#: blocking/gap/adequate/caution/clear.
+DEFAULTED_TALLY_LABEL = "defaulted"
+
+#: Share of a domain's consults that may go UNREAD before the alarm speaks.
+#: Not zero — an occasional off-contract reply is ordinary, and
+#: `parse_opinion`'s recovery branches exist for the recoverable ones. North of
+#: one consult in five is a broken output-shape contract rather than a cautious
+#: specialist: run 8b64a0e0, the worst measured run, defaulted 27 of 168 (16%),
+#: and that run's six laundered opinions were the motivating incident for the
+#: whole `read_state` split. Read as "measure this", exactly like the flatness
+#: share above.
+_UNREADABLE_SHARE_WARN = 0.20
+
 
 def signal_mix_report(counts: dict[str, int] | None) -> str | None:
     """The run's signal mix, or None below the sample floor.
@@ -499,6 +617,11 @@ def signal_mix_report(counts: dict[str, int] | None) -> str | None:
     "counted", because the tally excludes TRUNCATED consults: recorded durably,
     deliberately never counted (tools.py — an unread specialist has cleared
     nothing).
+
+    DEFAULTED consults are excluded from the mix and reported SEPARATELY, for
+    the same reason: `DEFAULTED_TALLY_LABEL` is a failed read, not a verdict,
+    and averaging it in states that a specialist said something it never said.
+    The denominator is therefore readable verdicts only.
     """
     if not counts:
         return None
@@ -509,18 +632,37 @@ def signal_mix_report(counts: dict[str, int] | None) -> str | None:
     # `SimulationEngine.stop()`, immediately before the log line that proves
     # every buffer reached disk.
     int_counts = {k: v for k, v in counts.items() if isinstance(v, int)}
+    unread = int_counts.pop(DEFAULTED_TALLY_LABEL, 0)
     total = sum(int_counts.values())
     if total < MIN_CONSULTS_FOR_MIX_REPORT:
+        # The pathological case the exclusion would otherwise silence: a run
+        # whose consults are mostly or entirely UNREADABLE has no mix to
+        # report, and saying nothing would read as "no consults happened".
+        if unread >= MIN_CONSULTS_FOR_MIX_REPORT:
+            return (
+                f"[specialists] {unread} consults this run had a verdict signal "
+                f"that could NOT BE READ, against {total} readable ones — there "
+                f"is no mix to report. This is a parse/output-shape failure, not "
+                f"a cautious panel: grep 'signal DEFAULTED' for the per-consult "
+                f"WARNINGs and check the personas' answer format."
+            )
         return None
     parts = ", ".join(
         f"{label} {int_counts.get(label, 0)} ({int_counts.get(label, 0) / total:.1%})"
         for label in sorted(int_counts)
     )
+    unread_note = (
+        f" {unread} further consult(s) were EXCLUDED because their signal could "
+        f"not be read ({unread / (total + unread):.1%} of {total + unread}); an "
+        f"unread specialist has met no bar and is not a verdict."
+        if unread else ""
+    )
     return (
         f"[specialists] signal mix over {total} counted consults this run: "
-        f"{parts}. A low share of the top label is EXPECTED for an early-stage "
-        f"population and is not evidence of miscalibration. Discrimination is "
-        f"measured by scripts/panel_calibration_ladder.py, not by this ratio — "
+        f"{parts}.{unread_note} A low share of the top label is EXPECTED for an "
+        f"early-stage population and is not evidence of miscalibration. "
+        f"Discrimination is measured by scripts/panel_calibration_ladder.py, "
+        f"not by this ratio — "
         f"see docs/audits/2026-08-27-consult-persona-calibration/."
     )
 
@@ -528,12 +670,23 @@ def signal_mix_report(counts: dict[str, int] | None) -> str | None:
 def domain_flatness_warning(
     per_domain: dict[str, dict[str, int]] | None,
 ) -> list[str]:
-    """One line per domain that returned essentially one label all run.
+    """One line per domain that returned essentially one label all run, plus
+    one per domain whose replies mostly could not be READ.
 
     A PROMPT TO MEASURE, never a verdict — worded so it cannot be read as the
     retired clear-rate alarm was. `legal` is the domain this exists to
     surface: 0 of 91 `clear` all-time and unmoved across every tier of the
     ladder.
+
+    The two lines answer different questions and neither can stand in for the
+    other, which is why DEFAULTED consults are excluded from the flatness
+    arithmetic instead of counted at the label they defaulted to. Flatness is a
+    claim about a PERSONA ("it says the same thing whatever it is shown");
+    unreadability is a claim about the output-shape CONTRACT ("we cannot tell
+    what it said"). Counting the second as the first is how the alarm came to
+    accuse a persona for a parse failure — and, in the mixed case, how it went
+    quiet for a domain that had stopped being readable at all. See
+    `DEFAULTED_TALLY_LABEL`.
     """
     out: list[str] = []
     for domain in sorted(per_domain or {}):
@@ -543,34 +696,75 @@ def domain_flatness_warning(
         # both ran over the UNFILTERED dict, so a non-int value would have
         # raised there instead — again inside `SimulationEngine.stop()`.
         int_counts = {k: v for k, v in counts.items() if isinstance(v, int)}
+        unread = int_counts.pop(DEFAULTED_TALLY_LABEL, 0)
         total = sum(int_counts.values())
+        attempts = total + unread
+        if (
+            attempts >= _MIN_CONSULTS_FOR_FLATNESS
+            and unread / attempts > _UNREADABLE_SHARE_WARN
+        ):
+            out.append(
+                f"[specialists] {domain} had {unread} of {attempts} consults "
+                f"({unread / attempts:.1%}) whose verdict signal could NOT BE "
+                f"READ, above the {_UNREADABLE_SHARE_WARN:.0%} ceiling. That is "
+                f"the output-shape contract failing, not a cautious specialist "
+                f"— check the persona's answer format against parse_opinion "
+                f"before reading anything into this domain's mix."
+            )
         if total < _MIN_CONSULTS_FOR_FLATNESS:
             continue
         modal = max(int_counts.values())
         if modal / total < _FLATNESS_MODAL_SHARE:
             continue
         label = max(int_counts, key=lambda k: int_counts[k])
+        unread_note = (
+            f" ({unread} further consult(s) went unread and are excluded.)"
+            if unread else ""
+        )
         out.append(
             f"[specialists] {domain} returned {label!r} on {modal} of {total} "
-            f"consults ({modal / total:.1%}). A one-sided domain may be correct "
-            f"— run scripts/panel_calibration_ladder.py and check whether it "
-            f"moves across quality tiers before changing anything."
+            f"READ consults ({modal / total:.1%}).{unread_note} A one-sided "
+            f"domain may be correct — run scripts/panel_calibration_ladder.py "
+            f"and check whether it moves across quality tiers before changing "
+            f"anything."
         )
     return out
 
 
 def _paired(observations: dict[tuple[str, str], str]) -> list[tuple[str, str]]:
     """Every domain observed under exactly two conditions, as (a, b) signal
-    pairs. A domain NOT seen under exactly two conditions — one only, or three
-    or more — is DROPPED rather than counted: it cannot be compared pairwise,
-    and counting it as agreement would inflate invariance and deflate
-    sensitivity — the two errors that would make a compressed panel look
-    discriminating."""
+    pairs.
+
+    A domain seen under ONE condition is DROPPED rather than counted: it cannot
+    be compared pairwise, and counting it as agreement would inflate invariance
+    and deflate sensitivity — the two errors that would make a compressed panel
+    look discriminating. That is asymmetric exclusion working as intended; a
+    grid with a failed cell simply has fewer pairs.
+
+    A domain seen under THREE OR MORE conditions RAISES. It used to be dropped
+    by the same branch, which meant a caller handing in all three quality tiers
+    at once got ``(0, 0)`` back from ``construct_sensitivity``, printed as
+    ``n/a`` — a total measurement loss that looks like a formatting quirk.
+    There is no correct pair to pick out of three observations, so the only
+    honest answers are "raise" or "return the pairwise matrix", and this
+    function's callers are two-condition metrics. The shipped ladder always
+    filters to exactly two conditions before calling
+    (``scripts/panel_calibration_ladder.py::report``), so this is a programming
+    error, not an input to tolerate.
+    """
     by_domain: dict[str, dict[str, str]] = {}
     for (condition, domain), signal in observations.items():
         by_domain.setdefault(domain, {})[condition] = signal
     pairs: list[tuple[str, str]] = []
-    for conditions in by_domain.values():
+    for domain, conditions in by_domain.items():
+        if len(conditions) > 2:
+            raise ValueError(
+                f"paired metrics need at most two conditions per domain; "
+                f"{domain!r} was observed under {len(conditions)} "
+                f"({sorted(conditions)}). Filter the observations to the two "
+                f"conditions being compared — silently dropping the domain "
+                f"reported the whole measurement as n/a."
+            )
         if len(conditions) != 2:
             continue
         a, b = (conditions[k] for k in sorted(conditions))
@@ -582,9 +776,24 @@ def construct_sensitivity(
     observations: dict[tuple[str, str], str],
 ) -> tuple[int, int]:
     """``(moved, comparable)`` — how often the verdict CHANGED when the input's
-    real quality changed. Higher is better. Published LLM judges average 0.319
-    (arXiv:2608.24419); this panel measured 0.594 at one quality rung on
-    2026-08-28."""
+    real quality changed. Higher is better.
+
+    On comparison figures, and why this docstring no longer asserts one: the
+    "published LLM judges average 0.319 (arXiv:2608.24419)" benchmark that used
+    to sit here is NOT like-for-like and the preprint could not be verified
+    (2026-08-28 citation audit, docs/audits/2026-08-27-consult-persona-
+    calibration/03-literature-review.md). It reports R at matched invariance
+    S >= 0.90 against this panel's measured S = 0.833, so the two numbers are
+    not comparable even if the source is sound. Compare runs of THIS harness
+    against each other instead; the committed baseline is
+    ladder-baseline-preB.json (pooled R = 0.625 over 32 paired comparisons).
+
+    Note the denominator when reading a single rung: per-rung R has at most 8
+    pairs, so it moves in steps of 0.125 and cannot express a threshold like
+    0.594. That threshold is the POOLED figure, 19/32.
+
+    Raises ``ValueError`` if any domain carries three or more conditions — see
+    ``_paired``, which used to report that case as a comparable-free ``n/a``."""
     pairs = _paired(observations)
     return sum(1 for a, b in pairs if a != b), len(pairs)
 
@@ -593,7 +802,10 @@ def invariance(observations: dict[tuple[str, str], str]) -> tuple[int, int]:
     """``(held, comparable)`` — how often the verdict was UNCHANGED under an
     edit that did not change the construct. Higher is better, but it trades
     against sensitivity: a constant judge scores 1.0 here and 0.0 there, which
-    is why both are always reported."""
+    is why both are always reported.
+
+    Raises ``ValueError`` if any domain carries three or more conditions — see
+    ``_paired``."""
     pairs = _paired(observations)
     return sum(1 for a, b in pairs if a == b), len(pairs)
 

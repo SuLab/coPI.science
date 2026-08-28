@@ -867,8 +867,22 @@ def test_every_planned_column_names_its_table():
 
 
 def test_planned_objects_matches_what_the_migration_files_actually_create():
-    """Drift guard: re-derive the object names from alembic/versions/0019..0025 and
-    compare. Hardcoding the list keeps the check readable; this keeps it honest."""
+    """Drift guard: re-derive the object names from every revision in
+    `REVISION_ORDER` and compare. Hardcoding the list keeps the check readable;
+    this keeps it honest.
+
+    It used to stop at 0025 — and `PLANNED_OBJECTS` itself then stopped at
+    0034 while the head moved to 0038, silently: four revisions' worth of new
+    columns and one index had no collision entry, and nothing failed. The
+    range is derived from `REVISION_ORDER` now, so a new revision cannot be
+    added to the chain without either listing its creations or failing here.
+
+    `REVISION_ORDER[0]` (0018) is skipped, and that is not an exemption: it is
+    the EARLIEST supported start (`SUPPORTED_START_REVISIONS`), so it has
+    already been applied in every database preflight can run against and can
+    never be among the pending revisions `planned_objects_between` returns.
+    `PLANNED_OBJECTS` starts at 0019 by design.
+    """
     import re
 
     versions_dir = Path(__file__).resolve().parents[2] / "alembic" / "versions"
@@ -878,7 +892,7 @@ def test_planned_objects_matches_what_the_migration_files_actually_create():
         "column": re.compile(r'add_column\(\s*\n?\s*"[^"]+",\s*\n?\s*sa\.Column\("([^"]+)"'),
         "constraint": re.compile(r'create_unique_constraint\(\s*\n?\s*"([^"]+)"'),
     }
-    for revision in ("0019", "0020", "0021", "0022", "0023", "0024", "0025"):
+    for revision in pf.REVISION_ORDER[1:]:
         matches = list(versions_dir.glob(f"{revision}_*.py"))
         assert len(matches) == 1, (revision, matches)
         source = matches[0].read_text()

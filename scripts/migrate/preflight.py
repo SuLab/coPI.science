@@ -312,6 +312,36 @@ PLANNED_OBJECTS: tuple[PlannedObject, ...] = (
     PlannedObject("0034", "column", "muted_by", "agents"),
     PlannedObject("0034", "constraint", "fk_agents_muted_by_users", "agents"),
     PlannedObject("0034", "index", "ix_agents_muted_by", "agents"),
+    # 0035_drop_raw_verdict_and_wall_ms — three additive nullable columns
+    # despite the file name (it is named for what the columns RESTORE, not for a
+    # DROP; nothing is dropped by `upgrade`).
+    PlannedObject("0035", "column", "raw_verdict", "assessment_drops"),
+    PlannedObject("0035", "column", "wall_ms", "llm_call_logs"),
+    PlannedObject("0035", "column", "closed_by_role", "thread_decisions"),
+    # 0036_panel_owed_thread_id_truncated_and_repairs
+    PlannedObject("0036", "column", "panel_owed", "opportunity_assessments"),
+    PlannedObject("0036", "column", "thread_id", "opportunity_assessments"),
+    PlannedObject(
+        "0036", "index", "ix_opportunity_assessments_thread_id",
+        "opportunity_assessments",
+    ),
+    PlannedObject("0036", "column", "truncated", "specialist_consults"),
+    PlannedObject("0036", "column", "cache_read_input_tokens", "llm_call_logs"),
+    PlannedObject("0036", "column", "cache_creation_input_tokens", "llm_call_logs"),
+    # `private_channel_members_user_id_fkey` is deliberately NOT listed. 0036
+    # DROPS it and recreates it ON DELETE CASCADE, so its pre-existence is the
+    # migration's PRECONDITION, not a collision — an entry here would BLOCK
+    # every correctly-migrated database. Only the creation of a NEW object can
+    # collide; a drop-then-create of an existing one cannot.
+    # 0037_recommended_next_experiment
+    PlannedObject(
+        "0037", "column", "recommended_next_experiment", "opportunity_assessments",
+    ),
+    # 0038_specialist_consult_read_state_and_stamp
+    PlannedObject("0038", "column", "read_state", "specialist_consults"),
+    PlannedObject("0038", "column", "established", "specialist_consults"),
+    PlannedObject("0038", "column", "rubric_version", "specialist_consults"),
+    PlannedObject("0038", "column", "rubric_content_hash", "specialist_consults"),
 )
 
 REVISION_ORDER = (

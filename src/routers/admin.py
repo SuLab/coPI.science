@@ -483,12 +483,19 @@ async def admin_llm_calls(
     # consults for — was only readable by opening the row and reading the JSON.
     # Parsed server-side here, and ONLY for `consult_` rows: running
     # parse_opinion over 50 arbitrary responses would be 50 wasted json.loads.
-    # `parse_opinion` never raises and degrades an unreadable reply to
-    # "caution", exactly as the engine does — a specialist we could not read has
-    # not cleared anything.
+    # `parse_opinion` never raises and degrades an unreadable reply to `gap`,
+    # exactly as the engine does — a specialist we could not read has not met
+    # any bar. `allow_historical=True` is one of only TWO places that opt into
+    # the pre-2026-08-28 `caution`/`clear` (`_READABLE_SIGNALS`,
+    # src/agent/specialists.py), and this is why the flag exists: the page
+    # re-parses STORED text, so every consult logged before the rename would
+    # otherwise be relabelled `gap` on every page view. It must stay OFF on the
+    # live consult path, which shares this same function — see that constant.
     consult_signals = {
         str(log.id): parse_opinion(
-            log.response_text, domain=log.phase.removeprefix("consult_")
+            log.response_text,
+            domain=log.phase.removeprefix("consult_"),
+            allow_historical=True,
         ).verdict_signal
         for log in logs
         if log.phase.startswith("consult_")

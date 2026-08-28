@@ -74,9 +74,13 @@ def _sync_section_4(text: str, role: str) -> tuple[str, bool]:
             "the document's shape changed and this script must be revisited"
         )
 
-    drifted = [
-        i for i, b in enumerate(blocks) if " ".join(b.split()) != " ".join(wanted[i].split())
-    ]
+    # Judged EXACTLY, not whitespace-normalised. `test_doc_prompt_sync.py`
+    # compares section 4 with whitespace collapsed, so a block that differs only
+    # in wrapping passes the test -- but the rewrite below is byte-exact, so a
+    # normalised comparison here would report "in sync" and then still rewrite
+    # the file. That made `--check` exit 0 on a document a plain run would
+    # change, which is the one thing a --check mode must never do.
+    drifted = [i for i, b in enumerate(blocks) if b != wanted[i]]
     it = iter(wanted)
     section = re.sub(
         r"(````text\n)(?:.*?)(\n````)",

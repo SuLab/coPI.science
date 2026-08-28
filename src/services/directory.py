@@ -37,6 +37,7 @@ from src.services.blackbird_rubric import (
     BANDING,
     RUBRIC_VERSION,
     RUBRIC_WEIGHTS,
+    load_rubric,
 )
 
 # Hard cap on rows fetched for one render of the triage queue (B1). Scoped to
@@ -423,6 +424,22 @@ async def list_assessments(
         for domain, spec in SPECIALIST_DOMAINS.items()
         for dimension in spec.maps_to_dimensions
     }
+    # Fallback owners from the stage bars: `maps_to_dimensions` is empty for
+    # clinical, legal and technologic since v3 folded market_unmet_need, ip_fto
+    # and platform into the consolidated dimensions, and a dimension with no
+    # owner at all renders no "who to ask" hint. setdefault, so an OWNING
+    # specialist above always wins — a bar may quote a dimension it does not own
+    # (legal quotes venture_potential, which commercial owns).
+    #
+    # Under the CURRENT table this loop changes nothing, deliberately and
+    # measurably: all six dimensions already have an owner, and the extra names a
+    # bar's `source` can contribute are gating keys plus `red_flags` /
+    # `scoring_preamble`, none of which is ever a key of RUBRIC_WEIGHTS below. It
+    # is here so that folding another dimension away cannot silently blank the
+    # hint for it — the shape that produced the empty tuples above.
+    for domain, bar in load_rubric().stage_bars.items():
+        for named in (s.strip() for s in bar.source.split(",")):
+            specialist_for.setdefault(named, domain)
     dimension_stats = []
     for dimension, weight in RUBRIC_WEIGHTS.items():
         values = [

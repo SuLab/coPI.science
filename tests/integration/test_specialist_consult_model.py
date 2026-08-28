@@ -201,8 +201,14 @@ async def test_all_four_are_nullable_so_old_rows_still_load(db_session):
     db_session.add(row)
     await db_session.commit()
     got = (await db_session.execute(select(SpecialistConsult))).scalars().one()
+    # All FOUR, as the name says. This asserted only the first two, so a server
+    # default quietly added to either stamp column — the exact thing that would
+    # make a pre-0038 row indistinguishable from one judged against the current
+    # rubric — would not have failed anything.
     assert got.read_state is None
     assert got.established is None
+    assert got.rubric_version is None
+    assert got.rubric_content_hash is None
 
 
 @pytest.mark.asyncio

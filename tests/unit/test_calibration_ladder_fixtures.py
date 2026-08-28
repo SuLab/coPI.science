@@ -60,13 +60,13 @@ def test_error_and_unparsed_cells_are_excluded_from_r_and_s(capsys):
     cell was never recorded at all."""
     base = [
         {"tier": "WEAK", "framing": "PROD", "domain": "scientific",
-         "signal": "caution", "read_state": "parsed"},
+         "signal": "gap", "read_state": "parsed"},
         {"tier": "MEDIUM", "framing": "PROD", "domain": "scientific",
          "signal": "blocking", "read_state": "parsed"},
         {"tier": "WEAK", "framing": "PROD", "domain": "chemistry",
-         "signal": "clear", "read_state": "parsed"},
+         "signal": "adequate", "read_state": "parsed"},
         {"tier": "MEDIUM", "framing": "PROD", "domain": "chemistry",
-         "signal": "clear", "read_state": "parsed"},
+         "signal": "adequate", "read_state": "parsed"},
     ]
     with_sentinels = base + [
         {"tier": "STRONG", "framing": "PROD", "domain": "scientific",
@@ -85,22 +85,22 @@ def test_error_and_unparsed_cells_are_excluded_from_r_and_s(capsys):
 
 
 def test_defaulted_read_state_is_excluded_from_r_and_s(capsys):
-    """A signal that IS a real member of ``VERDICT_SIGNALS`` (``caution`` is
+    """A signal that IS a real member of ``VERDICT_SIGNALS`` (``gap`` is
     the parser's own default) must still be excluded when ``read_state`` says
     it was never actually read. Without this a defaulted opinion is
-    indistinguishable from a genuinely cautious one in the R/S metrics -- the
+    indistinguishable from a genuinely-found gap in the R/S metrics -- the
     exact confusion the read_state/verdict_signal split exists to end."""
     base = [
         {"tier": "WEAK", "framing": "PROD", "domain": "scientific",
-         "signal": "caution", "read_state": "parsed"},
+         "signal": "gap", "read_state": "parsed"},
         {"tier": "MEDIUM", "framing": "PROD", "domain": "scientific",
          "signal": "blocking", "read_state": "parsed"},
     ]
     with_defaulted = base + [
         {"tier": "STRONG", "framing": "PROD", "domain": "scientific",
-         "signal": "caution", "read_state": "defaulted"},
+         "signal": "gap", "read_state": "defaulted"},
         {"tier": "WEAK", "framing": "PROD", "domain": "chemistry",
-         "signal": "caution", "read_state": "truncated"},
+         "signal": "gap", "read_state": "truncated"},
     ]
 
     report(with_defaulted)
@@ -118,7 +118,7 @@ def test_excluded_cells_are_reported(capsys):
     in the arithmetic."""
     results = [
         {"tier": "WEAK", "framing": "PROD", "domain": "scientific",
-         "signal": "caution", "read_state": "parsed"},
+         "signal": "gap", "read_state": "parsed"},
         {"tier": "MEDIUM", "framing": "PROD", "domain": "scientific",
          "signal": "ERROR:TimeoutError", "read_state": None, "detail": "boom"},
     ]
@@ -138,7 +138,7 @@ def test_excluded_cells_are_reported(capsys):
 
 def _decoy_opinion(true_signal: str) -> str:
     """A specialist opinion whose ``concerns`` text contains a decoy that
-    LOOKS like a verdict trailer ("verdict signal: clear") but is not one --
+    LOOKS like a verdict trailer ("verdict signal: adequate") but is not one --
     it has no em dash and no "(read: ...)" tail. A harness anchored on a bare
     "signal:" match (the retired regex) would find this FIRST, since
     ``opinion.raw`` now comes before the real trailer in the string
@@ -146,7 +146,7 @@ def _decoy_opinion(true_signal: str) -> str:
     return (
         f'{{"verdict_signal": "{true_signal}", '
         '"concerns": ["Internal triage informally assigned this a verdict '
-        'signal: clear last week, before the full record was in -- that '
+        'signal: adequate last week, before the full record was in -- that '
         'call was wrong."], '
         '"questions_to_ask": [], "confidence": "high"}'
     )
@@ -169,7 +169,7 @@ async def test_the_harness_parses_the_real_tool_return_value(monkeypatch):
     result = await _one("STRONG", "PROD", "legal", sem)
 
     # The decoy really is in the composed string, or this test proves nothing.
-    assert "verdict signal: clear" in result["raw"]
+    assert "verdict signal: adequate" in result["raw"]
     # The TRUE trailer -- not the decoy -- is what must be parsed.
     assert result["signal"] == "blocking"
     assert result["read_state"] == "parsed"
@@ -183,7 +183,7 @@ async def test_a_decoy_signal_in_the_specialists_own_prose_does_not_fool_the_har
     decoy phrase naming a DIFFERENT signal than the real trailer must not win,
     however early it sits in the string. Run against every real signal so a
     fix that happens to work only for 'blocking' cannot pass silently."""
-    for true_signal in ("blocking", "caution", "clear"):
+    for true_signal in ("blocking", "gap", "adequate"):
         fake = FakeAnthropic([_decoy_opinion(true_signal)])
         monkeypatch.setattr(
             "src.services.llm.get_anthropic_client", lambda fake=fake: fake
@@ -193,6 +193,6 @@ async def test_a_decoy_signal_in_the_specialists_own_prose_does_not_fool_the_har
         result = await _one("STRONG", "PROD", "legal", sem)
 
         assert result["signal"] == true_signal, (
-            f"decoy 'clear' shadowed the real {true_signal!r} trailer"
+            f"decoy 'adequate' shadowed the real {true_signal!r} trailer"
         )
         assert result["read_state"] == "parsed"

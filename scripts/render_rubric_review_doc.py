@@ -175,6 +175,30 @@ def render_review_markdown(rubric: Rubric, generated: str, changelog: str) -> st
         "",
         r.heuristic,
         "",
+        "## 6. Stage bars — `[stage_bar_global]` and `[stage_bar.*]`",
+        "",
+        "One bar per evaluation-panel specialist, rendered into that "
+        "specialist's persona at consult time. Each is a CONDENSATION of the "
+        "clause named in `source` — nothing here is new policy, and `source` is "
+        "printed so this section can be checked against the sections above it.",
+        "",
+        "**The global bar, which every one of the eight specialists reads "
+        "FIRST**, above its own domain bar — `[stage_bar_global]` (source: "
+        f"`{r.stage_bar_global.source}`):",
+        "",
+        f"> {r.stage_bar_global.text}",
+        "",
+        "Then the domain bar:",
+        "",
+        "| Domain | Source clause(s) | The bar as the specialist reads it |",
+        "|---|---|---|",
+    ]
+    lines += [
+        f"| {bar.domain} | `{bar.source}` | {bar.text} |"
+        for bar in r.stage_bars.values()
+    ]
+    lines += [
+        "",
         "## Appendix A — change history (`[meta].changelog`)",
         "",
         "```",

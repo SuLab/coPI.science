@@ -10,12 +10,14 @@ from src.agent.agent import _extract_dois
 from src.agent.prompt_safety import delimit
 from src.agent.roles import load_role
 from src.agent.specialists import (
+    DEFAULTED_TALLY_LABEL,
     SPECIALIST_DOMAINS,
     has_usable_content,
     parse_opinion,
     persona_path,
     read_state_for,
 )
+from src.services.blackbird_rubric import render_stage_bar_markdown
 from src.services.llm import generate_agent_response, is_truncated_stop
 from src.services.patents import PriorArtResult, search_prior_art
 from src.services.pubmed import fetch_abstract, fetch_full_text
@@ -29,6 +31,13 @@ PROFILES_DIR = Path("profiles")
 # nothing that could walk out of the directory it is joined onto. Used to validate
 # the model-supplied argument to retrieve_profile.
 _SAFE_AGENT_ID = re.compile(r"[A-Za-z0-9_-]+")
+
+# The placeholder every prompts/specialists/*.md carries, filled from the rubric
+# document at consult time (_execute_consult_specialist). Held to all eight files
+# by tests/unit/test_rubric_prompt_sync.py: a persona that loses it silently
+# reverts to judging against no stated stage bar at all, which is the defect the
+# placeholder exists to fix.
+_STAGE_BAR_PLACEHOLDER = "{stage_bar}"
 
 # Anthropic tool-use schema definitions
 TOOL_DEFINITIONS: list[dict[str, Any]] = [
@@ -592,6 +601,14 @@ async def _execute_consult_specialist(
         )
 
     persona = path.read_text(encoding="utf-8")
+    # The specialists were never inside the mechanism that keeps the hub's
+    # prompt and the document in step (render_rubric_markdown -> {rubric},
+    # src/agent/agent.py). str.replace, NOT str.format: persona files contain
+    # bare curly braces, the same reason _render_identity uses replace.
+    if _STAGE_BAR_PLACEHOLDER in persona:
+        persona = persona.replace(
+            _STAGE_BAR_PLACEHOLDER, render_stage_bar_markdown(domain)
+        )
     # Book the call before issuing it, the same way _reply_to_thread books its
     # own: a call that is made and then fails is still billed, so charging only
     # on success would let a flapping specialist run free.
@@ -721,7 +738,19 @@ async def _execute_consult_specialist(
             domain, agent_id, stop_reasons[-1],
         )
     elif on_consult is not None:
-        on_consult(domain, opinion.verdict_signal)
+        # The domain is credited to the floor either way — that decision belongs
+        # to `has_usable_content` and the `truncated` branch above, and is
+        # deliberately unchanged here. What DOES change with the read is the
+        # label this consult is TALLIED under: a defaulted signal is a failed
+        # read, not a verdict, and booking it as `_DEFAULT_SIGNAL` made the
+        # run-level mix and `domain_flatness_warning` report a specialist
+        # opinion nobody gave. `DEFAULTED_TALLY_LABEL` keeps it in the sample
+        # (so the loss is visible) and out of the mix (so it is not averaged in).
+        on_consult(
+            domain,
+            DEFAULTED_TALLY_LABEL if opinion.signal_was_defaulted
+            else opinion.verdict_signal,
+        )
     logger.info(
         "[specialists] %s consulted %s -> %s (%s)%s",
         agent_id, domain, opinion.verdict_signal, opinion.confidence,
@@ -738,6 +767,20 @@ async def _execute_consult_specialist(
                 # Lists, not the dataclass's tuples: these land in JSONB.
                 concerns=list(opinion.concerns),
                 questions_to_ask=list(opinion.questions_to_ask),
+                # ALWAYS a real list, `[]` included, and that is the write
+                # behaviour the column was designed around: NULL means "never
+                # asked" (a pre-2026-08-28 row, before the field existed), `[]`
+                # means "asked, and nothing came back". What `[]` cannot do is
+                # tell WHY nothing came back: `_str_tuple` yields the empty
+                # tuple for a missing key, a non-list value and a genuinely
+                # empty list alike, so `[]` covers a specialist that named no
+                # positives, a persona that ignored the key, a reply whose
+                # signal was DEFAULTED, and a TRUNCATED reply cut off before it
+                # got there. `read_state` (sent below) is what separates those
+                # last two from the first two; it is not recoverable from this
+                # column alone. That ambiguity is accepted — conflating it with
+                # NULL is not, since it would relabel every zero-positive
+                # opinion as unasked.
                 established=list(opinion.established),
                 raw_opinion=opinion.raw,
                 # The row's own copy of the refusal above — a `refusal` OR a
@@ -755,9 +798,10 @@ async def _execute_consult_specialist(
                 # any opinion this predicate did not mark "parsed" — a
                 # complete reply that failed to parse is just as unread as a
                 # truncated one, and until now it still posted a
-                # workspace-visible verdict nobody produced. Not stored yet:
-                # `_record_specialist_consult` accepts and ignores it until
-                # migration 0038 (a later task) adds the column.
+                # workspace-visible verdict nobody produced. STORED, as of
+                # migration 0038: `specialist_consults.read_state` is written on
+                # every consult from that deploy forward, so a NULL there means
+                # "written before 0038" and never "parsed".
                 read_state=read_state,
             )
         except Exception as exc:  # noqa: BLE001 — a record must not cost the opinion
@@ -787,9 +831,17 @@ async def _execute_consult_specialist(
     # Label AFTER the body, deliberately. This used to be
     # f"{spec.title} — signal: {signal}\n\n{raw}", which put a verdict word
     # ahead of the evidence in the hub's context — the worst position for it.
-    # Anchoring on a score already in context reaches Cohen's d = 0.71 and is
-    # not removable by instruction (arXiv:2608.25869); generating evidence
-    # before rating is worth +6 to +11 accuracy points (arXiv:2305.17926).
+    # Anchoring on a score already in context is a real and instruction-
+    # resistant effect, which is why the label moved; the position is the
+    # defensible part of this change. Two caveats on the figures this comment
+    # used to assert, from the 2026-08-28 citation audit: the Cohen's d = 0.71
+    # anchoring result is an EXTERNAL-anchor finding, not a
+    # self-generated-token one, and the "+6 to +11 accuracy points" for
+    # evidence-before-rating is k = 6 ensembling on PAIRWISE judging, which
+    # does not transfer to reordering one key in one schema. Measured here, the
+    # schema reorder COST discrimination (see the ladder runs in
+    # docs/audits/2026-08-27-consult-persona-calibration/). Do not cite either
+    # number as support for this layout.
     # `read: parsed` is stated so the hub can tell a read opinion from one whose
     # signal was defaulted — the same distinction `read_state` draws for the
     # panel note.

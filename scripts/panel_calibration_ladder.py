@@ -329,8 +329,8 @@ def _is_real_signal(result: dict) -> bool:
       failed or no trailer could be found at all, or
     * a signal that WAS found in the trailer but was DEFAULTED rather than
       read (``read_state != "parsed"``). ``tools.py`` still appends a trailer
-      for a defaulted opinion (``— signal: caution (read: defaulted)``), and
-      ``caution`` is a real member of ``VERDICT_SIGNALS`` — so the sentinel
+      for a defaulted opinion (``— signal: gap (read: defaulted)``), and
+      ``gap`` is a real member of ``VERDICT_SIGNALS`` — so the sentinel
       check alone would let a defaulted signal straight through. A defaulted
       signal is not a specialist's judgement (``read_state_for``,
       ``src/agent/specialists.py``), and letting it into the metrics is the
@@ -349,10 +349,14 @@ def _is_real_signal(result: dict) -> bool:
     an operator needs to see that calls failed or defaulted.
 
     Deliberately checks membership in ``VERDICT_SIGNALS`` rather than a
-    hardcoded ``{"blocking", "caution", "clear"}`` literal: the verdict
-    vocabulary is scheduled to change later in this plan, and a hardcoded list
-    here would silently stop recognising the new words as real signals the
-    day the rename ships, quietly corrupting every ladder run after it.
+    hardcoded literal: the verdict vocabulary DID change under this plan
+    (2026-08-28, ``caution``/``clear`` -> ``gap``/``adequate``), and a
+    hardcoded list here would have silently stopped recognising the new words
+    as real signals the day the rename shipped, quietly corrupting every
+    ladder run after it. Note this deliberately does NOT admit
+    ``HISTORICAL_VERDICT_SIGNALS``: the ladder measures the panel as it runs
+    TODAY, so a live reply reaching back for a retired label is an off-contract
+    answer and must be excluded, not scored.
     """
     return result["signal"] in VERDICT_SIGNALS and result.get("read_state") == "parsed"
 
