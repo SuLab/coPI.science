@@ -749,6 +749,15 @@ async def _execute_consult_specialist(
                 # included: NULL in that column means "written before 0036",
                 # which is a third state and not this one.
                 truncated=truncated,
+                # Generalises the cancellation above: `_post_panel_note`
+                # (src/agent/simulation.py) refuses to publish a signal for
+                # any opinion this predicate did not mark "parsed" — a
+                # complete reply that failed to parse is just as unread as a
+                # truncated one, and until now it still posted a
+                # workspace-visible verdict nobody produced. Not stored yet:
+                # `_record_specialist_consult` accepts and ignores it until
+                # migration 0038 (a later task) adds the column.
+                read_state=read_state,
             )
         except Exception as exc:  # noqa: BLE001 — a record must not cost the opinion
             # The engine's writer is itself best-effort and already logs its own

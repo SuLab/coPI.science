@@ -4303,6 +4303,14 @@ class SimulationEngine:
         questions_to_ask: list | None,
         raw_opinion: str,
         truncated: bool | None = None,
+        # Accepted and unused: no column exists yet to put it in. Migration
+        # 0038 (a later task) adds one and this parameter starts being stored
+        # then. Declared now so `tools.py` can start sending it without this
+        # writer raising `TypeError: unexpected keyword argument` — the other
+        # fan-out target of the same `record_consult` closure, `_post_panel_note`,
+        # tolerates unknown kwargs via `**_withheld`; this function has no such
+        # catch-all, so the parameter has to be named explicitly here too.
+        read_state: str | None = None,
     ) -> None:
         """Write one successful consult to ``specialist_consults``.
 
@@ -4377,6 +4385,7 @@ class SimulationEngine:
         question: str,
         verdict_signal: str,
         truncated: bool | None = None,
+        read_state: str | None = None,
         **_withheld,
     ) -> None:
         """Post the one-line, signal-level trace of a successful consult into
@@ -4404,9 +4413,10 @@ class SimulationEngine:
         three-argument signature IS the enforcement and is deliberately not
         widened.
 
-        ``truncated`` is the one field pulled back out of ``**_withheld``, and
-        for the opposite reason to the rest: it is not withheld from the note,
-        it CANCELS the note. A consult the API cut off mid-sentence parsed to
+        ``truncated`` and ``read_state`` are the two fields pulled back out of
+        ``**_withheld``, and for the opposite reason to the rest: they are not
+        withheld from the note, they CANCEL it. ``truncated`` was the original
+        special case — a consult the API cut off mid-sentence parsed to
         nothing, so ``verdict_signal`` is the schema's DEFAULT ``caution`` and
         no specialist ever said it — and this note goes into the PI's own
         interview thread, which every lab in the workspace can read. Publishing
@@ -4417,6 +4427,19 @@ class SimulationEngine:
         which is why it is spelled out as a parameter rather than read out of
         the catch-all: a named parameter is visible in the signature, a dict key
         is not.
+
+        ``read_state`` (``src/agent/specialists.py::read_state_for``)
+        generalises that same reasoning to a reply that arrived COMPLETE and
+        simply failed to parse — not truncated, but just as unread: ``caution``
+        there is also a parse default, not something a specialist said. Any
+        ``read_state`` other than ``"parsed"`` cancels the note the same way
+        ``truncated`` does. ``read_state=None`` is treated as "post it" rather
+        than "unread": ``None`` means a caller written before this parameter
+        existed, and failing closed on that would silently stop every note the
+        moment a call site was missed rather than updated. ``truncated`` stays
+        in the signature alongside it (not folded into ``read_state`` and
+        removed) so a caller that supplies only one of the two still fails
+        closed.
 
         The DURABLE row is still written either way — it is the only evidence
         the attempt happened, and it now carries ``truncated=True`` so the floor
@@ -4439,17 +4462,25 @@ class SimulationEngine:
             # No channel, nowhere to post. A consult made outside a thread
             # (a direct tool call, a test) has no interview to annotate.
             return
-        if truncated:
-            # See the docstring: the signal on a truncated consult is the
-            # schema default, not an opinion. Logged rather than silent — a note
-            # that does not appear is otherwise indistinguishable from
-            # `panel_notes_in_thread=false`.
+        # CANCELLED for any opinion we did not actually read. `truncated` was
+        # the original special case and its reasoning was right — "no
+        # specialist ever said it" — but it covered only an API cut-off. A
+        # reply that arrived COMPLETE and failed to parse is not truncated,
+        # and posted a workspace-visible "caution" for a verdict `parse_opinion`
+        # had defaulted. `read_state` is the general predicate; `truncated` is
+        # kept beside it so a caller that supplies only one still fails closed.
+        if truncated or (read_state is not None and read_state != "parsed"):
+            # See the docstring: the signal on an unread opinion is a parse
+            # default, not something a specialist said. Logged rather than
+            # silent — a note that does not appear is otherwise
+            # indistinguishable from `panel_notes_in_thread=false`.
             logger.info(
-                "[%s] Panel note skipped for the %s consult (thread %s): the "
-                "opinion was truncated, so its signal is a parse default and "
-                "not something a specialist said. The durable row still stands "
-                "and the domain still does not count toward the floor.",
-                agent_id, domain, thread_ts or "?",
+                "[%s] Panel note skipped for the %s consult (thread %s): "
+                "truncated=%r, read_state=%r, so its signal is a parse "
+                "default and not something a specialist said. The durable "
+                "row still stands and the domain still does not count "
+                "toward the floor.",
+                agent_id, domain, thread_ts or "?", truncated, read_state,
             )
             return
         try:

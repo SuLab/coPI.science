@@ -1291,3 +1291,54 @@ async def test_a_complete_consult_still_posts_its_note(engine, monkeypatch):
         assert _notes(turn.client) != []
     finally:
         await _delete_run(turn.factory, turn.run_id)
+
+
+# --- 7c. `read_state` generalises the truncation cancellation ----------------
+#
+# A note is a workspace-visible statement in the PI's own interview thread. It
+# must not assert a verdict that was DEFAULTED rather than read — the same
+# reason `truncated` already cancels it (§7 above), just not the only reason
+# any more: a reply can arrive COMPLETE and still fail to parse, and that is
+# just as unread as a truncation. `_post_panel_note` is driven directly here
+# (as the clip-rate tests in §7b already do), reusing the `sim`/`agent`/client
+# a real consult set up, because the claim under test is about the parameter
+# itself, not about wiring a fresh engine.
+
+
+@pytest.mark.parametrize(
+    "read_state, expect_note",
+    [("parsed", True), ("defaulted", False), ("truncated", False)],
+)
+@pytest.mark.asyncio
+async def test_only_a_read_opinion_reaches_the_thread(
+    engine, monkeypatch, read_state, expect_note,
+):
+    turn = await _drive_a_consult(engine, monkeypatch)
+    try:
+        turn.client.posted.clear()  # isolate this call from the fixture's own note
+        await turn.sim._post_panel_note(
+            "blackbird", channel="general", thread_ts="t1",
+            domain="chemistry", question="is the route scalable?",
+            verdict_signal="caution", read_state=read_state,
+        )
+        assert bool(_notes(turn.client)) is expect_note
+    finally:
+        await _delete_run(turn.factory, turn.run_id)
+
+
+@pytest.mark.asyncio
+async def test_a_missing_read_state_still_posts(engine, monkeypatch):
+    """``None`` means "this caller predates the field", not "unread". Failing
+    closed here would silently stop every note the moment a caller was missed
+    rather than updated — exactly the failure mode `**_withheld` elsewhere
+    exists to avoid."""
+    turn = await _drive_a_consult(engine, monkeypatch)
+    try:
+        turn.client.posted.clear()
+        await turn.sim._post_panel_note(
+            "blackbird", channel="general", thread_ts="t1",
+            domain="chemistry", question="q", verdict_signal="caution",
+        )
+        assert _notes(turn.client)
+    finally:
+        await _delete_run(turn.factory, turn.run_id)
