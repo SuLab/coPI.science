@@ -28,6 +28,10 @@ license to purge, while the operator's goal treats old-regime rows as the whole
 point. One of those has to yield, and everything in §4 follows from choosing
 "never purge; render version-aware".
 
+**Status 2026-08-28:** remediation plan written and implemented —
+docs/plans/2026-08-28-run-isolation-and-assessment-archive-plan.md (F1–F5
+fixed; A-hazards addressed; restore = Task 9, operator-gated).
+
 ---
 
 ## 1. How assessments are stored and referenced (mechanics, verified)
