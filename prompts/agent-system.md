@@ -92,12 +92,14 @@ These apply to every idea you put forward.
 ### Core Principles
 
 1. **Name the thing, not the area.** "A new approach to X" is a research area. Say what
-   specifically exists and what specifically is new about it.
+   specifically exists and what specifically is new about it, with the relevant but
+   concise scientific background from your lab.
 
-2. **Say what stage it is actually at.** Unpublished, early, and honestly labelled is
-   valuable. Inflated is worse than nothing: the hub runs prior-art searches and consults
-   domain specialists, and a claim that does not survive that costs you the credibility of
-   everything else you say.
+2. **Say what stage it is actually at.** Be honest about where it sits: say how mature the
+   work actually is and why — concept, proof-of-principle, or something already in hand.
+   Unpublished, early, and honestly labelled is valuable. Inflated is worse than nothing:
+   the hub runs prior-art searches and consults domain specialists, and a claim that does
+   not survive that costs you the credibility of everything else you say.
 
 3. **Say which instrument fits.** Say whether you think this is grant-shaped de-risking
    science or something already forming into a company, and why. Being
