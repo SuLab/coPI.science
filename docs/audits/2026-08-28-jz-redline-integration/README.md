@@ -1,8 +1,13 @@
 # Adversarial analysis: integrating the 2026-08-28 JZ prompt redlines
 
-**Status:** analysis only. **Nothing has been integrated and no prompt file has been
-modified.** Measured 2026-08-28 against `/home/a/Downloads/2026-08-28-hub-bot-prompts-JZ-redline.docx`
-and `…-pi-bot-prompts-JZ-redline.docx`, and against the repo at `b648be5`.
+**Status:** measured 2026-08-28 against
+`/home/a/Downloads/2026-08-28-hub-bot-prompts-JZ-redline.docx` and
+`…-pi-bot-prompts-JZ-redline.docx`, and against the repo at `b648be5`.
+
+**The hub document's four edits (E1–E4) were approved by the operator on 2026-08-28 and
+are APPLIED** — see "Applying E1–E4" below for the two adaptations that were necessary.
+**Nothing from the pi document has been integrated**, and the pi doc's conflict (Finding
+4) and its `_PI_LAB` edits (Finding 5) remain open.
 
 > ## ⚠️ CORRECTION (2026-08-28, superseding this document's first revision)
 >
@@ -123,6 +128,39 @@ experiment **or scope of work**", and a worked example is inserted:
 
 Absent from all 12 historical versions of the file.
 
+### Applying E1–E4 (operator-approved 2026-08-28)
+
+Applied by strategy C — re-derived against current text, not pasted. Verified after: the
+13 characterization snapshots still pass and `tests/unit/test_rubric_prompt_sync.py` is
+green, so nothing snapshot-pinned or rubric-coupled moved.
+
+| edit | landed in | note |
+|---|---|---|
+| E1 | `prompts/roles/scout_hub/agent-system.md:6-9` | re-wrapped to the file's ~88-col style |
+| E2 | `prompts/roles/scout_hub/agent-system.md:127-129` | **clause completed** — see below |
+| E3 | `src/agent/thread_guidance.py` `_SCOUT_HUB` DECIDE | **renumbered** — see below |
+| E4 | `prompts/roles/scout_hub/phase4-thread-reply.md:210-220` | worked example kept; milestones clause NOT taken |
+
+Two adaptations were forced, both recorded because they change the reviewer's literal text:
+
+1. **E2's sentence is truncated in the source document.** It ends "…Blackbird staff may
+   think alongside them once it is" — and that is genuinely where it stops: the next
+   docx paragraph is the following bullet, so nothing was lost in extraction. The
+   ellipsis is unmistakably "once it is *funded*", and shipping a sentence that stops
+   mid-clause into a live prompt would be worse than completing it, so it reads
+   "…once it is funded". **Flag this back to the reviewer** — it is the one place the
+   applied text says something they did not literally write.
+2. **E3 referenced "item 10", which no longer exists.** That is the doc's stale v2.x
+   sidecar numbering; the current `phase4-thread-reply.md` numbers the recommended
+   experiment **item 5**. Applied as "what item 5 of your concluding sidecar needs" —
+   naming the sidecar as well as the number, since `_SCOUT_HUB` guidance is read
+   without the phase-4 prompt's numbered list in view.
+
+E4's own reference to "the milestones array above" was **not** applied: `suggested_derisking_milestones`
+was cut from the sidecar in v3.2.0, so the current text routes overflow to `rationale`
+instead. Taking that clause would have reintroduced a deleted field. Only the
+project-counts intent was applied.
+
 ### What is *not* an edit
 
 - **The eight specialist personas and `identity.md` are untouched** — see Finding 5.
@@ -232,15 +270,52 @@ Both deletions agree. The replacements are **compatible in spirit but not identi
 applying JZ's text verbatim would overwrite a deliberate v3.1.0 design decision with a
 different one. This is a semantic merge requiring adjudication, not a mechanical patch.
 
-**Also:** three funnel references survive in JZ's final text at doc lines 21 ("The
-funnel" heading), 94, and 233's tail — places JZ **did not touch**. Those are misses, not
-endorsements. Applying the document's final state wholesale would **reintroduce funnel
-language the repo deliberately removed.**
+### Adjudicated: COMBINE (operator-directed 2026-08-28)
 
-## Finding 5 — the phase-guidance edits are under a standing prohibition
+Keep the repo's instrument-fit framing **and** land JZ's maturity substance — but not both
+in the same slot, because a closer read of the list shows they do not actually collide
+head-on:
 
-The EXPLORE/DECIDE/MUST CONCLUDE edits (+7/−7) target `_PI_LAB` in
-`src/agent/thread_guidance.py`, which CLAUDE.md pins to
+**Item 2 already owns stage honesty**: "**Say what stage it is actually at.** Unpublished,
+early, and honestly labelled is valuable. Inflated is worse than nothing…". So dropping
+JZ's maturity text into item 3 — which is what a first pass at "combine" suggests, and
+what an earlier draft of this recommendation proposed — would have created a **duplicate
+of item 2 two bullets below it**, and left the list saying the same thing twice with
+different words. That is the failure the strategy-C classification exists to catch.
+
+JZ's replacement contains exactly three substantive additions. Each has a home already:
+
+| JZ's addition | where it lands | why there |
+|---|---|---|
+| "concept, proof-of-principle, or something already in hand" | **item 2** | item 2 already asks for stage; this makes the answer a **checkable three-point scale** instead of the vague "unpublished, early" |
+| "Give the relevant but concise scientific background from your lab" | **item 1** | item 1 is "Name the thing, not the area" — the background is what makes the thing nameable |
+| "Be honest about where it sits" (framing) | **item 2** | same slot as the scale it introduces |
+
+**Item 3 is left exactly as it is**, so the instrument ask survives in both places it
+currently appears (`:102` and `:216`).
+
+Net effect: nothing is duplicated, no v3.1.0 decision is reverted, and JZ's one genuinely
+new contribution — a maturity vocabulary a reader can check an answer against — replaces
+the vaguest phrase in the list. The rule-7 tension noted above (whether a PI should be
+asked to pick a funding vehicle at all) is **not** resolved by this and remains a live
+design question; the operator chose to keep instrument-fit, so it stays.
+
+⚠️ **This edit alone forces the audited `.ambr` regeneration** (Finding 5), and the
+remaining ~200 pi-doc edits will force a second one when they land. Batching them into a
+single regeneration would have been cheaper; applying this now was the explicit
+instruction.
+
+**Also:** **two** funnel references survive in JZ's final text — doc line 21 (the section
+heading "The funnel") and line 94 ("Say where you think it sits on Blackbird's funnel") —
+both places JZ **did not touch**. (An earlier revision of this file said three, counting a
+tail-of-line occurrence that does not exist: `grep -o -i funnel` over the reconstructed
+final text returns exactly 2.) The repo's current `prompts/agent-system.md` contains the
+word **zero** times. Those two are misses, not endorsements. Applying the document's final
+state wholesale would **reintroduce funnel language the repo deliberately removed.**
+
+## Finding 5 — EVERY pi-doc tranche is snapshot-pinned, not just the phase guidance
+
+CLAUDE.md pins `src/agent/thread_guidance.py`'s `_PI_LAB` strings to
 `tests/characterization/__snapshots__/test_agent_turn_gm.ambr` (164 KB) with:
 
 > "do not reword them, and never run `pytest --snapshot-update` to make a mismatch go
@@ -250,11 +325,37 @@ Exactly one reviewed regeneration has occurred (2026-08-27), "executed at the op
 direction with the `.ambr` diff audited hunk-by-hunk — every changed line belonged to that
 one rewrite. Any future pi_lab change takes the same reviewed-diff path."
 
-So these seven edits are integrable **only** via an explicitly operator-directed,
-hunk-by-hunk-audited snapshot regeneration. They cannot ride along with the rest.
+⚠️ **An earlier revision of this file read that prohibition too narrowly**, concluding that
+only the seven `_PI_LAB` edits were pinned and that the other three tranches could be
+applied normally. **That is wrong.** The GM snapshot captures a `pi_lab` agent's fully
+composed turn, so it embeds the PI's *prompt files* verbatim as well as its phase guidance.
+Measured by sampling each file's first 40 non-blank lines for literal presence in the
+`.ambr`:
 
-**E3 is not caught by this.** The prohibition names `_PI_LAB`; E3 targets `_SCOUT_HUB`,
-which no snapshot pins.
+| pi-doc tranche → target | sampled lines present in `.ambr` | pinned? |
+|---|---|---|
+| 1. System prompt → `prompts/agent-system.md` | **30 of 40** | yes |
+| 5. Making a new post → `prompts/phase5-new-post.md` | **26 of 40** | yes |
+| 3. Replying during an interview → `prompts/phase4-thread-reply.md` | **25 of 40** | yes |
+| EXPLORE/DECIDE/MUST CONCLUDE → `_PI_LAB` | (pinned by CLAUDE.md) | yes |
+
+`"The two instruments"`, `"Say which instrument fits"` and `"grant-shaped de-risking"` each
+appear **7 times** in the snapshot.
+
+**So there is no unpinned tranche and no safe-first ordering.** The whole pi-doc
+integration — all ~200 edits — is **one** operator-directed, hunk-by-hunk-audited `.ambr`
+regeneration. Splitting it into "apply these now, hold those" is not available; attempting
+the +131/−39 system-prompt tranche alone would fail the characterization suite exactly as
+the `_PI_LAB` edits would.
+
+**The hub edits are not caught by any of this**, which is why E1–E4 could ship
+immediately: the snapshot is a `pi_lab` turn, so it embeds no hub prompt and no
+`_SCOUT_HUB` string. Verified two ways — none of E3's anchors (`work backwards`,
+`on that timeline`, `Blackbird instrument this`, `Consult the panel as you go`) nor the
+current `_SCOUT_HUB` DECIDE opening (`Work the gating criteria explicitly`) occurs in the
+`.ambr` even once, and all 13 snapshots passed after E1–E4 landed. The file's single
+literal `scout_hub` mention is prose inside a *pi_lab* prompt describing a `tagged_agent`
+rule.
 
 ## Finding 6 — the Phase B interaction, which is still benign
 
@@ -307,27 +408,29 @@ cannot silently revert a deliberate decision, which is the failure mode that mat
 
 ## Recommended sequence
 
-1. **Phase B first**, on the eight personas — unblocked, no competing claim (Finding 6).
-2. **Then the hub doc's E1–E4 via strategy C**, as four individually adjudicated edits
-   against current text — small, and they are the only reviewer intent that exists in no
-   other artifact.
-3. **Then the pi doc via strategy C**, in three tranches: the system prompt (+131/−39),
-   `phase5-new-post.md` (+18/−13), and `phase4-thread-reply.md` (+8/−6).
-4. **The `_PI_LAB` edits last**, as their own operator-directed `.ambr` regeneration with
-   a hunk-by-hunk audited diff.
-5. **Regenerate the hub doc from the post-Phase-B repo** and send it back for review —
-   noting that it was a stale export, and asking that future rounds be saved **with
-   change-tracking on**, since this round's hub edits were recoverable only by
-   full-history forensics.
+1. ~~**Phase B first**, on the eight personas~~ — **in progress**; unblocked, no competing
+   claim (Finding 6).
+2. ~~**Then the hub doc's E1–E4 via strategy C**~~ — **DONE** (approved 2026-08-28). Four
+   individually adjudicated edits against current text; see "Applying E1–E4".
+3. **Then the pi doc as ONE unit**, via strategy C, gated on Finding 4's adjudication and
+   executed as a **single** operator-directed `.ambr` regeneration with a hunk-by-hunk
+   audited diff. Per Finding 5 there is no unpinned subset to land first, so the tranche
+   boundaries (+131/−39, +18/−13, +8/−6, +7/−7) are useful only for *reviewing* the
+   change, not for sequencing it.
+4. **Regenerate the hub doc from the post-Phase-B repo** and send it back for review —
+   noting that it was a stale export, that E1–E4 were applied (with E2's completed clause
+   flagged), and asking that future rounds be saved **with change-tracking on**, since
+   this round's hub edits were recoverable only by full-history forensics.
 
 ## What needs an operator decision
 
-1. **E1, E2, E4** — three prompt-content edits (E3 is adjudicated as compatible in
-   Finding 1). Each is a judgement about what Blackbird tells its bots, not a merge
-   mechanic. **Not applied.**
+1. ~~**E1, E2, E4**~~ — **approved and applied 2026-08-28**, together with E3. One thing
+   to review rather than decide: E2's completed clause ("once it is *funded*").
 2. **Finding 4's conflict** — keep the repo's *instrument-fit* framing, adopt JZ's
-   *maturity-honesty* framing, or combine them.
-3. **The `.ambr` regeneration** — CLAUDE.md requires explicit operator direction.
+   *maturity-honesty* framing, or combine them. **Still open, and it now gates the whole
+   pi doc** (Finding 5), so it is the decision to make first.
+3. **The `.ambr` regeneration** — CLAUDE.md requires explicit operator direction, and per
+   Finding 5 it covers **all** ~200 pi-doc edits, not just the seven phase-guidance ones.
 4. **JZ's +43% expansion** — a prompt that grows by 43% changes token cost and dilutes
    emphasis. Worth confirming the whole expansion is wanted before it ships.
 
