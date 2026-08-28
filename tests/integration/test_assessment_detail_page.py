@@ -446,10 +446,11 @@ async def _seed_scale_fixture(db_session, *, funnel_stage):
 async def test_detail_page_renders_the_documents_banding_and_weights(
     client, db_session, admin
 ):
-    """The legend and the dimension bars come from the rubric document — the
-    band lines (3.4/2.8) and the weight beside each bar (differentiation &
-    unmet need at 25%) — whatever the row's funnel stage says, since one scale
-    scores every verdict."""
+    """The legend and the dimension bars come from the row's own revision
+    entry — the band lines (3.4/2.8) and the weight beside each bar
+    (differentiation & unmet need at 25%) — whatever the row's funnel stage
+    says, since one scale scores every verdict. (Live-document coverage lives
+    in test_the_assessments_legend_states_the_rubric_thresholds.)"""
     assessment = await _seed_scale_fixture(db_session, funnel_stage="incubation")
     html = (
         await client.get(
@@ -460,6 +461,78 @@ async def test_detail_page_renders_the_documents_banding_and_weights(
     assert "&lt;2.8" in html
     assert "25% weight" in html  # differentiation_unmet_need
     assert "10% weight" in html  # team_executability, unscored but listed
+
+
+async def _seed_stamped(db_session, *, version, content_hash, scores):
+    run = await factories.make_simulation_run(db_session)
+    assessment = OpportunityAssessment(
+        simulation_run_id=run.id, agent_id=HUB, subject_agent_id=SUBJECT,
+        channel_name=CHANNEL, company_or_project="Stamped Fixture Co",
+        recommendation="conditional", weighted_score=3.20, band="conditional",
+        rubric_version=version, rubric_content_hash=content_hash, scores=scores,
+    )
+    db_session.add(assessment)
+    await db_session.flush()
+    return assessment
+
+
+async def test_an_archived_stamp_renders_that_revisions_dimensions(
+    client, db_session, admin
+):
+    """A v2.1.0 row must show its own 13-dimension space and 4.0/3.0 band
+    lines — not six blank live dimensions under a 3.4/2.8 legend."""
+    assessment = await _seed_stamped(
+        db_session, version="2.1.0", content_hash="2f38fc9bce4d",
+        scores={"ip_fto": 3, "differentiation": 4},
+    )
+    html = (
+        await client.get(
+            f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+        )
+    ).text
+    assert 'class="score-ip_fto' in html
+    assert "6%/4% (investment/incubation)" in html
+    assert "&ge;4.0 advance" in html and "&lt;3.0" in html
+    assert 'class="score-scientific_credibility' not in html, (
+        "live-document dimensions leaked into an archived row's render"
+    )
+
+
+async def test_an_unknown_stamp_renders_the_rows_own_scores_with_a_warning(
+    client, db_session, admin
+):
+    assessment = await _seed_stamped(
+        db_session, version="9.9.9", content_hash="deadbeef0000",
+        scores={"mystery_dim": 2},
+    )
+    html = (
+        await client.get(
+            f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+        )
+    ).text
+    assert 'class="score-mystery_dim' in html
+    assert "matches no entry in the revision registry" in html
+    assert 'class="score-differentiation_unmet_need' not in html
+
+
+async def test_an_unstamped_row_keeps_the_live_render_and_shows_extras(
+    client, db_session, admin
+):
+    """Pre-0030 rows have no stamp: they keep today's live-document rendering
+    (the banner already says so) — but any score key the live document does
+    not name must still render instead of vanishing."""
+    assessment = await _seed_stamped(
+        db_session, version=None, content_hash=None,
+        scores={"differentiation_unmet_need": 4, "ip_fto": 3},
+    )
+    html = (
+        await client.get(
+            f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+        )
+    ).text
+    assert 'class="score-differentiation_unmet_need' in html
+    assert 'class="score-scientific_credibility' in html  # live dims all listed
+    assert 'class="score-ip_fto' in html                  # extra appended
 
 
 async def test_admin_detail_page_404s_on_an_unknown_id(client, db_session, admin):

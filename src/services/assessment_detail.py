@@ -47,12 +47,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 # `panel_state`.
 from src.agent.specialists import parse_opinion
 from src.models import AgentMessage, LlmCallLog, OpportunityAssessment, SpecialistConsult
-from src.services.blackbird_rubric import (
-    BANDING,
-    RUBRIC_VERSION,
-    RUBRIC_WEIGHTS,
-    load_rubric,
-)
+from src.services.blackbird_rubric import BANDING, RUBRIC_VERSION
+from src.services.rubric_revisions import resolve_revision
 
 # Hard bounds. This page is a read of unbounded production data: a channel can
 # hold hundreds of hub turns and a retrieve_full_text result can be an entire
@@ -522,31 +518,63 @@ async def build_assessment_detail(
         if row is not None:
             pi_user_id = str(row)
 
-    rubric = load_rubric()
+    revision, revision_provenance = resolve_revision(
+        assessment.rubric_version, assessment.rubric_content_hash
+    )
     scores = assessment.scores if isinstance(assessment.scores, dict) else {}
     normalized_scores = {
-        key.strip().lower(): value for key, value in scores.items() if isinstance(key, str)
+        key.strip().lower(): value
+        for key, value in scores.items()
+        if isinstance(key, str)
     }
-    dimensions = []
-    for key, weight in RUBRIC_WEIGHTS.items():
-        raw = normalized_scores.get(key)
-        value = (
+
+    def _score_value(raw: object) -> float | None:
+        return (
             float(raw)
             if isinstance(raw, (int, float)) and not isinstance(raw, bool)
             else None
         )
+
+    def _pct(value: float | None) -> float | None:
+        # Bar width as a percentage of the revision's scale, clamped — a
+        # verdict can carry an out-of-range score and a >100% width would
+        # overflow the track. No revision -> no known scale -> no bar.
+        if revision is None:
+            return None
+        if value is None:
+            return 0.0
+        return min(100.0, max(0.0, value / revision.scale_max * 100.0))
+
+    dimensions = []
+    named_keys: set[str] = set()
+    if revision is not None:
+        for dim in revision.dimensions:
+            value = _score_value(normalized_scores.get(dim.key))
+            named_keys.add(dim.key)
+            dimensions.append({
+                "key": dim.key,
+                "title": dim.title,
+                "weight": dim.weight,
+                "weight_note": dim.weight_note,
+                "score": value,
+                "pct": _pct(value),
+            })
+    # Score keys the chosen revision does not name still render — a stored row
+    # must show its data, never blanks (the pre-registry page dropped a v2
+    # row's 13 scores on the floor).
+    for key in sorted(normalized_scores):
+        if key in named_keys:
+            continue
+        value = _score_value(normalized_scores[key])
+        if value is None:
+            continue
         dimensions.append({
             "key": key,
-            "weight": weight,
+            "title": key.replace("_", " "),
+            "weight": None,
+            "weight_note": None,
             "score": value,
-            # Bar width as a percentage of the scale, clamped: a verdict can
-            # carry an out-of-range score and a >100% width would overflow the
-            # track. The weighted score itself clamps the same way.
-            "pct": (
-                min(100.0, max(0.0, value / rubric.scale_max * 100.0))
-                if value is not None
-                else 0.0
-            ),
+            "pct": _pct(value),
         })
 
     thread_id, messages = await _load_thread_messages(db, assessment)
@@ -621,8 +649,9 @@ async def build_assessment_detail(
         "assessment": assessment,
         "pi_user_id": pi_user_id,
         "dimensions": dimensions,
-        "scale_max": rubric.scale_max,
-        "rubric_weights": RUBRIC_WEIGHTS,
+        "revision": revision,
+        "revision_provenance": revision_provenance,
+        "scale_max": revision.scale_max if revision is not None else None,
         "banding": BANDING,
         "rubric_version": RUBRIC_VERSION,
         "panel_state": panel_state(assessment),
