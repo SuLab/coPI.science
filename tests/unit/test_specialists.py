@@ -812,6 +812,24 @@ def test_the_report_states_the_mix_and_never_diagnoses_a_cause():
     assert "panel_calibration_ladder" in msg, "point at the instrument instead"
 
 
+def test_the_report_names_its_denominator_as_counted_consults():
+    """The word "counted" is load-bearing, not decoration — a future "tidy
+    this f-string" pass must not drop it.
+
+    The tally excludes TRUNCATED consults: recorded durably in
+    `specialist_consults` but deliberately never counted here (tools.py — an
+    unread specialist has cleared nothing). So `specialist_consults` can hold
+    MORE rows for a run than this report's own total. Run ee419dd3 measured
+    exactly that gap — 229 rows, "2 of 228" in the old alarm's message — and
+    it went to an audit as an unexplained discrepancy precisely because the
+    message did not say which basis it was counting on. "counted consults" is
+    what tells the operator the difference is by design, not a lost count.
+    """
+    message = signal_mix_report({"caution": 202, "blocking": 24, "clear": 2})
+    assert message is not None
+    assert "228 counted consults" in message
+
+
 def test_the_report_is_quiet_below_its_sample_floor():
     """Unchanged from the retired alarm: at n<50 a mix report is noise."""
     assert signal_mix_report({"caution": 49}) is None

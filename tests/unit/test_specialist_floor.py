@@ -554,6 +554,33 @@ async def test_stop_does_not_warn_of_flatness_for_a_domain_with_real_variance(ca
 
 
 @pytest.mark.asyncio
+async def test_stop_warns_of_flatness_for_a_genuinely_one_sided_domain(caplog):
+    """The positive-path counterpart to the test above, driven through the
+    real `stop()` wiring rather than only through the pure function
+    (`test_specialists.py::test_a_domain_stuck_on_one_label_is_named` covers
+    that). Without this, a bug in the for-loop itself — wrong attribute name,
+    wrong logger method, an exception swallowed before the loop runs — would
+    be invisible to this suite, since every other engine-level test here
+    asserts the warning's ABSENCE.
+
+    `domain_flatness_warning` logs via `logger.warning`
+    (`simulation.py:1221`), so WARNING is the correct capture level here —
+    deliberately the opposite choice from the mix-report tests above, which
+    log at INFO. The two must not be interchanged.
+    """
+    eng = _engine(_hub())
+    eng._consult_signal_counts_by_domain = {
+        "legal": {"caution": 87, "blocking": 4},  # 91 total, 95.6% modal
+    }
+
+    with caplog.at_level(logging.WARNING, logger="src.agent.simulation"):
+        await eng.stop()
+
+    assert _FLATNESS_WARNING_MARKER in caplog.text
+    assert "legal" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_the_mix_report_states_the_clear_share_however_small(caplog):
     """The regression the retired alarm was rebuilt for is moot now: there is
     no threshold left to silence. Under the old zero test, ONE `clear` bought
@@ -576,10 +603,16 @@ async def test_the_mix_report_states_the_clear_share_however_small(caplog):
 
 @pytest.mark.asyncio
 async def test_stop_does_not_warn_below_the_threshold(caplog):
+    """The mix report logs at INFO (`signal_mix_report` -> `logger.info`), so
+    the capture level here must be INFO, not WARNING: under a WARNING-level
+    capture `Logger.isEnabledFor(INFO)` is False and the assertion below would
+    pass unconditionally regardless of whether the n>=50 floor exists at all —
+    a fix-round finding (2026-08-28) against an earlier version of this test
+    that used WARNING here and could not fail no matter what the floor did."""
     eng = _engine(_hub())
     eng._consult_signal_counts = {"caution": 49}  # one short of 50, still no clear
 
-    with caplog.at_level(logging.WARNING, logger="src.agent.simulation"):
+    with caplog.at_level(logging.INFO, logger="src.agent.simulation"):
         await eng.stop()
 
     assert _MIX_REPORT_MARKER not in caplog.text
@@ -588,12 +621,19 @@ async def test_stop_does_not_warn_below_the_threshold(caplog):
 @pytest.mark.asyncio
 async def test_stop_is_safe_with_an_empty_tally(caplog):
     """No consults happened at all this run (e.g. a run with no interviews) —
-    stop() must still complete cleanly and must not warn."""
+    stop() must still complete cleanly and must not warn.
+
+    Captured at INFO deliberately, not WARNING: INFO is the lower of the two
+    levels either function could log at (`signal_mix_report` -> INFO,
+    `domain_flatness_warning` -> WARNING), and `Logger.isEnabledFor` treats a
+    WARNING record as enabled under an INFO-level capture too, so one context
+    manager here catches a regression in either guard rather than only one.
+    """
     eng = _engine(_hub())
     assert eng._consult_signal_counts == {}
     assert eng._consult_signal_counts_by_domain == {}
 
-    with caplog.at_level(logging.WARNING, logger="src.agent.simulation"):
+    with caplog.at_level(logging.INFO, logger="src.agent.simulation"):
         await eng.stop()
 
     assert _MIX_REPORT_MARKER not in caplog.text
