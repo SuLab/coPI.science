@@ -5,6 +5,29 @@ Anthology, NeurIPS/ICLR/OpenReview, ACM DL). Organised by the decision each body
 of evidence bears on rather than by topic, because the point of the review is to
 constrain the fix.
 
+**⚠️ CITATION RELIABILITY AUDIT (added 2026-08-28).** An adversarial re-read found
+several citations carrying more weight than they can bear. Read the review with these in
+mind:
+
+- **The evidence-before-rating warrant is misapplied.** The "+6 to +11 accuracy points"
+  figure comes from **k = 6 ensembling on pairwise judging**; it was used here to justify
+  a **k = 1 reorder of one JSON key**. The same source grades the *opposite* result —
+  chain-of-thought narrowing the criterion — as STRONG. The measured outcome of the
+  reorder was a loss of discrimination, consistent with the source's own caveat rather
+  than with the inference drawn from it.
+- **The anchoring effect size `d = 0.71` is an EXTERNAL-anchor result**, not a
+  self-generated-token one, so it does not straightforwardly transfer to a model reading
+  its own prior output.
+- **`arXiv:2605.04298` is cited against its own direction.**
+- **The `R = 0.319` comparison is not like-for-like:** that benchmark reports R at matched
+  invariance S >= 0.90, against this panel's measured S = 0.833.
+- **Six load-bearing 2026 preprints could not be verified**, including `arXiv:2608.24419`,
+  which is hard-coded into a source comment in `src/agent/specialists.py`. Treat every
+  2026 preprint ID in this file as unconfirmed.
+- **Lindner et al. (NIH, N = 18,043) is real and aptly used**, with one caveat: the
+  "mirroring" claim rests on rank agreement at n = 2, and NIH's score compression runs
+  toward *leniency* while this panel's ran toward *severity*.
+
 **Evidence grades.** **STRONG** = quantified, multi-model or multi-dataset,
 peer-reviewed or replicated. **MODERATE** = quantified, single credible study.
 **WEAK** = single small study, single-author preprint, or qualitative only.

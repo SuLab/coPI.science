@@ -5,6 +5,15 @@ code path.** This is the experiment
 `docs/audits/2026-08-24-panel-clear-rate/README.md` §7 prescribed, extended from a
 one-factor design to a 2×3 factorial so it also tests that audit's H3.
 
+> **STATISTICAL CORRECTION (2026-08-28).** The headline `p = 5.1e-07` in this file
+> applies Fisher's exact test to 16 domain-matched pairs as if they were independent.
+> The correct paired test (McNemar) gives **p = 1.22e-4** — the main effect stands, the
+> magnitude was overstated ~240x. Separately, the "framing p = 1.00" result is an
+> arithmetic artefact of a near-degenerate table at n = 8, where even total abolition of
+> the top label reaches only p = 0.20; a paired sign test over all 24 pairs is 4-0
+> toward NEUTRAL being harsher (p = 0.125). Read framing as **underpowered and
+> unmeasured**, never as shown-inert. Details: `audit-evidence.md`.
+
 > **CORRECTION (2026-08-28), and it is a correction to this audit, not to the
 > code.** An earlier and smaller version of this diagnosis **had already been run
 > on 2026-08-18** — `scripts/diagnose_specialist_calibration.py` (committed as

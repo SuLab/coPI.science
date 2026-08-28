@@ -7,6 +7,32 @@
 A panel that clears almost nothing cannot discriminate — check persona calibration.
 ```
 
+> ## ⚠️ STATISTICAL CORRECTIONS (2026-08-28, from `audit-evidence.md`)
+>
+> The core conclusion below — that the panel discriminates and the clear-rate alarm's
+> diagnosis is wrong — **survives**. Three of the numbers used to argue it do not, and
+> two of them would license the wrong next action if taken at face value.
+>
+> 1. **`p = 5.1e-07` is roughly 240x too small.** Fisher's exact test there treats 16
+>    domain-matched pairs as independent observations. The paired test the design calls
+>    for (McNemar) gives **p = 1.22e-4**. Still decisive; not what was claimed.
+> 2. **"Framing does nothing (p = 1.00)" is an artefact, not a null result.** At n = 8
+>    the comparison has essentially no power: even TOTAL abolition of the top label
+>    would only reach p = 0.20. A paired sign test over all 24 pairs runs **4-0 toward
+>    the NEUTRAL framing being harsher** (p = 0.125) — a one-directional signal the
+>    reported test cannot see. Framing is **unmeasured**, not inert. This matters
+>    because "framing is inert" was the stated reason not to reword the personas.
+> 3. **"Only `legal` is flat" is overstated.** `legal` (2 of 8 WEAK→STRONG changes) is
+>    statistically indistinguishable from `clinical` (4 of 8), Fisher p = 0.61. The
+>    "0 of 91 clear" property is shared by **6 of 8** domains, and production entropy
+>    ranks `legal` **4th**, behind technologic, clinical and budget. The "changed 0 of
+>    2 tiers" figure was one run's noise — the committed baseline shows 1 of 2.
+>
+> Since these were written, the fix built on them has been measured, and the result is
+> recorded in `05-isolation-series-design.md` and the SDD ledger: the interventions moved
+> the panel's operating point rather than its resolution, exactly as this review's own
+> "prompting moves the criterion, not the resolution" citation predicts.
+
 ## Verdict
 
 **The alarm's diagnosis is wrong, and its metric measures the wrong thing.** The
