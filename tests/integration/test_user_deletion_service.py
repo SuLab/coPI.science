@@ -154,6 +154,28 @@ async def test_files_are_deleted_post_commit(db_session, monkeypatch, tmp_path):
     assert report.errors == []
 
 
+async def test_archived_working_memory_purged_on_deletion(db_session, monkeypatch, tmp_path):
+    # --fresh archives whole memory trees under archive/<stamp>/<agent_id>;
+    # a deleted PI's synthesized memory must not survive in those snapshots.
+    pub = tmp_path / "pub"
+    mem = tmp_path / "mem"
+    monkeypatch.setattr("src.services.user_deletion._PUBLIC_DIR", pub)
+    monkeypatch.setattr("src.services.user_deletion._MEMORY_DIR", mem)
+    user, agent = await _seed_pi_with_agent(db_session)
+    slug = agent.agent_id
+    (mem / "archive" / "20260828T120000Z" / slug).mkdir(parents=True)
+    (mem / "archive" / "20260828T120000Z" / slug / "public.md").write_text(
+        "archived memory"
+    )
+    (mem / "archive" / "20260828T120000Z" / "other").mkdir()
+
+    report = await delete_user_account(db_session, user)
+
+    assert not (mem / "archive" / "20260828T120000Z" / slug).exists()
+    assert (mem / "archive" / "20260828T120000Z" / "other").exists()
+    assert report.errors == []
+
+
 async def test_unsafe_agent_id_skips_files_but_reports(db_session, monkeypatch, tmp_path):
     monkeypatch.setattr("src.services.user_deletion._PUBLIC_DIR", tmp_path / "pub")
     monkeypatch.setattr("src.services.user_deletion._MEMORY_DIR", tmp_path / "mem")

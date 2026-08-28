@@ -92,11 +92,18 @@ class DeletionReport:
 def _agent_paths(agent_id: str) -> list[Path]:
     if not _SAFE_AGENT_ID.fullmatch(agent_id):
         raise ValueError(f"refusing file cleanup for unsafe agent_id {agent_id!r}")
-    return [
+    paths = [
         _PUBLIC_DIR / f"{agent_id}.md",
         _MEMORY_DIR / f"{agent_id}.md",  # legacy pre-partition memory file
         _MEMORY_DIR / agent_id,  # partitioned memory directory
     ]
+    # --fresh archives whole memory trees under archive/<stamp>/; a deleted
+    # PI's synthesized memory must be purged from those snapshots too.
+    archive_root = _MEMORY_DIR / "archive"
+    if archive_root.is_dir():
+        paths.extend(sorted(archive_root.glob(f"*/{agent_id}")))
+        paths.extend(sorted(archive_root.glob(f"*/{agent_id}.md")))
+    return paths
 
 
 def _delete_agent_files(agent_id: str, report: DeletionReport) -> None:
