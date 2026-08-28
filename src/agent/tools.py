@@ -14,6 +14,7 @@ from src.agent.specialists import (
     has_usable_content,
     parse_opinion,
     persona_path,
+    read_state_for,
 )
 from src.services.llm import generate_agent_response, is_truncated_stop
 from src.services.patents import PriorArtResult, search_prior_art
@@ -712,6 +713,7 @@ async def _execute_consult_specialist(
     # retry died: that fallthrough reports `max_tokens`, so it is safe here only
     # while this predicate is the shared one (src/services/llm.py).
     truncated = bool(stop_reasons) and is_truncated_stop(stop_reasons[-1])
+    read_state = read_state_for(truncated=truncated, opinion=opinion)
     if truncated:
         logger.error(
             "[specialists] %s consult for %s was cut off mid-reply "

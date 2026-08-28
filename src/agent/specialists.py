@@ -138,6 +138,13 @@ class SpecialistOpinion:
     questions_to_ask: tuple[str, ...]
     confidence: str
     raw: str
+    # Whether `verdict_signal` above was READ off the reply or DEFAULTED by
+    # parse_opinion. Not a judgement about the opportunity — a fact about the
+    # reply — which is why it is derived here and never asked of the model. Its
+    # consumer is `read_state_for`; before it existed, a defaulted `caution` was
+    # byte-indistinguishable from a genuine one and only a WARNING line
+    # (`_warn_defaulted`) recorded the difference.
+    signal_was_defaulted: bool = False
 
 
 # --- panel notes ------------------------------------------------------------
@@ -330,10 +337,12 @@ def parse_opinion(raw: str, *, domain: str) -> SpecialistOpinion:
         return SpecialistOpinion(
             domain=domain, verdict_signal=_DEFAULT_SIGNAL, concerns=(),
             questions_to_ask=(), confidence="low", raw=raw,
+            signal_was_defaulted=True,
         )
 
     signal = data.get("verdict_signal")
-    if signal not in VERDICT_SIGNALS:
+    signal_defaulted = signal not in VERDICT_SIGNALS
+    if signal_defaulted:
         _warn_defaulted(
             domain,
             f"the object parsed but its verdict_signal was {signal!r}, not one of "
@@ -351,7 +360,34 @@ def parse_opinion(raw: str, *, domain: str) -> SpecialistOpinion:
         questions_to_ask=_str_tuple(data.get("questions_to_ask")),
         confidence=confidence,
         raw=raw,
+        signal_was_defaulted=signal_defaulted,
     )
+
+
+#: The three ways a consult's reply can stand relative to being READ. This is a
+#: property of the reply, not of the opportunity, and is deliberately never
+#: asked of the model — it is computed from what the code already knows.
+READ_STATES: frozenset[str] = frozenset({"parsed", "defaulted", "truncated"})
+
+
+def read_state_for(*, truncated: bool, opinion: SpecialistOpinion) -> str:
+    """Which of ``READ_STATES`` this consult is in.
+
+    ``truncated`` outranks a clean parse deliberately: a reply the API cut off
+    can still parse when the JSON happens to close early, and "the API stopped
+    this mid-sentence" is the stronger statement about how much of the
+    specialist's reasoning we actually have.
+
+    Generalises the special case at ``_post_panel_note``, which pulls
+    ``truncated`` out of ``**_withheld`` solely to CANCEL the workspace-visible
+    note because "no specialist ever said it". That reasoning applies equally to
+    a reply that arrived complete and failed to parse — which is not
+    ``truncated``, and which therefore posted a note asserting a verdict nobody
+    produced.
+    """
+    if truncated:
+        return "truncated"
+    return "defaulted" if opinion.signal_was_defaulted else "parsed"
 
 
 def _warn_defaulted(domain: str, why: str) -> None:
@@ -359,10 +395,12 @@ def _warn_defaulted(domain: str, why: str) -> None:
 
     The six laundered consults were invisible precisely because a defaulted
     opinion is indistinguishable from a genuine cautious one — same signal, same
-    confidence, same stored row, no log line anywhere. This is the greppable
-    difference. Deliberately not a field on ``SpecialistOpinion`` or a column on
-    ``specialist_consults``: a column belongs in its own migration, and the WARNING
-    is what makes the next six countable today.
+    confidence, same stored row, no log line anywhere. This WARNING is what made
+    the next six greppable before ``SpecialistOpinion.signal_was_defaulted`` (and
+    the ``read_state`` it feeds) existed to answer the same question
+    structurally; kept as the immediate, per-call signal in the log, since a
+    field on the dataclass is not the same thing as a line an operator sees at
+    the time.
 
     Rare by construction — 141 of 168 consults in the motivating run parsed
     cleanly — so this is not a per-consult line.

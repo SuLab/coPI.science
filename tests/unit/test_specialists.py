@@ -12,6 +12,7 @@ from pathlib import Path
 from src.agent.specialists import (
     MIN_CLEAR_RATE,
     PANEL_NOTE_QUESTION_CHARS,
+    READ_STATES,
     SPECIALIST_DOMAINS,
     VERDICT_SIGNALS,
     clear_rate_warning,
@@ -21,6 +22,7 @@ from src.agent.specialists import (
     has_usable_content,
     parse_opinion,
     persona_path,
+    read_state_for,
     required_domains_for,
 )
 
@@ -873,3 +875,53 @@ def test_nothing_but_the_three_publishable_fields_can_reach_a_note():
     assert all(p.kind is p.KEYWORD_ONLY for p in params.values()), (
         "keyword-only, so a positional call cannot silently pass the wrong field"
     )
+
+
+# ---------------------------------------------------------------
+# read_state_for — splitting "we could not read this reply" out of the
+# verdict_signal axis, which used to carry both meanings at once.
+# ---------------------------------------------------------------
+
+
+def test_a_reply_that_parsed_reports_its_signal_as_read():
+    op = parse_opinion(_raw(verdict_signal="blocking"), domain="chemistry")
+    assert op.signal_was_defaulted is False
+    assert read_state_for(truncated=False, opinion=op) == "parsed"
+
+
+def test_an_unreadable_reply_is_marked_defaulted_not_merely_cautious():
+    """The 15 defaulted rows in production are byte-indistinguishable from
+    genuine cautious ones. This is the field that separates them."""
+    op = parse_opinion("this is prose, not an object", domain="chemistry")
+    assert op.verdict_signal == "caution"
+    assert op.signal_was_defaulted is True
+    assert read_state_for(truncated=False, opinion=op) == "defaulted"
+
+
+def test_an_off_contract_signal_also_counts_as_defaulted():
+    op = parse_opinion(_raw(verdict_signal="catastrophic"), domain="chemistry")
+    assert op.signal_was_defaulted is True
+
+
+def test_a_defaulted_confidence_alone_is_not_a_read_failure():
+    """Only the SIGNAL decides read-state. A reply whose signal parsed but whose
+    confidence was off-contract was still read."""
+    op = parse_opinion(
+        _raw(verdict_signal="blocking", confidence="extremely"), domain="chemistry"
+    )
+    assert op.verdict_signal == "blocking"
+    assert op.signal_was_defaulted is False
+
+
+def test_truncation_outranks_a_clean_parse():
+    """A reply cut off mid-sentence can still parse if the JSON happened to
+    close early. Truncation is the stronger statement and must win."""
+    op = parse_opinion(_raw(verdict_signal="blocking"), domain="chemistry")
+    assert read_state_for(truncated=True, opinion=op) == "truncated"
+
+
+def test_every_read_state_returned_is_in_the_declared_set():
+    for truncated in (True, False):
+        for raw in (_raw(verdict_signal="clear"), "prose"):
+            op = parse_opinion(raw, domain="legal")
+            assert read_state_for(truncated=truncated, opinion=op) in READ_STATES
