@@ -168,13 +168,18 @@ that resolved to no message, and the assessment detail page's interview
 timeline was empty for 90% of the corpus. `_open_fresh_run`
 (`src/agent/main.py:99`) now only mints a new `SimulationRun` row: **the new
 `simulation_run_id` IS the isolation**, every startup and main-loop read is
-already run-scoped, and pre-run Slack history is skipped rather than
-re-imported (`_seed_slack_cursors_without_ingest` parks each polled channel's
+already run-scoped (true since 2026-08-28 — `thread_decisions`/`proposal_reviews`
+were the unscoped exceptions until then, which fed prior runs' interview
+summaries into fresh Phase-5 prompts), and pre-run Slack history is skipped
+rather than re-imported (`_seed_slack_cursors_without_ingest` parks each polled channel's
 cursor at the newest message it can see, or at the wall clock for a channel it
 could not read at all — a "0" cursor made the live poller re-import the whole
 back catalogue on the first tick). Consequences for an operator: rows now
 **accumulate** across fresh runs, so pick the run you mean on the admin pages;
-and `profiles/memory/*` is still not reset, deliberately and as before.
+and `profiles/memory/*` is ARCHIVED, not kept: `--fresh` moves it to
+`profiles/memory/archive/<UTC stamp>/` (2026-08-28) so a fresh run's prompts
+carry no prior-run verdict ledger; plain resumes keep memory untouched, and
+deleting a PI purges their archived copies too.
 
 **`--budget` is deprecated.** It is a *cumulative* cap for the whole run, it is
 rebuilt from `llm_call_logs` on restart, and it therefore benches an agent
@@ -649,7 +654,8 @@ the rubric it started with. Stop the run, start it again (see "Before restarting
 check the startup banner: it logs `Screening rubric: version X (content hash Y)`. X must
 match `[meta].version` in the file; Y is the first 12 hex characters of the file's sha256
 (not the full digest). New assessments are stamped with both, so pre-/post-change rows
-stay comparable.
+stay comparable. A version bump also requires the outgoing document's entry in
+`prompts/rubric/revisions.toml` — see the assessment-archive box.
 
 > **Deploy order for `0030_specialist_consults_rubric_version` — migrate BEFORE the new
 > code serves.** `0030` is additive (a new `specialist_consults` table, plus nullable
@@ -820,6 +826,31 @@ stay comparable.
 > sync turns one prompt edit into a fistful of CI failures on the next full run
 > rather than an error at the point of the edit. `--check` reports drift without
 > writing.
+
+> ### ⚠️ The assessment archive: never purge, never delete a run row.
+>
+> `opportunity_assessments` rows are the cross-version comparison corpus —
+> each is stamped (`rubric_version`, `rubric_content_hash`) and the read
+> paths render it against that revision via `prompts/rubric/revisions.toml`
+> + `src/services/rubric_revisions.py`. Three standing rules:
+>
+> 1. **A rubric regime change is "stamp and keep", never a purge.** The one
+>    purge on record (2026-08-27, rubric v3) deleted all 82 pre-3.2.0 rows;
+>    they survive only in
+>    `backups/opportunity_assessments_pre_purge_1787862739.dump`
+>    (restore runbook: docs/plans/2026-08-28-run-isolation-and-assessment-
+>    archive-plan.md, Task 9).
+> 2. **On every `[meta].version` bump** of `blackbird-rubric.toml`, append
+>    the OUTGOING document's entry (version, sha256[:12] of the old bytes,
+>    scale, band lines, dimension table) to `prompts/rubric/revisions.toml`
+>    in the same commit — otherwise the rows it stamped render as "unknown
+>    revision".
+> 3. **Never DELETE from `simulation_runs`.** Every run-produced table
+>    (`agent_messages`, `opportunity_assessments`, `assessment_drops`,
+>    `llm_call_logs`, `specialist_consults`, `thread_decisions`,
+>    `pi_dm_messages`, `agent_channels`) is ON DELETE CASCADE from it — one
+>    row's delete silently destroys that run's entire archive. No code path
+>    does this; the exposure is manual SQL.
 
 **One interview yields exactly one assessment, and the row you end up with comes
 from the LAST verdict-bearing reply.** **A sidecar is now trusted on its own**

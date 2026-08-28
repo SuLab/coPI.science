@@ -26,7 +26,9 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from src.agent.agent import Agent
+from src.agent.message_log import LogEntry
 from src.agent.simulation import SimulationEngine
+from src.agent.state import ThreadState
 from src.agent.transport import NullTransport
 from src.config import get_settings
 from tests import factories
@@ -361,4 +363,123 @@ async def test_a_second_rebuild_does_not_duplicate_call_times(db_session, monkey
     assert len(su.state.call_times) == 1, (
         "a second rebuild duplicated the call_times ledger: "
         f"{list(su.state.call_times)}"
+    )
+
+
+async def test_the_rebuild_ignores_another_runs_thread_decisions(db_session):
+    """A --fresh run must not inherit prior runs' interview outcomes: an
+    unfiltered thread_decisions read fed every earlier run's closing summaries
+    into Phase-5 prompts as 'you already pitched this' (audit F2)."""
+    run = await factories.make_simulation_run(db_session)
+    other = await factories.make_simulation_run(db_session)
+    await factories.make_thread_decision(
+        db_session, run=other, thread_id="9999.000100", channel="general",
+        agent_a="su", agent_b="wiseman", outcome="no_proposal",
+        summary_text="FOREIGN-RUN-SUMMARY",
+    )
+    # Same-run control: over-filtering would be its own regression.
+    await factories.make_thread_decision(
+        db_session, run=run, thread_id="7777.000100", channel="general",
+        agent_a="su", agent_b="wiseman", outcome="no_proposal",
+        summary_text="THIS-RUN-SUMMARY",
+    )
+    await db_session.flush()
+
+    eng = _engine_for(db_session, run.id)
+    await eng._rebuild_state_from_db()
+    await eng._rebuild_agent_state()
+
+    pair = tuple(sorted(["su", "wiseman"]))
+    summaries = [t["summary"] for t in eng._prior_threads.get(pair, [])]
+    assert summaries == ["THIS-RUN-SUMMARY"], summaries
+    assert "7777.000100" in eng._closed_thread_ids
+    assert "9999.000100" not in eng._closed_thread_ids, (
+        "another run's closed-thread ids leaked into this run's closed set"
+    )
+
+
+async def test_the_rebuild_ignores_another_runs_proposals(db_session):
+    """A prior run's unreviewed proposal must not bench a fresh run's agent,
+    and a prior run's collab_private proposal must not pre-finalize a
+    same-named private channel (audit F3)."""
+    run = await factories.make_simulation_run(db_session)
+    other = await factories.make_simulation_run(db_session)
+    await factories.make_thread_decision(
+        db_session, run=other, thread_id="8888.000100", channel="general",
+        agent_a="su", agent_b="wiseman", outcome="proposal",
+    )
+    await factories.make_thread_decision(
+        db_session, run=other, thread_id="8888.000200", channel="prv-su-wiseman",
+        agent_a="su", agent_b="wiseman", outcome="proposal",
+        origin_visibility="collab_private",
+    )
+    await db_session.flush()
+
+    eng = _engine_for(db_session, run.id)
+    await eng._rebuild_state_from_db()
+    await eng._rebuild_agent_state()
+
+    assert eng.agents["su"].state.pending_proposals == []
+    assert eng.agents["wiseman"].state.pending_proposals == []
+    assert "prv-su-wiseman" not in eng._finalized_private_channels
+
+
+async def test_the_rebuild_still_loads_this_runs_proposals(db_session):
+    """Positive control for the new filter."""
+    run = await factories.make_simulation_run(db_session)
+    await factories.make_thread_decision(
+        db_session, run=run, thread_id="6666.000100", channel="general",
+        agent_a="su", agent_b="wiseman", outcome="proposal",
+    )
+    await db_session.flush()
+
+    eng = _engine_for(db_session, run.id)
+    await eng._rebuild_state_from_db()
+    await eng._rebuild_agent_state()
+
+    assert [p.thread_id for p in eng.agents["su"].state.pending_proposals] == ["6666.000100"]
+
+
+async def test_a_thread_with_no_root_in_the_log_is_evicted_not_replied(
+    db_session, monkeypatch
+):
+    """A reply ingested into a thread whose parent this run never saw (e.g. a
+    foreign bot's thread_broadcast into a PREVIOUS run's interview) must be
+    evicted, not answered: get_thread_history would hand the LLM a one-message
+    'history' and restart a concluded interview at ordinal 2 (audit F4).
+
+    Nothing else on the unguarded path stops this turn — the participation
+    check waves a missing root through (allowed is None) and budget_cap=0 is
+    the INERT legacy cap, not zero budget — so without the monkeypatches the
+    RED run would reach a real Anthropic call.
+    """
+    run = await factories.make_simulation_run(db_session)
+    eng = _engine_for(db_session, run.id)
+    su = eng.agents["su"]
+
+    monkeypatch.setattr(su, "build_phase4_prompt", lambda **kw: ("sys", []))
+
+    async def _must_not_run(**kwargs):
+        raise AssertionError("an orphan thread must never reach the model")
+
+    monkeypatch.setattr("src.agent.simulation.generate_with_tools", _must_not_run)
+
+    orphan_root = "1111.000100"
+    eng.message_log.append(LogEntry(
+        ts="1111.000200", channel="general",
+        sender_agent_id="wiseman", sender_name="WisemanBot",
+        content="reply into a previous run's thread",
+        thread_ts=orphan_root, posted_at=1111.0002, is_bot=True,
+    ))
+    thread = ThreadState(
+        thread_id=orphan_root, channel="general", other_agent_id="wiseman",
+        message_count=1, has_pending_reply=True,
+    )
+    su.state.active_threads[orphan_root] = thread
+
+    await eng._reply_to_thread(su, thread)
+
+    assert orphan_root not in su.state.active_threads, "orphan thread not evicted"
+    assert orphan_root in eng._closed_thread_ids, (
+        "eviction must pin the id closed or Phase 3 re-activates it next tick"
     )

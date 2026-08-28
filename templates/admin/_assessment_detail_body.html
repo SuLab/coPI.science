@@ -159,8 +159,13 @@
             </div>
             <div class="text-xs text-gray-400 mt-1">
                 computed, not taken from the model &middot;
-                &ge;{{ banding.advance_min }} advance,
-                &lt;{{ banding.conditional_min }} {{ banding.pass_label }}
+                {% if revision and revision.advance_min is not none %}
+                    &ge;{{ revision.advance_min }} advance,
+                    &lt;{{ revision.conditional_min }} {{ revision.pass_label or banding.pass_label }}{% if revision.banding_note %}
+                    <span class="cursor-help" title="{{ revision.banding_note }}">*</span>{% endif %}
+                {% else %}
+                    band lines for this row's revision are not recorded
+                {% endif %}
             </div>
         </div>
     </div>
@@ -175,6 +180,13 @@
                 <span class="text-amber-700">The current document is
                 <span class="font-mono">{{ rubric_version }}</span> — scores are not
                 directly comparable across revisions.</span>
+            {% endif %}
+            {% if revision_provenance == 'archived' %}
+                <span class="text-gray-500">Dimension names, weights and band lines above
+                are that revision's, from prompts/rubric/revisions.toml.</span>
+            {% elif revision_provenance == 'unknown' %}
+                <span class="text-amber-700">This stamp matches no entry in the revision registry —
+                scores are shown as stored, with no weights or band lines.</span>
             {% endif %}
         {% else %}
             This verdict predates rubric stamping, so which revision scored it is
@@ -330,9 +342,10 @@
    but is deliberately not rendered — every stored row post-purge is v3.2.0+
    and carries none. #}
 
-{# The dimensions as weighted bars, in RUBRIC_WEIGHTS order (heaviest
-   first) so what actually moved the score reads first. Bar length is the score
-   on the 1-{{ scale_max }} scale; the weight is printed beside it, because a 5
+{# The dimensions as weighted bars, in the resolved revision's order (heaviest
+   first) so what actually moved the score reads first, followed by any score
+   key that revision does not name. Bar length is the score on the row's own
+   scale (unknown -> no bar); the weight is printed beside it, because a 5
    at 3% and a 2 at 15% look identical as bars and are not remotely the same
    fact. An unscored dimension shows an empty track and "not scored", never a
    zero-length bar that reads as a scored zero — it counts as ZERO in the
@@ -345,24 +358,27 @@
         {% for d in dimensions %}
         <div class="score-{{ d.key }} flex items-center gap-3 text-xs">
             <span class="w-56 shrink-0 {% if d.score is none %}text-gray-400{% else %}text-gray-700{% endif %}">
-                {{ d.key.replace("_", " ") }}
+                {{ d.title }}
             </span>
             <span class="w-10 shrink-0 text-right font-semibold {% if d.score is none %}text-gray-400{% else %}text-gray-800{% endif %}">
                 {% if d.score is none %}—{% else %}{{ "%g"|format(d.score) }}{% endif %}
             </span>
-            <span class="flex-1 h-2 bg-gray-100 rounded-full overflow-hidden" title="{{ d.key.replace('_', ' ') }} — {{ d.weight }}% of the weighted score{% if d.score is none %} (not scored: counts as zero){% endif %}">
-                <span class="block h-2 rounded-full {% if d.weight >= 10 %}bg-indigo-500{% else %}bg-indigo-300{% endif %}" style="width: {{ "%.0f"|format(d.pct) }}%"></span>
+            <span class="flex-1 h-2 bg-gray-100 rounded-full overflow-hidden" title="{{ d.title }}{% if d.weight_note %} — {{ d.weight_note }} of the weighted score{% endif %}{% if d.score is none %} (not scored: counts as zero){% endif %}">
+                {% if d.pct is not none %}
+                <span class="block h-2 rounded-full {% if d.weight and d.weight >= 10 %}bg-indigo-500{% else %}bg-indigo-300{% endif %}" style="width: {{ "%.0f"|format(d.pct) }}%"></span>
+                {% endif %}
             </span>
             <span class="w-24 shrink-0 text-gray-400">
-                {{ d.weight }}% weight{% if d.score is none %} &middot; not scored{% endif %}
+                {% if d.weight_note %}{{ d.weight_note }} weight{% else %}&mdash;{% endif %}{% if d.score is none %} &middot; not scored{% endif %}
             </span>
         </div>
         {% endfor %}
     </div>
     <p class="text-xs text-gray-400 mt-3">
-        Bars are the score on the 1&ndash;{{ scale_max }} scale. The weighted score
-        above is computed from these dimension values and their weights
-        (src/services/blackbird_rubric.py) — an unscored dimension drags it down.
+        {% if scale_max %}Bars are the score on the {{ revision.scale_min }}&ndash;{{ scale_max }} scale.{% else %}This row's revision is not in the registry, so its scale is unknown and no bars are drawn.{% endif %}
+        The weighted score above was computed at write time from these dimension
+        values and the weights of the revision that scored them
+        (src/services/blackbird_rubric.py) — an unscored dimension counted as zero.
     </p>
 </div>
 

@@ -23,6 +23,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from src.agent.agent import Agent
+from src.agent.message_log import LogEntry
 from src.agent.simulation import SimulationEngine
 from src.agent.state import ThreadState
 from src.config import get_settings
@@ -556,6 +557,16 @@ async def test_reservation_limiter_holds_under_n_concurrent_repliers(
                        "blackbird": FakeSlackClient(agent_id="blackbird")},
         session_factory=factory, simulation_run_id=run_id,
     )
+    # Root each thread: the orphan-eviction guard in `_reply_to_thread` (added
+    # 2026-08-28) evicts any thread whose root is absent from the log instead
+    # of replying to it, and this test needs all 10 reply attempts to
+    # actually be dispatched to the (fake) LLM.
+    for i in range(n):
+        eng.message_log.append(LogEntry(
+            ts=f"t{i}", channel="general", sender_agent_id="blackbird",
+            sender_name="BlackbirdBot", content=f"the hub's opener {i}",
+            thread_ts=None, posted_at=float(i), slack_ts=f"t{i}",
+        ))
     eng._running = True
     eng._reply_sem = asyncio.Semaphore(n)  # let all N genuinely race together
 

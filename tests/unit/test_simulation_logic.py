@@ -808,6 +808,7 @@ class TestGracefulShutdown:
         being a frozen snapshot taken at dispatch time.
         """
         from src.agent.agent import Agent
+        from src.agent.message_log import LogEntry
         from src.agent.state import ThreadState
         from tests.fakes import FakeSlackClient
 
@@ -820,6 +821,15 @@ class TestGracefulShutdown:
         engine = SimulationEngine(
             agents=[agent], slack_clients={"blackbird": FakeSlackClient(agent_id="blackbird")}
         )
+        # Root the thread: the orphan-eviction guard in `_reply_to_thread`
+        # (added 2026-08-28) evicts any thread whose root is absent from the
+        # log instead of replying to it, and this test needs the reply to
+        # actually be attempted.
+        engine.message_log.append(LogEntry(
+            ts="t1", channel="general", sender_agent_id="wang",
+            sender_name="WangBot", content="the lab's post", thread_ts=None,
+            posted_at=1.0, slack_ts="t1",
+        ))
         engine._running = True
         monkeypatch.setattr(agent, "build_phase4_prompt", lambda **kw: ("sys", []))
 
@@ -1133,6 +1143,7 @@ _SUPPRESSING_SLACK_MESSAGE = (
 class TestPhase4ReplySuppression:
     def _engine_with_thread(self):
         from src.agent.agent import Agent
+        from src.agent.message_log import LogEntry
         from src.agent.state import ThreadState
         from tests.fakes import FakeSlackClient
 
@@ -1144,6 +1155,15 @@ class TestPhase4ReplySuppression:
         agent.state.active_threads["t1"] = thread
         client = FakeSlackClient(agent_id="blackbird")
         engine = SimulationEngine(agents=[agent], slack_clients={"blackbird": client})
+        # Root the thread: the orphan-eviction guard in `_reply_to_thread`
+        # (added 2026-08-28) evicts any thread whose root is absent from the
+        # log instead of replying to it. Suppression/counting is what this
+        # class tests, not ordinal, so one root message is enough.
+        engine.message_log.append(LogEntry(
+            ts="t1", channel="general", sender_agent_id="wang",
+            sender_name="WangBot", content="the lab's post", thread_ts=None,
+            posted_at=1.0, slack_ts="t1",
+        ))
         return engine, agent, thread, client
 
     @pytest.mark.asyncio
@@ -1420,6 +1440,7 @@ class TestHubAssessmentRelocation:
         """A pi_lab reply must never even try to extract a sidecar — the
         Option A call site is gated on `agent.role == "scout_hub"`."""
         from src.agent.agent import Agent
+        from src.agent.message_log import LogEntry
         from src.agent.state import ThreadState
         from tests.fakes import FakeSlackClient
 
@@ -1431,6 +1452,15 @@ class TestHubAssessmentRelocation:
         lab.state.active_threads["t1"] = thread
         client = FakeSlackClient(agent_id="gill")
         engine = SimulationEngine(agents=[lab], slack_clients={"gill": client})
+        # Root the thread: the orphan-eviction guard in `_reply_to_thread`
+        # (added 2026-08-28) evicts any thread whose root is absent from the
+        # log instead of replying to it. This test is about the role gate,
+        # not ordinal, so one root message is enough.
+        engine.message_log.append(LogEntry(
+            ts="t1", channel="general", sender_agent_id="blackbird",
+            sender_name="BlackbirdBot", content="the interview opener",
+            thread_ts=None, posted_at=1.0, slack_ts="t1",
+        ))
 
         called = {"capture": False}
 
@@ -1494,22 +1524,36 @@ def _seed_panel_notes(engine, thread_id: str, channel: str, count: int) -> None:
 
 
 def _seed_thread_history(engine, thread_id: str, channel: str, count: int) -> None:
-    """Append ``count`` plain replies to ``thread_id`` so `_reply_to_thread`'s
-    own recompute (``len(get_thread_history(thread_id))``) lands on exactly
-    ``count`` — none of these entries' ``ts`` equals ``thread_id`` itself, so
-    there is no "root" entry inflating the count by one."""
+    """Append ``count`` total messages to ``thread_id``: the first IS the root
+    (``ts == thread_id``, ``thread_ts=None``) and the rest are replies. This
+    still lands `_reply_to_thread`'s own recompute
+    (``len(get_thread_history(thread_id))``) on exactly ``count`` — the root
+    counts toward the total precisely because `get_thread_history` always
+    pins it first — while giving the thread a real root, which the
+    orphan-eviction guard in `_reply_to_thread` (added 2026-08-28: a thread
+    whose root is absent from the log is evicted, not replied to) requires.
+    Before that guard, this helper was deliberately rootless; now a rootless
+    thread never reaches the LLM at all, so every caller needs ``count >= 1``.
+
+    The root also carries ``slack_ts == ts`` (pure-Slack-on mode): without it
+    `_slack_parent_ts` sees a real, DB-only root with no Slack presence and
+    skips mirroring the turn's reply, so it would never reach
+    ``client.posted`` even though it posted successfully.
+    """
     from src.agent.message_log import LogEntry
 
     for i in range(count):
+        is_root = i == 0
         engine.message_log.append(LogEntry(
-            ts=f"{thread_id}-msg{i}",
+            ts=thread_id if is_root else f"{thread_id}-msg{i}",
             channel=channel,
             sender_agent_id="wang" if i % 2 else "blackbird",
             sender_name="WangBot" if i % 2 else "BlackbirdBot",
             content=f"message {i}",
-            thread_ts=thread_id,
+            thread_ts=None if is_root else thread_id,
             posted_at=float(i),
             is_bot=True,
+            slack_ts=thread_id if is_root else None,
         ))
 
 
@@ -1944,6 +1988,7 @@ class TestSuppressedPostBacksOff:
 
     def _engine_with_thread(self):
         from src.agent.agent import Agent
+        from src.agent.message_log import LogEntry
         from src.agent.simulation import SimulationEngine
         from src.agent.state import ThreadState
         from tests.fakes import FakeSlackClient
@@ -1956,6 +2001,17 @@ class TestSuppressedPostBacksOff:
         agent.state.active_threads["t1"] = thread
         client = FakeSlackClient(agent_id="blackbird")
         engine = SimulationEngine(agents=[agent], slack_clients={"blackbird": client})
+        # Root the thread: the orphan-eviction guard in `_reply_to_thread`
+        # (added 2026-08-28) evicts any thread whose root is absent from the
+        # log instead of replying to it. This class is about the suppressed-
+        # post backoff counter, not ordinal, so one root message is enough,
+        # and it is seeded once here — every `_attempt` call below reuses the
+        # same engine/log, so the root persists across repeated turns.
+        engine.message_log.append(LogEntry(
+            ts="t1", channel="general", sender_agent_id="wang",
+            sender_name="WangBot", content="the lab's post", thread_ts=None,
+            posted_at=1.0, slack_ts="t1",
+        ))
         return engine, agent, thread
 
     async def _attempt(self, monkeypatch, engine, agent, thread):

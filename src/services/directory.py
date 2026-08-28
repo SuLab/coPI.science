@@ -255,21 +255,36 @@ async def list_assessments(
     Defaults to the CURRENT simulation run (the most recently started
     ``SimulationRun``) — ``?run_id=all`` or picking an older run from the
     dropdown reaches everything else; nothing is ever deleted from this view,
-    only filtered. This is deliberate, not incidental: ``--fresh``
-    (``src/agent/main.py``) wipes ``agent_messages``/``agent_channels`` but
-    NEVER ``opportunity_assessments`` — a screening verdict is a durable
-    record and losing one is worse than keeping a stale one — so after a
-    fresh restart, old assessments whose Slack messages no longer exist would
+    only filtered (one operator-run, backed-up purge on record: 2026-08-27,
+    rubric v3). This is deliberate, not incidental: before the 2026-08-22 fix,
+    ``--fresh`` (``src/agent/main.py``) ran three UNFILTERED deletes —
+    ``agent_messages``, ``agent_channels`` and ``pi_dm_messages`` — with no
+    ``simulation_run_id`` predicate, so every historical run's Slack messages
+    went with it while ``opportunity_assessments`` (never touched by any
+    ``--fresh``, before or after) survived pointing at threads that no longer
+    existed. Today's ``--fresh`` deletes nothing at all — it only mints a new
+    ``simulation_run_id``, and that new id is the isolation — but the old
+    runs already orphaned that way are still on record, so after a fresh
+    restart, old assessments whose Slack messages no longer exist would
     otherwise sit on this page with nothing to distinguish them from current
     ones. Scoping to the latest run excludes those by construction (their
-    ``simulation_run_id`` is the run that got wiped), while the "All Runs"
-    escape hatch and the per-run dropdown keep every row reachable. Mirrors
-    the run-selector pattern already used by ``admin_discussions``.
+    ``simulation_run_id`` is a run whose messages are gone), while the "All
+    Runs" escape hatch and the per-run dropdown keep every row reachable.
+    Mirrors the run-selector pattern already used by ``admin_discussions``.
     """
     runs_result = await db.execute(
         select(SimulationRun).order_by(SimulationRun.started_at.desc())
     )
     runs = runs_result.scalars().all()
+
+    # Stored rows per run — the dropdown's honesty device: an old run showing
+    # "0 stored" is distinguishable from a populated one, and (post-purge) from
+    # a run whose rows exist only in the offline backup.
+    counts_result = await db.execute(
+        select(OpportunityAssessment.simulation_run_id, func.count())
+        .group_by(OpportunityAssessment.simulation_run_id)
+    )
+    assessment_counts_by_run = dict(counts_result.all())
 
     show_all_runs = run_id == "all"
     selected_run_id: uuid.UUID | str | None = "all" if show_all_runs else None
@@ -463,6 +478,25 @@ async def list_assessments(
         row.band for row in assessments if row.band
     ).items())
 
+    # Rows whose scores share no key with the live document contribute n=0 to
+    # every dimension_stats row and pool their bands from another threshold
+    # regime — count them so the tables can disclose what they exclude. Keys
+    # are compared strip+lower, matching the normalization the detail page
+    # applies (``assessment_detail.py``'s ``normalized_scores``), so a stored
+    # key that only differs by case or incidental whitespace is not
+    # miscounted as off-rubric here while the detail page still recognizes it.
+    live_keys = set(RUBRIC_WEIGHTS)
+    off_rubric_count = sum(
+        1
+        for row in assessments
+        if isinstance(row.scores, dict)
+        and row.scores
+        and not (
+            live_keys
+            & {k.strip().lower() for k in row.scores if isinstance(k, str)}
+        )
+    )
+
     # Verdicts that were lost — generated and discarded, or never produced at
     # all — scoped exactly like the rows above. Without this an empty page is
     # ambiguous: "nothing screened yet" and "everything screened and every
@@ -524,6 +558,8 @@ async def list_assessments(
         "incomplete_panel_count": incomplete_panel_count,
         "dimension_stats": dimension_stats,
         "band_counts": band_counts,
+        "assessment_counts_by_run": assessment_counts_by_run,
+        "off_rubric_count": off_rubric_count,
     }
 
 

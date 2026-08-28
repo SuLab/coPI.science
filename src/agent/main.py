@@ -50,8 +50,9 @@ def main(
         help=(
             "Start a NEW simulation run instead of resuming the latest. Deletes "
             "nothing: a new simulation_run_id is what isolates the run, and "
-            "pre-run Slack history is skipped rather than re-imported. Does not "
-            "reset profiles/memory/*."
+            "pre-run Slack history is skipped rather than re-imported. Archives "
+            "profiles/memory/* to profiles/memory/archive/<UTC stamp>/ so agents "
+            "start with no working memory."
         ),
     ),
     reset_cursors: bool = typer.Option(False, "--reset-cursors", help="Reset scan cursors so agents re-read all posts"),
@@ -96,6 +97,18 @@ def _log_api_call_units() -> None:
     logger.info("%s", API_CALL_UNITS_NOTE)
 
 
+def _stamp_run_config(config: dict) -> dict:
+    """The run row's own record of which rubric opened it. The startup banner
+    already logs these two values; persisting them is what lets the admin run
+    dropdown label a run by rubric after the log is gone. Per-assessment
+    stamps stay authoritative for individual verdicts."""
+    return {
+        **config,
+        "rubric_version": RUBRIC_VERSION,
+        "rubric_content_hash": RUBRIC_CONTENT_HASH,
+    }
+
+
 async def _open_fresh_run(session_factory, config: dict) -> uuid.UUID:
     """Open a new ``SimulationRun`` row for a ``--fresh`` start. DELETES NOTHING.
 
@@ -114,20 +127,24 @@ async def _open_fresh_run(session_factory, config: dict) -> uuid.UUID:
     ``(simulation_run_id, message_ts)`` so re-seeing a Slack ts is a different
     key, and ``agent_channels`` has no unique constraint beyond its PK so
     per-run duplicate ``channel_name`` rows are fine. ``pi_dm_messages`` is a
-    dead table: nothing in ``src/`` writes it.
+    dead table: nothing in ``src/`` writes it. ``thread_decisions`` and
+    ``proposal_reviews`` reads were the exception until 2026-08-28 and are now
+    filtered too.
 
     ONE read was not run-scoped and had to be fixed alongside this, or "delete
     nothing" would be strictly worse than the bug: see
     ``SimulationEngine._sync_private_channels_from_db``, which without its run
     filter would hand a brand-new run every previous run's private channels.
 
-    Not reset, deliberately and as before: ``profiles/memory/*``. A ``--fresh``
-    run's agents still carry the working memory they synthesized in prior runs.
+    Working memory is handled by the caller: ``--fresh`` archives
+    ``profiles/memory/*`` to ``profiles/memory/archive/<stamp>/`` (see
+    ``src.agent.working_memory_reset``) so a fresh run's agents start with
+    none, while plain resumes keep it.
     """
     from src.models import SimulationRun
 
     async with session_factory() as db:
-        run = SimulationRun(status="running", config=dict(config))
+        run = SimulationRun(status="running", config=_stamp_run_config(config))
         db.add(run)
         await db.commit()
         logger.info("Created new simulation run %s", run.id)
@@ -235,6 +252,23 @@ async def _run_simulation(
             slack_clients[agent.agent_id] = NullTransport(agent_id=agent.agent_id)
         logger.info("Slack disabled — running DB-only (NullTransport for %d agents)", len(agents))
 
+    if fresh:
+        # A fresh run must not carry previous runs' synthesized verdict
+        # ledgers into its prompts (they are injected into EVERY system
+        # prompt via Agent._compose_working_memory). Archive-and-reset
+        # BEFORE the run opens; nothing is deleted. Plain resumes never
+        # touch memory. Deliberately outside the no_db branch: --fresh
+        # --no-db must start blind too. See docs/audits/
+        # 2026-08-28-run-isolation-and-assessment-archive (F1).
+        from src.agent.agent import PROFILES_DIR
+        from src.agent.working_memory_reset import archive_working_memory
+
+        archived_to = archive_working_memory(PROFILES_DIR / "memory")
+        if archived_to is not None:
+            logger.info("--fresh: working memory archived to %s", archived_to)
+        else:
+            logger.info("--fresh: no working memory to archive")
+
     # Set up database session factory
     session_factory = None
     simulation_run_id = None
@@ -273,6 +307,18 @@ async def _run_simulation(
                 existing_run = result.scalar_one_or_none()
 
                 if existing_run:
+                    stamped_hash = (existing_run.config or {}).get("rubric_content_hash")
+                    if stamped_hash and stamped_hash != RUBRIC_CONTENT_HASH:
+                        logger.warning(
+                            "Resuming run %s, which opened under rubric %s (%s); "
+                            "this process loaded %s (%s). Per-assessment stamps "
+                            "remain authoritative.",
+                            existing_run.id,
+                            (existing_run.config or {}).get("rubric_version"),
+                            stamped_hash,
+                            RUBRIC_VERSION,
+                            RUBRIC_CONTENT_HASH,
+                        )
                     simulation_run_id = existing_run.id
                     existing_run.status = "running"
                     existing_run.ended_at = None
@@ -280,7 +326,7 @@ async def _run_simulation(
                     logger.info("Resuming simulation run %s", simulation_run_id)
                 else:
                     # No existing run — create one
-                    run = SimulationRun(status="running", config=run_config)
+                    run = SimulationRun(status="running", config=_stamp_run_config(run_config))
                     db.add(run)
                     await db.commit()
                     simulation_run_id = run.id
