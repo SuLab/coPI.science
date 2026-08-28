@@ -255,17 +255,21 @@ async def list_assessments(
     ``SimulationRun``) — ``?run_id=all`` or picking an older run from the
     dropdown reaches everything else; nothing is ever deleted from this view,
     only filtered (one operator-run, backed-up purge on record: 2026-08-27,
-    rubric v3). This is deliberate, not incidental: ``--fresh``
-    (``src/agent/main.py``) wipes ``agent_messages``/``agent_channels`` but
-    NEVER ``opportunity_assessments`` — a screening verdict is a durable
-    record and losing one is worse than keeping a stale one (one operator-run,
-    backed-up purge on record: 2026-08-27, rubric v3) — so after a
-    fresh restart, old assessments whose Slack messages no longer exist would
+    rubric v3). This is deliberate, not incidental: before the 2026-08-22 fix,
+    ``--fresh`` (``src/agent/main.py``) ran three UNFILTERED deletes —
+    ``agent_messages``, ``agent_channels`` and ``pi_dm_messages`` — with no
+    ``simulation_run_id`` predicate, so every historical run's Slack messages
+    went with it while ``opportunity_assessments`` (never touched by any
+    ``--fresh``, before or after) survived pointing at threads that no longer
+    existed. Today's ``--fresh`` deletes nothing at all — it only mints a new
+    ``simulation_run_id``, and that new id is the isolation — but the old
+    runs already orphaned that way are still on record, so after a fresh
+    restart, old assessments whose Slack messages no longer exist would
     otherwise sit on this page with nothing to distinguish them from current
     ones. Scoping to the latest run excludes those by construction (their
-    ``simulation_run_id`` is the run that got wiped), while the "All Runs"
-    escape hatch and the per-run dropdown keep every row reachable. Mirrors
-    the run-selector pattern already used by ``admin_discussions``.
+    ``simulation_run_id`` is a run whose messages are gone), while the "All
+    Runs" escape hatch and the per-run dropdown keep every row reachable.
+    Mirrors the run-selector pattern already used by ``admin_discussions``.
     """
     runs_result = await db.execute(
         select(SimulationRun).order_by(SimulationRun.started_at.desc())
@@ -459,14 +463,21 @@ async def list_assessments(
 
     # Rows whose scores share no key with the live document contribute n=0 to
     # every dimension_stats row and pool their bands from another threshold
-    # regime — count them so the tables can disclose what they exclude.
+    # regime — count them so the tables can disclose what they exclude. Keys
+    # are compared strip+lower, matching the normalization the detail page
+    # applies (``assessment_detail.py``'s ``normalized_scores``), so a stored
+    # key that only differs by case or incidental whitespace is not
+    # miscounted as off-rubric here while the detail page still recognizes it.
     live_keys = set(RUBRIC_WEIGHTS)
     off_rubric_count = sum(
         1
         for row in assessments
         if isinstance(row.scores, dict)
         and row.scores
-        and not (live_keys & set(row.scores))
+        and not (
+            live_keys
+            & {k.strip().lower() for k in row.scores if isinstance(k, str)}
+        )
     )
 
     # Verdicts that were lost — generated and discarded, or never produced at
