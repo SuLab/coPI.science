@@ -16,6 +16,9 @@
 #   2.0.0 e3ef75f84c48  <- git 2740b5a
 #   2.1.0 2f38fc9bce4d  <- git 3cdb7f5
 #   2.2.0 1fccf33fc990  <- dangling blob c067ccd38610b94786ac21292688c0e46ee8728f
+#   3.2.0 42aec0479ac6  <- git 3349263 (the document live when this registry was
+#         first written; entry appended 2026-08-28 with the 3.3.0 bump, per the
+#         maintenance rule — sha256 12-hex verified against the merge base)
 #   3.0.0 5743056327df  <- document unrecoverable; reconstructed from the live
 #         document's [meta].changelog: the 3.0.0 entry attests the six keys,
 #         weights, 3.4/2.8 bands and 1-5 scale; 3.2.0's entry records "No
@@ -323,6 +326,40 @@ advance_min = 3.4
 conditional_min = 2.8
 pass_label = "pass (decline)"
 banding_note = "Document not recoverable; keys, weights, bands and scale attested by the [meta].changelog (3.1.0/3.2.0 changed no weights, thresholds or dimensions); dimension titles and pass_label carried over from the 3.2.0 document."
+
+  [[revision.dimension]]
+  key = "differentiation_unmet_need"
+  title = "Differentiation & unmet need"
+  weight = 25
+  [[revision.dimension]]
+  key = "scientific_credibility"
+  title = "Scientific credibility & mechanism"
+  weight = 20
+  [[revision.dimension]]
+  key = "translational_path"
+  title = "Translational & development path"
+  weight = 15
+  [[revision.dimension]]
+  key = "fundable_experiment"
+  title = "Fundable killer experiment & capital efficiency"
+  weight = 15
+  [[revision.dimension]]
+  key = "venture_potential"
+  title = "Venture potential: IP path, platform & signals"
+  weight = 15
+  [[revision.dimension]]
+  key = "team_executability"
+  title = "Team & executability"
+  weight = 10
+
+[[revision]]
+version = "3.2.0"
+content_hash = "42aec0479ac6"
+scale_min = 1
+scale_max = 5
+advance_min = 3.4
+conditional_min = 2.8
+pass_label = "pass (decline)"
 
   [[revision.dimension]]
   key = "differentiation_unmet_need"
