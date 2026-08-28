@@ -207,13 +207,18 @@ of it may appear anywhere in `<slack_message>` above:
    route-to-incubation means the science is worth pursuing but the deciding experiment
    cannot yet be defined, so item 5 carries what must be resolved first instead of an
    experiment; pass means do not fund.
-5. **Recommended next experiment to fund.** Exactly one — the single experiment
-   Blackbird should fund next to de-risk this idea, concept, technology, or chemistry.
-   Name the experiment, the readout it produces, the threshold that counts as a pass,
-   and roughly what it would cost and how long it would take. This is the line Blackbird
-   staff act on, so it has to be specific enough to scope: not "further validation" but
-   the actual experiment. Record it in `recommended_next_experiment`; any further
-   go/no-go criteria beyond it belong in `rationale`, written the same way. Alongside
+5. **Recommended next experiment to fund.** Exactly one — the single experiment or
+   tightly scoped project Blackbird should fund next to de-risk this idea, concept,
+   technology, or chemistry. A project counts wherever it is scoped like an experiment
+   and ends in a concrete result: refining a diagnostic algorithm against a defined set
+   of additional patient samples is a project, and its readout is measured performance
+   against that set.
+   Name the experiment or project, the readout or deliverable it produces, the threshold
+   that counts as a pass, and roughly what it would cost and how long it would take. This
+   is the line Blackbird staff act on, so it has to be specific enough to scope: not
+   "further validation" but the actual experiment or scope of work. Record it in
+   `recommended_next_experiment`; any further go/no-go criteria beyond it belong in
+   `rationale`, written the same way. Alongside
    it, state the clean scientific result that would trigger an incubation decision — the
    readout that, if it comes out right, would justify starting a program. Where you told
    the PI what would change your read, record the same thing so staff and PI are working
