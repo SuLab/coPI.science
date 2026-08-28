@@ -260,6 +260,19 @@ async def test_a_successful_consult_writes_a_row_carrying_the_whole_exchange(
         # change cannot lose the original.
         assert row.raw_opinion == _OPINION_JSON
         assert row.created_at is not None
+        # `_record_specialist_consult` (simulation.py) is the ONLY producer of
+        # these three columns, and nothing previously asserted any of them on a
+        # WRITTEN row — deleting the lines that set them would keep CI green
+        # while migration 0038's headline claim (a rubric stamp on every
+        # consult, and the read/defaulted/truncated split) silently shipped as
+        # NULL. This opinion parsed cleanly and was not truncated, so the read
+        # is "parsed", not "defaulted" or "truncated".
+        assert row.read_state == "parsed"
+        assert row.rubric_version == RUBRIC_VERSION
+        assert row.rubric_content_hash == RUBRIC_CONTENT_HASH
+        assert row.rubric_version and row.rubric_content_hash, (
+            "not vacuously equal to None on both sides"
+        )
 
         # The in-memory floor and the durable record agree, keyed on the same
         # (PI, interview) pair — the durable row is added to the in-memory

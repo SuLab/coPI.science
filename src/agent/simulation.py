@@ -1216,9 +1216,9 @@ class SimulationEngine:
         # "counted consults" for exactly this reason.
         mix = signal_mix_report(self._consult_signal_counts)
         if mix:
-            logger.info(mix)
+            logger.info("%s", mix)
         for line in domain_flatness_warning(self._consult_signal_counts_by_domain):
-            logger.warning(line)
+            logger.warning("%s", line)
 
         logger.info("Simulation stopping...")
 

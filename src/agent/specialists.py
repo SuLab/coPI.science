@@ -495,12 +495,19 @@ def signal_mix_report(counts: dict[str, int] | None) -> str | None:
     """
     if not counts:
         return None
-    total = sum(v for v in counts.values() if isinstance(v, int))
+    # Filtered ONCE, then used everywhere below — `total` used to be summed
+    # over ints only while `parts` unconditionally divided by it, so a
+    # non-int value in `counts` (this function's contract never actually
+    # produces one; the guard is defensive) would have raised right here, in
+    # `SimulationEngine.stop()`, immediately before the log line that proves
+    # every buffer reached disk.
+    int_counts = {k: v for k, v in counts.items() if isinstance(v, int)}
+    total = sum(int_counts.values())
     if total < MIN_CONSULTS_FOR_MIX_REPORT:
         return None
     parts = ", ".join(
-        f"{label} {counts.get(label, 0)} ({counts.get(label, 0) / total:.1%})"
-        for label in sorted(counts)
+        f"{label} {int_counts.get(label, 0)} ({int_counts.get(label, 0) / total:.1%})"
+        for label in sorted(int_counts)
     )
     return (
         f"[specialists] signal mix over {total} counted consults this run: "
@@ -524,13 +531,18 @@ def domain_flatness_warning(
     out: list[str] = []
     for domain in sorted(per_domain or {}):
         counts = per_domain[domain]
-        total = sum(v for v in counts.values() if isinstance(v, int))
+        # Same filter as `signal_mix_report`, applied consistently rather than
+        # only to `total`: `max(counts.values())` and the `key=` lookup below
+        # both ran over the UNFILTERED dict, so a non-int value would have
+        # raised there instead — again inside `SimulationEngine.stop()`.
+        int_counts = {k: v for k, v in counts.items() if isinstance(v, int)}
+        total = sum(int_counts.values())
         if total < _MIN_CONSULTS_FOR_FLATNESS:
             continue
-        modal = max(counts.values())
+        modal = max(int_counts.values())
         if modal / total < _FLATNESS_MODAL_SHARE:
             continue
-        label = max(counts, key=lambda k: counts[k])
+        label = max(int_counts, key=lambda k: int_counts[k])
         out.append(
             f"[specialists] {domain} returned {label!r} on {modal} of {total} "
             f"consults ({modal / total:.1%}). A one-sided domain may be correct "
@@ -542,10 +554,11 @@ def domain_flatness_warning(
 
 def _paired(observations: dict[tuple[str, str], str]) -> list[tuple[str, str]]:
     """Every domain observed under exactly two conditions, as (a, b) signal
-    pairs. A domain seen under one condition only is DROPPED rather than
-    counted: it cannot be compared, and counting it as agreement would inflate
-    invariance and deflate sensitivity — the two errors that would make a
-    compressed panel look discriminating."""
+    pairs. A domain NOT seen under exactly two conditions — one only, or three
+    or more — is DROPPED rather than counted: it cannot be compared pairwise,
+    and counting it as agreement would inflate invariance and deflate
+    sensitivity — the two errors that would make a compressed panel look
+    discriminating."""
     by_domain: dict[str, dict[str, str]] = {}
     for (condition, domain), signal in observations.items():
         by_domain.setdefault(domain, {})[condition] = signal

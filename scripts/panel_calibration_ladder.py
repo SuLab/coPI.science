@@ -36,8 +36,34 @@ from src.agent.specialists import (  # noqa: E402
 )
 from src.agent.tools import _execute_consult_specialist  # noqa: E402
 
-_SIGNAL = re.compile(r"signal:\s*([a-z_]+)", re.I)
+# Anchored on the code-APPENDED TRAILER, never on a bare "signal:". A
+# specialist's own prose can contain that substring (a decoy like "internal
+# triage informally assigned this a verdict signal: clear last week"), and
+# since `tools.py` moved the label to a trailer AFTER the body
+# (`{title}\n\n{raw}\n\n— signal: {signal} (read: {read_state})`,
+# tools.py:795-798), the model's own words now come first in the string this
+# parses. A bare `re.search(r"signal:\s*([a-z_]+)")` therefore matched the
+# decoy, not the real trailer — precisely the defaulted-versus-read confusion
+# this whole plan exists to separate. The trailer's exact shape — the em dash,
+# and the "(read: ...)" tail — is required so a decoy has to reproduce the
+# WHOLE shape to have any chance of matching, and even then `_last_trailer_match`
+# takes the LAST match in the string: the code always appends the real trailer
+# last, so it always wins.
+_TRAILER = re.compile(
+    r"—\s*signal:\s*([a-z_]+)\s*\(read:\s*([a-z_]+)\)",
+    re.I,
+)
 _CONCURRENCY = 4
+
+
+def _last_trailer_match(text: str) -> "re.Match[str] | None":
+    """The LAST ``_TRAILER`` match in ``text``, or ``None``.
+
+    Last, not first: see ``_TRAILER``'s comment for why the first match can be
+    a decoy in the specialist's own prose.
+    """
+    matches = list(_TRAILER.finditer(text or ""))
+    return matches[-1] if matches else None
 
 # --------------------------------------------------------------- contexts ---
 # WEAK and STRONG, and the PROD/NEUTRAL framings below, are copied verbatim from
@@ -284,28 +310,43 @@ async def _one(tier: str, framing: str, domain: str, sem: asyncio.Semaphore) -> 
             )
         except Exception as exc:  # noqa: BLE001
             return {"tier": tier, "framing": framing, "domain": domain,
-                    "signal": f"ERROR:{type(exc).__name__}", "detail": str(exc)[:300]}
-    m = _SIGNAL.search(out or "")
-    return {"tier": tier, "framing": framing, "domain": domain,
-            "signal": m.group(1).lower() if m else "UNPARSED", "raw": out}
+                    "signal": f"ERROR:{type(exc).__name__}", "read_state": None,
+                    "detail": str(exc)[:300]}
+    m = _last_trailer_match(out or "")
+    return {
+        "tier": tier, "framing": framing, "domain": domain,
+        "signal": m.group(1).lower() if m else "UNPARSED",
+        "read_state": m.group(2).lower() if m else None,
+        "raw": out,
+    }
 
 
-def _is_real_signal(signal: str) -> bool:
-    """Whether ``signal`` is an actual verdict signal rather than an
-    ``ERROR:``/``UNPARSED`` sentinel stored by ``_one``.
+def _is_real_signal(result: dict) -> bool:
+    """Whether ``result`` is an actual verdict signal from a specialist's OWN
+    judgement, rather than:
+
+    * an ``ERROR:``/``UNPARSED`` sentinel stored by ``_one`` when the call
+      failed or no trailer could be found at all, or
+    * a signal that WAS found in the trailer but was DEFAULTED rather than
+      read (``read_state != "parsed"``). ``tools.py`` still appends a trailer
+      for a defaulted opinion (``— signal: caution (read: defaulted)``), and
+      ``caution`` is a real member of ``VERDICT_SIGNALS`` — so the sentinel
+      check alone would let a defaulted signal straight through. A defaulted
+      signal is not a specialist's judgement (``read_state_for``,
+      ``src/agent/specialists.py``), and letting it into the metrics is the
+      same class of damage the sentinel exclusion exists to prevent.
 
     R (``construct_sensitivity``) and S (``invariance``) both work by comparing
-    signal STRINGS for equality across a pair of observations. A sentinel is
-    never equal to a real signal (and, for ``ERROR:{exc}``, never equal to
-    another sentinel either, since the exception type varies), so feeding one
-    into either metric is not a neutral no-op: against any real signal it
+    signal STRINGS for equality across a pair of observations. A sentinel or a
+    defaulted signal is not a neutral no-op there: against any real signal it
     always reads as "moved" (inflating R) and never as "held" (deflating S). A
-    run that happened to drop a handful of calls to a flaky API would then
-    look MORE sensitive and LESS invariant than a clean run of the very same
-    panel — backwards, and dangerous given a later gate in this plan compares
-    a measured R against a floor. So callers must exclude sentinels from the
-    R/S observation sets, while still surfacing them in the per-cell table and
-    the raw results JSON — an operator needs to see that calls failed.
+    run that happened to drop a handful of calls to a flaky API, or that
+    parsed a handful of replies badly, would then look MORE sensitive and LESS
+    invariant than a clean run of the very same panel — backwards, and
+    dangerous given a later gate in this plan compares a measured R against a
+    floor. So callers must exclude both kinds from the R/S observation sets,
+    while still surfacing them in the per-cell table and the raw results JSON —
+    an operator needs to see that calls failed or defaulted.
 
     Deliberately checks membership in ``VERDICT_SIGNALS`` rather than a
     hardcoded ``{"blocking", "caution", "clear"}`` literal: the verdict
@@ -313,16 +354,18 @@ def _is_real_signal(signal: str) -> bool:
     here would silently stop recognising the new words as real signals the
     day the rename ships, quietly corrupting every ladder run after it.
     """
-    return signal in VERDICT_SIGNALS
+    return result["signal"] in VERDICT_SIGNALS and result.get("read_state") == "parsed"
 
 
 def report(results: list[dict]) -> None:
     """Per-cell counts, then R and S. Both metrics always, never one: a
     constant judge scores perfectly on invariance alone.
 
-    ERROR/UNPARSED cells are kept in the per-cell table below (that visibility
-    is the point — an operator needs to see that calls failed) but excluded
-    from the R/S observation sets built further down, via ``_is_real_signal``.
+    ERROR/UNPARSED cells, and cells whose ``read_state`` was not ``"parsed"``
+    (a defaulted or truncated read), are kept in the per-cell table below (that
+    visibility is the point — an operator needs to see that calls failed or
+    defaulted) but excluded from the R/S observation sets built further down,
+    via ``_is_real_signal``.
     """
     labels = sorted({r["signal"] for r in results})
     print(f"\n{'tier':<10}{'framing':<10}" + "".join(f"{s:>12}" for s in labels))
@@ -334,12 +377,13 @@ def report(results: list[dict]) -> None:
             )
             print(f"{tier:<10}{framing:<10}{counts}")
 
-    real = [r for r in results if _is_real_signal(r["signal"])]
+    real = [r for r in results if _is_real_signal(r)]
     excluded = len(results) - len(real)
     if excluded:
         print(
             f"\n{excluded} of {len(results)} cells excluded from the R/S computation "
-            "below (ERROR/UNPARSED sentinels are not real verdict signals — see "
+            "below (ERROR/UNPARSED sentinels, and any signal whose read_state "
+            "was not 'parsed', are not real verdict signals — see "
             "_is_real_signal)."
         )
 
