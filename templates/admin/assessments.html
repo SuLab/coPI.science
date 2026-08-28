@@ -15,7 +15,7 @@
                 class="text-sm border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500">
             {% for run in runs %}
             <option value="{{ run.id }}" {% if not show_all_runs and run.id == selected_run_id %}selected{% endif %}>
-                {{ run.started_at.strftime('%b %d %H:%M') }} ({{ run.status }}){% if run.id == runs[0].id %} — current{% endif %}
+                {{ run.started_at.strftime('%b %d %H:%M') }} ({{ run.status }}, {{ assessment_counts_by_run.get(run.id, 0) }} stored{% if run.config and run.config.get('rubric_version') %}, rubric {{ run.config.get('rubric_version') }}{% endif %}){% if run.id == runs[0].id %} — current{% endif %}
             </option>
             {% endfor %}
             <option value="all" {% if show_all_runs %}selected{% endif %}>All Runs</option>
@@ -64,9 +64,10 @@
     {% if show_all_runs %}
         Showing every run on record.
     {% else %}
-        Showing the current run only — assessments from earlier (e.g.
-        <code>--fresh</code>-wiped) runs still exist and are never deleted;
-        pick a run above or <a class="underline" href="/admin/assessments?run_id=all">view all runs</a>.
+        Showing the current run only — verdict rows survive <code>--fresh</code>
+        restarts and nothing in the app deletes them (the one operator purge on
+        record, 2026-08-27, was backed up first); pick a run above or
+        <a class="underline" href="/admin/assessments?run_id=all">view all runs</a>.
     {% endif %}
     {# Worded for whichever sort is active. It used to say "by score; the rest
        are lower-scoring", which became false the moment `sort` existed: under

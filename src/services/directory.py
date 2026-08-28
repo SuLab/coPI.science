@@ -254,10 +254,12 @@ async def list_assessments(
     Defaults to the CURRENT simulation run (the most recently started
     ``SimulationRun``) — ``?run_id=all`` or picking an older run from the
     dropdown reaches everything else; nothing is ever deleted from this view,
-    only filtered. This is deliberate, not incidental: ``--fresh``
+    only filtered (one operator-run, backed-up purge on record: 2026-08-27,
+    rubric v3). This is deliberate, not incidental: ``--fresh``
     (``src/agent/main.py``) wipes ``agent_messages``/``agent_channels`` but
     NEVER ``opportunity_assessments`` — a screening verdict is a durable
-    record and losing one is worse than keeping a stale one — so after a
+    record and losing one is worse than keeping a stale one (one operator-run,
+    backed-up purge on record: 2026-08-27, rubric v3) — so after a
     fresh restart, old assessments whose Slack messages no longer exist would
     otherwise sit on this page with nothing to distinguish them from current
     ones. Scoping to the latest run excludes those by construction (their
@@ -269,6 +271,15 @@ async def list_assessments(
         select(SimulationRun).order_by(SimulationRun.started_at.desc())
     )
     runs = runs_result.scalars().all()
+
+    # Stored rows per run — the dropdown's honesty device: an old run showing
+    # "0 stored" is distinguishable from a populated one, and (post-purge) from
+    # a run whose rows exist only in the offline backup.
+    counts_result = await db.execute(
+        select(OpportunityAssessment.simulation_run_id, func.count())
+        .group_by(OpportunityAssessment.simulation_run_id)
+    )
+    assessment_counts_by_run = dict(counts_result.all())
 
     show_all_runs = run_id == "all"
     selected_run_id: uuid.UUID | str | None = "all" if show_all_runs else None
@@ -446,6 +457,18 @@ async def list_assessments(
         row.band for row in assessments if row.band
     ).items())
 
+    # Rows whose scores share no key with the live document contribute n=0 to
+    # every dimension_stats row and pool their bands from another threshold
+    # regime — count them so the tables can disclose what they exclude.
+    live_keys = set(RUBRIC_WEIGHTS)
+    off_rubric_count = sum(
+        1
+        for row in assessments
+        if isinstance(row.scores, dict)
+        and row.scores
+        and not (live_keys & set(row.scores))
+    )
+
     # Verdicts that were lost — generated and discarded, or never produced at
     # all — scoped exactly like the rows above. Without this an empty page is
     # ambiguous: "nothing screened yet" and "everything screened and every
@@ -507,6 +530,8 @@ async def list_assessments(
         "incomplete_panel_count": incomplete_panel_count,
         "dimension_stats": dimension_stats,
         "band_counts": band_counts,
+        "assessment_counts_by_run": assessment_counts_by_run,
+        "off_rubric_count": off_rubric_count,
     }
 
 

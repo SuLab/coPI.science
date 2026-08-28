@@ -794,6 +794,8 @@ async def admin_assessments(
             incomplete_panel_count=view["incomplete_panel_count"],
             dimension_stats=view["dimension_stats"],
             band_counts=view["band_counts"],
+            assessment_counts_by_run=view["assessment_counts_by_run"],
+            off_rubric_count=view["off_rubric_count"],
         ),
     )
 

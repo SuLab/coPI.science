@@ -345,3 +345,46 @@ async def test_the_banner_count_is_the_same_predicate(db_session):
     )
     assert view["incomplete_panel_count"] == expected
     assert 0 < expected < len(_PANEL_MATRIX)
+
+
+@pytest.mark.asyncio
+async def test_the_view_counts_stored_rows_per_run(db_session):
+    """The run dropdown must distinguish an empty run from a populated one —
+    'No assessments recorded yet.' used to be the same string for both."""
+    run_a = await factories.make_simulation_run(db_session)
+    run_b = await factories.make_simulation_run(db_session)
+    for _ in range(2):
+        db_session.add(OpportunityAssessment(
+            simulation_run_id=run_a.id, agent_id="blackbird",
+            channel_name="general", recommendation="pass",
+        ))
+    db_session.add(OpportunityAssessment(
+        simulation_run_id=run_b.id, agent_id="blackbird",
+        channel_name="general", recommendation="pass",
+    ))
+    await db_session.commit()
+
+    view = await list_assessments(db_session, str(run_a.id))
+    assert view["assessment_counts_by_run"][run_a.id] == 2
+    assert view["assessment_counts_by_run"][run_b.id] == 1
+
+
+@pytest.mark.asyncio
+async def test_off_rubric_rows_are_counted_not_silently_dropped(db_session):
+    """dimension_stats picks values by live key, so an archived-revision row
+    contributes nothing — the page must SAY so instead of looking authoritative
+    over a corpus it ignored."""
+    run = await factories.make_simulation_run(db_session)
+    db_session.add(OpportunityAssessment(
+        simulation_run_id=run.id, agent_id="blackbird", channel_name="general",
+        recommendation="pass", rubric_version="2.1.0",
+        rubric_content_hash="2f38fc9bce4d", scores={"ip_fto": 3},
+    ))
+    db_session.add(OpportunityAssessment(
+        simulation_run_id=run.id, agent_id="blackbird", channel_name="general",
+        recommendation="pass", scores={"differentiation_unmet_need": 4},
+    ))
+    await db_session.commit()
+
+    view = await list_assessments(db_session, str(run.id))
+    assert view["off_rubric_count"] == 1
