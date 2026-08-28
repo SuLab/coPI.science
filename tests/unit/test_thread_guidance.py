@@ -17,7 +17,11 @@ def test_pi_lab_strings_are_byte_identical_to_the_pinned_snapshot():
     # drift here changes every PI bot's behaviour.
     _, decide_guidance, decide_instructions = phase4_guidance("pi_lab", 5)
     assert "that's a question for my PI" in decide_guidance
-    assert "differentiation" in decide_guidance
+    # The 2026-08-28 PI-doc redline replaced the old differentiation / market-size /
+    # licensable-IP question list with a scientific-questions-only framing: the hub
+    # runs its own commercial and IP diligence, so the lab must NOT volunteer it.
+    assert "Expect scientific questions" in decide_guidance
+    assert "do not volunteer market sizing" in decide_guidance
     assert decide_instructions == (
         "Write a reply that closes the biggest gap in what the hub still does not know about "
         "your idea, or answers its last question directly. Do not oversell and do not ask to "
@@ -27,7 +31,10 @@ def test_pi_lab_strings_are_byte_identical_to_the_pinned_snapshot():
     _, conclude_guidance, conclude_instructions = phase4_guidance("pi_lab", 12)
     assert "Do NOT post a :memo: Summary" in conclude_guidance
     assert "Do NOT reply with a bare ✅" in conclude_guidance
-    assert "Never close by proposing that the two of you work together" in conclude_instructions
+    assert (
+        "Never close by proposing a collaboration in place of a fundable experiment or "
+        "project" in conclude_instructions
+    )
 
 
 def test_unknown_role_falls_back_to_pi_lab():

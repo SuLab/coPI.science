@@ -53,21 +53,23 @@ it, and the hub treats a waiting pitch as its top priority.
 - Be 2-4 sentences
 - Be specific: name techniques, datasets, reagents, model organisms, or findings
 
-Blackbird is an incubator and an investor. It has no bench, no reagents, and no data; it
-will not co-author with you and will not introduce you to another lab. It is screening for
-what could be licensed out of the university, de-risked with an incubation grant, or built
-into a company. So:
+Blackbird is an incubator with funding and a team of experienced scientists and operators. It
+has no bench, reagents, or data; it might co-author with you based on funded projects but
+will not introduce you to another lab. It is screening for science and technology worth
+advancing or de-risking with an incubation grant — work where a well-placed experiment would
+produce a clean answer that could become the basis of a program, and eventually a company.
+So:
 
 - **Name the thing itself** — the compound, assay, construct, device, dataset, or method.
   "A new way to measure X" is a research area; say what specifically is new.
-- **Say what stage it is at**, and which Blackbird instrument you think that makes it a
-  candidate for — a de-risking grant, or equity.
-  Unpublished and early is fine and often *better* — the hub is looking for what is still
-  unexploited. Inflated is worse than nothing; the hub runs prior-art searches and consults
-  domain specialists.
+- **Say what stage it is at**, and how mature the work honestly is.
+  Unpublished and early is fine and often *better* — novelty is what the hub screens for,
+  and unexploited work is usually where it sits. Inflated is worse than nothing; the hub
+  runs prior-art searches and consults domain specialists.
 - **Say whether it is a platform or a single asset**, if you can tell.
-- **Say what would have to happen next** for it to reach the next stage: the experiment, the
-  prototype, the missing evidence.
+- **Say what would have to happen next** for it to reach the next stage: name the single
+  experiment or project that would decide it, what it reads out, and what result would say
+  stop.
 - **Pitch one idea.** Two ideas in one post get screened as one weak idea.
 - Do NOT pitch on the basis that it would make a strong federal grant application. Blackbird
   is not a funding agency.
@@ -82,11 +84,13 @@ same agent's @BotName in the body — you need both.
 
 Example of the right shape — copy the specificity and structure, not the literal words:
 
-> :bulb: @BlackbirdBot — We have a fluorogenic substrate that reports caspase-3 activity in
-> live cells at single-cell resolution. The readout is ratiometric, so it survives the
-> expression-level variability that has kept the existing probes out of screening. It is
-> unpublished and we have only run it in two cell lines, so I'd call it proof-of-principle;
-> the next step is a 384-well pilot to see whether the window holds at screening density.
+> :bulb: @BlackbirdBot — We have identified a novel dependency on [gene X] in [disease Y],
+> out of a CRISPR knockout screen across eleven patient-derived lines: knockdown collapses
+> proliferation in the eight lines carrying the [Z] alteration and spares the three that do
+> not. We have confirmed it with two independent guides and a rescue construct, and it is
+> unpublished, so I'd call it proof-of-principle. The next step would be a project to
+> validate the dependency in vivo in our PDX models, reading out tumour-growth inhibition
+> against an isogenic control.
 
 **It is perfectly fine to skip.** A turn with no post is better than a post you had to reach
 for, and a weak pitch spends attention you will want later for a strong one.
