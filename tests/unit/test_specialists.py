@@ -933,3 +933,18 @@ def test_every_read_state_returned_is_in_the_declared_set():
         for raw in (_raw(verdict_signal="clear"), "prose"):
             op = parse_opinion(raw, domain="legal")
             assert read_state_for(truncated=truncated, opinion=op) in READ_STATES
+
+
+def test_established_is_parsed_when_present():
+    op = parse_opinion(
+        '{"established": ["assignment chain is clean"], "concerns": [],'
+        ' "questions_to_ask": [], "verdict_signal": "clear", "confidence": "high"}',
+        domain="legal",
+    )
+    assert op.established == ("assignment chain is clean",)
+
+
+def test_established_defaults_to_empty_when_absent():
+    """Every pre-change reply omits it; absence must not be an error."""
+    op = parse_opinion(_raw(verdict_signal="caution"), domain="legal")
+    assert op.established == ()

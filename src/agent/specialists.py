@@ -145,6 +145,12 @@ class SpecialistOpinion:
     # byte-indistinguishable from a genuine one and only a WARNING line
     # (`_warn_defaulted`) recorded the difference.
     signal_was_defaulted: bool = False
+    # What the record DOES establish in this domain. Positive-valence, and the
+    # only such field in the contract: before it existed the schema could
+    # express nothing but problems, so specialists filed positives inside
+    # `concerns` with a hedge appended ("this is the strongest positive signal
+    # in my domain and I have no counter-evidence against it, but...").
+    established: tuple[str, ...] = ()
 
 
 # --- panel notes ------------------------------------------------------------
@@ -361,6 +367,7 @@ def parse_opinion(raw: str, *, domain: str) -> SpecialistOpinion:
         confidence=confidence,
         raw=raw,
         signal_was_defaulted=signal_defaulted,
+        established=_str_tuple(data.get("established")),
     )
 
 

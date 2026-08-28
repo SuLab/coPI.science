@@ -4322,9 +4322,13 @@ class SimulationEngine:
         # written before this parameter existed keeps recording "not stated"
         # rather than asserting a read that was never checked.
         read_state: str | None = None,
-        # The specialist contract's positive-evidence field. No call site
-        # produces it yet — that starts with a later task — so this is always
-        # None today and the column stays NULL until then.
+        # The specialist contract's positive-evidence field, produced by the
+        # `on_consult_record` call in `tools.py` since the personas gained an
+        # `established` key. Still `None`-defaulted: a persona reply that omits
+        # the key, and every reply written before the key existed, parses to an
+        # empty tuple, and rows from before this column stay NULL. A NULL here
+        # therefore means "never asked", not "the specialist established
+        # nothing" — the same distinction the column's own comment draws.
         established: list | None = None,
     ) -> None:
         """Write one successful consult to ``specialist_consults``.
@@ -4379,7 +4383,15 @@ class SimulationEngine:
                     raw_opinion=raw_opinion,
                     truncated=truncated,
                     read_state=read_state,
-                    established=list(established) if established else None,
+                    # `[]` and NULL are different answers here, exactly as they
+                    # are for `concerns` above: an empty list is "the
+                    # specialist was asked and named nothing", NULL is "never
+                    # asked". Collapsing `[]` to NULL was harmless while no
+                    # call site produced the field, but `tools.py` now always
+                    # sends a real list, so collapsing it would relabel every
+                    # zero-positive opinion as unasked — the one reading the
+                    # column's own documentation rules out.
+                    established=None if established is None else list(established),
                     rubric_version=RUBRIC_VERSION,
                     rubric_content_hash=RUBRIC_CONTENT_HASH,
                 ))

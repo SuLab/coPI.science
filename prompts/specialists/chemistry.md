@@ -43,13 +43,16 @@ Reply with JSON and nothing else:
 
 ```
 {
-  "verdict_signal": "blocking | caution | clear",
+  "established": ["what the record DOES support in your domain"],
   "concerns": ["one specific concern per entry"],
   "questions_to_ask": ["a question the hub should put to the PI, in the PI's language"],
+  "verdict_signal": "blocking | caution | clear",
   "confidence": "high | moderate | low"
 }
 ```
 
+- **established** — name what the record supports, not only what it lacks. A
+  specialist that lists only concerns is reporting half of what it found.
 - **blocking** — a flaw that makes the result unusable as it stands.
 - **caution** — a real weakness that changes how much weight the result carries.
 - **clear** — nothing in your domain stands in the way. Say this when it is true; a panel

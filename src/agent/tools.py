@@ -738,6 +738,7 @@ async def _execute_consult_specialist(
                 # Lists, not the dataclass's tuples: these land in JSONB.
                 concerns=list(opinion.concerns),
                 questions_to_ask=list(opinion.questions_to_ask),
+                established=list(opinion.established),
                 raw_opinion=opinion.raw,
                 # The row's own copy of the refusal above — a `refusal` OR a
                 # `max_tokens`, whichever cut the reply off. Without it the
