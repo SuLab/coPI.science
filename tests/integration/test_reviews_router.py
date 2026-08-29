@@ -7,7 +7,7 @@ tests/integration/test_manager_views.py's mutation-allowlist test.
 import uuid
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from src.models import (
     USER_ROLE_ADMIN,
@@ -96,6 +96,55 @@ async def test_reviewer_can_submit_feedback_and_learn_enqueues_one_deduped_job(
     assert len(jobs) == 1
     assert jobs[0].status == "pending"
     assert jobs[0].payload == {"assessment_id": str(assessment.id)}
+
+
+async def test_two_pending_jobs_already_exist_dedupe_still_succeeds(client, db_session):
+    """Regression for the final-review finding: ``enqueue_analysis_if_absent``'s
+    dedupe SELECT used ``scalar_one_or_none()``, which raises
+    ``MultipleResultsFound`` -- not a clean skip -- the moment more than one
+    pending/processing job already names this assessment, a state a race in
+    at-least-once enqueueing could produce. Seed that state directly (rather
+    than trying to win the race) and prove a submission still 302s, still
+    writes the feedback row, and still adds no third job."""
+    reviewer = await factories.make_user(db_session, user_role=USER_ROLE_REVIEWER)
+    assessment = await _seed_assessment(db_session)
+    db_session.add_all(
+        [
+            Job(
+                type="review_feedback_analysis",
+                status="pending",
+                payload={"assessment_id": str(assessment.id)},
+            )
+            for _ in range(2)
+        ]
+    )
+    await db_session.flush()
+
+    r = await client.post(
+        f"/reviews/assessments/{assessment.id}/feedback",
+        data={"score": "4", "comment": "Good idea", "feedback_mode": "learn"},
+        headers=auth_headers(reviewer.id),
+        follow_redirects=False,
+    )
+    assert r.status_code == 302, r.text
+
+    rows = (
+        (
+            await db_session.execute(
+                select(AssessmentReview).where(AssessmentReview.assessment_id == assessment.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert len(rows) == 1
+
+    jobs = (
+        (await db_session.execute(select(Job).where(Job.type == "review_feedback_analysis")))
+        .scalars()
+        .all()
+    )
+    assert len(jobs) == 2
 
 
 async def test_log_only_feedback_enqueues_nothing(client, db_session):
@@ -297,6 +346,40 @@ async def test_reviewer_can_approve_and_history_appends(client, db_session):
         follow_redirects=False,
     )
     assert r1.status_code == 302, r1.text
+
+    # The test harness runs each test inside one outer SAVEPOINT transaction,
+    # so both POSTs below execute inside that SAME Postgres transaction and
+    # `func.now()` -- transaction-start time, not statement time -- returns
+    # the IDENTICAL instant for both events' `created_at`. The (created_at,
+    # id) ordering the assertion below relies on then falls through to `id`,
+    # a random uuid4 with no chronological meaning, making "latest" a coin
+    # flip. Backdate the first event by one second with a raw UPDATE so the
+    # ordering is deterministic regardless of the harness's transaction
+    # semantics, then expire just that one object so the later SELECT
+    # re-reads its backdated value instead of the ORM's cached one --
+    # `expire_all()` would also expire `assessment`/`reviewer`, and the
+    # sync attribute access on those below would then need an implicit
+    # (async) refresh and raise `MissingGreenlet`.
+    first_event = (
+        (
+            await db_session.execute(
+                select(AssessmentReviewEvent).where(
+                    AssessmentReviewEvent.assessment_id == assessment.id
+                )
+            )
+        )
+        .scalars()
+        .one()
+    )
+    await db_session.execute(
+        text(
+            "UPDATE assessment_review_events "
+            "SET created_at = created_at - interval '1 second' "
+            "WHERE id = :id"
+        ),
+        {"id": first_event.id},
+    )
+    db_session.expire(first_event)
 
     r2 = await client.post(
         f"/reviews/assessments/{assessment.id}/status",

@@ -88,14 +88,20 @@ async def enqueue_analysis_if_absent(
     unless a pending/processing job for it already exists. Returns whether a
     new job was enqueued."""
     existing = (
-        await db.execute(
-            select(Job.id).where(
-                Job.type == "review_feedback_analysis",
-                Job.status.in_(("pending", "processing")),
-                Job.payload["assessment_id"].astext == str(assessment_id),
+        (
+            await db.execute(
+                select(Job.id)
+                .where(
+                    Job.type == "review_feedback_analysis",
+                    Job.status.in_(("pending", "processing")),
+                    Job.payload["assessment_id"].astext == str(assessment_id),
+                )
+                .limit(1)
             )
         )
-    ).scalar_one_or_none()
+        .scalars()
+        .first()
+    )
     if existing is not None:
         return False
     db.add(

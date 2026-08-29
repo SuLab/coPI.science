@@ -504,9 +504,10 @@ when a form stops working after a deploy.
 `hybrid_property` over `user_role`, so it still works in both SQL
 (`select(User.is_admin)`) and Python, but **cannot be assigned**. Set the role
 instead. The physical `users.is_admin` column stays in the database, unmapped and
-defaulted. Dropping it is deferred to a separate later migration (`0039`+ — `0031`
-through `0038` are all taken now: `0038` went to
-`specialist_consults`'s `read_state`/`established`/rubric stamp instead, see the
+defaulted. Dropping it is deferred to a separate later migration (`0040`+ — `0031`
+through `0039` are all taken now: `0038` went to
+`specialist_consults`'s `read_state`/`established`/rubric stamp instead, and `0039`
+to the reviewer-role/review-tables migration instead, see the
 box below), which **has not been written, let alone applied** — see the design
 doc's §8.
 

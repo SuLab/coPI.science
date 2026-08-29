@@ -29,8 +29,8 @@ Query logic lives in src/services/directory.py and is shared with /admin.
 Dependencies are module-level singletons (``_DB``, ``_STAFF``, ``_REVIEW``)
 rather than inline ``Depends(...)`` calls in argument defaults: ruff's B008
 flags the latter, and with ~2 per handler this router would otherwise chip
-away at a lint ceiling (231, currently sitting at 225) that later tasks
-still need headroom under.
+away at a lint ceiling that later tasks still need headroom under (see
+``scripts/ci.sh``'s ``SRC_LINT_MAX``).
 """
 
 import hashlib
