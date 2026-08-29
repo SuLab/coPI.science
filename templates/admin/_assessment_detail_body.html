@@ -434,7 +434,11 @@
                         </span>
                         {% endif %}
                     </div>
-                    <div class="text-sm text-gray-800 whitespace-pre-line max-h-64 overflow-y-auto">{{ m.content }}</div>
+                    {# JS-rendered (marked+DOMPurify, fail-closed to textContent). Deliberate trade-off,
+                       same as the discussions pages: if /static/js/markdown.js itself fails to load,
+                       this div renders empty — accepted for parity with the existing data-markdown
+                       surfaces rather than inventing a second rendering path here. #}
+                    <div class="text-sm text-gray-800 max-h-64 overflow-y-auto" data-markdown="{{ m.content | e }}"></div>
 
                     {% if admin_view and entry.tool_turns %}
                     <div class="mt-2 pt-2 border-t border-gray-200">
