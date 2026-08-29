@@ -32,7 +32,11 @@ async def test_container_is_migrated(engine):
         # 0038 specialist_consults.read_state/.established/.rubric_version/
         #      .rubric_content_hash (read-state split from verdict_signal, the
         #      positive-evidence field, and the first rubric stamp on consults)
-        assert v == "0038"
+        # 0039 users.user_role gains 'reviewer', job_type_enum gains
+        #      'review_feedback_analysis', plus four new tables:
+        #      assessment_reviews, assessment_review_events,
+        #      assessment_review_assignments, prompt_change_suggestions
+        assert v == "0039"
 
 
 async def test_writes_are_rolled_back_part1(db_session):
