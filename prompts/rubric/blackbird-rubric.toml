@@ -37,10 +37,13 @@
 # `scoring_preamble`.
 
 [meta]
-version = "3.3.0"
-date = "2026-08-28"
+version = "3.4.0"
+date = "2026-08-29"
 source = "data/Blackbird_initial_priorities-criteria_v1.pdf (Blackbird's investment priorities and screening criteria, synthesized from its Project and Target Rubrics and four worked deal memoranda); consolidated to six single-scale dimensions per docs/plans/2026-08-27-rubric-v3-consolidation.md"
 changelog = """
+3.4.0 (2026-08-29): pass_label 'pass (decline)' -> 'decline'; display-only,
+stored vocabulary unchanged (recommendation/band keep writing "pass"). No
+weight, threshold, gating, or dimension changes.
 3.3.0 (2026-08-28): per-domain stage bars added ([stage_bar.*] below), rendered
 into the eight specialist personas through the {stage_bar} placeholder
 (src/agent/tools.py). NO weight, threshold, dimension, gating key, band
@@ -106,8 +109,8 @@ max = 5
 [banding]
 # Banding over the weighted mean of the six dimensions. NOTE the vocabulary:
 # the computed band "pass" means pass ON the deal (decline) — it is not "passed
-# the screen". pass_label is the display label only; the stored band value
-# stays "pass".
+# the screen". pass_label is the display label only ("decline", since 3.4.0);
+# the stored band value stays "pass".
 #
 # 3.4/2.8 are PROVISIONAL BY CONSTRUCTION: derived by back-testing the
 # consolidated dimensions against 51 production verdicts (conditional_min=2.8
@@ -117,8 +120,10 @@ max = 5
 advance_min = 3.4
 conditional_min = 2.8
 # Vocabulary: 'pass' means pass ON the deal (decline) — not 'passing' the
-# screen. pass_label is that vocabulary's display form.
-pass_label = "pass (decline)"
+# screen. pass_label is that vocabulary's display form: everywhere a human
+# reads it, this is the only word shown. The stored value is unaffected —
+# `recommendation`/`band` keep writing "pass".
+pass_label = "decline"
 # Parenthetical rendered after the conditional band in the prompt's Banding
 # line. (The pass band carries none: the route-to-incubation exit is covered
 # by the advisory note and the recommendation semantics.)

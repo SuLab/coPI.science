@@ -504,10 +504,11 @@ when a form stops working after a deploy.
 `hybrid_property` over `user_role`, so it still works in both SQL
 (`select(User.is_admin)`) and Python, but **cannot be assigned**. Set the role
 instead. The physical `users.is_admin` column stays in the database, unmapped and
-defaulted. Dropping it is deferred to a separate later migration (`0040`+ — `0031`
-through `0039` are all taken now: `0038` went to
-`specialist_consults`'s `read_state`/`established`/rubric stamp instead, and `0039`
-to the reviewer-role/review-tables migration instead, see the
+defaulted. Dropping it is deferred to a separate later migration (`0041`+ — `0031`
+through `0040` are all taken now: `0038` went to
+`specialist_consults`'s `read_state`/`established`/rubric stamp instead, `0039`
+to the reviewer-role/review-tables migration instead, and `0040` went to
+`prose_format`, see the
 box below), which **has not been written, let alone applied** — see the design
 doc's §8.
 
@@ -871,6 +872,31 @@ stay comparable. A version bump also requires the outgoing document's entry in
 > sync turns one prompt edit into a fistful of CI failures on the next full run
 > rather than an error at the point of the edit. `--check` reports drift without
 > writing.
+
+> **Deploy order for `0040_assessment_prose_format` — migrate BEFORE the new
+> code serves.** `0040` is one additive nullable String(20) column
+> (`opportunity_assessments.prose_format`), so *old code against the new
+> schema* is safe. The reverse is not: the new code **maps the column**, so
+> against a pre-`0040` database every `select(OpportunityAssessment)` — both
+> assessment list pages, both detail pages — raises `UndefinedColumn`, and on
+> the engine side `_persist_assessment`'s INSERT names it, so every verdict
+> write fails too. Build, migrate from a one-off container, then start — same
+> ordering as `0028`/`0030`/`0036`/`0037`/`0038`:
+>
+>     DC="docker compose -f docker-compose.prod.yml"
+>     $DC build blackbird-app worker
+>     $DC run --rm blackbird-app alembic upgrade head
+>     $DC run --rm blackbird-app alembic current      # must equal `alembic heads`
+>     $DC up -d blackbird-app worker
+>
+> The agent image bakes `src/` in too and must be rebuilt separately
+> (`$DC --profile agent build agent`) — this is also the change that ships the
+> markdown phase4 prompt instruction the stamp gates, so a rebuild that skips
+> the agent image leaves the hub writing markdown prose the running database
+> stamps `NULL` (plain), the opposite of the intended pairing. NULL on every
+> pre-`0040` row, deliberately never backfilled: those verdicts were never
+> written under the markdown contract, so plain rendering is permanently
+> correct for them, not a placeholder.
 
 > ### ⚠️ The assessment archive: never purge, never delete a run row.
 >

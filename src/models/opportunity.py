@@ -78,6 +78,16 @@ class OpportunityAssessment(Base):
         JSONB(none_as_null=True), nullable=True
     )
     rationale: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Stamped at write time by `_persist_assessment`, never re-derived by the
+    # read path. NULL means legacy plain text: those rows were written before
+    # the markdown-prompt regime (0040) and some contain literal `*` in
+    # scientific identifiers (e.g. `HLA-A*02:01`) that a markdown pass would
+    # corrupt by reading as emphasis, so they stay rendered
+    # `white-space: pre-line` forever. `'markdown'` means `rationale` and
+    # `recommended_next_experiment` were written under the markdown-prompt
+    # contract and are safe to render through the sanitized data-markdown
+    # pipeline.
+    prose_format: Mapped[str | None] = mapped_column(String(20), nullable=True)
     # Sidecar item 10 (rubric v2.1.0): the single experiment Blackbird should
     # fund next — the line staff act on, so it is a first-class column rather
     # than a raw_verdict spelunk. NULL for every row written before 0037 (never

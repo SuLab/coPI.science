@@ -786,6 +786,50 @@ async def test_persist_assessment_stores_the_recommended_next_experiment(engine)
                 await cleanup.commit()
 
 
+async def test_persist_assessment_stamps_prose_format_markdown(engine):
+    """0040: every NEW row is stamped `prose_format="markdown"` at write time —
+    the stamp ships together with the phase4 prompt instruction to write
+    `rationale`/`recommended_next_experiment` as Markdown, and it is what
+    gates rendering on the read path (never re-derived)."""
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from src.agent.simulation import SimulationEngine
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as setup:
+        run = SimulationRun()
+        setup.add(run)
+        await setup.commit()
+        run_id = run.id
+
+    stub = SimulationEngine(
+        agents=[], slack_clients={}, session_factory=factory, simulation_run_id=run_id,
+    )
+    await SimulationEngine._persist_assessment(stub, "blackbird", "general", {
+        "subject_agent_id": "wang",
+        "recommendation": "advance",
+        "rationale": "**Bold** rationale.",
+    })
+
+    try:
+        async with factory() as check:
+            row = (await check.execute(
+                select(OpportunityAssessment).where(
+                    OpportunityAssessment.simulation_run_id == run_id
+                )
+            )).scalar_one()
+            assert row.prose_format == "markdown"
+    finally:
+        async with factory() as cleanup:
+            stale = (await cleanup.execute(
+                select(SimulationRun).where(SimulationRun.id == run_id)
+            )).scalar_one_or_none()
+            if stale is not None:
+                await cleanup.delete(stale)
+                await cleanup.commit()
+
+
 # --- Phase 4 wiring: the real Option A relocation, not the
 # _persist_assessment stub (Task 11 fix round 1, Finding 2; relocated by the
 # reply-only-hub reconciliation, Task 6) -------------------------------------
@@ -1325,7 +1369,7 @@ async def test_admin_assessments_page_renders_band_as_text_not_just_colour(
     # The computed band, legible as text. "pass" renders with its meaning
     # spelled out — it is the PDF's deal vocabulary (pass ON the deal), and a
     # bare "pass" reads as the opposite of the decline it records.
-    assert _band_label(html) == "pass (decline)"
+    assert _band_label(html) == "decline"
     # band and recommendation must never be presented as each other.
     assert _band_label(html) != "route-to-incubation"
 
@@ -2288,7 +2332,7 @@ async def test_admin_assessments_page_triage_restructure(client, db_session, adm
     test_admin_assessments_page_renders_no_inline_detail_rows):
 
     * the recommendation renders as a chip whose ``pass`` value is labelled
-      "pass (decline)" — the PDF's deal vocabulary means the decline, and a
+      "decline" — the PDF's deal vocabulary means the decline, and a
       bare "pass" reads as its opposite;
     * red flags collapse to a count badge in the triage row — the full list
       is detail-page content;
@@ -2319,7 +2363,7 @@ async def test_admin_assessments_page_triage_restructure(client, db_session, adm
 
     # Recommendation chip: pass is labelled with its meaning; the routed row
     # keeps its verbatim value.
-    assert "pass (decline)" in html
+    assert "decline" in html
     assert "route-to-incubation" in html
 
     # Red flags: count badge only — the list itself lives on the detail page.
@@ -2330,7 +2374,7 @@ async def test_admin_assessments_page_triage_restructure(client, db_session, adm
     # Headline cards count recommendations, not bands: both fixtures band
     # "pass", but one is a positive routing and must be counted as one.
     assert "Route-to-incubation" in html
-    assert "Pass (decline)" in html
+    assert "Decline" in html
 
 
 @pytest.mark.asyncio
@@ -2370,7 +2414,7 @@ async def test_admin_assessments_cards_count_recommendation_not_band(
     }
     assert counts["Total"] == 2
     assert counts["Route-to-incubation"] == 1
-    assert counts["Pass (decline)"] == 1
+    assert counts["Decline"] == 1
     assert counts["Advance"] == 0
     assert counts["Conditional"] == 0
 

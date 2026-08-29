@@ -3462,6 +3462,11 @@ class SimulationEngine:
             # `/admin/assessments` detail page the permalink's reader can reach.
             project = _bounded_str(verdict.get("company_or_project"), 120) or "(untitled)"
             recommendation = _bounded_str(verdict.get("recommendation"), 30) or "unknown"
+            # Display form only — the stored verdict and every downstream
+            # engine predicate keep writing "pass"; this headline is the one
+            # place a human reads it, so it reads as "decline" (rubric
+            # banding.pass_label).
+            recommendation_display = "decline" if recommendation == "pass" else recommendation
 
             source_channel_id = self._channel_id_map.get(thread.channel)
             permalink = None
@@ -3487,7 +3492,7 @@ class SimulationEngine:
             link_part = f" — <{permalink}|View interview>" if permalink else " (link unavailable)"
 
             text = (
-                f":mag: {pi_label} — {project} → *{recommendation}*{score_part}{link_part}"
+                f":mag: {pi_label} — {project} → *{recommendation_display}*{score_part}{link_part}"
             )
             await client.apost_message(ASSESSMENTS_SUMMARY_CHANNEL, text)
             logger.info(
@@ -3805,6 +3810,11 @@ class SimulationEngine:
             # writes states a real boolean, so NULL in the column means exactly
             # "written before 0036" (or backfilled, or hand-built by a test).
             panel_owed=panel_owed,
+            # Ships together with the phase4 prompt instruction to write
+            # `rationale`/`recommended_next_experiment` as Markdown: the stamp
+            # is what gates rendering, so a new row is always marked, never
+            # inferred from content. See OpportunityAssessment.prose_format.
+            prose_format="markdown",
         )
         # Pre-generated rather than left to the column's Python-side default:
         # a buffered row (queued below on a failed first attempt) now carries a
