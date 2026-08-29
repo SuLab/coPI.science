@@ -53,10 +53,14 @@ logger = logging.getLogger(__name__)
 
 # CWD-relative, the same convention src/agent/roles.py uses for PROMPTS_DIR:
 # every process (uvicorn, the agent run, pytest) starts at the repo root, and
-# prompts/ is bind-mounted into blackbird-app and agent (NOT worker, which
-# mounts only ./profiles and never imports this module). A pure document edit
-# needs a restart of those two, not an image rebuild; a document edit that
-# changes the SHAPE this module parses needs both, together.
+# prompts/ is bind-mounted into blackbird-app and agent. The worker now
+# bind-mounts ./prompts too (read-only, for the review bot's
+# review_feedback_analysis job, which reads prompt files as plain data through
+# the dependency-free src/services/interview_transcript.py loader) but still
+# never imports THIS module — verified by an import probe, not a grep, since
+# a transitive import would be easy to miss. A pure document edit needs a
+# restart of blackbird-app and agent, not an image rebuild; a document edit
+# that changes the SHAPE this module parses needs both, together.
 RUBRIC_PATH = Path("prompts/rubric/blackbird-rubric.toml")
 
 # How many dimensions the document must define. Deliberate friction: adding or

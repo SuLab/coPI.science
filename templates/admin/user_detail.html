@@ -59,6 +59,8 @@
             <strong>PI</strong> — own profile and lab agent.
             <strong>Manager</strong> — read-only view of every PI, the assessments
             queue and agent activity; no lab of their own, and cannot impersonate.
+            <strong>Reviewer</strong> — read-only PI directory and assessments,
+            plus review feedback and approve/disapprove; nothing else.
             <strong>Admin</strong> — full access.
         </p>
         {% if target_user.id != current_user.id %}

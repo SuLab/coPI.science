@@ -133,15 +133,21 @@ the dev database.
 > to `docker-compose.prod.yml`.** The committed file still names the web service
 > `app` (`git show HEAD:docker-compose.prod.yml`); the host's working tree
 > renames it to `blackbird-app`, pins `container_name: copi-blackbird-app-1`,
-> attaches it to the shared `copi-edge` network, and swaps every `awslogs`
-> driver for `json-file`. The rename is not cosmetic — Compose adds the service
-> name as a network alias on every attached network, so an `app` on `copi-edge`
-> would collide with org1's `app` and org1's nginx upstream would resolve to
-> **this** container, breaking copi.science. So: never `git checkout`,
-> `git stash` or `git restore` that file, and on a fresh clone expect `service
-> "blackbird-app" is not defined` until the edit is reapplied. The `prompts/`
-> and `profiles/` bind mounts below are identical in both versions; only the
-> name, network, container_name and logging differ.
+> attaches it to the shared `copi-edge` network, swaps every `awslogs`
+> driver for `json-file`, and (2026-08-28, for the review bot) adds a
+> read-only `- ./prompts:/app/prompts:ro` mount to the **worker** service,
+> which the committed file does not give the worker at all. The rename is not
+> cosmetic — Compose adds the service name as a network alias on every
+> attached network, so an `app` on `copi-edge` would collide with org1's `app`
+> and org1's nginx upstream would resolve to **this** container, breaking
+> copi.science. So: never `git checkout`, `git stash` or `git restore` that
+> file, and on a fresh clone expect `service "blackbird-app" is not defined`
+> AND a worker with no `prompts/` visibility at all until the edit is
+> reapplied. The `prompts/` and `profiles/` bind mounts below are identical
+> in both versions for `blackbird-app` and `agent`; the worker's `prompts/`
+> mount is the one exception — it exists ONLY in the working tree, not in the
+> committed file — so do not assume the worker row of any mount table matches
+> `git show HEAD:docker-compose.prod.yml`.
 
 The simulation runs in a one-off container named `blackbird-agent-run`:
 
@@ -491,10 +497,10 @@ Every refusal logs one WARNING naming the method, path, received origin,
 `Sec-Fetch-Site` and the expected origin — grep for `Refused cross-site` first
 when a form stops working after a deploy.
 
-## Account Types (PI / manager / admin)
+## Account Types (PI / manager / admin / reviewer)
 
 **`users.user_role` is the single source of truth**, with values `pi`, `manager`,
-`admin`. `User.is_admin` is no longer a mapped column — it is a read-only
+`admin`, `reviewer`. `User.is_admin` is no longer a mapped column — it is a read-only
 `hybrid_property` over `user_role`, so it still works in both SQL
 (`select(User.is_admin)`) and Python, but **cannot be assigned**. Set the role
 instead. The physical `users.is_admin` column stays in the database, unmapped and
@@ -532,6 +538,19 @@ doc's §8.
   admin-only), and there is deliberately no LLM-call drill-down and no export.
   Managers *do* see private (`collab_private`) discussion threads — a policy
   decision, recorded in the design doc.
+- **Reviewer** — read+review only, no write outside review: read-only PI directory
+  and assessments (`/manager/pis`, `/manager/pis/{id}`, `/manager/assessments`,
+  `/manager/assessments/{id}`), plus leaving review feedback and
+  approve/disapprove via `/reviews`. Cannot assign reviewers, cannot see
+  discussions/activity/prompt-suggestions, has no PI surface (`/profile`,
+  `/agent`), and has no admin access. Provisioned the same way as manager/admin:
+  the admin Account Type role-set on `/admin/users/{id}`, or the `role:set` CLI.
+  `get_pi_user` denies it exactly as it denies a manager; `is_staff` (admin OR
+  manager) deliberately **excludes** it, since the manager router's write
+  handlers and the discussions/activity/prompt-suggestions pages must never
+  admit a reviewer; the review-scoped predicate is a separate dependency,
+  **`get_review_user`** (admin OR manager OR reviewer), gating the `/reviews`
+  router and the manager router's reviewer-visible GETs.
 - **Admin** — everything, including `/admin/*` and impersonation.
 
 `is_manager` means exactly `user_role == 'manager'`. The "may see the manager views"
@@ -646,11 +665,36 @@ authoritative contract for the sidecar's shape);
 `specialists.py`'s `maps_to_dimension`. The per-phase behaviour otherwise lives in
 `prompts/roles/scout_hub/` and `src/agent/thread_guidance.py`.
 
+**The review bot is a separate consumer of `prompts/`, not part of BlackbirdBot's
+live simulation.** A `review_feedback_analysis` job (`src/services/review_bot.py`)
+turns human reviewer feedback with `feedback_mode == "learn"` into a distilled
+prompt/rubric-change *suggestion*. Enqueueing is deduped
+(`enqueue_analysis_if_absent`) so repeated "learn" feedback on one assessment
+still fires at most one pending job, not one per feedback row. The job runs on
+the **worker**, which now bind-mounts `./prompts` read-only for exactly this
+purpose and reads the prompt files as plain data through the dependency-free
+`src/services/interview_transcript.py` loader — it deliberately never imports
+`blackbird_rubric.py` (see that module's comment, and the import probe in
+`tests/`). The model is `settings.llm_review_model` (`claude-opus-5`), a
+setting distinct from the simulation's own model config. A suggestion is never
+auto-applied to any prompt file — it is stored as a `PromptChangeSuggestion`
+row and surfaced at `/manager/prompt-suggestions` for a human (admin or
+manager; a reviewer cannot see this page) to read and act on manually. The
+bot's LLM calls are, by design, unlogged (no `llm_call_logs` row — that emit
+gate needs a callback only the simulation engine installs) and unthrottled (no
+rate limiter in front of it): the cost signal lives on the suggestion row
+itself, not in the usual telemetry tables, so do not go looking for these
+calls in `llm_call_logs` or in any per-window rate-limit accounting.
+
 **Editing the rubric takes effect on restart, not on rebuild.** `prompts/` is
-bind-mounted into exactly the two services that read it, `blackbird-app` and `agent`, so
-a document edit needs no image build (`worker` mounts only `./profiles` — it never
-imports the rubric). But the document is read ONCE at import, so a running process keeps
-the rubric it started with. Stop the run, start it again (see "Before restarting" above), and
+bind-mounted into `blackbird-app` and `agent`, the two services that read it as a
+*rendered* document, so a document edit needs no image build there. It is also now
+bind-mounted read-only into `worker` (2026-08-28, for the review bot above), but that
+mount needs no restart to pick up an edit: the worker reads prompt files fresh, as
+plain data, on each `review_feedback_analysis` job rather than importing the rubric
+module once at process start. For `blackbird-app` and `agent`, the document is read
+ONCE at import, so a running process keeps the rubric it started with. Stop the run,
+start it again (see "Before restarting" above), and
 check the startup banner: it logs `Screening rubric: version X (content hash Y)`. X must
 match `[meta].version` in the file; Y is the first 12 hex characters of the file's sha256
 (not the full digest). New assessments are stamped with both, so pre-/post-change rows
@@ -851,6 +895,16 @@ stay comparable. A version bump also requires the outgoing document's entry in
 >    `pi_dm_messages`, `agent_channels`) is ON DELETE CASCADE from it — one
 >    row's delete silently destroys that run's entire archive. No code path
 >    does this; the exposure is manual SQL.
+> 4. **Deleting an `opportunity_assessments` row now destroys human work, not
+>    just engine output.** `assessment_reviews`, `assessment_review_events`
+>    and `assessment_review_assignments` are all ON DELETE CASCADE from
+>    `opportunity_assessments.id` (migration `0039`), so a run-row delete under
+>    rule 3 — or any other delete of an assessment — takes every reviewer
+>    comment, score, approve/disapprove event and assignment on it with it.
+>    `prompt_change_suggestions` is the deliberate exception: its
+>    `assessment_id` FK is SET NULL, because a suggestion is a distilled
+>    artifact of the source assessment, not a record ABOUT it, and is worth
+>    keeping even once its source row is gone.
 
 **One interview yields exactly one assessment, and the row you end up with comes
 from the LAST verdict-bearing reply.** **A sidecar is now trusted on its own**
