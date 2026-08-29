@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from src.config import get_settings
 from src.models import Job, User
 from src.services.profile_pipeline import run_profile_pipeline
+from src.services.review_bot import execute_review_analysis
 
 logging.basicConfig(
     level=logging.INFO,
@@ -101,6 +102,8 @@ async def process_job(job_id: uuid.UUID, job_type: str, job_attempts: int, job_m
                 await execute_generate_profile(job, db)
             elif job.type == "monthly_refresh":
                 await execute_monthly_refresh(job, db)
+            elif job.type == "review_feedback_analysis":
+                await execute_review_analysis(job, db)
             else:
                 raise ValueError(f"Unknown job type: {job.type}")
 

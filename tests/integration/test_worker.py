@@ -41,7 +41,7 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 from sqlalchemy.orm.attributes import set_committed_value
 
-from src.models import Job, ResearcherProfile, User
+from src.models import Job, OpportunityAssessment, ResearcherProfile, SimulationRun, User
 from src.worker import main as worker_main
 
 pytestmark = pytest.mark.integration
@@ -68,9 +68,49 @@ class _Harness:
 
         `users` cascades to jobs/profiles/publications; the extra jobs delete catches
         jobs enqueued with `user_id = NULL`.
+
+        T11 added `new_assessment`, which writes a tagged `simulation_runs` row (via
+        `config->>'tag'`) and an `opportunity_assessments` row off it. This file
+        COMMITS, so a leaked row here would trip `foreign_pending_jobs()` on the next
+        run just like a leaked job would. `simulation_runs` CASCADEs to
+        `opportunity_assessments`, which in turn CASCADEs to `assessment_reviews`,
+        `assessment_review_events` and `assessment_review_assignments` — but
+        `prompt_change_suggestions.assessment_id` is SET NULL, not CASCADE (A-2), so
+        that table needs its own explicit delete or a leaked suggestion row would
+        survive with a nulled FK. The four review-table deletes are explicit (rather
+        than relying solely on the simulation_runs cascade) so this sweep stays
+        correct even if a future test in this file seeds review rows directly.
         """
         async with self.factory() as db:
             await db.execute(text("DELETE FROM jobs WHERE payload->>'tag' = :t"), {"t": TAG})
+            tagged_assessments = (
+                "SELECT id FROM opportunity_assessments WHERE simulation_run_id IN "
+                "(SELECT id FROM simulation_runs WHERE config->>'tag' = :t)"
+            )
+            await db.execute(
+                text(f"DELETE FROM assessment_review_assignments WHERE assessment_id IN ({tagged_assessments})"),
+                {"t": TAG},
+            )
+            await db.execute(
+                text(f"DELETE FROM assessment_review_events WHERE assessment_id IN ({tagged_assessments})"),
+                {"t": TAG},
+            )
+            await db.execute(
+                text(f"DELETE FROM assessment_reviews WHERE assessment_id IN ({tagged_assessments})"),
+                {"t": TAG},
+            )
+            await db.execute(
+                text(f"DELETE FROM prompt_change_suggestions WHERE assessment_id IN ({tagged_assessments})"),
+                {"t": TAG},
+            )
+            await db.execute(
+                text(
+                    "DELETE FROM opportunity_assessments WHERE simulation_run_id IN "
+                    "(SELECT id FROM simulation_runs WHERE config->>'tag' = :t)"
+                ),
+                {"t": TAG},
+            )
+            await db.execute(text("DELETE FROM simulation_runs WHERE config->>'tag' = :t"), {"t": TAG})
             await db.execute(text("DELETE FROM users WHERE orcid LIKE 'T5-%'"))
             await db.commit()
 
@@ -87,18 +127,44 @@ class _Harness:
             await db.commit()
         return uid
 
+    async def new_assessment(self) -> uuid.UUID:
+        """A tagged `SimulationRun` + `OpportunityAssessment` pair (T11).
+
+        Tagged via `SimulationRun.config`, the same `{"tag": TAG}` shape `enqueue`
+        uses on a job's payload — `sweep` finds this row by joining through it.
+        """
+        async with self.factory() as db:
+            run = SimulationRun(config={"tag": TAG})
+            db.add(run)
+            await db.flush()
+            assessment = OpportunityAssessment(
+                simulation_run_id=run.id, agent_id="blackbird", channel_name="t5-review",
+            )
+            db.add(assessment)
+            await db.commit()
+            return assessment.id
+
     async def enqueue(
         self,
         user_id: uuid.UUID | None = None,
         job_type: str = "generate_profile",
         max_attempts: int = 3,
         enqueued_at: datetime | None = None,
+        payload_extra: dict | None = None,
     ) -> uuid.UUID:
-        """Enqueue exactly the way `src/cli.py` and `src/routers/onboarding.py` do."""
+        """Enqueue exactly the way `src/cli.py` and `src/routers/onboarding.py` do.
+
+        `payload_extra` is merged OVER `{"tag": TAG}` (and the `user_id` key, if
+        any) — T11's `review_feedback_analysis` jobs carry an `assessment_id`
+        instead of a `user_id`, so this is the seam that lets a test add
+        arbitrary payload keys without inventing a second enqueue helper.
+        """
         jid = uuid.uuid4()
         payload = {"tag": TAG}
         if user_id is not None:
             payload["user_id"] = str(user_id)
+        if payload_extra:
+            payload.update(payload_extra)
         async with self.factory() as db:
             job = Job(
                 id=jid,
@@ -1062,3 +1128,50 @@ async def test_an_unknown_job_type_is_rejected_loudly_by_the_dispatcher(wk, monk
         await worker_main.process_job(jid2, "generate_profile", 0, 3, wk.factory)
     assert (await wk.job_state(jid2)).status == "completed"
     assert await wk.profile_count(uid2) == 1
+
+
+# ---------------------------------------------------------------------------
+# T11 — review_feedback_analysis dispatch
+# ---------------------------------------------------------------------------
+
+
+async def test_worker_dispatches_review_feedback_analysis(wk, monkeypatch):
+    """T11 — `process_job` routes a `review_feedback_analysis` job to
+    `execute_review_analysis` (Task 10), with its payload and the claimed job
+    intact.
+
+    `execute_review_analysis` is imported module-top in `src/worker/main.py`
+    (next to `run_profile_pipeline`), so the effective binding for a monkeypatch
+    is `worker_main.execute_review_analysis` — patching
+    `src.services.review_bot.execute_review_analysis` would have no effect on
+    the worker, for the same reason the pipeline patches throughout this file
+    target `worker_main.run_profile_pipeline`.
+
+    Before the dispatch branch existed this failed with
+    `ValueError: Unknown job type: review_feedback_analysis` — the RED this
+    test is meant to catch if the branch is ever removed.
+    """
+    aid = await wk.new_assessment()
+    jid = await wk.enqueue(
+        job_type="review_feedback_analysis",
+        payload_extra={"assessment_id": str(aid)},
+    )
+
+    seen = {}
+
+    async def fake_execute(job, db):
+        seen["job_id"] = job.id
+        seen["payload"] = dict(job.payload)
+
+    monkeypatch.setattr(worker_main, "execute_review_analysis", fake_execute)
+
+    processed = await _one_round(wk.factory)
+    assert processed is not None and processed.id == jid
+
+    assert seen.get("job_id") == jid, (
+        "execute_review_analysis was never called with the claimed job — "
+        "review_feedback_analysis is not reaching the review bot"
+    )
+    assert seen["payload"]["assessment_id"] == str(aid)
+    state = await wk.job_state(jid)
+    assert state.status == "completed"
