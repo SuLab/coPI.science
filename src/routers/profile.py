@@ -46,6 +46,13 @@ async def profile_view(
     current_user: User = Depends(get_current_user),
 ):
     """View user's profile page."""
+    # A REVIEWER (Task 1) is neither staff nor PI and has no lab profile to
+    # view — bounce before the onboarding check, which would otherwise send
+    # it to a page it can never complete (get_pi_user gates the only writer
+    # of onboarding_complete).
+    if current_user.is_reviewer:
+        return RedirectResponse(url="/manager/assessments", status_code=302)
+
     # Redirect to onboarding if not complete
     if not current_user.onboarding_complete:
         return RedirectResponse(url="/onboarding", status_code=302)
@@ -83,6 +90,11 @@ async def profile_edit(
     current_user: User = Depends(get_current_user),
 ):
     """Edit profile page."""
+    # Same reviewer bounce as GET /profile: without it a reviewer renders a
+    # profile-edit form whose POST /profile/save 403s (get_pi_user).
+    if current_user.is_reviewer:
+        return RedirectResponse(url="/manager/assessments", status_code=302)
+
     profile_result = await db.execute(
         select(ResearcherProfile).where(ResearcherProfile.user_id == current_user.id)
     )

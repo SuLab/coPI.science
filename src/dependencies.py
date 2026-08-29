@@ -177,32 +177,36 @@ async def get_admin_user(
 async def get_pi_user(
     current_user: User = Depends(get_current_user),
 ) -> User:
-    """Dependency for the PI-owned *write* surfaces: rejects a manager.
+    """Dependency for the PI-owned *write* surfaces: rejects a manager or a
+    reviewer.
 
     D7 makes manager and PI mutually exclusive, and a manager has no lab of
-    its own. Read-only bounces (auth.py's post-login redirect,
-    onboarding.py's GET) are not enough on their own: the writes are what
-    actually mint a lab. POST /onboarding/save-profile is the ONLY writer of
+    its own; a reviewer (Task 1) is neither staff nor PI and has no lab
+    either. Read-only bounces (auth.py's post-login redirect, onboarding.py's
+    GET) are not enough on their own: the writes are what actually mint a
+    lab. POST /onboarding/save-profile is the ONLY writer of
     `onboarding_complete = True` in src/ and it also creates the
     ResearcherProfile, and POST /agent/request gates solely on those two — so
-    a manager who could POST the first could then POST the second and receive
-    an AgentRegistry row. That is the escalation this closes.
+    a manager or reviewer who could POST the first could then POST the second
+    and receive an AgentRegistry row. That is the escalation this closes.
 
-    The predicate is `is_manager`, NOT `user_role == 'pi'`: an admin is not a
-    `pi` either, and `templates/base.html` still offers admins the My Profile
-    and My Agent links, so a `== 'pi'` test would 403 every admin on their own
-    nav. Admins keep the PI surfaces, exactly as they did before this branch.
+    The predicate is `is_manager or is_reviewer`, NOT `user_role == 'pi'`: an
+    admin is not a `pi` either, and `templates/base.html` still offers admins
+    the My Profile and My Agent links, so a `== 'pi'` test would 403 every
+    admin on their own nav. Admins keep the PI surfaces, exactly as they did
+    before this branch — this is an additive denylist, never a positive
+    `== 'pi'` allowlist.
 
     403 rather than a redirect: every route wearing this is a POST, and
     replaying a POST as a GET navigation is wrong for the same reason
-    `_login_location` above refuses to remember one. A manager never sees
+    `_login_location` above refuses to remember one. Neither role ever sees
     these forms (the nav hides them), so reaching one is not a wrong turn to
     be gently corrected — it is a request that must simply fail, visibly.
     """
-    if current_user.is_manager:
+    if current_user.is_manager or current_user.is_reviewer:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Managers have no lab profile or agent (PI accounts only)",
+            detail="Staff accounts have no lab profile or agent (PI accounts only)",
         )
     return current_user
 
@@ -224,4 +228,15 @@ async def get_staff_user(
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN, detail="Manager access required"
         )
+    return current_user
+
+
+async def get_review_user(current_user: User = Depends(get_current_user)) -> User:
+    """Admin, manager, or reviewer. Gates the /reviews router and the manager
+    router's reviewer-visible GETs. Deliberately separate from get_staff_user:
+    is_staff keeps gating manager writes, discussions, activity and prompt
+    suggestions, which a reviewer must never reach."""
+    if not (current_user.is_staff or current_user.is_reviewer):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
+                            detail="Review access required")
     return current_user
