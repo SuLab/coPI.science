@@ -8,6 +8,7 @@ docs/specs/2026-08-05-hub-bot-customization-design.md.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import tomllib
 from dataclasses import dataclass
@@ -122,3 +123,71 @@ def load_role(name: str) -> RoleSpec:
         name=name, label=label, tools=tools,
         calls_per_load_per_window=rate, post_types=post_types,
     )
+
+
+#: The prompt files a role actually composes, per Agent._load_prompt's call
+#: sites (src/agent/agent.py:286/:311/:401/:490). scout_hub deliberately
+#: omits phase5-new-post.md: the hub is reply-only (post_types = [] in its
+#: role.toml, and the engine hard-gates Phase 5 for it), so that file is never
+#: composed for the hub and a pi-side edit to it must not move the hub's hash.
+ROLE_PROMPT_FILES: dict[str, tuple[str, ...]] = {
+    "pi_lab": (
+        "agent-system.md", "identity.md",
+        "phase4-thread-reply.md", "phase5-new-post.md",
+    ),
+    "scout_hub": (
+        "agent-system.md", "identity.md", "phase4-thread-reply.md",
+    ),
+}
+
+
+@dataclass(frozen=True)
+class PromptSetStamp:
+    """Declared version + computed content hash of one role's prompt set.
+
+    Same pattern as the rubric (src/services/blackbird_rubric.py): the version
+    is what a human declared in role.toml, the sha256[:12] hash is what the
+    files actually contain — a hash change without a version bump means an
+    edit nobody recorded.
+    """
+
+    role: str
+    version: str
+    content_hash: str
+
+
+def prompt_set_stamp(role: str) -> PromptSetStamp:
+    """Stamp for a role in ROLE_PROMPT_FILES. Raises KeyError for any other
+    role — the two announced roles are a closed set, and a silent default
+    would stamp a role with files it does not use.
+
+    The hash covers the role.toml manifest (when present) plus each resolved
+    prompt file, keyed by FILENAME (not path) so the value is stable across
+    checkouts. A missing file hashes as the literal b"<missing>" rather than
+    raising: the announcement must never take down a run start.
+    """
+    filenames = ROLE_PROMPT_FILES[role]
+    h = hashlib.sha256()
+    manifest = ROLES_DIR / role / "role.toml"
+    parts: list[tuple[str, Path]] = []
+    if manifest.is_file():
+        parts.append(("role.toml", manifest))
+    parts += [(name, resolve_prompt_path(role, name)) for name in filenames]
+    for name, path in parts:
+        h.update(name.encode("utf-8"))
+        h.update(b"\0")
+        try:
+            h.update(path.read_bytes())
+        except OSError:
+            h.update(b"<missing>")
+        h.update(b"\0")
+
+    version = "unversioned"
+    if manifest.is_file():
+        try:
+            declared = tomllib.loads(manifest.read_text(encoding="utf-8")).get("version")
+            if declared:
+                version = str(declared)
+        except (tomllib.TOMLDecodeError, OSError):
+            pass  # load_role already logs malformed manifests
+    return PromptSetStamp(role=role, version=version, content_hash=h.hexdigest()[:12])

@@ -1,3 +1,11 @@
+# Version of the scout_hub PROMPT SET (this manifest + agent-system.md,
+# identity.md, phase4-thread-reply.md in this directory). Bump on ANY edit to
+# those files; the run-start announcement stamps every run with this version
+# plus a content hash (src/agent/roles.py::prompt_set_stamp), and a hash
+# change without a version bump is an unrecorded edit. Read by
+# prompt_set_stamp only — load_role ignores unknown keys.
+version = "1.0.0"
+
 label = "Scout Hub"
 tools = ["retrieve_profile", "retrieve_abstract", "retrieve_full_text", "search_prior_art", "consult_specialist"]
 

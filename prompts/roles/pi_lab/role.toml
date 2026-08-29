@@ -1,3 +1,9 @@
+# Version of the pi_lab PROMPT SET (this manifest + the four BASE prompt files
+# prompts/{agent-system,identity,phase4-thread-reply,phase5-new-post}.md —
+# pi_lab is the absence of overrides, see src/agent/roles.py). Bump on ANY
+# edit to those files; see the matching note in scout_hub/role.toml.
+version = "1.0.0"
+
 label = "PI Lab"
 tools = ["retrieve_profile", "retrieve_abstract", "retrieve_full_text"]
 
