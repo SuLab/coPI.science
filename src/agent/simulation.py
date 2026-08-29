@@ -3325,9 +3325,26 @@ class SimulationEngine:
                     # says a verdict that is not held never posts; the same logic
                     # says a verdict that is not final does not post YET.
                     if announce:
-                        await self._post_assessment_summary(
+                        if await self._post_assessment_summary(
                             agent, thread, verdict, slack_ts,
-                        )
+                        ):
+                            await self._mark_summary_posted(thread.thread_id)
+                        else:
+                            # Nothing reached Slack. Leave `summary_posted_at`
+                            # NULL so the close path, the shutdown sweep and the
+                            # repair script can all still find this verdict —
+                            # `_HeldVerdict.announced` alone would hide it from
+                            # every one of them.
+                            self._assessed_threads[thread.thread_id] = (
+                                self._assessed_threads[thread.thread_id]
+                                ._replace(announced=False)
+                            )
+                            logger.warning(
+                                "[%s] The #assessments-summary headline for %s "
+                                "did not post; the verdict is stored and will be "
+                                "retried when the interview ends",
+                                agent.agent_id, thread.other_agent_id or "?",
+                            )
                     elif not terminal:
                         logger.info(
                             "[%s] Provisional verdict stored for %s (message "
@@ -3484,6 +3501,56 @@ class SimulationEngine:
                 agent.agent_id, thread.thread_id,
             )
             return False
+
+    async def _mark_summary_posted(self, thread_id: str | None) -> None:
+        """Record durably that this interview's headline is in Slack.
+
+        Keyed by THREAD, not by row id, for two reasons that both bite in
+        production. `_persist_assessment` returns `None` for a verdict that
+        only reached `_pending_assessments`, so an id is not always available;
+        and `_retire_superseded_verdict` DELETES the row a headline described
+        and replaces it, so an id captured at post time can name a row that no
+        longer exists. The thread is the stable identity of an interview, and
+        the interview is what gets announced once.
+
+        Also patches any copy still queued in `_pending_assessments`, so a row
+        that has not landed yet carries the stamp when it does — otherwise the
+        flush writes NULL over a headline that is already public.
+
+        Best-effort and never raises: the headline is already in Slack by the
+        time this runs. A failure here costs at-most-once across a restart, not
+        the post.
+        """
+        if not thread_id:
+            return
+        now = datetime.now(UTC)
+        for queued in self._pending_assessments:
+            if queued.get("thread_id") == thread_id:
+                queued["summary_posted_at"] = now
+        if not self.session_factory or not self.simulation_run_id:
+            return
+        from sqlalchemy import update as sa_update
+
+        try:
+            async with self.session_factory() as db:
+                await db.execute(
+                    sa_update(OpportunityAssessment)
+                    .where(
+                        OpportunityAssessment.simulation_run_id
+                        == self.simulation_run_id,
+                        OpportunityAssessment.thread_id == thread_id,
+                        OpportunityAssessment.summary_posted_at.is_(None),
+                    )
+                    .values(summary_posted_at=now)
+                )
+                await db.commit()
+        except Exception as exc:  # noqa: BLE001 — the headline already posted
+            logger.warning(
+                "Posted the #assessments-summary headline for thread %s but "
+                "could not record it on the row: %s. A restart of this run may "
+                "post a second headline for the same interview.",
+                thread_id, exc,
+            )
 
     def _warn_if_hub_conclude_missing_assessment(
         self, agent: Agent, thread: ThreadState, response_text: str, raw_response: str,

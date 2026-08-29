@@ -40,6 +40,7 @@ the same failure the drops table exists to end.
 
 import json
 import uuid
+from collections.abc import Callable
 
 import pytest
 from sqlalchemy import select
@@ -157,7 +158,10 @@ async def _delete_run(factory, run_id):
             await cleanup.commit()
 
 
-async def _drive_reply(engine, monkeypatch, raw_response, *, prior_messages):
+async def _drive_reply(
+    engine, monkeypatch, raw_response, *, prior_messages,
+    configure: Callable[[SimulationEngine], None] | None = None,
+):
     """Drive the REAL path: `_reply_to_thread` on a live engine, so the close
     decision reaches the capture gate the way production computes it.
 
@@ -168,11 +172,19 @@ async def _drive_reply(engine, monkeypatch, raw_response, *, prior_messages):
     EXPLORE turn, not the CONCLUDE turn it looks like (CLAUDE.md's warning, and
     the bug 81dbe44 found in both existing harnesses).
 
+    ``configure``, if given, runs on the freshly-built engine BEFORE
+    `_reply_to_thread` — a seam for tests that need engine state (e.g. the
+    assessments-summary channel wiring) in place before the capture path runs
+    INSIDE this call. Calling it only after this function returns would be too
+    late: `_reply_to_thread` (and any headline it posts) has already happened.
+
     Returns ``(sim, agent, thread, client, factory, run_id)``.
     """
     factory = async_sessionmaker(engine, expire_on_commit=False)
     run_id = await _new_run(factory)
     sim, agent = _hub(factory, run_id)
+    if configure is not None:
+        configure(sim)
     thread = ThreadState(
         thread_id="t1", channel="single-cell-omics", other_agent_id="gordy",
         message_count=prior_messages, has_pending_reply=True,
