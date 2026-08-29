@@ -898,6 +898,34 @@ stay comparable. A version bump also requires the outgoing document's entry in
 > written under the markdown contract, so plain rendering is permanently
 > correct for them, not a placeholder.
 
+> **Deploy order for `0041_assessment_summary_posted_at` — migrate BEFORE the
+> new code serves.** `0041` is one additive nullable `TIMESTAMPTZ` column
+> (`opportunity_assessments.summary_posted_at`), so *old code against the new
+> schema* is safe. The reverse is not: the new code **maps the column**, so
+> against a pre-`0041` database every `select(OpportunityAssessment)` — both
+> assessment list pages, both detail pages — raises `UndefinedColumn`, and on
+> the engine side `_persist_assessment`'s INSERT names it, so every verdict
+> write fails too. Build, migrate from a one-off container, then start — same
+> ordering as `0028`/`0030`/`0036`/`0037`/`0038`/`0040`:
+>
+>     DC="docker compose -f docker-compose.prod.yml"
+>     $DC build blackbird-app worker
+>     $DC run --rm blackbird-app alembic upgrade head
+>     $DC run --rm blackbird-app alembic current      # must equal `alembic heads`
+>     $DC up -d blackbird-app worker
+>
+> The agent image bakes `src/` in too and must be rebuilt separately
+> (`$DC --profile agent build agent`) — and here that rebuild is the whole
+> point: the announce-on-close path lives in the engine, so an app-only deploy
+> migrates the column and keeps losing headlines.
+>
+> NULL on every pre-`0041` row, deliberately never backfilled: for those rows
+> the only record of whether a headline posted is the Slack channel itself, and
+> a guess would be indistinguishable from a measurement. Use
+> `scripts/backfill_assessment_headlines.py --stamp-only` to record one you
+> have verified by eye, and the same script without `--stamp-only` to post one
+> that is genuinely missing.
+
 > ### ⚠️ The assessment archive: never purge, never delete a run row.
 >
 > `opportunity_assessments` rows are the cross-version comparison corpus —
@@ -1084,6 +1112,19 @@ and since v3.0.0 / 2026-08-27 the second key is `credible_science`, not
   headline is skipped outright (the hub's transport is a `NullTransport`, which has no
   async post/permalink methods at all) — the assessment row is still written, so nothing is
   lost but the Slack copy.
+
+> As of 2026-08-29 that is no longer the ONLY path. A verdict whose interview
+> ends without a terminal reply — the `max_thread_messages` timeout, an
+> abandoned thread, or the run's own shutdown — is announced by
+> `_announce_owed_headline`, queued by `_close_thread` and drained by
+> `_drain_and_flush` / `stop()`. Announcement is now a property of the
+> INTERVIEW ENDING, not of one particular reply, and `at-most-once` is enforced
+> by the `opportunity_assessments.summary_posted_at` column rather than by
+> in-memory state alone. Each rescue logs one **WARNING** naming the trigger —
+> a run with several means the hub is being locked out of its own CONCLUDE
+> ordinal (RCA §2.2), which this path makes non-destructive but does not fix.
+> See `docs/audits/2026-08-29-lost-assessment-headlines/README.md`.
+
 - **`weighted_score` is computed**, never taken from the model:
   `src/services/blackbird_rubric.py`. `recommendation` (which may be
   `route-to-incubation`) comes straight from the model's verdict and the computed `band`

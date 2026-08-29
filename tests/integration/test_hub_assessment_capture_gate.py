@@ -743,9 +743,14 @@ async def test_assessed_threads_is_rehydrated_after_a_restart(engine):
       `_sidecar_refusal` refuse the interview's legitimate later verdict
       (`if ordinal <= held.ordinal`). Zero costs at most a spurious
       `duplicate_thread_verdict` drop if the same turn is re-captured.
-    * `announced=False` — `True` would suppress the `#assessments-summary`
-      headline for a verdict stored provisionally before the restart, which is a
-      silent D12 breach. `False` merely repeats today's behaviour.
+    * `announced=False` — read from `summary_posted_at is not None` (migration
+      0041), not hardcoded. This assertion holds because `_seed_assessment`
+      never sets `summary_posted_at`, so it stays NULL, which reads as "never
+      announced" — the same value a hardcoded `False` used to produce, but now
+      because the column has no record of a post, not as a guess. A hardcoded
+      `True` would have been the wrong guess either way: it would suppress the
+      `#assessments-summary` headline for a verdict stored provisionally
+      before the restart, a silent D12 breach.
     * `final` is DERIVED, not guessed: a closed thread has a `ThreadDecision`,
       so `final = thread_id in self._closed_thread_ids`. `final=True` as a
       "conservative" default would be the worst of the three — `_sidecar_refusal`
