@@ -265,6 +265,21 @@ async def test_no_summary_channel_posts_nothing(monkeypatch, tmp_path):
     assert ASSESSMENTS_SUMMARY_CHANNEL not in hub_client.posted_messages
 
 
+async def test_a_posted_headline_reports_success(monkeypatch, tmp_path):
+    eng, hub, lab, hub_client = _engine(monkeypatch, tmp_path)
+    thread = ThreadState(thread_id="t1", channel="general", other_agent_id="wang")
+    assert await eng._post_assessment_summary(hub, thread, VERDICT, "111.000") is True
+
+
+async def test_an_unconfigured_channel_reports_failure(monkeypatch, tmp_path):
+    """The caller must not stamp `summary_posted_at` when nothing was posted."""
+    eng, hub, lab, hub_client = _engine(monkeypatch, tmp_path)
+    eng._assessments_summary_channel_id = None
+    thread = ThreadState(thread_id="t1", channel="general", other_agent_id="wang")
+    assert await eng._post_assessment_summary(hub, thread, VERDICT, "111.000") is False
+    assert ASSESSMENTS_SUMMARY_CHANNEL not in hub_client.posted_messages
+
+
 async def test_capture_hub_assessment_posts_when_the_verdict_is_held(
     monkeypatch, tmp_path,
 ):

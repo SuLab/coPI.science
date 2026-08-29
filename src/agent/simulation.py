@@ -57,6 +57,7 @@ from src.models import (
     ThreadDecision,
 )
 from src.models.agent_activity import VISIBILITY_COLLAB_PRIVATE, VISIBILITY_PUBLIC
+from src.services.assessment_headline import render_assessment_headline
 from src.services.blackbird_rubric import RUBRIC_CONTENT_HASH, RUBRIC_VERSION
 from src.services.blackbird_rubric import band as rubric_band
 from src.services.blackbird_rubric import weighted_score as rubric_weighted_score
@@ -3381,17 +3382,19 @@ class SimulationEngine:
 
     async def _post_assessment_summary(
         self, agent: Agent, thread: ThreadState, verdict: dict, slack_ts: str | None,
-    ) -> None:
+    ) -> bool:
         """Post a headline-only summary of a concluded interview to the
-        assessments-summary channel (design D12/D13/D14/D16). Called from
+        assessments-summary channel (design D12/D13/D14/D16). Returns True when
+        a headline actually reached Slack — the caller stamps
+        `opportunity_assessments.summary_posted_at` on that answer, so a False
+        here must mean nothing was posted. Called from
         _capture_hub_assessment right after a verdict is HELD — covers both
         the immediate fail (closes_thread) path and the pass path
         symmetrically, since both funnel through that one call site.
 
-        Deliberately duplicates two PURE function calls
-        (rubric_weighted_score/rubric_band) rather than reading them back off
-        the persisted row. The weighting LOGIC itself is not duplicated, only
-        these two calls.
+        Rendering itself is delegated to `render_assessment_headline`
+        (`src/services/assessment_headline.py`) so the engine and
+        `scripts/backfill_assessment_headlines.py` cannot render differently.
 
         Never raises: a Slack failure here must not affect anything the
         caller already did (the assessment row's persistence, or the reply
@@ -3433,40 +3436,11 @@ class SimulationEngine:
                     agent.agent_id, thread.thread_id, channel_id,
                     "missing" if not client else "not connected",
                 )
-                return
+                return False
 
             subject_agent_id = thread.other_agent_id
             pi = self.agents.get(subject_agent_id) if subject_agent_id else None
             pi_label = pi.pi_name if pi else (subject_agent_id or "Unknown lab")
-
-            scores = verdict.get("scores") if isinstance(verdict.get("scores"), dict) else {}
-            if scores:
-                score = rubric_weighted_score(scores)
-                band = rubric_band(score)
-                score_part = f" (band: {band}, score: {score:.1f})"
-            else:
-                score_part = ""
-
-            # Both fields come straight from the model and land in a PUBLIC
-            # channel, so they get the same treatment `_persist_assessment`
-            # gives them before they reach a bounded column: `_bounded_str`
-            # drops a non-string (a model that answers `company_or_project`
-            # with an object would otherwise have a Python `repr` posted to
-            # Slack) and clips an over-long one, which is what keeps this a
-            # HEADLINE (design D12) instead of an unbounded wall of model text
-            # that `split_for_slack` would then cut into several messages.
-            # `recommendation`'s 30 is its column's own width, so the post and
-            # the stored row can never disagree about it; `company_or_project`
-            # is a `Text` column with no width, so its 120 is this post's own
-            # display bound — the full title is always in the row and on the
-            # `/admin/assessments` detail page the permalink's reader can reach.
-            project = _bounded_str(verdict.get("company_or_project"), 120) or "(untitled)"
-            recommendation = _bounded_str(verdict.get("recommendation"), 30) or "unknown"
-            # Display form only — the stored verdict and every downstream
-            # engine predicate keep writing "pass"; this headline is the one
-            # place a human reads it, so it reads as "decline" (rubric
-            # banding.pass_label).
-            recommendation_display = "decline" if recommendation == "pass" else recommendation
 
             source_channel_id = self._channel_id_map.get(thread.channel)
             permalink = None
@@ -3489,21 +3463,27 @@ class SimulationEngine:
                         "verdict; posting the headline without one",
                         agent.agent_id, thread.thread_id, exc_info=True,
                     )
-            link_part = f" — <{permalink}|View interview>" if permalink else " (link unavailable)"
 
-            text = (
-                f":mag: {pi_label} — {project} → *{recommendation_display}*{score_part}{link_part}"
+            text = render_assessment_headline(
+                pi_label=pi_label,
+                project=verdict.get("company_or_project"),
+                recommendation=verdict.get("recommendation"),
+                scores=verdict.get("scores"),
+                permalink=permalink,
             )
             await client.apost_message(ASSESSMENTS_SUMMARY_CHANNEL, text)
             logger.info(
                 "[%s] Posted #assessments-summary headline for %s (%s)",
-                agent.agent_id, subject_agent_id or "?", recommendation,
+                agent.agent_id, subject_agent_id or "?",
+                verdict.get("recommendation"),
             )
+            return True
         except Exception:
             logger.exception(
                 "[%s] Failed to post assessments-summary headline for thread %s",
                 agent.agent_id, thread.thread_id,
             )
+            return False
 
     def _warn_if_hub_conclude_missing_assessment(
         self, agent: Agent, thread: ThreadState, response_text: str, raw_response: str,
