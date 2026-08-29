@@ -14,7 +14,17 @@ from starlette.responses import PlainTextResponse
 from src.agent.ids import WRITER_WEB, set_default_writer_id
 from src.config import get_settings
 from src.database import get_session_factory
-from src.routers import admin, agent_page, auth, invite, manager, onboarding, profile, public
+from src.routers import (
+    admin,
+    agent_page,
+    auth,
+    invite,
+    manager,
+    onboarding,
+    profile,
+    public,
+    reviews,
+)
 from src.routers import settings as settings_router
 
 logging.basicConfig(
@@ -365,6 +375,7 @@ def create_app() -> FastAPI:
     application.include_router(agent_page.router, prefix="/agent", tags=["agent"])
     application.include_router(admin.router, prefix="/admin", tags=["admin"])
     application.include_router(manager.router, prefix="/manager", tags=["manager"])
+    application.include_router(reviews.router, prefix="/reviews", tags=["reviews"])
     application.include_router(invite.router, tags=["invite"])
     application.include_router(settings_router.router, prefix="/settings", tags=["settings"])
 

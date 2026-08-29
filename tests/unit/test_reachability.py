@@ -147,6 +147,18 @@ ROUTE_ALLOWLIST: dict[tuple[str, str], str] = {
         "Same as /cabo-graph: hand-shared public graph URL for the Schultz group "
         "alumni cohort, whitelisted in nginx/nginx.conf:111."
     ),
+    ("POST", "/reviews/assessments/{assessment_id}/feedback"): (
+        "review forms land with the Task-6 detail card; "
+        "test_route_allowlist_has_no_stale_entries forces removal then"
+    ),
+    ("POST", "/reviews/feedback/{feedback_id}/edit"): (
+        "review forms land with the Task-6 detail card; "
+        "test_route_allowlist_has_no_stale_entries forces removal then"
+    ),
+    ("POST", "/reviews/feedback/{feedback_id}/delete"): (
+        "review forms land with the Task-6 detail card; "
+        "test_route_allowlist_has_no_stale_entries forces removal then"
+    ),
 }
 
 # Optional third-party imports that are allowed to be absent at test time. Empty
