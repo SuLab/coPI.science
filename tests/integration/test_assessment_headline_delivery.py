@@ -18,6 +18,7 @@ from src.agent.channels import ASSESSMENTS_SUMMARY_CHANNEL
 from src.agent.message_log import LogEntry
 from src.agent.simulation import _HeldVerdict
 from src.models import OpportunityAssessment, SimulationRun
+from tests.fakes import FakeSlackClient
 from tests.integration.test_hub_assessment_capture_gate import (  # noqa: F401
     _assessments,
     _delete_run,
@@ -214,8 +215,9 @@ async def test_draining_twice_does_not_post_twice(engine, monkeypatch):
         # pass while the guard it names went completely unexercised. Deleting it
         # forces the fall-through to the `summary_posted_at IS NULL` predicate,
         # which is the load-bearing one. It is also the realistic shape: a
-        # restarted process rehydrates every verdict with `announced=False`
-        # (`_rehydrate_assessed_threads`), so the DB is genuinely the only thing
+        # restarted process rebuilds `_assessed_threads` from the rows
+        # (`_rehydrate_assessed_threads`) and a pre-`0041` row carries no stamp
+        # to rebuild from, so the DB predicate is genuinely the only thing
         # standing between a re-queued thread and a second public headline.
         del sim._assessed_threads["t1"]
         sim._pending_headlines.append("t1")   # simulate a re-queue
@@ -333,20 +335,128 @@ async def test_a_failed_in_turn_post_stays_discoverable_and_is_rescued_later(
         await _delete_run(factory, run_id)
 
 
+class _SlackRefusesTheHeadline(FakeSlackClient):
+    """A transport that accepts the interview reply and silently REFUSES the
+    headline, returning `None` from `post_message` without raising.
+
+    That is `AgentSlackClient.post_message`'s real contract, not an invented
+    one: it ends `if not posted: return None` (src/agent/slack_client.py), and
+    `apost_message` is a `to_thread` wrapper that forwards it — so
+    `not_in_channel` after a failed autojoin, an archived channel,
+    `invalid_auth` and a chunk failure all reach the engine as a falsy return
+    and nothing else.
+
+    Subclassed rather than teaching `tests/fakes.py::FakeSlackClient` to fail:
+    that fake's truthy-dict return is depended on by every other suite.
+    """
+
+    def __init__(self, *args, refuse_channel: str, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._refuse_channel = refuse_channel
+        self.refused: list[str] = []
+
+    def post_message(self, channel: str, text: str, thread_ts: str | None = None):
+        if channel == self._refuse_channel:
+            # Recorded, but NOT appended to `posted`/`posted_messages` — Slack
+            # refused it, so no such message exists for `_headlines` to find.
+            self.refused.append(text)
+            return None
+        return super().post_message(channel, text, thread_ts)
+
+
+@pytest.mark.asyncio
+async def test_a_slack_refused_headline_is_never_recorded_as_posted(
+    engine, monkeypatch,
+):
+    """Fix round 2, finding 1. `_post_assessment_summary` discarded
+    `apost_message`'s return value, so a REFUSED post — which raises nothing —
+    was reported as success, and `_capture_hub_assessment` then stamped
+    `summary_posted_at` on a headline that never reached the channel. That
+    stamp is permanent and unqualified: the close path, the shutdown sweep and
+    `scripts/backfill_assessment_headlines.py` all read it as "already
+    announced" (`select_rows_needing_headline` skips a stamped row outright),
+    so the verdict becomes invisible to every repair path there is — the column
+    silently redefined from "it posted" to "we tried".
+
+    Driven at the TRANSPORT boundary, deliberately unlike
+    `test_a_failed_in_turn_post_stays_discoverable_and_is_rescued_later`, which
+    stubs `_post_assessment_summary` itself to return False. That one pins what
+    the CALLER does with a False; this one pins that a swallowed Slack refusal
+    produces one at all. Both are needed: with the bug in place the caller-side
+    test still passed.
+    """
+
+    def _wire_and_refuse_the_headline(sim):
+        _wire_summary_channel(sim)
+        sim.slack_clients["blackbird"] = _SlackRefusesTheHeadline(
+            agent_id="blackbird", refuse_channel=ASSESSMENTS_SUMMARY_CHANNEL,
+        )
+
+    sim, agent, thread, client, factory, run_id = await _drive_reply(
+        engine, monkeypatch, _reply_with_sidecar(), prior_messages=_CONCLUDE_COUNT,
+        configure=_wire_and_refuse_the_headline,
+    )
+    try:
+        # The CONCLUDE turn tried, and Slack refused. Assert the attempt
+        # happened, or everything below would hold vacuously.
+        assert len(client.refused) == 1, "the headline post was attempted"
+        assert _headlines(client) == [], "and nothing reached the channel"
+
+        rows = await _assessments(factory, run_id)
+        assert len(rows) == 1
+        assert rows[0].summary_posted_at is None, (
+            "a refused post must never be recorded as posted — a stamp here "
+            "hides the verdict from the sweep and from the repair script"
+        )
+        assert sim._assessed_threads["t1"].announced is False, (
+            "and the held verdict stays discoverable in memory too"
+        )
+
+        # The boundary contract itself: a falsy transport answer is a failure,
+        # not a success with a missing side effect.
+        assert await sim._post_assessment_summary(
+            agent, thread, {"company_or_project": "x", "recommendation": "conditional",
+                            "scores": {}}, "1.0",
+        ) is False
+
+        # Still owed, and still found: the shutdown sweep re-derives this thread
+        # from `summary_posted_at IS NULL` and tries again.
+        await sim.stop()
+        assert len(client.refused) == 3, (
+            "the sweep re-attempted the headline the refusal left owed"
+        )
+        rows = await _assessments(factory, run_id)
+        assert rows[0].summary_posted_at is None, (
+            "still un-announced after a second refusal — never stamped on a "
+            "post that did not happen"
+        )
+    finally:
+        await _delete_run(factory, run_id)
+
+
 @pytest.mark.asyncio
 async def test_shutdown_seeds_owed_headlines_from_the_database_not_memory(
     engine, monkeypatch,
 ):
-    """Fix round 1, finding 1. `_rehydrate_assessed_threads` deliberately
-    reloads EVERY assessment of a resumed run into `_assessed_threads` with
-    `announced=False` — the in-memory map cannot distinguish "never announced"
-    from "announced before this process started". Those rehydrated entries sit
-    at the FRONT of the insertion-ordered dict, ahead of anything genuinely
-    owed this session. Before the DB-derived seed, walking `_assessed_threads`
-    alone would queue all of them, and `_drain_pending_headlines` counts
-    `drained` per POP rather than per successful post — so the bound-limited
-    sweep burned its whole budget on no-op reads for already-public headlines
-    and reported the genuinely owed verdict, queued last, as LOST.
+    """Fix round 1, finding 1. The shutdown sweep seeds from
+    `summary_posted_at IS NULL`, not from `_assessed_threads`, because the
+    in-memory map can say `announced=False` over a row that is already
+    stamped — and those entries sit at the FRONT of the insertion-ordered
+    dict, ahead of anything genuinely owed this session. Before the DB-derived
+    seed, walking `_assessed_threads` alone would queue all of them, and
+    `_drain_pending_headlines` counts `drained` per POP rather than per
+    successful post — so the bound-limited sweep burned its whole budget on
+    no-op reads for already-public headlines and reported the genuinely owed
+    verdict, queued last, as LOST.
+
+    `_rehydrate_assessed_threads` hardcoded `announced=False` for EVERY
+    reloaded verdict when this test was written; it now derives the flag from
+    `summary_posted_at is not None` (commit bfbef77, same branch), which
+    narrows that disagreement without ending it — a row stamped out of band
+    (`backfill_assessment_headlines.py --stamp-only` against a live run) and
+    every pre-`0041` row still produce exactly the state seeded below. It is
+    constructed directly here rather than via a rehydrate, so the test pins
+    the sweep's seed and nothing else.
 
     `HEADLINES_MAX_AT_SHUTDOWN` is monkeypatched down to 2 rather than
     building 26+ rows — the failure mode reproduces at any bound smaller than
@@ -380,9 +490,11 @@ async def test_shutdown_seeds_owed_headlines_from_the_database_not_memory(
         ))
         await db.commit()
 
-    # Mimic `_rehydrate_assessed_threads` on a resume: every verdict of this
-    # run loaded with `announced=False`, the rehydrated (already-public) ones
-    # inserted FIRST — same insertion order a real rehydrate would produce.
+    # The state a resume produces whenever the stamp cannot be trusted to
+    # rebuild the flag (a pre-`0041` row, or one stamped out of band while this
+    # process ran): every verdict of this run held with `announced=False`, the
+    # already-public ones inserted FIRST — the insertion order a rehydrate
+    # walking `created_at` would produce.
     for thread_id in [*already_announced_ids, owed_thread_id]:
         sim._assessed_threads[thread_id] = _HeldVerdict(
             ordinal=12, final=True, slack_ts=None, announced=False,

@@ -80,12 +80,26 @@ def render_assessment_headline(
     overriding at all. See the module docstring for why a caller — the
     repair script — would want this.
 
-    Either way, an absent score/band omits the band/score segment of the
-    headline entirely, rather than printing `None` or a `weighted_score({})`
-    0.00 that bands as a decline nobody made. That is true whether "absent"
-    means an empty `scores` map (the compute path) or `score is None` on the
-    override path — e.g. the stored row's own `weighted_score` is NULL
-    because its verdict carried no dimension scores at all.
+    The band/score segment is omitted entirely — rather than printing `None`
+    or a `weighted_score({})` 0.00 that bands as a decline nobody made — in
+    exactly ONE case: the compute path reached an empty (or non-dict) `scores`
+    map. There is no separate "absent override" case, and the distinction is
+    worth stating because the obvious reading is wrong: `score=None` does not
+    suppress the segment, it declines the override, and a non-empty `scores`
+    then falls through and COMPUTES band/score against whichever rubric
+    document this process has loaded — the live recomputation the override
+    exists to prevent.
+
+    A partial override is therefore unreachable rather than defended, and
+    deliberately so. `_persist_assessment` writes `weighted_score`, `band` and
+    `scores` from one computation, so a stored row carries either all three or
+    none of them (`scores or None` alongside a NULL score/band); the repair
+    script passes `row.weighted_score`/`row.band` straight through, so it
+    supplies both or neither. Rejecting a partial override in code would add a
+    branch no caller can reach — untestable except by constructing the state
+    that cannot occur — so this is documented instead. A future caller that
+    can produce one (a hand-built row, a partial backfill) must pass both
+    values or accept a live recomputation.
     """
     if score is not None and band is not None:
         score_part = f" (band: {band}, score: {score:.1f})"

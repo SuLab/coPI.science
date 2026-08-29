@@ -1244,27 +1244,33 @@ class SimulationEngine:
         # buffers reached disk.
         try:
             # Seed from a DB query for exactly which interviews still owe a
-            # headline, rather than from `_assessed_threads` alone. On a plain
-            # RESUME, `_rehydrate_assessed_threads` deliberately reloads EVERY
-            # assessment of this simulation_run_id with `announced=False` — the
-            # in-memory map cannot distinguish "never announced" from
-            # "announced before this process started" — so with 25+ prior
-            # verdicts, walking `_assessed_threads` alone would spend the whole
-            # `HEADLINES_MAX_AT_SHUTDOWN` budget re-reading already-public
-            # headlines (the rehydrated entries sit at the front of the
-            # insertion-ordered dict) and report this session's genuinely owed
-            # verdicts as LOST. `summary_posted_at IS NULL` is the exact,
-            # durable definition of "still owed" — the same predicate
-            # `_announce_owed_headline` itself reads before posting, so this
-            # seed and that guard can never disagree. (A future change may make
-            # the rehydrate set `announced` from `summary_posted_at is not
-            # None`, which narrows this problem but does not close it: rows
-            # written before migration `0041` have `summary_posted_at` NULL
-            # regardless of whether a headline ever posted, and would still
-            # seed here — so the DB-derived seed remains the durable fix.) A
-            # thread this finds that is not in `_assessed_threads` at all is
-            # correct and desirable: it covers interview-ending paths that
-            # never call `_close_thread`.
+            # headline, rather than from `_assessed_threads` alone.
+            # `summary_posted_at IS NULL` is the exact, durable definition of
+            # "still owed" — the same predicate `_announce_owed_headline`
+            # itself reads before posting, so this seed and that guard can
+            # never disagree. The in-memory map can disagree with both, in
+            # either direction, and each direction costs something real:
+            #
+            # * announced=False over a row that IS stamped (a repair-script
+            #   `--stamp-only` pass against a live run, say) queues an
+            #   already-public headline, and on a resume with 25+ prior
+            #   verdicts the rehydrated entries sit at the FRONT of the
+            #   insertion-ordered dict — so a memory-derived seed can spend the
+            #   whole `HEADLINES_MAX_AT_SHUTDOWN` budget on no-op reads and then
+            #   report this session's genuinely owed verdicts as LOST;
+            # * a thread with no entry at all is invisible to a memory walk,
+            #   which is exactly the interview-ending paths that never call
+            #   `_close_thread` — the case this sweep exists for.
+            #
+            # `_rehydrate_assessed_threads` DOES now derive `announced` from
+            # `summary_posted_at is not None` (it hardcoded False until this
+            # branch), which narrows the first bullet but does not close it:
+            # rows written before migration `0041` read NULL whether or not a
+            # headline ever posted, so a resumed pre-`0041` run rehydrates them
+            # all as owed and this query returns them all too. No seed can fix
+            # that — the column is the only record there is — which is why
+            # CLAUDE.md's `0041` box makes running the repair procedure a
+            # precondition for resuming such a run.
             owed_thread_ids: list[str] | None = None
             if self.session_factory and self.simulation_run_id:
                 from sqlalchemy import select as sa_select
@@ -1307,20 +1313,33 @@ class SimulationEngine:
                     "without a concluding reply, or an earlier headline post "
                     "for it failed", len(self._pending_headlines),
                 )
-            await self._drain_pending_headlines(
+            unposted = await self._drain_pending_headlines(
                 limit=HEADLINES_MAX_AT_SHUTDOWN, trigger="shutdown",
             )
-            if self._pending_headlines:
-                # Say LOST with the ids, the same way the buffer flushes do: the
-                # assessment rows are safe, so this is recoverable, but only by
-                # someone who knows it happened.
+            over_budget = list(self._pending_headlines)
+            if over_budget or unposted:
+                # Say LOST with the count and the ids, the same way the buffer
+                # flushes do: the assessment rows are safe, so this is
+                # recoverable, but only by someone who knows it happened.
+                #
+                # BOTH causes are counted. This used to fire only on the
+                # `HEADLINES_MAX_AT_SHUTDOWN` overflow — but a thread whose post
+                # FAILS is popped and never re-queued, so a Slack outage at
+                # shutdown emptied the queue, left the count at zero, and
+                # produced no aggregate line and no pointer to the repair script
+                # at all: only per-thread logs, for the one failure mode most
+                # likely to hit every thread at once.
                 logger.error(
                     "LOST %d #assessments-summary headline(s) at shutdown "
-                    "(threads: %s). The assessment rows are safe — re-post "
-                    "with: python scripts/backfill_assessment_headlines.py "
-                    "--run %s --apply",
-                    len(self._pending_headlines),
-                    ", ".join(self._pending_headlines),
+                    "(%d attempted and not posted, %d never attempted past the "
+                    "%d-headline shutdown bound; threads still queued: %s). The "
+                    "assessment rows are safe — re-post with: python "
+                    "scripts/backfill_assessment_headlines.py --run %s --apply",
+                    unposted + len(over_budget),
+                    unposted,
+                    len(over_budget),
+                    HEADLINES_MAX_AT_SHUTDOWN,
+                    ", ".join(over_budget) or "none",
                     self.simulation_run_id,
                 )
         except Exception:
@@ -3556,9 +3575,11 @@ class SimulationEngine:
         assessments-summary channel (design D12/D13/D14/D16). Returns True when
         a headline actually reached Slack — the caller stamps
         `opportunity_assessments.summary_posted_at` on that answer, so a False
-        here must mean nothing was posted. Called from
-        _capture_hub_assessment right after a verdict is HELD — covers both
-        the immediate fail (closes_thread) path and the pass path
+        here must mean nothing was posted. That is why the transport's RETURN
+        VALUE is checked and not just its exceptions: `post_message` swallows a
+        refusal and answers `None` rather than raising (see the check below).
+        Called from _capture_hub_assessment right after a verdict is HELD —
+        covers both the immediate fail (closes_thread) path and the pass path
         symmetrically, since both funnel through that one call site.
 
         Rendering itself is delegated to `render_assessment_headline`
@@ -3640,7 +3661,35 @@ class SimulationEngine:
                 scores=verdict.get("scores"),
                 permalink=permalink,
             )
-            await client.apost_message(ASSESSMENTS_SUMMARY_CHANNEL, text)
+            posted = await client.apost_message(ASSESSMENTS_SUMMARY_CHANNEL, text)
+            if not posted:
+                # A REFUSED post is not an exception here. `post_message` ends
+                # `if not posted: return None` (src/agent/slack_client.py), and
+                # `apost_message` is a thin `to_thread` wrapper that forwards
+                # it — so `not_in_channel` after a failed autojoin, an archived
+                # channel, `invalid_auth` and a chunk failure ALL arrive as a
+                # falsy return and nothing else. Discarding that return made
+                # this method answer True for a headline that never existed,
+                # and the caller then stamped `summary_posted_at` on it —
+                # which hides the verdict from the close path, the shutdown
+                # sweep AND `scripts/backfill_assessment_headlines.py` (whose
+                # `select_rows_needing_headline` skips an already-stamped row),
+                # turning the column from "it posted" into "we tried". The
+                # script has always honoured this contract (`if not result:` ->
+                # no stamp); the engine must agree with it about the same fact.
+                #
+                # ERROR, not the caller's WARNING: that one says a retry is
+                # coming, this one says Slack refused a public post outright.
+                logger.error(
+                    "[%s] Slack refused the #assessments-summary headline for "
+                    "thread %s (channel %s / %s) — nothing was posted, so "
+                    "`summary_posted_at` stays NULL and the verdict remains "
+                    "discoverable by the shutdown sweep and by "
+                    "scripts/backfill_assessment_headlines.py",
+                    agent.agent_id, thread.thread_id,
+                    ASSESSMENTS_SUMMARY_CHANNEL, channel_id,
+                )
+                return False
             logger.info(
                 "[%s] Posted #assessments-summary headline for %s (%s)",
                 agent.agent_id, subject_agent_id or "?",
@@ -3841,24 +3890,38 @@ class SimulationEngine:
 
     async def _drain_pending_headlines(
         self, *, limit: int | None = None, trigger: str = "thread-close",
-    ) -> None:
+    ) -> int:
         """Post the headlines `_close_thread` and `stop()` queued.
 
         Pops BEFORE posting, so a thread that fails cannot spin the queue — the
         durable retry is `scripts/backfill_assessment_headlines.py`, not this
         loop, and `summary_posted_at` makes a re-queue harmless anyway. Never
         raises: this runs from the main loop's `finally` and from `stop()`.
+
+        Returns how many drained thread ids did NOT result in a post. Popping
+        without re-queueing means a Slack outage at shutdown empties the queue
+        completely, so `stop()`'s LOST tally — which is the only line carrying
+        the repair command — would read ZERO for the very failure it exists to
+        report if it counted the leftover queue alone. Every falsy answer is
+        counted, including `_announce_owed_headline`'s "no un-announced verdict
+        row found": that thread was queued, was drained, and got no headline,
+        which is exactly what an operator needs told. Each one has already
+        logged its own specific cause; this count is the aggregate.
         """
         drained = 0
+        unposted = 0
         while self._pending_headlines and (limit is None or drained < limit):
             thread_id = self._pending_headlines.pop(0)
             drained += 1
             try:
-                await self._announce_owed_headline(thread_id, trigger=trigger)
+                if not await self._announce_owed_headline(thread_id, trigger=trigger):
+                    unposted += 1
             except Exception:
+                unposted += 1
                 logger.exception(
                     "Failed to announce the owed headline for thread %s", thread_id,
                 )
+        return unposted
 
     def _warn_if_hub_conclude_missing_assessment(
         self, agent: Agent, thread: ThreadState, response_text: str, raw_response: str,

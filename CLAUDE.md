@@ -930,6 +930,36 @@ stay comparable. A version bump also requires the outgoing document's entry in
 > `scripts/backfill_assessment_headlines.py --stamp-only` to record one you
 > have verified by eye, and the same script without `--stamp-only` to post one
 > that is genuinely missing.
+>
+> ⚠️ **Repair the existing rows BEFORE you start any simulation run.**
+> `src/agent/main.py` RESUMES the latest run by default — that is the restart
+> command in "Running the Agent Simulation" above — and the new shutdown sweep
+> announces every verdict of the resumed run whose `summary_posted_at` is NULL.
+> NULL means "not announced", every pre-`0041` row is NULL whatever actually
+> happened in Slack, so **resuming a pre-`0041` run re-announces headlines that
+> are already public**, one unretractable duplicate post each. No code change
+> can close this: the column is the only durable record, and before `0041`
+> there was none.
+>
+> Concretely, for production run `61ccad6d` as measured 2026-08-29: six
+> assessment rows, all `summary_posted_at IS NULL`, **five of whose headlines
+> are already in `#assessments-summary`** and one (rothstein — conditional,
+> 2.85, the run's highest score) genuinely missing. Resuming it as-is posts
+> five duplicates and one correct headline.
+>
+> So, after `alembic upgrade head` and before starting ANY run, for every run
+> that already has headlines in Slack: check the five against the channel by
+> eye and stamp them (`--stamp-only`), post the missing one (no `--stamp-only`),
+> then verify there is nothing left owed —
+>
+>     $DC exec -T postgres psql -U copi -d copi -t -A -c \
+>       "SELECT COUNT(*) FROM opportunity_assessments
+>          WHERE simulation_run_id = '<run>' AND summary_posted_at IS NULL;"
+>
+> — which must read `0` before that run is resumed. Run the script without
+> `--apply` first: it previews every post and stamp it would make. A run with
+> NO headlines in Slack needs none of this; the sweep announcing its rows is
+> the fix working.
 
 > ### ⚠️ The assessment archive: never purge, never delete a run row.
 >
