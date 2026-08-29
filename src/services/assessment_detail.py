@@ -46,7 +46,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 # must never re-derive the floor's decision from today's predicate. See
 # `panel_state`.
 from src.agent.specialists import parse_opinion
-from src.models import AgentMessage, LlmCallLog, OpportunityAssessment, SpecialistConsult
+from src.models import (
+    AgentMessage,
+    AssessmentReview,
+    AssessmentReviewAssignment,
+    AssessmentReviewEvent,
+    LlmCallLog,
+    OpportunityAssessment,
+    SpecialistConsult,
+    User,
+)
 from src.services.blackbird_rubric import BANDING, RUBRIC_VERSION
 from src.services.interview_transcript import load_interview_thread
 from src.services.rubric_revisions import resolve_revision
@@ -506,7 +515,11 @@ def panel_state(assessment: OpportunityAssessment) -> str:
 
 
 async def build_assessment_detail(
-    db: AsyncSession, assessment_id: uuid.UUID, *, admin_view: bool
+    db: AsyncSession,
+    assessment_id: uuid.UUID,
+    *,
+    admin_view: bool,
+    viewer_is_staff: bool = False,
 ) -> dict[str, Any] | None:
     """One assessment, its dimension breakdown, and its interview timeline.
 
@@ -515,6 +528,12 @@ async def build_assessment_detail(
 
     ``admin_view=False`` omits every admin-only value from the returned
     context: no ``raw_opinion``, no tool activity. See the module docstring.
+
+    ``viewer_is_staff`` gates ``review_capable_users`` (the assignee roster
+    for the Human-review card's assign form): it is queried ONLY when True,
+    so a reviewer's render never enumerates the staff/reviewer roster — the
+    same rule ``src/routers/manager.py``'s own PI-add form applies, and it
+    saves a query on every non-staff render.
     """
     assessment = (
         await db.execute(
@@ -666,6 +685,13 @@ async def build_assessment_detail(
         if chip["is_consult"]
     )
 
+    review_feedback = await _load_review_feedback(db, assessment.id)
+    review_status_history = await _load_review_status_history(db, assessment.id)
+    review_assignments = await _load_review_assignments(db, assessment.id)
+    review_capable_users = (
+        await _load_review_capable_users(db) if viewer_is_staff else []
+    )
+
     return {
         "assessment": assessment,
         "pi_user_id": pi_user_id,
@@ -697,7 +723,79 @@ async def build_assessment_detail(
         "logs_scanned": logs_scanned,
         "log_scan_limit": LOG_SCAN_LIMIT,
         "admin_view": admin_view,
+        # Human-review card (Task 6). All three review tables are ordered
+        # (created_at, id) — Postgres `now()` is transaction-start, so ties
+        # inside one write burst are real and `id` is the tiebreak.
+        # ``review_status`` is the LATEST event (last of the ordered history),
+        # or None when the assessment has never had one recorded.
+        "review_feedback": review_feedback,
+        "review_status": review_status_history[-1] if review_status_history else None,
+        "review_status_history": review_status_history,
+        "review_assignments": review_assignments,
+        "review_capable_users": review_capable_users,
     }
+
+
+async def _load_review_feedback(
+    db: AsyncSession, assessment_id: uuid.UUID
+) -> list[AssessmentReview]:
+    """Every human review-feedback row for this assessment, oldest first."""
+    rows = (
+        await db.execute(
+            select(AssessmentReview)
+            .where(AssessmentReview.assessment_id == assessment_id)
+            .order_by(AssessmentReview.created_at, AssessmentReview.id)
+        )
+    ).scalars().all()
+    return list(rows)
+
+
+async def _load_review_status_history(
+    db: AsyncSession, assessment_id: uuid.UUID
+) -> list[AssessmentReviewEvent]:
+    """The full approve/disapprove/clear audit trail, oldest first. The last
+    entry is the current status — see ``build_assessment_detail``'s
+    ``review_status`` key."""
+    rows = (
+        await db.execute(
+            select(AssessmentReviewEvent)
+            .where(AssessmentReviewEvent.assessment_id == assessment_id)
+            .order_by(AssessmentReviewEvent.created_at, AssessmentReviewEvent.id)
+        )
+    ).scalars().all()
+    return list(rows)
+
+
+async def _load_review_assignments(
+    db: AsyncSession, assessment_id: uuid.UUID
+) -> list[AssessmentReviewAssignment]:
+    """Everyone currently assigned to review this assessment, oldest first."""
+    rows = (
+        await db.execute(
+            select(AssessmentReviewAssignment)
+            .where(AssessmentReviewAssignment.assessment_id == assessment_id)
+            .order_by(AssessmentReviewAssignment.created_at, AssessmentReviewAssignment.id)
+        )
+    ).scalars().all()
+    return list(rows)
+
+
+async def _load_review_capable_users(db: AsyncSession) -> list[User]:
+    """The assignee roster for the assign form: every allowed staff or
+    reviewer account. Callers must gate this on ``viewer_is_staff`` — see the
+    module docstring's redaction note and ``build_assessment_detail``.
+    """
+    rows = (
+        await db.execute(
+            select(User)
+            .where(
+                or_(User.is_staff, User.is_reviewer),
+                User.access_status == "allowed",
+            )
+            .order_by(User.name, User.id)
+        )
+    ).scalars().all()
+    return list(rows)
 
 
 async def _load_consults(

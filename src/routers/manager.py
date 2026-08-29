@@ -355,7 +355,9 @@ async def manager_assessment_detail(
     decision 2, and the redaction happens in the service, not just in the
     template (see ``src.services.assessment_detail``).
     """
-    detail = await build_assessment_detail(db, assessment_id, admin_view=False)
+    detail = await build_assessment_detail(
+        db, assessment_id, admin_view=False, viewer_is_staff=current_user.is_staff
+    )
     if detail is None:
         raise HTTPException(status_code=404, detail="Assessment not found")
     return templates.TemplateResponse(
