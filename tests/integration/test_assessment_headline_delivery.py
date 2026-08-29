@@ -198,6 +198,19 @@ async def test_draining_twice_does_not_post_twice(engine, monkeypatch):
         await sim._reply_to_thread(agent, thread)
 
         await sim._drain_pending_headlines()
+
+        # Drop the in-memory record BEFORE re-queueing, and do not "tidy" this
+        # line away. The first drain left `_assessed_threads["t1"]` with
+        # `announced=True`, and `_announce_owed_headline` short-circuits on that
+        # before it issues any SQL — so with the record in place the second drain
+        # would return without ever touching the database, and this test would
+        # pass while the guard it names went completely unexercised. Deleting it
+        # forces the fall-through to the `summary_posted_at IS NULL` predicate,
+        # which is the load-bearing one. It is also the realistic shape: a
+        # restarted process rehydrates every verdict with `announced=False`
+        # (`_rehydrate_assessed_threads`), so the DB is genuinely the only thing
+        # standing between a re-queued thread and a second public headline.
+        del sim._assessed_threads["t1"]
         sim._pending_headlines.append("t1")   # simulate a re-queue
         await sim._drain_pending_headlines()
 

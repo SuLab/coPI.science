@@ -592,12 +592,16 @@ class SimulationEngine:
         # visibility, channel_id); agent_id (not the Agent object) because a
         # roster sync can rebuild the object between enqueue and drain.
         self._pending_memory_events: list[tuple[str, str, str, str | None]] = []
-        # Interviews that ENDED holding a verdict nobody announced. Queued
-        # rather than posted at the close, because `_close_thread` runs holding
-        # the thread lock, both agent locks and a reply-lane semaphore slot, and
-        # a headline is two Slack round-trips — the same reason the memory
-        # events beside this are queued rather than synthesised there (audit
-        # finding 1). Drained by `_drain_and_flush` and by `stop()`.
+        # Interviews that ENDED holding a verdict nobody announced. TWO things
+        # put a thread here and they are not the same failure: the interview
+        # ended without a concluding reply at all, or a concluding reply landed
+        # and its own headline post FAILED (`_capture_hub_assessment` leaves
+        # `announced` False for exactly that). Queued rather than posted at the
+        # close, because `_close_thread` runs holding the thread lock, both
+        # agent locks and a reply-lane semaphore slot, and a headline is two
+        # Slack round-trips — the same reason the memory events beside this are
+        # queued rather than synthesised there (audit finding 1). Drained by
+        # `_drain_and_flush` and by `stop()`.
         self._pending_headlines: list[str] = []
         # Guards against two drains running at once (main loop vs stop(), or
         # a future second call site): concurrent drains would pop same-agent
@@ -3635,6 +3639,17 @@ class SimulationEngine:
         way — the `max_thread_messages` timeout, abandonment, the run's own
         shutdown — dropped its verdict silently.
 
+        TWO different failures arrive here, and this method cannot tell them
+        apart — so it deliberately does not try, and neither should its log:
+
+        * the interview ended without a concluding reply at all (the
+          message-count parity break of the RCA's §2.2, which this path makes
+          non-destructive but does not fix);
+        * a concluding reply DID land and was fine, but its own headline post
+          failed — `_capture_hub_assessment` records that by leaving
+          `announced` False and `summary_posted_at` NULL, precisely so this
+          path can pick the verdict up.
+
         Everything is resolved from the STORED ROW, never from live state, and
         both halves of that matter:
 
@@ -3680,6 +3695,26 @@ class SimulationEngine:
             )
             return False
         if row is None:
+            # Not silent. `_drain_pending_headlines` has ALREADY popped this
+            # thread id, so a `return False` here is a queue entry that vanishes
+            # without a trace — the exact shape of loss this whole path exists
+            # to end, and the last instance of it left in the method.
+            #
+            # The commonest cause is benign-but-worth-seeing: the verdict's
+            # first DB write failed and the row is still on
+            # `_pending_assessments`, invisible to this SELECT. That one still
+            # gets another chance — `stop()` re-derives the queue from
+            # `_assessed_threads` AFTER the final `_flush_pending_assessments`.
+            # The rest (a row a cleanup removed, a thread that never got one) are
+            # for `scripts/backfill_assessment_headlines.py`.
+            logger.warning(
+                "No un-announced verdict row found for thread %s (trigger=%s), "
+                "so no #assessments-summary headline was posted for it. If its "
+                "first write failed the row may still be on the retry queue, in "
+                "which case the shutdown sweep will re-derive this thread and "
+                "try again.",
+                thread_id, trigger,
+            )
             return False
 
         agent = self.agents.get(row.agent_id)
@@ -3711,15 +3746,20 @@ class SimulationEngine:
         await self._mark_summary_posted(thread_id)
         if held is not None:
             self._assessed_threads[thread_id] = held._replace(announced=True)
-        # WARNING, not INFO. Every rescue means the hub was locked out of its
-        # own CONCLUDE turn — the message-count parity break of the RCA's §2.2,
-        # which this path makes non-destructive but does not fix. A run with
-        # several of these is the signal to go fix that.
+        # WARNING, not INFO: every rescue means something upstream failed, and
+        # both causes are worth an operator's attention. But it reports what it
+        # OBSERVED, not a diagnosis. It used to assert the parity break as the
+        # single cause ("the hub was locked out of its own CONCLUDE turn"),
+        # which is simply false for the other half — a Slack outage that fails
+        # the in-turn post lands here too, and an operator reading that line
+        # would go hunting a message-count bug that never happened. Naming both
+        # costs one clause; naming the wrong one costs an afternoon.
         logger.warning(
             "[%s] RESCUED the #assessments-summary headline for %s (thread %s, "
-            "trigger=%s): the interview ended without a concluding reply, so "
-            "the verdict was announced on the way out rather than by its own "
-            "final turn. See docs/audits/2026-08-29-lost-assessment-headlines/.",
+            "trigger=%s): the interview ended holding a verdict that had never "
+            "been announced — either it ended without a concluding reply, or an "
+            "earlier headline post for it failed. Announced on the way out. See "
+            "docs/audits/2026-08-29-lost-assessment-headlines/.",
             row.agent_id, row.subject_agent_id or "?", thread_id, trigger,
         )
         return True
