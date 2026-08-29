@@ -1,11 +1,16 @@
 """assessment summary_posted_at — the durable record that a headline posted
 
 Additive and nullable, so OLD CODE AGAINST THE NEW SCHEMA IS SAFE. The reverse
-is not: the new code MAPS this column, so every `select(OpportunityAssessment)`
-— both assessment list pages, both detail pages — raises `UndefinedColumn`
-against a pre-0041 database, and `_persist_assessment`'s INSERT names it, so
-every verdict write fails too. Migrate BEFORE the new code serves; see the
-deploy box in CLAUDE.md.
+is not, but only on the read side: the new code MAPS this column, so every
+`select(OpportunityAssessment)` — both assessment list pages, both detail
+pages — raises `UndefinedColumn` against a pre-0041 database. The write side is
+genuinely safe: `_persist_assessment`'s INSERT never assigns
+`summary_posted_at` (it is written later, by `_mark_summary_posted`, once a
+headline actually posts), and SQLAlchemy omits an unset, no-server-default
+nullable attribute from the generated INSERT's column list, so a fresh verdict
+write SUCCEEDS against a pre-0041 schema either way. Migrate BEFORE the new
+code serves regardless — the read side alone takes down both assessment list
+pages and both detail pages; see the deploy box in CLAUDE.md.
 
 Deliberately NOT backfilled. NULL means "no headline has been posted for this
 row", and for a pre-0041 row that is unknowable from the database alone — the

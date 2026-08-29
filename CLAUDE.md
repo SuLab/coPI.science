@@ -504,11 +504,11 @@ when a form stops working after a deploy.
 `hybrid_property` over `user_role`, so it still works in both SQL
 (`select(User.is_admin)`) and Python, but **cannot be assigned**. Set the role
 instead. The physical `users.is_admin` column stays in the database, unmapped and
-defaulted. Dropping it is deferred to a separate later migration (`0041`+ — `0031`
-through `0040` are all taken now: `0038` went to
+defaulted. Dropping it is deferred to a separate later migration (`0042`+ — `0031`
+through `0041` are all taken now: `0038` went to
 `specialist_consults`'s `read_state`/`established`/rubric stamp instead, `0039`
-to the reviewer-role/review-tables migration instead, and `0040` went to
-`prose_format`, see the
+to the reviewer-role/review-tables migration instead, `0040` went to
+`prose_format`, and `0041` to `summary_posted_at`, see the
 box below), which **has not been written, let alone applied** — see the design
 doc's §8.
 
@@ -901,12 +901,17 @@ stay comparable. A version bump also requires the outgoing document's entry in
 > **Deploy order for `0041_assessment_summary_posted_at` — migrate BEFORE the
 > new code serves.** `0041` is one additive nullable `TIMESTAMPTZ` column
 > (`opportunity_assessments.summary_posted_at`), so *old code against the new
-> schema* is safe. The reverse is not: the new code **maps the column**, so
-> against a pre-`0041` database every `select(OpportunityAssessment)` — both
-> assessment list pages, both detail pages — raises `UndefinedColumn`, and on
-> the engine side `_persist_assessment`'s INSERT names it, so every verdict
-> write fails too. Build, migrate from a one-off container, then start — same
-> ordering as `0028`/`0030`/`0036`/`0037`/`0038`/`0040`:
+> schema* is safe. The reverse is not, but only on the read side: the new code
+> **maps the column**, so against a pre-`0041` database every
+> `select(OpportunityAssessment)` — both assessment list pages, both detail
+> pages — raises `UndefinedColumn`. The write side is genuinely safe:
+> `_persist_assessment`'s INSERT never assigns `summary_posted_at` — that
+> column is written later, by `_mark_summary_posted`, once a headline actually
+> posts — and SQLAlchemy omits an unset, no-server-default nullable attribute
+> from the generated INSERT's column list, so a fresh verdict write SUCCEEDS
+> against a pre-`0041` schema either way. Build, migrate from a one-off
+> container, then start — same ordering as
+> `0028`/`0030`/`0036`/`0037`/`0038`/`0040`:
 >
 >     DC="docker compose -f docker-compose.prod.yml"
 >     $DC build blackbird-app worker
@@ -1013,9 +1018,18 @@ later turn looked like a FIRST verdict and landed a second row, and a lab bot
 ⏸️-closing a thread that already held one produced a spurious
 `closed_before_verdict` drop. Rows with a NULL `thread_id` — every row written
 before `0036` — are skipped rather than guessed at, and the restored record uses
-`ordinal=0`, `announced=False` and a `final` DERIVED from `_closed_thread_ids`;
-each of those three is a deliberate choice about which way to fail, documented at
-the function.
+`ordinal=0`, a `final` DERIVED from `_closed_thread_ids`, and an `announced`
+READ from `summary_posted_at is not None` (migration `0041`) rather than
+defaulted. `ordinal` and `final` are still deliberate choices about which way to
+fail if the answer is unknown; `announced` no longer needs one, because the
+column now carries the real answer — it used to be hardcoded `False`, which
+was the safer of two guesses (a hardcoded `True` would have suppressed the
+`#assessments-summary` headline for a verdict stored provisionally before the
+restart, and a headline cannot be retracted), but a guess either way traded one
+breach for another: reading the column instead means a verdict whose headline
+was already public does not get a second one. A pre-`0041` row reads NULL and
+therefore `False`, which is exactly the old hardcoded behaviour. All three
+fields are documented at the function.
 
 When writing a
 test that drives a concluding reply, seed the thread's history in the
