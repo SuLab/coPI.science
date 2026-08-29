@@ -7,17 +7,22 @@ highest score) because the interview ended by `max_thread_messages` timeout
 instead of by a terminal reply, and nothing announces on that path.
 """
 
+from datetime import UTC, datetime
+
 import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from src.agent.channels import ASSESSMENTS_SUMMARY_CHANNEL
 from src.agent.message_log import LogEntry
+from src.agent.simulation import _HeldVerdict
 from src.models import OpportunityAssessment, SimulationRun
 from tests.integration.test_hub_assessment_capture_gate import (  # noqa: F401
     _assessments,
     _delete_run,
     _drive_reply,
+    _hub,
+    _new_run,
     _reply_with_sidecar,
 )
 
@@ -322,5 +327,96 @@ async def test_a_failed_in_turn_post_stays_discoverable_and_is_rescued_later(
         )
         rows = await _assessments(factory, run_id)
         assert rows[0].summary_posted_at is not None
+    finally:
+        await _delete_run(factory, run_id)
+
+
+@pytest.mark.asyncio
+async def test_shutdown_seeds_owed_headlines_from_the_database_not_memory(
+    engine, monkeypatch,
+):
+    """Fix round 1, finding 1. `_rehydrate_assessed_threads` deliberately
+    reloads EVERY assessment of a resumed run into `_assessed_threads` with
+    `announced=False` — the in-memory map cannot distinguish "never announced"
+    from "announced before this process started". Those rehydrated entries sit
+    at the FRONT of the insertion-ordered dict, ahead of anything genuinely
+    owed this session. Before the DB-derived seed, walking `_assessed_threads`
+    alone would queue all of them, and `_drain_pending_headlines` counts
+    `drained` per POP rather than per successful post — so the bound-limited
+    sweep burned its whole budget on no-op reads for already-public headlines
+    and reported the genuinely owed verdict, queued last, as LOST.
+
+    `HEADLINES_MAX_AT_SHUTDOWN` is monkeypatched down to 2 rather than
+    building 26+ rows — the failure mode reproduces at any bound smaller than
+    the rehydrated count, and this keeps the test fast. Against the buggy
+    memory-derived seed this fails two ways at once: the owed thread is never
+    announced, and it is named in a LOST error it does not deserve.
+    """
+    monkeypatch.setattr("src.agent.simulation.HEADLINES_MAX_AT_SHUTDOWN", 2)
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    run_id = await _new_run(factory)
+    sim, agent = _hub(factory, run_id)
+    _wire_summary_channel(sim)
+    client = sim.slack_clients["blackbird"]
+
+    already_announced_ids = ["announced-1", "announced-2", "announced-3"]
+    owed_thread_id = "owed-1"
+
+    async with factory() as db:
+        for thread_id in already_announced_ids:
+            db.add(OpportunityAssessment(
+                simulation_run_id=run_id, agent_id="blackbird",
+                channel_name="single-cell-omics", thread_id=thread_id,
+                recommendation="decline", scores={},
+                summary_posted_at=datetime.now(UTC),
+            ))
+        db.add(OpportunityAssessment(
+            simulation_run_id=run_id, agent_id="blackbird",
+            channel_name="single-cell-omics", thread_id=owed_thread_id,
+            recommendation="route-to-incubation", scores={},
+        ))
+        await db.commit()
+
+    # Mimic `_rehydrate_assessed_threads` on a resume: every verdict of this
+    # run loaded with `announced=False`, the rehydrated (already-public) ones
+    # inserted FIRST — same insertion order a real rehydrate would produce.
+    for thread_id in [*already_announced_ids, owed_thread_id]:
+        sim._assessed_threads[thread_id] = _HeldVerdict(
+            ordinal=12, final=True, slack_ts=None, announced=False,
+        )
+
+    try:
+        await sim.stop()
+
+        assert sim._pending_headlines == [], (
+            "nothing was reported LOST — the DB seed is exact, not bounded "
+            "by memory order"
+        )
+        assert sim._assessed_threads[owed_thread_id].announced is True, (
+            "the genuinely owed verdict was announced despite 3 stale "
+            "rehydrated entries ahead of it and a bound of 2"
+        )
+        assert len(_headlines(client)) == 1, (
+            "exactly the owed verdict's headline, none of the already-public ones"
+        )
+
+        async with factory() as db:
+            owed_row = (await db.execute(
+                select(OpportunityAssessment).where(
+                    OpportunityAssessment.thread_id == owed_thread_id,
+                )
+            )).scalar_one()
+            assert owed_row.summary_posted_at is not None
+
+            for thread_id in already_announced_ids:
+                stale = (await db.execute(
+                    select(OpportunityAssessment).where(
+                        OpportunityAssessment.thread_id == thread_id,
+                    )
+                )).scalar_one()
+                assert stale.summary_posted_at is not None, (
+                    "already-announced rows are untouched, not re-posted"
+                )
     finally:
         await _delete_run(factory, run_id)

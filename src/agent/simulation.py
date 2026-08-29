@@ -1238,29 +1238,96 @@ class SimulationEngine:
         # `_run_main_loop()` directly in the same coroutine and `stop()` is only
         # awaited (from src/agent/main.py's finally-block) after `start()` has
         # returned, so this sweep can never run concurrently with the main
-        # loop's own `_drain_and_flush`.
-        for thread_id, held in self._assessed_threads.items():
-            if not held.announced and thread_id not in self._pending_headlines:
-                self._pending_headlines.append(thread_id)
-        if self._pending_headlines:
-            logger.info(
-                "Announcing %d interview verdict(s) that ended without a "
-                "concluding reply", len(self._pending_headlines),
+        # loop's own `_drain_and_flush`. Wrapped like the memory drain above:
+        # anything escaping here must not skip the "Simulation stopping..."
+        # line below, which CLAUDE.md documents as the operator's proof the
+        # buffers reached disk.
+        try:
+            # Seed from a DB query for exactly which interviews still owe a
+            # headline, rather than from `_assessed_threads` alone. On a plain
+            # RESUME, `_rehydrate_assessed_threads` deliberately reloads EVERY
+            # assessment of this simulation_run_id with `announced=False` — the
+            # in-memory map cannot distinguish "never announced" from
+            # "announced before this process started" — so with 25+ prior
+            # verdicts, walking `_assessed_threads` alone would spend the whole
+            # `HEADLINES_MAX_AT_SHUTDOWN` budget re-reading already-public
+            # headlines (the rehydrated entries sit at the front of the
+            # insertion-ordered dict) and report this session's genuinely owed
+            # verdicts as LOST. `summary_posted_at IS NULL` is the exact,
+            # durable definition of "still owed" — the same predicate
+            # `_announce_owed_headline` itself reads before posting, so this
+            # seed and that guard can never disagree. (A future change may make
+            # the rehydrate set `announced` from `summary_posted_at is not
+            # None`, which narrows this problem but does not close it: rows
+            # written before migration `0041` have `summary_posted_at` NULL
+            # regardless of whether a headline ever posted, and would still
+            # seed here — so the DB-derived seed remains the durable fix.) A
+            # thread this finds that is not in `_assessed_threads` at all is
+            # correct and desirable: it covers interview-ending paths that
+            # never call `_close_thread`.
+            owed_thread_ids: list[str] | None = None
+            if self.session_factory and self.simulation_run_id:
+                from sqlalchemy import select as sa_select
+                try:
+                    async with self.session_factory() as db:
+                        owed_thread_ids = list((await db.execute(
+                            sa_select(OpportunityAssessment.thread_id)
+                            .where(
+                                OpportunityAssessment.simulation_run_id
+                                == self.simulation_run_id,
+                                OpportunityAssessment.thread_id.is_not(None),
+                                OpportunityAssessment.summary_posted_at.is_(None),
+                            )
+                            .distinct()
+                        )).scalars().all())
+                except Exception:
+                    logger.exception(
+                        "Could not read which interviews owe a "
+                        "#assessments-summary headline at shutdown; falling "
+                        "back to the in-memory _assessed_threads map, which "
+                        "cannot tell a genuinely owed verdict from a "
+                        "rehydrated one on a resumed run"
+                    )
+                    owed_thread_ids = None
+            if owed_thread_ids is None:
+                owed_thread_ids = [
+                    thread_id for thread_id, held in self._assessed_threads.items()
+                    if not held.announced
+                ]
+            for thread_id in owed_thread_ids:
+                held = self._assessed_threads.get(thread_id)
+                if held is not None and held.announced:
+                    continue
+                if thread_id not in self._pending_headlines:
+                    self._pending_headlines.append(thread_id)
+            if self._pending_headlines:
+                logger.info(
+                    "Announcing %d interview verdict(s) that ended holding an "
+                    "un-announced verdict — either the interview ended "
+                    "without a concluding reply, or an earlier headline post "
+                    "for it failed", len(self._pending_headlines),
+                )
+            await self._drain_pending_headlines(
+                limit=HEADLINES_MAX_AT_SHUTDOWN, trigger="shutdown",
             )
-        await self._drain_pending_headlines(
-            limit=HEADLINES_MAX_AT_SHUTDOWN, trigger="shutdown",
-        )
-        if self._pending_headlines:
-            # Say LOST with the ids, the same way the buffer flushes do: the
-            # assessment rows are safe, so this is recoverable, but only by
-            # someone who knows it happened.
-            logger.error(
-                "LOST %d #assessments-summary headline(s) at shutdown (threads: "
-                "%s). The assessment rows are safe — re-post with: python "
-                "scripts/backfill_assessment_headlines.py --run %s --apply",
-                len(self._pending_headlines),
-                ", ".join(self._pending_headlines),
-                self.simulation_run_id,
+            if self._pending_headlines:
+                # Say LOST with the ids, the same way the buffer flushes do: the
+                # assessment rows are safe, so this is recoverable, but only by
+                # someone who knows it happened.
+                logger.error(
+                    "LOST %d #assessments-summary headline(s) at shutdown "
+                    "(threads: %s). The assessment rows are safe — re-post "
+                    "with: python scripts/backfill_assessment_headlines.py "
+                    "--run %s --apply",
+                    len(self._pending_headlines),
+                    ", ".join(self._pending_headlines),
+                    self.simulation_run_id,
+                )
+        except Exception:
+            logger.exception(
+                "Shutdown headline sweep failed; any un-announced verdict for "
+                "this run can still be repaired with "
+                "scripts/backfill_assessment_headlines.py"
             )
 
         # The clear-rate FLOOR was retired 2026-08-28. It asserted that a low
