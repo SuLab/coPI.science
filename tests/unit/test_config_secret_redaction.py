@@ -154,6 +154,9 @@ NON_SECRET_STR_FIELDS = {
     "llm_agent_model_opus",
     "llm_agent_model_sonnet",
     "llm_review_model",
+    # Channel names for the run-start announcement — public channel names,
+    # not credentials.
+    "run_start_announce_channels",
 }
 
 

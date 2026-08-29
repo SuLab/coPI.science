@@ -328,6 +328,20 @@ class Settings(BaseSettings):
     # Simulation parameters
     active_thread_threshold: int = 3        # per-agent max active threads
     max_thread_messages: int = 12           # system-enforced thread close
+    # Channels (by NAME, comma-separated) that receive the engine-authored
+    # run-start announcement when a --fresh run begins. Default: the six
+    # seeded channels plus assessments-summary — the simulation's own
+    # channels, deliberately not the whole workspace
+    # (tests/unit/test_run_marker.py pins the equivalence to SEEDED_CHANNELS,
+    # which config.py must not import). Empty string disables the
+    # announcement. The message body is prompts/run_start_announcement.md;
+    # the :checkered_flag: sentinel line is prepended by code and both
+    # Slack-ingest paths drop messages carrying it. See
+    # src/agent/run_marker.py.
+    run_start_announce_channels: str = (
+        "general,drug-repurposing,structural-biology,aging-and-longevity,"
+        "single-cell-omics,chemical-biology,assessments-summary"
+    )
     turn_delay_seconds: float = 0.0         # pause between turns
     phase5_skip_probability: float = 0.0    # chance agent skips new post
     lab_daily_post_cap: int = 1  # pi_lab: one pitch per day (design §9)
