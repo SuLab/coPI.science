@@ -7,6 +7,7 @@ highest score) because the interview ended by `max_thread_messages` timeout
 instead of by a terminal reply, and nothing announces on that path.
 """
 
+import uuid
 from datetime import UTC, datetime
 
 import pytest
@@ -21,6 +22,7 @@ from tests.integration.test_hub_assessment_capture_gate import (  # noqa: F401
     _assessments,
     _delete_run,
     _drive_reply,
+    _drops,
     _hub,
     _new_run,
     _reply_with_sidecar,
@@ -418,5 +420,87 @@ async def test_shutdown_seeds_owed_headlines_from_the_database_not_memory(
                 assert stale.summary_posted_at is not None, (
                     "already-announced rows are untouched, not re-posted"
                 )
+    finally:
+        await _delete_run(factory, run_id)
+
+
+# ---------------------------------------------------------------------------
+# The flag has to survive a restart and a supersession, not just a post.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_rehydration_reads_the_durable_headline_flag(engine, monkeypatch):
+    """A restart must not re-post a headline that is already public, and must
+    not suppress one that never posted. Before 0041 the flag was hardcoded
+    False, which got the second case right and the first case wrong."""
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    run_id = await _new_run(factory)
+    sim, agent = _hub(factory, run_id)
+    try:
+        async with factory() as db:
+            db.add(OpportunityAssessment(
+                id=uuid.uuid4(), simulation_run_id=run_id, agent_id="blackbird",
+                channel_name="general", thread_id="t-announced", slack_ts="1.0",
+                summary_posted_at=datetime.now(UTC),
+            ))
+            db.add(OpportunityAssessment(
+                id=uuid.uuid4(), simulation_run_id=run_id, agent_id="blackbird",
+                channel_name="general", thread_id="t-owed", slack_ts="2.0",
+            ))
+            await db.commit()
+
+        await sim._rehydrate_assessed_threads()
+
+        assert sim._assessed_threads["t-announced"].announced is True
+        assert sim._assessed_threads["t-owed"].announced is False
+    finally:
+        await _delete_run(factory, run_id)
+
+
+@pytest.mark.asyncio
+async def test_a_superseded_verdict_carries_its_headline_stamp_forward(
+    engine, monkeypatch,
+):
+    """`announced` carries forward in memory so the channel keeps its first
+    word. The COLUMN has to agree, or a restart re-announces the replacement.
+
+    Ruling P6: driving this with a SECOND `_drive_reply` (as an earlier draft
+    of this test did) is unreachable — after the first ordinal-12 reply the
+    thread already holds 12 messages, so a second `_reply_to_thread` hits
+    `message_count >= settings.max_thread_messages` and closes the thread as
+    `timeout` instead of replying; no supersession would ever happen. Instead,
+    drive the second verdict by calling `_capture_hub_assessment` directly —
+    it is the exact unit under test, and owns both the `already_announced`
+    carry-forward and the `_mark_summary_posted` call — with
+    `thread.message_count` raised so the ordinal still lands in CONCLUDE.
+    """
+    sim, agent, thread, client, factory, run_id = await _drive_reply(
+        engine, monkeypatch, _reply_with_sidecar(), prior_messages=_CONCLUDE_COUNT,
+        configure=_wire_summary_channel,
+    )
+    try:
+        assert len(_headlines(client)) == 1
+        rows = await _assessments(factory, run_id)
+        assert rows[0].summary_posted_at is not None
+
+        # A later CONCLUDE turn supersedes it: the first row is deleted and a
+        # new one takes its place on the same thread. `message_count = 13`
+        # makes the next ordinal 14 — still CONCLUDE (> 11) — without hitting
+        # `max_thread_messages` the way a second real `_reply_to_thread` would.
+        thread.message_count = 13
+        await sim._capture_hub_assessment(
+            agent, thread, _reply_with_sidecar(4), "2.2", closes_thread=False,
+        )
+
+        rows = await _assessments(factory, run_id)
+        assert len(rows) == 1, "one interview, one row"
+        assert rows[0].summary_posted_at is not None, (
+            "the replacement inherits the stamp — the headline is already public"
+        )
+        assert len(_headlines(client)) == 1, "and no second headline is posted"
+        assert [d.reason for d in await _drops(factory, run_id)] == [
+            "duplicate_thread_verdict"
+        ], "the retirement of the superseded row is recorded"
     finally:
         await _delete_run(factory, run_id)

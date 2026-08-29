@@ -3505,6 +3505,14 @@ class SimulationEngine:
                             replacement_ordinal=thread.message_count + 1,
                             replacement_id=replacement_id,
                         )
+                        # `announced` carries forward in memory (above) so the
+                        # channel keeps its first word; the COLUMN has to agree
+                        # or the next restart reads NULL off the replacement and
+                        # posts a second headline for the same interview.
+                        # `_mark_summary_posted` keys on the thread, so it lands
+                        # on whichever row now holds it.
+                        if already_announced:
+                            await self._mark_summary_posted(thread.thread_id)
             elif _ASSESSMENT_UNCLOSED_RE.search(raw_response or ""):
                 # An <assessment_json> opening tag is present but
                 # _extract_assessment_json found no usable verdict in it —
@@ -4626,10 +4634,16 @@ class SimulationEngine:
           refuse the interview's legitimate LATER verdict
           (``if ordinal <= held.ordinal``); zero costs at most a spurious
           ``duplicate_thread_verdict`` drop if the very same turn is re-captured.
-        * ``announced=False``. ``True`` would suppress the
-          ``#assessments-summary`` headline for a verdict stored provisionally
-          before the restart — a silent D12 breach. ``False`` merely preserves
-          the behaviour of a process that never knew about the row at all.
+        * ``announced`` is READ, not defaulted, from
+          ``summary_posted_at`` (migration 0041). It used to be hardcoded
+          ``False`` with the reasoning that ``True`` "would suppress the
+          headline for a verdict stored provisionally before the restart — a
+          silent D12 breach". That was the right call against a schema with no
+          answer in it, but it traded one breach for another: a verdict whose
+          headline was ALREADY public got a second one, and a headline cannot
+          be retracted. The column answers the question directly, so neither
+          trade is necessary. A pre-0041 row reads NULL and therefore False,
+          which is exactly the old behaviour.
         * ``final`` is DERIVED, not defaulted: closing a thread writes a
           ``ThreadDecision``, so ``thread_id in self._closed_thread_ids`` is the
           real answer. This must therefore run AFTER ``_rebuild_agent_state``
@@ -4657,6 +4671,7 @@ class SimulationEngine:
                     sa_select(
                         OpportunityAssessment.thread_id,
                         OpportunityAssessment.slack_ts,
+                        OpportunityAssessment.summary_posted_at,
                     )
                     .where(
                         OpportunityAssessment.simulation_run_id == self.simulation_run_id,
@@ -4672,12 +4687,12 @@ class SimulationEngine:
                 exc,
             )
             return
-        for thread_id, slack_ts in rows:
+        for thread_id, slack_ts, summary_posted_at in rows:
             self._assessed_threads[thread_id] = _HeldVerdict(
                 ordinal=0,
                 final=thread_id in self._closed_thread_ids,
                 slack_ts=slack_ts,
-                announced=False,
+                announced=summary_posted_at is not None,
             )
         if rows:
             # `len(rows)` — the number of stored verdicts read — NOT
