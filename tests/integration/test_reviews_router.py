@@ -15,6 +15,8 @@ from src.models import (
     USER_ROLE_PI,
     USER_ROLE_REVIEWER,
     AssessmentReview,
+    AssessmentReviewAssignment,
+    AssessmentReviewEvent,
     Job,
     OpportunityAssessment,
     SimulationRun,
@@ -43,6 +45,9 @@ def test_the_reviews_router_posts_are_an_explicit_allowlist():
         "/assessments/{assessment_id}/feedback",
         "/feedback/{feedback_id}/edit",
         "/feedback/{feedback_id}/delete",
+        "/assessments/{assessment_id}/status",
+        "/assessments/{assessment_id}/assign",
+        "/assessments/{assessment_id}/unassign",
     }
     methods = {m for r in reviews_router.router.routes for m in getattr(r, "methods", ())}
     assert methods == {"POST"}
@@ -278,3 +283,211 @@ async def test_a_reviewer_posting_surface_admin_is_clamped_to_manager(client, db
     )
     assert r.status_code == 302, r.text
     assert r.headers["location"] == f"/manager/assessments/{assessment.id}"
+
+
+async def test_reviewer_can_approve_and_history_appends(client, db_session):
+    reviewer = await factories.make_user(db_session, user_role=USER_ROLE_REVIEWER)
+    assessment = await _seed_assessment(db_session)
+
+    r1 = await client.post(
+        f"/reviews/assessments/{assessment.id}/status",
+        data={"action": "approved"},
+        headers=auth_headers(reviewer.id),
+        follow_redirects=False,
+    )
+    assert r1.status_code == 302, r1.text
+
+    r2 = await client.post(
+        f"/reviews/assessments/{assessment.id}/status",
+        data={"action": "disapproved"},
+        headers=auth_headers(reviewer.id),
+        follow_redirects=False,
+    )
+    assert r2.status_code == 302, r2.text
+
+    events = (
+        (
+            await db_session.execute(
+                select(AssessmentReviewEvent).where(
+                    AssessmentReviewEvent.assessment_id == assessment.id
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert len(events) == 2
+    assert all(e.actor_name == reviewer.name for e in events)
+    latest = sorted(events, key=lambda e: (e.created_at, e.id))[-1]
+    assert latest.action == "disapproved"
+
+
+async def test_bad_action_is_400(client, db_session):
+    reviewer = await factories.make_user(db_session, user_role=USER_ROLE_REVIEWER)
+    assessment = await _seed_assessment(db_session)
+
+    r = await client.post(
+        f"/reviews/assessments/{assessment.id}/status",
+        data={"action": "bogus"},
+        headers=auth_headers(reviewer.id),
+        follow_redirects=False,
+    )
+    assert r.status_code == 400
+    events = (await db_session.execute(select(AssessmentReviewEvent))).scalars().all()
+    assert events == []
+
+
+async def test_status_on_missing_assessment_is_404(client, db_session):
+    reviewer = await factories.make_user(db_session, user_role=USER_ROLE_REVIEWER)
+
+    r = await client.post(
+        f"/reviews/assessments/{uuid.uuid4()}/status",
+        data={"action": "approved"},
+        headers=auth_headers(reviewer.id),
+        follow_redirects=False,
+    )
+    assert r.status_code == 404
+
+
+async def test_reviewer_cannot_assign_but_manager_can(client, db_session):
+    reviewer = await factories.make_user(db_session, user_role=USER_ROLE_REVIEWER)
+    manager = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
+    assignee = await factories.make_user(db_session, user_role=USER_ROLE_REVIEWER)
+    assessment = await _seed_assessment(db_session)
+
+    r_reviewer = await client.post(
+        f"/reviews/assessments/{assessment.id}/assign",
+        data={"assignee_user_id": str(assignee.id)},
+        headers=auth_headers(reviewer.id),
+        follow_redirects=False,
+    )
+    assert r_reviewer.status_code == 403
+
+    r_manager = await client.post(
+        f"/reviews/assessments/{assessment.id}/assign",
+        data={"assignee_user_id": str(assignee.id)},
+        headers=auth_headers(manager.id),
+        follow_redirects=False,
+    )
+    assert r_manager.status_code == 302, r_manager.text
+
+    rows = (
+        (
+            await db_session.execute(
+                select(AssessmentReviewAssignment).where(
+                    AssessmentReviewAssignment.assessment_id == assessment.id
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert len(rows) == 1
+    assert rows[0].assignee_user_id == assignee.id
+    assert rows[0].assigned_by_name == manager.name
+
+
+async def test_assignment_is_idempotent(client, db_session):
+    manager = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
+    assignee = await factories.make_user(db_session, user_role=USER_ROLE_REVIEWER)
+    assessment = await _seed_assessment(db_session)
+
+    for _ in range(2):
+        r = await client.post(
+            f"/reviews/assessments/{assessment.id}/assign",
+            data={"assignee_user_id": str(assignee.id)},
+            headers=auth_headers(manager.id),
+            follow_redirects=False,
+        )
+        assert r.status_code == 302, r.text
+
+    rows = (
+        (
+            await db_session.execute(
+                select(AssessmentReviewAssignment).where(
+                    AssessmentReviewAssignment.assessment_id == assessment.id
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert len(rows) == 1
+
+
+async def test_unassign_removes_the_row(client, db_session):
+    manager = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
+    assignee = await factories.make_user(db_session, user_role=USER_ROLE_REVIEWER)
+    assessment = await _seed_assessment(db_session)
+
+    r_assign = await client.post(
+        f"/reviews/assessments/{assessment.id}/assign",
+        data={"assignee_user_id": str(assignee.id)},
+        headers=auth_headers(manager.id),
+        follow_redirects=False,
+    )
+    assert r_assign.status_code == 302, r_assign.text
+
+    r = await client.post(
+        f"/reviews/assessments/{assessment.id}/unassign",
+        data={"assignee_user_id": str(assignee.id)},
+        headers=auth_headers(manager.id),
+        follow_redirects=False,
+    )
+    assert r.status_code == 302, r.text
+
+    rows = (
+        (
+            await db_session.execute(
+                select(AssessmentReviewAssignment).where(
+                    AssessmentReviewAssignment.assessment_id == assessment.id
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert rows == []
+
+
+async def test_assignee_must_be_review_capable_and_allowed(client, db_session):
+    manager = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
+    pi = await factories.make_user(db_session, user_role=USER_ROLE_PI)
+    denied_reviewer = await factories.make_user(
+        db_session, user_role=USER_ROLE_REVIEWER, access_status="denied"
+    )
+    assessment = await _seed_assessment(db_session)
+
+    r_pi = await client.post(
+        f"/reviews/assessments/{assessment.id}/assign",
+        data={"assignee_user_id": str(pi.id)},
+        headers=auth_headers(manager.id),
+        follow_redirects=False,
+    )
+    assert r_pi.status_code == 400
+
+    r_denied = await client.post(
+        f"/reviews/assessments/{assessment.id}/assign",
+        data={"assignee_user_id": str(denied_reviewer.id)},
+        headers=auth_headers(manager.id),
+        follow_redirects=False,
+    )
+    assert r_denied.status_code == 400
+
+    rows = (await db_session.execute(select(AssessmentReviewAssignment))).scalars().all()
+    assert rows == []
+
+
+async def test_malformed_assignee_id_is_400(client, db_session):
+    manager = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
+    assessment = await _seed_assessment(db_session)
+
+    r = await client.post(
+        f"/reviews/assessments/{assessment.id}/assign",
+        data={"assignee_user_id": "not-a-uuid"},
+        headers=auth_headers(manager.id),
+        follow_redirects=False,
+    )
+    assert r.status_code == 400
+    rows = (await db_session.execute(select(AssessmentReviewAssignment))).scalars().all()
+    assert rows == []

@@ -20,7 +20,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.database import get_db
 from src.dependencies import get_admin_user, get_review_user, get_staff_user
 from src.models import AssessmentReview, OpportunityAssessment, User
-from src.services.assessment_reviews import edit_feedback, submit_feedback
+from src.services.assessment_reviews import (
+    assign_reviewer,
+    edit_feedback,
+    record_status_event,
+    submit_feedback,
+    unassign_reviewer,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +65,48 @@ async def _load_review(db: AsyncSession, feedback_id: uuid.UUID) -> AssessmentRe
     return review
 
 
+async def _load_assessment(
+    db: AsyncSession, assessment_id: uuid.UUID
+) -> OpportunityAssessment:
+    assessment = (
+        await db.execute(
+            select(OpportunityAssessment).where(OpportunityAssessment.id == assessment_id)
+        )
+    ).scalar_one_or_none()
+    if assessment is None:
+        raise HTTPException(status_code=404, detail="Assessment not found")
+    return assessment
+
+
+async def _load_assignee(db: AsyncSession, assignee_user_id: uuid.UUID) -> User:
+    """Load and validate a would-be assignee. 400, never a bare lookup
+    failure: an unknown id, a PI, or a non-'allowed' account are all request
+    errors, not server errors. Mirrors the last-admin guard's allowed-only
+    counting rationale (``admin.py:262-265``): a denied/pending account is
+    not actually reachable to do the review, regardless of its role.
+    """
+    assignee = (
+        await db.execute(select(User).where(User.id == assignee_user_id))
+    ).scalar_one_or_none()
+    if assignee is None:
+        raise HTTPException(status_code=400, detail="unknown user")
+    if not (
+        (assignee.is_staff or assignee.is_reviewer) and assignee.access_status == "allowed"
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="assignee must be a staff member or reviewer with allowed access",
+        )
+    return assignee
+
+
+def _parse_assignee_id(assignee_user_id: str) -> uuid.UUID:
+    try:
+        return uuid.UUID(assignee_user_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Malformed assignee id") from exc
+
+
 @router.post("/assessments/{assessment_id}/feedback")
 async def submit_review_feedback(
     assessment_id: uuid.UUID,
@@ -70,13 +118,7 @@ async def submit_review_feedback(
     current_user: User = _REVIEW,
 ):
     _refuse_impersonation(current_user)
-    assessment = (
-        await db.execute(
-            select(OpportunityAssessment).where(OpportunityAssessment.id == assessment_id)
-        )
-    ).scalar_one_or_none()
-    if assessment is None:
-        raise HTTPException(status_code=404, detail="Assessment not found")
+    assessment = await _load_assessment(db, assessment_id)
     try:
         await submit_feedback(
             db,
@@ -138,5 +180,70 @@ async def delete_review_feedback(
     await db.commit()
     logger.info(
         "Review feedback %s deleted by %s (%s)", feedback_id, current_user.name, current_user.id,
+    )
+    return _assessments_redirect(surface, current_user, assessment_id)
+
+
+@router.post("/assessments/{assessment_id}/status")
+async def set_review_status(
+    assessment_id: uuid.UUID,
+    action: str = Form(...),
+    surface: str = Form("manager"),
+    db: AsyncSession = _DB,
+    current_user: User = _REVIEW,
+):
+    _refuse_impersonation(current_user)
+    assessment = await _load_assessment(db, assessment_id)
+    try:
+        await record_status_event(
+            db, assessment=assessment, actor=current_user, action=action
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    await db.commit()
+    logger.info(
+        "Review status %s recorded by %s (%s) on assessment %s",
+        action, current_user.name, current_user.id, assessment_id,
+    )
+    return _assessments_redirect(surface, current_user, assessment_id)
+
+
+@router.post("/assessments/{assessment_id}/assign")
+async def assign_review(
+    assessment_id: uuid.UUID,
+    assignee_user_id: str = Form(...),
+    surface: str = Form("manager"),
+    db: AsyncSession = _DB,
+    current_user: User = _STAFF,
+):
+    _refuse_impersonation(current_user)
+    assessment = await _load_assessment(db, assessment_id)
+    assignee_id = _parse_assignee_id(assignee_user_id)
+    assignee = await _load_assignee(db, assignee_id)
+    await assign_reviewer(db, assessment=assessment, assignee=assignee, assigned_by=current_user)
+    await db.commit()
+    logger.info(
+        "Assessment %s assigned to %s (%s) by %s (%s)",
+        assessment_id, assignee.name, assignee.id, current_user.name, current_user.id,
+    )
+    return _assessments_redirect(surface, current_user, assessment_id)
+
+
+@router.post("/assessments/{assessment_id}/unassign")
+async def unassign_review(
+    assessment_id: uuid.UUID,
+    assignee_user_id: str = Form(...),
+    surface: str = Form("manager"),
+    db: AsyncSession = _DB,
+    current_user: User = _STAFF,
+):
+    _refuse_impersonation(current_user)
+    assessment = await _load_assessment(db, assessment_id)
+    assignee_id = _parse_assignee_id(assignee_user_id)
+    await unassign_reviewer(db, assessment=assessment, assignee_user_id=assignee_id)
+    await db.commit()
+    logger.info(
+        "Assessment %s unassigned from user %s by %s (%s)",
+        assessment_id, assignee_id, current_user.name, current_user.id,
     )
     return _assessments_redirect(surface, current_user, assessment_id)

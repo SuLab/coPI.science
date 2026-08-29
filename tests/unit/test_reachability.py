@@ -159,6 +159,18 @@ ROUTE_ALLOWLIST: dict[tuple[str, str], str] = {
         "review forms land with the Task-6 detail card; "
         "test_route_allowlist_has_no_stale_entries forces removal then"
     ),
+    ("POST", "/reviews/assessments/{assessment_id}/status"): (
+        "review forms land with the Task-6 detail card; "
+        "test_route_allowlist_has_no_stale_entries forces removal then"
+    ),
+    ("POST", "/reviews/assessments/{assessment_id}/assign"): (
+        "review forms land with the Task-6 detail card; "
+        "test_route_allowlist_has_no_stale_entries forces removal then"
+    ),
+    ("POST", "/reviews/assessments/{assessment_id}/unassign"): (
+        "review forms land with the Task-6 detail card; "
+        "test_route_allowlist_has_no_stale_entries forces removal then"
+    ),
 }
 
 # Optional third-party imports that are allowed to be absent at test time. Empty
