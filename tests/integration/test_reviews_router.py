@@ -48,6 +48,7 @@ def test_the_reviews_router_posts_are_an_explicit_allowlist():
         "/assessments/{assessment_id}/status",
         "/assessments/{assessment_id}/assign",
         "/assessments/{assessment_id}/unassign",
+        "/suggestions/{suggestion_id}/status",
     }
     methods = {m for r in reviews_router.router.routes for m in getattr(r, "methods", ())}
     assert methods == {"POST"}

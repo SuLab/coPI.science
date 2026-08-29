@@ -11,6 +11,7 @@ need headroom under.
 
 import logging
 import uuid
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, Form, HTTPException
 from fastapi.responses import RedirectResponse
@@ -19,7 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.database import get_db
 from src.dependencies import get_admin_user, get_review_user, get_staff_user
-from src.models import AssessmentReview, OpportunityAssessment, User
+from src.models import AssessmentReview, OpportunityAssessment, PromptChangeSuggestion, User
 from src.services.assessment_reviews import (
     assign_reviewer,
     edit_feedback,
@@ -27,6 +28,11 @@ from src.services.assessment_reviews import (
     submit_feedback,
     unassign_reviewer,
 )
+
+#: Mirrors PromptChangeSuggestion.status's docstring (src/models/review.py).
+#: Kept local rather than shared with src/routers/manager.py's copy — see
+#: that module's comment for why.
+_SUGGESTION_STATUSES = frozenset({"open", "dismissed", "implemented"})
 
 logger = logging.getLogger(__name__)
 
@@ -247,3 +253,46 @@ async def unassign_review(
         assessment_id, assignee_id, current_user.name, current_user.id,
     )
     return _assessments_redirect(surface, current_user, assessment_id)
+
+
+async def _load_suggestion(
+    db: AsyncSession, suggestion_id: uuid.UUID
+) -> PromptChangeSuggestion:
+    suggestion = (
+        await db.execute(
+            select(PromptChangeSuggestion).where(PromptChangeSuggestion.id == suggestion_id)
+        )
+    ).scalar_one_or_none()
+    if suggestion is None:
+        raise HTTPException(status_code=404, detail="Suggestion not found")
+    return suggestion
+
+
+@router.post("/suggestions/{suggestion_id}/status")
+async def set_suggestion_status(
+    suggestion_id: uuid.UUID,
+    action: str = Form(...),
+    db: AsyncSession = _DB,
+    current_user: User = _STAFF,
+):
+    """Task 12: staff-set attribution only — never auto-applied, never touches
+    the prompt files themselves. Redirects to the full literal detail path,
+    never a bare-prefix constant (the same discipline
+    ``_assessments_redirect`` documents), because there is no admin/manager
+    surface split to whitelist here: this page lives on /manager only."""
+    _refuse_impersonation(current_user)
+    if action not in _SUGGESTION_STATUSES:
+        raise HTTPException(status_code=400, detail="Invalid status action")
+    suggestion = await _load_suggestion(db, suggestion_id)
+    suggestion.status = action
+    suggestion.status_set_by_user_id = current_user.id
+    suggestion.status_set_by_name = current_user.name
+    suggestion.status_set_at = datetime.now(UTC)
+    await db.commit()
+    logger.info(
+        "Prompt suggestion %s status set to %s by %s (%s)",
+        suggestion_id, action, current_user.name, current_user.id,
+    )
+    return RedirectResponse(
+        url=f"/manager/prompt-suggestions/{suggestion_id}", status_code=302
+    )

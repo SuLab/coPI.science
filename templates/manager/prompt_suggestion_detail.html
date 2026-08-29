@@ -1,0 +1,137 @@
+{% extends "base.html" %}
+{% block title %}Manager — Prompt Suggestion — CoPI{% endblock %}
+
+{% block extra_head %}
+<script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"
+        integrity="sha384-/TQbtLCAerC3jgaim+N78RZSDYV7ryeoBCVqTuzRrFec2akfBkHS7ACQ3PQhvMVi"
+        crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"
+        integrity="sha384-+VfUPEb0PdtChMwmBcBmykRMDd+v6D/oFmB3rZM/puCMDYcIvF968OimRh4KQY9a"
+        crossorigin="anonymous"></script>
+<script src="/static/js/markdown.js"></script>
+<style>
+    .proposal-md h2 { font-weight: 600; font-size: 1rem; margin-top: 0.75rem; margin-bottom: 0.25rem; }
+    .proposal-md h3 { font-weight: 600; font-size: 0.875rem; margin-top: 0.75rem; margin-bottom: 0.25rem; }
+    .proposal-md p { margin-bottom: 0.5rem; }
+    .proposal-md ul, .proposal-md ol { padding-left: 1.5rem; margin-bottom: 0.5rem; }
+    .proposal-md li { margin-bottom: 0.25rem; }
+    .proposal-md strong { font-weight: 600; }
+    .proposal-md a { color: #4f46e5; text-decoration: underline; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="mb-4">
+    <a href="/manager/prompt-suggestions" class="text-sm text-indigo-600 hover:underline">&larr; Prompt Suggestions</a>
+</div>
+
+<div class="flex items-start justify-between mb-4 gap-4">
+    <div>
+        <h1 class="text-2xl font-bold text-gray-900">
+            {{ suggestion.subject_label or '—' }}
+            {% if not suggestion.assessment_id %}
+            <span class="text-base font-normal text-gray-400 italic">(assessment no longer available)</span>
+            {% endif %}
+        </h1>
+        <p class="text-xs text-gray-500 mt-1">
+            Target: <span class="font-mono">{{ suggestion.target }}</span>
+            &middot; Model: {{ suggestion.model or '—' }}
+            &middot; Created <span data-utc="{{ suggestion.created_at.isoformat() }}" data-utc-fmt="short">{{ suggestion.created_at.strftime('%Y-%m-%d %H:%M') }}</span>
+            {% if suggestion.rubric_version %}&middot; Rubric {{ suggestion.rubric_version }}{% endif %}
+            {% if not suggestion.transcript_available %}&middot; <span class="text-amber-600">no interview transcript</span>{% endif %}
+            {% if suggestion.input_truncated %}&middot; <span class="text-amber-600">input truncated</span>{% endif %}
+        </p>
+    </div>
+    {% set status_colors = {
+        'open': 'bg-amber-100 text-amber-700',
+        'dismissed': 'bg-gray-100 text-gray-600',
+        'implemented': 'bg-green-100 text-green-700',
+    } %}
+    <span class="inline-flex items-center px-3 py-1 rounded-full text-sm font-medium whitespace-nowrap
+        {{ status_colors.get(suggestion.status, 'bg-gray-100 text-gray-600') }}">
+        {{ suggestion.status | title }}
+    </span>
+</div>
+
+<!-- Status action -->
+<form method="post" action="/reviews/suggestions/{{ suggestion.id }}/status" class="mb-6 flex items-center gap-2">
+    <button type="submit" name="action" value="open" class="text-xs font-medium bg-gray-400 text-white px-2 py-1 rounded hover:bg-gray-500">Reopen</button>
+    <button type="submit" name="action" value="dismissed" class="text-xs font-medium bg-red-600 text-white px-2 py-1 rounded hover:bg-red-700">Dismiss</button>
+    <button type="submit" name="action" value="implemented" class="text-xs font-medium bg-green-600 text-white px-2 py-1 rounded hover:bg-green-700">Mark Implemented</button>
+    {% if suggestion.status_set_by_name %}
+    <span class="text-xs text-gray-500">
+        last set to "{{ suggestion.status }}" by {{ suggestion.status_set_by_name }}
+        {% if suggestion.status_set_at %}
+        on <span data-utc="{{ suggestion.status_set_at.isoformat() }}" data-utc-fmt="short">{{ suggestion.status_set_at.strftime('%Y-%m-%d %H:%M') }}</span>
+        {% endif %}
+    </span>
+    {% endif %}
+</form>
+
+<!-- The suggestion itself -->
+<div class="bg-white rounded-xl shadow-sm border border-gray-200 p-4 mb-6">
+    <h2 class="text-sm font-semibold text-gray-700 uppercase mb-2">Suggested Change</h2>
+    <div class="text-sm text-gray-700 proposal-md" data-markdown="{{ suggestion.suggestion | e }}"></div>
+
+    <details class="mt-4">
+        <summary class="cursor-pointer text-xs text-gray-400">Raw model response</summary>
+        <pre class="mt-1 text-xs bg-gray-50 p-2 rounded overflow-x-auto max-h-64 overflow-y-auto whitespace-pre-wrap">{{ suggestion.raw_response }}</pre>
+    </details>
+</div>
+
+<!-- Provenance: the feedback this was distilled from -->
+<div class="bg-white rounded-xl shadow-sm border border-gray-200 p-4 mb-6">
+    <h2 class="text-sm font-semibold text-gray-700 uppercase mb-2">
+        Distilled From ({{ suggestion.feedback_snapshot | length }} feedback row{{ '' if suggestion.feedback_snapshot | length == 1 else 's' }})
+    </h2>
+    {% if suggestion.feedback_snapshot %}
+    <table class="min-w-full text-sm">
+        <thead>
+            <tr class="text-left text-xs text-gray-500 uppercase">
+                <th class="pr-4 py-1">Reviewer</th>
+                <th class="pr-4 py-1">Score</th>
+                <th class="pr-4 py-1">Mode</th>
+                <th class="pr-4 py-1">Comment</th>
+                <th class="pr-4 py-1">When</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for f in suggestion.feedback_snapshot %}
+            <tr class="border-t border-gray-100 align-top">
+                <td class="pr-4 py-1 font-medium text-gray-800">{{ f.reviewer_name }}</td>
+                <td class="pr-4 py-1">{{ f.score }}/5</td>
+                <td class="pr-4 py-1">{{ f.feedback_mode }}</td>
+                <td class="pr-4 py-1 text-gray-700 whitespace-pre-line">{{ f.comment }}</td>
+                <td class="pr-4 py-1 text-xs text-gray-500 whitespace-nowrap">{{ f.created_at }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p class="text-sm text-gray-400">No feedback recorded.</p>
+    {% endif %}
+</div>
+
+<!-- Provenance: the prompt files the bot read, and their current staleness -->
+<div class="bg-white rounded-xl shadow-sm border border-gray-200 p-4">
+    <h2 class="text-sm font-semibold text-gray-700 uppercase mb-2">Prompt Files Read</h2>
+    {% if file_status %}
+    <ul class="space-y-1 text-xs font-mono">
+        {% for f in file_status %}
+        <li class="flex items-center gap-2 flex-wrap">
+            <span class="text-gray-700">{{ f.path }}</span>
+            {% if f.badge == 'missing' %}
+            <span class="px-2 py-0.5 rounded-full bg-gray-200 text-gray-600 font-sans font-medium">file missing</span>
+            {% elif f.badge == 'stale' %}
+            <span class="px-2 py-0.5 rounded-full bg-amber-200 text-amber-900 font-sans font-semibold">STALE</span>
+            {% else %}
+            <span class="px-2 py-0.5 rounded-full bg-green-100 text-green-700 font-sans font-medium">current</span>
+            {% endif %}
+        </li>
+        {% endfor %}
+    </ul>
+    {% else %}
+    <p class="text-sm text-gray-400">No prompt files recorded.</p>
+    {% endif %}
+</div>
+{% endblock %}

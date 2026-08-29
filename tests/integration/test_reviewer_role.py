@@ -23,6 +23,7 @@ from Task 2 because the manager router did not yet admit a reviewer, is
 """
 
 import re
+import uuid
 
 import pytest
 from fastapi import Depends, FastAPI
@@ -233,6 +234,8 @@ REVIEWER_MANAGER_EXPECTATIONS = {
     ("GET", "/manager/discussions"): 403,
     ("GET", "/manager/activity"): 403,
     ("GET", "/manager/activity/{run_id}"): 403,
+    ("GET", "/manager/prompt-suggestions"): 403,
+    ("GET", "/manager/prompt-suggestions/{suggestion_id}"): 403,
     ("POST", "/manager/pis"): 403,
     ("POST", "/manager/pis/{user_id}/profile"): 403,
     ("POST", "/manager/pis/{user_id}/mute"): 403,
@@ -273,6 +276,7 @@ async def test_reviewer_manager_surface_is_exactly_the_read_slice(client, db_ses
         "user_id": str(pi.id),
         "run_id": str(run.id),
         "assessment_id": str(assessment.id),
+        "suggestion_id": str(uuid.uuid4()),
     }
 
     live_routes = set()
