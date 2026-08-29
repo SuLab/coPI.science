@@ -8,6 +8,7 @@
             <a href="/manager/pis" class="text-sm text-gray-500 hover:text-gray-700">← All PIs</a>
             <h1 class="text-2xl font-bold text-gray-900 mt-1">{{ target_user.name }}</h1>
         </div>
+        {% if effective_user.is_staff and not impersonation_banner %}
         {% if target_user.agent and target_user.agent.status == 'inactive' %}
             <div class="text-right">
                 <form method="post" action="/manager/pis/{{ target_user.id }}/unmute" class="inline">
@@ -52,6 +53,7 @@
             <span class="text-xs text-gray-400">
                 Agent is {{ target_user.agent.status }} — mute is only available for an active or already-muted agent.
             </span>
+        {% endif %}
         {% endif %}
     </div>
 
@@ -105,6 +107,7 @@
     </div>
 
     <!-- Edit profile -->
+    {% if effective_user.is_staff and not impersonation_banner %}
     <form method="post" action="/manager/pis/{{ target_user.id }}/profile" class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
         <h2 class="text-lg font-semibold text-gray-800 mb-4">Edit Profile</h2>
         <div class="grid grid-cols-1 gap-4 mb-5">
@@ -175,6 +178,27 @@
             Save Changes
         </button>
     </form>
+    {% endif %}
+
+    {% if not (effective_user.is_staff and not impersonation_banner) %}
+    <!-- Read-only details (reviewer, or any impersonated view): the two
+         fields that otherwise only existed inside the Edit Profile form
+         above, so a reviewer (or an admin impersonating one) still sees
+         them somewhere. -->
+    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
+        <h2 class="text-lg font-semibold text-gray-800 mb-4">Details</h2>
+        <dl class="grid grid-cols-1 gap-3 text-sm">
+            <div>
+                <dt class="text-gray-500">Keywords</dt>
+                <dd class="font-medium">{{ (profile.keywords or []) | join(', ') if profile and profile.keywords else '—' }}</dd>
+            </div>
+            <div>
+                <dt class="text-gray-500">JHU tenure start</dt>
+                <dd class="font-medium">{{ tenure_start or '—' }}</dd>
+            </div>
+        </dl>
+    </div>
+    {% endif %}
 
     {% if profile %}
     <!-- Profile -->

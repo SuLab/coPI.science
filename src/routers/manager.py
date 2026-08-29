@@ -1,18 +1,36 @@
-"""Manager dashboard router — global, strictly read-only.
+"""Manager dashboard router — global read access, with an explicit write
+allowlist (D1) and, since Task 3, three read tiers instead of one.
 
-Every route here is GET, and the router carries its gate as a router-level
-dependency rather than a per-handler one. /admin declares Depends(get_admin_user)
-on 34 separate handlers (F5), which means a route added there without the
-declaration is open to any logged-in user. A router-level dependency makes that
-mistake impossible for this surface: a new route is gated by construction.
+The router-level dependency (``Depends(get_review_user)``) is deliberately
+the WIDEST audience this surface admits — admin, manager, or reviewer — and
+it exists so a route added here with no dependency of its own is still
+gated by construction, unlike /admin, which declares Depends(get_admin_user)
+on 34 separate handlers (F5) and is therefore only as safe as every
+individual declaration. But the router-level dependency is NOT the real
+gate for any individual handler: it only proves a caller is one of the
+three roles above, never which one. The per-handler singleton — ``_STAFF``
+(admin/manager) or ``_REVIEW`` (+ reviewer) — is what actually decides who
+is admitted to a given route, and every write handler stays on ``_STAFF``
+regardless of what the router-level dependency alone would allow through.
+Exactly four GETs use ``_REVIEW``: ``manager_pis``, ``manager_pi_detail``,
+``manager_assessments`` and ``manager_assessment_detail``; ``manager_root``
+takes no per-handler dependency at all (its only job is a redirect to a
+route that is itself reviewer-reachable). Every other handler — the four
+POSTs, ``manager_discussions`` and ``manager_activity``/
+``manager_activity_detail`` — stays on ``_STAFF``, so a reviewer reaches
+none of them. This docstring is not what enforces that split;
+``tests/integration/test_reviewer_role.py``'s
+``test_reviewer_manager_surface_is_exactly_the_read_slice`` enumerates the
+live router for both methods against an explicit expectation map and fails
+loudly the moment a route and the map disagree.
 
 Query logic lives in src/services/directory.py and is shared with /admin.
 
-Dependencies are module-level singletons (``_DB``, ``_STAFF``) rather than
-inline ``Depends(...)`` calls in argument defaults: ruff's B008 flags the
-latter, and with ~2 per handler this router would otherwise chip away at a
-lint ceiling (231, currently sitting at 225) that later tasks still need
-headroom under.
+Dependencies are module-level singletons (``_DB``, ``_STAFF``, ``_REVIEW``)
+rather than inline ``Depends(...)`` calls in argument defaults: ruff's B008
+flags the latter, and with ~2 per handler this router would otherwise chip
+away at a lint ceiling (231, currently sitting at 225) that later tasks
+still need headroom under.
 """
 
 import logging
@@ -26,7 +44,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.database import get_db
-from src.dependencies import get_staff_user
+from src.dependencies import get_review_user, get_staff_user
 from src.models import USER_ROLE_PI, AgentRegistry, User
 from src.services.agent_mute import set_agent_mute_state
 from src.services.assessment_detail import build_assessment_detail
@@ -47,11 +65,12 @@ from src.services.profile_edit import apply_profile_edits
 from src.services.thread_panel import panel_cards_by_thread
 
 logger = logging.getLogger(__name__)
-router = APIRouter(dependencies=[Depends(get_staff_user)])
+router = APIRouter(dependencies=[Depends(get_review_user)])
 templates = Jinja2Templates(directory="templates")
 
 _DB = Depends(get_db)
-_STAFF = Depends(get_staff_user)
+_STAFF = Depends(get_staff_user)      # manager|admin — writes, discussions, activity
+_REVIEW = Depends(get_review_user)    # + reviewer — the four read handlers only
 _AGENT_FILTER = Query(default=[])
 
 
@@ -70,9 +89,17 @@ def _template_context(
     /admin. Mirrors the same pattern in onboarding.py / profile.py /
     agent_page.py / settings.py.
 
-    None of the manager templates key page data off `current_user` (they are
-    read-only listings driven entirely by `**kwargs`), so swapping it for the
-    real admin here only affects the banner/nav, not what data is shown.
+    Templates DO now key controls off the user (Task 3): pi_detail.html's
+    mute buttons and Edit Profile form, and pis.html's Add-PI form, are all
+    gated on `effective_user.is_staff and not impersonation_banner` in the
+    template, never on `current_user` — because an admin CAN impersonate a
+    reviewer (the impersonate cookie carries no role restriction), and under
+    impersonation this dict's `current_user` is swapped back to the real
+    admin. A `current_user.is_staff` gate would therefore render write forms
+    for an admin impersonating a reviewer that then 403 on submission.
+    `effective_user` (base.html's `impersonation_banner or current_user`) is
+    what those controls gate on; `current_user` here still only decides the
+    banner/nav, and the swap above is unchanged.
     """
     impersonated = getattr(current_user, "_is_impersonated", False)
     real_admin = getattr(current_user, "_real_admin", None)
@@ -100,7 +127,7 @@ async def manager_pis(
     institution_filter: str | None = None,
     claimed_filter: str | None = None,
     db: AsyncSession = _DB,
-    current_user: User = _STAFF,
+    current_user: User = _REVIEW,
 ):
     """PI directory. Unclaimed stubs included (D11) so recruitment coverage is
     visible; staff accounts excluded so the admin roster is not enumerable."""
@@ -130,7 +157,7 @@ async def manager_pi_detail(
     user_id: uuid.UUID,
     request: Request,
     db: AsyncSession = _DB,
-    current_user: User = _STAFF,
+    current_user: User = _REVIEW,
 ):
     """One PI's record. 404s on a non-PI account so a manager cannot read an
     admin's row by guessing or harvesting a UUID."""
@@ -299,7 +326,7 @@ async def manager_assessments(
     sort: str | None = None,
     lab: str | None = None,
     db: AsyncSession = _DB,
-    current_user: User = _STAFF,
+    current_user: User = _REVIEW,
 ):
     """BlackbirdBot's screening verdicts. Same data, same run-scoping and the
     same sort/lab controls as /admin/assessments; read-only, and it has no
@@ -317,7 +344,7 @@ async def manager_assessment_detail(
     assessment_id: uuid.UUID,
     request: Request,
     db: AsyncSession = _DB,
-    current_user: User = _STAFF,
+    current_user: User = _REVIEW,
 ):
     """One verdict in full, plus the interview that produced it.
 

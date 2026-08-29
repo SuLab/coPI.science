@@ -11,11 +11,18 @@ PI (no lab profile or agent). This file pins:
     denial (additive denylist — admins keep every PI write).
   - Login/onboarding/profile GETs bounce a reviewer to /manager/assessments
     rather than rendering a PI page it can never complete.
+  - Task 3 (below): the manager router actually admits a reviewer to exactly
+    four read routes — GET /manager, /manager/pis, /manager/pis/{id},
+    /manager/assessments, /manager/assessments/{id} — and refuses it
+    everywhere else on that router, and the manager templates render
+    read-only for a reviewer (and for an admin impersonating one).
 
-The full follow-the-chain-to-200 assertion on /manager/assessments belongs to
-Task 3, once the manager router actually admits reviewers; here we only assert
-the redirect itself (302 + Location), per the task-2 brief.
+The full follow-the-chain-to-200 assertion on /manager/assessments, deferred
+from Task 2 because the manager router did not yet admit a reviewer, is
+`test_reviewer_full_login_chain_terminates` below.
 """
+
+import re
 
 import pytest
 from fastapi import Depends, FastAPI
@@ -27,9 +34,11 @@ from src.models import (
     USER_ROLE_PI,
     USER_ROLE_REVIEWER,
     Job,
+    OpportunityAssessment,
     ResearcherProfile,
     User,
 )
+from src.services.jhu_rules import set_tenure_start
 from tests import factories
 from tests.integration.test_manager_access import auth_headers
 from tests.integration.test_pi_only_writes import (
@@ -40,6 +49,8 @@ from tests.integration.test_pi_only_writes import (
 )
 
 pytestmark = pytest.mark.integration
+
+_PARAM_RE = re.compile(r"\{(\w+)\}")
 
 
 @pytest.mark.parametrize(
@@ -208,3 +219,193 @@ async def test_reviewer_profile_and_edit_pages_redirect(client, db_session):
     )
     assert r2.status_code == 302
     assert r2.headers["location"] == "/manager/assessments"
+
+
+# --- Task 3: the manager router's reviewer-visible read slice --------------
+
+REVIEWER_MANAGER_EXPECTATIONS = {
+    ("GET", "/manager"): 302,
+    ("GET", "/manager/pis"): 200,
+    ("GET", "/manager/pis/{user_id}"): 200,
+    ("GET", "/manager/assessments"): 200,
+    ("GET", "/manager/assessments/{assessment_id}"): 200,
+    ("GET", "/manager/discussions"): 403,
+    ("GET", "/manager/activity"): 403,
+    ("GET", "/manager/activity/{run_id}"): 403,
+    ("POST", "/manager/pis"): 403,
+    ("POST", "/manager/pis/{user_id}/profile"): 403,
+    ("POST", "/manager/pis/{user_id}/mute"): 403,
+    ("POST", "/manager/pis/{user_id}/unmute"): 403,
+}
+
+# What each write route needs in its POST body to get PAST FastAPI's own
+# request validation and actually reach (and be refused by) the per-handler
+# dependency — mirrors test_manager_pi_writes.py::test_pi_is_denied_all_four_write_routes,
+# which supplies the same shapes for the same reason. `None` means "no data".
+_REVIEWER_POST_BODIES = {
+    "/manager/pis": {"orcid": "0000-0006-0000-0000"},
+    "/manager/pis/{user_id}/profile": {},
+    "/manager/pis/{user_id}/mute": None,
+    "/manager/pis/{user_id}/unmute": None,
+}
+
+
+async def test_reviewer_manager_surface_is_exactly_the_read_slice(client, db_session):
+    """Replaces the "gated by construction" claim the module docstring lost
+    when the router grew a write allowlist and a three-tier read audience:
+    enumerated from the LIVE router for BOTH methods (the
+    test_manager_views.py::_manager_get_paths shape, extended to POST), so a
+    manager route added later with no entry in the map above fails this test
+    loudly instead of silently reaching — or silently refusing — a reviewer."""
+    from src.routers import manager as manager_router
+
+    rev = await factories.make_user(db_session, user_role=USER_ROLE_REVIEWER)
+    pi = await factories.make_user(db_session, user_role=USER_ROLE_PI)
+    run = await factories.make_simulation_run(db_session)
+    assessment = OpportunityAssessment(
+        simulation_run_id=run.id, agent_id="blackbird", channel_name="general",
+    )
+    db_session.add(assessment)
+    await db_session.flush()
+
+    param_values = {
+        "user_id": str(pi.id),
+        "run_id": str(run.id),
+        "assessment_id": str(assessment.id),
+    }
+
+    live_routes = set()
+    for route in manager_router.router.routes:
+        methods = getattr(route, "methods", ())
+        for method in ("GET", "POST"):
+            if method in methods:
+                live_routes.add((method, f"/manager{route.path}"))
+
+    assert live_routes == set(REVIEWER_MANAGER_EXPECTATIONS), (
+        "the manager router's live GET+POST routes no longer match "
+        "REVIEWER_MANAGER_EXPECTATIONS -- update the map in this test"
+    )
+
+    for (method, template_path), expected in REVIEWER_MANAGER_EXPECTATIONS.items():
+        path = template_path
+        for name in _PARAM_RE.findall(path):
+            path = path.replace("{" + name + "}", param_values[name])
+        if method == "GET":
+            r = await client.get(
+                path, headers=auth_headers(rev.id), follow_redirects=False
+            )
+        else:
+            data = _REVIEWER_POST_BODIES[template_path]
+            kwargs = {"data": data} if data is not None else {}
+            r = await client.post(
+                path, headers=auth_headers(rev.id), follow_redirects=False, **kwargs
+            )
+        assert r.status_code == expected, (
+            f"{method} {path} was {r.status_code}, expected {expected}"
+        )
+
+
+async def test_reviewer_nav_shows_review_link_and_nothing_else(client, db_session):
+    rev = await factories.make_user(db_session, user_role=USER_ROLE_REVIEWER)
+    r = await client.get("/settings", headers=auth_headers(rev.id))
+    assert r.status_code == 200
+    assert 'href="/manager/assessments"' in r.text
+    assert "My Profile" not in r.text
+    assert "My Agent" not in r.text
+    assert 'href="/admin/users"' not in r.text
+
+
+async def test_reviewer_subnav_hides_staff_items(client, db_session):
+    rev = await factories.make_user(db_session, user_role=USER_ROLE_REVIEWER)
+    body = (await client.get("/manager/pis", headers=auth_headers(rev.id))).text
+    assert 'href="/manager/pis"' in body
+    assert 'href="/manager/assessments"' in body
+    assert "/manager/discussions" not in body
+    assert "/manager/activity" not in body
+
+
+async def test_reviewer_pi_detail_is_read_only(client, db_session):
+    """Never assert on the bare word "Mute": pi_detail.html legitimately
+    renders "Muted"/"mute" elsewhere (the inactive-agent timestamp line and
+    the terminal-status caption) even with the write chain hidden."""
+    rev = await factories.make_user(db_session, user_role=USER_ROLE_REVIEWER)
+    pi = await factories.make_user(db_session, user_role=USER_ROLE_PI)
+    await factories.make_agent(db_session, user=pi, status="active")
+    await factories.make_profile(db_session, user=pi, keywords=["gene-editing"])
+    await set_tenure_start(pi.id, 2015, "manual", db=db_session)
+    await db_session.flush()
+
+    body = (await client.get(f"/manager/pis/{pi.id}", headers=auth_headers(rev.id))).text
+    assert 'action="/manager/pis/' not in body
+    assert ">Mute<" not in body
+    assert ">Unmute<" not in body
+    assert "gene-editing" in body
+    assert "2015" in body
+
+
+async def test_manager_still_sees_the_edit_form(client, db_session):
+    mgr = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
+    pi = await factories.make_user(db_session, user_role=USER_ROLE_PI)
+    body = (await client.get(f"/manager/pis/{pi.id}", headers=auth_headers(mgr.id))).text
+    assert f'action="/manager/pis/{pi.id}/profile"' in body
+    assert 'name="jhu_tenure_start"' in body
+
+
+async def test_admin_impersonating_a_reviewer_sees_no_staff_forms(client, db_session):
+    """get_review_user PASSES an impersonated reviewer (it gates on the
+    effective session user, which get_current_user already swapped), so both
+    pages 200 — the template identity trap is exactly why the gates on them
+    use effective_user/impersonation_banner rather than current_user."""
+    admin = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN, name="Adm Rev")
+    rev = await factories.make_user(db_session, user_role=USER_ROLE_REVIEWER, name="Rev Imp")
+    pi = await factories.make_user(db_session, user_role=USER_ROLE_PI)
+    await factories.make_agent(db_session, user=pi, status="active")
+    headers = auth_headers(admin.id)
+    headers["Cookie"] += f"; copi-impersonate={rev.id}"
+
+    pis_body = (await client.get("/manager/pis", headers=headers)).text
+    assert pis_body  # sanity: the page actually rendered (200, not a redirect body)
+    assert 'action="/manager/pis"' not in pis_body
+
+    detail_body = (await client.get(f"/manager/pis/{pi.id}", headers=headers)).text
+    assert 'action="/manager/pis/' not in detail_body
+    assert ">Mute<" not in detail_body
+    assert ">Unmute<" not in detail_body
+
+
+async def test_reviewer_is_denied_every_admin_route(client, db_session):
+    """Clone of test_manager_views.py::test_manager_is_denied_every_admin_route
+    for a reviewer."""
+    from src.routers import admin as admin_router
+
+    rev = await factories.make_user(db_session, user_role=USER_ROLE_REVIEWER)
+    checked = 0
+    for route in admin_router.router.routes:
+        if "GET" not in getattr(route, "methods", ()) or "{" in route.path:
+            continue
+        r = await client.get(
+            f"/admin{route.path}", headers=auth_headers(rev.id), follow_redirects=False
+        )
+        assert r.status_code == 403, f"/admin{route.path} leaked to a reviewer"
+        checked += 1
+    assert checked >= 8, "the admin sweep matched too few routes to be meaningful"
+
+
+async def test_reviewer_full_login_chain_terminates(client, db_session):
+    """reviewer -> /profile -> /manager/assessments, with no loop. Task 2
+    stopped at the 302 (test_reviewer_profile_and_edit_pages_redirect above);
+    now that Task 3 admits a reviewer to /manager/assessments, the full chain
+    is assertable. Mirrors
+    test_manager_onboarding.py::test_manager_profile_url_bounce_terminates,
+    including its cookie-jar seeding comment trick: httpx strips a
+    manually-set Cookie header on every redirect hop and rebuilds "Cookie"
+    from the client's cookie jar instead
+    (httpx._client.Client._redirect_headers unconditionally pops it), so a
+    header-only auth_headers() cookie silently disappears once
+    follow_redirects=True actually follows the 302."""
+    rev = await factories.make_user(db_session, user_role=USER_ROLE_REVIEWER)
+    cookie_value = auth_headers(rev.id)["Cookie"].split("=", 1)[1]
+    client.cookies.set("copi-session", cookie_value)
+    r = await client.get("/profile", follow_redirects=True)
+    assert r.status_code == 200
+    assert str(r.url).endswith("/manager/assessments")
