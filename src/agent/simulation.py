@@ -1225,6 +1225,40 @@ class SimulationEngine:
         await self._flush_llm_logs(final=True)
         await self._flush_pending_assessments(final=True)
 
+        # Every interview still holding an unannounced verdict is over: the run
+        # is ending, so no later turn will ever conclude or supersede it. This
+        # is the last chance to honour D12, and it must run AFTER the assessment
+        # flush above — `_announce_owed_headline` reads the row back from the
+        # database, so a verdict still sitting on `_pending_assessments` would
+        # be invisible to it. No drain lock is needed here: `start()` awaits
+        # `_run_main_loop()` directly in the same coroutine and `stop()` is only
+        # awaited (from src/agent/main.py's finally-block) after `start()` has
+        # returned, so this sweep can never run concurrently with the main
+        # loop's own `_drain_and_flush`.
+        for thread_id, held in self._assessed_threads.items():
+            if not held.announced and thread_id not in self._pending_headlines:
+                self._pending_headlines.append(thread_id)
+        if self._pending_headlines:
+            logger.info(
+                "Announcing %d interview verdict(s) that ended without a "
+                "concluding reply", len(self._pending_headlines),
+            )
+        await self._drain_pending_headlines(
+            limit=HEADLINES_MAX_AT_SHUTDOWN, trigger="shutdown",
+        )
+        if self._pending_headlines:
+            # Say LOST with the ids, the same way the buffer flushes do: the
+            # assessment rows are safe, so this is recoverable, but only by
+            # someone who knows it happened.
+            logger.error(
+                "LOST %d #assessments-summary headline(s) at shutdown (threads: "
+                "%s). The assessment rows are safe — re-post with: python "
+                "scripts/backfill_assessment_headlines.py --run %s --apply",
+                len(self._pending_headlines),
+                ", ".join(self._pending_headlines),
+                self.simulation_run_id,
+            )
+
         # The clear-rate FLOOR was retired 2026-08-28. It asserted that a low
         # `clear` share meant the panel could not discriminate; a 48-consult
         # positive control falsified that (blocking 87.5% -> 0% across a

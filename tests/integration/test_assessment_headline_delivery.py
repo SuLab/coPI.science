@@ -206,3 +206,108 @@ async def test_draining_twice_does_not_post_twice(engine, monkeypatch):
         )
     finally:
         await _delete_run(factory, run_id)
+
+
+# ---------------------------------------------------------------------------
+# The run ending is the interview ending too — the shutdown sweep.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_shutdown_announces_a_still_open_interview_s_verdict(
+    engine, monkeypatch,
+):
+    """The run's timer is the end of the interview too. Production run
+    61ccad6d's timer fired five minutes after rothstein's verdict was stored —
+    by then the thread had already been closed, but an OPEN one is the same
+    situation: no later turn is coming."""
+    sim, agent, thread, client, factory, run_id = await _drive_reply(
+        engine, monkeypatch, _reply_with_sidecar(), prior_messages=_LAST_DECIDE_COUNT,
+        configure=_wire_summary_channel,
+    )
+    try:
+        assert thread.status != "closed", "the interview is still open"
+        assert _headlines(client) == []
+
+        await sim.stop()
+
+        assert len(_headlines(client)) == 1, (
+            "a run that ends announces every verdict it is holding"
+        )
+        rows = await _assessments(factory, run_id)
+        assert rows[0].summary_posted_at is not None
+    finally:
+        await _delete_run(factory, run_id)
+
+
+@pytest.mark.asyncio
+async def test_shutdown_does_not_re_announce_an_already_posted_headline(
+    engine, monkeypatch,
+):
+    sim, agent, thread, client, factory, run_id = await _drive_reply(
+        engine, monkeypatch, _reply_with_sidecar(), prior_messages=_CONCLUDE_COUNT,
+        configure=_wire_summary_channel,
+    )
+    try:
+        assert len(_headlines(client)) == 1
+        await sim.stop()
+        assert len(_headlines(client)) == 1, "exactly one, never two"
+    finally:
+        await _delete_run(factory, run_id)
+
+
+@pytest.mark.asyncio
+async def test_a_failed_in_turn_post_stays_discoverable_and_is_rescued_later(
+    engine, monkeypatch,
+):
+    """Carried finding from Task 3's review: `_capture_hub_assessment` resets
+    `announced` back to False when `_post_assessment_summary` returns False on
+    the CONCLUDE turn itself, so a transient Slack failure there must not
+    permanently hide the verdict from the close path, the shutdown sweep, or
+    the repair script — that branch had no direct test before this one.
+
+    Seam: `_post_assessment_summary` itself, made to fail exactly once, rather
+    than breaking `FakeSlackClient.apost_message`. That pins the boundary
+    contract the branch actually checks (a `False` return), not one particular
+    way of producing it, and needs no manual un-patching to let the later
+    rescue attempt succeed.
+    """
+
+    def _wire_and_fail_the_first_post(sim):
+        _wire_summary_channel(sim)
+        original = sim._post_assessment_summary
+        state = {"failed_once": False}
+
+        async def flaky_once(*args, **kwargs):
+            if not state["failed_once"]:
+                state["failed_once"] = True
+                return False
+            return await original(*args, **kwargs)
+
+        monkeypatch.setattr(sim, "_post_assessment_summary", flaky_once)
+
+    sim, agent, thread, client, factory, run_id = await _drive_reply(
+        engine, monkeypatch, _reply_with_sidecar(), prior_messages=_CONCLUDE_COUNT,
+        configure=_wire_and_fail_the_first_post,
+    )
+    try:
+        assert _headlines(client) == [], "the CONCLUDE turn's post attempt failed"
+        rows = await _assessments(factory, run_id)
+        assert len(rows) == 1
+        assert rows[0].summary_posted_at is None, (
+            "a failed post must not be recorded as posted"
+        )
+        assert sim._assessed_threads["t1"].announced is False, (
+            "announced is reset so the verdict stays discoverable by the "
+            "close path, the shutdown sweep, and the repair script"
+        )
+
+        await sim.stop()
+
+        assert len(_headlines(client)) == 1, (
+            "a failed post must never permanently hide a verdict"
+        )
+        rows = await _assessments(factory, run_id)
+        assert rows[0].summary_posted_at is not None
+    finally:
+        await _delete_run(factory, run_id)
