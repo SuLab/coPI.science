@@ -92,5 +92,9 @@ mutants/
 # they are full database copies containing message bodies and tokens.
 backups/
 
+# Baked git identity for the runtime announcement (scripts/write_build_info.py,
+# written during docker build; read by src/services/build_info.py)
+.build_info.json
+
 # Subagent-driven-development scratch workspace
 .superpowers/
