@@ -27,6 +27,7 @@ from src.agent.post_types import (
 )
 from src.agent.prompt_safety import delimit
 from src.agent.roles import load_role
+from src.agent.run_marker import is_run_start_marker
 from src.agent.slack_client import SlackListingIncomplete, ThreadNotFound
 from src.agent.specialists import (
     clip_question,
@@ -5821,6 +5822,15 @@ class SimulationEngine:
                 # permanent. The rule now lives in exactly one place.
                 for msg in messages:
                     ts = msg.get("ts", "")
+                    # Engine-authored run-start markers are operational
+                    # signage, not conversation: never mirror one into the
+                    # log, but advance the cursor past it or this tick's
+                    # newest message gets re-fetched forever. See
+                    # src/agent/run_marker.py (prefix contract).
+                    if is_run_start_marker(msg.get("text")):
+                        if ts:
+                            self._poll_cursors[ch_id] = ts
+                        continue
                     user_id = msg.get("user", "")
                     is_bot = bool(msg.get("bot_id") or msg.get("subtype") == "bot_message")
 
@@ -7143,6 +7153,17 @@ class SimulationEngine:
             messages = await client.aget_full_channel_history(ch_id)
             for msg in messages:
                 ts = msg.get("ts", "")
+                # Run-start markers are never ingested (see the matching skip
+                # in _poll_slack_for_bot_messages). Recording the ts in
+                # _known_slack_ts and advancing the cursor mirrors what the
+                # loop does for a dedup hit; skipping the root also skips its
+                # reply_count branch, so replies under a marker (human
+                # comments, split-continuation chunks) never ingest either.
+                if is_run_start_marker(msg.get("text")):
+                    if ts:
+                        self._known_slack_ts.add(ts)
+                        self._poll_cursors[ch_id] = ts
+                    continue
                 user_id = msg.get("user", "")
                 bot_id = msg.get("bot_id")
                 is_bot = bool(bot_id) or msg.get("subtype") == "bot_message"
