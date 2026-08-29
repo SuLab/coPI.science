@@ -96,3 +96,25 @@ def test_shipped_template_file_renders_cleanly():
     text = render_run_start_announcement(VALUES)
     assert is_run_start_marker(text)
     assert "<run_id>" in text
+
+
+def test_non_utf8_template_file_falls_back_to_default(no_template):
+    """A template file with non-UTF-8 bytes (e.g. from a Windows editor) is
+    unreadable and degrades to the built-in default without raising."""
+    (no_template / "run_start_announcement.md").write_bytes(b"caf\xe9 {run_id}")
+    text = render_run_start_announcement(VALUES)
+    assert is_run_start_marker(text)
+    assert "<run_id>" in text  # default rendered instead
+
+
+def test_template_with_dotted_attribute_access_falls_back(no_template):
+    """A template using dotted-attribute syntax (e.g. {run_id.foo}) raises
+    AttributeError during format_map, which is caught and degrades to the
+    default with a WARNING."""
+    (no_template / "run_start_announcement.md").write_text(
+        "invalid syntax: {run_id.nonexistent}", encoding="utf-8"
+    )
+    text = render_run_start_announcement(VALUES)
+    assert is_run_start_marker(text)
+    assert "<run_id>" in text  # default rendered instead
+    assert "invalid syntax" not in text

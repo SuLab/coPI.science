@@ -68,25 +68,27 @@ def _template_body() -> str:
 
     Read at call time (not import) from roles.PROMPTS_DIR so the bind-mounted
     prompts/ directory is honoured and tests can monkeypatch the dir.
+    Degrades to DEFAULT_TEMPLATE on any read failure (file missing, unreadable,
+    or containing non-UTF-8 bytes).
     """
     path = roles.PROMPTS_DIR / TEMPLATE_FILENAME
     try:
         return path.read_text(encoding="utf-8")
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         return DEFAULT_TEMPLATE
 
 
 def render_run_start_announcement(values: dict[str, str]) -> str:
     """Render the announcement. Never raises; always sentinel-prefixed.
 
-    A malformed operator template (unknown placeholder, stray braces) degrades
-    to the built-in default with one WARNING — a broken customization must not
-    cost the run its announcement.
+    A malformed operator template (unknown placeholder, stray braces, dotted
+    attribute access, etc.) degrades to the built-in default with one WARNING —
+    a broken customization must not cost the run its announcement.
     """
     body = _template_body()
     try:
         rendered = body.format_map(values)
-    except (KeyError, IndexError, ValueError) as exc:
+    except Exception as exc:
         logger.warning(
             "prompts/%s failed to render (%s: %s) — using the built-in "
             "default announcement body",
