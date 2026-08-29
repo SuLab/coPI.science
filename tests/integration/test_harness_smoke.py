@@ -36,7 +36,9 @@ async def test_container_is_migrated(engine):
         #      'review_feedback_analysis', plus four new tables:
         #      assessment_reviews, assessment_review_events,
         #      assessment_review_assignments, prompt_change_suggestions
-        assert v == "0039"
+        # 0040 opportunity_assessments.prose_format (write-time stamp gating
+        #      markdown rendering of rationale/recommended_next_experiment)
+        assert v == "0040"
 
 
 async def test_writes_are_rolled_back_part1(db_session):

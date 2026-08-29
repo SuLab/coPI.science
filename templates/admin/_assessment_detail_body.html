@@ -332,7 +332,18 @@
 {% if a.rationale %}
 <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6">
     <h3 class="text-sm font-semibold text-gray-700 uppercase mb-2">Rationale</h3>
+    {# `prose_format` is the write-time stamp (0040), replayed here rather than
+       re-derived: 'markdown' means the hub wrote this under the markdown-
+       prompt contract (Part A4) and it is safe to render through the
+       sanitized data-markdown pipeline. Anything else — NULL (legacy plain
+       text, which may contain a literal `*` in a scientific identifier a
+       markdown pass would corrupt) or a future unknown value — falls back to
+       the existing plain rendering, which is always safe. #}
+    {% if a.prose_format == 'markdown' %}
+    <div class="assessment-rationale text-sm text-gray-700" data-markdown="{{ a.rationale | e }}"></div>
+    {% else %}
     <p class="assessment-rationale text-sm text-gray-700 whitespace-pre-line">{{ a.rationale }}</p>
+    {% endif %}
 </div>
 {% endif %}
 
@@ -342,7 +353,12 @@
 {% if a.recommended_next_experiment %}
 <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6">
     <h3 class="text-sm font-semibold text-gray-700 uppercase mb-2">Recommended next experiment</h3>
+    {# Same write-time stamp and same safe fallback as Rationale above. #}
+    {% if a.prose_format == 'markdown' %}
+    <div class="assessment-next-experiment text-sm text-gray-700" data-markdown="{{ a.recommended_next_experiment | e }}"></div>
+    {% else %}
     <p class="assessment-next-experiment text-sm text-gray-700 whitespace-pre-line">{{ a.recommended_next_experiment }}</p>
+    {% endif %}
 </div>
 {% endif %}
 
@@ -389,174 +405,6 @@
         values and the weights of the revision that scored them
         (src/services/blackbird_rubric.py) — an unscored dimension counted as zero.
     </p>
-</div>
-
-{# ---------------------------------------------------------------------------
-   Interview timeline
-   --------------------------------------------------------------------------- #}
-<div class="bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6">
-    <h3 class="text-sm font-semibold text-gray-700 uppercase mb-1">Interview timeline</h3>
-    <p class="text-xs text-gray-400 mb-4">
-        The thread this verdict came out of, interleaved with the specialist panel
-        {% if admin_view %}and the hub's tool calls{% endif %}.
-        {% if admin_view and retro_consult_count and not consult_count %}
-            No <span class="font-mono">specialist_consults</span> rows exist for this
-            interview — that table only records consults from runs after it shipped —
-            so the {{ retro_consult_count }} consult{{ '' if retro_consult_count == 1 else 's' }}
-            below were recovered from the hub's own tool log.
-        {% endif %}
-    </p>
-
-    {% if not messages_available %}
-        {# Not an error. `--fresh` wipes agent_messages and never wipes
-           opportunity_assessments, so a verdict legitimately outlives its own
-           transcript; the verdict above is the durable record. #}
-        <div class="rounded-lg border border-gray-200 bg-gray-50 p-4 text-sm text-gray-600">
-            Interview messages unavailable. The thread this verdict came from is not in
-            <span class="font-mono">agent_messages</span> — a <code>--fresh</code> run
-            wipes messages and channels but never assessments, so an older verdict
-            outlives its transcript. Everything above is unaffected.
-        </div>
-    {% else %}
-        <div class="space-y-3">
-        {% for entry in timeline %}
-            {% if entry.kind == 'message' %}
-                {% set m = entry.message %}
-                <div class="rounded-lg border {% if m.is_verdict_message %}border-indigo-300 bg-indigo-50{% elif m.is_hub %}border-gray-200 bg-white{% else %}border-gray-200 bg-gray-50{% endif %} p-3">
-                    <div class="flex items-center gap-2 text-xs text-gray-500 mb-1">
-                        <span class="font-semibold text-gray-700">
-                            {% if m.agent_id %}{{ m.agent_id | capitalize }}Bot{% else %}{{ m.sender_name or "(unknown sender)" }}{% endif %}
-                        </span>
-                        <span>{{ m.phase }}</span>
-                        {% if m.is_verdict_message %}
-                        <span class="px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-700 font-medium">
-                            carried this verdict
-                        </span>
-                        {% endif %}
-                    </div>
-                    {# JS-rendered (marked+DOMPurify, fail-closed to textContent). Deliberate trade-off,
-                       same as the discussions pages: if /static/js/markdown.js itself fails to load,
-                       this div renders empty — accepted for parity with the existing data-markdown
-                       surfaces rather than inventing a second rendering path here. #}
-                    <div class="text-sm text-gray-800 max-h-64 overflow-y-auto" data-markdown="{{ m.content | e }}"></div>
-
-                    {% if admin_view and entry.tool_turns %}
-                    <div class="mt-2 pt-2 border-t border-gray-200">
-                        {% for turn in entry.tool_turns %}
-                            {{ tool_turn(turn, signal_chip) }}
-                        {% endfor %}
-                    </div>
-                    {% endif %}
-                </div>
-            {% else %}
-                {% set c = entry.consult %}
-                {# Panel card. Recorded consults only (specialist_consults);
-                   the retro ones ride along as tool chips under the hub
-                   message that made them. #}
-                <div class="rounded-lg border border-dashed border-gray-300 bg-white p-3 ml-6">
-                    <div class="flex items-center gap-2 text-xs mb-1">
-                        <span class="font-semibold text-gray-700">panel &middot; {{ c.domain }}</span>
-                        {% if c.reply_truncated %}
-                        {# See the summary chips above: a cut-off reply has no
-                           signal, only the parser's default. `confidence` is
-                           suppressed with it for the same reason — it is the
-                           same default, and "moderate confidence" attached to
-                           nothing reads as an opinion held moderately. #}
-                        <span class="panel-cut-off px-2 py-0.5 rounded-full font-medium bg-gray-200 text-gray-600">
-                            reply cut off
-                        </span>
-                        {% else %}
-                        <span class="px-2 py-0.5 rounded-full font-medium {{ signal_chip.get(c.verdict_signal, 'bg-gray-100 text-gray-600') }}">
-                            {{ c.verdict_signal }}
-                        </span>
-                        {# Beside the label, not only as the list below:
-                           `adequate` (2026-08-28) means "meets the bar for THIS
-                           STAGE", not "no concerns". Every `clear` opinion ever
-                           emitted carried 4-9 concerns, one of them "Succession
-                           risk is high as described" under a ✅. #}
-                        <span class="panel-concern-count text-gray-400"
-                              title="Concerns filed by this specialist. A signal is not a concern count: `adequate` means the record meets the bar for this stage, not that nothing was raised.">
-                            {{ c.concern_count }} concern{{ '' if c.concern_count == 1 else 's' }}
-                        </span>
-                        {% if c.confidence %}<span class="text-gray-400">confidence: {{ c.confidence }}</span>{% endif %}
-                        {% if c.read_state and c.read_state != 'parsed' %}
-                        {# Written from 0038 on; NULL means "never recorded",
-                           which is why a missing value shows nothing rather
-                           than claiming a clean read. #}
-                        <span class="panel-read-state text-gray-500"
-                              title="How this reply stood relative to being READ (specialist_consults.read_state). Anything but `parsed` means the signal is a default, not something the specialist said.">
-                            read: {{ c.read_state }}
-                        </span>
-                        {% endif %}
-                        {% endif %}
-                    </div>
-                    {% if c.reply_truncated %}
-                    <div class="text-xs text-gray-600 mb-1">
-                        The specialist's reply stopped before it finished. Anything
-                        below is a partial answer, and this domain does NOT count
-                        toward the specialist floor — see
-                        <span class="font-mono">specialist_consults.truncated</span>.
-                    </div>
-                    {% endif %}
-                    {% if c.question %}
-                    <div class="text-xs text-gray-600 mb-1">
-                        <span class="font-medium text-gray-500">Asked:</span> {{ c.question }}
-                    </div>
-                    {% endif %}
-                    {% if c.concerns %}
-                    <div class="text-xs text-gray-700">
-                        <span class="font-medium text-gray-500">Concerns:</span>
-                        <ul class="list-disc list-inside">
-                            {% for concern in c.concerns %}<li>{{ concern }}</li>{% endfor %}
-                        </ul>
-                    </div>
-                    {% endif %}
-                    {% if c.questions_to_ask %}
-                    <div class="text-xs text-gray-700 mt-1">
-                        <span class="font-medium text-gray-500">Questions to ask the PI:</span>
-                        <ul class="list-disc list-inside">
-                            {% for q in c.questions_to_ask %}<li>{{ q }}</li>{% endfor %}
-                        </ul>
-                    </div>
-                    {% endif %}
-                    {% if admin_view and c.raw_opinion %}
-                    <details class="mt-2">
-                        <summary class="text-xs text-gray-400 cursor-pointer">Full opinion (raw)</summary>
-                        <pre class="mt-1 text-xs bg-gray-50 p-2 rounded overflow-x-auto max-h-64 overflow-y-auto whitespace-pre-wrap">{{ c.raw_opinion }}</pre>
-                    </details>
-                    {% endif %}
-                </div>
-            {% endif %}
-        {% endfor %}
-        </div>
-
-        {% if admin_view and unplaced_turns %}
-        {# Turns whose posted text could not be matched to any message in the
-           thread (an edited reply, a stripped mention, a truncation). Shown
-           rather than dropped: a turn we cannot place is still evidence of
-           what the hub did, and silently discarding it would make this page
-           look complete when it is not. #}
-        <div class="mt-5 pt-4 border-t border-gray-200">
-            <h4 class="text-xs font-semibold text-gray-500 uppercase mb-2">
-                Unplaced turns ({{ unplaced_turns | length }})
-            </h4>
-            <p class="text-xs text-gray-400 mb-2">
-                Tool activity from this thread's time window whose reply text could not
-                be matched to a message above — not dropped, just unattributed.
-            </p>
-            {% for turn in unplaced_turns %}
-                {{ tool_turn(turn, signal_chip) }}
-            {% endfor %}
-        </div>
-        {% endif %}
-
-        {% if admin_view and logs_scanned >= log_scan_limit %}
-        <p class="text-xs text-amber-700 mt-3">
-            Tool activity is capped at the {{ log_scan_limit }} most recent hub calls in
-            this thread's time window; older calls in the window are not shown.
-        </p>
-        {% endif %}
-    {% endif %}
 </div>
 
 {# ---------------------------------------------------------------------------
@@ -771,4 +619,172 @@
         </form>
         {% endif %}
     </div>
+</div>
+
+{# ---------------------------------------------------------------------------
+   Interview timeline
+   --------------------------------------------------------------------------- #}
+<div class="bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6">
+    <h3 class="text-sm font-semibold text-gray-700 uppercase mb-1">Interview timeline</h3>
+    <p class="text-xs text-gray-400 mb-4">
+        The thread this verdict came out of, interleaved with the specialist panel
+        {% if admin_view %}and the hub's tool calls{% endif %}.
+        {% if admin_view and retro_consult_count and not consult_count %}
+            No <span class="font-mono">specialist_consults</span> rows exist for this
+            interview — that table only records consults from runs after it shipped —
+            so the {{ retro_consult_count }} consult{{ '' if retro_consult_count == 1 else 's' }}
+            below were recovered from the hub's own tool log.
+        {% endif %}
+    </p>
+
+    {% if not messages_available %}
+        {# Not an error. `--fresh` wipes agent_messages and never wipes
+           opportunity_assessments, so a verdict legitimately outlives its own
+           transcript; the verdict above is the durable record. #}
+        <div class="rounded-lg border border-gray-200 bg-gray-50 p-4 text-sm text-gray-600">
+            Interview messages unavailable. The thread this verdict came from is not in
+            <span class="font-mono">agent_messages</span> — a <code>--fresh</code> run
+            wipes messages and channels but never assessments, so an older verdict
+            outlives its transcript. Everything above is unaffected.
+        </div>
+    {% else %}
+        <div class="space-y-3">
+        {% for entry in timeline %}
+            {% if entry.kind == 'message' %}
+                {% set m = entry.message %}
+                <div class="rounded-lg border {% if m.is_verdict_message %}border-indigo-300 bg-indigo-50{% elif m.is_hub %}border-gray-200 bg-white{% else %}border-gray-200 bg-gray-50{% endif %} p-3">
+                    <div class="flex items-center gap-2 text-xs text-gray-500 mb-1">
+                        <span class="font-semibold text-gray-700">
+                            {% if m.agent_id %}{{ m.agent_id | capitalize }}Bot{% else %}{{ m.sender_name or "(unknown sender)" }}{% endif %}
+                        </span>
+                        <span>{{ m.phase }}</span>
+                        {% if m.is_verdict_message %}
+                        <span class="px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-700 font-medium">
+                            carried this verdict
+                        </span>
+                        {% endif %}
+                    </div>
+                    {# JS-rendered (marked+DOMPurify, fail-closed to textContent). Deliberate trade-off,
+                       same as the discussions pages: if /static/js/markdown.js itself fails to load,
+                       this div renders empty — accepted for parity with the existing data-markdown
+                       surfaces rather than inventing a second rendering path here. #}
+                    <div class="text-sm text-gray-800 max-h-64 overflow-y-auto" data-markdown="{{ m.content | e }}"></div>
+
+                    {% if admin_view and entry.tool_turns %}
+                    <div class="mt-2 pt-2 border-t border-gray-200">
+                        {% for turn in entry.tool_turns %}
+                            {{ tool_turn(turn, signal_chip) }}
+                        {% endfor %}
+                    </div>
+                    {% endif %}
+                </div>
+            {% else %}
+                {% set c = entry.consult %}
+                {# Panel card. Recorded consults only (specialist_consults);
+                   the retro ones ride along as tool chips under the hub
+                   message that made them. #}
+                <div class="rounded-lg border border-dashed border-gray-300 bg-white p-3 ml-6">
+                    <div class="flex items-center gap-2 text-xs mb-1">
+                        <span class="font-semibold text-gray-700">panel &middot; {{ c.domain }}</span>
+                        {% if c.reply_truncated %}
+                        {# See the summary chips above: a cut-off reply has no
+                           signal, only the parser's default. `confidence` is
+                           suppressed with it for the same reason — it is the
+                           same default, and "moderate confidence" attached to
+                           nothing reads as an opinion held moderately. #}
+                        <span class="panel-cut-off px-2 py-0.5 rounded-full font-medium bg-gray-200 text-gray-600">
+                            reply cut off
+                        </span>
+                        {% else %}
+                        <span class="px-2 py-0.5 rounded-full font-medium {{ signal_chip.get(c.verdict_signal, 'bg-gray-100 text-gray-600') }}">
+                            {{ c.verdict_signal }}
+                        </span>
+                        {# Beside the label, not only as the list below:
+                           `adequate` (2026-08-28) means "meets the bar for THIS
+                           STAGE", not "no concerns". Every `clear` opinion ever
+                           emitted carried 4-9 concerns, one of them "Succession
+                           risk is high as described" under a ✅. #}
+                        <span class="panel-concern-count text-gray-400"
+                              title="Concerns filed by this specialist. A signal is not a concern count: `adequate` means the record meets the bar for this stage, not that nothing was raised.">
+                            {{ c.concern_count }} concern{{ '' if c.concern_count == 1 else 's' }}
+                        </span>
+                        {% if c.confidence %}<span class="text-gray-400">confidence: {{ c.confidence }}</span>{% endif %}
+                        {% if c.read_state and c.read_state != 'parsed' %}
+                        {# Written from 0038 on; NULL means "never recorded",
+                           which is why a missing value shows nothing rather
+                           than claiming a clean read. #}
+                        <span class="panel-read-state text-gray-500"
+                              title="How this reply stood relative to being READ (specialist_consults.read_state). Anything but `parsed` means the signal is a default, not something the specialist said.">
+                            read: {{ c.read_state }}
+                        </span>
+                        {% endif %}
+                        {% endif %}
+                    </div>
+                    {% if c.reply_truncated %}
+                    <div class="text-xs text-gray-600 mb-1">
+                        The specialist's reply stopped before it finished. Anything
+                        below is a partial answer, and this domain does NOT count
+                        toward the specialist floor — see
+                        <span class="font-mono">specialist_consults.truncated</span>.
+                    </div>
+                    {% endif %}
+                    {% if c.question %}
+                    <div class="text-xs text-gray-600 mb-1">
+                        <span class="font-medium text-gray-500">Asked:</span> {{ c.question }}
+                    </div>
+                    {% endif %}
+                    {% if c.concerns %}
+                    <div class="text-xs text-gray-700">
+                        <span class="font-medium text-gray-500">Concerns:</span>
+                        <ul class="list-disc list-inside">
+                            {% for concern in c.concerns %}<li>{{ concern }}</li>{% endfor %}
+                        </ul>
+                    </div>
+                    {% endif %}
+                    {% if c.questions_to_ask %}
+                    <div class="text-xs text-gray-700 mt-1">
+                        <span class="font-medium text-gray-500">Questions to ask the PI:</span>
+                        <ul class="list-disc list-inside">
+                            {% for q in c.questions_to_ask %}<li>{{ q }}</li>{% endfor %}
+                        </ul>
+                    </div>
+                    {% endif %}
+                    {% if admin_view and c.raw_opinion %}
+                    <details class="mt-2">
+                        <summary class="text-xs text-gray-400 cursor-pointer">Full opinion (raw)</summary>
+                        <pre class="mt-1 text-xs bg-gray-50 p-2 rounded overflow-x-auto max-h-64 overflow-y-auto whitespace-pre-wrap">{{ c.raw_opinion }}</pre>
+                    </details>
+                    {% endif %}
+                </div>
+            {% endif %}
+        {% endfor %}
+        </div>
+
+        {% if admin_view and unplaced_turns %}
+        {# Turns whose posted text could not be matched to any message in the
+           thread (an edited reply, a stripped mention, a truncation). Shown
+           rather than dropped: a turn we cannot place is still evidence of
+           what the hub did, and silently discarding it would make this page
+           look complete when it is not. #}
+        <div class="mt-5 pt-4 border-t border-gray-200">
+            <h4 class="text-xs font-semibold text-gray-500 uppercase mb-2">
+                Unplaced turns ({{ unplaced_turns | length }})
+            </h4>
+            <p class="text-xs text-gray-400 mb-2">
+                Tool activity from this thread's time window whose reply text could not
+                be matched to a message above — not dropped, just unattributed.
+            </p>
+            {% for turn in unplaced_turns %}
+                {{ tool_turn(turn, signal_chip) }}
+            {% endfor %}
+        </div>
+        {% endif %}
+
+        {% if admin_view and logs_scanned >= log_scan_limit %}
+        <p class="text-xs text-amber-700 mt-3">
+            Tool activity is capped at the {{ log_scan_limit }} most recent hub calls in
+            this thread's time window; older calls in the window are not shown.
+        </p>
+        {% endif %}
+    {% endif %}
 </div>

@@ -338,6 +338,112 @@ async def test_sidecar_prose_stays_plain_text(client, db_session, admin, manager
         assert "data-markdown" not in html[tag_start:tag_end]
 
 
+RATIONALE_MARKDOWN_CONTENT = "A **bold** claim about `HLA-A*02:01`"
+NEXT_EXPERIMENT_MARKDOWN_CONTENT = "- Run the assay against `HLA-A*02:01` first"
+
+
+async def test_prose_format_markdown_renders_data_markdown_divs_on_both_surfaces(
+    client, db_session, admin, manager
+):
+    """`prose_format='markdown'` is the write-time stamp (0040) that gates
+    rendering: a row written under the markdown-prompt contract renders
+    `rationale` and `recommended_next_experiment` as sanitized data-markdown
+    divs, on BOTH surfaces — the opposite of test_sidecar_prose_stays_plain_text
+    below, which is the NULL/legacy case."""
+    run = await factories.make_simulation_run(db_session)
+    assessment = OpportunityAssessment(
+        simulation_run_id=run.id,
+        agent_id=HUB,
+        subject_agent_id=SUBJECT,
+        channel_name=CHANNEL,
+        recommendation="advance",
+        rationale=RATIONALE_MARKDOWN_CONTENT,
+        recommended_next_experiment=NEXT_EXPERIMENT_MARKDOWN_CONTENT,
+        prose_format="markdown",
+    )
+    db_session.add(assessment)
+    await db_session.flush()
+
+    for path, user in (
+        (f"/admin/assessments/{assessment.id}", admin),
+        (f"/manager/assessments/{assessment.id}", manager),
+    ):
+        resp = await client.get(path, headers=auth_headers(user.id))
+        assert resp.status_code == 200
+        html = resp.text
+        assert 'data-markdown="A **bold** claim about `HLA-A*02:01`"' in html
+        rationale_class_at = html.index('class="assessment-rationale')
+        tag_start = html.rindex("<div", 0, rationale_class_at)
+        tag_end = html.index(">", rationale_class_at)
+        assert "data-markdown" in html[tag_start:tag_end]
+
+        next_experiment_class_at = html.index('class="assessment-next-experiment')
+        ne_tag_start = html.rindex("<div", 0, next_experiment_class_at)
+        ne_tag_end = html.index(">", next_experiment_class_at)
+        assert "data-markdown" in html[ne_tag_start:ne_tag_end]
+        assert (
+            'data-markdown="- Run the assay against `HLA-A*02:01` first"' in html
+        )
+
+
+async def test_pass_recommendation_and_band_render_as_decline_on_the_detail_page(
+    client, db_session, admin, manager
+):
+    """The stored vocabulary is unchanged (`recommendation`/`band` keep writing
+    "pass") — only the display form, via `banding.pass_label`, changes. Both
+    the recommendation chip and the band label route through it."""
+    from src.services.blackbird_rubric import BANDING
+
+    run = await factories.make_simulation_run(db_session)
+    assessment = OpportunityAssessment(
+        simulation_run_id=run.id,
+        agent_id=HUB,
+        subject_agent_id=SUBJECT,
+        channel_name=CHANNEL,
+        company_or_project="Decline Wording Fixture Co",
+        recommendation="pass",
+        weighted_score=1.50,
+        band="pass",
+    )
+    db_session.add(assessment)
+    await db_session.flush()
+
+    assert BANDING["pass_label"] == "decline"
+    for path, user in (
+        (f"/admin/assessments/{assessment.id}", admin),
+        (f"/manager/assessments/{assessment.id}", manager),
+    ):
+        resp = await client.get(path, headers=auth_headers(user.id))
+        assert resp.status_code == 200
+        html = resp.text
+        assert "decline" in html
+        assert 'class="band-label' in html
+
+
+async def test_human_review_card_sits_between_dimension_scores_and_the_timeline(
+    client, db_session, admin, manager
+):
+    """The Human review card moved between the Dimension scores card and the
+    Interview timeline section (a pure reorder), on BOTH surfaces — the shared
+    body template. String-index comparison of three stable headings."""
+    _, assessment = await _seed(db_session)
+
+    for path, user in (
+        (f"/admin/assessments/{assessment.id}", admin),
+        (f"/manager/assessments/{assessment.id}", manager),
+    ):
+        resp = await client.get(path, headers=auth_headers(user.id))
+        assert resp.status_code == 200
+        html = resp.text
+        dimension_scores_at = html.index("Dimension scores")
+        human_review_at = html.index("Human review")
+        timeline_at = html.index("Interview timeline")
+        assert dimension_scores_at < human_review_at < timeline_at, (
+            "Human review card must render between Dimension scores and the "
+            f"Interview timeline: {path}"
+        )
+
+
 async def test_admin_detail_page_shows_the_panel_and_the_tool_activity(
     client, db_session, admin
 ):

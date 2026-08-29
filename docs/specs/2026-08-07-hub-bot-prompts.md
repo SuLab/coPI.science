@@ -517,7 +517,10 @@ of it may appear anywhere in `<slack_message>` above:
    names it; conditional means fund it once a stated condition is met;
    route-to-incubation means the science is worth pursuing but the deciding experiment
    cannot yet be defined, so item 5 carries what must be resolved first instead of an
-   experiment; pass means do not fund.
+   experiment; pass means do not fund. This field's value is always the internal label —
+   `advance`/`conditional`/`pass`/`route-to-incubation` — but where it is `pass`, say so
+   in the visible `<slack_message>` as **decline** rather than the internal label; the
+   field here keeps its own value unchanged.
 5. **Recommended next experiment to fund.** Exactly one — the single experiment or
    tightly scoped project Blackbird should fund next to de-risk this idea, concept,
    technology, or chemistry. A project counts wherever it is scoped like an experiment
@@ -534,6 +537,13 @@ of it may appear anywhere in `<slack_message>` above:
    readout that, if it comes out right, would justify starting a program. Where you told
    the PI what would change your read, record the same thing so staff and PI are working
    from one list.
+
+**Formatting `rationale` and `recommended_next_experiment`.** Write both fields in
+simple Markdown: short paragraphs separated by a blank line, `**bold**` run-in labels
+to open a section (e.g. `**FTO:** ...`), and `-` bullets for lists. No headings, no
+tables, no code fences. Wrap any identifier that contains a literal asterisk in
+backticks — e.g. `` `HLA-A*02:01` `` — so it renders as text instead of being read as
+emphasis.
 
 If you're missing information for one of these, say so in `rationale` and mark the
 relevant gating criterion *unconfirmed* — never skip it silently and never guess.
@@ -630,14 +640,14 @@ Write a reply that closes the biggest gap in your scientific screen. Ask about s
 **`{phase_guidance}`**
 
 ````text
-This is message 12 — you MUST conclude the interview now. Do NOT propose a collaboration; you are not a party to the science. Close with your verdict stated inline so nothing is lost: which gating criteria are met, not met, or unconfirmed, your recommendation (advance / conditional / pass / route-to-incubation), the red flags you saw, and a confidence label. Where you are recommending advance or conditional, name the go/no-go experiments explicitly — the specific results that would decide whether this becomes a program — and name the single experiment Blackbird should fund first, recorded in recommended_next_experiment. On route-to-incubation, say instead what would have to be resolved before that experiment can even be defined. Unconfirmed intent criteria are expected and do not block a verdict — record them and flag them for human follow-up. If the idea warrants a :mag: Opportunity Assessment, this same reply also carries the machine-readable sidecar — there is no separate post. If it does not, start your reply with ⏸️ and say specifically what would need to change — name the evidence that would make this assessable, so the PI knows what would justify bringing it back.
+This is message 12 — you MUST conclude the interview now. Do NOT propose a collaboration; you are not a party to the science. Close with your verdict stated inline so nothing is lost: which gating criteria are met, not met, or unconfirmed, your recommendation (advance / conditional / pass / route-to-incubation — state a pass as "decline" in the visible reply; the sidecar value stays `pass`), the red flags you saw, and a confidence label. Where you are recommending advance or conditional, name the go/no-go experiments explicitly — the specific results that would decide whether this becomes a program — and name the single experiment Blackbird should fund first, recorded in recommended_next_experiment. On route-to-incubation, say instead what would have to be resolved before that experiment can even be defined. Unconfirmed intent criteria are expected and do not block a verdict — record them and flag them for human follow-up. If the idea warrants a :mag: Opportunity Assessment, this same reply also carries the machine-readable sidecar — there is no separate post. If it does not, start your reply with ⏸️ and say specifically what would need to change — name the evidence that would make this assessable, so the PI knows what would justify bringing it back.
 ````
 
 **`{instructions}`**
 
 ````text
 This is the final message. You MUST either:
-1. Close the interview with your inline verdict — gating status, recommendation (advance / conditional / pass / route-to-incubation), red flags, confidence label — and, in this same reply, the `<assessment_json>` sidecar. There is no separate post, OR
+1. Close the interview with your inline verdict — gating status, recommendation (advance / conditional / pass / route-to-incubation), red flags, confidence label — and, in this same reply, the `<assessment_json>` sidecar. There is no separate post. State a pass recommendation as "decline" in the visible reply; the sidecar value stays `pass`. OR
 2. Start your reply with ⏸️ and close gracefully, naming the specific missing piece that would make this assessable. Emit no sidecar.
 
 Option 2 is perfectly acceptable — most interviews should end there. Never close by proposing that the two labs work together.

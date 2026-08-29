@@ -156,7 +156,7 @@
         <div class="text-3xl font-bold text-gray-400">
             {{ assessments | selectattr("recommendation", "equalto", "pass") | list | length }}
         </div>
-        <div class="text-sm text-gray-500 mt-1">Pass (decline)</div>
+        <div class="text-sm text-gray-500 mt-1">Decline</div>
     </div>
 </div>
 
@@ -259,9 +259,9 @@
                            for a screen reader. The band/weighted-score
                            relationship it used to gesture at is spelled out
                            once in the page intro instead. "pass" renders as
-                           "pass (decline)": it is the PDF's deal vocabulary
-                           (pass ON the deal), and unlabelled it reads as the
-                           opposite of what it means. #}
+                           "decline": it is the PDF's deal vocabulary (pass ON
+                           the deal), and unlabelled it reads as the opposite
+                           of what it means. #}
                         <span class="band-label ml-1.5 text-xs font-medium uppercase tracking-wide align-middle
                             {% if a.band == 'advance' %}text-green-600
                             {% elif a.band == 'conditional' %}text-amber-600
@@ -275,7 +275,7 @@
                        primary verdict column. Colors follow the headline
                        cards; an unrecognized value (bounded-VARCHAR clipping
                        can produce one) gets the neutral style, never an
-                       error. "pass" is labelled "pass (decline)" for the same
+                       error. "pass" is labelled "decline" for the same
                        vocabulary reason as the band label above. #}
                     {% if a.recommendation %}
                         {% set rec_chip = {

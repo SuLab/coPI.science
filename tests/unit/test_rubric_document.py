@@ -83,7 +83,7 @@ def test_characterization_banding_is_pinned():
     assert BANDING == {
         "advance_min": 3.4,
         "conditional_min": 2.8,
-        "pass_label": "pass (decline)",
+        "pass_label": "decline",
     }
 
 
@@ -112,7 +112,7 @@ def test_characterization_science_block_is_35_points():
 
 def test_version_and_content_hash_are_exported():
     rubric = load_rubric()
-    # "3.3.0" adds the per-domain [stage_bar.*] table and nothing else — no
+    # "3.3.0" added the per-domain [stage_bar.*] table and nothing else — no
     # weight, threshold, dimension, gating-key, band-semantic or red-flag
     # change. It is a version bump rather than a silent data edit because the
     # bars change what the eight specialists are told the bar IS, and the stamp
@@ -120,8 +120,10 @@ def test_version_and_content_hash_are_exported():
     # opportunity_assessments.rubric_version. ("3.2.0" before it removed the
     # four ceremonial elements the content audit named: skeleton
     # weighted_score, the milestones array, pass_note, vocabulary_note.)
+    # "3.4.0" only renames pass_label ('pass (decline)' -> 'decline'), display
+    # only — the stored recommendation/band vocabulary is unchanged.
     # Pinned, not derived.
-    assert RUBRIC_VERSION == rubric.version == "3.3.0"
+    assert RUBRIC_VERSION == rubric.version == "3.4.0"
     assert RUBRIC_CONTENT_HASH == rubric.content_hash
     assert len(RUBRIC_CONTENT_HASH) == 12
     assert all(c in "0123456789abcdef" for c in RUBRIC_CONTENT_HASH)
@@ -229,7 +231,7 @@ def test_rejects_inverted_band_lines(tmp_path):
 
 
 def test_rejects_missing_version(tmp_path):
-    path = _mutated_copy(tmp_path, 'version = "3.3.0"', 'version = ""')
+    path = _mutated_copy(tmp_path, 'version = "3.4.0"', 'version = ""')
     with pytest.raises(RubricError, match=r"\[meta\].version"):
         parse_rubric(path)
 
@@ -259,7 +261,7 @@ def test_rejects_version_longer_than_the_column_width(tmp_path):
     # fail loudly here, never truncate silently at the write site -- silent
     # truncation would let two distinct long versions stamp identically and
     # destroy pre/post-calibration comparability.
-    path = _mutated_copy(tmp_path, 'version = "3.3.0"', 'version = "3.3.0-twenty-one-chars"')
+    path = _mutated_copy(tmp_path, 'version = "3.4.0"', 'version = "3.4.0-twenty-one-chars"')
     with pytest.raises(RubricError, match=r"\[meta\].version.*20 char.*rubric_version"):
         parse_rubric(path)
 

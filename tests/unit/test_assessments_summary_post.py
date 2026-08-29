@@ -54,7 +54,9 @@ async def test_a_held_pass_verdict_posts_a_headline(monkeypatch, tmp_path):
     text = hub_client.posted_messages[ASSESSMENTS_SUMMARY_CHANNEL][0]
     assert "Wang" in text or "wang" in text
     assert "CRISPR Platform" in text
-    assert "pass" in text
+    # Display form only: the stored `recommendation` is "pass", but a human
+    # reading this channel sees "decline" — the rubric's `pass_label`.
+    assert "decline" in text
     # A weak smoke check only — `VERDICT` carries no `rationale` key at all, so
     # this would pass even against code that leaked one. D12's real gate is
     # test_the_headline_leaks_no_rationale_red_flags_gating_or_raw_verdict.
@@ -132,7 +134,7 @@ async def test_the_headline_leaks_no_rationale_red_flags_gating_or_raw_verdict(
 
     # The headline still says what it is SUPPOSED to say...
     assert "CRISPR Platform" in text
-    assert "pass" in text
+    assert "decline" in text
 
     # ...and nothing it is not.
     for sentinel in _LEAK_SENTINELS:
@@ -214,7 +216,7 @@ async def test_a_raising_permalink_degrades_instead_of_dropping_the_post(
     # The verdict itself still made it to the channel — the link was the only
     # casualty.
     assert "CRISPR Platform" in text
-    assert "pass" in text
+    assert "decline" in text
 
 
 async def test_a_model_supplied_project_that_is_not_a_string_never_reaches_slack(
