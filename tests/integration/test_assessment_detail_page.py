@@ -243,6 +243,101 @@ async def test_detail_page_renders_the_recommended_next_experiment(
         assert "Recommended next experiment" in resp.text
 
 
+# Deliberately no apostrophes or double quotes: markupsafe escapes ' -> &#39;
+# and " -> &#34; inside the data-markdown attribute, so a naive `in html`
+# check against quoted prose would fail even when rendering is correct.
+TIMELINE_MARKDOWN_CONTENT = "A **bold** claim about HLA-A*02:01"
+
+
+async def test_timeline_messages_render_via_data_markdown_on_both_surfaces(
+    client, db_session, admin, manager
+):
+    """Interview messages are LLM/agent-generated prose — the same trust class
+    as the discussion proposals that already use the sanitized data-markdown
+    pattern (marked + DOMPurify, fail-closed to textContent) — so the timeline
+    must render them through that pattern rather than as literal-asterisk
+    plain text, on BOTH surfaces."""
+    run = await factories.make_simulation_run(db_session)
+    now = time.time()
+    root_ts = f"{now - 600:.6f}"
+    reply_ts = f"{now:.6f}"
+    await factories.make_agent_message(
+        db_session,
+        run=run,
+        agent_id=SUBJECT,
+        channel_name=CHANNEL,
+        message_ts=root_ts,
+        phase="new_post",
+        content="We have a selective inhibitor of the BCAA-autophagy axis.",
+        posted_at=now - 600,
+    )
+    await factories.make_agent_message(
+        db_session,
+        run=run,
+        agent_id=HUB,
+        channel_name=CHANNEL,
+        message_ts=reply_ts,
+        thread_ts=root_ts,
+        phase="thread_reply",
+        content=TIMELINE_MARKDOWN_CONTENT,
+        posted_at=now,
+    )
+    assessment = OpportunityAssessment(
+        simulation_run_id=run.id,
+        agent_id=HUB,
+        subject_agent_id=SUBJECT,
+        channel_name=CHANNEL,
+        slack_ts=reply_ts,
+        company_or_project="Markdown Timeline Fixture Co",
+        recommendation="advance",
+    )
+    db_session.add(assessment)
+    await db_session.flush()
+
+    for path, user in (
+        (f"/admin/assessments/{assessment.id}", admin),
+        (f"/manager/assessments/{assessment.id}", manager),
+    ):
+        resp = await client.get(path, headers=auth_headers(user.id))
+        assert resp.status_code == 200
+        html = resp.text
+        assert 'data-markdown="A **bold** claim' in html
+        assert "/static/js/markdown.js" in html
+        assert "marked@12.0.2/marked.min.js" in html
+        assert "dompurify@3.1.6/dist/purify.min.js" in html
+
+
+async def test_sidecar_prose_stays_plain_text(client, db_session, admin, manager):
+    """Rationale (and the other sidecar prose fields) is corpus-verified
+    near-plain prose with meaningful literal `*` — e.g. `HLA-A*02:01` — that a
+    markdown pass would corrupt, so it must never gain a data-markdown
+    attribute, unlike the interview timeline above."""
+    run = await factories.make_simulation_run(db_session)
+    assessment = OpportunityAssessment(
+        simulation_run_id=run.id,
+        agent_id=HUB,
+        subject_agent_id=SUBJECT,
+        channel_name=CHANNEL,
+        recommendation="advance",
+        rationale="**not markdown**",
+    )
+    db_session.add(assessment)
+    await db_session.flush()
+
+    for path, user in (
+        (f"/admin/assessments/{assessment.id}", admin),
+        (f"/manager/assessments/{assessment.id}", manager),
+    ):
+        resp = await client.get(path, headers=auth_headers(user.id))
+        assert resp.status_code == 200
+        html = resp.text
+        assert "**not markdown**" in html
+        rationale_class_at = html.index('class="assessment-rationale')
+        tag_start = html.rindex("<p", 0, rationale_class_at)
+        tag_end = html.index(">", rationale_class_at)
+        assert "data-markdown" not in html[tag_start:tag_end]
+
+
 async def test_admin_detail_page_shows_the_panel_and_the_tool_activity(
     client, db_session, admin
 ):

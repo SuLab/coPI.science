@@ -36,7 +36,7 @@ services:
     volumes:
       - .:/app
       - ./profiles:/app/profiles
-      - ./prompts:/app/prompts
+      - ./prompts:/app/prompts:ro
     depends_on:
       postgres:
         condition: service_healthy

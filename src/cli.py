@@ -178,7 +178,7 @@ def admin_revoke(
 @app.command(name="role:set")
 def role_set(
     orcid: str = typer.Option(..., "--orcid", help="ORCID ID of the account"),
-    role: str = typer.Option(..., "--role", help="pi | manager | admin"),
+    role: str = typer.Option(..., "--role", help="pi | manager | admin | reviewer"),
 ):
     """Set a user's account type. The escape hatch when no admin can log in."""
     async def _set() -> bool:

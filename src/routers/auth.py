@@ -297,13 +297,14 @@ async def auth_callback(
     # (D7) and has no research profile to review, so it skips onboarding —
     # without this a manager is sent to a page whose only exit is saving a
     # research profile (POST /onboarding/save-profile is the sole write of
-    # onboarding_complete in src/).
+    # onboarding_complete in src/). A REVIEWER (Task 1) is neither staff nor
+    # PI and has no research profile either, so it skips onboarding too.
     #
     # Admins are excluded from the skip, not included in it: they keep the PI
     # surfaces (base.html still shows them My Profile / My Agent), so sending
     # an admin with incomplete onboarding anywhere but /onboarding just defers
     # the same bounce one hop, via /profile.
-    if not user.onboarding_complete and not user.is_manager:
+    if not user.onboarding_complete and not user.is_manager and not user.is_reviewer:
         return RedirectResponse(url="/onboarding", status_code=302)
 
     # Resume the page the user originally requested, if any.
@@ -312,6 +313,8 @@ async def auth_callback(
         return RedirectResponse(url=next_url, status_code=302)
     if user.is_manager:
         return RedirectResponse(url="/manager/pis", status_code=302)
+    if user.is_reviewer:
+        return RedirectResponse(url="/manager/assessments", status_code=302)
     return RedirectResponse(url="/profile", status_code=302)
 
 

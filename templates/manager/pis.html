@@ -8,6 +8,7 @@
 </div>
 
 <!-- Add PI -->
+{% if effective_user.is_staff and not impersonation_banner %}
 <form method="post" action="/manager/pis" class="mb-6 flex items-end gap-2">
     <div>
         <label class="block text-xs text-gray-500 mb-1" for="orcid">Add a PI by ORCID iD</label>
@@ -36,6 +37,7 @@
         </span>
     {% endif %}
 </form>
+{% endif %}
 
 <!-- Filters -->
 <div class="bg-white rounded-lg border border-gray-200 p-4 mb-4 flex flex-wrap gap-4">

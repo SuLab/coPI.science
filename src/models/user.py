@@ -16,7 +16,11 @@ from src.database import Base
 USER_ROLE_PI = "pi"
 USER_ROLE_MANAGER = "manager"
 USER_ROLE_ADMIN = "admin"
-VALID_USER_ROLES = (USER_ROLE_PI, USER_ROLE_MANAGER, USER_ROLE_ADMIN)
+# Read+review only, added 2026-08-28 for the human-review-feedback feature.
+# Deliberately NOT part of is_staff (below): a reviewer can score and comment
+# on assessments but must not gain the manager/admin surfaces is_staff gates.
+USER_ROLE_REVIEWER = "reviewer"
+VALID_USER_ROLES = (USER_ROLE_PI, USER_ROLE_MANAGER, USER_ROLE_ADMIN, USER_ROLE_REVIEWER)
 
 
 class User(Base):
@@ -103,8 +107,22 @@ class User(Base):
     def _is_manager_expr(cls):
         return cls.user_role == USER_ROLE_MANAGER
 
+    # Read+review only: a reviewer may score and comment on assessments, but
+    # deliberately gains none of the manager/admin surfaces. Never fold this
+    # into is_staff — see the module-level comment on USER_ROLE_REVIEWER.
+    @hybrid_property
+    def is_reviewer(self) -> bool:
+        return self.user_role == USER_ROLE_REVIEWER
+
+    @is_reviewer.inplace.expression
+    @classmethod
+    def _is_reviewer_expr(cls):
+        return cls.user_role == USER_ROLE_REVIEWER
+
     # The "may see the manager views" predicate. Everything that means
     # "admin OR manager" must name THIS, never a widened is_admin (F7).
+    # Deliberately EXCLUDES USER_ROLE_REVIEWER: a reviewer's surfaces are
+    # scoped to assessment review, not the manager/admin views this gates.
     @hybrid_property
     def is_staff(self) -> bool:
         return self.user_role in (USER_ROLE_MANAGER, USER_ROLE_ADMIN)

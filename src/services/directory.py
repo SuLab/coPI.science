@@ -33,6 +33,7 @@ from src.models import (
     User,
 )
 from src.services.assessment_detail import panel_state, unvetted_panel_filter
+from src.services.assessment_reviews import EMPTY_REVIEW_COLUMNS, review_columns_for
 from src.services.blackbird_rubric import (
     BANDING,
     RUBRIC_VERSION,
@@ -400,6 +401,18 @@ async def list_assessments(
     # the rule, one of which nobody updates.
     for _row in assessments:
         _row.panel_state = panel_state(_row)
+
+    # Batched Assigned/Reviewed-by/status-chip columns (Task 7) — the exact
+    # same attach-to-row pattern as `panel_state` above, and for the exact
+    # same reason: `_assessments_body.html` is included by an admin template
+    # that allowlists every context key it forwards (`src/routers/admin.py`)
+    # and by a manager template that splats the whole view, so a new
+    # top-level key would reach one surface and render as silently-falsy
+    # Jinja `Undefined` on the other. Riding on `assessments` is the only
+    # shape that reaches both.
+    review_cols = await review_columns_for(db, [a.id for a in assessments])
+    for _row in assessments:
+        _row.review_cols = review_cols.get(_row.id, EMPTY_REVIEW_COLUMNS)
 
     # Batched agent_id -> user_id lookup, so the template can link a row's
     # lab to that PI's profile. Only ever resolvable for a LIVE roster entry

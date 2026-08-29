@@ -14,6 +14,7 @@ from src.models import (
     USER_ROLE_ADMIN,
     USER_ROLE_MANAGER,
     USER_ROLE_PI,
+    USER_ROLE_REVIEWER,
     VALID_USER_ROLES,
     User,
 )
@@ -28,23 +29,32 @@ def _user(role: str) -> User:
     return User(name="X", orcid="0000-0000-0000-0001", user_role=role)
 
 
-def test_valid_roles_are_exactly_the_three_account_types():
-    assert VALID_USER_ROLES == (USER_ROLE_PI, USER_ROLE_MANAGER, USER_ROLE_ADMIN)
+def test_valid_roles_are_exactly_the_four_account_types():
+    assert VALID_USER_ROLES == (
+        USER_ROLE_PI, USER_ROLE_MANAGER, USER_ROLE_ADMIN, USER_ROLE_REVIEWER,
+    )
 
 
 @pytest.mark.parametrize(
-    "role,expect_admin,expect_manager,expect_staff",
+    "role,expect_admin,expect_manager,expect_staff,expect_reviewer",
     [
-        (USER_ROLE_PI, False, False, False),
-        (USER_ROLE_MANAGER, False, True, True),
-        (USER_ROLE_ADMIN, True, False, True),
+        (USER_ROLE_PI, False, False, False, False),
+        (USER_ROLE_MANAGER, False, True, True, False),
+        (USER_ROLE_ADMIN, True, False, True, False),
+        (USER_ROLE_REVIEWER, False, False, False, True),
     ],
 )
-def test_predicates_in_python(role, expect_admin, expect_manager, expect_staff):
+def test_predicates_in_python(role, expect_admin, expect_manager, expect_staff, expect_reviewer):
     u = _user(role)
     assert u.is_admin is expect_admin
     assert u.is_manager is expect_manager
     assert u.is_staff is expect_staff
+    assert u.is_reviewer is expect_reviewer
+
+
+def test_is_staff_excludes_reviewer_in_sql():
+    sql = str(select(User).where(User.is_staff).compile(compile_kwargs={"literal_binds": True}))
+    assert "'reviewer'" not in sql
 
 
 def test_is_admin_is_false_for_a_manager():

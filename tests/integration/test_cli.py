@@ -35,6 +35,7 @@ from src.models import (
     USER_ROLE_ADMIN,
     USER_ROLE_MANAGER,
     USER_ROLE_PI,
+    USER_ROLE_REVIEWER,
     AgentRegistry,
     Job,
     ProfileRevision,
@@ -480,9 +481,9 @@ def test_admin_grant_on_unknown_orcid_should_exit_nonzero(runner):
 # ===========================================================================
 
 
-def test_role_set_round_trips_through_all_three_roles(db, runner):
+def test_role_set_round_trips_through_all_roles(db, runner):
     """The round trip admin:grant/admin:revoke cannot express: pi -> manager
-    -> admin -> pi, driven purely by --role."""
+    -> reviewer -> admin -> pi, driven purely by --role."""
     target_orcid = _orcid("role-target")
 
     async def _seed(session):
@@ -500,6 +501,9 @@ def test_role_set_round_trips_through_all_three_roles(db, runner):
     )
     assert "Set Role Target" in result.output
     assert _role(target_orcid) == USER_ROLE_MANAGER
+
+    _ok(runner.invoke(cli_app, ["role:set", "--orcid", target_orcid, "--role", "reviewer"]))
+    assert _role(target_orcid) == USER_ROLE_REVIEWER
 
     _ok(runner.invoke(cli_app, ["role:set", "--orcid", target_orcid, "--role", "admin"]))
     assert _role(target_orcid) == USER_ROLE_ADMIN

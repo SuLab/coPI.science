@@ -821,7 +821,9 @@ async def admin_assessment_detail(
     specialist's verbatim opinion. /manager/assessments/{id} renders the same
     shared body with it False; see ``src.services.assessment_detail``.
     """
-    detail = await build_assessment_detail(db, assessment_id, admin_view=True)
+    detail = await build_assessment_detail(
+        db, assessment_id, admin_view=True, viewer_is_staff=current_user.is_staff
+    )
     if detail is None:
         raise HTTPException(status_code=404, detail="Assessment not found")
     return templates.TemplateResponse(

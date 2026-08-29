@@ -45,8 +45,12 @@ from src.models import (
     AgentChannel,
     AgentMessage,
     AssessmentDrop,
+    AssessmentReview,
+    AssessmentReviewAssignment,
+    AssessmentReviewEvent,
     LlmCallLog,
     OpportunityAssessment,
+    PromptChangeSuggestion,
     ProposalReview,
     SimulationRun,
     SpecialistConsult,
@@ -3287,7 +3291,7 @@ class SimulationEngine:
                 # as a fallback (not written into `verdict` itself) so
                 # `raw_verdict` stays exactly what the model emitted — see
                 # _persist_assessment's docstring.
-                held = await self._persist_assessment(
+                held, replacement_id = await self._persist_assessment(
                     agent.agent_id, thread.channel, verdict, slack_ts=slack_ts,
                     subject_agent_id_fallback=thread.other_agent_id,
                     thread=thread,
@@ -3337,6 +3341,7 @@ class SimulationEngine:
                         await self._retire_superseded_verdict(
                             agent.agent_id, thread, superseded,
                             replacement_ordinal=thread.message_count + 1,
+                            replacement_id=replacement_id,
                         )
             elif _ASSESSMENT_UNCLOSED_RE.search(raw_response or ""):
                 # An <assessment_json> opening tag is present but
@@ -3384,11 +3389,9 @@ class SimulationEngine:
         symmetrically, since both funnel through that one call site.
 
         Deliberately duplicates two PURE function calls
-        (rubric_weighted_score/rubric_band) rather than changing
-        _persist_assessment's return signature to hand back its computed
-        values — that would risk breaking existing direct unit-test callers
-        of _persist_assessment that assert a plain bool return. The
-        weighting LOGIC itself is not duplicated, only these two calls.
+        (rubric_weighted_score/rubric_band) rather than reading them back off
+        the persisted row. The weighting LOGIC itself is not duplicated, only
+        these two calls.
 
         Never raises: a Slack failure here must not affect anything the
         caller already did (the assessment row's persistence, or the reply
@@ -3570,16 +3573,24 @@ class SimulationEngine:
     async def _persist_assessment(
         self, agent_id: str, channel: str, verdict: dict, slack_ts: str | None = None,
         *, subject_agent_id_fallback: str | None = None, thread: ThreadState | None = None,
-    ) -> bool:
+    ) -> tuple[bool, uuid.UUID | None]:
         """Store a scouting verdict. Best-effort: a failure here must never cost
         the Slack post that already went out.
 
-        Returns whether the verdict is HELD — committed, or queued on
-        ``_pending_assessments`` for a retry that will still land it. False means
-        nothing was stored and nothing will be: the engine has no database (see
-        ``__init__``). ``_capture_hub_assessment`` uses this to decide whether the
+        Returns ``(held, assessment_id)``. ``held`` is whether the verdict is
+        HELD — committed, or queued on ``_pending_assessments`` for a retry
+        that will still land it. False means nothing was stored and nothing
+        will be: the engine has no database (see ``__init__``).
+        ``_capture_hub_assessment`` uses ``held`` to decide whether the
         thread has had its one verdict; a queued row counts, because letting a
         second verdict through while the first is still queued lands BOTH.
+
+        ``assessment_id`` is the row's pre-generated primary key when the write
+        actually committed, and ``None`` in the other two cases (no database;
+        queued for a later retry) — a buffered row is not yet a real FK target,
+        so ``_retire_superseded_verdict`` cannot re-point a superseded
+        verdict's human-review rows onto it until a later flush lands it for
+        real.
 
         ``slack_ts`` is the canonical post id ``_post_message`` returned for
         the post/reply the verdict came from (F7) — the row's link back to
@@ -3682,7 +3693,7 @@ class SimulationEngine:
                 "[%s] Skipping assessment persistence — no database configured",
                 agent_id,
             )
-            return False
+            return False, None
 
         scores = verdict.get("scores") if isinstance(verdict.get("scores"), dict) else {}
         computed_score, computed_band = self._computed_score_and_band(verdict)
@@ -3795,6 +3806,18 @@ class SimulationEngine:
             # "written before 0036" (or backfilled, or hand-built by a test).
             panel_owed=panel_owed,
         )
+        # Pre-generated rather than left to the column's Python-side default:
+        # a buffered row (queued below on a failed first attempt) now carries a
+        # FIXED id from the moment it is built. Deliberate retry-semantics
+        # change: a retry whose PREVIOUS attempt actually reached the server
+        # before failing (e.g. the commit succeeded but the ack was lost) now
+        # surfaces as a PK violation -> an `unwritable_row` drop, instead of
+        # silently landing a second row under a fresh id and duplicating the
+        # verdict — an improvement on this, the engine's most protected write
+        # path. It is also what lets `_retire_superseded_verdict` re-point a
+        # superseded verdict's human-review rows onto the row that will hold
+        # this verdict once it actually commits.
+        assessment_kwargs["id"] = uuid.uuid4()
         try:
             async with self.session_factory() as db:
                 db.add(OpportunityAssessment(**assessment_kwargs))
@@ -3804,7 +3827,7 @@ class SimulationEngine:
                 agent_id, subject_agent_id or "?",
                 recommendation or "?", computed_score, computed_band,
             )
-            return True
+            return True, assessment_kwargs["id"]
         except Exception as exc:  # noqa: BLE001 — never lose a posted assessment
             # This row is the actual product of the screening pipeline, and
             # unlike _close_thread/_record_assessment_drop it is fully built
@@ -3823,7 +3846,7 @@ class SimulationEngine:
                 "for retry: %s",
                 agent_id, exc, exc_info=True,
             )
-            return True
+            return True, None
 
     @staticmethod
     def _verdict_is_terminal(
@@ -3936,7 +3959,7 @@ class SimulationEngine:
 
     async def _retire_superseded_verdict(
         self, agent_id: str, thread: ThreadState, superseded: _HeldVerdict,
-        *, replacement_ordinal: int,
+        *, replacement_ordinal: int, replacement_id: uuid.UUID | None,
     ) -> None:
         """Remove the provisional verdict a later concluding reply just replaced.
 
@@ -3945,6 +3968,21 @@ class SimulationEngine:
         showed (three rows, 2.51/2.66/2.69, for one pearce interview). The
         interview keeps exactly one row, and the one it keeps is the
         better-informed one.
+
+        ``replacement_id`` is the replacement row's pre-generated primary key
+        (``_persist_assessment``'s second return value) — ``None`` when the
+        replacement itself only made it to ``_pending_assessments`` and not yet
+        to the database. When it is not ``None``, any ``AssessmentReview``,
+        ``AssessmentReviewEvent``, ``AssessmentReviewAssignment`` or
+        ``PromptChangeSuggestion`` row a human attached to the row being
+        retired is re-pointed onto the replacement BEFORE the delete, in the
+        same transaction — otherwise a human's review of a provisional verdict
+        is silently lost to the CASCADE the moment a later reply supersedes it.
+        When it is ``None`` the re-point is skipped and the retired row's
+        review rows CASCADE away with it: there is no live replacement row yet
+        to re-point them onto, and stamping them onto a row that may never
+        land (or may land under a different id after `_flush_pending_
+        assessments` retries) would be worse than losing them outright.
 
         The supersession itself is recorded as a ``duplicate_thread_verdict``
         drop for the SUPERSEDED verdict — the trail has to survive the deletion,
@@ -4043,8 +4081,31 @@ class SimulationEngine:
             return
         try:
             from sqlalchemy import delete as sa_delete
+            from sqlalchemy import select as sa_select
+            from sqlalchemy import update as sa_update
 
             async with self.session_factory() as db:
+                if replacement_id is not None:
+                    old_ids = sa_select(OpportunityAssessment.id).where(
+                        *self._superseded_row_filter(agent_id, thread, superseded)
+                    ).scalar_subquery()
+                    for model in (
+                        AssessmentReview, AssessmentReviewEvent, PromptChangeSuggestion,
+                    ):
+                        await db.execute(
+                            sa_update(model)
+                            .where(model.assessment_id.in_(old_ids))
+                            .values(assessment_id=replacement_id)
+                        )
+                    existing = sa_select(AssessmentReviewAssignment.assignee_user_id).where(
+                        AssessmentReviewAssignment.assessment_id == replacement_id
+                    ).scalar_subquery()
+                    await db.execute(
+                        sa_update(AssessmentReviewAssignment)
+                        .where(AssessmentReviewAssignment.assessment_id.in_(old_ids),
+                               AssessmentReviewAssignment.assignee_user_id.not_in(existing))
+                        .values(assessment_id=replacement_id)
+                    )
                 result = await db.execute(
                     sa_delete(OpportunityAssessment).where(
                         *self._superseded_row_filter(agent_id, thread, superseded)
@@ -4059,9 +4120,11 @@ class SimulationEngine:
             )
         except Exception as exc:  # noqa: BLE001 — never lose a posted reply over this
             logger.error(
-                "[%s] Failed to remove the superseded assessment row for thread "
-                "%s (slack_ts=%s): %s — the interview now has TWO assessments, "
-                "the drop row above says which is which",
+                "[%s] Failed to remove the superseded assessment row (and "
+                "re-point its review rows) for thread %s (slack_ts=%s): %s — "
+                "the interview now has TWO assessments, the drop row above "
+                "says which is which, and any review re-point for this "
+                "retirement may not have completed",
                 agent_id, thread.thread_id, superseded.slack_ts, exc,
                 exc_info=True,
             )

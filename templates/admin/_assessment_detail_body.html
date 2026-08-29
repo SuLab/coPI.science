@@ -10,6 +10,15 @@
    the admin-only raw-verdict block. Grep this file for absolute admin/manager
    paths — it must print nothing.
 
+   EXCEPTION, recorded (Task 6, human-review card): literal `/reviews/...`
+   action paths ARE allowed here, unlike `/admin/...`/`/manager/...`. That
+   router is not split by surface — the same six routes serve admin, manager
+   and reviewer alike, and `src/routers/reviews.py`'s `_assessments_redirect`
+   (keyed on the form's `surface` hidden input) is what sends each caller back
+   to its OWN detail page after the write — so a literal `/reviews/` action
+   here has none of the one-surface-only problem an `/admin/` or `/manager/`
+   literal would.
+
    `admin_view` gates the two admin-only strands (plan decision 2): the hub's
    tool activity, and each specialist's verbatim opinion. Those values are
    already ABSENT from a manager render's context (the service omits them), so
@@ -425,7 +434,11 @@
                         </span>
                         {% endif %}
                     </div>
-                    <div class="text-sm text-gray-800 whitespace-pre-line max-h-64 overflow-y-auto">{{ m.content }}</div>
+                    {# JS-rendered (marked+DOMPurify, fail-closed to textContent). Deliberate trade-off,
+                       same as the discussions pages: if /static/js/markdown.js itself fails to load,
+                       this div renders empty — accepted for parity with the existing data-markdown
+                       surfaces rather than inventing a second rendering path here. #}
+                    <div class="text-sm text-gray-800 max-h-64 overflow-y-auto" data-markdown="{{ m.content | e }}"></div>
 
                     {% if admin_view and entry.tool_turns %}
                     <div class="mt-2 pt-2 border-t border-gray-200">
@@ -544,4 +557,218 @@
         </p>
         {% endif %}
     {% endif %}
+</div>
+
+{# ---------------------------------------------------------------------------
+   Human review (Task 6)
+
+   `effective_user` is base.html's `impersonation_banner or current_user`
+   (base.html:41) and is already in scope by the time this include is
+   reached — but it is re-set HERE too, defensively: it makes this card
+   self-contained if it is ever rendered outside the base.html include chain
+   (a unit-style template render with stub context, for instance), and a
+   redundant `{% set %}` to the same value is harmless.
+
+   Every write form is wrapped in `can_write`, which forbids the whole write
+   half under impersonation (F6): a route behind `_refuse_impersonation`
+   that still rendered a live-looking form would 403 on submission, and a
+   dead control is worse than none. Within `can_write`, three further author/
+   role checks narrow individual forms: edit (review author only), delete
+   (admin only) and assign/unassign (staff only) — see
+   src/routers/reviews.py's own gates, which these mirror.
+
+   `surface` is `'admin'`/`'manager'` from the already-present `admin_view`
+   flag, and `src/routers/reviews.py::_assessments_redirect` is what turns
+   that back into the caller's own detail page after the write (see the
+   header's `/reviews/` exception note). Every action path below is LITERAL
+   — a Jinja expression fills only a path-param slot — and every form
+   carries `method="post"`: both are load-bearing for
+   tests/unit/test_reachability.py's route-reference credit. #}
+{% set effective_user = impersonation_banner or current_user %}
+{% set can_write = not impersonation_banner %}
+<div class="bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6">
+    <h2 class="text-sm font-semibold text-gray-700 uppercase mb-3">Human review</h2>
+
+    {# --- Status: explicit approved/disapproved branches, quiet "Unreviewed"
+       for none-or-cleared, and an alarming terminal else for anything the
+       `assessment_review_events.action` CHECK "guarantees" cannot happen —
+       same house convention as the gating rows above. A `cleared` LATEST
+       event reads as "Unreviewed" deliberately: clearing is how a reviewer
+       resets the status back to no verdict, so the two states are the same
+       fact from a reader's point of view. #}
+    <div class="mb-4">
+        <span class="text-xs font-semibold text-gray-500 uppercase">Status</span>
+        <div class="review-status mt-1 text-sm flex items-center gap-2 flex-wrap">
+            {% if review_status is none or review_status.action == 'cleared' %}
+                <span class="text-gray-400">Unreviewed</span>
+            {% elif review_status.action == 'approved' %}
+                <span class="review-status-approved px-2 py-0.5 rounded-full bg-green-100 text-green-700 font-medium">Approved</span>
+                <span class="text-gray-500">by {{ review_status.actor_name }}</span>
+            {% elif review_status.action == 'disapproved' %}
+                <span class="review-status-disapproved px-2 py-0.5 rounded-full bg-red-100 text-red-700 font-medium">Disapproved</span>
+                <span class="text-gray-500">by {{ review_status.actor_name }}</span>
+            {% else %}
+                <span class="review-status-unknown px-2 py-0.5 rounded-full bg-red-200 text-red-900 font-semibold"
+                      title="Unrecognized status action — the assessment_review_events CHECK constraint should make this unreachable.">
+                    &#9888; Unknown status action: {{ review_status.action }}
+                </span>
+                <span class="text-gray-500">by {{ review_status.actor_name }}</span>
+            {% endif %}
+        </div>
+        {% if review_status_history %}
+        <details class="mt-2">
+            <summary class="cursor-pointer text-xs text-gray-400">
+                Status history ({{ review_status_history | length }})
+            </summary>
+            <ul class="review-status-history mt-1 space-y-1 text-xs text-gray-500">
+                {% for event in review_status_history %}
+                <li>
+                    {% if event.action == 'approved' %}
+                        <span class="text-green-700 font-medium">Approved</span>
+                    {% elif event.action == 'disapproved' %}
+                        <span class="text-red-700 font-medium">Disapproved</span>
+                    {% elif event.action == 'cleared' %}
+                        <span class="text-gray-500 font-medium">Cleared</span>
+                    {% else %}
+                        <span class="text-red-900 font-semibold" title="Unrecognized status action">Unknown status action: {{ event.action }}</span>
+                    {% endif %}
+                    by {{ event.actor_name }}
+                    &middot;
+                    <span data-utc="{{ event.created_at.isoformat() }}" data-utc-fmt="short">{{ event.created_at.strftime('%Y-%m-%d %H:%M') }}</span>
+                </li>
+                {% endfor %}
+            </ul>
+        </details>
+        {% endif %}
+    </div>
+
+    {% if can_write %}
+    <form method="post" action="/reviews/assessments/{{ a.id }}/status" class="mb-4 flex items-center gap-2">
+        <input type="hidden" name="surface" value="{{ 'admin' if admin_view else 'manager' }}">
+        <button type="submit" name="action" value="approved" class="text-xs font-medium bg-green-600 text-white px-2 py-1 rounded hover:bg-green-700">Approve</button>
+        <button type="submit" name="action" value="disapproved" class="text-xs font-medium bg-red-600 text-white px-2 py-1 rounded hover:bg-red-700">Disapprove</button>
+        <button type="submit" name="action" value="cleared" class="text-xs font-medium bg-gray-400 text-white px-2 py-1 rounded hover:bg-gray-500">Clear</button>
+    </form>
+    {% endif %}
+
+    {# --- Feedback: one row per AssessmentReview, oldest first. Comments are
+       plain autoescaped text with `whitespace-pre-line` — NEVER
+       `data-markdown` — a reviewer's comment is not the PI-facing prose this
+       app renders as markdown elsewhere, and treating it as such would be an
+       HTML-injection surface via `{{ }}`'s own escaping being routed around. #}
+    <div class="mb-4">
+        <span class="text-xs font-semibold text-gray-500 uppercase">
+            Feedback{% if review_feedback %} ({{ review_feedback | length }}){% endif %}
+        </span>
+        {% if review_feedback %}
+        <ul class="review-feedback-list mt-2 space-y-3">
+            {% for review in review_feedback %}
+            <li class="review-feedback-row border border-gray-100 rounded-lg p-3">
+                <div class="flex items-center gap-2 text-xs text-gray-500 flex-wrap">
+                    <span class="font-semibold text-gray-700">{{ review.reviewer_name }}</span>
+                    <span class="font-medium text-gray-700">{{ review.score }}/5</span>
+                    {% if review.feedback_mode == 'learn' %}
+                        <span class="review-mode-chip px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-700 font-medium">Learn</span>
+                    {% elif review.feedback_mode == 'log_only' %}
+                        <span class="review-mode-chip px-2 py-0.5 rounded-full bg-gray-100 text-gray-600 font-medium">Don't learn — log only</span>
+                    {% else %}
+                        <span class="review-mode-chip px-2 py-0.5 rounded-full bg-red-200 text-red-900 font-semibold"
+                              title="Unrecognized feedback mode — the assessment_reviews CHECK constraint should make this unreachable.">
+                            &#9888; Unknown mode: {{ review.feedback_mode }}
+                        </span>
+                    {% endif %}
+                    {% if review.edited %}<span class="text-gray-400 italic">(edited)</span>{% endif %}
+                    <span data-utc="{{ review.created_at.isoformat() }}" data-utc-fmt="short">{{ review.created_at.strftime('%Y-%m-%d %H:%M') }}</span>
+                </div>
+                {% if review.comment %}
+                <p class="review-comment mt-1 text-sm text-gray-700 whitespace-pre-line">{{ review.comment }}</p>
+                {% endif %}
+                {% if can_write %}
+                    {% if effective_user and review.reviewer_user_id == effective_user.id %}
+                    <details class="mt-2">
+                        <summary class="cursor-pointer text-xs text-indigo-600">Edit</summary>
+                        <form method="post" action="/reviews/feedback/{{ review.id }}/edit" class="mt-2 space-y-2">
+                            <input type="hidden" name="surface" value="{{ 'admin' if admin_view else 'manager' }}">
+                            <select name="score" class="border rounded px-1 py-0.5 text-xs">
+                                {% for n in range(1, 6) %}<option value="{{ n }}" {% if review.score == n %}selected{% endif %}>{{ n }}</option>{% endfor %}
+                            </select>
+                            <textarea name="comment" rows="2" class="w-full border rounded px-2 py-1 text-xs">{{ review.comment }}</textarea>
+                            <select name="feedback_mode" class="border rounded px-1 py-0.5 text-xs">
+                                <option value="learn" {% if review.feedback_mode == 'learn' %}selected{% endif %}>Learn</option>
+                                <option value="log_only" {% if review.feedback_mode == 'log_only' %}selected{% endif %}>Don't learn — log only</option>
+                            </select>
+                            <button type="submit" class="text-xs font-medium bg-indigo-600 text-white px-2 py-1 rounded hover:bg-indigo-700">Save</button>
+                        </form>
+                    </details>
+                    {% endif %}
+                    {% if effective_user.is_admin %}
+                    <form method="post" action="/reviews/feedback/{{ review.id }}/delete" class="mt-1">
+                        <input type="hidden" name="surface" value="{{ 'admin' if admin_view else 'manager' }}">
+                        <button type="submit" class="text-xs text-red-600 hover:text-red-800">Delete</button>
+                    </form>
+                    {% endif %}
+                {% endif %}
+            </li>
+            {% endfor %}
+        </ul>
+        {% else %}
+        <p class="text-sm text-gray-400 mt-2">No feedback recorded.</p>
+        {% endif %}
+    </div>
+
+    {% if can_write %}
+    <details class="mb-4">
+        <summary class="cursor-pointer text-xs text-indigo-600">Add feedback</summary>
+        <form method="post" action="/reviews/assessments/{{ a.id }}/feedback" class="mt-2 space-y-2">
+            <input type="hidden" name="surface" value="{{ 'admin' if admin_view else 'manager' }}">
+            <select name="score" required class="border rounded px-1 py-0.5 text-xs">
+                <option value="" disabled selected>Score</option>
+                {% for n in range(1, 6) %}<option value="{{ n }}">{{ n }}</option>{% endfor %}
+            </select>
+            <textarea name="comment" rows="2" placeholder="Comment" class="w-full border rounded px-2 py-1 text-xs"></textarea>
+            <select name="feedback_mode" required class="border rounded px-1 py-0.5 text-xs">
+                <option value="" disabled selected>Mode</option>
+                <option value="learn">Learn</option>
+                <option value="log_only">Don't learn — log only</option>
+            </select>
+            <button type="submit" class="text-xs font-medium bg-indigo-600 text-white px-2 py-1 rounded hover:bg-indigo-700">Submit feedback</button>
+        </form>
+    </details>
+    {% endif %}
+
+    {# --- Assignments: read for everyone, assign/unassign only for staff
+       (never a reviewer — a reviewer may score an assessment but does not
+       manage who else is on it). #}
+    <div>
+        <span class="text-xs font-semibold text-gray-500 uppercase">
+            Assigned{% if review_assignments %} ({{ review_assignments | length }}){% endif %}
+        </span>
+        {% if review_assignments %}
+        <ul class="review-assignments-list mt-1 space-y-1 text-sm">
+            {% for assignment in review_assignments %}
+            <li class="flex items-center gap-2">
+                <span class="text-gray-700">{{ assignment.assignee_name }}</span>
+                {% if can_write and effective_user.is_staff %}
+                <form method="post" action="/reviews/assessments/{{ a.id }}/unassign" class="inline">
+                    <input type="hidden" name="surface" value="{{ 'admin' if admin_view else 'manager' }}">
+                    <input type="hidden" name="assignee_user_id" value="{{ assignment.assignee_user_id }}">
+                    <button type="submit" class="text-xs text-red-600 hover:text-red-800">Remove</button>
+                </form>
+                {% endif %}
+            </li>
+            {% endfor %}
+        </ul>
+        {% else %}
+        <p class="text-sm text-gray-400 mt-1">No one assigned.</p>
+        {% endif %}
+        {% if can_write and effective_user.is_staff %}
+        <form method="post" action="/reviews/assessments/{{ a.id }}/assign" class="mt-2 flex items-center gap-2">
+            <input type="hidden" name="surface" value="{{ 'admin' if admin_view else 'manager' }}">
+            <select name="assignee_user_id" class="border rounded px-1 py-0.5 text-xs">
+                {% for u in review_capable_users %}<option value="{{ u.id }}">{{ u.name }}</option>{% endfor %}
+            </select>
+            <button type="submit" class="text-xs font-medium bg-indigo-600 text-white px-2 py-1 rounded hover:bg-indigo-700">Assign</button>
+        </form>
+        {% endif %}
+    </div>
 </div>

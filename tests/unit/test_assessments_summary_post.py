@@ -2,6 +2,7 @@
 assessments-summary channel, with no rationale/red-flags/gating content
 (design D12/D13/D14/D16)."""
 import json
+import uuid
 
 import pytest
 
@@ -279,7 +280,7 @@ async def test_capture_hub_assessment_posts_when_the_verdict_is_held(
 
     async def held(*a, **kw):
         persist_calls.append(kw)
-        return True
+        return True, uuid.uuid4()
     monkeypatch.setattr(eng, "_persist_assessment", held)
 
     await eng._capture_hub_assessment(hub, thread, _raw(VERDICT), "555.000", closes_thread=True)
@@ -371,7 +372,7 @@ async def test_a_provisional_verdict_is_stored_but_not_announced(monkeypatch, tm
 
     async def fake_persist(agent_id, channel, verdict, **kw):
         persisted.append(verdict)
-        return True
+        return True, uuid.uuid4()
     monkeypatch.setattr(eng, "_persist_assessment", fake_persist)
 
     await eng._capture_hub_assessment(hub, thread, _raw(VERDICT), "777.000", closes_thread=False)

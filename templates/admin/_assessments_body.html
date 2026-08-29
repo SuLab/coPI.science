@@ -222,6 +222,8 @@
                 <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Gating</th>
                 <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Red flags</th>
                 <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Rubric</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Assigned</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Reviewed by</th>
                 <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">When</th>
                 <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase"></th>
             </tr>
@@ -284,6 +286,28 @@
                         } %}
                         <span class="px-2 py-0.5 rounded-full text-xs font-medium whitespace-nowrap {{ rec_chip.get(a.recommendation, 'bg-gray-100 text-gray-500') }}">{{ banding.pass_label if a.recommendation == 'pass' else a.recommendation }}</span>
                     {% else %}—{% endif %}
+                    {# The human approval-status chip, from `review_cols.status`
+                       (src/services/assessment_reviews.py::review_columns_for).
+                       Only two branches are explicit: 'approved' and
+                       'disapproved' are the only values the chip ever shows —
+                       a cleared status folds to None at the service layer (the
+                       same "no active status" as never having been reviewed),
+                       so None gets nothing here, deliberately quiet. The
+                       terminal {% else %} is the house convention for a value
+                       this page does not recognize (same shape as the gating
+                       rows below and the panel-state badge above) — the
+                       column's own CHECK constraint makes it unreachable in
+                       practice, but an unhandled value must still read as
+                       alarming, never as a silent no-op. #}
+                    {% if a.review_cols.status == 'approved' %}
+                        <span class="ml-1.5 px-2 py-0.5 rounded-full text-xs font-medium whitespace-nowrap bg-green-100 text-green-700">Approved</span>
+                    {% elif a.review_cols.status == 'disapproved' %}
+                        <span class="ml-1.5 px-2 py-0.5 rounded-full text-xs font-medium whitespace-nowrap bg-red-100 text-red-700">Disapproved</span>
+                    {% elif a.review_cols.status is none %}
+                    {# Never reviewed, or reviewed then cleared — no chip. #}
+                    {% else %}
+                        <span class="ml-1.5 px-2 py-0.5 rounded-full text-xs font-medium whitespace-nowrap bg-amber-100 text-amber-800" title="Unrecognized review status: {{ a.review_cols.status }}">review status unknown</span>
+                    {% endif %}
                     {# The panel finding for THIS row, in the same five states the
                        detail page renders — attached to the row by
                        src/services/directory.py::list_assessments so both surfaces
@@ -361,6 +385,12 @@
                     {% else %}
                         <span class="text-gray-400" title="written before rubric stamping (migration 0030)">&mdash;</span>
                     {% endif %}
+                </td>
+                <td class="px-4 py-3 text-xs text-gray-600">
+                    {{ a.review_cols.assigned_names | join(", ") if a.review_cols.assigned_names else "—" }}
+                </td>
+                <td class="px-4 py-3 text-xs text-gray-600">
+                    {{ a.review_cols.reviewed_by_names | join(", ") if a.review_cols.reviewed_by_names else "—" }}
                 </td>
                 <td class="px-4 py-3 text-xs text-gray-500">
                     {{ a.created_at.strftime("%Y-%m-%d %H:%M") }}

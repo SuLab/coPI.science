@@ -46,15 +46,24 @@ from sqlalchemy.ext.asyncio import AsyncSession
 # must never re-derive the floor's decision from today's predicate. See
 # `panel_state`.
 from src.agent.specialists import parse_opinion
-from src.models import AgentMessage, LlmCallLog, OpportunityAssessment, SpecialistConsult
+from src.models import (
+    AgentMessage,
+    AssessmentReview,
+    AssessmentReviewAssignment,
+    AssessmentReviewEvent,
+    LlmCallLog,
+    OpportunityAssessment,
+    SpecialistConsult,
+    User,
+)
 from src.services.blackbird_rubric import BANDING, RUBRIC_VERSION
+from src.services.interview_transcript import load_interview_thread
 from src.services.rubric_revisions import resolve_revision
 
 # Hard bounds. This page is a read of unbounded production data: a channel can
 # hold hundreds of hub turns and a retrieve_full_text result can be an entire
 # paper, so every list and every blob here is capped rather than trusted.
 LOG_SCAN_LIMIT = 200
-MESSAGE_SCAN_LIMIT = 500
 RESULT_EXCERPT_CHARS = 200
 RESULT_FULL_CHARS = 4000
 INPUT_SUMMARY_CHARS = 200
@@ -506,7 +515,11 @@ def panel_state(assessment: OpportunityAssessment) -> str:
 
 
 async def build_assessment_detail(
-    db: AsyncSession, assessment_id: uuid.UUID, *, admin_view: bool
+    db: AsyncSession,
+    assessment_id: uuid.UUID,
+    *,
+    admin_view: bool,
+    viewer_is_staff: bool = False,
 ) -> dict[str, Any] | None:
     """One assessment, its dimension breakdown, and its interview timeline.
 
@@ -515,6 +528,12 @@ async def build_assessment_detail(
 
     ``admin_view=False`` omits every admin-only value from the returned
     context: no ``raw_opinion``, no tool activity. See the module docstring.
+
+    ``viewer_is_staff`` gates ``review_capable_users`` (the assignee roster
+    for the Human-review card's assign form): it is queried ONLY when True,
+    so a reviewer's render never enumerates the staff/reviewer roster — the
+    same rule ``src/routers/manager.py``'s own PI-add form applies, and it
+    saves a query on every non-staff render.
     """
     assessment = (
         await db.execute(
@@ -598,7 +617,7 @@ async def build_assessment_detail(
             "pct": _pct(value),
         })
 
-    thread_id, messages = await _load_thread_messages(db, assessment)
+    thread_id, messages = await load_interview_thread(db, assessment)
     consults = await _load_consults(db, assessment, thread_id, admin_view=admin_view)
 
     message_views = [
@@ -666,6 +685,13 @@ async def build_assessment_detail(
         if chip["is_consult"]
     )
 
+    review_feedback = await _load_review_feedback(db, assessment.id)
+    review_status_history = await _load_review_status_history(db, assessment.id)
+    review_assignments = await _load_review_assignments(db, assessment.id)
+    review_capable_users = (
+        await _load_review_capable_users(db) if viewer_is_staff else []
+    )
+
     return {
         "assessment": assessment,
         "pi_user_id": pi_user_id,
@@ -697,64 +723,79 @@ async def build_assessment_detail(
         "logs_scanned": logs_scanned,
         "log_scan_limit": LOG_SCAN_LIMIT,
         "admin_view": admin_view,
+        # Human-review card (Task 6). All three review tables are ordered
+        # (created_at, id) — Postgres `now()` is transaction-start, so ties
+        # inside one write burst are real and `id` is the tiebreak.
+        # ``review_status`` is the LATEST event (last of the ordered history),
+        # or None when the assessment has never had one recorded.
+        "review_feedback": review_feedback,
+        "review_status": review_status_history[-1] if review_status_history else None,
+        "review_status_history": review_status_history,
+        "review_assignments": review_assignments,
+        "review_capable_users": review_capable_users,
     }
 
 
-async def _load_thread_messages(
-    db: AsyncSession, assessment: OpportunityAssessment
-) -> tuple[str | None, list[AgentMessage]]:
-    """The interview thread this verdict came out of.
-
-    Anchored on the message the verdict was POSTED as: ``slack_ts`` is written
-    from the Slack post (or the locally minted ts when Slack is off), and it
-    can land in either ``AgentMessage.slack_ts`` or ``AgentMessage.message_ts``
-    depending on which side minted it — so both are tried.
-
-    Returns ``(None, [])`` whenever the thread cannot be reconstructed, which
-    is a NORMAL outcome, not an error: ``--fresh`` wipes ``agent_messages`` and
-    never wipes ``opportunity_assessments``, so an older verdict legitimately
-    outlives its own transcript. The caller renders the verdict either way.
-    """
-    if not assessment.slack_ts:
-        return None, []
-    anchor = (
-        await db.execute(
-            select(AgentMessage)
-            .where(
-                AgentMessage.simulation_run_id == assessment.simulation_run_id,
-                AgentMessage.channel_name == assessment.channel_name,
-                or_(
-                    AgentMessage.slack_ts == assessment.slack_ts,
-                    AgentMessage.message_ts == assessment.slack_ts,
-                ),
-            )
-            .order_by(AgentMessage.posted_at, AgentMessage.created_at)
-            .limit(1)
-        )
-    ).scalars().first()
-    if anchor is None:
-        return None, []
-    # The thread's id is the ROOT's ts: a reply carries it in thread_ts, and the
-    # root itself carries None there and is its own thread.
-    thread_id = anchor.thread_ts or anchor.message_ts
-    if thread_id is None:
-        return None, [anchor]
+async def _load_review_feedback(
+    db: AsyncSession, assessment_id: uuid.UUID
+) -> list[AssessmentReview]:
+    """Every human review-feedback row for this assessment, oldest first."""
     rows = (
         await db.execute(
-            select(AgentMessage)
-            .where(
-                AgentMessage.simulation_run_id == assessment.simulation_run_id,
-                AgentMessage.channel_name == anchor.channel_name,
-                or_(
-                    AgentMessage.thread_ts == thread_id,
-                    AgentMessage.message_ts == thread_id,
-                ),
-            )
-            .order_by(AgentMessage.posted_at, AgentMessage.created_at)
-            .limit(MESSAGE_SCAN_LIMIT)
+            select(AssessmentReview)
+            .where(AssessmentReview.assessment_id == assessment_id)
+            .order_by(AssessmentReview.created_at, AssessmentReview.id)
         )
     ).scalars().all()
-    return thread_id, list(rows)
+    return list(rows)
+
+
+async def _load_review_status_history(
+    db: AsyncSession, assessment_id: uuid.UUID
+) -> list[AssessmentReviewEvent]:
+    """The full approve/disapprove/clear audit trail, oldest first. The last
+    entry is the current status — see ``build_assessment_detail``'s
+    ``review_status`` key."""
+    rows = (
+        await db.execute(
+            select(AssessmentReviewEvent)
+            .where(AssessmentReviewEvent.assessment_id == assessment_id)
+            .order_by(AssessmentReviewEvent.created_at, AssessmentReviewEvent.id)
+        )
+    ).scalars().all()
+    return list(rows)
+
+
+async def _load_review_assignments(
+    db: AsyncSession, assessment_id: uuid.UUID
+) -> list[AssessmentReviewAssignment]:
+    """Everyone currently assigned to review this assessment, oldest first."""
+    rows = (
+        await db.execute(
+            select(AssessmentReviewAssignment)
+            .where(AssessmentReviewAssignment.assessment_id == assessment_id)
+            .order_by(AssessmentReviewAssignment.created_at, AssessmentReviewAssignment.id)
+        )
+    ).scalars().all()
+    return list(rows)
+
+
+async def _load_review_capable_users(db: AsyncSession) -> list[User]:
+    """The assignee roster for the assign form: every allowed staff or
+    reviewer account. Callers must gate this on ``viewer_is_staff`` — see the
+    module docstring's redaction note and ``build_assessment_detail``.
+    """
+    rows = (
+        await db.execute(
+            select(User)
+            .where(
+                or_(User.is_staff, User.is_reviewer),
+                User.access_status == "allowed",
+            )
+            .order_by(User.name, User.id)
+        )
+    ).scalars().all()
+    return list(rows)
 
 
 async def _load_consults(

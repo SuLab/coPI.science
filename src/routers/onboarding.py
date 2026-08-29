@@ -68,6 +68,11 @@ async def onboarding_start(
     if current_user.is_manager:
         return RedirectResponse(url="/manager/pis", status_code=302)
 
+    # A REVIEWER (Task 1) is neither staff nor PI and has no research profile
+    # to review either — same reasoning as the manager bounce above.
+    if current_user.is_reviewer:
+        return RedirectResponse(url="/manager/assessments", status_code=302)
+
     # Get latest job for this user
     result = await db.execute(
         select(Job)
@@ -97,6 +102,7 @@ async def onboarding_start(
         and profile is None
         and current_user.access_status == "allowed"
         and not current_user.is_manager
+        and not current_user.is_reviewer
     ):
         job = Job(
             type="generate_profile",
