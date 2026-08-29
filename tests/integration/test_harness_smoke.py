@@ -38,7 +38,9 @@ async def test_container_is_migrated(engine):
         #      assessment_review_assignments, prompt_change_suggestions
         # 0040 opportunity_assessments.prose_format (write-time stamp gating
         #      markdown rendering of rationale/recommended_next_experiment)
-        assert v == "0040"
+        # 0041 opportunity_assessments.summary_posted_at (durable at-most-once
+        #      record that a #assessments-summary headline posted for this row)
+        assert v == "0041"
 
 
 async def test_writes_are_rolled_back_part1(db_session):

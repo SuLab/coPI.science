@@ -40,6 +40,7 @@ the same failure the drops table exists to end.
 
 import json
 import uuid
+from collections.abc import Callable
 
 import pytest
 from sqlalchemy import select
@@ -157,7 +158,10 @@ async def _delete_run(factory, run_id):
             await cleanup.commit()
 
 
-async def _drive_reply(engine, monkeypatch, raw_response, *, prior_messages):
+async def _drive_reply(
+    engine, monkeypatch, raw_response, *, prior_messages,
+    configure: Callable[[SimulationEngine], None] | None = None,
+):
     """Drive the REAL path: `_reply_to_thread` on a live engine, so the close
     decision reaches the capture gate the way production computes it.
 
@@ -168,11 +172,19 @@ async def _drive_reply(engine, monkeypatch, raw_response, *, prior_messages):
     EXPLORE turn, not the CONCLUDE turn it looks like (CLAUDE.md's warning, and
     the bug 81dbe44 found in both existing harnesses).
 
+    ``configure``, if given, runs on the freshly-built engine BEFORE
+    `_reply_to_thread` — a seam for tests that need engine state (e.g. the
+    assessments-summary channel wiring) in place before the capture path runs
+    INSIDE this call. Calling it only after this function returns would be too
+    late: `_reply_to_thread` (and any headline it posts) has already happened.
+
     Returns ``(sim, agent, thread, client, factory, run_id)``.
     """
     factory = async_sessionmaker(engine, expire_on_commit=False)
     run_id = await _new_run(factory)
     sim, agent = _hub(factory, run_id)
+    if configure is not None:
+        configure(sim)
     thread = ThreadState(
         thread_id="t1", channel="single-cell-omics", other_agent_id="gordy",
         message_count=prior_messages, has_pending_reply=True,
@@ -731,9 +743,14 @@ async def test_assessed_threads_is_rehydrated_after_a_restart(engine):
       `_sidecar_refusal` refuse the interview's legitimate later verdict
       (`if ordinal <= held.ordinal`). Zero costs at most a spurious
       `duplicate_thread_verdict` drop if the same turn is re-captured.
-    * `announced=False` — `True` would suppress the `#assessments-summary`
-      headline for a verdict stored provisionally before the restart, which is a
-      silent D12 breach. `False` merely repeats today's behaviour.
+    * `announced=False` — read from `summary_posted_at is not None` (migration
+      0041), not hardcoded. This assertion holds because `_seed_assessment`
+      never sets `summary_posted_at`, so it stays NULL, which reads as "never
+      announced" — the same value a hardcoded `False` used to produce, but now
+      because the column has no record of a post, not as a guess. A hardcoded
+      `True` would have been the wrong guess either way: it would suppress the
+      `#assessments-summary` headline for a verdict stored provisionally
+      before the restart, a silent D12 breach.
     * `final` is DERIVED, not guessed: a closed thread has a `ThreadDecision`,
       so `final = thread_id in self._closed_thread_ids`. `final=True` as a
       "conservative" default would be the worst of the three — `_sidecar_refusal`

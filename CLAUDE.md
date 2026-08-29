@@ -504,11 +504,11 @@ when a form stops working after a deploy.
 `hybrid_property` over `user_role`, so it still works in both SQL
 (`select(User.is_admin)`) and Python, but **cannot be assigned**. Set the role
 instead. The physical `users.is_admin` column stays in the database, unmapped and
-defaulted. Dropping it is deferred to a separate later migration (`0041`+ — `0031`
-through `0040` are all taken now: `0038` went to
+defaulted. Dropping it is deferred to a separate later migration (`0042`+ — `0031`
+through `0041` are all taken now: `0038` went to
 `specialist_consults`'s `read_state`/`established`/rubric stamp instead, `0039`
-to the reviewer-role/review-tables migration instead, and `0040` went to
-`prose_format`, see the
+to the reviewer-role/review-tables migration instead, `0040` went to
+`prose_format`, and `0041` to `summary_posted_at`, see the
 box below), which **has not been written, let alone applied** — see the design
 doc's §8.
 
@@ -898,6 +898,69 @@ stay comparable. A version bump also requires the outgoing document's entry in
 > written under the markdown contract, so plain rendering is permanently
 > correct for them, not a placeholder.
 
+> **Deploy order for `0041_assessment_summary_posted_at` — migrate BEFORE the
+> new code serves.** `0041` is one additive nullable `TIMESTAMPTZ` column
+> (`opportunity_assessments.summary_posted_at`), so *old code against the new
+> schema* is safe. The reverse is not, but only on the read side: the new code
+> **maps the column**, so against a pre-`0041` database every
+> `select(OpportunityAssessment)` — both assessment list pages, both detail
+> pages — raises `UndefinedColumn`. The write side is genuinely safe:
+> `_persist_assessment`'s INSERT never assigns `summary_posted_at` — that
+> column is written later, by `_mark_summary_posted`, once a headline actually
+> posts — and SQLAlchemy omits an unset, no-server-default nullable attribute
+> from the generated INSERT's column list, so a fresh verdict write SUCCEEDS
+> against a pre-`0041` schema either way. Build, migrate from a one-off
+> container, then start — same ordering as
+> `0028`/`0030`/`0036`/`0037`/`0038`/`0040`:
+>
+>     DC="docker compose -f docker-compose.prod.yml"
+>     $DC build blackbird-app worker
+>     $DC run --rm blackbird-app alembic upgrade head
+>     $DC run --rm blackbird-app alembic current      # must equal `alembic heads`
+>     $DC up -d blackbird-app worker
+>
+> The agent image bakes `src/` in too and must be rebuilt separately
+> (`$DC --profile agent build agent`) — and here that rebuild is the whole
+> point: the announce-on-close path lives in the engine, so an app-only deploy
+> migrates the column and keeps losing headlines.
+>
+> NULL on every pre-`0041` row, deliberately never backfilled: for those rows
+> the only record of whether a headline posted is the Slack channel itself, and
+> a guess would be indistinguishable from a measurement. Use
+> `scripts/backfill_assessment_headlines.py --stamp-only` to record one you
+> have verified by eye, and the same script without `--stamp-only` to post one
+> that is genuinely missing.
+>
+> ⚠️ **Repair the existing rows BEFORE you start any simulation run.**
+> `src/agent/main.py` RESUMES the latest run by default — that is the restart
+> command in "Running the Agent Simulation" above — and the new shutdown sweep
+> announces every verdict of the resumed run whose `summary_posted_at` is NULL.
+> NULL means "not announced", every pre-`0041` row is NULL whatever actually
+> happened in Slack, so **resuming a pre-`0041` run re-announces headlines that
+> are already public**, one unretractable duplicate post each. No code change
+> can close this: the column is the only durable record, and before `0041`
+> there was none.
+>
+> Concretely, for production run `61ccad6d` as measured 2026-08-29: six
+> assessment rows, all `summary_posted_at IS NULL`, **five of whose headlines
+> are already in `#assessments-summary`** and one (rothstein — conditional,
+> 2.85, the run's highest score) genuinely missing. Resuming it as-is posts
+> five duplicates and one correct headline.
+>
+> So, after `alembic upgrade head` and before starting ANY run, for every run
+> that already has headlines in Slack: check the five against the channel by
+> eye and stamp them (`--stamp-only`), post the missing one (no `--stamp-only`),
+> then verify there is nothing left owed —
+>
+>     $DC exec -T postgres psql -U copi -d copi -t -A -c \
+>       "SELECT COUNT(*) FROM opportunity_assessments
+>          WHERE simulation_run_id = '<run>' AND summary_posted_at IS NULL;"
+>
+> — which must read `0` before that run is resumed. Run the script without
+> `--apply` first: it previews every post and stamp it would make. A run with
+> NO headlines in Slack needs none of this; the sweep announcing its rows is
+> the fix working.
+
 > ### ⚠️ The assessment archive: never purge, never delete a run row.
 >
 > `opportunity_assessments` rows are the cross-version comparison corpus —
@@ -985,9 +1048,18 @@ later turn looked like a FIRST verdict and landed a second row, and a lab bot
 ⏸️-closing a thread that already held one produced a spurious
 `closed_before_verdict` drop. Rows with a NULL `thread_id` — every row written
 before `0036` — are skipped rather than guessed at, and the restored record uses
-`ordinal=0`, `announced=False` and a `final` DERIVED from `_closed_thread_ids`;
-each of those three is a deliberate choice about which way to fail, documented at
-the function.
+`ordinal=0`, a `final` DERIVED from `_closed_thread_ids`, and an `announced`
+READ from `summary_posted_at is not None` (migration `0041`) rather than
+defaulted. `ordinal` and `final` are still deliberate choices about which way to
+fail if the answer is unknown; `announced` no longer needs one, because the
+column now carries the real answer — it used to be hardcoded `False`, which
+was the safer of two guesses (a hardcoded `True` would have suppressed the
+`#assessments-summary` headline for a verdict stored provisionally before the
+restart, and a headline cannot be retracted), but a guess either way traded one
+breach for another: reading the column instead means a verdict whose headline
+was already public does not get a second one. A pre-`0041` row reads NULL and
+therefore `False`, which is exactly the old hardcoded behaviour. All three
+fields are documented at the function.
 
 When writing a
 test that drives a concluding reply, seed the thread's history in the
@@ -1084,6 +1156,19 @@ and since v3.0.0 / 2026-08-27 the second key is `credible_science`, not
   headline is skipped outright (the hub's transport is a `NullTransport`, which has no
   async post/permalink methods at all) — the assessment row is still written, so nothing is
   lost but the Slack copy.
+
+> As of 2026-08-29 that is no longer the ONLY path. A verdict whose interview
+> ends without a terminal reply — the `max_thread_messages` timeout, an
+> abandoned thread, or the run's own shutdown — is announced by
+> `_announce_owed_headline`, queued by `_close_thread` and drained by
+> `_drain_and_flush` / `stop()`. Announcement is now a property of the
+> INTERVIEW ENDING, not of one particular reply, and `at-most-once` is enforced
+> by the `opportunity_assessments.summary_posted_at` column rather than by
+> in-memory state alone. Each rescue logs one **WARNING** naming the trigger —
+> a run with several means the hub is being locked out of its own CONCLUDE
+> ordinal (RCA §2.2), which this path makes non-destructive but does not fix.
+> See `docs/audits/2026-08-29-lost-assessment-headlines/README.md`.
+
 - **`weighted_score` is computed**, never taken from the model:
   `src/services/blackbird_rubric.py`. `recommendation` (which may be
   `route-to-incubation`) comes straight from the model's verdict and the computed `band`

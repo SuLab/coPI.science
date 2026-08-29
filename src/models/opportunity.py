@@ -88,6 +88,17 @@ class OpportunityAssessment(Base):
     # contract and are safe to render through the sanitized data-markdown
     # pipeline.
     prose_format: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    # The durable half of the at-most-once headline guarantee (2026-08-29).
+    # Set when a `#assessments-summary` headline for THIS row reaches Slack.
+    # NULL is "not announced" and is never backfilled: for a pre-0041 row the
+    # answer lives only in the Slack channel, and a guess here would be
+    # indistinguishable from a measurement. `_rehydrate_assessed_threads`
+    # reads it so a restart cannot re-announce a verdict already public, and
+    # `_announce_owed_headline` reads it so the close path and the shutdown
+    # sweep cannot both post the same one.
+    summary_posted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     # Sidecar item 10 (rubric v2.1.0): the single experiment Blackbird should
     # fund next — the line staff act on, so it is a first-class column rather
     # than a raw_verdict spelunk. NULL for every row written before 0037 (never

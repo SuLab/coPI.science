@@ -57,6 +57,7 @@ from src.models import (
     ThreadDecision,
 )
 from src.models.agent_activity import VISIBILITY_COLLAB_PRIVATE, VISIBILITY_PUBLIC
+from src.services.assessment_headline import render_assessment_headline
 from src.services.blackbird_rubric import RUBRIC_CONTENT_HASH, RUBRIC_VERSION
 from src.services.blackbird_rubric import band as rubric_band
 from src.services.blackbird_rubric import weighted_score as rubric_weighted_score
@@ -287,6 +288,13 @@ RUN_STATS_UPDATE_INTERVAL = 30.0
 # sized for ONE 16k call, so an unbounded shutdown drain can outlive it and
 # get SIGKILLed mid-flush. Anything beyond this bound is dropped LOUDLY.
 MEMORY_EVENTS_MAX_AT_SHUTDOWN = 10
+
+# Headlines to post during `stop()`. Each is up to two Slack round-trips and the
+# container's stop grace period is finite, so the sweep is bounded like the
+# memory drain beside it. Higher than that bound because a headline is cheap
+# next to an LLM call, and because a whole run's worth of un-announced verdicts
+# arriving at once is exactly the case this exists for.
+HEADLINES_MAX_AT_SHUTDOWN = 25
 
 # Closed-thread summaries kept in memory per agent pair, for the Phase-5
 # dedup context. The DB's thread_decisions table remains the full record;
@@ -584,6 +592,17 @@ class SimulationEngine:
         # visibility, channel_id); agent_id (not the Agent object) because a
         # roster sync can rebuild the object between enqueue and drain.
         self._pending_memory_events: list[tuple[str, str, str, str | None]] = []
+        # Interviews that ENDED holding a verdict nobody announced. TWO things
+        # put a thread here and they are not the same failure: the interview
+        # ended without a concluding reply at all, or a concluding reply landed
+        # and its own headline post FAILED (`_capture_hub_assessment` leaves
+        # `announced` False for exactly that). Queued rather than posted at the
+        # close, because `_close_thread` runs holding the thread lock, both
+        # agent locks and a reply-lane semaphore slot, and a headline is two
+        # Slack round-trips — the same reason the memory events beside this are
+        # queued rather than synthesised there (audit finding 1). Drained by
+        # `_drain_and_flush` and by `stop()`.
+        self._pending_headlines: list[str] = []
         # Guards against two drains running at once (main loop vs stop(), or
         # a future second call site): concurrent drains would pop same-agent
         # events into overlapping LLM calls — exactly the lost update this
@@ -1124,6 +1143,18 @@ class SimulationEngine:
         if self._pending_assessments:
             await self._flush_pending_assessments()
 
+        # AFTER the flushes, never before: a verdict that failed its first write
+        # is on `_pending_assessments`, and `_announce_owed_headline` reads the
+        # row back from the database. Draining first would find nothing and
+        # silently skip the interview this whole path exists for.
+        #
+        # Deliberately NOT gated on `self._running`, unlike the memory drain
+        # above: a Slack post is not an LLM call, the queue is short, and the
+        # tick where `_running` has just been cleared is exactly when a closing
+        # interview most needs it.
+        if self._pending_headlines:
+            await self._drain_pending_headlines()
+
     def request_stop(self) -> None:
         """Ask the main loop to exit — safe to call from a signal handler.
 
@@ -1197,6 +1228,126 @@ class SimulationEngine:
         await self._flush_persisted(force_stats=True, final=True)
         await self._flush_llm_logs(final=True)
         await self._flush_pending_assessments(final=True)
+
+        # Every interview still holding an unannounced verdict is over: the run
+        # is ending, so no later turn will ever conclude or supersede it. This
+        # is the last chance to honour D12, and it must run AFTER the assessment
+        # flush above — `_announce_owed_headline` reads the row back from the
+        # database, so a verdict still sitting on `_pending_assessments` would
+        # be invisible to it. No drain lock is needed here: `start()` awaits
+        # `_run_main_loop()` directly in the same coroutine and `stop()` is only
+        # awaited (from src/agent/main.py's finally-block) after `start()` has
+        # returned, so this sweep can never run concurrently with the main
+        # loop's own `_drain_and_flush`. Wrapped like the memory drain above:
+        # anything escaping here must not skip the "Simulation stopping..."
+        # line below, which CLAUDE.md documents as the operator's proof the
+        # buffers reached disk.
+        try:
+            # Seed from a DB query for exactly which interviews still owe a
+            # headline, rather than from `_assessed_threads` alone.
+            # `summary_posted_at IS NULL` is the exact, durable definition of
+            # "still owed" — the same predicate `_announce_owed_headline`
+            # itself reads before posting, so this seed and that guard can
+            # never disagree. The in-memory map can disagree with both, in
+            # either direction, and each direction costs something real:
+            #
+            # * announced=False over a row that IS stamped (a repair-script
+            #   `--stamp-only` pass against a live run, say) queues an
+            #   already-public headline, and on a resume with 25+ prior
+            #   verdicts the rehydrated entries sit at the FRONT of the
+            #   insertion-ordered dict — so a memory-derived seed can spend the
+            #   whole `HEADLINES_MAX_AT_SHUTDOWN` budget on no-op reads and then
+            #   report this session's genuinely owed verdicts as LOST;
+            # * a thread with no entry at all is invisible to a memory walk,
+            #   which is exactly the interview-ending paths that never call
+            #   `_close_thread` — the case this sweep exists for.
+            #
+            # `_rehydrate_assessed_threads` DOES now derive `announced` from
+            # `summary_posted_at is not None` (it hardcoded False until this
+            # branch), which narrows the first bullet but does not close it:
+            # rows written before migration `0041` read NULL whether or not a
+            # headline ever posted, so a resumed pre-`0041` run rehydrates them
+            # all as owed and this query returns them all too. No seed can fix
+            # that — the column is the only record there is — which is why
+            # CLAUDE.md's `0041` box makes running the repair procedure a
+            # precondition for resuming such a run.
+            owed_thread_ids: list[str] | None = None
+            if self.session_factory and self.simulation_run_id:
+                from sqlalchemy import select as sa_select
+                try:
+                    async with self.session_factory() as db:
+                        owed_thread_ids = list((await db.execute(
+                            sa_select(OpportunityAssessment.thread_id)
+                            .where(
+                                OpportunityAssessment.simulation_run_id
+                                == self.simulation_run_id,
+                                OpportunityAssessment.thread_id.is_not(None),
+                                OpportunityAssessment.summary_posted_at.is_(None),
+                            )
+                            .distinct()
+                        )).scalars().all())
+                except Exception:
+                    logger.exception(
+                        "Could not read which interviews owe a "
+                        "#assessments-summary headline at shutdown; falling "
+                        "back to the in-memory _assessed_threads map, which "
+                        "cannot tell a genuinely owed verdict from a "
+                        "rehydrated one on a resumed run"
+                    )
+                    owed_thread_ids = None
+            if owed_thread_ids is None:
+                owed_thread_ids = [
+                    thread_id for thread_id, held in self._assessed_threads.items()
+                    if not held.announced
+                ]
+            for thread_id in owed_thread_ids:
+                held = self._assessed_threads.get(thread_id)
+                if held is not None and held.announced:
+                    continue
+                if thread_id not in self._pending_headlines:
+                    self._pending_headlines.append(thread_id)
+            if self._pending_headlines:
+                logger.info(
+                    "Announcing %d interview verdict(s) that ended holding an "
+                    "un-announced verdict — either the interview ended "
+                    "without a concluding reply, or an earlier headline post "
+                    "for it failed", len(self._pending_headlines),
+                )
+            unposted = await self._drain_pending_headlines(
+                limit=HEADLINES_MAX_AT_SHUTDOWN, trigger="shutdown",
+            )
+            over_budget = list(self._pending_headlines)
+            if over_budget or unposted:
+                # Say LOST with the count and the ids, the same way the buffer
+                # flushes do: the assessment rows are safe, so this is
+                # recoverable, but only by someone who knows it happened.
+                #
+                # BOTH causes are counted. This used to fire only on the
+                # `HEADLINES_MAX_AT_SHUTDOWN` overflow — but a thread whose post
+                # FAILS is popped and never re-queued, so a Slack outage at
+                # shutdown emptied the queue, left the count at zero, and
+                # produced no aggregate line and no pointer to the repair script
+                # at all: only per-thread logs, for the one failure mode most
+                # likely to hit every thread at once.
+                logger.error(
+                    "LOST %d #assessments-summary headline(s) at shutdown "
+                    "(%d attempted and not posted, %d never attempted past the "
+                    "%d-headline shutdown bound; threads still queued: %s). The "
+                    "assessment rows are safe — re-post with: python "
+                    "scripts/backfill_assessment_headlines.py --run %s --apply",
+                    unposted + len(over_budget),
+                    unposted,
+                    len(over_budget),
+                    HEADLINES_MAX_AT_SHUTDOWN,
+                    ", ".join(over_budget) or "none",
+                    self.simulation_run_id,
+                )
+        except Exception:
+            logger.exception(
+                "Shutdown headline sweep failed; any un-announced verdict for "
+                "this run can still be repaired with "
+                "scripts/backfill_assessment_headlines.py"
+            )
 
         # The clear-rate FLOOR was retired 2026-08-28. It asserted that a low
         # `clear` share meant the panel could not discriminate; a 48-consult
@@ -2574,6 +2725,19 @@ class SimulationEngine:
                     (other_agent.agent_id, other_event, VISIBILITY_PUBLIC, None)
                 )
 
+            # An interview is over. If it still holds a verdict nobody
+            # announced, that verdict has no later turn coming and this is the
+            # last moment anything knows the interview ended — before 2026-08-29
+            # nothing looked, and production lost two headlines (slusher,
+            # rothstein) exactly here. QUEUE only: see `_pending_headlines`.
+            held = self._assessed_threads.get(thread.thread_id)
+            if (
+                held is not None
+                and not held.announced
+                and thread.thread_id not in self._pending_headlines
+            ):
+                self._pending_headlines.append(thread.thread_id)
+
     async def _evict_dead_thread(self, thread_id: str) -> None:
         """Remove a thread_id from every agent's in-memory state.
 
@@ -3324,9 +3488,26 @@ class SimulationEngine:
                     # says a verdict that is not held never posts; the same logic
                     # says a verdict that is not final does not post YET.
                     if announce:
-                        await self._post_assessment_summary(
+                        if await self._post_assessment_summary(
                             agent, thread, verdict, slack_ts,
-                        )
+                        ):
+                            await self._mark_summary_posted(thread.thread_id)
+                        else:
+                            # Nothing reached Slack. Leave `summary_posted_at`
+                            # NULL so the close path, the shutdown sweep and the
+                            # repair script can all still find this verdict —
+                            # `_HeldVerdict.announced` alone would hide it from
+                            # every one of them.
+                            self._assessed_threads[thread.thread_id] = (
+                                self._assessed_threads[thread.thread_id]
+                                ._replace(announced=False)
+                            )
+                            logger.warning(
+                                "[%s] The #assessments-summary headline for %s "
+                                "did not post; the verdict is stored and will be "
+                                "retried when the interview ends",
+                                agent.agent_id, thread.other_agent_id or "?",
+                            )
                     elif not terminal:
                         logger.info(
                             "[%s] Provisional verdict stored for %s (message "
@@ -3343,6 +3524,14 @@ class SimulationEngine:
                             replacement_ordinal=thread.message_count + 1,
                             replacement_id=replacement_id,
                         )
+                        # `announced` carries forward in memory (above) so the
+                        # channel keeps its first word; the COLUMN has to agree
+                        # or the next restart reads NULL off the replacement and
+                        # posts a second headline for the same interview.
+                        # `_mark_summary_posted` keys on the thread, so it lands
+                        # on whichever row now holds it.
+                        if already_announced:
+                            await self._mark_summary_posted(thread.thread_id)
             elif _ASSESSMENT_UNCLOSED_RE.search(raw_response or ""):
                 # An <assessment_json> opening tag is present but
                 # _extract_assessment_json found no usable verdict in it —
@@ -3381,17 +3570,21 @@ class SimulationEngine:
 
     async def _post_assessment_summary(
         self, agent: Agent, thread: ThreadState, verdict: dict, slack_ts: str | None,
-    ) -> None:
+    ) -> bool:
         """Post a headline-only summary of a concluded interview to the
-        assessments-summary channel (design D12/D13/D14/D16). Called from
-        _capture_hub_assessment right after a verdict is HELD — covers both
-        the immediate fail (closes_thread) path and the pass path
+        assessments-summary channel (design D12/D13/D14/D16). Returns True when
+        a headline actually reached Slack — the caller stamps
+        `opportunity_assessments.summary_posted_at` on that answer, so a False
+        here must mean nothing was posted. That is why the transport's RETURN
+        VALUE is checked and not just its exceptions: `post_message` swallows a
+        refusal and answers `None` rather than raising (see the check below).
+        Called from _capture_hub_assessment right after a verdict is HELD —
+        covers both the immediate fail (closes_thread) path and the pass path
         symmetrically, since both funnel through that one call site.
 
-        Deliberately duplicates two PURE function calls
-        (rubric_weighted_score/rubric_band) rather than reading them back off
-        the persisted row. The weighting LOGIC itself is not duplicated, only
-        these two calls.
+        Rendering itself is delegated to `render_assessment_headline`
+        (`src/services/assessment_headline.py`) so the engine and
+        `scripts/backfill_assessment_headlines.py` cannot render differently.
 
         Never raises: a Slack failure here must not affect anything the
         caller already did (the assessment row's persistence, or the reply
@@ -3433,40 +3626,11 @@ class SimulationEngine:
                     agent.agent_id, thread.thread_id, channel_id,
                     "missing" if not client else "not connected",
                 )
-                return
+                return False
 
             subject_agent_id = thread.other_agent_id
             pi = self.agents.get(subject_agent_id) if subject_agent_id else None
             pi_label = pi.pi_name if pi else (subject_agent_id or "Unknown lab")
-
-            scores = verdict.get("scores") if isinstance(verdict.get("scores"), dict) else {}
-            if scores:
-                score = rubric_weighted_score(scores)
-                band = rubric_band(score)
-                score_part = f" (band: {band}, score: {score:.1f})"
-            else:
-                score_part = ""
-
-            # Both fields come straight from the model and land in a PUBLIC
-            # channel, so they get the same treatment `_persist_assessment`
-            # gives them before they reach a bounded column: `_bounded_str`
-            # drops a non-string (a model that answers `company_or_project`
-            # with an object would otherwise have a Python `repr` posted to
-            # Slack) and clips an over-long one, which is what keeps this a
-            # HEADLINE (design D12) instead of an unbounded wall of model text
-            # that `split_for_slack` would then cut into several messages.
-            # `recommendation`'s 30 is its column's own width, so the post and
-            # the stored row can never disagree about it; `company_or_project`
-            # is a `Text` column with no width, so its 120 is this post's own
-            # display bound — the full title is always in the row and on the
-            # `/admin/assessments` detail page the permalink's reader can reach.
-            project = _bounded_str(verdict.get("company_or_project"), 120) or "(untitled)"
-            recommendation = _bounded_str(verdict.get("recommendation"), 30) or "unknown"
-            # Display form only — the stored verdict and every downstream
-            # engine predicate keep writing "pass"; this headline is the one
-            # place a human reads it, so it reads as "decline" (rubric
-            # banding.pass_label).
-            recommendation_display = "decline" if recommendation == "pass" else recommendation
 
             source_channel_id = self._channel_id_map.get(thread.channel)
             permalink = None
@@ -3489,21 +3653,275 @@ class SimulationEngine:
                         "verdict; posting the headline without one",
                         agent.agent_id, thread.thread_id, exc_info=True,
                     )
-            link_part = f" — <{permalink}|View interview>" if permalink else " (link unavailable)"
 
-            text = (
-                f":mag: {pi_label} — {project} → *{recommendation_display}*{score_part}{link_part}"
+            text = render_assessment_headline(
+                pi_label=pi_label,
+                project=verdict.get("company_or_project"),
+                recommendation=verdict.get("recommendation"),
+                scores=verdict.get("scores"),
+                permalink=permalink,
             )
-            await client.apost_message(ASSESSMENTS_SUMMARY_CHANNEL, text)
+            posted = await client.apost_message(ASSESSMENTS_SUMMARY_CHANNEL, text)
+            if not posted:
+                # A REFUSED post is not an exception here. `post_message` ends
+                # `if not posted: return None` (src/agent/slack_client.py), and
+                # `apost_message` is a thin `to_thread` wrapper that forwards
+                # it — so `not_in_channel` after a failed autojoin, an archived
+                # channel, `invalid_auth` and a chunk failure ALL arrive as a
+                # falsy return and nothing else. Discarding that return made
+                # this method answer True for a headline that never existed,
+                # and the caller then stamped `summary_posted_at` on it —
+                # which hides the verdict from the close path, the shutdown
+                # sweep AND `scripts/backfill_assessment_headlines.py` (whose
+                # `select_rows_needing_headline` skips an already-stamped row),
+                # turning the column from "it posted" into "we tried". The
+                # script has always honoured this contract (`if not result:` ->
+                # no stamp); the engine must agree with it about the same fact.
+                #
+                # ERROR, not the caller's WARNING: that one says a retry is
+                # coming, this one says Slack refused a public post outright.
+                logger.error(
+                    "[%s] Slack refused the #assessments-summary headline for "
+                    "thread %s (channel %s / %s) — nothing was posted, so "
+                    "`summary_posted_at` stays NULL and the verdict remains "
+                    "discoverable by the shutdown sweep and by "
+                    "scripts/backfill_assessment_headlines.py",
+                    agent.agent_id, thread.thread_id,
+                    ASSESSMENTS_SUMMARY_CHANNEL, channel_id,
+                )
+                return False
             logger.info(
                 "[%s] Posted #assessments-summary headline for %s (%s)",
-                agent.agent_id, subject_agent_id or "?", recommendation,
+                agent.agent_id, subject_agent_id or "?",
+                verdict.get("recommendation"),
             )
+            return True
         except Exception:
             logger.exception(
                 "[%s] Failed to post assessments-summary headline for thread %s",
                 agent.agent_id, thread.thread_id,
             )
+            return False
+
+    async def _mark_summary_posted(self, thread_id: str | None) -> None:
+        """Record durably that this interview's headline is in Slack.
+
+        Keyed by THREAD, not by row id, for two reasons that both bite in
+        production. `_persist_assessment` returns `None` for a verdict that
+        only reached `_pending_assessments`, so an id is not always available;
+        and `_retire_superseded_verdict` DELETES the row a headline described
+        and replaces it, so an id captured at post time can name a row that no
+        longer exists. The thread is the stable identity of an interview, and
+        the interview is what gets announced once.
+
+        Also patches any copy still queued in `_pending_assessments`, so a row
+        that has not landed yet carries the stamp when it does — otherwise the
+        flush writes NULL over a headline that is already public.
+
+        Best-effort and never raises: the headline is already in Slack by the
+        time this runs. A failure here costs at-most-once across a restart, not
+        the post.
+        """
+        if not thread_id:
+            return
+        now = datetime.now(UTC)
+        for queued in self._pending_assessments:
+            if queued.get("thread_id") == thread_id:
+                queued["summary_posted_at"] = now
+        if not self.session_factory or not self.simulation_run_id:
+            return
+        from sqlalchemy import update as sa_update
+
+        try:
+            async with self.session_factory() as db:
+                await db.execute(
+                    sa_update(OpportunityAssessment)
+                    .where(
+                        OpportunityAssessment.simulation_run_id
+                        == self.simulation_run_id,
+                        OpportunityAssessment.thread_id == thread_id,
+                        OpportunityAssessment.summary_posted_at.is_(None),
+                    )
+                    .values(summary_posted_at=now)
+                )
+                await db.commit()
+        except Exception as exc:  # noqa: BLE001 — the headline already posted
+            logger.warning(
+                "Posted the #assessments-summary headline for thread %s but "
+                "could not record it on the row: %s. A restart of this run may "
+                "post a second headline for the same interview.",
+                thread_id, exc,
+            )
+
+    async def _announce_owed_headline(self, thread_id: str, *, trigger: str) -> bool:
+        """Post the `#assessments-summary` headline an ENDED interview still owes.
+
+        The completeness half of the invariant in
+        docs/audits/2026-08-29-lost-assessment-headlines/README.md §5:
+        announcement used to be a side effect of one particular REPLY (terminal
+        = ⏸️, or the CONCLUDE ordinal), and an interview that ended any other
+        way — the `max_thread_messages` timeout, abandonment, the run's own
+        shutdown — dropped its verdict silently.
+
+        TWO different failures arrive here, and this method cannot tell them
+        apart — so it deliberately does not try, and neither should its log:
+
+        * the interview ended without a concluding reply at all (the
+          message-count parity break of the RCA's §2.2, which this path makes
+          non-destructive but does not fix);
+        * a concluding reply DID land and was fine, but its own headline post
+          failed — `_capture_hub_assessment` records that by leaving
+          `announced` False and `summary_posted_at` NULL, precisely so this
+          path can pick the verdict up.
+
+        Everything is resolved from the STORED ROW, never from live state, and
+        both halves of that matter:
+
+        * the agent that closed the thread is often the PI, not the hub
+          (production run 61ccad6d logged the close under `[rothstein]`), so
+          `row.agent_id` is the only correct source for whose client posts;
+        * a closed thread has already been popped from every agent's
+          `active_threads`, and after a restart there is no `ThreadState` at
+          all — but `channel_name`, `subject_agent_id` and `slack_ts` are all
+          columns, so a faithful one can be rebuilt.
+
+        `summary_posted_at IS NULL` in the predicate is the at-most-once guard,
+        and it is deliberately in the SQL rather than in Python: the close path
+        and the shutdown sweep can both name the same thread, and a headline is
+        a public post that cannot be retracted.
+
+        Returns True when a headline actually reached Slack. Never raises.
+        """
+        held = self._assessed_threads.get(thread_id)
+        if held is not None and held.announced:
+            return False
+        if not self.session_factory or not self.simulation_run_id:
+            return False
+        from sqlalchemy import select as sa_select
+
+        try:
+            async with self.session_factory() as db:
+                row = (await db.execute(
+                    sa_select(OpportunityAssessment)
+                    .where(
+                        OpportunityAssessment.simulation_run_id
+                        == self.simulation_run_id,
+                        OpportunityAssessment.thread_id == thread_id,
+                        OpportunityAssessment.summary_posted_at.is_(None),
+                    )
+                    .order_by(OpportunityAssessment.created_at.desc())
+                    .limit(1)
+                )).scalars().first()
+        except Exception as exc:  # noqa: BLE001 — never cost the caller
+            logger.warning(
+                "Could not read the verdict owed a headline for thread %s: %s",
+                thread_id, exc,
+            )
+            return False
+        if row is None:
+            # Not silent. `_drain_pending_headlines` has ALREADY popped this
+            # thread id, so a `return False` here is a queue entry that vanishes
+            # without a trace — the exact shape of loss this whole path exists
+            # to end, and the last instance of it left in the method.
+            #
+            # The commonest cause is benign-but-worth-seeing: the verdict's
+            # first DB write failed and the row is still on
+            # `_pending_assessments`, invisible to this SELECT. That one still
+            # gets another chance — `stop()` re-derives the queue from
+            # `_assessed_threads` AFTER the final `_flush_pending_assessments`.
+            # The rest (a row a cleanup removed, a thread that never got one) are
+            # for `scripts/backfill_assessment_headlines.py`.
+            logger.warning(
+                "No un-announced verdict row found for thread %s (trigger=%s), "
+                "so no #assessments-summary headline was posted for it. If its "
+                "first write failed the row may still be on the retry queue, in "
+                "which case the shutdown sweep will re-derive this thread and "
+                "try again.",
+                thread_id, trigger,
+            )
+            return False
+
+        agent = self.agents.get(row.agent_id)
+        if agent is None:
+            logger.warning(
+                "Interview %s ended owing a #assessments-summary headline, but "
+                "its author %r is not on this roster — re-post with "
+                "scripts/backfill_assessment_headlines.py --run %s --apply",
+                thread_id, row.agent_id, self.simulation_run_id,
+            )
+            return False
+
+        thread = ThreadState(
+            thread_id=thread_id,
+            channel=row.channel_name,
+            other_agent_id=row.subject_agent_id or "",
+        )
+        verdict = {
+            "company_or_project": row.company_or_project,
+            "recommendation": row.recommendation,
+            "scores": row.scores or {},
+        }
+        posted = await self._post_assessment_summary(
+            agent, thread, verdict, row.slack_ts,
+        )
+        if not posted:
+            return False
+
+        await self._mark_summary_posted(thread_id)
+        if held is not None:
+            self._assessed_threads[thread_id] = held._replace(announced=True)
+        # WARNING, not INFO: every rescue means something upstream failed, and
+        # both causes are worth an operator's attention. But it reports what it
+        # OBSERVED, not a diagnosis. It used to assert the parity break as the
+        # single cause ("the hub was locked out of its own CONCLUDE turn"),
+        # which is simply false for the other half — a Slack outage that fails
+        # the in-turn post lands here too, and an operator reading that line
+        # would go hunting a message-count bug that never happened. Naming both
+        # costs one clause; naming the wrong one costs an afternoon.
+        logger.warning(
+            "[%s] RESCUED the #assessments-summary headline for %s (thread %s, "
+            "trigger=%s): the interview ended holding a verdict that had never "
+            "been announced — either it ended without a concluding reply, or an "
+            "earlier headline post for it failed. Announced on the way out. See "
+            "docs/audits/2026-08-29-lost-assessment-headlines/.",
+            row.agent_id, row.subject_agent_id or "?", thread_id, trigger,
+        )
+        return True
+
+    async def _drain_pending_headlines(
+        self, *, limit: int | None = None, trigger: str = "thread-close",
+    ) -> int:
+        """Post the headlines `_close_thread` and `stop()` queued.
+
+        Pops BEFORE posting, so a thread that fails cannot spin the queue — the
+        durable retry is `scripts/backfill_assessment_headlines.py`, not this
+        loop, and `summary_posted_at` makes a re-queue harmless anyway. Never
+        raises: this runs from the main loop's `finally` and from `stop()`.
+
+        Returns how many drained thread ids did NOT result in a post. Popping
+        without re-queueing means a Slack outage at shutdown empties the queue
+        completely, so `stop()`'s LOST tally — which is the only line carrying
+        the repair command — would read ZERO for the very failure it exists to
+        report if it counted the leftover queue alone. Every falsy answer is
+        counted, including `_announce_owed_headline`'s "no un-announced verdict
+        row found": that thread was queued, was drained, and got no headline,
+        which is exactly what an operator needs told. Each one has already
+        logged its own specific cause; this count is the aggregate.
+        """
+        drained = 0
+        unposted = 0
+        while self._pending_headlines and (limit is None or drained < limit):
+            thread_id = self._pending_headlines.pop(0)
+            drained += 1
+            try:
+                if not await self._announce_owed_headline(thread_id, trigger=trigger):
+                    unposted += 1
+            except Exception:
+                unposted += 1
+                logger.exception(
+                    "Failed to announce the owed headline for thread %s", thread_id,
+                )
+        return unposted
 
     def _warn_if_hub_conclude_missing_assessment(
         self, agent: Agent, thread: ThreadState, response_text: str, raw_response: str,
@@ -4279,10 +4697,16 @@ class SimulationEngine:
           refuse the interview's legitimate LATER verdict
           (``if ordinal <= held.ordinal``); zero costs at most a spurious
           ``duplicate_thread_verdict`` drop if the very same turn is re-captured.
-        * ``announced=False``. ``True`` would suppress the
-          ``#assessments-summary`` headline for a verdict stored provisionally
-          before the restart — a silent D12 breach. ``False`` merely preserves
-          the behaviour of a process that never knew about the row at all.
+        * ``announced`` is READ, not defaulted, from
+          ``summary_posted_at`` (migration 0041). It used to be hardcoded
+          ``False`` with the reasoning that ``True`` "would suppress the
+          headline for a verdict stored provisionally before the restart — a
+          silent D12 breach". That was the right call against a schema with no
+          answer in it, but it traded one breach for another: a verdict whose
+          headline was ALREADY public got a second one, and a headline cannot
+          be retracted. The column answers the question directly, so neither
+          trade is necessary. A pre-0041 row reads NULL and therefore False,
+          which is exactly the old behaviour.
         * ``final`` is DERIVED, not defaulted: closing a thread writes a
           ``ThreadDecision``, so ``thread_id in self._closed_thread_ids`` is the
           real answer. This must therefore run AFTER ``_rebuild_agent_state``
@@ -4310,6 +4734,7 @@ class SimulationEngine:
                     sa_select(
                         OpportunityAssessment.thread_id,
                         OpportunityAssessment.slack_ts,
+                        OpportunityAssessment.summary_posted_at,
                     )
                     .where(
                         OpportunityAssessment.simulation_run_id == self.simulation_run_id,
@@ -4325,12 +4750,12 @@ class SimulationEngine:
                 exc,
             )
             return
-        for thread_id, slack_ts in rows:
+        for thread_id, slack_ts, summary_posted_at in rows:
             self._assessed_threads[thread_id] = _HeldVerdict(
                 ordinal=0,
                 final=thread_id in self._closed_thread_ids,
                 slack_ts=slack_ts,
-                announced=False,
+                announced=summary_posted_at is not None,
             )
         if rows:
             # `len(rows)` — the number of stored verdicts read — NOT
