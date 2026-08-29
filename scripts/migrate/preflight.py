@@ -71,7 +71,7 @@ EXIT_OK = 0
 EXIT_BLOCKED = 1
 EXIT_WARN = 2
 
-DEFAULT_TARGET = "0038"
+DEFAULT_TARGET = "0039"
 #: Revisions this migration path has been exercised from.
 #:
 #: 0020 and 0021 are here because origin/main's own alembic head is 0021 (PR19). A
@@ -98,8 +98,10 @@ DEFAULT_TARGET = "0038"
 #: it is the starting point for 0036. 0036 joins for the same reason the comment above
 #: predicts every time DEFAULT_TARGET moves: with the target at 0037, a database stamped
 #: 0036 must be a supported start, not a BLOCK. 0037 joins now for the identical reason:
-#: production is stamped 0037, so with DEFAULT_TARGET moved to 0038 (this migration),
-#: 0037 is the starting point and must be a supported start, not a BLOCK.
+#: production is stamped 0037, so with DEFAULT_TARGET moved to 0038, 0037 is the starting
+#: point and must be a supported start, not a BLOCK. 0038 joins now for the identical
+#: reason: production is stamped 0038, so with DEFAULT_TARGET moved to 0039 (this
+#: migration), 0038 is the starting point and must be a supported start, not a BLOCK.
 #:
 #: Starting at 0020/0021 is strictly safer than starting at 0018: uq_agent_messages_run_ts
 #: already exists, so duplicates cannot be present and there is no 0019 index build to
@@ -115,7 +117,7 @@ DEFAULT_TARGET = "0038"
 #: tables, no backfill).
 SUPPORTED_START_REVISIONS = (
     "0018", "0019", "0020", "0021", "0023", "0024", "0025", "0026", "0027", "0028", "0029",
-    "0030", "0031", "0032", "0033", "0034", "0035", "0036", "0037",
+    "0030", "0031", "0032", "0033", "0034", "0035", "0036", "0037", "0038",
 )
 
 #: Start revisions at which migration 0019 has already run, so the expensive
@@ -342,11 +344,28 @@ PLANNED_OBJECTS: tuple[PlannedObject, ...] = (
     PlannedObject("0038", "column", "established", "specialist_consults"),
     PlannedObject("0038", "column", "rubric_version", "specialist_consults"),
     PlannedObject("0038", "column", "rubric_content_hash", "specialist_consults"),
+    # 0039_reviewer_role_and_review_tables. The four CHECK constraints (score,
+    # feedback_mode, action, status) and the recreated ck_users_user_role are
+    # deliberately NOT listed: the drift test's regex set does not extract
+    # `create_check_constraint`/inline `sa.CheckConstraint` names (verified at
+    # tests/unit/test_migration_checks.py's
+    # test_planned_objects_matches_what_the_migration_files_actually_create),
+    # and ck_users_user_role is dropped-then-recreated under the SAME name, so
+    # listing it here would BLOCK every correctly-migrated database on its own
+    # pre-existence — the same reasoning as the omitted
+    # private_channel_members_user_id_fkey note under 0036.
+    PlannedObject("0039", "table", "assessment_reviews"),
+    PlannedObject("0039", "table", "assessment_review_events"),
+    PlannedObject("0039", "table", "assessment_review_assignments"),
+    PlannedObject("0039", "table", "prompt_change_suggestions"),
+    PlannedObject(
+        "0039", "constraint", "uq_review_assignment_once", "assessment_review_assignments",
+    ),
 )
 
 REVISION_ORDER = (
     "0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027", "0028",
-    "0029", "0030", "0031", "0032", "0033", "0034", "0035", "0036", "0037", "0038",
+    "0029", "0030", "0031", "0032", "0033", "0034", "0035", "0036", "0037", "0038", "0039",
 )
 
 

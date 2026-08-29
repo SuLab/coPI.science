@@ -17,7 +17,11 @@ class Job(Base):
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
     type: Mapped[str] = mapped_column(
-        Enum("generate_profile", "monthly_refresh", name="job_type_enum"), nullable=False
+        Enum(
+            "generate_profile", "monthly_refresh", "review_feedback_analysis",
+            name="job_type_enum",
+        ),
+        nullable=False,
     )
     status: Mapped[str] = mapped_column(
         Enum("pending", "processing", "completed", "failed", "dead", name="job_status_enum"),
