@@ -198,6 +198,24 @@ brake for the `scout_hub`, which sits on an unpaced lane
 uniform cumulative cap long before any spoke does. See
 `docs/specs/2026-08-06-hub-budget-scheduler-design.md`.
 
+**Fresh runs announce themselves in Slack.** On `--fresh` (and only then), the
+engine posts one `:checkered_flag: NEW EXPERIMENTAL RUN` marker per channel in
+`RUN_START_ANNOUNCE_CHANNELS` (`src/config.py`, default: the six seeded
+channels + `assessments-summary`; empty disables) right before the main loop —
+after star-topology validation, so a run that fails startup is never
+announced. The body is `prompts/run_start_announcement.md` (bind-mounted:
+editable without a rebuild; the sentinel first line is prepended by code and
+is NOT editable), carrying start time, planned duration, the image's git
+commit/branch/dirty count (`.build_info.json`, baked by the Dockerfile —
+`unknown`s mean a pre-feature image), the hub/PI prompt-set versions
+(`version` keys in the two `prompts/roles/*/role.toml`, which must be bumped
+on any prompt-set edit) and the rubric version. Both Slack-ingest paths drop
+sentinel-prefixed messages, so markers never enter `agent_messages` — do not
+reuse that prefix for anything else, and do not change it (old markers would
+start re-ingesting on the next resume; see `src/agent/run_marker.py`). What
+was announced is recorded under `run_start_announcement` in
+`simulation_runs.config`.
+
 > ⚠️ **As of 2026-08-22 every one of those numbers counts REAL API CALLS, where
 > it used to count turns — and none of them has been re-tuned.**
 > `Agent.record_api_call` booked six sites but never the extra TOOL ROUNDS
