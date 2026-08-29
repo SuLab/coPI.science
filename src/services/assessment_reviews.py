@@ -16,11 +16,18 @@ writes behind it. ``assign_reviewer`` is idempotent via
 — reassigning the same (assessment, assignee) pair is a no-op, not a
 duplicate row or a raised IntegrityError (the named-constraint form has
 precedent at ``src/agent/simulation.py:6298``).
+
+``review_columns_for`` (Task 7) is the batched read behind the two list
+pages' "Assigned"/"Reviewed by" columns and approval-status chip — see its
+own docstring for why it is exactly three ``IN``-clause queries plus a
+Python fold, never a ``DISTINCT ON``.
 """
 
 from __future__ import annotations
 
 import uuid
+from collections import namedtuple
+from collections.abc import Sequence
 
 from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -47,6 +54,24 @@ VALID_FEEDBACK_MODES = ("learn", "log_only")
 #: Comment rows are capped, not rejected — a reviewer pasting an overlong
 #: transcript should still get a saved row, just truncated.
 _MAX_COMMENT_CHARS = 10_000
+
+#: The list-page columns behind one assessment row's "Assigned"/"Reviewed by"
+#: cells and status chip (Task 7). ``status`` is ``None`` for "never
+#: reviewed" AND for "reviewed, then cleared" — see ``_CHIP_STATUSES``.
+ReviewColumns = namedtuple("ReviewColumns", "assigned_names reviewed_by_names status")
+
+#: What ``review_columns_for`` returns for an assessment id with no
+#: assignment, feedback, or status-event rows at all.
+EMPTY_REVIEW_COLUMNS = ReviewColumns((), (), None)
+
+#: The only two ``VALID_STATUS_ACTIONS`` that leave an active status for the
+#: chip to show. 'cleared' IS a legitimate, storable action — it is how a
+#: reviewer undoes a prior approve/disapprove — but its effect is "no active
+#: status", the same as never having been reviewed at all, so it folds to
+#: ``None`` here rather than becoming a fourth chip. This is a narrower list
+#: than ``VALID_STATUS_ACTIONS`` on purpose: that constant governs what may be
+#: WRITTEN, this one governs what the chip may SHOW.
+_CHIP_STATUSES = ("approved", "disapproved")
 
 
 def _validate(score: int, feedback_mode: str) -> None:
@@ -218,3 +243,142 @@ async def unassign_reviewer(
             AssessmentReviewAssignment.assignee_user_id == assignee_user_id,
         )
     )
+
+
+def _dedup_ordered(names) -> list[str]:
+    """First-seen order, deduplicated. Local rather than ``dict.fromkeys``
+    spelled out, so the intent reads at the call site."""
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for name in names:
+        if name not in seen:
+            seen.add(name)
+            ordered.append(name)
+    return ordered
+
+
+async def review_columns_for(
+    db: AsyncSession, assessment_ids: Sequence[uuid.UUID]
+) -> dict[uuid.UUID, ReviewColumns]:
+    """Batch the Assigned/Reviewed-by/status-chip columns for a page of
+    assessment rows — one dict lookup per row rather than N+1 queries.
+
+    Exactly THREE ``IN``-clause queries, never a ``DISTINCT ON``: the status
+    chip needs only the LATEST status event per assessment, while "reviewed
+    by" needs EVERY actor who ever touched the row (a feedback author or a
+    status-event actor, unioned and deduplicated) — one ``DISTINCT ON`` query
+    returns a single row per assessment and would silently drop every earlier
+    actor, which is exactly the information "reviewed by" exists to show.
+
+    Early-returns ``{}`` for an empty ``assessment_ids`` without touching
+    ``db`` at all — the zero-query contract for an empty run/page (there is
+    no query-count listener in this suite, so the empty return IS the
+    assertable contract).
+
+    An assessment id with no assignment, feedback, or status-event row at all
+    is simply absent from the returned dict — callers fall back to
+    ``EMPTY_REVIEW_COLUMNS`` (see ``directory.list_assessments``), the same
+    "missing means untouched" shape whether ``assessment_ids`` names one id
+    or a page of them.
+    """
+    ids = list(assessment_ids)
+    if not ids:
+        return {}
+
+    assignment_rows = (
+        await db.execute(
+            select(
+                AssessmentReviewAssignment.assessment_id,
+                AssessmentReviewAssignment.assignee_name,
+            )
+            .where(AssessmentReviewAssignment.assessment_id.in_(ids))
+            .order_by(
+                AssessmentReviewAssignment.assessment_id,
+                AssessmentReviewAssignment.created_at,
+                AssessmentReviewAssignment.id,
+            )
+        )
+    ).all()
+
+    review_rows = (
+        await db.execute(
+            select(
+                AssessmentReview.assessment_id,
+                AssessmentReview.reviewer_name,
+                AssessmentReview.created_at,
+            )
+            .where(AssessmentReview.assessment_id.in_(ids))
+            .order_by(
+                AssessmentReview.assessment_id,
+                AssessmentReview.created_at,
+                AssessmentReview.id,
+            )
+        )
+    ).all()
+
+    # Ordered (assessment_id, created_at, id) rather than left to arrive in
+    # whatever order Postgres feels like: the LAST row per assessment (by
+    # this order) is the status the chip shows, and every row along the way
+    # still contributes its actor to "reviewed by". `func.now()` is
+    # transaction-start time, so two events written in the same transaction
+    # can share a `created_at` — the `id` tiebreak is what keeps "last"
+    # deterministic when that happens.
+    event_rows = (
+        await db.execute(
+            select(
+                AssessmentReviewEvent.assessment_id,
+                AssessmentReviewEvent.actor_name,
+                AssessmentReviewEvent.action,
+                AssessmentReviewEvent.created_at,
+            )
+            .where(AssessmentReviewEvent.assessment_id.in_(ids))
+            .order_by(
+                AssessmentReviewEvent.assessment_id,
+                AssessmentReviewEvent.created_at,
+                AssessmentReviewEvent.id,
+            )
+        )
+    ).all()
+
+    assigned_by_id: dict[uuid.UUID, list[str]] = {}
+    for row in assignment_rows:
+        assigned_by_id.setdefault(row.assessment_id, []).append(row.assignee_name)
+
+    # "Reviewed by" = distinct feedback authors UNION every status-event
+    # actor, in the order they actually acted — not "every comment, then
+    # every status change" — so the two sources are merged by `created_at`
+    # before deduplication.
+    actor_events_by_id: dict[uuid.UUID, list[tuple]] = {}
+    for row in review_rows:
+        actor_events_by_id.setdefault(row.assessment_id, []).append(
+            (row.created_at, row.reviewer_name)
+        )
+    for row in event_rows:
+        actor_events_by_id.setdefault(row.assessment_id, []).append(
+            (row.created_at, row.actor_name)
+        )
+
+    reviewed_by_id: dict[uuid.UUID, list[str]] = {}
+    for assessment_id, entries in actor_events_by_id.items():
+        entries.sort(key=lambda entry: entry[0])
+        reviewed_by_id[assessment_id] = _dedup_ordered(name for _, name in entries)
+
+    # The events query above is already ordered ascending per assessment, so
+    # a plain overwrite loop leaves the LAST event's action standing — see
+    # `_CHIP_STATUSES` for why 'cleared' folds to `None` instead of standing
+    # as its own action here.
+    status_by_id: dict[uuid.UUID, str | None] = {}
+    for row in event_rows:
+        status_by_id[row.assessment_id] = (
+            row.action if row.action in _CHIP_STATUSES else None
+        )
+
+    all_ids = set(assigned_by_id) | set(reviewed_by_id) | set(status_by_id)
+    return {
+        assessment_id: ReviewColumns(
+            tuple(_dedup_ordered(assigned_by_id.get(assessment_id, []))),
+            tuple(reviewed_by_id.get(assessment_id, [])),
+            status_by_id.get(assessment_id),
+        )
+        for assessment_id in all_ids
+    }

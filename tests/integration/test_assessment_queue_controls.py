@@ -17,8 +17,12 @@ import pytest
 from src.models import (
     USER_ROLE_ADMIN,
     USER_ROLE_MANAGER,
+    AssessmentReview,
+    AssessmentReviewAssignment,
+    AssessmentReviewEvent,
     OpportunityAssessment,
 )
+from src.services.assessment_reviews import review_columns_for
 from tests import factories
 from tests.integration.test_manager_access import auth_headers
 
@@ -449,3 +453,200 @@ async def test_an_unknown_panel_state_is_never_left_unbadged(
     assert "panel not recorded" not in html
     assert "panel unverified" not in html
     assert "&#9873; panel" not in html and "⚑ panel" not in html
+
+
+# ---------------------------------------------------------------------------
+# Task 7: the "Assigned"/"Reviewed by" columns and the approval-status chip
+#
+# review_columns_for (src/services/assessment_reviews.py) is the batched read
+# behind both. It is deliberately three IN-clause queries plus a Python fold,
+# never a DISTINCT ON: the status chip needs only the LATEST status event per
+# assessment, while "reviewed by" needs EVERY actor who ever touched the row
+# (a feedback author or a status-event actor), and one DISTINCT ON query
+# returns a single row per assessment and would silently drop every earlier
+# actor.
+# ---------------------------------------------------------------------------
+
+
+async def _seed_reviewed_row(db_session, run, *, project="Reviewed Co"):
+    """One row touched by all three review tables, with EXPLICIT created_at
+    values — ties are real inside one test transaction (Postgres's `now()`
+    is transaction-start time), so the chronological order this pins would be
+    a coin flip without them.
+
+    Assigned: Alice A. Then feedback by Bob B, then approved by Cara C, then
+    disapproved by Dana D — the disapprove is both the last event (so it is
+    the status chip) and the last actor (so it is the last name folded into
+    "reviewed by").
+    """
+    alice = await factories.make_user(db_session, name="Alice A")
+    bob = await factories.make_user(db_session, name="Bob B")
+    cara = await factories.make_user(db_session, name="Cara C")
+    dana = await factories.make_user(db_session, name="Dana D")
+    assessment = OpportunityAssessment(
+        simulation_run_id=run.id, agent_id="blackbird",
+        subject_agent_id="wang", channel_name="general",
+        company_or_project=project, recommendation="advance",
+        weighted_score=4.0, band="advance",
+    )
+    db_session.add(assessment)
+    await db_session.flush()
+
+    t0 = datetime(2026, 8, 20, 12, 0, tzinfo=UTC)
+    db_session.add(AssessmentReviewAssignment(
+        assessment_id=assessment.id, assignee_user_id=alice.id, assignee_name="Alice A",
+        assigned_by_user_id=alice.id, assigned_by_name="Alice A", created_at=t0,
+    ))
+    db_session.add(AssessmentReview(
+        assessment_id=assessment.id, reviewer_user_id=bob.id, reviewer_name="Bob B",
+        score=4, comment="Looks promising", feedback_mode="learn",
+        created_at=t0 + timedelta(minutes=1),
+    ))
+    db_session.add(AssessmentReviewEvent(
+        assessment_id=assessment.id, action="approved",
+        actor_user_id=cara.id, actor_name="Cara C",
+        created_at=t0 + timedelta(minutes=2),
+    ))
+    db_session.add(AssessmentReviewEvent(
+        assessment_id=assessment.id, action="disapproved",
+        actor_user_id=dana.id, actor_name="Dana D",
+        created_at=t0 + timedelta(minutes=3),
+    ))
+    await db_session.flush()
+    return assessment
+
+
+def _row_slice(html: str, marker: str) -> str:
+    """The rest of the <tr> the row marker sits in — the same
+    split-on-a-known-string convention _order() above uses for the sort
+    tests, scoped to one row rather than the whole page."""
+    return html.split(marker, 1)[1].split("</tr>", 1)[0]
+
+
+@pytest.mark.parametrize(
+    ("base", "role"),
+    [("/admin", USER_ROLE_ADMIN), ("/manager", USER_ROLE_MANAGER)],
+)
+async def test_list_pages_show_reviewer_columns(client, db_session, base, role):
+    staff = await factories.make_user(
+        db_session, user_role=role, email=f"review-cols{base.strip('/')}@example.org"
+    )
+    run = await factories.make_simulation_run(db_session)
+    await _seed_reviewed_row(db_session, run, project="Reviewed Co")
+    untouched = OpportunityAssessment(
+        simulation_run_id=run.id, agent_id="blackbird",
+        subject_agent_id="gordy", channel_name="general",
+        company_or_project="Untouched Co", recommendation="pass",
+        weighted_score=1.0, band="pass",
+    )
+    db_session.add(untouched)
+    await db_session.flush()
+
+    html = (
+        await client.get(
+            f"{base}/assessments?run_id={run.id}", headers=auth_headers(staff.id)
+        )
+    ).text
+
+    assert "Reviewed Co" in html
+    assert "Assigned" in html and "Reviewed by" in html
+
+    reviewed_row = _row_slice(html, "Reviewed Co")
+    assert "Alice A" in reviewed_row
+    assert "Bob B, Cara C, Dana D" in reviewed_row
+    assert "Disapproved" in reviewed_row
+
+    # An untouched row gets neither names nor a chip.
+    untouched_row = _row_slice(html, "Untouched Co")
+    assert "Alice A" not in untouched_row
+    assert "Bob B" not in untouched_row
+    assert "Approved" not in untouched_row
+    assert "Disapproved" not in untouched_row
+    assert untouched_row.count("—") >= 2, "the two new columns must render — when untouched"
+
+
+async def test_review_columns_for_empty_ids_hits_the_db_zero_times():
+    """The early return IS the contract: a db stub that raises on any
+    `execute` call proves nothing was queried, since there is no
+    before_cursor_execute listener in this suite to count against instead."""
+
+    class _ExplodingDB:
+        async def execute(self, *args, **kwargs):
+            raise AssertionError("no query should run for an empty id list")
+
+    assert await review_columns_for(_ExplodingDB(), []) == {}
+
+
+async def test_review_columns_parity_with_single_id_calls(db_session):
+    """5 seeded assessments, each touched by at least one review row (so it
+    is a key in both the batched and the single-id result) — the batched
+    call must equal the union of calling review_columns_for one id at a
+    time."""
+    run = await factories.make_simulation_run(db_session)
+    assessments = []
+    for i in range(5):
+        a = OpportunityAssessment(
+            simulation_run_id=run.id, agent_id="blackbird",
+            subject_agent_id="wang", channel_name="general",
+            company_or_project=f"Parity Co {i}",
+        )
+        db_session.add(a)
+        await db_session.flush()
+        assessments.append(a)
+
+    base_t = datetime(2026, 8, 20, 9, 0, tzinfo=UTC)
+    for i, a in enumerate(assessments):
+        reviewer = await factories.make_user(db_session, name=f"Parity Reviewer {i}")
+        db_session.add(AssessmentReview(
+            assessment_id=a.id, reviewer_user_id=reviewer.id, reviewer_name=reviewer.name,
+            score=3, comment="note", feedback_mode="log_only",
+            created_at=base_t + timedelta(minutes=i),
+        ))
+        actor = await factories.make_user(db_session, name=f"Parity Actor {i}")
+        db_session.add(AssessmentReviewEvent(
+            assessment_id=a.id,
+            action="approved" if i % 2 == 0 else "disapproved",
+            actor_user_id=actor.id, actor_name=actor.name,
+            created_at=base_t + timedelta(minutes=i, seconds=30),
+        ))
+    await db_session.flush()
+
+    ids = [a.id for a in assessments]
+    batched = await review_columns_for(db_session, ids)
+    singles = {
+        a.id: (await review_columns_for(db_session, [a.id]))[a.id] for a in assessments
+    }
+
+    assert batched == singles
+    assert set(batched) == set(ids)
+
+
+async def test_no_detail_prose_in_new_columns(client, db_session, admin):
+    """The new columns show names and a chip, never comment text — the same
+    scan-only discipline test_admin_assessments_page_renders_no_inline_detail_rows
+    (tests/integration/test_opportunity_assessment_persistence.py) pins for
+    rationale/red-flags/milestones."""
+    run = await factories.make_simulation_run(db_session)
+    assessment = OpportunityAssessment(
+        simulation_run_id=run.id, agent_id="blackbird",
+        subject_agent_id="wang", channel_name="general",
+        company_or_project="Prose Guard Co",
+    )
+    db_session.add(assessment)
+    await db_session.flush()
+    reviewer = await factories.make_user(db_session, name="Prose Reviewer")
+    db_session.add(AssessmentReview(
+        assessment_id=assessment.id, reviewer_user_id=reviewer.id,
+        reviewer_name="Prose Reviewer", score=5,
+        comment="TOP-SECRET-REVIEW-COMMENT-TEXT", feedback_mode="learn",
+    ))
+    await db_session.flush()
+
+    html = (
+        await client.get(
+            f"/admin/assessments?run_id={run.id}", headers=auth_headers(admin.id)
+        )
+    ).text
+
+    assert "Prose Reviewer" in html
+    assert "TOP-SECRET-REVIEW-COMMENT-TEXT" not in html

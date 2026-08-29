@@ -40,6 +40,7 @@ from src.models import (
 )
 from src.services.jhu_rules import set_tenure_start
 from tests import factories
+from tests.integration.test_assessment_queue_controls import _row_slice, _seed_reviewed_row
 from tests.integration.test_manager_access import auth_headers
 from tests.integration.test_pi_only_writes import (
     _IDS,
@@ -409,3 +410,28 @@ async def test_reviewer_full_login_chain_terminates(client, db_session):
     r = await client.get("/profile", follow_redirects=True)
     assert r.status_code == 200
     assert str(r.url).endswith("/manager/assessments")
+
+
+async def test_reviewer_sees_the_review_columns_on_manager_assessments(
+    client, db_session
+):
+    """Task 7: the Assigned/Reviewed-by columns and the approval-status chip
+    are not staff-only — a reviewer reaches the same /manager/assessments
+    page (Task 3) and must see the same names and chip a manager/admin does.
+    Clone of test_assessment_queue_controls.py::test_list_pages_show_reviewer_columns,
+    for the one role that page doesn't already parametrize over."""
+    rev = await factories.make_user(db_session, user_role=USER_ROLE_REVIEWER)
+    run = await factories.make_simulation_run(db_session)
+    await _seed_reviewed_row(db_session, run, project="Reviewer Role Co")
+
+    html = (
+        await client.get(
+            f"/manager/assessments?run_id={run.id}", headers=auth_headers(rev.id)
+        )
+    ).text
+
+    assert "Reviewer Role Co" in html
+    row = _row_slice(html, "Reviewer Role Co")
+    assert "Alice A" in row
+    assert "Bob B, Cara C, Dana D" in row
+    assert "Disapproved" in row
