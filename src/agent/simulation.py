@@ -289,6 +289,13 @@ RUN_STATS_UPDATE_INTERVAL = 30.0
 # get SIGKILLed mid-flush. Anything beyond this bound is dropped LOUDLY.
 MEMORY_EVENTS_MAX_AT_SHUTDOWN = 10
 
+# Headlines to post during `stop()`. Each is up to two Slack round-trips and the
+# container's stop grace period is finite, so the sweep is bounded like the
+# memory drain beside it. Higher than that bound because a headline is cheap
+# next to an LLM call, and because a whole run's worth of un-announced verdicts
+# arriving at once is exactly the case this exists for.
+HEADLINES_MAX_AT_SHUTDOWN = 25
+
 # Closed-thread summaries kept in memory per agent pair, for the Phase-5
 # dedup context. The DB's thread_decisions table remains the full record;
 # this bounds only what a process accumulates (audit finding 5: one dict per
@@ -585,6 +592,13 @@ class SimulationEngine:
         # visibility, channel_id); agent_id (not the Agent object) because a
         # roster sync can rebuild the object between enqueue and drain.
         self._pending_memory_events: list[tuple[str, str, str, str | None]] = []
+        # Interviews that ENDED holding a verdict nobody announced. Queued
+        # rather than posted at the close, because `_close_thread` runs holding
+        # the thread lock, both agent locks and a reply-lane semaphore slot, and
+        # a headline is two Slack round-trips — the same reason the memory
+        # events beside this are queued rather than synthesised there (audit
+        # finding 1). Drained by `_drain_and_flush` and by `stop()`.
+        self._pending_headlines: list[str] = []
         # Guards against two drains running at once (main loop vs stop(), or
         # a future second call site): concurrent drains would pop same-agent
         # events into overlapping LLM calls — exactly the lost update this
@@ -1124,6 +1138,18 @@ class SimulationEngine:
             await self._flush_llm_logs()
         if self._pending_assessments:
             await self._flush_pending_assessments()
+
+        # AFTER the flushes, never before: a verdict that failed its first write
+        # is on `_pending_assessments`, and `_announce_owed_headline` reads the
+        # row back from the database. Draining first would find nothing and
+        # silently skip the interview this whole path exists for.
+        #
+        # Deliberately NOT gated on `self._running`, unlike the memory drain
+        # above: a Slack post is not an LLM call, the queue is short, and the
+        # tick where `_running` has just been cleared is exactly when a closing
+        # interview most needs it.
+        if self._pending_headlines:
+            await self._drain_pending_headlines()
 
     def request_stop(self) -> None:
         """Ask the main loop to exit — safe to call from a signal handler.
@@ -2575,6 +2601,19 @@ class SimulationEngine:
                     (other_agent.agent_id, other_event, VISIBILITY_PUBLIC, None)
                 )
 
+            # An interview is over. If it still holds a verdict nobody
+            # announced, that verdict has no later turn coming and this is the
+            # last moment anything knows the interview ended — before 2026-08-29
+            # nothing looked, and production lost two headlines (slusher,
+            # rothstein) exactly here. QUEUE only: see `_pending_headlines`.
+            held = self._assessed_threads.get(thread.thread_id)
+            if (
+                held is not None
+                and not held.announced
+                and thread.thread_id not in self._pending_headlines
+            ):
+                self._pending_headlines.append(thread.thread_id)
+
     async def _evict_dead_thread(self, thread_id: str) -> None:
         """Remove a thread_id from every agent's in-memory state.
 
@@ -3551,6 +3590,126 @@ class SimulationEngine:
                 "post a second headline for the same interview.",
                 thread_id, exc,
             )
+
+    async def _announce_owed_headline(self, thread_id: str, *, trigger: str) -> bool:
+        """Post the `#assessments-summary` headline an ENDED interview still owes.
+
+        The completeness half of the invariant in
+        docs/audits/2026-08-29-lost-assessment-headlines/README.md §5:
+        announcement used to be a side effect of one particular REPLY (terminal
+        = ⏸️, or the CONCLUDE ordinal), and an interview that ended any other
+        way — the `max_thread_messages` timeout, abandonment, the run's own
+        shutdown — dropped its verdict silently.
+
+        Everything is resolved from the STORED ROW, never from live state, and
+        both halves of that matter:
+
+        * the agent that closed the thread is often the PI, not the hub
+          (production run 61ccad6d logged the close under `[rothstein]`), so
+          `row.agent_id` is the only correct source for whose client posts;
+        * a closed thread has already been popped from every agent's
+          `active_threads`, and after a restart there is no `ThreadState` at
+          all — but `channel_name`, `subject_agent_id` and `slack_ts` are all
+          columns, so a faithful one can be rebuilt.
+
+        `summary_posted_at IS NULL` in the predicate is the at-most-once guard,
+        and it is deliberately in the SQL rather than in Python: the close path
+        and the shutdown sweep can both name the same thread, and a headline is
+        a public post that cannot be retracted.
+
+        Returns True when a headline actually reached Slack. Never raises.
+        """
+        held = self._assessed_threads.get(thread_id)
+        if held is not None and held.announced:
+            return False
+        if not self.session_factory or not self.simulation_run_id:
+            return False
+        from sqlalchemy import select as sa_select
+
+        try:
+            async with self.session_factory() as db:
+                row = (await db.execute(
+                    sa_select(OpportunityAssessment)
+                    .where(
+                        OpportunityAssessment.simulation_run_id
+                        == self.simulation_run_id,
+                        OpportunityAssessment.thread_id == thread_id,
+                        OpportunityAssessment.summary_posted_at.is_(None),
+                    )
+                    .order_by(OpportunityAssessment.created_at.desc())
+                    .limit(1)
+                )).scalars().first()
+        except Exception as exc:  # noqa: BLE001 — never cost the caller
+            logger.warning(
+                "Could not read the verdict owed a headline for thread %s: %s",
+                thread_id, exc,
+            )
+            return False
+        if row is None:
+            return False
+
+        agent = self.agents.get(row.agent_id)
+        if agent is None:
+            logger.warning(
+                "Interview %s ended owing a #assessments-summary headline, but "
+                "its author %r is not on this roster — re-post with "
+                "scripts/backfill_assessment_headlines.py --run %s --apply",
+                thread_id, row.agent_id, self.simulation_run_id,
+            )
+            return False
+
+        thread = ThreadState(
+            thread_id=thread_id,
+            channel=row.channel_name,
+            other_agent_id=row.subject_agent_id or "",
+        )
+        verdict = {
+            "company_or_project": row.company_or_project,
+            "recommendation": row.recommendation,
+            "scores": row.scores or {},
+        }
+        posted = await self._post_assessment_summary(
+            agent, thread, verdict, row.slack_ts,
+        )
+        if not posted:
+            return False
+
+        await self._mark_summary_posted(thread_id)
+        if held is not None:
+            self._assessed_threads[thread_id] = held._replace(announced=True)
+        # WARNING, not INFO. Every rescue means the hub was locked out of its
+        # own CONCLUDE turn — the message-count parity break of the RCA's §2.2,
+        # which this path makes non-destructive but does not fix. A run with
+        # several of these is the signal to go fix that.
+        logger.warning(
+            "[%s] RESCUED the #assessments-summary headline for %s (thread %s, "
+            "trigger=%s): the interview ended without a concluding reply, so "
+            "the verdict was announced on the way out rather than by its own "
+            "final turn. See docs/audits/2026-08-29-lost-assessment-headlines/.",
+            row.agent_id, row.subject_agent_id or "?", thread_id, trigger,
+        )
+        return True
+
+    async def _drain_pending_headlines(
+        self, *, limit: int | None = None, trigger: str = "thread-close",
+    ) -> None:
+        """Post the headlines `_close_thread` and `stop()` queued.
+
+        Pops BEFORE posting, so a thread that fails cannot spin the queue — the
+        durable retry is `scripts/backfill_assessment_headlines.py`, not this
+        loop, and `summary_posted_at` makes a re-queue harmless anyway. Never
+        raises: this runs from the main loop's `finally` and from `stop()`.
+        """
+        drained = 0
+        while self._pending_headlines and (limit is None or drained < limit):
+            thread_id = self._pending_headlines.pop(0)
+            drained += 1
+            try:
+                await self._announce_owed_headline(thread_id, trigger=trigger)
+            except Exception:
+                logger.exception(
+                    "Failed to announce the owed headline for thread %s", thread_id,
+                )
 
     def _warn_if_hub_conclude_missing_assessment(
         self, agent: Agent, thread: ThreadState, response_text: str, raw_response: str,
