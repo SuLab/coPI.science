@@ -320,6 +320,7 @@ class Settings(BaseSettings):
     llm_agent_model: str = "claude-sonnet-5"
     llm_agent_model_opus: str = "claude-opus-5"
     llm_agent_model_sonnet: str = "claude-sonnet-5"
+    llm_review_model: str = "claude-opus-5"  # review bot, worker-side
 
     # Worker
     worker_poll_interval: int = 5  # seconds

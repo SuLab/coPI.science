@@ -48,13 +48,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.agent.specialists import parse_opinion
 from src.models import AgentMessage, LlmCallLog, OpportunityAssessment, SpecialistConsult
 from src.services.blackbird_rubric import BANDING, RUBRIC_VERSION
+from src.services.interview_transcript import load_interview_thread
 from src.services.rubric_revisions import resolve_revision
 
 # Hard bounds. This page is a read of unbounded production data: a channel can
 # hold hundreds of hub turns and a retrieve_full_text result can be an entire
 # paper, so every list and every blob here is capped rather than trusted.
 LOG_SCAN_LIMIT = 200
-MESSAGE_SCAN_LIMIT = 500
 RESULT_EXCERPT_CHARS = 200
 RESULT_FULL_CHARS = 4000
 INPUT_SUMMARY_CHARS = 200
@@ -598,7 +598,7 @@ async def build_assessment_detail(
             "pct": _pct(value),
         })
 
-    thread_id, messages = await _load_thread_messages(db, assessment)
+    thread_id, messages = await load_interview_thread(db, assessment)
     consults = await _load_consults(db, assessment, thread_id, admin_view=admin_view)
 
     message_views = [
@@ -698,63 +698,6 @@ async def build_assessment_detail(
         "log_scan_limit": LOG_SCAN_LIMIT,
         "admin_view": admin_view,
     }
-
-
-async def _load_thread_messages(
-    db: AsyncSession, assessment: OpportunityAssessment
-) -> tuple[str | None, list[AgentMessage]]:
-    """The interview thread this verdict came out of.
-
-    Anchored on the message the verdict was POSTED as: ``slack_ts`` is written
-    from the Slack post (or the locally minted ts when Slack is off), and it
-    can land in either ``AgentMessage.slack_ts`` or ``AgentMessage.message_ts``
-    depending on which side minted it — so both are tried.
-
-    Returns ``(None, [])`` whenever the thread cannot be reconstructed, which
-    is a NORMAL outcome, not an error: ``--fresh`` wipes ``agent_messages`` and
-    never wipes ``opportunity_assessments``, so an older verdict legitimately
-    outlives its own transcript. The caller renders the verdict either way.
-    """
-    if not assessment.slack_ts:
-        return None, []
-    anchor = (
-        await db.execute(
-            select(AgentMessage)
-            .where(
-                AgentMessage.simulation_run_id == assessment.simulation_run_id,
-                AgentMessage.channel_name == assessment.channel_name,
-                or_(
-                    AgentMessage.slack_ts == assessment.slack_ts,
-                    AgentMessage.message_ts == assessment.slack_ts,
-                ),
-            )
-            .order_by(AgentMessage.posted_at, AgentMessage.created_at)
-            .limit(1)
-        )
-    ).scalars().first()
-    if anchor is None:
-        return None, []
-    # The thread's id is the ROOT's ts: a reply carries it in thread_ts, and the
-    # root itself carries None there and is its own thread.
-    thread_id = anchor.thread_ts or anchor.message_ts
-    if thread_id is None:
-        return None, [anchor]
-    rows = (
-        await db.execute(
-            select(AgentMessage)
-            .where(
-                AgentMessage.simulation_run_id == assessment.simulation_run_id,
-                AgentMessage.channel_name == anchor.channel_name,
-                or_(
-                    AgentMessage.thread_ts == thread_id,
-                    AgentMessage.message_ts == thread_id,
-                ),
-            )
-            .order_by(AgentMessage.posted_at, AgentMessage.created_at)
-            .limit(MESSAGE_SCAN_LIMIT)
-        )
-    ).scalars().all()
-    return thread_id, list(rows)
 
 
 async def _load_consults(

@@ -153,6 +153,7 @@ NON_SECRET_STR_FIELDS = {
     "llm_agent_model",
     "llm_agent_model_opus",
     "llm_agent_model_sonnet",
+    "llm_review_model",
 }
 
 
