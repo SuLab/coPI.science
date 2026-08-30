@@ -446,6 +446,32 @@ with a single `docker run`.
   `docker stop -t 420 copi-blackbird-agent-1` by hand remains correct and
   loses nothing.
 
+**`/admin/simulation`'s Live tab renders dollar cost from a versioned,
+hand-maintained price table, not from anything Anthropic returns at call
+time.** `PRICES`/`AS_OF` in `src/services/llm_pricing.py` are the whole
+table — repricing is an edit to that one file plus a **web-tier rebuild
+only** (`$DC build blackbird-app`; the agent image never renders costs, so
+it does not need rebuilding for a price change). An unpriced model name
+renders as "unpriced" rather than a silent $0. Rows written before migration
+`0036` have NULL cache-token columns (`llm_call_logs.cache_read_input_tokens`
+/ `.cache_creation_input_tokens` did not exist yet), which the cost service
+reads as zero — the page labels any aggregate touching one of those rows
+with "≥" (`CostSummary.is_floor` / `InterviewCost.is_floor`): the true cost
+of a pre-`0036` run is that number or higher, never less, and the read path
+never re-derives this from anything except the presence of NULLs. Both the
+page's engine-status badge and its Start/Stop buttons are only as honest as
+the heartbeat: the running engine upserts the single
+`simulation_process_status` row roughly every 30s
+(`CONTROL_POLL_INTERVAL`, `src/agent/simulation.py`), and `derive_panel_state`
+treats it as `stale` once `updated_at` is more than
+`HEARTBEAT_STALE_SECONDS` (120s) old — a stale row disables the Stop button
+(nothing may be listening) and greys the per-agent live columns to "—"
+rather than showing a frozen last-seen number. `not_deployed` is a distinct,
+narrower state reserved for a `simulation_process_status` table with no row
+at all — it is upserted once (id=1) and never deleted by any code path, so
+once the supervisor has checked in even once in an environment, a later
+`stop` degrades the page to `stale`, never back to `not_deployed`.
+
 ## Adding New PIs
 
 **The `AgentRegistry` table is the single source of truth for the agent roster.**
