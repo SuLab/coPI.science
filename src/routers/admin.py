@@ -1,20 +1,25 @@
 """Admin dashboard router."""
 
+import hashlib
 import logging
 import re
 import uuid
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, status
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import delete as sa_delete
 from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from src.agent.roles import available_roles
+from src.agent.run_marker import _template_body, parse_announce_channels, validate_template
 from src.agent.specialists import parse_opinion
 from src.config import get_settings
 from src.database import get_db
@@ -28,13 +33,16 @@ from src.models import (
     USER_ROLE_ADMIN,
     VALID_USER_ROLES,
     AccessAllowlist,
+    AdminAuditEvent,
     AgentRegistry,
+    AppSetting,
     Cohort,
     CohortAuditEvent,
     CohortMembership,
     Job,
     LlmCallLog,
     ResearcherProfile,
+    SimulationCommand,
     SimulationRun,
     ThreadDecision,
     User,
@@ -58,6 +66,12 @@ from src.services.llm import is_truncated_stop
 from src.services.agent_activation import activation_blockers
 from src.services.jhu_rules import get_tenure_start
 from src.services.pi_onboarding import find_or_create_pi_by_orcid
+from src.services.simulation_control import (
+    derive_panel_state,
+    enqueue_command,
+    read_status,
+    record_audit,
+)
 from src.services.thread_panel import panel_cards_by_thread
 from src.services.user_deletion import delete_user_account
 from src.services.validators import csv_safe_cell
@@ -2070,3 +2084,327 @@ async def admin_cohort_remove_agent(
         await db.delete(membership)
         await db.commit()
     return RedirectResponse(url=f"/admin/cohorts/{cohort_id}", status_code=302)
+
+
+# ---------------------------------------------------------------------------
+# /admin/simulation — the control-plane panel (Task 7 of the 2026-08-30
+# simulation-control-panel plan). Command/heartbeat/audit primitives live in
+# src.services.simulation_control; this module stays thin — read the panel
+# state, shape a form, ask the service a question, render or redirect. The
+# supervisor (src/agent/supervisor.py) and the running engine's own
+# `_poll_control_plane` are the only consumers of the rows written here.
+# ---------------------------------------------------------------------------
+
+#: Slack's own channel-name shape (lowercase letters, digits, hyphens,
+#: underscores, up to 80 chars) — checked per name AFTER
+#: parse_announce_channels has already split/deduped/trimmed the raw input,
+#: so an admin typo is caught here rather than surfacing later as a silent
+#: channel_not_found from Slack at run-start time.
+_ANNOUNCE_CHANNEL_RE = re.compile(r"^[a-z0-9_-]{1,80}$")
+
+_KEY_ANNOUNCE_CHANNELS = "run_start_announce_channels"
+_KEY_ANNOUNCE_TEMPLATE = "run_start_announcement_template"
+
+
+def _hash12(text: str | None) -> str | None:
+    """First 12 hex chars of a sha256 digest, or None for a None input.
+
+    The ONLY form the announce-template audit payload ever records of a
+    template body — never the full text (it may echo an unpublished PI
+    disclosure's placeholder shape, or simply be long).
+    """
+    if text is None:
+        return None
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
+
+
+async def _kv_get(db: AsyncSession, key: str) -> str | None:
+    return (await db.execute(select(AppSetting.value).where(AppSetting.key == key))).scalar_one_or_none()
+
+
+async def _kv_upsert(db: AsyncSession, key: str, value: str) -> None:
+    stmt = pg_insert(AppSetting).values(key=key, value=value)
+    stmt = stmt.on_conflict_do_update(index_elements=[AppSetting.key], set_={"value": value})
+    await db.execute(stmt)
+
+
+async def _kv_delete(db: AsyncSession, key: str) -> None:
+    await db.execute(sa_delete(AppSetting).where(AppSetting.key == key))
+
+
+async def _simulation_context(
+    db: AsyncSession,
+    request: Request,
+    current_user: User,
+    *,
+    msg: str | None = None,
+    error: str | None = None,
+    template_error: str | None = None,
+    template_value_override: str | None = None,
+) -> dict:
+    """Assemble every value templates/admin/simulation.html renders.
+
+    Shared by the GET route and by the announce-template POST's inline-error
+    re-render (the one POST here that renders the page directly instead of
+    redirecting — see that handler's docstring for why).
+    """
+    now = datetime.now(UTC)
+    status_row = await read_status(db)
+    panel_state = derive_panel_state(status_row, now)
+
+    pending_result = await db.execute(
+        select(SimulationCommand)
+        .where(SimulationCommand.status == "pending")
+        .order_by(SimulationCommand.created_at)
+    )
+    pending_commands = pending_result.scalars().all()
+    pending_start = next((c for c in pending_commands if c.command == "start"), None)
+
+    recent_result = await db.execute(
+        select(SimulationCommand).order_by(SimulationCommand.created_at.desc()).limit(20)
+    )
+    recent_commands = recent_result.scalars().all()
+
+    latest_run = (
+        await db.execute(select(SimulationRun).order_by(SimulationRun.started_at.desc()).limit(1))
+    ).scalar_one_or_none()
+
+    channels_kv = await _kv_get(db, _KEY_ANNOUNCE_CHANNELS)
+    channels_value = channels_kv if channels_kv is not None else get_settings().run_start_announce_channels
+
+    if template_value_override is not None:
+        template_value = template_value_override
+    else:
+        template_kv = await _kv_get(db, _KEY_ANNOUNCE_TEMPLATE)
+        template_value = template_kv if template_kv is not None else _template_body()
+
+    audit_result = await db.execute(
+        select(AdminAuditEvent).order_by(AdminAuditEvent.created_at.desc()).limit(20)
+    )
+    audit_events = audit_result.scalars().all()
+
+    return _template_context(
+        request,
+        current_user,
+        active_admin="simulation",
+        panel_state=panel_state,
+        status_row=status_row,
+        latest_run=latest_run,
+        pending_commands=pending_commands,
+        pending_start=pending_start,
+        recent_commands=recent_commands,
+        channels_value=channels_value,
+        template_value=template_value,
+        audit_events=audit_events,
+        msg=msg,
+        error=error,
+        template_error=template_error,
+    )
+
+
+@router.get("/simulation", response_class=HTMLResponse)
+async def admin_simulation(
+    request: Request,
+    db: AsyncSession = _DB,
+    current_user: User = _ADMIN,
+):
+    """The simulation control panel: status card, start/stop forms, the
+    announce-channels + announce-template editors, and recent command/audit
+    history. Stats sections are appended by Task 11 — see the marker comment
+    inside the template."""
+    ctx = await _simulation_context(
+        db,
+        request,
+        current_user,
+        msg=request.query_params.get("msg"),
+        error=request.query_params.get("error"),
+    )
+    return templates.TemplateResponse(request, "admin/simulation.html", ctx)
+
+
+@router.post("/simulation/start")
+async def admin_simulation_start(
+    request: Request,
+    fresh: bool = Form(False),
+    max_runtime: int = Form(0),
+    db: AsyncSession = _DB,
+    current_user: User = _ADMIN,
+):
+    """Enqueue a `start` command for the supervisor to claim.
+
+    Refused (no row written) when `derive_panel_state` already reads
+    `running`/`starting` — a live engine, CLI-launched or panel-launched
+    alike, since the heartbeat is state-source-agnostic — or when a `start`
+    is already pending (the common double-click case, caught here before
+    ever reaching the database). The 0042 partial unique index
+    (`uq_simulation_commands_one_pending`) is the second, race-proof layer:
+    an `IntegrityError` from `enqueue_command` is caught and rendered as the
+    same refusal. DECLARED v1 decision: this two-field form plus these
+    refusals ARE the confirmation step — no JS confirm dialog — and the
+    sharp CLI-only flags (`--all-agents`/`--reset-cursors`) are deliberately
+    not exposed here; the page links no substitute.
+    """
+    now = datetime.now(UTC)
+    status_row = await read_status(db)
+    panel_state = derive_panel_state(status_row, now)
+    pending_start = (
+        await db.execute(
+            select(SimulationCommand).where(
+                SimulationCommand.status == "pending",
+                SimulationCommand.command == "start",
+            )
+        )
+    ).scalar_one_or_none()
+    if panel_state in ("running", "starting") or pending_start is not None:
+        return RedirectResponse(
+            url=f"/admin/simulation?error={quote('A run is already starting or in progress.')}",
+            status_code=302,
+        )
+    payload = {"fresh": fresh, "max_runtime": max_runtime}
+    try:
+        await enqueue_command(
+            db, command="start", payload=payload, requested_by_user_id=current_user.id
+        )
+    except IntegrityError:
+        await db.rollback()
+        return RedirectResponse(
+            url=f"/admin/simulation?error={quote('A start is already pending.')}",
+            status_code=302,
+        )
+    await record_audit(
+        db, action="simulation_start_requested", actor_user_id=current_user.id, payload=payload
+    )
+    return RedirectResponse(
+        url=f"/admin/simulation?msg={quote('Start requested.')}", status_code=302
+    )
+
+
+@router.post("/simulation/stop")
+async def admin_simulation_stop(
+    request: Request,
+    db: AsyncSession = _DB,
+    current_user: User = _ADMIN,
+):
+    """Enqueue a `stop` command.
+
+    Refused when the panel does not currently read `running` — the same
+    predicate the supervisor itself uses (src/agent/supervisor.py) to decide
+    whether a claimed stop has a live engine to reach; anything else, the
+    supervisor would immediately finish a stop as "nothing running" on its
+    own next poll, so refusing here gives the same answer without writing a
+    row nobody will act on. The IntegrityError catch is the same
+    double-click/race guard as the start route.
+    """
+    now = datetime.now(UTC)
+    status_row = await read_status(db)
+    panel_state = derive_panel_state(status_row, now)
+    if panel_state != "running":
+        return RedirectResponse(
+            url=f"/admin/simulation?error={quote('Nothing is running.')}", status_code=302
+        )
+    try:
+        await enqueue_command(db, command="stop", payload=None, requested_by_user_id=current_user.id)
+    except IntegrityError:
+        await db.rollback()
+        return RedirectResponse(
+            url=f"/admin/simulation?error={quote('A stop is already pending.')}",
+            status_code=302,
+        )
+    await record_audit(
+        db, action="simulation_stop_requested", actor_user_id=current_user.id, payload=None
+    )
+    return RedirectResponse(url=f"/admin/simulation?msg={quote('Stop requested.')}", status_code=302)
+
+
+@router.post("/simulation/announce-settings")
+async def admin_simulation_announce_settings(
+    request: Request,
+    channels: str = Form(""),
+    db: AsyncSession = _DB,
+    current_user: User = _ADMIN,
+):
+    """Persist (or clear) the DB override for the run-start announcement's
+    channel list.
+
+    `src.agent.run_marker.parse_announce_channels` does the split/dedup/trim;
+    each resulting name is then checked against Slack's own channel-name
+    shape (`_ANNOUNCE_CHANNEL_RE`) before anything is written. An empty
+    input clears the override (falls back to the `Settings` default).
+    """
+    names = parse_announce_channels(channels)
+    bad = [n for n in names if not _ANNOUNCE_CHANNEL_RE.match(n)]
+    if bad:
+        return RedirectResponse(
+            url=f"/admin/simulation?error={quote('Invalid channel name(s): ' + ', '.join(bad))}",
+            status_code=302,
+        )
+    old_value = await _kv_get(db, _KEY_ANNOUNCE_CHANNELS)
+    new_value = ",".join(names) or None
+    if new_value is None:
+        await _kv_delete(db, _KEY_ANNOUNCE_CHANNELS)
+    else:
+        await _kv_upsert(db, _KEY_ANNOUNCE_CHANNELS, new_value)
+    await record_audit(
+        db,
+        action="simulation_announce_channels_updated",
+        actor_user_id=current_user.id,
+        payload={"old": old_value, "new": new_value},
+    )
+    return RedirectResponse(
+        url=f"/admin/simulation?msg={quote('Announce channels updated.')}", status_code=302
+    )
+
+
+@router.post("/simulation/announce-template")
+async def admin_simulation_announce_template(
+    request: Request,
+    body: str = Form(""),
+    reset: bool = Form(False),
+    db: AsyncSession = _DB,
+    current_user: User = _ADMIN,
+):
+    """Save (or reset) the DB override for the run-start announcement body.
+
+    `reset` deletes the KV row outright and is never validated (deleting
+    can't introduce a bad template) — it falls back to the template FILE,
+    not to `DEFAULT_TEMPLATE` directly (see `run_marker._template_body`).
+    Otherwise the body is checked with `run_marker.validate_template` BEFORE
+    anything is written: a bad body re-renders this same page with the
+    error inline and the just-submitted text still in the textarea, rather
+    than redirecting — the one route here that isn't a plain
+    POST-then-redirect, because the error needs the submitted body back in
+    front of the admin, not a fresh KV read. The audit payload never stores
+    the template text itself, only a sha256[:12] fingerprint of the old and
+    new bodies.
+    """
+    old_value = await _kv_get(db, _KEY_ANNOUNCE_TEMPLATE)
+
+    if reset:
+        if old_value is not None:
+            await _kv_delete(db, _KEY_ANNOUNCE_TEMPLATE)
+            await record_audit(
+                db,
+                action="simulation_announce_template_reset",
+                actor_user_id=current_user.id,
+                payload={"old_hash": _hash12(old_value), "new_hash": None},
+            )
+        return RedirectResponse(
+            url=f"/admin/simulation?msg={quote('Template reset to file default.')}",
+            status_code=302,
+        )
+
+    error = validate_template(body)
+    if error:
+        ctx = await _simulation_context(
+            db, request, current_user, template_error=error, template_value_override=body
+        )
+        return templates.TemplateResponse(request, "admin/simulation.html", ctx)
+
+    await _kv_upsert(db, _KEY_ANNOUNCE_TEMPLATE, body)
+    await record_audit(
+        db,
+        action="simulation_announce_template_updated",
+        actor_user_id=current_user.id,
+        payload={"old_hash": _hash12(old_value), "new_hash": _hash12(body)},
+    )
+    return RedirectResponse(url=f"/admin/simulation?msg={quote('Template saved.')}", status_code=302)

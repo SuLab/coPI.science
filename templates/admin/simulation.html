@@ -1,0 +1,229 @@
+{% extends "base.html" %}
+{% block title %}Admin — Simulation — CoPI{% endblock %}
+
+{% block content %}
+<div id="sim-body">
+
+<div class="flex items-center justify-between mb-6">
+    <h1 class="text-2xl font-bold text-gray-900">Simulation Control</h1>
+</div>
+
+{% if msg %}
+<div class="mb-4 rounded-lg border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-800">{{ msg }}</div>
+{% endif %}
+{% if error %}
+<div class="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">{{ error }}</div>
+{% endif %}
+
+<!-- Status card -->
+<div class="bg-white border border-gray-200 rounded-xl shadow-sm p-5 mb-6">
+    <div class="flex items-center justify-between">
+        <h2 class="text-lg font-semibold text-gray-900">Engine status</h2>
+        {% if panel_state == 'not_deployed' %}
+        <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-600">Not deployed</span>
+        {% elif panel_state == 'stale' %}
+        <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-yellow-100 text-yellow-800">STALE</span>
+        {% elif panel_state == 'running' %}
+        <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">Running</span>
+        {% elif panel_state == 'starting' %}
+        <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800">Starting</span>
+        {% elif panel_state == 'stopping' %}
+        <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800">Stopping</span>
+        {% else %}
+        <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-600">{{ panel_state | capitalize }}</span>
+        {% endif %}
+    </div>
+
+    {% if panel_state == 'not_deployed' %}
+    <p class="mt-2 text-sm text-gray-500">
+        No heartbeat has ever been recorded — the supervisor/agent container is not
+        deployed, or has never checked in.
+    </p>
+    {% else %}
+    <p class="mt-2 text-sm text-gray-500">Last heartbeat: {{ status_row.updated_at }}</p>
+    {% if panel_state == 'stale' %}
+    <p class="mt-1 text-sm text-yellow-700">
+        The engine has not been heard from in over two minutes — it may not be responding.
+    </p>
+    {% endif %}
+    {% if status_row.detail %}
+    <dl class="mt-3 grid grid-cols-2 sm:grid-cols-4 gap-3 text-sm">
+        {% if status_row.detail.roster_size is defined %}
+        <div><dt class="text-gray-500">Roster size</dt><dd class="font-medium">{{ status_row.detail.roster_size }}</dd></div>
+        {% endif %}
+        {% if status_row.detail.tick_at is defined %}
+        <div><dt class="text-gray-500">Last tick</dt><dd class="font-medium">{{ status_row.detail.tick_at }}</dd></div>
+        {% endif %}
+        {% if status_row.detail.fresh is defined %}
+        <div><dt class="text-gray-500">Fresh</dt><dd class="font-medium">{{ status_row.detail.fresh }}</dd></div>
+        {% endif %}
+        {% if status_row.detail.max_runtime is defined %}
+        <div><dt class="text-gray-500">Max runtime</dt><dd class="font-medium">{{ status_row.detail.max_runtime }}</dd></div>
+        {% endif %}
+    </dl>
+    {% endif %}
+    {% endif %}
+
+    {% if latest_run %}
+    <p class="mt-3 text-sm text-gray-500">
+        Latest run:
+        <a class="text-indigo-600 hover:underline" href="/admin/activity/{{ latest_run.id }}">{{ latest_run.id }}</a>
+        — {{ latest_run.status }}, started {{ latest_run.started_at }}
+    </p>
+    {% endif %}
+</div>
+
+<!-- Start / stop controls -->
+<div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
+    <div class="bg-white border border-gray-200 rounded-xl shadow-sm p-5">
+        <h2 class="text-lg font-semibold text-gray-900 mb-3">Start a run</h2>
+        {% if pending_start %}
+        <p class="text-sm text-gray-500 mb-3">
+            A start request is already pending (requested {{ pending_start.created_at }}).
+        </p>
+        {% endif %}
+        <form action="/admin/simulation/start" method="post" class="space-y-3">
+            <label class="flex items-center gap-2 text-sm text-gray-700">
+                <input type="checkbox" name="fresh" value="true" checked class="rounded border-gray-300">
+                Fresh run (mints a new simulation run id — deletes nothing)
+            </label>
+            <div>
+                <label class="block text-xs font-medium text-gray-600 mb-1">Max runtime (minutes, 0 = indefinite)</label>
+                <input type="number" name="max_runtime" value="0" min="0"
+                       class="border border-gray-300 rounded px-2 py-1 text-sm w-40">
+            </div>
+            <button type="submit"
+                    class="inline-flex items-center px-4 py-2 rounded-md bg-indigo-600 text-white text-sm font-medium hover:bg-indigo-700 disabled:opacity-50"
+                    {% if panel_state in ('running', 'starting') or pending_start %}disabled{% endif %}>
+                Start
+            </button>
+        </form>
+    </div>
+
+    <div class="bg-white border border-gray-200 rounded-xl shadow-sm p-5">
+        <h2 class="text-lg font-semibold text-gray-900 mb-3">Stop the run</h2>
+        <p class="text-sm text-gray-500 mb-3">
+            Sends a graceful stop to the live engine. Refused unless the panel currently
+            reads Running.
+        </p>
+        <form action="/admin/simulation/stop" method="post">
+            <button type="submit"
+                    class="inline-flex items-center px-4 py-2 rounded-md bg-red-600 text-white text-sm font-medium hover:bg-red-700 disabled:opacity-50"
+                    {% if panel_state != 'running' %}disabled{% endif %}>
+                Stop
+            </button>
+        </form>
+    </div>
+</div>
+
+<!-- Announce settings: channels -->
+<div class="bg-white border border-gray-200 rounded-xl shadow-sm p-5 mb-6">
+    <h2 class="text-lg font-semibold text-gray-900 mb-3">Run-start announcement — channels</h2>
+    <p class="text-sm text-gray-500 mb-3">
+        Comma-separated Slack channel names (lowercase letters, digits, hyphens,
+        underscores). Empty clears the override and falls back to the Settings default.
+    </p>
+    <form action="/admin/simulation/announce-settings" method="post" class="flex items-end gap-3">
+        <div class="flex-1">
+            <label class="block text-xs font-medium text-gray-600 mb-1">Channels</label>
+            <input type="text" name="channels" value="{{ channels_value }}"
+                   class="border border-gray-300 rounded px-2 py-1 text-sm w-full">
+        </div>
+        <button type="submit"
+                class="inline-flex items-center px-4 py-2 rounded-md bg-indigo-600 text-white text-sm font-medium hover:bg-indigo-700">
+            Save
+        </button>
+    </form>
+</div>
+
+<!-- Announce settings: template -->
+<div class="bg-white border border-gray-200 rounded-xl shadow-sm p-5 mb-6">
+    <h2 class="text-lg font-semibold text-gray-900 mb-3">Run-start announcement — template</h2>
+    {% if template_error %}
+    <div class="mb-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">{{ template_error }}</div>
+    {% endif %}
+    <p class="text-sm text-gray-500 mb-3">
+        Placeholders: {{ '{run_id}' }}, {{ '{started_at}' }}, {{ '{run_duration}' }},
+        {{ '{git_commit}' }}, {{ '{git_branch}' }}, {{ '{git_dirty}' }},
+        {{ '{hub_prompts_version}' }}, {{ '{hub_prompts_hash}' }}, {{ '{pi_prompts_version}' }},
+        {{ '{pi_prompts_hash}' }}, {{ '{rubric_version}' }}, {{ '{rubric_hash}' }}.
+    </p>
+    <form action="/admin/simulation/announce-template" method="post" class="space-y-3">
+        <textarea name="body" rows="10"
+                  class="border border-gray-300 rounded px-3 py-2 text-sm w-full font-mono">{{ template_value }}</textarea>
+        <input type="hidden" name="reset" value="false">
+        <button type="submit"
+                class="inline-flex items-center px-4 py-2 rounded-md bg-indigo-600 text-white text-sm font-medium hover:bg-indigo-700">
+            Validate &amp; save
+        </button>
+    </form>
+    <form action="/admin/simulation/announce-template" method="post" class="mt-2">
+        <input type="hidden" name="body" value="">
+        <input type="hidden" name="reset" value="true">
+        <button type="submit"
+                class="inline-flex items-center px-4 py-2 rounded-md bg-gray-200 text-gray-800 text-sm font-medium hover:bg-gray-300">
+            Reset to file default
+        </button>
+    </form>
+</div>
+
+<!-- Commands -->
+<div class="bg-white border border-gray-200 rounded-xl shadow-sm overflow-hidden mb-6">
+    <div class="px-5 py-3 border-b border-gray-200">
+        <h2 class="text-lg font-semibold text-gray-900">Commands</h2>
+    </div>
+    <table class="min-w-full divide-y divide-gray-200">
+        <thead class="bg-gray-50">
+            <tr>
+                <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Command</th>
+                <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+                <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Requested</th>
+                <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Consumed</th>
+                <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Result</th>
+            </tr>
+        </thead>
+        <tbody class="divide-y divide-gray-100">
+            {% for cmd in recent_commands %}
+            <tr>
+                <td class="px-4 py-2 text-sm text-gray-900">{{ cmd.command }}</td>
+                <td class="px-4 py-2 text-sm text-gray-700">{{ cmd.status }}</td>
+                <td class="px-4 py-2 text-sm text-gray-500">{{ cmd.created_at }}</td>
+                <td class="px-4 py-2 text-sm text-gray-500">{{ cmd.consumed_at or '—' }}</td>
+                <td class="px-4 py-2 text-sm text-gray-500">{{ cmd.result or '—' }}</td>
+            </tr>
+            {% else %}
+            <tr><td colspan="5" class="px-4 py-4 text-sm text-gray-400 text-center">No commands recorded yet.</td></tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<!-- Recent admin actions -->
+<div class="bg-white border border-gray-200 rounded-xl shadow-sm overflow-hidden mb-6">
+    <div class="px-5 py-3 border-b border-gray-200">
+        <h2 class="text-lg font-semibold text-gray-900">Recent admin actions</h2>
+    </div>
+    <table class="min-w-full divide-y divide-gray-200">
+        <thead class="bg-gray-50">
+            <tr>
+                <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Action</th>
+                <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">When</th>
+            </tr>
+        </thead>
+        <tbody class="divide-y divide-gray-100">
+            {% for ev in audit_events %}
+            <tr>
+                <td class="px-4 py-2 text-sm text-gray-900">{{ ev.action }}</td>
+                <td class="px-4 py-2 text-sm text-gray-500">{{ ev.created_at }}</td>
+            </tr>
+            {% else %}
+            <tr><td colspan="2" class="px-4 py-4 text-sm text-gray-400 text-center">No admin actions recorded yet.</td></tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+{# stats sections appended by Task 11 #}
+
+</div><!-- #sim-body -->
+{% endblock %}
