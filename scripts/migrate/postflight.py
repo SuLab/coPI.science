@@ -180,6 +180,8 @@ EXPECTED_CONSTRAINTS: dict[str, tuple[str, str]] = {
 
 EXPECTED_ENUMS: dict[str, tuple[str, ...]] = {
     "pi_dm_direction_enum": ("inbound", "outbound"),
+    "sim_command_enum": ("start", "stop"),
+    "sim_command_status_enum": ("pending", "done", "failed", "stale"),
 }
 
 #: Columns whose NULLs would be a data defect even though the catalog forbids them.

@@ -123,6 +123,7 @@ DEFAULT_TARGET = "0042"
 SUPPORTED_START_REVISIONS = (
     "0018", "0019", "0020", "0021", "0023", "0024", "0025", "0026", "0027", "0028", "0029",
     "0030", "0031", "0032", "0033", "0034", "0035", "0036", "0037", "0038", "0039", "0040",
+    "0041",
 )
 
 #: Start revisions at which migration 0019 has already run, so the expensive
@@ -370,12 +371,23 @@ PLANNED_OBJECTS: tuple[PlannedObject, ...] = (
     PlannedObject("0040", "column", "prose_format", "opportunity_assessments"),
     # 0041_assessment_summary_posted_at
     PlannedObject("0041", "column", "summary_posted_at", "opportunity_assessments"),
+    # 0042_simulation_control_plane
+    PlannedObject("0042", "table", "simulation_commands"),
+    PlannedObject("0042", "table", "simulation_process_status"),
+    PlannedObject("0042", "table", "admin_audit_events"),
+    PlannedObject("0042", "column", "thread_ts", "llm_call_logs"),
+    PlannedObject("0042", "type", "sim_command_enum"),
+    PlannedObject("0042", "type", "sim_command_status_enum"),
+    PlannedObject("0042", "index", "ix_simulation_commands_pending", "simulation_commands"),
+    PlannedObject(
+        "0042", "index", "uq_simulation_commands_one_pending", "simulation_commands",
+    ),
 )
 
 REVISION_ORDER = (
     "0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027", "0028",
     "0029", "0030", "0031", "0032", "0033", "0034", "0035", "0036", "0037", "0038", "0039",
-    "0040", "0041",
+    "0040", "0041", "0042",
 )
 
 
