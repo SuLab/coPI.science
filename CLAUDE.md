@@ -136,7 +136,12 @@ the dev database.
 > attaches it to the shared `copi-edge` network, swaps every `awslogs`
 > driver for `json-file`, and (2026-08-28, for the review bot) adds a
 > read-only `- ./prompts:/app/prompts:ro` mount to the **worker** service,
-> which the committed file does not give the worker at all. The rename is not
+> which the committed file does not give the worker at all. It also
+> (2026-08-30, for the simulation control panel) changes the **agent**
+> service's `command` from `src.agent.main` to `src.agent.supervisor`, and
+> adds `restart: unless-stopped`, `container_name:
+> copi-blackbird-agent-1`, and `stop_grace_period: 420s` — none of which the
+> committed file has either. The rename is not
 > cosmetic — Compose adds the service name as a network alias on every
 > attached network, so an `app` on `copi-edge` would collide with org1's `app`
 > and org1's nginx upstream would resolve to **this** container, breaking
@@ -147,7 +152,9 @@ the dev database.
 > in both versions for `blackbird-app` and `agent`; the worker's `prompts/`
 > mount is the one exception — it exists ONLY in the working tree, not in the
 > committed file — so do not assume the worker row of any mount table matches
-> `git show HEAD:docker-compose.prod.yml`.
+> `git show HEAD:docker-compose.prod.yml`. The agent service's
+> `command`/`restart`/`container_name`/`stop_grace_period` lines are the same
+> kind of exception — working-tree only, absent from the committed file.
 
 The simulation runs in a one-off container named `blackbird-agent-run`:
 
@@ -394,6 +401,50 @@ environment. Step 2 + step 6 above (rm, then `run`) is what actually picks up an
 edited `.env`. For the web tier the equivalent is `$DC up -d --force-recreate
 blackbird-app` — and one `.env` key now fails the site closed if it is wrong,
 see "The Origin guard" below.
+
+### Simulation control plane (2026-08-30)
+
+`src.agent.supervisor` is now the `agent` service's `command` (see the
+two-stack warning above — that line, like `restart: unless-stopped`,
+`container_name: copi-blackbird-agent-1` and `stop_grace_period: 420s`, lives
+only in the uncommitted compose working tree). It replaces the one-off `$DC
+--profile agent run -d --name blackbird-agent-run agent python -m
+src.agent.main` invocation above for NORMAL operation: with `restart:
+unless-stopped` and a stable `container_name` in place, the supervisor is
+started like any other long-lived service, `$DC --profile agent up -d agent`,
+and stays up across host reboots and crashes rather than living and dying
+with a single `docker run`.
+
+- **Starts happen ONLY from `/admin/simulation`**, or the CLI emergency path
+  documented above (`docker compose run` with an explicit `python -m
+  src.agent.main ...` command) — compose v2 clears the restart policy on a
+  `run` one-off, so that emergency path can never be auto-resurrected by
+  `restart: unless-stopped`. The supervisor process itself never starts a
+  simulation run on its own.
+- **`stop` issued from the admin page is gentler than `docker stop`**: it
+  asks the already-running engine to stop in-process, which drains and
+  flushes exactly like `SimulationEngine.stop()` always has, with no
+  container-level SIGTERM/grace-period dance needed at all.
+- **On boot the supervisor stales any pending start command** rather than
+  acting on it — it never auto-starts a run on container (re)start, which is
+  the same never-auto-start-the-simulation policy this file has always
+  followed, now enforced by the supervisor itself rather than by operator
+  discipline alone. A host reboot or a plain `$DC up -d agent` brings the
+  supervisor back IDLE, waiting for an operator to start a run from
+  `/admin/simulation`.
+- **A code deploy is now**: `$DC --profile agent build agent` then `$DC up -d
+  agent` — there is no `run -d --name blackbird-agent-run` step anymore. Per
+  the previous bullet, the supervisor container comes back up IDLE; starting
+  a run after a deploy is a separate, explicit operator action from
+  `/admin/simulation`.
+- **`docker stop -t 420` semantics are unchanged.** Everything the "Before
+  restarting" section above says about the 420s grace period still applies
+  verbatim to the supervisor container. `stop_grace_period: 420s` in the
+  compose file gives that same 420s as compose's own default (compose's
+  built-in default is 10s), so a bare `docker compose stop agent` no longer
+  needs an explicit `-t 420` to avoid a premature SIGKILL — but running
+  `docker stop -t 420 copi-blackbird-agent-1` by hand remains correct and
+  loses nothing.
 
 ## Adding New PIs
 
