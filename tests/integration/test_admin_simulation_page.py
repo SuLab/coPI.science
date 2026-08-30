@@ -29,8 +29,10 @@ from src.models import (
     USER_ROLE_MANAGER,
     AdminAuditEvent,
     AppSetting,
+    OpportunityAssessment,
     SimulationCommand,
     SimulationProcessStatus,
+    ThreadDecision,
 )
 from tests import factories
 from tests.integration.test_manager_access import auth_headers
@@ -291,3 +293,138 @@ async def test_non_admin_manager_is_refused_on_every_route(client, db_session):
             headers=headers,
         )
     ).status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# Task 11 — the Live tab: stats wired into /admin/simulation.
+#
+#   (a) a seeded run renders the cost hero with the hand-computed figure
+#       (Task 9/8's canonical case: 1M input + 100k output + 500k cache-read
+#       + 200k cache-creation on claude-opus-5 = $9.00) and the cache hit-rate
+#       meter's detail text (500,000 of 1,500,000 input tokens cached),
+#   (b) an unpriced model name appears in a visible warning,
+#   (c) headlines-owed renders the count from a seeded un-stamped assessment,
+#   (d) `?run=` switches runs — the default (latest) shows one figure, the
+#       explicit older run shows the other,
+#   (e) an EMPTY run (no calls/messages/assessments at all) renders every
+#       section without a 500,
+#   (f) the api-call-units caveat string is present wherever total_api_calls
+#       shows.
+# ---------------------------------------------------------------------------
+
+
+async def test_live_tab_cost_hero_and_cache_hit_rate_hand_computed(client, db_session):
+    admin = await _admin(db_session, "sim-admin-t11a@example.org")
+    run = await factories.make_simulation_run(db_session)
+    await factories.make_llm_call_log(
+        db_session, run=run, model="claude-opus-5",
+        input_tokens=1_000_000, output_tokens=100_000,
+        cache_read_input_tokens=500_000, cache_creation_input_tokens=200_000,
+    )
+    await db_session.commit()
+
+    resp = await client.get(f"/admin/simulation?run={run.id}", headers=auth_headers(admin.id))
+
+    assert resp.status_code == 200
+    assert "$9.00" in resp.text
+    assert "500,000 of 1,500,000 input tokens served from cache" in resp.text
+    assert "33%" in resp.text
+
+
+async def test_live_tab_surfaces_unpriced_model_in_a_visible_warning(client, db_session):
+    admin = await _admin(db_session, "sim-admin-t11b@example.org")
+    run = await factories.make_simulation_run(db_session)
+    await factories.make_llm_call_log(
+        db_session, run=run, model="claude-unknown-42",
+        input_tokens=100, output_tokens=10,
+        cache_read_input_tokens=0, cache_creation_input_tokens=0,
+    )
+    await db_session.commit()
+
+    resp = await client.get(f"/admin/simulation?run={run.id}", headers=auth_headers(admin.id))
+
+    assert resp.status_code == 200
+    assert "claude-unknown-42" in resp.text
+    assert "sc-tile--warn" in resp.text
+    assert "Unpriced model" in resp.text
+
+
+async def test_live_tab_headlines_owed_from_a_terminal_unannounced_assessment(client, db_session):
+    admin = await _admin(db_session, "sim-admin-t11c@example.org")
+    run = await factories.make_simulation_run(db_session)
+    db_session.add(OpportunityAssessment(
+        simulation_run_id=run.id, agent_id="blackbird", channel_name="general",
+        thread_id="T1", recommendation="advance", summary_posted_at=None,
+    ))
+    db_session.add(ThreadDecision(
+        simulation_run_id=run.id, thread_id="T1", channel="c",
+        agent_a="blackbird", agent_b="labbot", outcome="no_proposal",
+    ))
+    await db_session.commit()
+
+    resp = await client.get(f"/admin/simulation?run={run.id}", headers=auth_headers(admin.id))
+
+    assert resp.status_code == 200
+    assert "Headlines owed" in resp.text
+    assert "sc-tile--warn" in resp.text
+    assert '<div class="sc-tile-value">1</div>' in resp.text
+
+
+async def test_live_tab_run_selector_switches_between_runs(client, db_session):
+    admin = await _admin(db_session, "sim-admin-t11d@example.org")
+    older = await factories.make_simulation_run(
+        db_session, started_at=datetime(2026, 1, 1, tzinfo=UTC)
+    )
+    await factories.make_llm_call_log(
+        db_session, run=older, model="claude-opus-5",
+        input_tokens=1_000_000, output_tokens=100_000,
+        cache_read_input_tokens=500_000, cache_creation_input_tokens=200_000,
+    )  # $9.00
+    newer = await factories.make_simulation_run(
+        db_session, started_at=datetime(2026, 1, 2, tzinfo=UTC)
+    )
+    await factories.make_llm_call_log(
+        db_session, run=newer, model="claude-sonnet-5",
+        input_tokens=25_000, output_tokens=0,
+        cache_read_input_tokens=0, cache_creation_input_tokens=0,
+    )  # 25_000 * 2 / 1e6 = 0.05
+    await db_session.commit()
+
+    default_resp = await client.get("/admin/simulation", headers=auth_headers(admin.id))
+    assert default_resp.status_code == 200
+    assert "$0.05" in default_resp.text
+    assert "$9.00" not in default_resp.text
+    assert f'value="{newer.id}"' in default_resp.text
+    assert "selected" in default_resp.text
+
+    older_resp = await client.get(
+        f"/admin/simulation?run={older.id}", headers=auth_headers(admin.id)
+    )
+    assert older_resp.status_code == 200
+    assert "$9.00" in older_resp.text
+
+
+async def test_live_tab_empty_run_renders_every_section_without_a_500(client, db_session):
+    admin = await _admin(db_session, "sim-admin-t11e@example.org")
+    run = await factories.make_simulation_run(db_session)
+    await db_session.commit()
+
+    resp = await client.get(f"/admin/simulation?run={run.id}", headers=auth_headers(admin.id))
+
+    assert resp.status_code == 200
+    assert "Interview timeline" in resp.text
+    assert "Stop-reason taxonomy" in resp.text
+    assert "Hub : lab token burn ratio" in resp.text
+    assert "Internal Server Error" not in resp.text
+
+
+async def test_live_tab_api_call_units_caveat_is_present(client, db_session):
+    admin = await _admin(db_session, "sim-admin-t11f@example.org")
+    run = await factories.make_simulation_run(db_session, total_api_calls=42)
+    await db_session.commit()
+
+    resp = await client.get(f"/admin/simulation?run={run.id}", headers=auth_headers(admin.id))
+
+    assert resp.status_code == 200
+    assert "REAL API CALLS" in resp.text
+    assert "not turns" in resp.text

@@ -4,7 +4,9 @@ import hashlib
 import logging
 import re
 import uuid
+from collections import defaultdict
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any
 from urllib.parse import quote
 
@@ -18,6 +20,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from src.agent.main import API_CALL_UNITS_NOTE
 from src.agent.roles import available_roles
 from src.agent.run_marker import _template_body, parse_announce_channels, validate_template
 from src.agent.specialists import parse_opinion
@@ -41,6 +44,7 @@ from src.models import (
     CohortMembership,
     Job,
     LlmCallLog,
+    OpportunityAssessment,
     ResearcherProfile,
     SimulationCommand,
     SimulationRun,
@@ -48,6 +52,7 @@ from src.models import (
     User,
     WaitlistSignup,
 )
+from src.services.agent_activation import activation_blockers
 from src.services.assessment_detail import build_assessment_detail
 from src.services.cohorts import (
     compute_gates,
@@ -62,15 +67,40 @@ from src.services.directory import (
     list_runs_overview,
     load_user_detail,
 )
-from src.services.llm import is_truncated_stop
-from src.services.agent_activation import activation_blockers
 from src.services.jhu_rules import get_tenure_start
+from src.services.llm import is_truncated_stop
 from src.services.pi_onboarding import find_or_create_pi_by_orcid
 from src.services.simulation_control import (
+    HEARTBEAT_STALE_SECONDS,
     derive_panel_state,
     enqueue_command,
     read_status,
     record_audit,
+)
+from src.services.simulation_stats import (
+    CALL_STATS_ROW_LIMIT,
+    consult_fanout,
+    cost_per_interview,
+    cost_summary,
+    funnel,
+    hourly_activity,
+    hub_lab_burn,
+    interview_timeline,
+    latency_percentiles,
+    per_agent,
+    run_overview,
+    specialist_mix,
+    stop_reason_taxonomy,
+)
+from src.services.svg_charts import (
+    CATEGORICAL_COLORS,
+    diverging_hbar,
+    gantt,
+    hbar_list,
+    meter,
+    sparkline,
+    stacked_hbar,
+    stat_tile,
 )
 from src.services.thread_panel import panel_cards_by_thread
 from src.services.user_deletion import delete_user_account
@@ -2132,6 +2162,378 @@ async def _kv_delete(db: AsyncSession, key: str) -> None:
     await db.execute(sa_delete(AppSetting).where(AppSetting.key == key))
 
 
+# ---------------------------------------------------------------------------
+# Live tab (Task 11) — wires src.services.simulation_stats + svg_charts into
+# the control panel. Strictly single-run: every figure below comes from ONE
+# `simulation_run_id`, chosen by `_resolve_selected_run`, and nothing here
+# ever sums across runs — the run selector exists so an operator can compare
+# runs side by side, never so the page can blend them.
+# ---------------------------------------------------------------------------
+
+
+async def _rubric_stamps_by_run(db: AsyncSession) -> dict[uuid.UUID, list[str]]:
+    """Every distinct (rubric_version, rubric_content_hash) an OpportunityAssessment
+    row in each run was stamped with, most-common first. Regime segmentation for the
+    run selector — a run that straddled a rubric bump shows both stamps rather than
+    picking one."""
+    rows = (
+        await db.execute(
+            select(
+                OpportunityAssessment.simulation_run_id,
+                OpportunityAssessment.rubric_version,
+                OpportunityAssessment.rubric_content_hash,
+                func.count(),
+            ).group_by(
+                OpportunityAssessment.simulation_run_id,
+                OpportunityAssessment.rubric_version,
+                OpportunityAssessment.rubric_content_hash,
+            )
+        )
+    ).all()
+    by_run: dict[uuid.UUID, list[tuple[int, str]]] = defaultdict(list)
+    for run_id, version, content_hash, n in rows:
+        label = f"{version or 'unstamped'} ({content_hash or '—'}) ×{n}"
+        by_run[run_id].append((int(n), label))
+    return {
+        run_id: [label for _, label in sorted(entries, reverse=True)]
+        for run_id, entries in by_run.items()
+    }
+
+
+async def _resolve_selected_run(
+    db: AsyncSession, request: Request,
+) -> tuple[SimulationRun | None, list[SimulationRun]]:
+    """`?run=<uuid>`, defaulting to the latest run by `started_at`. An absent,
+    malformed, or unknown `run` param all fall back to the default rather than
+    erroring — the selector is a convenience, not a hard filter that can 404."""
+    runs = (
+        await db.execute(select(SimulationRun).order_by(SimulationRun.started_at.desc()))
+    ).scalars().all()
+    selected = None
+    run_param = request.query_params.get("run")
+    if run_param:
+        try:
+            run_uuid = uuid.UUID(run_param)
+        except ValueError:
+            run_uuid = None
+        if run_uuid is not None:
+            selected = next((r for r in runs if r.id == run_uuid), None)
+    if selected is None:
+        selected = runs[0] if runs else None
+    return selected, runs
+
+
+def _agent_heartbeat_display(
+    last_activity: datetime | None, now: datetime,
+) -> tuple[str, str]:
+    """(last_activity_display, heartbeat_display) — both "—" when absent or
+    stale (same `HEARTBEAT_STALE_SECONDS` the engine-wide status row uses)."""
+    if last_activity is None:
+        return "—", "—"
+    age_seconds = (now - last_activity).total_seconds()
+    heartbeat = "live" if age_seconds <= HEARTBEAT_STALE_SECONDS else "—"
+    return last_activity.isoformat(), heartbeat
+
+
+async def _live_tab_context(db: AsyncSession, request: Request) -> dict[str, Any]:
+    """Every value the Live tab's stats sections render, for ONE run — see the
+    module comment above. Returns a minimal dict (no run selected, no runs
+    exist) when there is nothing to show; the template degrades every
+    subsection to an em-dash on its own empty data."""
+    selected_run, all_runs = await _resolve_selected_run(db, request)
+    rubric_stamps = await _rubric_stamps_by_run(db)
+    run_options = [
+        {
+            "id": r.id,
+            "status": r.status,
+            "started_at": r.started_at,
+            "rubric_stamps": rubric_stamps.get(r.id, []),
+            "is_selected": selected_run is not None and r.id == selected_run.id,
+        }
+        for r in all_runs
+    ]
+
+    if selected_run is None:
+        return {
+            "stats_run": None,
+            "run_options": run_options,
+            "api_call_units_note": API_CALL_UNITS_NOTE,
+        }
+
+    run_id = selected_run.id
+    overview = await run_overview(db, run_id)
+    cost = await cost_summary(db, run_id)
+    hours = await hourly_activity(db, run_id)
+    fun = await funnel(db, run_id)
+    domains = await specialist_mix(db, run_id)
+    fanout = await consult_fanout(db, run_id)
+    agents = await per_agent(db, run_id)
+    taxonomy = await stop_reason_taxonomy(db, run_id)
+    latency = await latency_percentiles(db, run_id)
+    timeline = await interview_timeline(db, run_id)
+    per_interview = await cost_per_interview(db, run_id)
+
+    total_call_rows = (
+        await db.execute(
+            select(func.count())
+            .select_from(LlmCallLog)
+            .where(LlmCallLog.simulation_run_id == run_id)
+        )
+    ).scalar_one()
+    latency_capped = total_call_rows > CALL_STATS_ROW_LIMIT
+
+    hub_agent_id = (
+        await db.execute(
+            select(AgentRegistry.agent_id).where(AgentRegistry.role == "scout_hub").limit(1)
+        )
+    ).scalar_one_or_none()
+    burn_points = await hub_lab_burn(db, run_id, hub_agent_id) if hub_agent_id else []
+
+    # --- KPI row ------------------------------------------------------
+    cost_hero_notes = ["Single-run draw — never aggregated across runs."]
+    if cost.unpriced_models:
+        cost_hero_notes.insert(
+            0,
+            "Unpriced model(s) excluded from this total: " + ", ".join(cost.unpriced_models),
+        )
+    cost_hero_html = stat_tile(
+        "Total cost",
+        f"{'≥' if cost.is_floor else ''}${cost.total:.2f}",
+        " ".join(cost_hero_notes),
+        warn=bool(cost.unpriced_models),
+    )
+
+    elapsed_hours = overview.elapsed_seconds / 3600
+    burn_html = stat_tile(
+        "Burn rate",
+        f"${(float(cost.total) / elapsed_hours):.2f}/h" if elapsed_hours > 0 else "—",
+        "Single-run draw.",
+    )
+
+    cache_denominator = cost.total_input_tokens + cost.total_cache_read_tokens
+    cache_fraction = (
+        cost.total_cache_read_tokens / cache_denominator if cache_denominator > 0 else 0.0
+    )
+    cache_meter_html = meter(
+        "Cache hit rate",
+        cache_fraction,
+        f"{cost.total_cache_read_tokens:,} of {cache_denominator:,} input tokens served from cache",
+    )
+
+    progress_html = (
+        meter(
+            "Progress",
+            overview.elapsed_seconds / overview.planned_seconds,
+            f"{overview.elapsed_seconds:.0f}s of {overview.planned_seconds}s planned",
+        )
+        if overview.planned_seconds
+        else None
+    )
+
+    headlines_owed_html = stat_tile(
+        "Headlines owed", str(fun.headlines_owed), warn=fun.headlines_owed > 0
+    )
+    interviews_concluded_html = stat_tile("Interviews concluded", str(fun.terminal))
+
+    # --- cumulative cost sparkline + hourly token-class stacked bars ---
+    cumulative_points: list[float] = []
+    running_total = Decimal(0)
+    for h in hours:
+        running_total += h.cost
+        cumulative_points.append(float(running_total))
+    cumulative_cost_html = sparkline(cumulative_points) if cumulative_points else None
+
+    hourly_token_bars = [
+        {
+            "hour": h.hour,
+            "html": stacked_hbar(
+                h.hour.isoformat(),
+                [
+                    ("input", float(h.input_tokens), CATEGORICAL_COLORS[0]),
+                    ("output", float(h.output_tokens), CATEGORICAL_COLORS[1]),
+                    ("cache_read", float(h.cache_read_tokens), CATEGORICAL_COLORS[2]),
+                    ("cache_creation", float(h.cache_creation_tokens), CATEGORICAL_COLORS[3]),
+                ],
+            ),
+        }
+        for h in hours
+    ]
+
+    # --- cost by agent / model / phase ---------------------------------
+    cost_by_agent_html = (
+        hbar_list([(a.agent_id, float(a.cost), f"${a.cost:.2f} ({a.call_count} calls)") for a in cost.by_agent])
+        if cost.by_agent
+        else None
+    )
+    cost_by_model_html = (
+        hbar_list([
+            (m.model, float(m.cost) if m.cost is not None else 0.0,
+             f"${m.cost:.2f}" if m.cost is not None else "unpriced")
+            for m in cost.by_model
+        ])
+        if cost.by_model
+        else None
+    )
+    cost_by_phase_html = (
+        hbar_list([(p.phase, float(p.cost), f"${p.cost:.2f} ({p.call_count} calls)") for p in cost.by_phase])
+        if cost.by_phase
+        else None
+    )
+
+    # --- funnel + drops --------------------------------------------------
+    funnel_counts = [
+        ("opened", fun.interviews_opened),
+        ("verdicts stored", fun.verdicts_stored),
+        ("terminal", fun.terminal),
+        ("provisional", fun.provisional),
+        ("announced", fun.announced),
+        ("headlines owed", fun.headlines_owed),
+    ]
+    funnel_html = (
+        hbar_list([
+            (label, float(v), str(v))
+            for label, v in sorted(funnel_counts, key=lambda kv: kv[1], reverse=True)
+        ])
+        if any(v for _, v in funnel_counts)
+        else None
+    )
+    drops_rows = sorted(fun.drops_by_reason.items(), key=lambda kv: kv[1], reverse=True)
+
+    # --- specialist mix + fan-out ----------------------------------------
+    specialist_rows = [
+        {
+            "domain": d.domain,
+            "html": diverging_hbar(d.domain, d.blocking, d.gap, d.adequate, ("blocking", "gap", "adequate")),
+            "historical": d.historical,
+        }
+        for d in domains
+    ]
+    fanout_html = (
+        hbar_list([
+            (f"{b.consult_count} consult(s)", float(b.interview_count), f"{b.interview_count} interview(s)")
+            for b in fanout
+        ])
+        if fanout
+        else None
+    )
+
+    # --- stop-reason taxonomy + latency percentiles ----------------------
+    taxonomy_html = (
+        hbar_list([
+            (label, float(n), str(n))
+            for label, n in sorted(taxonomy.items(), key=lambda kv: kv[1], reverse=True)
+        ])
+        if taxonomy
+        else None
+    )
+    latency_rows = [
+        {"phase": phase, "n": pct.n, "p50": pct.p50, "p95": pct.p95, "p99": pct.p99}
+        for phase, pct in sorted(latency.items(), key=lambda kv: (kv[0] != "overall", kv[0]))
+    ]
+
+    # --- per-agent table (stats + heartbeat merged) ----------------------
+    now = datetime.now(UTC)
+    per_agent_rows = []
+    for r in agents:
+        last_activity_display, heartbeat_display = _agent_heartbeat_display(r.last_activity, now)
+        per_agent_rows.append({
+            "agent_id": r.agent_id,
+            "role": r.role or "—",
+            "registry_status": r.registry_status or "—",
+            "muted": r.muted,
+            "message_count": r.message_count,
+            "call_count": r.call_count,
+            "cost": f"${r.cost:.4f}",
+            "last_activity": last_activity_display,
+            "heartbeat": heartbeat_display,
+        })
+
+    # --- interview gantt --------------------------------------------------
+    cost_by_thread = {ic.thread_ts: ic for ic in per_interview}
+    gantt_rows = []
+    gantt_links = []
+    known_times = [
+        t for s in timeline for t in (s.first_message_at, s.last_message_at) if t is not None
+    ]
+    t0 = min(known_times) if known_times else 0.0
+    t1 = max(known_times) if known_times else 0.0
+    for s in timeline:
+        start = s.first_message_at if s.first_message_at is not None else t0
+        end = s.last_message_at if s.last_message_at is not None else start
+        ic = cost_by_thread.get(s.thread_id)
+        cost_display = "—"
+        if ic is not None:
+            cost_display = f"{'≥' if ic.is_floor else ''}${ic.cost:.2f}"
+        label = s.subject_agent_id or s.thread_id
+        gantt_rows.append((label, start, end, CATEGORICAL_COLORS[1 if s.announced else 0],
+                            f"{s.outcome} — {cost_display}"))
+        gantt_links.append({
+            "assessment_id": s.assessment_id,
+            "label": label,
+            "outcome": s.outcome,
+            "cost": cost_display,
+            "announced": s.announced,
+        })
+    gantt_html = gantt(gantt_rows, t0, t1) if gantt_rows else None
+    unattributed = cost_by_thread.get(None)
+    unattributed_note = None
+    if gantt_rows and unattributed is not None:
+        prefix = "≥" if unattributed.is_floor else ""
+        unattributed_note = (
+            f"{prefix}${unattributed.cost:.2f} in LLM calls could not be attributed to a "
+            "specific interview thread (no thread_ts recorded) and is excluded from every "
+            "row above."
+        )
+
+    # --- hub:lab burn sparkline --------------------------------------------
+    burn_sparkline_html = (
+        sparkline([p.ratio if p.ratio is not None else 0.0 for p in burn_points])
+        if burn_points
+        else None
+    )
+    burn_rows = [
+        {
+            "hour": p.hour,
+            "hub_tokens": p.hub_tokens,
+            "lab_tokens": p.lab_tokens,
+            "ratio": f"{p.ratio:.2f}" if p.ratio is not None else "no lab burn this hour",
+        }
+        for p in burn_points
+    ]
+
+    return {
+        "stats_run": selected_run,
+        "run_options": run_options,
+        "api_call_units_note": API_CALL_UNITS_NOTE,
+        "run_overview": overview,
+        "cost_hero_html": cost_hero_html,
+        "burn_html": burn_html,
+        "cache_meter_html": cache_meter_html,
+        "progress_html": progress_html,
+        "headlines_owed_html": headlines_owed_html,
+        "interviews_concluded_html": interviews_concluded_html,
+        "cumulative_cost_html": cumulative_cost_html,
+        "hourly_token_bars": hourly_token_bars,
+        "cost_by_agent_html": cost_by_agent_html,
+        "cost_by_model_html": cost_by_model_html,
+        "cost_by_phase_html": cost_by_phase_html,
+        "funnel_html": funnel_html,
+        "drops_rows": drops_rows,
+        "unvetted_panel_count": fun.unvetted_panel_count,
+        "specialist_rows": specialist_rows,
+        "fanout_html": fanout_html,
+        "taxonomy_html": taxonomy_html,
+        "latency_rows": latency_rows,
+        "latency_capped": latency_capped,
+        "per_agent_rows": per_agent_rows,
+        "gantt_html": gantt_html,
+        "gantt_links": gantt_links,
+        "unattributed_note": unattributed_note,
+        "burn_sparkline_html": burn_sparkline_html,
+        "burn_rows": burn_rows,
+    }
+
+
 async def _simulation_context(
     db: AsyncSession,
     request: Request,
@@ -2183,6 +2585,8 @@ async def _simulation_context(
     )
     audit_events = audit_result.scalars().all()
 
+    live_tab = await _live_tab_context(db, request)
+
     return _template_context(
         request,
         current_user,
@@ -2199,6 +2603,7 @@ async def _simulation_context(
         msg=msg,
         error=error,
         template_error=template_error,
+        **live_tab,
     )
 
 

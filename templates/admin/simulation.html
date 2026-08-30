@@ -223,7 +223,263 @@
     </table>
 </div>
 
-{# stats sections appended by Task 11 #}
+{# ==================================================================== #}
+{# Task 11 — the Live tab: read-only stats for ONE simulation run.       #}
+{# Never aggregated across runs — the selector below picks exactly one. #}
+{# ==================================================================== #}
+
+<div class="bg-white border border-gray-200 rounded-xl shadow-sm p-5 mb-6">
+    <h2 class="text-lg font-semibold text-gray-900 mb-3">Run selector</h2>
+    <form method="get" class="flex items-center gap-3">
+        <select name="run" onchange="this.form.submit()"
+                class="border border-gray-300 rounded px-2 py-1 text-sm">
+            {% for opt in run_options %}
+            <option value="{{ opt.id }}" {% if opt.is_selected %}selected{% endif %}>
+                {{ opt.started_at }} — {{ opt.status }}
+                {% if opt.rubric_stamps %} — {{ opt.rubric_stamps | join('; ') }}{% else %} — no verdicts yet{% endif %}
+            </option>
+            {% else %}
+            <option disabled>No simulation runs recorded yet.</option>
+            {% endfor %}
+        </select>
+        <noscript><button type="submit" class="px-3 py-1 rounded bg-gray-200 text-sm">Switch</button></noscript>
+    </form>
+</div>
+
+{% if not stats_run %}
+<div class="bg-white border border-gray-200 rounded-xl shadow-sm p-5 mb-6 text-sm text-gray-400">
+    No simulation run to show stats for yet — start one above.
+</div>
+{% else %}
+
+{% if run_overview %}
+<div class="bg-white border border-gray-200 rounded-xl shadow-sm p-5 mb-6 text-sm text-gray-600 space-y-1">
+    <div>Build: {{ run_overview.build_info.commit or '—' }} ({{ run_overview.build_info.branch or '—' }},
+        {{ run_overview.build_info.dirty_files if run_overview.build_info.dirty_files is not none else '—' }} dirty files,
+        source={{ run_overview.build_info.source }})</div>
+    <div>Prompt stamps: hub {{ run_overview.hub_prompt_stamp.version }} ({{ run_overview.hub_prompt_stamp.content_hash }}),
+        PI {{ run_overview.pi_prompt_stamp.version }} ({{ run_overview.pi_prompt_stamp.content_hash }})</div>
+    <div>Rubric: {{ run_overview.rubric_version }} ({{ run_overview.rubric_content_hash }})</div>
+    <div>Total API calls: {{ run_overview.total_api_calls }}
+        <span class="text-gray-400">— {{ api_call_units_note }}</span></div>
+</div>
+{% endif %}
+
+<!-- KPI row -->
+<p class="text-xs text-gray-400 mb-2">Single-run draw — every figure below is scoped to the selected run only.</p>
+<div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4 mb-6">
+    <div>{{ cost_hero_html | safe }}</div>
+    <div>{{ burn_html | safe }}</div>
+    <div>{{ cache_meter_html | safe }}</div>
+    <div>
+        {% if progress_html %}{{ progress_html | safe }}{% else %}
+        <div class="sc-tile"><div class="sc-tile-label">Progress</div><div class="sc-tile-value">indefinite</div></div>
+        {% endif %}
+    </div>
+    <div>{{ headlines_owed_html | safe }}</div>
+    <div>{{ interviews_concluded_html | safe }}</div>
+</div>
+
+<!-- Cumulative cost + hourly token stacked bars -->
+<div class="bg-white border border-gray-200 rounded-xl shadow-sm p-5 mb-6">
+    <h2 class="text-lg font-semibold text-gray-900 mb-3">Cost over time</h2>
+    <h3 class="text-sm font-medium text-gray-700 mb-1">Cumulative cost</h3>
+    {% if cumulative_cost_html %}{{ cumulative_cost_html | safe }}{% else %}<p class="text-gray-400">—</p>{% endif %}
+    <h3 class="text-sm font-medium text-gray-700 mt-4 mb-1">Tokens per hour (input / output / cache-read / cache-write)</h3>
+    {% if hourly_token_bars %}
+    <div class="space-y-2">
+        {% for b in hourly_token_bars %}
+        <div><span class="text-xs text-gray-500">{{ b.hour }}</span>{{ b.html | safe }}</div>
+        {% endfor %}
+    </div>
+    {% else %}<p class="text-gray-400">—</p>{% endif %}
+</div>
+
+<!-- Cost by agent / model / phase -->
+<div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6">
+    <div class="bg-white border border-gray-200 rounded-xl shadow-sm p-5">
+        <h2 class="text-lg font-semibold text-gray-900 mb-3">Cost by agent</h2>
+        {% if cost_by_agent_html %}{{ cost_by_agent_html | safe }}{% else %}<p class="text-gray-400">—</p>{% endif %}
+    </div>
+    <div class="bg-white border border-gray-200 rounded-xl shadow-sm p-5">
+        <h2 class="text-lg font-semibold text-gray-900 mb-3">Cost by model</h2>
+        {% if cost_by_model_html %}{{ cost_by_model_html | safe }}{% else %}<p class="text-gray-400">—</p>{% endif %}
+    </div>
+    <div class="bg-white border border-gray-200 rounded-xl shadow-sm p-5">
+        <h2 class="text-lg font-semibold text-gray-900 mb-3">Cost by phase</h2>
+        {% if cost_by_phase_html %}{{ cost_by_phase_html | safe }}{% else %}<p class="text-gray-400">—</p>{% endif %}
+    </div>
+</div>
+
+<!-- Funnel + drops -->
+<div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
+    <div class="bg-white border border-gray-200 rounded-xl shadow-sm p-5">
+        <h2 class="text-lg font-semibold text-gray-900 mb-3">Funnel</h2>
+        {% if funnel_html %}{{ funnel_html | safe }}{% else %}<p class="text-gray-400">—</p>{% endif %}
+        <p class="text-xs text-gray-500 mt-2">Unvetted panel (gap/unrecorded): {{ unvetted_panel_count }}</p>
+    </div>
+    <div class="bg-white border border-gray-200 rounded-xl shadow-sm p-5">
+        <h2 class="text-lg font-semibold text-gray-900 mb-3">Drops by reason</h2>
+        <details class="sc-chart-fallback"><summary>table view</summary>
+        <table><tbody>
+            {% for reason, count in drops_rows %}
+            <tr><th scope="row">{{ reason }}</th><td>{{ count }}</td></tr>
+            {% else %}
+            <tr><td class="text-gray-400">—</td></tr>
+            {% endfor %}
+        </tbody></table>
+        </details>
+    </div>
+</div>
+
+<!-- Specialist mix + fan-out -->
+<div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
+    <div class="bg-white border border-gray-200 rounded-xl shadow-sm p-5">
+        <h2 class="text-lg font-semibold text-gray-900 mb-3">Specialist mix (blocking / gap / adequate)</h2>
+        {% if specialist_rows %}
+        {% for s in specialist_rows %}
+        <div class="mb-3">
+            <div class="text-sm text-gray-700">{{ s.domain }}{% if s.historical %} <span class="text-xs text-gray-400">(+{{ s.historical }} historical)</span>{% endif %}</div>
+            {{ s.html | safe }}
+        </div>
+        {% endfor %}
+        {% else %}<p class="text-gray-400">—</p>{% endif %}
+    </div>
+    <div class="bg-white border border-gray-200 rounded-xl shadow-sm p-5">
+        <h2 class="text-lg font-semibold text-gray-900 mb-3">Panel fan-out</h2>
+        {% if fanout_html %}{{ fanout_html | safe }}{% else %}<p class="text-gray-400">—</p>{% endif %}
+    </div>
+</div>
+
+<!-- Stop-reason taxonomy + latency percentiles -->
+<div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
+    <div class="bg-white border border-gray-200 rounded-xl shadow-sm p-5">
+        <h2 class="text-lg font-semibold text-gray-900 mb-3">Stop-reason taxonomy</h2>
+        {% if taxonomy_html %}{{ taxonomy_html | safe }}{% else %}<p class="text-gray-400">—</p>{% endif %}
+    </div>
+    <div class="bg-white border border-gray-200 rounded-xl shadow-sm p-5">
+        <h2 class="text-lg font-semibold text-gray-900 mb-3">Latency (ms) — P50 / P95 / P99</h2>
+        {% if latency_capped %}
+        <p class="text-xs text-yellow-700 mb-2">Newest 20,000 calls only — this run has more.</p>
+        {% endif %}
+        <table class="min-w-full text-sm">
+            <thead><tr class="text-left text-xs text-gray-500 uppercase">
+                <th class="pr-4">Phase</th><th class="pr-4">n</th><th class="pr-4">P50</th><th class="pr-4">P95</th><th>P99</th>
+            </tr></thead>
+            <tbody>
+            {% for row in latency_rows %}
+            <tr>
+                <td class="pr-4">{{ row.phase }}</td>
+                <td class="pr-4">{{ row.n }}</td>
+                <td class="pr-4">{{ '%.0f'|format(row.p50) if row.p50 is not none else '—' }}</td>
+                <td class="pr-4">{{ '%.0f'|format(row.p95) if row.p95 is not none else '—' }}</td>
+                <td>{{ '%.0f'|format(row.p99) if row.p99 is not none else '—' }}</td>
+            </tr>
+            {% else %}
+            <tr><td colspan="5" class="text-gray-400">—</td></tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<!-- Per-agent table -->
+<div class="bg-white border border-gray-200 rounded-xl shadow-sm overflow-hidden mb-6">
+    <div class="px-5 py-3 border-b border-gray-200">
+        <h2 class="text-lg font-semibold text-gray-900">Per-agent activity</h2>
+        <p class="text-xs text-gray-400">Call counts are `llm_call_logs` rows, not real API calls — {{ api_call_units_note }}</p>
+    </div>
+    <table class="min-w-full divide-y divide-gray-200">
+        <thead class="bg-gray-50">
+            <tr>
+                <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Agent</th>
+                <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Role</th>
+                <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+                <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Muted</th>
+                <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Messages</th>
+                <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Calls</th>
+                <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Cost</th>
+                <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Last activity</th>
+                <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Heartbeat</th>
+            </tr>
+        </thead>
+        <tbody class="divide-y divide-gray-100">
+            {% for row in per_agent_rows %}
+            <tr>
+                <td class="px-4 py-2 text-sm text-gray-900">{{ row.agent_id }}</td>
+                <td class="px-4 py-2 text-sm text-gray-500">{{ row.role }}</td>
+                <td class="px-4 py-2 text-sm text-gray-500">{{ row.registry_status }}</td>
+                <td class="px-4 py-2 text-sm text-gray-500">{{ 'yes' if row.muted else 'no' }}</td>
+                <td class="px-4 py-2 text-sm text-gray-500">{{ row.message_count }}</td>
+                <td class="px-4 py-2 text-sm text-gray-500">{{ row.call_count }}</td>
+                <td class="px-4 py-2 text-sm text-gray-500">{{ row.cost }}</td>
+                <td class="px-4 py-2 text-sm text-gray-500">{{ row.last_activity }}</td>
+                <td class="px-4 py-2 text-sm text-gray-500">{{ row.heartbeat }}</td>
+            </tr>
+            {% else %}
+            <tr><td colspan="9" class="px-4 py-4 text-sm text-gray-400 text-center">No agent activity recorded yet.</td></tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<!-- Interview gantt -->
+<div class="bg-white border border-gray-200 rounded-xl shadow-sm p-5 mb-6">
+    <h2 class="text-lg font-semibold text-gray-900 mb-3">Interview timeline</h2>
+    {% if gantt_html %}
+    {{ gantt_html | safe }}
+    <table class="min-w-full text-sm mt-3">
+        <thead><tr class="text-left text-xs text-gray-500 uppercase">
+            <th class="pr-4">Interview</th><th class="pr-4">Outcome</th><th class="pr-4">Cost</th><th>Link</th>
+        </tr></thead>
+        <tbody>
+        {% for link in gantt_links %}
+        <tr>
+            <td class="pr-4">{{ link.label }}</td>
+            <td class="pr-4">{{ link.outcome }}</td>
+            <td class="pr-4">{{ link.cost }}</td>
+            <td><a class="text-indigo-600 hover:underline" href="/admin/assessments/{{ link.assessment_id }}">detail &rarr;</a></td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% if unattributed_note %}<p class="text-xs text-gray-500 mt-2">* {{ unattributed_note }}</p>{% endif %}
+    {% else %}<p class="text-gray-400">—</p>{% endif %}
+</div>
+
+<!-- Hub:lab burn sparkline -->
+<div class="bg-white border border-gray-200 rounded-xl shadow-sm p-5 mb-6">
+    <h2 class="text-lg font-semibold text-gray-900 mb-3">Hub : lab token burn ratio, per hour</h2>
+    {% if burn_sparkline_html %}
+    {{ burn_sparkline_html | safe }}
+    <details class="sc-chart-fallback"><summary>table view</summary>
+    <table><tbody>
+        {% for row in burn_rows %}
+        <tr><th scope="row">{{ row.hour }}</th><td>hub {{ row.hub_tokens }}</td><td>lab {{ row.lab_tokens }}</td><td>{{ row.ratio }}</td></tr>
+        {% endfor %}
+    </tbody></table>
+    </details>
+    {% else %}<p class="text-gray-400">—</p>{% endif %}
+</div>
+
+{% endif %}{# stats_run #}
 
 </div><!-- #sim-body -->
+
+<label class="mb-4 flex items-center gap-2 text-sm text-gray-500">
+    <input type="checkbox" id="sim-refresh-pause" class="rounded border-gray-300">
+    Pause auto-refresh
+</label>
+<script>
+const simRefreshTimer = setInterval(() => {
+  if (document.getElementById('sim-refresh-pause')?.checked) return;
+  fetch(location.href).then(r => r.text()).then(h => {
+    const d = new DOMParser().parseFromString(h, 'text/html');
+    const next = d.getElementById('sim-body');
+    const cur = document.getElementById('sim-body');
+    if (!next || !cur) { clearInterval(simRefreshTimer); return; }
+    cur.innerHTML = next.innerHTML;
+  });
+}, 30000);
+</script>
 {% endblock %}
