@@ -1692,7 +1692,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 ## Deploy notes (operator, not part of implementation)
 
 - **No migration.** Nothing touches the schema (`run_start_announcement` lives inside the existing `simulation_runs.config` JSON).
-- **All three images must be rebuilt** (`$DC build blackbird-app worker` + `$DC --profile agent build agent`): the engine change lives in the agent image, and the `.build_info.json` layer only exists in images built after this lands. An old agent image simply never announces; a new one on a pre-feature build announces `unknown` git fields — both are safe.
+- **All three images must be rebuilt** (`$DC build blackbird-app worker` + `$DC --profile agent build agent`): the engine change lives in the agent image, and the `.build_info.json` layer only exists in images built after this lands. `dirty state unknown` in the announcement means `.build_info.json` was missing and the `.git` fallback served (rebuild to restore the dirty count); a pre-feature agent image never announces at all.
 - The announcement fires on the **next `--fresh` run only**. Resuming the current run (`61ccad6d`) posts nothing.
 - To change recipients: edit `RUN_START_ANNOUNCE_CHANNELS` in `.env` (the agent container is created per run, so the next run picks it up — no rebuild). To change wording: edit `prompts/run_start_announcement.md` (bind-mounted — no rebuild). Both take effect at the next run start, not mid-run.
 - Per the standing preference, nothing in this plan starts, stops, or restarts the simulation.

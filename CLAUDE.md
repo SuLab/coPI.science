@@ -207,7 +207,9 @@ announced. The body is `prompts/run_start_announcement.md` (bind-mounted:
 editable without a rebuild; the sentinel first line is prepended by code and
 is NOT editable), carrying start time, planned duration, the image's git
 commit/branch/dirty count (`.build_info.json`, baked by the Dockerfile —
-`unknown`s mean a pre-feature image), the hub/PI prompt-set versions
+`dirty state unknown` in the announcement means `.build_info.json` was
+missing and the `.git` fallback served (rebuild to restore the dirty count);
+a pre-feature agent image never announces at all), the hub/PI prompt-set versions
 (`version` keys in the two `prompts/roles/*/role.toml`, which must be bumped
 on any prompt-set edit) and the rubric version. Both Slack-ingest paths drop
 sentinel-prefixed messages, so markers never enter `agent_messages` — do not

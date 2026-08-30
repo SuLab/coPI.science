@@ -3849,42 +3849,56 @@ class SimulationEngine:
             )
             posted: dict[str, str] = {}
             failed: list[str] = []
-            for name in names:
-                ch_id = self._channel_id_map.get(name)
-                if not ch_id:
-                    ch_id = await asyncio.to_thread(client.get_channel_id, name)
-                if not ch_id or ch_id.startswith("local:"):
-                    logger.warning(
-                        "Run-start announcement: cannot resolve #%s to a real "
-                        "Slack channel (got %r) — skipping it", name, ch_id,
-                    )
-                    failed.append(name)
-                    continue
-                try:
-                    result = await client.apost_message(ch_id, text)
-                except Exception:  # noqa: BLE001 — per-channel isolation
-                    logger.warning(
-                        "Run-start announcement to #%s (%s) raised — skipping",
-                        name, ch_id, exc_info=True,
-                    )
-                    failed.append(name)
-                    continue
-                ts = (result or {}).get("ts")
-                if ts:
-                    posted[name] = ts
-                else:
-                    logger.warning(
-                        "Run-start announcement to #%s (%s) was refused by "
-                        "Slack — nothing posted there", name, ch_id,
-                    )
-                    failed.append(name)
-            logger.info(
-                "Run-start announcement: posted to %d channel(s)%s — %s",
-                len(posted),
-                f", {len(failed)} failed ({', '.join(failed)})" if failed else "",
-                ", ".join(posted) or "none",
-            )
-            await self._record_run_start_announcement(text, posted, failed)
+            try:
+                for name in names:
+                    # Both id resolution and the post itself sit inside this
+                    # one per-channel try: a non-SlackApiError exception
+                    # during get_channel_id (a network blip, say) must skip
+                    # only THIS channel, not abort every channel still to
+                    # come. ch_id stays None if resolution itself raised, so
+                    # the "raised" WARNING below still has something to log.
+                    ch_id = None
+                    try:
+                        ch_id = self._channel_id_map.get(name)
+                        if not ch_id:
+                            ch_id = await asyncio.to_thread(client.get_channel_id, name)
+                        if not ch_id or ch_id.startswith("local:"):
+                            logger.warning(
+                                "Run-start announcement: cannot resolve #%s to "
+                                "a real Slack channel (got %r) — skipping it",
+                                name, ch_id,
+                            )
+                            failed.append(name)
+                            continue
+                        result = await client.apost_message(ch_id, text)
+                    except Exception:  # noqa: BLE001 — per-channel isolation
+                        logger.warning(
+                            "Run-start announcement to #%s (%s) raised — skipping",
+                            name, ch_id, exc_info=True,
+                        )
+                        failed.append(name)
+                        continue
+                    ts = (result or {}).get("ts")
+                    if ts:
+                        posted[name] = ts
+                    else:
+                        logger.warning(
+                            "Run-start announcement to #%s (%s) was refused by "
+                            "Slack — nothing posted there", name, ch_id,
+                        )
+                        failed.append(name)
+            finally:
+                # Runs even on a mid-loop escape (nothing above should escape
+                # the per-channel try, but this is the recorded contract, not
+                # a hope): whatever actually posted before any such escape is
+                # still logged and written to the run row.
+                logger.info(
+                    "Run-start announcement: posted to %d channel(s)%s — %s",
+                    len(posted),
+                    f", {len(failed)} failed ({', '.join(failed)})" if failed else "",
+                    ", ".join(posted) or "none",
+                )
+                await self._record_run_start_announcement(text, posted, failed)
         except Exception:
             logger.exception("Run-start announcement failed — continuing startup")
 

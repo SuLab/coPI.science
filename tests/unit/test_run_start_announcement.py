@@ -144,6 +144,60 @@ async def test_the_run_row_records_the_announcement(monkeypatch, tmp_path, engin
                 await db.commit()
 
 
+async def test_channel_resolution_exception_does_not_abort_other_channels(
+    monkeypatch, tmp_path, engine, caplog,
+):
+    """A non-SlackApiError raised while resolving one channel's id (a network
+    blip in get_channel_id, say) must not cost the OTHER configured channels
+    their post — only the resolution-failed channel should land in `failed`."""
+    eng, clients = _engine(
+        monkeypatch, tmp_path, channels="general,assessments-summary,no-such-channel",
+    )
+    hub = clients["blackbird"]
+
+    def _raise_for_no_such_channel(name):
+        if name == "no-such-channel":
+            raise RuntimeError("network blip")
+        return None
+
+    monkeypatch.setattr(hub, "get_channel_id", _raise_for_no_such_channel)
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as db:
+        run = SimulationRun(status="running", config={})
+        db.add(run)
+        await db.commit()
+        run_id = run.id
+    eng.session_factory = factory
+    eng.simulation_run_id = run_id
+
+    await eng._announce_run_start()  # must not raise
+
+    assert len(hub.posted_messages.get("C-GENERAL", [])) == 1
+    assert len(hub.posted_messages.get("C-SUMMARY", [])) == 1
+    assert any(
+        "no-such-channel" in r.getMessage() and "raised" in r.getMessage()
+        for r in caplog.records
+    )
+
+    try:
+        async with factory() as db:
+            row = (await db.execute(
+                select(SimulationRun).where(SimulationRun.id == run_id)
+            )).scalar_one()
+        rec = row.config["run_start_announcement"]
+        assert rec["failed"] == ["no-such-channel"]
+        assert set(rec["posted"].keys()) == {"general", "assessments-summary"}
+    finally:
+        async with factory() as db:
+            leftover = (await db.execute(
+                select(SimulationRun).where(SimulationRun.id == run_id)
+            )).scalar_one_or_none()
+            if leftover is not None:
+                await db.delete(leftover)
+                await db.commit()
+
+
 async def test_start_announces_only_fresh_runs_after_validation(monkeypatch, tmp_path):
     """Positional pin: announce fires between _validate_star_topology and
     _run_main_loop, and only when fresh_start=True."""

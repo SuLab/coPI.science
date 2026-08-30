@@ -5,12 +5,15 @@ messages (see test_run_marker_ingest_skip.py), so the prefix must be
 engine-prepended (customization can't remove it) and stable under the
 markdown->mrkdwn conversion every outbound post goes through.
 """
+from pathlib import Path
+
 import pytest
 
 from src.agent import roles
 from src.agent.channels import ASSESSMENTS_SUMMARY_CHANNEL, SEEDED_CHANNELS
 from src.agent.run_marker import (
     ANNOUNCEMENT_VALUE_KEYS,
+    DEFAULT_TEMPLATE,
     RUN_START_MARKER_PREFIX,
     is_run_start_marker,
     parse_announce_channels,
@@ -82,6 +85,10 @@ def test_parse_announce_channels():
     assert parse_announce_channels("") == []
 
 
+def test_parse_announce_channels_dedupes_preserving_first_occurrence_order():
+    assert parse_announce_channels("general,social,general") == ["general", "social"]
+
+
 def test_setting_default_is_the_simulation_channels():
     """Drift alarm: the literal default in config.py must equal the seeded
     channels plus assessments-summary (config.py cannot import channels.py)."""
@@ -96,6 +103,21 @@ def test_shipped_template_file_renders_cleanly():
     text = render_run_start_announcement(VALUES)
     assert is_run_start_marker(text)
     assert "<run_id>" in text
+
+
+def test_shipped_template_file_matches_default_template():
+    """Drift alarm: the repo copy of prompts/run_start_announcement.md must be
+    byte-identical to DEFAULT_TEMPLATE.
+
+    DEFAULT_TEMPLATE is kept in sync with the shipped file BY HAND (its own
+    docstring says so) — this is the forcing function that turns a
+    deliberate repo-copy edit that forgets the fallback into a failing test
+    instead of a silent divergence. It is NOT a claim about a running
+    deployment: an operator customizes the bind-mounted copy in prod, not
+    this repo file, and that customization is expected to diverge — this
+    test only ever reads the tree checked into git."""
+    shipped = Path("prompts/run_start_announcement.md").read_bytes()
+    assert shipped == DEFAULT_TEMPLATE.encode("utf-8")
 
 
 def test_non_utf8_template_file_falls_back_to_default(no_template):

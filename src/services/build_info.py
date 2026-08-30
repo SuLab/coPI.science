@@ -69,7 +69,7 @@ def _resolve_ref(git_dir: Path, ref: str) -> str | None:
     loose = git_dir / ref
     try:
         return loose.read_text(encoding="utf-8").strip() or None
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         pass
     try:
         for line in (git_dir / "packed-refs").read_text(encoding="utf-8").splitlines():
@@ -79,7 +79,7 @@ def _resolve_ref(git_dir: Path, ref: str) -> str | None:
             sha, _, name = line.partition(" ")
             if name.strip() == ref:
                 return sha.strip() or None
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         pass
     return None
 
@@ -88,7 +88,7 @@ def _from_git_dir(root: Path) -> BuildInfo | None:
     git_dir = root / ".git"
     try:
         head = (git_dir / "HEAD").read_text(encoding="utf-8").strip()
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         return None
     if head.startswith("ref: "):
         ref = head.removeprefix("ref: ").strip()
@@ -104,9 +104,9 @@ def get_build_info(root: Path | None = None) -> BuildInfo:
     """Never raises: an unreadable identity degrades to 'unavailable'."""
     root = root or REPO_ROOT
     info = _from_json(root)
-    if info is not None:
-        return info
-    info = _from_git_dir(root)
-    if info is not None:
-        return info
-    return BuildInfo(None, None, None, "unavailable")
+    if info is None:
+        info = _from_git_dir(root)
+    if info is None:
+        info = BuildInfo(None, None, None, "unavailable")
+    logger.debug("build info served from %s", info.source)
+    return info

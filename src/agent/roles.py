@@ -188,6 +188,9 @@ def prompt_set_stamp(role: str) -> PromptSetStamp:
             declared = tomllib.loads(manifest.read_text(encoding="utf-8")).get("version")
             if declared:
                 version = str(declared)
-        except (tomllib.TOMLDecodeError, OSError):
+        # UnicodeDecodeError (from read_text on a corrupt manifest) is a
+        # ValueError subclass, unrelated to the other two caught here — but a
+        # non-UTF-8 role.toml must degrade the same way a malformed one does.
+        except (tomllib.TOMLDecodeError, OSError, UnicodeDecodeError):
             pass  # load_role already logs malformed manifests
     return PromptSetStamp(role=role, version=version, content_hash=h.hexdigest()[:12])

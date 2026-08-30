@@ -79,11 +79,19 @@ def _template_body() -> str:
 
 
 def render_run_start_announcement(values: dict[str, str]) -> str:
-    """Render the announcement. Never raises; always sentinel-prefixed.
+    """Render the announcement. Always sentinel-prefixed.
 
     A malformed operator template (unknown placeholder, stray braces, dotted
     attribute access, etc.) degrades to the built-in default with one WARNING —
-    a broken customization must not cost the run its announcement.
+    a broken customization must not cost the run its announcement. The final
+    ``DEFAULT_TEMPLATE.format_map(values)`` is DELIBERATELY unguarded, though:
+    a missing engine-supplied key there is a code bug (a mismatch between
+    ``ANNOUNCEMENT_VALUE_KEYS`` and what the caller actually populates), not an
+    operator-customization failure, and it must fail loudly in tests rather
+    than silently swallow the symptom. The engine's own caller
+    (``SimulationEngine._announce_run_start``) has its own outer
+    ``except Exception`` for exactly that case, so this function is not
+    "never raises" end to end — only the operator-template path is guarded.
     """
     body = _template_body()
     try:
@@ -99,5 +107,6 @@ def render_run_start_announcement(values: dict[str, str]) -> str:
 
 
 def parse_announce_channels(raw: str) -> list[str]:
-    """Comma-separated channel names -> list. Empty string -> [] (feature off)."""
-    return [c.strip() for c in raw.split(",") if c.strip()]
+    """Comma-separated channel names -> deduplicated list, first occurrence
+    order preserved. Empty string -> [] (feature off)."""
+    return list(dict.fromkeys(c.strip() for c in raw.split(",") if c.strip()))
