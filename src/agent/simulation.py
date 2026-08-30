@@ -243,6 +243,9 @@ CHANNEL_POLL_INTERVAL = 15.0   # seconds between conversations.history sweeps
 #: 240 identical lines an hour PER CHANNEL burying everything else.
 POLL_ERROR_LOG_INTERVAL = 300.0
 ROSTER_POLL_INTERVAL = 30.0    # seconds between AgentRegistry roster re-syncs
+#: Seconds between control-plane polls (claim a pending stop command, refresh
+#: the heartbeat row). See _poll_control_plane.
+CONTROL_POLL_INTERVAL = 30.0
 
 # Distinguishes "role has no cached rate yet" from "role's cached rate is None
 # (no override)". A plain dict.get() default cannot tell those apart, so the
@@ -570,6 +573,9 @@ class SimulationEngine:
         # Last wall-clock time the AgentRegistry roster was re-synced (live
         # add/remove of agents as their status flips). See _sync_roster_from_db.
         self._last_roster_poll: float = 0.0
+        # Last wall-clock time the control plane was polled (claim a pending
+        # stop command, refresh the heartbeat row). See _poll_control_plane.
+        self._last_control_poll: float = 0.0
 
         # DB persistence buffer for the message log. MessageLog.append fires a
         # sync callback that enqueues here; _flush_persisted() batch-writes to
@@ -992,6 +998,13 @@ class SimulationEngine:
                 # the DB so the roster changes live, without a process restart.
                 await self._sync_roster_from_db()
 
+                # Operator control plane: claim a pending stop command and
+                # refresh the heartbeat row, so /admin/simulation can see the
+                # run is alive and stop it without touching the container.
+                # Own cadence gate inside (_last_control_poll), same pattern
+                # as _sync_roster_from_db above.
+                await self._poll_control_plane(time.time())
+
                 # Pick up profile edits made from the web app (separate process).
                 self._sync_profiles_from_disk()
 
@@ -1179,6 +1192,72 @@ class SimulationEngine:
         """
         self._running = False
         self._stop_event.set()
+
+    async def _poll_control_plane(self, now: float) -> None:
+        """Claim a pending operator `stop` command and refresh the heartbeat.
+
+        Gated on its own `_last_control_poll`/`CONTROL_POLL_INTERVAL`, the same
+        way `_sync_roster_from_db` gates on `_last_roster_poll`/
+        `ROSTER_POLL_INTERVAL` — the caller (`_run_main_loop`) invokes this
+        every tick and the cadence lives here, not at the call site.
+
+        The whole body sits in one try/except: this is a support surface for
+        `/admin/simulation`, not the simulation itself, so a DB hiccup here
+        must cost at most one missed heartbeat, never the run.
+
+        With no pending `stop`, upserts state "running" with a `detail` snapshot
+        (`tick_at`, per-agent `active_threads`/`calls_in_window`/`api_calls`/
+        `messages`, and `roster_size`) so a human watching `/admin/simulation`
+        can see the engine is alive and how loaded it is. A pending `stop` is
+        claimed, marked done, and turned into a real `request_stop()` — then the
+        heartbeat is upserted as "stopping" instead, so the state row reflects
+        the shutdown that is now underway rather than lagging a tick behind it.
+        """
+        if not self.session_factory:
+            return
+        if now - self._last_control_poll < CONTROL_POLL_INTERVAL:
+            return
+        self._last_control_poll = now
+
+        try:
+            from src.services.simulation_control import (
+                claim_pending,
+                finish_command,
+                upsert_status,
+            )
+
+            detail = {
+                "tick_at": datetime.now(UTC).isoformat(),
+                "agents": {
+                    aid: {
+                        "active_threads": len(a.state.active_threads),
+                        "calls_in_window": len(a.state.call_times),
+                        "api_calls": a.api_call_count,
+                        "messages": a.message_count,
+                    }
+                    for aid, a in self.agents.items()
+                },
+                "roster_size": len(self.agents),
+            }
+
+            async with self.session_factory() as db:
+                cmd = await claim_pending(db, command="stop")
+                if cmd is not None:
+                    await finish_command(
+                        db, cmd.id, status="done", result=f"run {self.simulation_run_id}",
+                    )
+                    self.request_stop()
+                    await upsert_status(
+                        db, state="stopping",
+                        simulation_run_id=self.simulation_run_id, detail=detail,
+                    )
+                else:
+                    await upsert_status(
+                        db, state="running",
+                        simulation_run_id=self.simulation_run_id, detail=detail,
+                    )
+        except Exception as exc:
+            logger.warning("[control] poll failed: %s", exc)
 
     async def _sleep(self, delay: float) -> None:
         """Sleep for ``delay`` seconds, returning early once a stop is requested.
@@ -2370,6 +2449,7 @@ class SimulationEngine:
                     "agent_id": agent.agent_id,
                     "phase": "thread_reply",
                     "channel": thread.channel,
+                    "thread_ts": thread.thread_id,
                 },
                 on_retry=agent.record_api_call,
                 # Was the reply the model handed back FINISHED? llm.py returns
@@ -7881,6 +7961,7 @@ class SimulationEngine:
             agent_id=entry.get("agent_id", "unknown"),
             phase=entry.get("phase", "unknown"),
             channel=entry.get("channel"),
+            thread_ts=entry.get("thread_ts"),
             model=entry.get("model", ""),
             system_prompt=entry.get("system_prompt", ""),
             messages_json=entry.get("messages", []),

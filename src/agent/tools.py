@@ -330,6 +330,11 @@ async def execute_tool(
                 # the durable consult record. `getattr` because thread_state is
                 # untyped here and legitimately None for a direct caller.
                 channel=getattr(thread_state, "channel", None),
+                # Same reasoning as `channel` immediately above: joins this
+                # consult's llm_call_logs row to the interview thread it was
+                # made during. `getattr` for the same direct-caller-with-no-
+                # thread reason.
+                thread_ts=getattr(thread_state, "thread_id", None),
                 on_consult=on_consult,
                 on_consult_record=on_consult_record,
                 on_api_call=on_api_call,
@@ -547,6 +552,7 @@ async def _execute_consult_specialist(
     *,
     agent_id: str,
     channel: str | None = None,
+    thread_ts: str | None = None,
     on_consult: Callable[[str, str], None] | None = None,
     on_consult_record: Callable[..., Awaitable[None]] | None = None,
     on_api_call: Callable[[], None] | None = None,
@@ -673,6 +679,7 @@ async def _execute_consult_specialist(
                 "agent_id": agent_id,
                 "phase": f"consult_{domain}",
                 "channel": channel,
+                "thread_ts": thread_ts,
             },
             # A truncation retry is a second billed call — book it too, same
             # contract every other generate_agent_response caller uses.
