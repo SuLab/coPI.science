@@ -40,7 +40,9 @@ async def test_container_is_migrated(engine):
         #      markdown rendering of rationale/recommended_next_experiment)
         # 0041 opportunity_assessments.summary_posted_at (durable at-most-once
         #      record that a #assessments-summary headline posted for this row)
-        assert v == "0041"
+        # 0042 simulation_commands, simulation_process_status, admin_audit_events
+        #      tables; llm_call_logs.thread_ts column
+        assert v == "0042"
 
 
 async def test_writes_are_rolled_back_part1(db_session):
