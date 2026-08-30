@@ -47,6 +47,7 @@ from src.models import (
     OpportunityAssessment,
     ResearcherProfile,
     SimulationCommand,
+    SimulationProcessStatus,
     SimulationRun,
     ThreadDecision,
     User,
@@ -2171,11 +2172,19 @@ async def _kv_delete(db: AsyncSession, key: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def _rubric_stamps_by_run(db: AsyncSession) -> dict[uuid.UUID, list[str]]:
-    """Every distinct (rubric_version, rubric_content_hash) an OpportunityAssessment
-    row in each run was stamped with, most-common first. Regime segmentation for the
-    run selector — a run that straddled a rubric bump shows both stamps rather than
-    picking one."""
+async def _rubric_stamps_by_run(
+    db: AsyncSession, run_ids: list[uuid.UUID],
+) -> dict[uuid.UUID, list[str]]:
+    """FALLBACK ONLY, for the runs in `run_ids` (legacy rows opened before
+    `_stamp_run_config` started recording `SimulationRun.config["rubric_version"]`
+    — see `_run_selector_rubric_label`, which prefers the config stamp and only
+    calls this for a run missing one). Derives a stamp from whatever distinct
+    (rubric_version, rubric_content_hash) an OpportunityAssessment row in that
+    run was stamped with, most-common first — a run that straddled a rubric
+    bump shows both stamps rather than picking one. Scoped to `run_ids` rather
+    than scanning every run's assessments on every page load."""
+    if not run_ids:
+        return {}
     rows = (
         await db.execute(
             select(
@@ -2183,7 +2192,9 @@ async def _rubric_stamps_by_run(db: AsyncSession) -> dict[uuid.UUID, list[str]]:
                 OpportunityAssessment.rubric_version,
                 OpportunityAssessment.rubric_content_hash,
                 func.count(),
-            ).group_by(
+            )
+            .where(OpportunityAssessment.simulation_run_id.in_(run_ids))
+            .group_by(
                 OpportunityAssessment.simulation_run_id,
                 OpportunityAssessment.rubric_version,
                 OpportunityAssessment.rubric_content_hash,
@@ -2198,6 +2209,37 @@ async def _rubric_stamps_by_run(db: AsyncSession) -> dict[uuid.UUID, list[str]]:
         run_id: [label for _, label in sorted(entries, reverse=True)]
         for run_id, entries in by_run.items()
     }
+
+
+async def _run_selector_labels(
+    db: AsyncSession, runs: list[SimulationRun],
+) -> dict[uuid.UUID, list[str]]:
+    """Rubric stamp label per run for the `?run=` selector.
+
+    Primary source is `SimulationRun.config["rubric_version"]` /
+    `["rubric_content_hash"]` — `_stamp_run_config` (src/agent/main.py) writes
+    both at run-open FOR EXACTLY THIS PURPOSE (its docstring: "what lets the
+    admin run dropdown label a run by rubric after the log is gone"), it is
+    already on every row `_resolve_selected_run` fetched (zero extra queries),
+    and it is correct even for a run with zero assessments — a run is stamped
+    by which rubric OPENED it, not by what it happened to score. Only a run
+    whose config predates that stamp (opened before this feature existed)
+    falls back to the assessment-derived scan, and only for those runs."""
+    unstamped_run_ids = [
+        r.id for r in runs if not (r.config or {}).get("rubric_version")
+    ]
+    fallback = await _rubric_stamps_by_run(db, unstamped_run_ids)
+
+    labels: dict[uuid.UUID, list[str]] = {}
+    for r in runs:
+        cfg = r.config or {}
+        version = cfg.get("rubric_version")
+        if version:
+            content_hash = cfg.get("rubric_content_hash")
+            labels[r.id] = [f"{version} ({content_hash or '—'})"]
+        else:
+            labels[r.id] = fallback.get(r.id, [])
+    return labels
 
 
 async def _resolve_selected_run(
@@ -2223,25 +2265,60 @@ async def _resolve_selected_run(
     return selected, runs
 
 
-def _agent_heartbeat_display(
-    last_activity: datetime | None, now: datetime,
+def _agents_detail_map(
+    status_row: SimulationProcessStatus | None, now: datetime,
+) -> dict[str, Any] | None:
+    """The engine's own per-agent heartbeat snapshot
+    (`SimulationProcessStatus.detail["agents"]`, written by
+    `SimulationEngine._poll_control_plane` every ~30s: `active_threads`,
+    `calls_in_window`, `api_calls`, `messages` per agent_id), or None when the
+    row itself is absent or stale (same `HEARTBEAT_STALE_SECONDS` threshold
+    `derive_panel_state` uses for the engine-wide badge) — a stale snapshot is
+    not "the agent is idle", it is "we do not know", so every agent's columns
+    read "—" together rather than showing a frozen last-seen number."""
+    if status_row is None:
+        return None
+    age_seconds = (now - status_row.updated_at).total_seconds()
+    if age_seconds > HEARTBEAT_STALE_SECONDS:
+        return None
+    detail = status_row.detail or {}
+    return detail.get("agents")
+
+
+def _agent_live_columns(
+    agent_id: str, agents_detail: dict[str, Any] | None,
 ) -> tuple[str, str]:
-    """(last_activity_display, heartbeat_display) — both "—" when absent or
-    stale (same `HEARTBEAT_STALE_SECONDS` the engine-wide status row uses)."""
-    if last_activity is None:
+    """(active_threads_display, calls_in_window_display) — "—" for both when
+    the heartbeat snapshot itself is unavailable (`agents_detail is None`, see
+    `_agents_detail_map`) or this particular agent has no entry in it (never
+    ticked yet, or dropped from the roster since)."""
+    row = (agents_detail or {}).get(agent_id) if agents_detail is not None else None
+    if row is None:
         return "—", "—"
-    age_seconds = (now - last_activity).total_seconds()
-    heartbeat = "live" if age_seconds <= HEARTBEAT_STALE_SECONDS else "—"
-    return last_activity.isoformat(), heartbeat
+    active_threads = row.get("active_threads")
+    calls_in_window = row.get("calls_in_window")
+    return (
+        str(active_threads) if active_threads is not None else "—",
+        str(calls_in_window) if calls_in_window is not None else "—",
+    )
 
 
-async def _live_tab_context(db: AsyncSession, request: Request) -> dict[str, Any]:
+async def _live_tab_context(
+    db: AsyncSession,
+    request: Request,
+    status_row: SimulationProcessStatus | None,
+    now: datetime,
+) -> dict[str, Any]:
     """Every value the Live tab's stats sections render, for ONE run — see the
-    module comment above. Returns a minimal dict (no run selected, no runs
-    exist) when there is nothing to show; the template degrades every
-    subsection to an em-dash on its own empty data."""
+    module comment above. `status_row`/`now` are the same heartbeat row and
+    clock `_simulation_context` already read for the engine-status badge —
+    passed in rather than re-read, and reused here for the per-agent table's
+    real `active_threads`/`calls_in_window` columns (see `_agents_detail_map`).
+    Returns a minimal dict (no run selected, no runs exist) when there is
+    nothing to show; the template degrades every subsection to an em-dash on
+    its own empty data."""
     selected_run, all_runs = await _resolve_selected_run(db, request)
-    rubric_stamps = await _rubric_stamps_by_run(db)
+    rubric_stamps = await _run_selector_labels(db, all_runs)
     run_options = [
         {
             "id": r.id,
@@ -2431,11 +2508,11 @@ async def _live_tab_context(db: AsyncSession, request: Request) -> dict[str, Any
         for phase, pct in sorted(latency.items(), key=lambda kv: (kv[0] != "overall", kv[0]))
     ]
 
-    # --- per-agent table (stats + heartbeat merged) ----------------------
-    now = datetime.now(UTC)
+    # --- per-agent table (stats + real heartbeat merged) ------------------
+    agents_detail = _agents_detail_map(status_row, now)
     per_agent_rows = []
     for r in agents:
-        last_activity_display, heartbeat_display = _agent_heartbeat_display(r.last_activity, now)
+        active_threads, calls_in_window = _agent_live_columns(r.agent_id, agents_detail)
         per_agent_rows.append({
             "agent_id": r.agent_id,
             "role": r.role or "—",
@@ -2444,8 +2521,9 @@ async def _live_tab_context(db: AsyncSession, request: Request) -> dict[str, Any
             "message_count": r.message_count,
             "call_count": r.call_count,
             "cost": f"${r.cost:.4f}",
-            "last_activity": last_activity_display,
-            "heartbeat": heartbeat_display,
+            "last_activity": r.last_activity.isoformat() if r.last_activity is not None else "—",
+            "active_threads": active_threads,
+            "calls_in_window": calls_in_window,
         })
 
     # --- interview gantt --------------------------------------------------
@@ -2486,8 +2564,18 @@ async def _live_tab_context(db: AsyncSession, request: Request) -> dict[str, Any
         )
 
     # --- hub:lab burn sparkline --------------------------------------------
+    # A None ratio (BurnPoint.ratio's docstring: hub tokens against zero lab
+    # tokens — genuinely unbounded) is the single most alarming state this
+    # chart exists to surface: pure hub burn with no lab activity to divide
+    # by. Plotting it as 0.0 would render that runaway-coordination signal as
+    # the CALMEST point on the line. Instead it is plotted at the series' own
+    # peak finite ratio (or 1.0 when the whole window has no finite ratio at
+    # all) so it reads as a spike, at or above every finite hour, never a
+    # floor — and the paired table spells out "∞" rather than a number.
+    finite_ratios = [p.ratio for p in burn_points if p.ratio is not None]
+    peak_ratio = max(finite_ratios) if finite_ratios else 1.0
     burn_sparkline_html = (
-        sparkline([p.ratio if p.ratio is not None else 0.0 for p in burn_points])
+        sparkline([p.ratio if p.ratio is not None else peak_ratio for p in burn_points])
         if burn_points
         else None
     )
@@ -2496,7 +2584,7 @@ async def _live_tab_context(db: AsyncSession, request: Request) -> dict[str, Any
             "hour": p.hour,
             "hub_tokens": p.hub_tokens,
             "lab_tokens": p.lab_tokens,
-            "ratio": f"{p.ratio:.2f}" if p.ratio is not None else "no lab burn this hour",
+            "ratio": f"{p.ratio:.2f}" if p.ratio is not None else "∞ — no lab tokens this hour",
         }
         for p in burn_points
     ]
@@ -2585,7 +2673,7 @@ async def _simulation_context(
     )
     audit_events = audit_result.scalars().all()
 
-    live_tab = await _live_tab_context(db, request)
+    live_tab = await _live_tab_context(db, request, status_row, now)
 
     return _template_context(
         request,

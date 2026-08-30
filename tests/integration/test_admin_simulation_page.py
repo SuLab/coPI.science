@@ -380,8 +380,12 @@ async def test_live_tab_run_selector_switches_between_runs(client, db_session):
         input_tokens=1_000_000, output_tokens=100_000,
         cache_read_input_tokens=500_000, cache_creation_input_tokens=200_000,
     )  # $9.00
+    # No OpportunityAssessment rows on either run — a config-stamped run must
+    # still show its rubric version in the selector (Finding 2): the stamp is
+    # recorded at run-open, not derived from what it happened to score.
     newer = await factories.make_simulation_run(
-        db_session, started_at=datetime(2026, 1, 2, tzinfo=UTC)
+        db_session, started_at=datetime(2026, 1, 2, tzinfo=UTC),
+        config={"rubric_version": "v9.9.9", "rubric_content_hash": "deadbeefcafe"},
     )
     await factories.make_llm_call_log(
         db_session, run=newer, model="claude-sonnet-5",
@@ -396,6 +400,8 @@ async def test_live_tab_run_selector_switches_between_runs(client, db_session):
     assert "$9.00" not in default_resp.text
     assert f'value="{newer.id}"' in default_resp.text
     assert "selected" in default_resp.text
+    # The zero-assessment `newer` run's config stamp, not "no verdicts yet".
+    assert "v9.9.9 (deadbeefcafe)" in default_resp.text
 
     older_resp = await client.get(
         f"/admin/simulation?run={older.id}", headers=auth_headers(admin.id)
@@ -428,3 +434,91 @@ async def test_live_tab_api_call_units_caveat_is_present(client, db_session):
     assert resp.status_code == 200
     assert "REAL API CALLS" in resp.text
     assert "not turns" in resp.text
+
+
+# ---------------------------------------------------------------------------
+# Review fixes (2026-08-30 re-review):
+#   (g) the per-agent table's live columns come from the REAL heartbeat
+#       snapshot (`SimulationProcessStatus.detail["agents"]`), reading "—"
+#       once that heartbeat goes stale — never a fabricated liveness guess,
+#   (h) the hub:lab burn sparkline plots a None ratio (zero lab tokens — the
+#       most alarming state, pure hub burn) as a SPIKE at the series' peak,
+#       never as a calm 0.0 floor.
+# ---------------------------------------------------------------------------
+
+
+async def test_live_tab_per_agent_table_uses_the_real_heartbeat_snapshot(client, db_session):
+    admin = await _admin(db_session, "sim-admin-t11g@example.org")
+    run = await factories.make_simulation_run(db_session)
+    await factories.make_llm_call_log(
+        db_session, run=run, agent_id="labbot", model="claude-sonnet-5",
+        input_tokens=10, output_tokens=1,
+        cache_read_input_tokens=0, cache_creation_input_tokens=0,
+    )
+    db_session.add(SimulationProcessStatus(
+        id=1, state="running", updated_at=datetime.now(UTC),
+        detail={"agents": {"labbot": {"active_threads": 3, "calls_in_window": 5}}},
+    ))
+    await db_session.commit()
+
+    fresh_resp = await client.get(f"/admin/simulation?run={run.id}", headers=auth_headers(admin.id))
+    assert fresh_resp.status_code == 200
+    assert "Active threads" in fresh_resp.text
+    assert "Calls in window" in fresh_resp.text
+    assert '<td class="px-4 py-2 text-sm text-gray-500">3</td>' in fresh_resp.text
+    assert '<td class="px-4 py-2 text-sm text-gray-500">5</td>' in fresh_resp.text
+
+    row = (await db_session.execute(select(SimulationProcessStatus))).scalar_one()
+    row.updated_at = datetime.now(UTC) - timedelta(minutes=10)
+    await db_session.commit()
+
+    stale_resp = await client.get(f"/admin/simulation?run={run.id}", headers=auth_headers(admin.id))
+    assert stale_resp.status_code == 200
+    assert '<td class="px-4 py-2 text-sm text-gray-500">3</td>' not in stale_resp.text
+    assert '<td class="px-4 py-2 text-sm text-gray-500">5</td>' not in stale_resp.text
+
+
+async def test_live_tab_hub_lab_burn_none_ratio_plots_as_a_spike_not_a_floor(client, db_session):
+    admin = await _admin(db_session, "sim-admin-t11h@example.org")
+    run = await factories.make_simulation_run(db_session)
+    await factories.make_agent(db_session, agent_id="blackbird", role="scout_hub", status="active")
+
+    # Hour 10: hub=1000, lab=500 -> ratio 2.0 (finite).
+    await factories.make_llm_call_log(
+        db_session, run=run, agent_id="blackbird", model="claude-sonnet-5",
+        input_tokens=1000, output_tokens=0, cache_read_input_tokens=0, cache_creation_input_tokens=0,
+        created_at=datetime(2026, 1, 1, 10, 0, 0, tzinfo=UTC),
+    )
+    await factories.make_llm_call_log(
+        db_session, run=run, agent_id="labbot", model="claude-sonnet-5",
+        input_tokens=500, output_tokens=0, cache_read_input_tokens=0, cache_creation_input_tokens=0,
+        created_at=datetime(2026, 1, 1, 10, 15, 0, tzinfo=UTC),
+    )
+    # Hour 11: hub=700, lab=0 -> ratio None. The alarming hour: pure hub burn.
+    await factories.make_llm_call_log(
+        db_session, run=run, agent_id="blackbird", model="claude-sonnet-5",
+        input_tokens=700, output_tokens=0, cache_read_input_tokens=0, cache_creation_input_tokens=0,
+        created_at=datetime(2026, 1, 1, 11, 0, 0, tzinfo=UTC),
+    )
+    # Hour 12: hub=2500, lab=500 -> ratio 5.0 (the series' peak finite ratio).
+    await factories.make_llm_call_log(
+        db_session, run=run, agent_id="blackbird", model="claude-sonnet-5",
+        input_tokens=2500, output_tokens=0, cache_read_input_tokens=0, cache_creation_input_tokens=0,
+        created_at=datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC),
+    )
+    await factories.make_llm_call_log(
+        db_session, run=run, agent_id="labbot", model="claude-sonnet-5",
+        input_tokens=500, output_tokens=0, cache_read_input_tokens=0, cache_creation_input_tokens=0,
+        created_at=datetime(2026, 1, 1, 12, 30, 0, tzinfo=UTC),
+    )
+    await db_session.commit()
+
+    resp = await client.get(f"/admin/simulation?run={run.id}", headers=auth_headers(admin.id))
+    assert resp.status_code == 200
+
+    section = resp.text[resp.text.index("Hub : lab token burn ratio"):]
+    # The None-ratio hour (11:00) is plotted at 5.0 too — tied for the peak,
+    # at/above every finite hour (2.0 and 5.0) — not at 0.0.
+    assert section.count("<title>5.0</title>") == 2
+    assert "<title>0.0</title>" not in section
+    assert "∞ — no lab tokens this hour" in section

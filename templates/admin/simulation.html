@@ -400,7 +400,8 @@
                 <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Calls</th>
                 <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Cost</th>
                 <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Last activity</th>
-                <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Heartbeat</th>
+                <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Active threads</th>
+                <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Calls in window</th>
             </tr>
         </thead>
         <tbody class="divide-y divide-gray-100">
@@ -414,10 +415,11 @@
                 <td class="px-4 py-2 text-sm text-gray-500">{{ row.call_count }}</td>
                 <td class="px-4 py-2 text-sm text-gray-500">{{ row.cost }}</td>
                 <td class="px-4 py-2 text-sm text-gray-500">{{ row.last_activity }}</td>
-                <td class="px-4 py-2 text-sm text-gray-500">{{ row.heartbeat }}</td>
+                <td class="px-4 py-2 text-sm text-gray-500">{{ row.active_threads }}</td>
+                <td class="px-4 py-2 text-sm text-gray-500">{{ row.calls_in_window }}</td>
             </tr>
             {% else %}
-            <tr><td colspan="9" class="px-4 py-4 text-sm text-gray-400 text-center">No agent activity recorded yet.</td></tr>
+            <tr><td colspan="10" class="px-4 py-4 text-sm text-gray-400 text-center">No agent activity recorded yet.</td></tr>
             {% endfor %}
         </tbody>
     </table>
