@@ -5,7 +5,8 @@ Covers the brief's test list (a)-(f):
   (b) start enqueues a pending command + audit row, a second POST while one
       is pending is refused (no second row written),
   (c) stop is accepted only while the heartbeat reads "running",
-  (d) the announce-channels KV round-trips (write, prefill, clear),
+  (d) the announce-channels KV round-trips (write, prefill, explicit disable,
+      clear),
   (e) the announce-template editor validates before writing, and reset
       deletes the KV row,
   (f) a manager (non-admin) is refused on every route.
@@ -24,6 +25,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy import select
 
+from src.config import get_settings
 from src.models import (
     USER_ROLE_ADMIN,
     USER_ROLE_MANAGER,
@@ -165,6 +167,29 @@ async def test_announce_settings_roundtrip(client, db_session):
     html = (await client.get("/admin/simulation", headers=auth_headers(admin.id))).text
     assert "general,drug-repurposing" in html
 
+    # Disable: an explicit `disable` checkbox writes the override as "" —
+    # distinct from clearing it outright, and the engine already treats an
+    # empty-string override as "skip the announcement"
+    # (parse_announce_channels("") == []).
+    resp_disable = await client.post(
+        "/admin/simulation/announce-settings",
+        data={"channels": "", "disable": "true"},
+        headers=auth_headers(admin.id),
+    )
+    assert resp_disable.status_code in (302, 303)
+    # `db_session` has `expire_on_commit=False` (tests/conftest.py), so the
+    # `row` object loaded above is not auto-invalidated by the route's own
+    # commit — an UPDATE-in-place (unlike the DELETE the "clear" step below
+    # exercises) needs an explicit refresh or a plain `select()` would just
+    # hand back the same stale in-memory object.
+    await db_session.refresh(row)
+    assert row.value == ""
+
+    html_disabled = (await client.get("/admin/simulation", headers=auth_headers(admin.id))).text
+    assert "Override: disabled" in html_disabled
+
+    # Clear: an empty field with "disable" unchecked deletes the override
+    # outright and falls back to the Settings default — unchanged behavior.
     resp2 = await client.post(
         "/admin/simulation/announce-settings",
         data={"channels": ""},
@@ -177,6 +202,10 @@ async def test_announce_settings_roundtrip(client, db_session):
         )
     ).scalar_one_or_none()
     assert row2 is None
+
+    html_default = (await client.get("/admin/simulation", headers=auth_headers(admin.id))).text
+    assert "No override" in html_default
+    assert get_settings().run_start_announce_channels in html_default
 
 
 async def test_announce_settings_rejects_a_bad_channel_name(client, db_session):
@@ -522,3 +551,47 @@ async def test_live_tab_hub_lab_burn_none_ratio_plots_as_a_spike_not_a_floor(cli
     assert section.count("<title>5.0</title>") == 2
     assert "<title>0.0</title>" not in section
     assert "∞ — no lab tokens this hour" in section
+
+
+# ---------------------------------------------------------------------------
+# Final-audit fixes (2026-08-30):
+#   (i) F10 — the unattributed-cost gantt footnote only renders when the
+#       unattributed bucket's cost is actually positive. `cost_per_interview`
+#       always returns a `thread_ts=None` bucket (zero or not) whenever ANY
+#       assessment has a thread_id, so gating on presence alone (the old
+#       condition) rendered a "$0.00 ... could not be attributed" line on
+#       every run with a scored interview and literally zero unattributed
+#       spend — noise on the common case, not a caveat.
+# ---------------------------------------------------------------------------
+
+
+async def test_live_tab_unattributed_cost_footnote_gated_on_positive_cost(client, db_session):
+    admin = await _admin(db_session, "sim-admin-t11i@example.org")
+    run = await factories.make_simulation_run(db_session)
+    db_session.add(OpportunityAssessment(
+        simulation_run_id=run.id, agent_id="blackbird", channel_name="general",
+        thread_id="T1", recommendation="advance", summary_posted_at=None,
+    ))
+    await db_session.commit()
+
+    # No unattributed LLM calls yet — the footnote must not appear even
+    # though the gantt has a row (the old, presence-only condition would
+    # have shown "$0.00 ... could not be attributed" here).
+    zero_resp = await client.get(f"/admin/simulation?run={run.id}", headers=auth_headers(admin.id))
+    assert zero_resp.status_code == 200
+    assert "could not be attributed to a" not in zero_resp.text
+
+    # Now add a genuinely unattributed call (no thread_ts) with real cost —
+    # the footnote must appear.
+    await factories.make_llm_call_log(
+        db_session, run=run, model="claude-sonnet-5",
+        input_tokens=25_000, output_tokens=0,
+        cache_read_input_tokens=0, cache_creation_input_tokens=0,
+    )
+    await db_session.commit()
+
+    positive_resp = await client.get(
+        f"/admin/simulation?run={run.id}", headers=auth_headers(admin.id)
+    )
+    assert positive_resp.status_code == 200
+    assert "could not be attributed to a" in positive_resp.text

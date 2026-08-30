@@ -21,6 +21,13 @@ Two test shapes are used, deliberately:
   the loop's first post-boot session opens — after boot's own session has
   closed, before the one counted iteration's session opens. No sleeping, no
   polling, no flakiness.
+- (g) reuses the same `_hook_before_nth_session` injection as (d)/(e) — a
+  fresh foreign `running` heartbeat has to be seeded AFTER boot's own
+  unconditional idle upsert commits, or boot would clobber it before the
+  loop under test ever ran — but drives `max_loops=2` (with a tiny
+  `poll_seconds`) instead of 1, since the defect under test (the idle
+  branch's own upsert clobbering a live foreign heartbeat) is specifically
+  about repeated idle ticks, not a single one.
 """
 import asyncio
 
@@ -338,3 +345,47 @@ async def test_a_start_enqueued_while_a_run_is_live_is_staled_at_run_end(engine,
             assert second.result == "requested while a run was live — request again"
     finally:
         await _cleanup(factory, command_ids=[first_holder["id"], second_holder["id"]])
+
+
+@pytest.mark.asyncio
+async def test_idle_branch_never_clobbers_a_fresh_foreign_running_heartbeat(engine):
+    """(g) The idle-branch heartbeat upsert (audit V3) must not overwrite a
+    LIVE foreign engine's heartbeat (a CLI-launched `python -m
+    src.agent.main`, audit V4's `running` tell). Before this fix the idle
+    branch upserted `state="idle"` unconditionally whenever no `start` was
+    pending, which — since a CLI engine's own heartbeat only refreshes every
+    ~30s while this loop ticks every ~5s — would flip a live `running` row to
+    `idle` within one iteration: the V4 stop guard a few lines above would
+    then see no fresh `running` heartbeat and finish the NEXT pending stop
+    as "nothing running" instead of leaving it for the live engine, and the
+    admin page would show Idle (inviting a colliding second Start) while a
+    real run was in progress.
+
+    Seeds a fresh `running` row (via the same `_hook_before_nth_session`
+    injection (d)/(e) use) immediately after boot's own session closes —
+    seeding any earlier would just have boot's own unconditional idle upsert
+    clobber it before the loop under test ever ran — then drives two full
+    idle iterations (`max_loops=2`) with no command ever pending, and
+    asserts the row still reads `running` throughout."""
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    await _clear_status(factory)
+
+    async def seed_fresh_running_heartbeat():
+        async with factory() as db:
+            await upsert_status(db, state="running")  # fresh updated_at
+
+    hooked_factory = _hook_before_nth_session(factory, n=2, hook=seed_fresh_running_heartbeat)
+
+    async def stub(*args):
+        raise AssertionError("run_fn must not be called — no start command is ever pending")
+
+    try:
+        await run_supervisor(
+            session_factory=hooked_factory, run_fn=stub, max_loops=2, poll_seconds=0.01
+        )
+
+        async with factory() as db:
+            status = await read_status(db)
+            assert status.state == "running"
+    finally:
+        await _cleanup(factory)

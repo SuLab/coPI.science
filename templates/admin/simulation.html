@@ -119,20 +119,42 @@
 <!-- Announce settings: channels -->
 <div class="bg-white border border-gray-200 rounded-xl shadow-sm p-5 mb-6">
     <h2 class="text-lg font-semibold text-gray-900 mb-3">Run-start announcement — channels</h2>
+    <p class="text-sm mb-1">
+        {% if channels_kv is none %}
+        <span class="font-medium text-gray-700">No override</span> — using the Settings default:
+        <code class="text-xs bg-gray-100 rounded px-1 py-0.5">{{ channels_default }}</code>
+        {% elif channels_kv == '' %}
+        <span class="font-medium text-yellow-800">Override: disabled</span> — the run-start
+        announcement is turned off, regardless of the Settings default.
+        {% else %}
+        <span class="font-medium text-green-700">Override: {{ channels_kv }}</span>
+        {% endif %}
+    </p>
     <p class="text-sm text-gray-500 mb-3">
         Comma-separated Slack channel names (lowercase letters, digits, hyphens,
-        underscores). Empty clears the override and falls back to the Settings default.
+        underscores). Saving with an EMPTY field and "Disable announcements" unchecked
+        CLEARS the override (falls back to the Settings default above) — it does not
+        disable anything. Check "Disable announcements" to explicitly turn the
+        announcement off instead.
     </p>
-    <form action="/admin/simulation/announce-settings" method="post" class="flex items-end gap-3">
-        <div class="flex-1">
-            <label class="block text-xs font-medium text-gray-600 mb-1">Channels</label>
-            <input type="text" name="channels" value="{{ channels_value }}"
-                   class="border border-gray-300 rounded px-2 py-1 text-sm w-full">
+    <form action="/admin/simulation/announce-settings" method="post" class="space-y-3">
+        <div class="flex items-end gap-3">
+            <div class="flex-1">
+                <label class="block text-xs font-medium text-gray-600 mb-1">Channels</label>
+                <input type="text" name="channels" value="{{ channels_value }}"
+                       class="border border-gray-300 rounded px-2 py-1 text-sm w-full">
+            </div>
+            <button type="submit"
+                    class="inline-flex items-center px-4 py-2 rounded-md bg-indigo-600 text-white text-sm font-medium hover:bg-indigo-700">
+                Save
+            </button>
         </div>
-        <button type="submit"
-                class="inline-flex items-center px-4 py-2 rounded-md bg-indigo-600 text-white text-sm font-medium hover:bg-indigo-700">
-            Save
-        </button>
+        <label class="flex items-center gap-2 text-sm text-gray-700">
+            <input type="checkbox" name="disable" value="true" {% if channels_kv == '' %}checked{% endif %}
+                   class="rounded border-gray-300">
+            Disable announcements (writes an explicit empty override — does not fall back to
+            the Settings default)
+        </label>
     </form>
 </div>
 
@@ -254,14 +276,26 @@
 
 {% if run_overview %}
 <div class="bg-white border border-gray-200 rounded-xl shadow-sm p-5 mb-6 text-sm text-gray-600 space-y-1">
+    <div class="text-xs font-semibold uppercase tracking-wide text-gray-400">
+        Process (web tier) — not the selected run's history
+    </div>
     <div>Build: {{ run_overview.build_info.commit or '—' }} ({{ run_overview.build_info.branch or '—' }},
         {{ run_overview.build_info.dirty_files if run_overview.build_info.dirty_files is not none else '—' }} dirty files,
         source={{ run_overview.build_info.source }})</div>
     <div>Prompt stamps: hub {{ run_overview.hub_prompt_stamp.version }} ({{ run_overview.hub_prompt_stamp.content_hash }}),
         PI {{ run_overview.pi_prompt_stamp.version }} ({{ run_overview.pi_prompt_stamp.content_hash }})</div>
     <div>Rubric: {{ run_overview.rubric_version }} ({{ run_overview.rubric_content_hash }})</div>
-    <div>Total API calls: {{ run_overview.total_api_calls }}
+    <div class="pt-1 mt-1 border-t border-gray-100">Total API calls (this run): {{ run_overview.total_api_calls }}
         <span class="text-gray-400">— {{ api_call_units_note }}</span></div>
+    <div>Run-start announcement (this run):
+        {% if run_overview.run_start_announcement %}
+        posted to {{ run_overview.run_start_announcement.posted.keys() | join(', ') if run_overview.run_start_announcement.posted else '—' }};
+        failed: {{ run_overview.run_start_announcement.failed | join(', ') if run_overview.run_start_announcement.failed else '—' }};
+        at {{ run_overview.run_start_announcement.at }}
+        {% else %}
+        —
+        {% endif %}
+    </div>
 </div>
 {% endif %}
 
@@ -323,7 +357,14 @@
         <details class="sc-chart-fallback"><summary>table view</summary>
         <table><tbody>
             {% for reason, count in drops_rows %}
+            {% if reason == 'unwritable_row' %}
+            <tr class="bg-yellow-50 text-yellow-800 font-medium">
+                <th scope="row" title="The engine wanted this row — a concluded verdict, already parsed and assembled — and the database refused it. Its only surviving trace is this drop.">{{ reason }} ⚠️</th>
+                <td>{{ count }}</td>
+            </tr>
+            {% else %}
             <tr><th scope="row">{{ reason }}</th><td>{{ count }}</td></tr>
+            {% endif %}
             {% else %}
             <tr><td class="text-gray-400">—</td></tr>
             {% endfor %}

@@ -9,7 +9,14 @@ redeploy, or crash-restart must never replay a pre-boot request.
 The running engine handles `stop` itself (SimulationEngine._poll_control_plane)
 — while idle, this loop clears orphaned `stop`s ONLY when no fresh `running`
 heartbeat exists (a live heartbeat means a CLI-emergency engine owns that
-stop; audit V4). The loop EXITS after each completed run (audit V5):
+stop; audit V4). For the same reason, the idle branch's own heartbeat upsert
+is skipped whenever that fresh foreign heartbeat is already `running` or
+`stopping`: without that check, this loop's ~5s idle tick would overwrite a
+CLI-launched engine's `running` row (which only refreshes every ~30s) with
+`idle` after one iteration, both defeating the V4 stop guard immediately
+after and making the page misreport an actively-running engine as Idle
+(inviting a second, colliding Start). The loop EXITS after each completed run
+(audit V5):
 `restart: unless-stopped` brings the process back up idle through the
 boot-staling path, which is what keeps `docker stop -t 420`'s documented
 semantics — mid-run, _run_simulation's own SIGTERM handler stops the engine
@@ -78,6 +85,12 @@ async def run_supervisor(session_factory=None, run_fn=None, poll_seconds=POLL_SE
         while not _shutdown and (max_loops is None or loops < max_loops):
             loops += 1
             async with session_factory() as db:
+                # Read the heartbeat ONCE per iteration: it answers both "is
+                # a stop aimed at a live foreign engine" (below) and "would
+                # our own idle upsert clobber that same foreign engine's
+                # heartbeat" (further below) — the same fresh
+                # `running`/`stopping` reading settles both questions.
+                panel_state = derive_panel_state(await read_status(db), datetime.now(UTC))
                 # Stops FIRST, so a stale stop can never survive into a run
                 # this iteration is about to start; and a stop aimed at a
                 # live foreign engine (CLI emergency path) is left pending
@@ -85,7 +98,7 @@ async def run_supervisor(session_factory=None, run_fn=None, poll_seconds=POLL_SE
                 # heartbeat is the tell (audit V4).
                 stop_cmd = await claim_pending(db, command="stop")
                 if stop_cmd is not None:
-                    if derive_panel_state(await read_status(db), datetime.now(UTC)) == "running":
+                    if panel_state == "running":
                         logger.info("Leaving stop %s for the live engine", stop_cmd.id)
                     else:
                         await finish_command(db, stop_cmd.id, status="done",
@@ -94,9 +107,16 @@ async def run_supervisor(session_factory=None, run_fn=None, poll_seconds=POLL_SE
                 if cmd is None:
                     # Idle heartbeat: without this the page reads a healthy
                     # idle supervisor as "stale" two minutes after boot
-                    # (audit V3).
-                    await upsert_status(db, state="idle")
-                    await db.commit()
+                    # (audit V3). But NEVER when a foreign engine (the CLI
+                    # emergency path) already owns a FRESH `running`/`stopping`
+                    # heartbeat — writing `idle` over that every ~5s would
+                    # clobber a heartbeat that only refreshes every ~30s,
+                    # defeating the V4 stop guard above after a single
+                    # iteration and showing the page an idle panel while a
+                    # real engine runs.
+                    if panel_state not in ("running", "stopping"):
+                        await upsert_status(db, state="idle")
+                        await db.commit()
                 else:
                     payload = cmd.payload or {}
                     fresh = bool(payload.get("fresh", False))
@@ -105,7 +125,23 @@ async def run_supervisor(session_factory=None, run_fn=None, poll_seconds=POLL_SE
                                         detail={"fresh": fresh, "max_runtime": max_runtime})
                     await db.commit()
                     cmd_id = cmd.id
-            if cmd is not None:
+            if cmd is not None and _shutdown:
+                # Claimed a `start` (and even upserted "starting") in the
+                # window above, but a shutdown signal landed before we got
+                # here to actually run it — never launch a run into a
+                # process that is already on its way out. Finish it stale
+                # rather than either running it anyway or leaving it
+                # claimed-but-pending forever; boot staling on the next
+                # start would eventually clear it, but that would silently
+                # discard the operator's request rather than telling them
+                # to ask again now.
+                async with session_factory() as db:
+                    await finish_command(
+                        db, cmd_id, status="stale",
+                        result="supervisor shutting down — request again",
+                    )
+                logger.info("Shutdown mid-claim — start %s finished stale", cmd_id)
+            elif cmd is not None:
                 try:
                     await run_fn(max_runtime, 0, False, False, fresh, False, False)
                     outcome, result = "done", "run completed"

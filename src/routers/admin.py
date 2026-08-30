@@ -2527,6 +2527,15 @@ async def _live_tab_context(
         })
 
     # --- interview gantt --------------------------------------------------
+    # NOTE (F11): `timeline`'s spans (`InterviewSpan.first_message_at` /
+    # `.last_message_at`, from `interview_timeline`) are MIN/MAX over
+    # `agent_messages` rows whose `thread_ts` equals the interview's
+    # `thread_id` — and the thread's own ROOT post never satisfies that: a
+    # root message IS the thing later replies point back to via `thread_ts`,
+    # so the root's own `thread_ts` column is NULL, not its own timestamp.
+    # Every bar drawn below therefore starts at the first REPLY, not the
+    # opening post, and is very slightly narrower than the interview's true
+    # wall-clock span. This is a rendering fact, not a bug to fix here.
     cost_by_thread = {ic.thread_ts: ic for ic in per_interview}
     gantt_rows = []
     gantt_links = []
@@ -2555,7 +2564,7 @@ async def _live_tab_context(
     gantt_html = gantt(gantt_rows, t0, t1) if gantt_rows else None
     unattributed = cost_by_thread.get(None)
     unattributed_note = None
-    if gantt_rows and unattributed is not None:
+    if gantt_rows and unattributed is not None and unattributed.cost > 0:
         prefix = "≥" if unattributed.is_floor else ""
         unattributed_note = (
             f"{prefix}${unattributed.cost:.2f} in LLM calls could not be attributed to a "
@@ -2660,7 +2669,8 @@ async def _simulation_context(
     ).scalar_one_or_none()
 
     channels_kv = await _kv_get(db, _KEY_ANNOUNCE_CHANNELS)
-    channels_value = channels_kv if channels_kv is not None else get_settings().run_start_announce_channels
+    channels_default = get_settings().run_start_announce_channels
+    channels_value = channels_kv if channels_kv is not None else channels_default
 
     if template_value_override is not None:
         template_value = template_value_override
@@ -2686,6 +2696,8 @@ async def _simulation_context(
         pending_start=pending_start,
         recent_commands=recent_commands,
         channels_value=channels_value,
+        channels_kv=channels_kv,
+        channels_default=channels_default,
         template_value=template_value,
         audit_events=audit_events,
         msg=msg,
@@ -2813,39 +2825,58 @@ async def admin_simulation_stop(
 async def admin_simulation_announce_settings(
     request: Request,
     channels: str = Form(""),
+    disable: bool = Form(False),
     db: AsyncSession = _DB,
     current_user: User = _ADMIN,
 ):
-    """Persist (or clear) the DB override for the run-start announcement's
-    channel list.
+    """Persist, disable, or clear the DB override for the run-start
+    announcement's channel list.
 
-    `src.agent.run_marker.parse_announce_channels` does the split/dedup/trim;
-    each resulting name is then checked against Slack's own channel-name
-    shape (`_ANNOUNCE_CHANNEL_RE`) before anything is written. An empty
-    input clears the override (falls back to the `Settings` default).
+    Three distinct outcomes, matching the three states the page shows
+    (`_simulation_context`'s `channels_kv`): an explicit `disable` writes the
+    override as `""` regardless of whatever is in `channels` — the engine
+    already treats an empty-string override as "skip the announcement"
+    (`parse_announce_channels("") == []`), so this is not new engine
+    behavior, just a page control for a state the engine already supported
+    but the page previously had no way to request on purpose (it was only
+    reachable by accident, and indistinguishable on the page from "no
+    override"). Leaving `disable` unchecked with an EMPTY `channels` field
+    still CLEARS the override outright (falls back to the `Settings`
+    default) — unchanged from before this control existed. A non-empty
+    `channels` field (with `disable` unchecked) sets the override to that
+    list, each name checked against Slack's own channel-name shape
+    (`_ANNOUNCE_CHANNEL_RE`) first. All three write the same audit action;
+    the `new` payload value (`""`, `None`, or a channel list) is what
+    distinguishes them after the fact.
     """
-    names = parse_announce_channels(channels)
-    bad = [n for n in names if not _ANNOUNCE_CHANNEL_RE.match(n)]
-    if bad:
-        return RedirectResponse(
-            url=f"/admin/simulation?error={quote('Invalid channel name(s): ' + ', '.join(bad))}",
-            status_code=302,
-        )
     old_value = await _kv_get(db, _KEY_ANNOUNCE_CHANNELS)
-    new_value = ",".join(names) or None
-    if new_value is None:
-        await _kv_delete(db, _KEY_ANNOUNCE_CHANNELS)
-    else:
+
+    if disable:
+        new_value = ""
         await _kv_upsert(db, _KEY_ANNOUNCE_CHANNELS, new_value)
+        msg = "Announcements disabled."
+    else:
+        names = parse_announce_channels(channels)
+        bad = [n for n in names if not _ANNOUNCE_CHANNEL_RE.match(n)]
+        if bad:
+            return RedirectResponse(
+                url=f"/admin/simulation?error={quote('Invalid channel name(s): ' + ', '.join(bad))}",
+                status_code=302,
+            )
+        new_value = ",".join(names) or None
+        if new_value is None:
+            await _kv_delete(db, _KEY_ANNOUNCE_CHANNELS)
+        else:
+            await _kv_upsert(db, _KEY_ANNOUNCE_CHANNELS, new_value)
+        msg = "Announce channels updated."
+
     await record_audit(
         db,
         action="simulation_announce_channels_updated",
         actor_user_id=current_user.id,
         payload={"old": old_value, "new": new_value},
     )
-    return RedirectResponse(
-        url=f"/admin/simulation?msg={quote('Announce channels updated.')}", status_code=302
-    )
+    return RedirectResponse(url=f"/admin/simulation?msg={quote(msg)}", status_code=302)
 
 
 @router.post("/simulation/announce-template")
