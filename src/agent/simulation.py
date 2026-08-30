@@ -3883,6 +3883,47 @@ class SimulationEngine:
             "rubric_hash": RUBRIC_CONTENT_HASH,
         }
 
+    async def _announce_overrides(self) -> tuple[str | None, str | None]:
+        """Read the two DB-overridable announce settings in one session.
+
+        Returns ``(channels, template_body)``: each is ``None`` when its
+        ``app_settings`` row is absent or its value is NULL — the caller
+        reads that as "no override, fall back to Settings / the template
+        file". Only called by ``_announce_run_start`` when
+        ``self.session_factory`` is set. This has its OWN try/except, distinct
+        from ``_announce_run_start``'s outer one: a KV hiccup here must cost
+        the announcement at most a fallback, not the channel-resolution and
+        posting work still to come in that method — the same reasoning as
+        ``_poll_control_plane``'s own try/except.
+        """
+        try:
+            from sqlalchemy import select as sa_select
+
+            from src.models import AppSetting
+
+            keys = (
+                "run_start_announce_channels",
+                "run_start_announcement_template",
+            )
+            async with self.session_factory() as db:
+                rows = (await db.execute(
+                    sa_select(AppSetting.key, AppSetting.value).where(
+                        AppSetting.key.in_(keys)
+                    )
+                )).all()
+            values = dict(rows)
+            return (
+                values.get("run_start_announce_channels"),
+                values.get("run_start_announcement_template"),
+            )
+        except Exception as exc:
+            logger.warning(
+                "Run-start announcement: app_settings read failed (%s) — "
+                "falling back to Settings/template-file defaults",
+                exc,
+            )
+            return None, None
+
     async def _announce_run_start(self) -> None:
         """Post the run-start marker to every configured channel (fresh runs
         only — the caller gates on self._fresh_start).
@@ -3901,6 +3942,11 @@ class SimulationEngine:
             names = parse_announce_channels(
                 get_settings().run_start_announce_channels
             )
+            template_override: str | None = None
+            if self.session_factory:
+                channels_override, template_override = await self._announce_overrides()
+                if channels_override is not None:
+                    names = parse_announce_channels(channels_override)
             if not names:
                 logger.info("Run-start announcement disabled (no channels configured)")
                 return
@@ -3925,7 +3971,7 @@ class SimulationEngine:
                 client = fallback
 
             text = render_run_start_announcement(
-                self._run_start_announcement_values()
+                self._run_start_announcement_values(), template_override
             )
             posted: dict[str, str] = {}
             failed: list[str] = []
