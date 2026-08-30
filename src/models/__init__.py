@@ -5,6 +5,8 @@ Import all models here so Alembic can detect them.
 
 from src.models.access import AccessAllowlist, WaitlistSignup
 from src.models.agent_activity import (
+    VISIBILITY_COLLAB_PRIVATE,
+    VISIBILITY_PUBLIC,
     AgentChannel,
     AgentMessage,
     LlmCallLog,
@@ -12,8 +14,6 @@ from src.models.agent_activity import (
     PrivateChannelMember,
     SimulationRun,
     ThreadDecision,
-    VISIBILITY_COLLAB_PRIVATE,
-    VISIBILITY_PUBLIC,
 )
 from src.models.agent_registry import AgentRegistry, ProposalReview
 from src.models.cohort import (
@@ -35,8 +35,8 @@ from src.models.email_notification import (
 )
 from src.models.job import Job
 from src.models.opportunity import AssessmentDrop, OpportunityAssessment
-from src.models.profile_revision import ProfileRevision
 from src.models.profile import ResearcherProfile
+from src.models.profile_revision import ProfileRevision
 from src.models.proposal_vote import VOTE_DOWN, VOTE_UP, ProposalVote
 from src.models.provisioning import AppSetting, SlackAppProvision
 from src.models.publication import Publication
@@ -45,6 +45,11 @@ from src.models.review import (
     AssessmentReviewAssignment,
     AssessmentReviewEvent,
     PromptChangeSuggestion,
+)
+from src.models.simulation_control import (
+    AdminAuditEvent,
+    SimulationCommand,
+    SimulationProcessStatus,
 )
 from src.models.specialist_consult import SpecialistConsult
 from src.models.user import (
@@ -106,4 +111,7 @@ __all__ = [
     "USER_ROLE_ADMIN",
     "USER_ROLE_REVIEWER",
     "VALID_USER_ROLES",
+    "SimulationCommand",
+    "SimulationProcessStatus",
+    "AdminAuditEvent",
 ]

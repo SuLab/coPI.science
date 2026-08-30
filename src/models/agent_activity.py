@@ -23,7 +23,6 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from src.database import Base
 
-
 # Channel visibility classes. See specs/privacy-and-channel-visibility.md.
 # 'public' — all bots and PIs; seeded and agent-created thematic channels.
 # 'collab_private' — 2 bots + up to 2 PIs; Slack is_private=true.
@@ -198,6 +197,11 @@ class LlmCallLog(Base):
     agent_id: Mapped[str] = mapped_column(String(50), nullable=False)
     phase: Mapped[str] = mapped_column(String(30), nullable=False)  # decide, respond, kickstart, memory
     channel: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    #: The interview thread this turn served, when the call site knows it
+    #: (thread replies and specialist consults). Nullable and never
+    #: backfilled: pre-0042 rows cannot be attributed retroactively, and
+    #: cost-per-interview treats NULL as "unattributed". Added 0042.
+    thread_ts: Mapped[str | None] = mapped_column(String(50), nullable=True)
     model: Mapped[str] = mapped_column(String(100), nullable=False)
     system_prompt: Mapped[str] = mapped_column(Text, nullable=False)
     messages_json: Mapped[dict] = mapped_column(JSON, nullable=False)
