@@ -139,16 +139,31 @@ def _render_transcript(
     """``(text, input_truncated)`` for the INTERVIEW TRANSCRIPT section.
 
     `thread_id is None` is `load_interview_thread`'s own signal that the
-    thread could not be reconstructed — a normal outcome (`--fresh` wipes
-    `agent_messages`, never `opportunity_assessments`) — and the literal
+    thread could not be reconstructed — a normal outcome for a verdict whose
+    messages are missing (a NULL ``slack_ts``, or a run whose messages were
+    deleted by a pre-2026-08-22 ``--fresh``) — and the literal
     ``TRANSCRIPT: unavailable`` block is what tells the model that plainly,
     rather than silently rendering an empty transcript that looks like an
     interview with nothing in it.
+
+    Every line is prefixed with ``> ``. The transcript is the one section
+    built from text other people wrote (PIs, lab bots, humans in the Slack
+    channel) and it is NOT JSON-escaped the way FEEDBACK is, so without the
+    prefix a message containing ``## CURRENT PROMPT FILES`` or ``--- FILE:``
+    would read to the model as a section boundary or a prompt file. With it,
+    nothing inside the transcript can start a line the way the real
+    boundaries do. `prompts/review-bot.md` tells the model about the prefix.
     """
     if thread_id is None:
         return "TRANSCRIPT: unavailable", False
 
-    full_text = "\n".join(f"{m.sender_name or m.agent_id}: {m.content}" for m in messages)
+    lines: list[str] = []
+    for m in messages:
+        who = m.sender_name or m.agent_id
+        body_lines = (m.content or "").splitlines() or [""]
+        for i, line in enumerate(body_lines):
+            lines.append(f"> {who}: {line}" if i == 0 else f"> {line}")
+    full_text = "\n".join(lines)
     if len(full_text) <= TRANSCRIPT_CHAR_BUDGET:
         return full_text, False
 
@@ -256,7 +271,9 @@ def _parse_model_output(raw: str) -> tuple[str, str]:
     comes back as a list from `extract_json`, per its own docstring), or a
     `target` that fails validation — degrades to ``("out_of_scope", raw)``.
     `raw_response` always keeps the model's exact text regardless; this is
-    what keeps a defaulted row reviewable rather than dropped.
+    what keeps a defaulted row reviewable rather than dropped. A valid
+    `target` whose `suggestion`/`rationale` compose to a blank body degrades
+    to ``(target, raw)`` for the same reason.
     """
     try:
         parsed = extract_json(raw)
@@ -271,7 +288,21 @@ def _parse_model_output(raw: str) -> tuple[str, str]:
 
     assert isinstance(target, str)  # narrowed by _is_valid_target above
     body = _compose_suggestion_body(parsed.get("suggestion"), parsed.get("rationale"))
+    if not body.strip():
+        # A valid target with nothing to show: keep the model's own text so
+        # the row is reviewable instead of a blank card (audit 2026-09-02).
+        return target, raw
     return target, body
+
+
+async def _load_assessment(
+    db: AsyncSession, assessment_id: uuid.UUID
+) -> OpportunityAssessment | None:
+    return (
+        await db.execute(
+            select(OpportunityAssessment).where(OpportunityAssessment.id == assessment_id)
+        )
+    ).scalar_one_or_none()
 
 
 async def execute_review_analysis(job: Job, db: AsyncSession) -> None:
@@ -303,11 +334,34 @@ async def execute_review_analysis(job: Job, db: AsyncSession) -> None:
         )
         return
 
-    assessment = (
-        await db.execute(
-            select(OpportunityAssessment).where(OpportunityAssessment.id == assessment_id)
-        )
-    ).scalar_one_or_none()
+    assessment = await _load_assessment(db, assessment_id)
+    if assessment is None:
+        # The engine's supersession re-point (`_retire_superseded_verdict`)
+        # rewrites this job's payload to the replacement id in the SAME
+        # transaction that deletes the retired row. If that landed between
+        # the worker's job fetch and this lookup, the in-memory payload is
+        # stale — re-read it once before concluding there is nothing to do
+        # (2026-09-02 plan, ruling R4). Best-effort: the jobs row itself can
+        # vanish at any await (user deletion cascades it), in which case the
+        # refresh raises and the original miss stands.
+        try:
+            await db.refresh(job, attribute_names=["payload"])
+        except Exception:  # noqa: BLE001 — a vanished row is the documented case
+            logger.info("review bot: job %s could not be re-read after an assessment miss", job.id)
+        else:
+            refreshed_raw = (job.payload or {}).get("assessment_id")
+            try:
+                refreshed_id = uuid.UUID(str(refreshed_raw)) if refreshed_raw else None
+            except (ValueError, AttributeError, TypeError):
+                refreshed_id = None
+            if refreshed_id is not None and refreshed_id != assessment_id:
+                logger.info(
+                    "review bot: job %s was re-pointed from assessment %s to %s while "
+                    "in flight; retrying the lookup",
+                    job.id, assessment_id, refreshed_id,
+                )
+                assessment_id = refreshed_id
+                assessment = await _load_assessment(db, assessment_id)
     if assessment is None:
         # Normal, not an error: a later sidecar can supersede and delete a
         # provisional verdict minutes after a review was left on it.
