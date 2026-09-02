@@ -11,10 +11,11 @@ then write, then stamp), not about transaction visibility.
 
 from __future__ import annotations
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from src.models import (
     USER_ROLE_REVIEWER,
+    AssessmentReview,
     Job,
     OpportunityAssessment,
     PromptChangeSuggestion,
@@ -142,3 +143,51 @@ async def test_unchanged_rows_are_still_stamped_and_no_warning_fires(
     await db_session.refresh(r1)
     assert r1.consumed_at is not None
     assert not [rec for rec in caplog.records if "stamped" in rec.getMessage()]
+
+
+async def test_repointed_job_consumes_the_repointed_reviews_under_the_new_id(
+    db_session, monkeypatch
+):
+    """What the engine's re-point (Task 2 of the 2026-09-02 plan) hands the
+    handler: reviews AND the job now name the replacement; the retired row is
+    gone. The handler must analyze under the replacement id."""
+    reviewer = await factories.make_user(db_session, user_role=USER_ROLE_REVIEWER)
+    retired = await _seed_assessment(db_session, slack_ts="1.1")
+    replacement = OpportunityAssessment(
+        simulation_run_id=retired.simulation_run_id, agent_id="blackbird",
+        channel_name="c1", slack_ts="2.2",
+    )
+    db_session.add(replacement)
+    await db_session.flush()
+
+    review = await submit_feedback(
+        db_session, assessment=retired, reviewer=reviewer,
+        score=3, comment="on the provisional verdict", feedback_mode="learn",
+    )
+    (job,) = await _review_jobs(db_session)
+    assert job.payload == {"assessment_id": str(retired.id)}
+
+    # The engine's re-point, then the delete.
+    await db_session.execute(
+        update(AssessmentReview)
+        .where(AssessmentReview.assessment_id == retired.id)
+        .values(assessment_id=replacement.id)
+    )
+    await db_session.execute(
+        update(Job).where(Job.id == job.id)
+        .values(payload={"assessment_id": str(replacement.id)})
+    )
+    await db_session.delete(retired)
+    await db_session.flush()
+    await db_session.refresh(job)
+
+    async def _fake(*args, **kwargs):
+        return _HAPPY
+
+    monkeypatch.setattr(review_bot, "generate_agent_response", _fake)
+    await review_bot.execute_review_analysis(job, db_session)
+
+    await db_session.refresh(review)
+    assert review.consumed_at is not None
+    suggestion = (await db_session.execute(select(PromptChangeSuggestion))).scalar_one()
+    assert suggestion.assessment_id == replacement.id
