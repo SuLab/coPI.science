@@ -6,8 +6,10 @@ approval-status audit trail and reviewer-assignment writes (Task 5).
 assessment in one pass (a later task), so the job itself is the batching
 unit — enqueueing one per submission would turn N rapid reviewer edits into N
 redundant model calls over the same rows. ``enqueue_analysis_if_absent`` is
-the guard: it only inserts a new job when no pending/processing
-``review_feedback_analysis`` job already names this assessment_id.
+the guard: it only inserts a new job when no PENDING ``review_feedback_analysis``
+job already names this assessment_id (a processing job has already
+snapshotted its rows and cannot cover a later one — see the function's
+docstring).
 
 ``record_status_event`` is APPEND-ONLY (never an update — the history is the
 point) and ``assign_reviewer``/``unassign_reviewer`` are the reviewer-roster
@@ -85,15 +87,24 @@ async def enqueue_analysis_if_absent(
     db: AsyncSession, *, assessment_id: uuid.UUID, user_id: uuid.UUID | None
 ) -> bool:
     """Enqueue one ``review_feedback_analysis`` job for ``assessment_id``,
-    unless a pending/processing job for it already exists. Returns whether a
-    new job was enqueued."""
+    unless a PENDING job for it already exists. Returns whether a new job was
+    enqueued.
+
+    ``pending`` only — never ``processing``. A processing job has already read
+    the feedback rows it will analyze (``execute_review_analysis`` snapshots
+    them before the model call), so it cannot cover a row written while it
+    waits on the model; counting it here left that row with no job at all
+    (audit 2026-09-02, D1). A job that lands in the queue behind a processing
+    one simply finds whatever is still unconsumed when its turn comes, and
+    completes as a no-op if that is nothing.
+    """
     existing = (
         (
             await db.execute(
                 select(Job.id)
                 .where(
                     Job.type == "review_feedback_analysis",
-                    Job.status.in_(("pending", "processing")),
+                    Job.status == "pending",
                     Job.payload["assessment_id"].astext == str(assessment_id),
                 )
                 .limit(1)

@@ -27,7 +27,7 @@ import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.agent.specialists import SPECIALIST_DOMAINS
@@ -392,8 +392,35 @@ async def execute_review_analysis(job: Job, db: AsyncSession) -> None:
             raw_response=raw,
         )
     )
-    for review in reviews:
-        review.consumed_at = now
+    # Stamp ONLY the rows this job analyzed, and only if they still read exactly
+    # as snapshotted. A row edited while the model call was in flight
+    # (`edit_feedback` resets consumed_at and changes the content) or deleted in
+    # that window matches nothing here and stays unconsumed for the job the
+    # edit/submit path already enqueued (the dedupe counts PENDING jobs only).
+    # A Core UPDATE rather than `review.consumed_at = now` on the ORM objects,
+    # because the ORM write would overwrite whatever the concurrent edit stored
+    # (audit 2026-09-02, D2).
+    stamped = 0
+    for review, snap in zip(reviews, feedback_snapshot, strict=True):
+        result = await db.execute(
+            update(AssessmentReview)
+            .where(
+                AssessmentReview.id == review.id,
+                AssessmentReview.consumed_at.is_(None),
+                AssessmentReview.feedback_mode == "learn",
+                AssessmentReview.score == snap["score"],
+                AssessmentReview.comment == snap["comment"],
+            )
+            .values(consumed_at=now)
+        )
+        stamped += result.rowcount or 0
+    if stamped != len(reviews):
+        logger.warning(
+            "review bot: stamped %d of %d feedback rows consumed for assessment %s "
+            "(job %s); the rest were edited or deleted while the model call was in "
+            "flight and stay unconsumed for the next job",
+            stamped, len(reviews), assessment.id, job.id,
+        )
 
     # One commit covering both the new suggestion row and every consumed_at —
     # consumption and the suggestion must land together or not at all.
