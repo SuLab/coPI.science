@@ -522,6 +522,7 @@ async def waitlist_submit(
         existing.name = name_clean or existing.name
         existing.institution = institution_clean or existing.institution
         existing.note = note_clean or existing.note
+        await db.commit()
     else:
         db.add(
             WaitlistSignup(
@@ -531,7 +532,14 @@ async def waitlist_submit(
                 note=note_clean or None,
             )
         )
-    await db.commit()
+        try:
+            await db.commit()
+        except IntegrityError:
+            # Lost a race: a concurrent first-time submission for this email
+            # committed first (unique `email`, access.py:43). Roll back and
+            # fall through to the same success response the existing-row
+            # branch above would have produced (V5).
+            await db.rollback()
     logger.info("Waitlist signup: %s", email_clean)
 
     return templates.TemplateResponse(
