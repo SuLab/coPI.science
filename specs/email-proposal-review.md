@@ -263,7 +263,7 @@ SES_SENDER_EMAIL=noreply@copi.science
 | `src/services/email_inbound.py` | S3 polling, reply parsing, LLM classification, dispatch, confirmation/help emails |
 | `src/routers/settings.py` | Settings page (frequency preferences) and unsubscribe endpoints |
 | `src/models/email_notification.py` | EmailNotification and EmailEngagementTracker SQLAlchemy models |
-| `prompts/email-reply-classify.md` | LLM prompt for classifying email replies |
+| `prompts/email-reply-classify.md` | *Currently unused by any code — `classify_reply` (`src/services/email_inbound.py:449-475`) builds its classification prompt inline instead. Kept on disk, not deleted, in case a future refactor wants to externalize the prompt again (#26 DOC-5).* |
 | `templates/settings.html` | Settings page template (frequency dropdown, status display) |
 | `templates/unsubscribe.html` | One-click unsubscribe confirmation page (no auth required) |
 | `alembic/versions/0008_email_notifications.py` | Migration: new tables + new columns on users and proposal_reviews |
