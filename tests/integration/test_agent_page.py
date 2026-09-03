@@ -355,6 +355,27 @@ async def test_signup_collision_also_disambiguates_the_bot_name(client, db_sessi
     assert (await _agent_of(db_session, second)).bot_name == "PWuBot"
 
 
+async def test_signup_third_same_initial_collision_gets_a_numeric_suffix(
+    client, db_session
+):
+    """A third same-initial namesake collides on the initial-prefixed id too
+    ('pwu' is already taken by the second Wu). The fallback must append the
+    numeric suffix to THAT prefixed candidate ('pwu2'), not restart from the
+    bare stem ('wu2') — issue #26 C1/C2. Before the fix there was no numeric
+    branch at all: this hit the agent_id unique constraint on commit -> 500.
+    """
+    first, _ = await _signup(client, db_session, "Chunlei Wu", "chunlei@example.org")
+    second, _ = await _signup(client, db_session, "Peng Wu", "peng@example.org")
+    third, r3 = await _signup(client, db_session, "Pei Wu", "pei@example.org")
+
+    assert r3.status_code == 302, r3.text
+    assert (await _agent_of(db_session, first)).agent_id == "wu"
+    assert (await _agent_of(db_session, second)).agent_id == "pwu"
+    third_agent = await _agent_of(db_session, third)
+    assert third_agent.agent_id == "pwu2"
+    assert third_agent.bot_name == "PWu2Bot"
+
+
 async def test_signup_needs_a_completed_profile(client, db_session):
     """Absence assertion + its control, in one test."""
     bare = await factories.make_user(

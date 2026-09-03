@@ -401,6 +401,11 @@ async def derive_agent_identity(
     rebuilt from the bare last name four lines later, so Peng Wu got
     ``pwu`` / ``WuBot`` — colliding with Chunlei Wu's bot while the ids differed.
     CLAUDE.md documents ``pwu`` / ``PWuBot``.
+
+    A THIRD same-initial namesake collides on the prefixed candidate too
+    (issue #26 C1): fall back to a numeric suffix appended to the prefixed
+    candidate (``pwu2``, ``pwu3``, ...), matching
+    ``scripts/backfill_agents.py``'s ``_resolve_agent_id``/``_bot_name_for``.
     """
     last_name = full_name.split()[-1]
     stem = "".join(c for c in last_name.lower() if c.isalpha())
@@ -409,10 +414,28 @@ async def derive_agent_identity(
     collision = await db.execute(
         select(AgentRegistry).where(AgentRegistry.agent_id == stem)
     )
-    if collision.scalar_one_or_none():
-        initial = full_name[0]
-        return f"{initial.lower()}{stem}", f"{initial.upper()}{display}Bot"
-    return stem, f"{display}Bot"
+    if not collision.scalar_one_or_none():
+        return stem, f"{display}Bot"
+
+    initial = full_name[0]
+    prefixed = f"{initial.lower()}{stem}"
+    collision = await db.execute(
+        select(AgentRegistry).where(AgentRegistry.agent_id == prefixed)
+    )
+    if not collision.scalar_one_or_none():
+        return prefixed, f"{initial.upper()}{display}Bot"
+
+    for i in range(2, 20):
+        candidate = f"{prefixed}{i}"
+        collision = await db.execute(
+            select(AgentRegistry).where(AgentRegistry.agent_id == candidate)
+        )
+        if not collision.scalar_one_or_none():
+            return candidate, f"{initial.upper()}{display}{i}Bot"
+    raise HTTPException(
+        status_code=409,
+        detail="Could not derive a unique agent identity, please contact support",
+    )
 
 
 @router.post("/request")
