@@ -11,10 +11,13 @@ would in the real race, instead of driving two real concurrent HTTP requests.
 """
 
 import types
+import uuid
 
+import pytest
+from fastapi import HTTPException
 from sqlalchemy.exc import IntegrityError
 
-from src.routers import public
+from src.routers import agent_page, public
 
 
 class _FakeResult:
@@ -99,3 +102,71 @@ async def test_waitlist_submit_survives_a_lost_race_on_email(monkeypatch):
     )
     assert db.rolled_back is True
     assert len(db.added) == 1, "the row must still be staged before the race is caught"
+
+
+class _ReviewRaceSession:
+    """Fake AsyncSession for review_proposal: serves the three guard SELECTs
+    (agent, thread_decision, existing-review) in order, then raises on the
+    4th execute() -- the call `record_engagement` makes. This models the
+    red-team's finding that SQLAlchemy autoflush surfaces the loser's
+    IntegrityError there, three lines before `commit()`, not at commit."""
+
+    def __init__(self, select_results, raise_at, raise_exc):
+        self._select_results = list(select_results)
+        self._raise_at = raise_at
+        self._raise_exc = raise_exc
+        self._calls = 0
+        self.added: list[object] = []
+        self.rolled_back = False
+        self.committed = False
+
+    async def execute(self, _stmt):
+        self._calls += 1
+        if self._calls == self._raise_at:
+            raise self._raise_exc
+        return _FakeResult(self._select_results.pop(0))
+
+    def add(self, obj):
+        self.added.append(obj)
+
+    async def commit(self):
+        self.committed = True
+
+    async def rollback(self):
+        self.rolled_back = True
+
+
+async def test_review_proposal_survives_a_lost_race_via_autoflush():
+    """V5-3/V5-9, corrected per the red-team: the SELECT guard (agent_page.py:487-494)
+    stops a SEQUENTIAL re-review, but two concurrent first-time reviews both pass it
+    and race on `uq_proposal_reviews_decision_agent`. Because record_engagement and
+    mark_notification_responded each run their own db.execute() on the SAME session
+    after db.add(review), SQLAlchemy's autoflush (default True; session factory kwargs
+    at src/database.py:39-43 do not disable it) fires the pending INSERT at the FIRST
+    of those calls -- so the IntegrityError surfaces from record_engagement's SELECT,
+    not from db.commit(). A guard that wraps only commit() (the vote endpoint's
+    pattern) would not catch it; the guard must span from db.add through commit."""
+    pi_id = uuid.uuid4()
+    td_id = uuid.uuid4()
+    agent = types.SimpleNamespace(agent_id="alpha", user_id=pi_id, status="active")
+    td = types.SimpleNamespace(id=td_id, agent_a="alpha", agent_b="beta")
+    current_user = types.SimpleNamespace(id=pi_id, name="PI Alpha")
+
+    db = _ReviewRaceSession(
+        select_results=[agent, td, None],
+        raise_at=4,
+        raise_exc=IntegrityError(
+            "INSERT INTO proposal_reviews ...", {}, Exception("dup")
+        ),
+    )
+
+    with pytest.raises(HTTPException) as ei:
+        await agent_page.review_proposal(
+            agent_id="alpha", thread_decision_id=td_id, request=_FakeRequest(),
+            rating=3, comment="", db=db, current_user=current_user,
+        )
+
+    assert ei.value.status_code == 400
+    assert ei.value.detail == "Already reviewed"
+    assert db.rolled_back is True
+    assert len(db.added) == 1, "the review row must still be staged before the guard rolls back"

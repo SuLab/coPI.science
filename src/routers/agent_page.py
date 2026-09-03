@@ -504,14 +504,29 @@ async def review_proposal(
         comment=comment.strip() or None,
         submitted_via="web",
     )
-    db.add(review)
 
-    # Record engagement and mark any outstanding email notification as responded
-    from src.services.email_notifications import mark_notification_responded, record_engagement
-    await record_engagement(current_user.id, db)
-    await mark_notification_responded(current_user.id, thread_decision_id, "review", db)
+    # V5: two concurrent first-time reviews for the same (thread_decision, agent)
+    # both pass the SELECT guard above and then race on
+    # uq_proposal_reviews_decision_agent. Autoflush (default True; see
+    # src/database.py:39-43) fires on the NEXT db.execute after db.add() below --
+    # which is record_engagement's SELECT, not the final commit -- so the loser's
+    # IntegrityError surfaces there. The guard therefore has to span from db.add
+    # through commit, not just wrap commit() the way the vote endpoint does.
+    try:
+        db.add(review)
 
-    await db.commit()
+        # Record engagement and mark any outstanding email notification as responded
+        from src.services.email_notifications import (
+            mark_notification_responded,
+            record_engagement,
+        )
+        await record_engagement(current_user.id, db)
+        await mark_notification_responded(current_user.id, thread_decision_id, "review", db)
+
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(status_code=400, detail="Already reviewed") from None
 
     return RedirectResponse(url=f"/agent/{agent_id}/dashboard", status_code=302)
 
