@@ -988,6 +988,40 @@ async def test_a_pi_cannot_post_into_another_pairs_private_channel(
     assert third_user is not None
 
 
+async def test_pi_cannot_reply_into_a_thread_their_agent_never_joined(client, db_session, world):
+    """COR-5 web residual: a free-form thread_ts must belong to a thread the posting
+    PI's own agent participates in; otherwise the engine would clear another lab's
+    proposal-review block on the PI's behalf."""
+    root = await factories.make_agent_message(
+        db_session, run=world.run, agent_id="alpha", channel_name="general",
+        message_ts="1700000000.000100", thread_ts=None, phase="new_post", content="root",
+    )
+    await factories.make_agent_message(
+        db_session, run=world.run, agent_id="beta", channel_name="general",
+        message_ts="1700000000.000200", thread_ts=root.message_ts, phase="thread_reply", content="r",
+    )
+    resp = await client.post(
+        f"/agent/{world.agent.agent_id}/message",
+        data={"channel_name": "general", "content": "looks good", "thread_ts": "1700000000.000100"},
+        headers=_auth(world.pi.id),
+    )
+    assert resp.status_code == 403
+    assert "thread" in resp.json()["detail"].lower()
+
+
+async def test_pi_can_reply_into_their_own_agents_thread(client, db_session, world):
+    await factories.make_agent_message(
+        db_session, run=world.run, agent_id=world.agent.agent_id, channel_name="general",
+        message_ts="1700000000.000300", thread_ts=None, phase="new_post", content="root",
+    )
+    resp = await client.post(
+        f"/agent/{world.agent.agent_id}/message",
+        data={"channel_name": "general", "content": "thanks", "thread_ts": "1700000000.000300"},
+        headers=_auth(world.pi.id),
+    )
+    assert resp.status_code == 302
+
+
 async def test_sending_a_dm_records_an_inbound_pi_dm(client, db_session, world):
     r = await client.post(
         f"/agent/{OWNER_AGENT}/dm",

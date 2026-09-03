@@ -965,6 +965,7 @@ async def post_agent_message(
     from src.services.pi_inbox import (
         get_latest_run_id,
         pi_may_post_to_channel,
+        pi_may_reply_in_thread,
         record_pi_message,
     )
 
@@ -998,6 +999,19 @@ async def post_agent_message(
     ):
         raise HTTPException(status_code=403, detail="Not a member of that channel")
 
+    reply_to = thread_ts.strip() or None
+    if reply_to and not await pi_may_reply_in_thread(
+        db,
+        run_id=run_id,
+        channel_name=target_channel,
+        thread_ts=reply_to,
+        agent_id=agent.agent_id,
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="Your agent is not a participant in that thread",
+        )
+
     async def _write() -> None:
         await record_pi_message(
             db,
@@ -1005,7 +1019,7 @@ async def post_agent_message(
             channel_name=target_channel,
             content=text,
             sender_name=f"{current_user.name} (PI)",
-            thread_ts=thread_ts.strip() or None,
+            thread_ts=reply_to,
         )
         await db.commit()
 

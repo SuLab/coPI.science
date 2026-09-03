@@ -100,6 +100,45 @@ async def pi_may_post_to_channel(
     return member is not None
 
 
+async def pi_may_reply_in_thread(
+    db: AsyncSession,
+    *,
+    run_id: uuid.UUID,
+    channel_name: str,
+    thread_ts: str,
+    agent_id: str,
+) -> bool:
+    """Whether this PI may address ``thread_ts`` on behalf of ``agent_id``.
+
+    The engine treats a PI message in a thread as authoritative for that thread
+    (proposal-review clear, reopen, pi_context), so a free-form ``thread_ts`` from
+    the web form must name a thread the PI's own agent actually participates in.
+    Requires (a) the thread root to exist in this run and channel and (b) at least
+    one message in the thread from ``agent_id``. Unknown threads are refused.
+    """
+    root = (await db.execute(
+        select(AgentMessage.id)
+        .where(
+            AgentMessage.simulation_run_id == run_id,
+            AgentMessage.channel_name == channel_name,
+            AgentMessage.message_ts == thread_ts,
+        )
+        .limit(1)
+    )).first()
+    if root is None:
+        return False
+    participant = (await db.execute(
+        select(AgentMessage.id)
+        .where(
+            AgentMessage.simulation_run_id == run_id,
+            AgentMessage.agent_id == agent_id,
+            or_(AgentMessage.message_ts == thread_ts, AgentMessage.thread_ts == thread_ts),
+        )
+        .limit(1)
+    )).first()
+    return participant is not None
+
+
 async def record_pi_message(
     db: AsyncSession,
     *,
