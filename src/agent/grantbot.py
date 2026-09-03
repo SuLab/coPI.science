@@ -636,18 +636,25 @@ async def _run_grantbot_with_session(
         from src.services.slack_tokens import slack_globally_enabled
         slack_on = await slack_globally_enabled(session)
         if slack_on:
-            candidate = getattr(settings, "slack_bot_token_grantbot", "")
-            if not candidate or candidate.startswith("xoxb-placeholder"):
-                candidate = settings.slack_bot_token_su
-                # WARNING, not INFO: posts made on this token carry SuBot's Slack
-                # uid, so the engine attributes them to `su` (the uid map resolves
-                # roster bots first, by design — see _bot_uid_map). The FOA still
-                # lands; its provenance is wrong until grantbot has its own token.
-                logger.warning(
-                    "No grantbot Slack token — using SuBot's token as fallback; "
-                    "these posts will be attributed to su, not grantbot",
+            from src.services.slack_tokens import get_agent_bot_token, is_valid_token
+            # DB first (this is what /admin/agents writes), then the .env field.
+            candidate = await get_agent_bot_token(session, "grantbot") or getattr(
+                settings, "slack_bot_token_grantbot", ""
+            )
+            if not is_valid_token(candidate):
+                # Do NOT fall back to SuBot's token (issue #23 COR-26c): a post made on a
+                # borrowed token carries that bot's Slack uid, so the engine's _bot_uid_map
+                # (roster bots resolve first, by design) attributes GrantBot's funding posts
+                # to `su`. Refuse rather than publish under the wrong identity — the per-FOA
+                # `if not bot_token:` branch below releases the claim so a future run with a
+                # real grantbot token can still post it.
+                candidate = ""
+                logger.error(
+                    "No grantbot Slack token configured (AgentRegistry row for 'grantbot', "
+                    "or SLACK_BOT_TOKEN_GRANTBOT) — refusing to post funding opportunities "
+                    "under another bot's identity this run",
                 )
-            if candidate and not candidate.startswith("xoxb-placeholder"):
+            if candidate:
                 bot_token = candidate
                 # to_thread: the helper is sync and makes paginated Slack calls
                 # with backoff, and this caller is async. Run inline it would hold
