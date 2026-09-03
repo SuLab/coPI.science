@@ -210,6 +210,28 @@ class TestSummarizer:
         assert "no prior activity" in format_funding_thread_summary(empty).lower()
 
 
+class TestTagRegexCaseInsensitivity:
+    """COR-28c: @-mentions of a bot tag must resolve regardless of case — Slack's own autocomplete
+    and manual typing both routinely produce @GRANTBOT, @SuBOT, etc."""
+
+    @pytest.mark.parametrize("mention,name", [
+        ("@grantbot", "grantbot"),
+        ("@GRANTBOT", "GRANTBOT"),
+        ("@SuBot", "SuBot"),
+        ("@SuBOT", "SuBOT"),
+    ])
+    def test_pairing_detection_is_case_insensitive(self, mention, name):
+        ml = MessageLog()
+        ml.set_bot_name_map({"wisemanbot": "wiseman"})
+        ml.append(_entry("100", None, "GrantBot", ":moneybag: PAR-25-297 opportunity"))
+        ml.append(_entry(
+            "101", "wiseman", "WisemanBot",
+            f"Aligning on this. {mention} take a look.", thread_ts="100",
+        ))
+        summary = summarize_funding_thread(ml, "100")
+        assert summary.pairings_proposed == [("WisemanBot", name)], summary.pairings_proposed
+
+
 class TestYourPriorMessages:
     def test_empty(self):
         assert "none" in format_your_prior_messages([]).lower()

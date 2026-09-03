@@ -11,6 +11,7 @@ import re
 from dataclasses import dataclass
 
 from src.agent.foa_pattern import FOA_NUMBER_RE as _FOA_NUMBER_RE
+from src.agent.mentions import BOT_TAG_RE
 from src.agent.message_log import LogEntry, MessageLog, is_funding_post
 
 
@@ -166,9 +167,6 @@ class FundingThreadSummary:
         return not (self.alignments or self.pairings_proposed or self.spinoffs)
 
 
-_TAG_RE = re.compile(r"@(\w+[Bb]ot)\b")
-
-
 def _first_meaningful_line(content: str, limit: int = 160) -> str:
     for line in content.splitlines():
         s = line.strip()
@@ -212,7 +210,7 @@ def summarize_funding_thread(
 
     for entry in replies:
         alignments.append((entry.sender_name, _first_meaningful_line(entry.content)))
-        for tag_match in _TAG_RE.finditer(entry.content):
+        for tag_match in BOT_TAG_RE.finditer(entry.content):
             bot_name = tag_match.group(1)
             key = (entry.sender_name, bot_name.lower())
             if key in seen_pairings:
