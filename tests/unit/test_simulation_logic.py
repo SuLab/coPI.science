@@ -2180,3 +2180,111 @@ class TestPhase5ReplyChannelComesFromTheTargetPost:
         # segment. See red-team B5.
         assert posts[0].thread_ts is None
         assert posts[0].visibility == VISIBILITY_COLLAB_PRIVATE
+
+
+# ---------------------------------------------------------------
+# LogEntry writers that must stamp visibility from the channel, not take
+# the dataclass default of 'public' (#20 COR-9a residual)
+# ---------------------------------------------------------------
+
+class TestRemainingLogEntryWritersStampVisibility:
+    """_post_message already stamps visibility from the channel (COR-9a,
+    fixed). These two other writers still take the LogEntry default of
+    'public' regardless of the channel's real visibility class."""
+
+    @pytest.mark.asyncio
+    async def test_proposal_thread_poller_stamps_private_visibility(self):
+        # async def + await, not asyncio.run — this file's convention
+        # (asyncio_mode = "auto"); see red-team m7.
+        from src.agent.agent import Agent
+        from src.agent.state import ProposalRef
+        from src.models.agent_activity import VISIBILITY_COLLAB_PRIVATE
+
+        class _StubReplyClient:
+            is_connected = True
+            def __init__(self, replies):
+                self._replies = replies
+            def get_thread_replies(self, channel_id, thread_ts, oldest="0"):
+                return self._replies
+            def resolve_user_name(self, user_id):
+                return "Some PI"
+
+        agent = Agent("a", "ABot", "A PI")
+        stub_client = _StubReplyClient(replies=[{"ts": "200.0", "user": "U_PI", "text": "looks good"}])
+        engine = SimulationEngine(agents=[agent], slack_clients={"a": stub_client})
+        engine._pi_slack_id_to_agent_ids = {"U_PI": ["a"]}
+        engine._channel_id_map["priv-chan"] = "C_PRIV"
+        engine._channel_visibility["priv-chan"] = VISIBILITY_COLLAB_PRIVATE
+        engine._private_channel_members["C_PRIV"] = {"a"}
+        agent.state.pending_proposals.append(ProposalRef(
+            thread_id="100.0", channel="priv-chan", other_agent_id="b",
+            summary_text="x", proposed_at=0.0,
+        ))
+
+        await engine._poll_proposal_threads_for_pi()
+
+        entry = engine.message_log.get_entry("200.0")
+        assert entry is not None
+        assert entry.visibility == VISIBILITY_COLLAB_PRIVATE
+
+    @pytest.mark.asyncio
+    async def test_web_reopen_synthetic_row_stamps_private_visibility(self):
+        import uuid as uuid_mod
+        from unittest.mock import AsyncMock
+
+        from src.agent.agent import Agent
+        from src.agent.state import ProposalRef
+        from src.models.agent_activity import VISIBILITY_COLLAB_PRIVATE
+
+        class _Row:
+            def __init__(self, **kw):
+                self.__dict__.update(kw)
+                # Task 20.10 adds thread_decision_id to the SELECT, and this
+                # task runs AFTER 20.10 in the execution order (phase 3, then
+                # phase 4) — not before, so the real code already reads it
+                # back via the unified (thread_decision_id, agent_id)
+                # reviewed_set key (red-team m7 corrects the ordering this
+                # comment originally had backwards). Giving the row a random,
+                # non-None uuid here — while the ProposalRef below leaves
+                # thread_decision_id at its None default — means this
+                # proposal's key never matches reviewed_set, so
+                # `newly_reviewed` stays empty and this path does not reach
+                # _update_agent_memory on its own. The explicit stub below is
+                # what actually guarantees no live call, though — don't rely
+                # on the key mismatch alone (see red-team B2).
+                self.thread_decision_id = kw.get("thread_decision_id", uuid_mod.uuid4())
+
+        rows = [_Row(
+            agent_id="a", rating=0, comment="please refine the budget",
+            thread_id="100.0", channel="priv-chan", refined_in_channel=None,
+        )]
+
+        class _FakeDB:
+            async def __aenter__(self):
+                return self
+            async def __aexit__(self, *exc):
+                return False
+            async def execute(self, *a, **kw):
+                return rows
+
+        agent = Agent("a", "ABot", "A PI")
+        engine = SimulationEngine(agents=[agent], slack_clients={})
+        engine._channel_visibility["priv-chan"] = VISIBILITY_COLLAB_PRIVATE
+        engine.session_factory = lambda: _FakeDB()
+        engine.simulation_run_id = uuid_mod.uuid4()
+        engine._hydrate_thread_from_db = AsyncMock()
+        # _sync_proposal_reviews_from_db can end in a real Anthropic call via
+        # _update_agent_memory -> generate_agent_response; this is tests/unit
+        # and must not depend on either the network or the key-mismatch
+        # reasoning above. See red-team B2.
+        engine._update_agent_memory = AsyncMock()
+        agent.state.pending_proposals.append(ProposalRef(
+            thread_id="100.0", channel="priv-chan", other_agent_id="b",
+            summary_text="x", proposed_at=0.0,
+        ))
+
+        await engine._sync_proposal_reviews_from_db()
+
+        entries = [e for e in engine.message_log._entries if e.thread_ts == "100.0"]
+        assert len(entries) == 1
+        assert entries[0].visibility == VISIBILITY_COLLAB_PRIVATE

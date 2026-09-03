@@ -3588,6 +3588,7 @@ class SimulationEngine:
                     thread_ts=thread_id,
                     posted_at=float(ts) if ts else 0.0,
                     is_bot=False,
+                    visibility=self._resolve_channel_visibility(channel_name),
                     slack_ts=ts or None,
                     slack_channel_id=ch_id,
                     # Slack-origin (polled from a Slack proposal thread), so the
@@ -5581,6 +5582,7 @@ class SimulationEngine:
                         thread_ts=thread_id,
                         posted_at=float(minted),
                         is_bot=False,
+                        visibility=self._resolve_channel_visibility(channel),
                     )
                     self.message_log.append(pi_entry)
 
