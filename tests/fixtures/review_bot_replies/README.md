@@ -24,18 +24,28 @@ output, not just hand-written malformed JSON.
 | fixture | source | `json.loads` error | position | true cause |
 |---|---|---|---|---|
 | `unparseable_rubric_1.txt` | `baseline_scientific_gap_0` | `Extra data` | 1802 (not EOF) | premature object close — the model wrote `…is the direct target."},"rationale":"…`, closing the object one key early (after `suggestion`), so `rationale` is trailing data outside the object |
-| `unparseable_rubric_2.txt` | `baseline_scientific_gap_2` | `Expecting ',' delimiter` | 4201 = EOF | unterminated object — the reply just ends after `…a dimension anchor."` with no closing brace at all, despite `stop_reason=end_turn` |
+| `unparseable_rubric_2.txt` | `baseline_scientific_gap_2` | `Unterminated string starting at` | 32 (the `suggestion` value's opening quote; EOF is 633) | unterminated object — the captured reply ended with no closing brace at all, despite `stop_reason=end_turn`. The committed file is a 633-character head of it, cut to remove lab-confidential transcript prose (see Truncation below), so the error it raises *now* is the cut's own unterminated string rather than the original's missing brace |
 | `unparseable_rubric_3.txt` | `transcript_unavailable_0` | `Expecting ',' delimiter` | 984 (not EOF) | unescaped `"` inside a string value — `do not use the words "independent validation" in \`rationale\`` |
 
 Truncation: the rule is `min(len(payload), JSONDecodeError.pos + 200)`
 characters of the original captured payload — long enough to (a) still
 start with `{"target": "rubric"` / `{"target":"rubric"`, (b) still fail
 `json.loads` for the same reason the original did, and (c) stay small.
-**Fixture 2 is untruncated** — its `pos` (4201) is exactly `len(payload)`
-(EOF), so `pos + 200` exceeds the original length and `min()` returns the
-payload exactly as captured; there is no tail past the model's own stopping
-point to cut. Fixture 3 (`pos` 984) is a genuine `pos + 200` = 1184-character
-cut. **Fixture 1 is truncated to 2200 characters, not 2002** (`pos + 200`):
+**Fixture 2 is cut to 633 characters for confidentiality, not by that rule.**
+The rule would have left it untouched — its `pos` (4201) was exactly
+`len(payload)` (EOF), so `pos + 200` exceeded the original length and `min()`
+returned the payload as captured — but the captured reply's `rationale`
+quoted a real PI interview's unpublished experimental specifics, and this
+repository is public, so the file was cut back to the end of the first fenced
+block inside `suggestion` (offset 633). The three properties the rule exists
+to protect were re-verified at that offset: it still starts with
+`{"target":"rubric"`, it still fails `json.loads` (now `Unterminated string
+starting at`, `pos` 32, where the `suggestion` value's opening quote is), and
+`extract_json` still raises — the 633-character head contains no `}` at all,
+so the last-resort brace-matching branch has nothing to match and falls
+through to the raise. Fixture 3 (`pos` 984) is a genuine `pos + 200` =
+1184-character cut. **Fixture 1 is truncated to 2200 characters, not 2002**
+(`pos + 200`):
 at 2002 chars the file's first `}` falls at offset 1801, and
 `extract_json`'s last-resort brace-matching branch parses `raw[0:1802]` as
 a VALID object — so a fixture cut there would exercise the pre-existing

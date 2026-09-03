@@ -69,7 +69,10 @@ async def test_stale_rows_are_requeued_exhausted_ones_die_fresh_ones_stay(sessio
     try:
         async with session_factory() as s:
             moved = await worker_main.requeue_stale_processing_jobs(s)
-        assert moved == 3
+        # The sweep is not tag-scoped — it updates every stale 'processing' row
+        # in the table — so `moved` is a GLOBAL count and only a lower bound is
+        # safe here. The per-id `_statuses` comparison below is the exact check.
+        assert moved >= 3, "the three stale rows this test seeded must all have moved"
         assert await _statuses(session_factory, ids) == {
             "stale_retryable": "pending",
             "stale_exhausted": "dead",

@@ -56,7 +56,12 @@ Preconditions (verify, do not assume):
 
   A worker recreated without this value (an old container, or a compose file
   missing the working-tree edit) will still SIGKILL a mid-call job at the
-  Docker default of 10 seconds and reproduce D4.
+  Docker default of 10 seconds and reproduce D4. 330 s is a narrowing, not a
+  guarantee: it covers ONE 300 s read timeout, not the SDK's two automatic
+  retries on top of it (`DEFAULT_MAX_RETRIES = 2`, not overridden), so a deploy
+  that lands on the retry tail is still killed mid-call — the worker's boot
+  requeue sweep (the `Requeued` check above) is what actually reclaims the row,
+  and it is the D4 remedy this precondition only supports.
 - `SELECT count(*) FROM jobs WHERE status='processing';` returns 0.
 - `SELECT count(*) FROM prompt_change_suggestions;` returns 0. This checklist
   assumes a clean slate; if it does not return 0, some `learn` feedback has

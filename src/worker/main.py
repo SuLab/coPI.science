@@ -54,11 +54,15 @@ async def claim_job(db: AsyncSession) -> Job | None:
 
 
 #: A job left in 'processing' longer than this is treated as abandoned by a
-#: worker that no longer exists: the compose default stop grace is 10 s and a
-#: single review-bot call can run to the 300 s read timeout, so a deploy
-#: mid-call SIGKILLs the process with the row still 'processing'. Nothing else
-#: ever resets that status, `claim_job` only takes 'pending', and the review
-#: enqueue dedupe used to count it as live (audit 2026-09-02, D4). The longest
+#: worker that no longer exists. The worker now has a 330 s `stop_grace_period`
+#: (working-tree `docker-compose.prod.yml`), which covers ONE 300 s Anthropic
+#: read timeout and no more: the SDK retries twice on top of that
+#: (`DEFAULT_MAX_RETRIES = 2`, never overridden in `src/services/llm.py`), so a
+#: deploy landing on the retry tail is still SIGKILLed with the row still
+#: 'processing'. Nothing else ever resets that status, `claim_job` only takes
+#: 'pending', and the review enqueue dedupe used to count it as live (audit
+#: 2026-09-02, D4) — the boot sweep below is what reclaims the row when that
+#: happens, and the grace period only makes it happen less often. The longest
 #: legitimate job is a review analysis that hits the read timeout on all three
 #: SDK attempts (~15 min); 30 min leaves that margin.
 STALE_PROCESSING_SECONDS = 1800
