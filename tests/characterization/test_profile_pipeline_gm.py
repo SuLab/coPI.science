@@ -827,3 +827,31 @@ async def test_a_pmid_listed_twice_by_orcid_inserts_exactly_one_publication(
         select(Publication).where(Publication.user_id == user.id, Publication.pmid == "1001")
     )).scalars().all()
     assert len(rows) == 1
+
+
+async def test_first_run_exports_the_private_seed_to_disk(db_session, monkeypatch, tmp_path):
+    """COR-23: an admin-seeded lab whose PI never visits /onboarding/private-profile
+    must still get agent instructions on disk from the pipeline's own seed write.
+
+    This is the only test in this file with an AgentRegistry, so it is also the only
+    one that reaches the export at all — hence the explicit export-dir patching (the
+    rest of the file never writes, so it never needed it).
+    """
+    from src.services import profile_export
+
+    monkeypatch.setattr(profile_export, "PROFILES_DIR", tmp_path / "public")
+    monkeypatch.setattr(profile_export, "PRIVATE_PROFILES_DIR", tmp_path / "private")
+    _install_fakes(monkeypatch)
+
+    user = await factories.make_user(db_session, name="Ada Lovelace")
+    agent = await factories.make_agent(
+        db_session, user=user, agent_id="gmseed", bot_name="GmSeedBot"
+    )
+    await db_session.flush()
+
+    profile = await profile_pipeline.run_profile_pipeline(user.id, db_session)
+
+    assert profile.private_profile_md is None      # nothing promoted it yet
+    assert profile.private_profile_seed            # the pipeline generated one
+    written = (tmp_path / "private" / f"{agent.agent_id}.md").read_text(encoding="utf-8")
+    assert written.strip() == _PRIVATE_SEED.strip()

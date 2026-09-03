@@ -127,20 +127,23 @@ def export_profile_to_markdown(
 def export_private_profile(
     user: User, profile: ResearcherProfile, agent_id: str | None
 ) -> Path | None:
-    """Export private_profile_md to profiles/private/{agent_id}.md.
+    """Export private_profile_md (or, absent that, private_profile_seed) to
+    profiles/private/{agent_id}.md.
 
-    Returns the path written, or None if the user has no AgentRegistry entry
-    or no private profile content.
+    Returns the path written, or None if the user has no AgentRegistry entry or
+    there is no private content of either kind (COR-23: a seed with nothing
+    exported yet must not read to the agent as "no private instructions").
     """
     if not agent_id:
         return None
-    if not profile.private_profile_md:
+    content = profile.private_profile_md or profile.private_profile_seed
+    if not content:
         return None
 
     path = PRIVATE_PROFILES_DIR / f"{agent_id}.md"
     try:
         PRIVATE_PROFILES_DIR.mkdir(parents=True, exist_ok=True)
-        atomic_write_text(path, profile.private_profile_md + "\n", encoding="utf-8")
+        atomic_write_text(path, content + "\n", encoding="utf-8")
         logger.info("Exported private profile for %s to %s", user.name, path)
         return path
     except Exception as exc:

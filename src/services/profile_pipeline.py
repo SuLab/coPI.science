@@ -469,6 +469,14 @@ async def run_profile_pipeline(
                     f"{profile.evidence_state}.",
                 )
 
+    # Look up agent_id (gates file export and revision)
+    from src.models import AgentRegistry
+    agent_result = await db.execute(
+        select(AgentRegistry).where(AgentRegistry.user_id == user.id)
+    )
+    agent_reg = agent_result.scalar_one_or_none()
+    agent_id = agent_reg.agent_id if agent_reg else None
+
     # Step 9b: Generate private profile seed (if no live profile and no existing seed)
     if not profile.private_profile_md and not profile.private_profile_seed:
         update_progress("step9b", "Generating agent instructions seed...")
@@ -480,13 +488,12 @@ async def run_profile_pipeline(
 
     await db.flush()
 
-    # Look up agent_id (gates file export and revision)
-    from src.models import AgentRegistry
-    agent_result = await db.execute(
-        select(AgentRegistry).where(AgentRegistry.user_id == user.id)
-    )
-    agent_reg = agent_result.scalar_one_or_none()
-    agent_id = agent_reg.agent_id if agent_reg else None
+    # Export private profile to disk (COR-23): export_private_profile falls back to
+    # private_profile_seed when there is no live private_profile_md yet, so an
+    # admin-seeded lab whose PI never logs in still gets agent instructions on disk
+    # instead of agent.py's "No private instructions yet." default.
+    from src.services.profile_export import export_private_profile
+    export_private_profile(user, profile, agent_id)
 
     # Export to markdown for agent consumption (include publications)
     from src.services.profile_export import export_profile_to_markdown
