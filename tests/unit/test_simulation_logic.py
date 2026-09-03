@@ -985,3 +985,103 @@ class TestPostMessageSuppressesEmptyText:
         assert posted is True
         assert len(engine.message_log._entries) == 1
         assert engine.message_log._entries[0].content == "a real message"
+
+
+# ---------------------------------------------------------------
+# ProposalRef.thread_decision_id — COR-13 unified review key
+# ---------------------------------------------------------------
+
+class TestProposalRefCarriesThreadDecisionId:
+    def test_default_is_none_and_a_uuid_round_trips(self):
+        import uuid as uuid_mod
+
+        from src.agent.state import ProposalRef
+
+        bare = ProposalRef(
+            thread_id="1.0", channel="general", other_agent_id="b",
+            summary_text="x", proposed_at=0.0,
+        )
+        assert bare.thread_decision_id is None
+
+        did = uuid_mod.uuid4()
+        tagged = ProposalRef(
+            thread_id="1.0", channel="general", other_agent_id="b",
+            summary_text="x", proposed_at=0.0, thread_decision_id=did,
+        )
+        assert tagged.thread_decision_id == did
+
+
+# ---------------------------------------------------------------
+# _sync_proposal_reviews_from_db — the web-guidance reopen mint must be
+# idempotent across restarts (COR-13 / red-team B6)
+# ---------------------------------------------------------------
+
+class TestWebGuidanceReopenMintIsIdempotentAcrossRestarts:
+    """The synthetic 'PI (via web)' guidance row must be minted once, ever —
+    not once per restart. Before this fix, _db_reopened_thread_ids reset to
+    empty on every process start, so this whole block re-ran unconditionally
+    on the first post-restart tick and re-appended another copy of the same
+    guidance message forever. See COR-13 / red-team B6."""
+
+    def _engine_with_pending_reopen(self):
+        import uuid as uuid_mod
+        from unittest.mock import AsyncMock
+
+        from src.agent.agent import Agent
+        from src.agent.state import ProposalRef
+        from src.models.agent_activity import VISIBILITY_COLLAB_PRIVATE
+
+        class _Row:
+            def __init__(self, **kw):
+                self.__dict__.update(kw)
+                self.thread_decision_id = kw.get("thread_decision_id", uuid_mod.uuid4())
+
+        rows = [_Row(
+            agent_id="a", rating=0, comment="please refine the budget",
+            thread_id="100.0", channel="priv-chan", refined_in_channel=None,
+        )]
+
+        class _FakeDB:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+            async def execute(self, *a, **kw):
+                return rows
+
+        agent = Agent("a", "ABot", "A PI")
+        engine = SimulationEngine(agents=[agent], slack_clients={})
+        engine._channel_visibility["priv-chan"] = VISIBILITY_COLLAB_PRIVATE
+        engine.session_factory = lambda: _FakeDB()
+        engine.simulation_run_id = uuid_mod.uuid4()
+        engine._hydrate_thread_from_db = AsyncMock()
+        engine._update_agent_memory = AsyncMock()
+        agent.state.pending_proposals.append(ProposalRef(
+            thread_id="100.0", channel="priv-chan", other_agent_id="b",
+            summary_text="x", proposed_at=0.0,
+        ))
+        return engine, agent
+
+    @pytest.mark.asyncio
+    async def test_a_simulated_restart_does_not_re_mint_the_guidance_row(self):
+        engine, agent = self._engine_with_pending_reopen()
+
+        await engine._sync_proposal_reviews_from_db()
+        entries = [e for e in engine.message_log._entries if e.thread_ts == "100.0"]
+        assert len(entries) == 1
+
+        # Simulate a process restart: _db_reopened_thread_ids resets to empty
+        # (it is in-memory only), but the message log — which a real rebuild
+        # would have reloaded from the DB — keeps the previously-minted row.
+        engine._db_reopened_thread_ids.clear()
+        await engine._sync_proposal_reviews_from_db()
+
+        entries_after = [e for e in engine.message_log._entries if e.thread_ts == "100.0"]
+        assert len(entries_after) == 1, (
+            "the synthetic PI-guidance row was re-minted on a simulated restart"
+        )
+        assert "100.0" in agent.state.active_threads, (
+            "the ThreadState must still be (re)constructed even though the mint was skipped"
+        )

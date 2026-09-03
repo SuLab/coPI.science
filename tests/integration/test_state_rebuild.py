@@ -177,6 +177,57 @@ async def test_a_decided_thread_is_not_reopened_by_a_rebuild(db_session):
     assert root_ts in eng._closed_thread_ids
 
 
+async def test_a_reopened_thread_survives_a_rebuild(db_session):
+    """A thread whose ThreadDecision.reopened_at is set (a PI reopened it,
+    Slack-native or via the web rating=0 guidance flow) must come back as an
+    active thread on rebuild — not stay closed like an un-reopened decided
+    thread — WITH a fresh reply budget and its PI guidance restored. Neither
+    survives a restart otherwise: message_count_offset defaults to 0, so the
+    very next Phase 4 recompute (len(history) - offset) would immediately hit
+    max_thread_messages and re-close it as 'timeout', and pi_context (never
+    itself persisted) would simply be gone. See COR-13 / red-team B6."""
+    # UTC/datetime are already imported at module scope (:24) — no need to
+    # re-import here (red-team m7).
+    run = await factories.make_simulation_run(db_session)
+    root_ts = await _stored_thread(db_session, run, replies=2)
+    # The PI's own reopening message is an ordinary log row (sender_agent_id
+    # NULL), exactly like a real Slack-native or web-guidance reopen leaves
+    # behind — the rebuild must find THIS to restore pi_context, not some
+    # synthetic marker.
+    pi_ts = f"{float(root_ts) + 100:.6f}"
+    await factories.make_agent_message(
+        db_session, run=run, agent_id=None,
+        channel_id="C1", channel_name="general",
+        message_ts=pi_ts, thread_ts=root_ts, posted_at=float(pi_ts),
+        content="please revisit the budget line", sender_name="PI su",
+        is_bot=False,
+    )
+    await factories.make_thread_decision(
+        db_session, run=run, thread_id=root_ts, channel="general",
+        agent_a="su", agent_b="wiseman", outcome="no_proposal",
+        reopened_at=datetime.now(UTC),
+    )
+    await db_session.flush()
+
+    eng = _engine_for(db_session, run.id)
+    await eng._rebuild_state_from_db()
+    await eng._rebuild_agent_state()
+
+    assert root_ts in eng.agents["su"].state.active_threads, (
+        "a reopened thread was left closed by the rebuild"
+    )
+    assert root_ts not in eng._closed_thread_ids
+
+    thread = eng.agents["su"].state.active_threads[root_ts]
+    assert thread.message_count_offset > 0, (
+        "a reopened thread came back with no reply budget — the first Phase 4 "
+        "recompute would close it as 'timeout'"
+    )
+    assert thread.pi_context == "please revisit the budget line", (
+        "a reopened thread's PI guidance was not restored by the rebuild"
+    )
+
+
 async def test_a_second_rebuild_does_not_duplicate_restored_proposals(db_session):
     """`pending_proposals` is a list and step 3 appends to it without clearing.
 

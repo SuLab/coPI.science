@@ -243,6 +243,9 @@ class ThreadDecision(Base):
     decided_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+    reopened_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )  # set when a PI reopens a decided thread (Slack-native or web rating=0 guidance) — COR-13
 
     def __repr__(self) -> str:
         return f"<ThreadDecision thread={self.thread_id} outcome={self.outcome}>"

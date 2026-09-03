@@ -337,6 +337,12 @@ class SimulationEngine:
 
         # Closed thread IDs — prevents Phase 3 from re-activating decided threads
         self._closed_thread_ids: set[str] = set()
+        # Already-accounted-for marker for the _prior_threads append (Phase 5
+        # dedup context) — like _closed_thread_ids, but ALSO covers a
+        # reopened-and-not-yet-reclosed thread, which _rebuild_agent_state
+        # must not add to _closed_thread_ids (that set means "definitely
+        # done"). See COR-13 / red-team B6.
+        self._prior_thread_accounted: set[str] = set()
 
         # Prior thread decisions per agent pair — for Phase 5 dedup context.
         # Key: tuple(sorted([agent_a, agent_b])), Value: list of dicts
@@ -1589,14 +1595,54 @@ class SimulationEngine:
         """Close a thread and log the decision."""
         thread.status = "closed"
         self._closed_thread_ids.add(thread.thread_id)
+        self._prior_thread_accounted.add(thread.thread_id)
 
-        # Track for Phase 5 dedup context
+        # Log to DB FIRST (moved ahead of the dedup-context append and the
+        # other-agent close) so decision.id is available for the
+        # ProposalRef(s) constructed below. See COR-13.
+        # decision.id is readable after commit because every session factory
+        # in this codebase sets expire_on_commit=False (src/database.py:41,
+        # src/agent/main.py, src/worker/main.py, src/agent/grantbot.py,
+        # tests/conftest.py) — stated explicitly so a later "cleanup" does not
+        # move this read before the commit under the mistaken belief it is
+        # needed to dodge an expired-attribute refresh (red-team m7).
+        decision_id: uuid.UUID | None = None
+        if self.session_factory and self.simulation_run_id:
+            try:
+                async with self.session_factory() as db:
+                    decision = ThreadDecision(
+                        simulation_run_id=self.simulation_run_id,
+                        thread_id=thread.thread_id,
+                        channel=thread.channel,
+                        agent_a=agent.agent_id,
+                        agent_b=thread.other_agent_id,
+                        outcome=outcome,
+                        summary_text=summary_text,
+                    )
+                    db.add(decision)
+                    await db.commit()
+                    decision_id = decision.id
+            except Exception as exc:
+                logger.warning("Failed to log thread decision: %s", exc)
+
+        # Track for Phase 5 dedup context.
         pair_key = tuple(sorted([agent.agent_id, thread.other_agent_id]))
         self._prior_threads.setdefault(pair_key, []).append({
             "channel": thread.channel,
             "outcome": outcome,
             "summary": (summary_text or "")[:400] or None,
         })
+
+        # This agent's own ProposalRef (if any) was appended by the caller
+        # (_check_thread_outcome / _check_private_channel_outcome) BEFORE
+        # _close_thread ran, so decision_id was not yet known there — stamp
+        # it now.
+        if decision_id is not None:
+            for p in agent.state.pending_proposals:
+                if p.thread_id == thread.thread_id:
+                    p.thread_decision_id = decision_id
+                    break
+
         # Remove from active threads
         agent.state.active_threads.pop(thread.thread_id, None)
 
@@ -1619,25 +1665,8 @@ class SimulationEngine:
                     other_agent_id=agent.agent_id,
                     summary_text=summary_text,
                     proposed_at=time.time(),
+                    thread_decision_id=decision_id,
                 ))
-
-        # Log to DB
-        if self.session_factory and self.simulation_run_id:
-            try:
-                async with self.session_factory() as db:
-                    decision = ThreadDecision(
-                        simulation_run_id=self.simulation_run_id,
-                        thread_id=thread.thread_id,
-                        channel=thread.channel,
-                        agent_a=agent.agent_id,
-                        agent_b=thread.other_agent_id,
-                        outcome=outcome,
-                        summary_text=summary_text,
-                    )
-                    db.add(decision)
-                    await db.commit()
-            except Exception as exc:
-                logger.warning("Failed to log thread decision: %s", exc)
 
         logger.info(
             "[%s] Thread %s closed: %s",
@@ -1731,19 +1760,20 @@ class SimulationEngine:
         """
         if channel in self._finalized_private_channels:
             return
+        decision_id: uuid.UUID | None = None
         if self.session_factory and self.simulation_run_id:
             try:
                 from sqlalchemy import select as sa_select
                 async with self.session_factory() as db:
-                    existing = await db.execute(
+                    existing_row = (await db.execute(
                         sa_select(ThreadDecision.id).where(
                             ThreadDecision.channel == channel,
                             ThreadDecision.origin_visibility == VISIBILITY_COLLAB_PRIVATE,
                             ThreadDecision.outcome == "proposal",
                         )
-                    )
-                    if existing.first() is None:
-                        db.add(ThreadDecision(
+                    )).first()
+                    if existing_row is None:
+                        decision = ThreadDecision(
                             simulation_run_id=self.simulation_run_id,
                             thread_id=thread_id,
                             channel=channel,
@@ -1752,8 +1782,12 @@ class SimulationEngine:
                             outcome="proposal",
                             summary_text=summary_text,
                             origin_visibility=VISIBILITY_COLLAB_PRIVATE,
-                        ))
+                        )
+                        db.add(decision)
                         await db.commit()
+                        decision_id = decision.id
+                    else:
+                        decision_id = existing_row[0]
             except Exception as exc:
                 logger.warning("Failed to record private refined proposal: %s", exc)
                 return
@@ -1775,6 +1809,7 @@ class SimulationEngine:
                 summary_text=summary_text,
                 proposed_at=time.time(),
                 reviewed=False,
+                thread_decision_id=decision_id,
             ))
 
         logger.info(
@@ -2974,6 +3009,7 @@ class SimulationEngine:
     async def _reopen_thread(self, agent_id: str, thread_ts: str, pi_entry: LogEntry) -> None:
         """Reopen a closed thread when a PI posts in it."""
         self._closed_thread_ids.discard(thread_ts)
+        await self._mark_thread_decisions_reopened(thread_ts)
         agent = self.agents.get(agent_id)
         if not agent:
             return
@@ -3019,6 +3055,38 @@ class SimulationEngine:
             )
 
         logger.info("[%s] PI reopened closed thread %s with %s", agent_id, thread_ts, other_id)
+
+    async def _mark_thread_decisions_reopened(self, thread_id: str) -> None:
+        """Stamp reopened_at on every ThreadDecision row for this thread.
+
+        Durable counterpart to discarding thread_id from _closed_thread_ids /
+        _db_reopened_thread_ids: without this, _rebuild_agent_state has no way
+        to know a thread was reopened after its decision, and re-closes it on
+        every restart — which is what forced the reopen mechanisms to redo
+        their whole side effect (a fresh synthetic PI-guidance row, a fresh
+        reply budget) every restart, forever. Best-effort: never raises,
+        matching _close_thread's own DB-write error handling. See COR-13.
+        """
+        if not self.session_factory:
+            return
+        try:
+            from sqlalchemy import select as sa_select
+            async with self.session_factory() as db:
+                rows = (await db.execute(
+                    sa_select(ThreadDecision).where(ThreadDecision.thread_id == thread_id)
+                )).scalars().all()
+                if not rows:
+                    return
+                now = datetime.now(UTC)
+                changed = False
+                for row in rows:
+                    if row.reopened_at is None:
+                        row.reopened_at = now
+                        changed = True
+                if changed:
+                    await db.commit()
+        except Exception as exc:
+            logger.warning("Failed to mark thread %s reopened: %s", thread_id, exc)
 
     async def _poll_pi_dms(self) -> None:
         """Poll Slack for PI DMs and record them as inbound rows.
@@ -4178,25 +4246,52 @@ class SimulationEngine:
         # Rebuild active_threads per agent.
         # Get all closed thread IDs and prior thread summaries from thread_decisions
         closed_thread_ids: set[str] = set()
+        # Reopened-and-not-since-re-closed threads (reopened_at set on the
+        # latest decision row) must NOT go into closed_thread_ids — Phase 3/5
+        # and the "2." generic active-threads loop below all treat that set
+        # as "definitely done". They still need the SAME _prior_threads
+        # idempotency accounting as a closed thread, though, so they get their
+        # own local set here and are folded into the shared
+        # _prior_thread_accounted marker below, instead of reusing
+        # _closed_thread_ids for that purpose. See COR-13 / red-team B6.
+        reopened_thread_ids: set[str] = set()
         if self.session_factory:
             try:
                 from sqlalchemy import select as sa_select
                 async with self.session_factory() as db:
                     result = await db.execute(sa_select(ThreadDecision))
                     all_decisions = result.scalars().all()
+                    # Latest decision per thread_id: a thread reopened after its
+                    # ORIGINAL close (reopened_at set on that row) must not be
+                    # treated as still-closed on rebuild — unless a NEWER
+                    # ThreadDecision (a genuine re-close) supersedes it. See
+                    # COR-13 / migration 0028.
+                    latest_for_thread: dict[str, ThreadDecision] = {}
                     for td in all_decisions:
-                        closed_thread_ids.add(td.thread_id)
+                        current = latest_for_thread.get(td.thread_id)
+                        td_ts = td.decided_at.timestamp() if td.decided_at else 0.0
+                        cur_ts = current.decided_at.timestamp() if current and current.decided_at else -1.0
+                        if current is None or td_ts > cur_ts:
+                            latest_for_thread[td.thread_id] = td
+                    for td in all_decisions:
+                        latest = latest_for_thread[td.thread_id]
+                        if latest.reopened_at is not None:
+                            reopened_thread_ids.add(td.thread_id)
+                        else:
+                            closed_thread_ids.add(td.thread_id)
                         # _prior_threads is a list per pair, so appending here
                         # unconditionally is not idempotent: a second rebuild —
                         # or a rebuild after _close_thread already recorded this
                         # thread in-process — feeds Phase 5 the same prior
                         # discussion twice, as "you already tried this N times".
-                        # _closed_thread_ids is the shared already-accounted-for
-                        # marker (_close_thread sets it before its own append),
-                        # and it is only updated after this loop, so a thread with
-                        # several decision rows from repeated propose/reopen cycles
-                        # still contributes each of them on the first pass.
-                        if td.thread_id in self._closed_thread_ids:
+                        # _prior_thread_accounted is the shared already-
+                        # accounted-for marker (_close_thread sets it before its
+                        # own append, alongside _closed_thread_ids — Step 3d),
+                        # and it is only updated after this loop, so a thread
+                        # with several decision rows from repeated
+                        # propose/reopen cycles still contributes each of them
+                        # on the first pass.
+                        if td.thread_id in self._prior_thread_accounted:
                             continue
                         pair_key = tuple(sorted([td.agent_a, td.agent_b]))
                         self._prior_threads.setdefault(pair_key, []).append({
@@ -4207,6 +4302,7 @@ class SimulationEngine:
                             "origin_visibility": td.origin_visibility,
                         })
                     self._closed_thread_ids.update(closed_thread_ids)
+                    self._prior_thread_accounted.update(closed_thread_ids | reopened_thread_ids)
             except Exception as exc:
                 logger.warning("Failed to load thread decisions: %s", exc)
 
@@ -4257,12 +4353,30 @@ class SimulationEngine:
                 history = self.message_log.get_thread_history(thread_id)
                 last_sender = history[-1].sender_agent_id if history else None
                 has_pending = last_sender is not None and last_sender != aid
+                # A reopened-but-not-since-re-closed thread (COR-13) needs a
+                # fresh reply budget and its PI guidance restored here, or the
+                # very next Phase 4 recompute (len(history) - offset, :1348)
+                # immediately hits max_thread_messages and closes it as
+                # "timeout", and pi_context — never itself persisted — is
+                # simply gone. Mirrors what a LIVE (same-process) reopen
+                # already does in _reopen_thread / the web-guidance reopen
+                # block (Step 3i). See red-team B6.
+                offset = 0
+                pi_context = None
+                if thread_id in reopened_thread_ids:
+                    offset = msg_count
+                    for h in reversed(history):
+                        if h.sender_agent_id is None:
+                            pi_context = h.content
+                            break
                 agent.state.active_threads[thread_id] = ThreadState(
                     thread_id=thread_id,
                     channel=entry.channel,
                     other_agent_id=other_id,
                     message_count=msg_count,
                     has_pending_reply=has_pending,
+                    message_count_offset=offset,
+                    pi_context=pi_context,
                 )
 
         # 3. Rebuild pending_proposals per agent
@@ -4324,6 +4438,7 @@ class SimulationEngine:
                         summary_text=td.summary_text or "",
                         proposed_at=td.decided_at.timestamp() if td.decided_at else 0.0,
                         reviewed=is_reviewed,
+                        thread_decision_id=td.id,
                     )
                     # pending_proposals is a list, and an unreviewed entry blocks
                     # its agent. A plain append is therefore not idempotent in a
@@ -5016,6 +5131,7 @@ class SimulationEngine:
                 # guidance back into the public thread and leak it).
                 result = await db.execute(
                     sa_select(
+                        ProposalReview.thread_decision_id,
                         ProposalReview.agent_id,
                         ProposalReview.rating,
                         ProposalReview.comment,
@@ -5027,7 +5143,14 @@ class SimulationEngine:
                 )
                 rows = list(result)
 
-            reviewed_set = {(r.agent_id, r.thread_id) for r in rows}
+            # Keyed by (thread_decision_id, agent_id) — the same key the
+            # rebuild uses (:4295 `(td.id, aid) in reviewed_set`). Previously
+            # this was (agent_id, thread_id): after a re-propose cycle mints a
+            # NEW ThreadDecision for the same thread_id, the rebuild (keyed on
+            # decision id) correctly blocked on the new decision while this
+            # tick (keyed on thread_id) matched the OLD decision's review row
+            # and silently unblocked it. See COR-13.
+            reviewed_set = {(r.thread_decision_id, r.agent_id) for r in rows}
             # Thread IDs of proposals that have been migrated to a private
             # channel. Any agent with a pending proposal on such a thread is
             # unblocked: the proposal is under active refinement, not
@@ -5075,7 +5198,7 @@ class SimulationEngine:
                 for proposal in agent.state.pending_proposals:
                     if not proposal.reviewed:
                         unblock = (
-                            (agent.agent_id, proposal.thread_id) in reviewed_set
+                            (proposal.thread_decision_id, agent.agent_id) in reviewed_set
                             or proposal.thread_id in migrated_threads
                         )
                         if unblock:
@@ -5127,22 +5250,33 @@ class SimulationEngine:
                 await self._hydrate_thread_from_db(thread_id)
 
                 # Create a synthetic log entry for the PI guidance so it appears
-                # in thread history and the agents can see it
-                minted = self.mint_ts()
-                pi_entry = LogEntry(
-                    ts=minted,
-                    channel=channel,
-                    sender_agent_id=None,
-                    sender_name="PI (via web)",
-                    content=guidance,
-                    thread_ts=thread_id,
-                    posted_at=float(minted),
-                    is_bot=False,
+                # in thread history and the agents can see it — UNLESS the
+                # thread history already carries this exact guidance (a prior
+                # process minted it and the rebuild/hydrate above already
+                # reloaded it from the DB; re-minting it every restart is the
+                # duplicate-row half of the bug COR-13 exists to fix). See
+                # red-team B6.
+                already_minted = any(
+                    e.sender_name == "PI (via web)" and e.content == guidance
+                    for e in self.message_log.get_thread_history(thread_id)
                 )
-                self.message_log.append(pi_entry)
+                if not already_minted:
+                    minted = self.mint_ts()
+                    pi_entry = LogEntry(
+                        ts=minted,
+                        channel=channel,
+                        sender_agent_id=None,
+                        sender_name="PI (via web)",
+                        content=guidance,
+                        thread_ts=thread_id,
+                        posted_at=float(minted),
+                        is_bot=False,
+                    )
+                    self.message_log.append(pi_entry)
 
                 # Reopen the thread for both agents
                 self._closed_thread_ids.discard(thread_id)
+                await self._mark_thread_decisions_reopened(thread_id)
                 existing_count = len(self.message_log.get_thread_history(thread_id))
 
                 agent.state.active_threads[thread_id] = ThreadState(

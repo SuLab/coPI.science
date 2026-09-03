@@ -232,9 +232,13 @@ PLANNED_OBJECTS: tuple[PlannedObject, ...] = (
     PlannedObject("0027", "index", "ix_slack_app_provisions_agent_registry_id", "slack_app_provisions"),
     PlannedObject("0027", "index", "ix_thread_decisions_agent_a_outcome", "thread_decisions"),
     PlannedObject("0027", "index", "ix_thread_decisions_agent_b_outcome", "thread_decisions"),
+    # 0028_thread_reopen_state
+    PlannedObject("0028", "column", "reopened_at", "thread_decisions"),
 )
 
-REVISION_ORDER = ("0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027")
+REVISION_ORDER = (
+    "0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027", "0028",
+)
 
 
 def planned_objects_between(current: str, target: str) -> tuple[PlannedObject, ...]:

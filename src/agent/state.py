@@ -1,5 +1,6 @@
 """Per-agent state dataclasses for the turn-based simulation."""
 
+import uuid
 from collections import deque
 from dataclasses import dataclass, field
 
@@ -56,6 +57,7 @@ class ProposalRef:
     summary_text: str  # the :memo: Summary content
     proposed_at: float
     reviewed: bool = False
+    thread_decision_id: uuid.UUID | None = None  # unifies the rebuild/tick review key — COR-13
 
 
 @dataclass
