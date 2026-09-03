@@ -82,3 +82,50 @@ def test_no_enforcing_csp_added_at_the_nginx_layer():
     # before those are audited (#27 I5).
     text = _nginx_conf()
     assert 'add_header Content-Security-Policy "' not in text
+
+
+def test_general_timeout_stays_120s():
+    # The general reverse-proxy location (and the graph-routes location) must
+    # keep the original 120s timeout — Task 27.12 only lengthens the timeout
+    # for the Slack-provisioning route, not the whole site (#27 I5-b).
+    block = _https_block(_nginx_conf(), "${DOMAIN}")
+    general_idx = block.index("location / {")
+    general_block = block[general_idx : block.index("}", general_idx) + 1]
+    assert "proxy_read_timeout 120s" in general_block
+    assert "proxy_send_timeout 120s" in general_block
+
+
+def test_provisioning_route_gets_a_longer_read_timeout():
+    block = _https_block(_nginx_conf(), "${DOMAIN}")
+    loc_idx = block.index(r"location ~ ^/admin/agents/")
+    loc_block = block[loc_idx : block.index("}", loc_idx) + 1]
+    assert "proxy_read_timeout 300s" in loc_block
+    assert "proxy_send_timeout 300s" in loc_block
+    assert loc_idx < block.index("location / {"), (
+        "must precede the catch-all so it isn't shadowed for this path"
+    )
+
+
+def test_provisioning_location_regex_matches_the_real_route_path():
+    import re
+
+    block = _https_block(_nginx_conf(), "${DOMAIN}")
+    start = block.index("location ~ ^/admin/agents/")
+    pattern = block[start:].split("location ~ ", 1)[1].split(" {", 1)[0]
+    # src/routers/admin.py:973 -> @router.post("/agents/{agent_id}/slack/provision")
+    assert re.search(pattern, "/admin/agents/0a1b2c3d-4e5f-6789-abcd-ef0123456789/slack/provision")
+
+
+def test_provisioning_location_inherits_same_proxy_headers_and_upstream_as_general():
+    block = _https_block(_nginx_conf(), "${DOMAIN}")
+    loc_idx = block.index(r"location ~ ^/admin/agents/")
+    loc_block = block[loc_idx : block.index("}", loc_idx) + 1]
+    assert "proxy_pass http://app;" in loc_block
+    for header in (
+        "proxy_set_header Host $host;",
+        "proxy_set_header X-Real-IP $remote_addr;",
+        "proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;",
+        "proxy_set_header X-Forwarded-Proto $scheme;",
+        "proxy_set_header X-Forwarded-Host $host;",
+    ):
+        assert header in loc_block, f"provisioning location is missing {header!r}"
