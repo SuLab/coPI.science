@@ -10,7 +10,8 @@ Usage:
 import asyncio
 import logging
 import signal
-from datetime import datetime, timezone
+import uuid
+from datetime import UTC, datetime, timezone
 
 import typer
 
@@ -53,6 +54,28 @@ def main(
     # only for PI DM rows, so it takes the aux slot (R1).
     set_default_writer_id(WRITER_ENGINE_AUX)
     asyncio.run(_run_simulation(max_runtime, budget, mock, no_db, fresh, reset_cursors, all_agents))
+
+
+async def _reconcile_stale_runs(session_factory, current_run_id: uuid.UUID) -> None:
+    """Mark every 'running' SimulationRun other than the current one as 'stopped'.
+
+    A crash, OOM-kill, or `docker kill` can leave a run's status stuck at
+    "running" forever: --fresh only inserts a new row and resume's
+    `order_by(started_at.desc()).limit(1)` only ever repairs the single
+    latest row (issue #25 D2). Called once at startup, after
+    simulation_run_id is resolved, from both the --fresh and resume paths.
+    """
+    from sqlalchemy import update
+
+    from src.models import SimulationRun
+
+    async with session_factory() as db:
+        await db.execute(
+            update(SimulationRun)
+            .where(SimulationRun.status == "running", SimulationRun.id != current_run_id)
+            .values(status="stopped", ended_at=datetime.now(UTC))
+        )
+        await db.commit()
 
 
 async def _run_simulation(
@@ -221,6 +244,8 @@ async def _run_simulation(
                     await db.commit()
                     simulation_run_id = run.id
                     logger.info("Created new simulation run %s", simulation_run_id)
+
+        await _reconcile_stale_runs(session_factory, simulation_run_id)
 
     # Create simulation engine
     runtime_label = f"{max_runtime}m" if max_runtime > 0 else "indefinite"
