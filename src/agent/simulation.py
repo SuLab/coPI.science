@@ -1616,6 +1616,23 @@ class SimulationEngine:
         summary_text: str | None = None,
     ) -> None:
         """Close a thread and log the decision."""
+        if thread.status == "closed":
+            # Idempotency guard (COR-7): a second call against the same
+            # ThreadState instance would otherwise double the ThreadDecision
+            # row, the PI DM, both agents' memory updates, and the
+            # _prior_threads dedup-context entry. Placed before the DB write
+            # (Task 20.10/COR-13 reordered this method so that write happens
+            # first) rather than after it, since the write itself is one of
+            # the things a repeat call must not re-trigger. A genuine reopen
+            # builds a NEW ThreadState (see _reopen_thread / the web reopen
+            # in _sync_proposal_reviews_from_db), so a legitimately reopened
+            # and re-closed thread is unaffected — it runs this method on a
+            # fresh object whose status was never "closed".
+            logger.debug(
+                "[%s] _close_thread: thread %s is already closed, skipping",
+                agent.agent_id, thread.thread_id,
+            )
+            return
         thread.status = "closed"
         self._closed_thread_ids.add(thread.thread_id)
         self._prior_thread_accounted.add(thread.thread_id)
@@ -1648,9 +1665,13 @@ class SimulationEngine:
             except Exception as exc:
                 logger.warning("Failed to log thread decision: %s", exc)
 
-        # Track for Phase 5 dedup context.
+        # Track for Phase 5 dedup context. Carries thread_id (missing before —
+        # COR-7) so a future reader can tell two entries apart or dedup by it;
+        # the idempotency guard above is what actually prevents an accidental
+        # duplicate append for the same close event.
         pair_key = tuple(sorted([agent.agent_id, thread.other_agent_id]))
         self._prior_threads.setdefault(pair_key, []).append({
+            "thread_id": thread.thread_id,
             "channel": thread.channel,
             "outcome": outcome,
             "summary": (summary_text or "")[:400] or None,

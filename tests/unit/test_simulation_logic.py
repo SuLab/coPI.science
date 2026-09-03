@@ -786,6 +786,60 @@ class TestFinalizeMarkerIsSharedAcrossPublicAndPrivate:
 
 
 # ---------------------------------------------------------------
+# _close_thread — idempotent, and its dedup-context entry carries
+# thread_id (#20 COR-7)
+# ---------------------------------------------------------------
+
+class TestCloseThreadIsIdempotent:
+    """A second _close_thread call on the same (already-closed) ThreadState
+    object must not double the ThreadDecision, the PI DM, both agents' memory
+    updates, or the Phase 5 dedup-context entry."""
+
+    @pytest.fixture(autouse=True)
+    def _no_live_llm_or_disk(self, monkeypatch, tmp_path):
+        """_close_thread ends in _update_agent_memory, which calls the real
+        Anthropic API and writes profiles/memory/<id>/public.md. Stub both:
+        this is tests/unit. See red-team B2 (both tests below drive
+        _close_thread at least once)."""
+        from unittest.mock import AsyncMock
+
+        import src.agent.agent as agent_mod
+        monkeypatch.setattr(agent_mod, "PROFILES_DIR", tmp_path)
+        monkeypatch.setattr(
+            "src.agent.simulation.generate_agent_response",
+            AsyncMock(return_value="## Working Memory\n1. nothing.\n"),
+        )
+
+    def _engine_with_active_thread(self):
+        from src.agent.agent import Agent
+        from src.agent.state import ThreadState
+
+        a = Agent("a", "ABot", "A PI")
+        b = Agent("b", "BBot", "B PI")
+        engine = SimulationEngine(agents=[a, b], slack_clients={})
+        thread = ThreadState(thread_id="1.0", channel="general", other_agent_id="b")
+        a.state.active_threads["1.0"] = thread
+        return engine, a, thread
+
+    async def test_a_second_call_on_the_same_object_does_not_duplicate(self):
+        engine, a, thread = self._engine_with_active_thread()
+
+        await engine._close_thread(a, thread, "no_proposal")
+        await engine._close_thread(a, thread, "no_proposal")
+
+        pair_key = tuple(sorted(["a", "b"]))
+        assert len(engine._prior_threads[pair_key]) == 1
+
+    async def test_the_entry_carries_thread_id(self):
+        engine, a, thread = self._engine_with_active_thread()
+
+        await engine._close_thread(a, thread, "no_proposal")
+
+        pair_key = tuple(sorted(["a", "b"]))
+        assert engine._prior_threads[pair_key][0]["thread_id"] == "1.0"
+
+
+# ---------------------------------------------------------------
 # mint_ts — monotonic, unique, ts-shaped ids (DB-primary store)
 # ---------------------------------------------------------------
 
