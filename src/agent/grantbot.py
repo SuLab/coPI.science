@@ -27,11 +27,12 @@ MIN_LEAD_DAYS = 21
 import typer
 from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from src.agent.ids import WRITER_GRANTBOT, set_default_writer_id
 from src.agent.slack_client import SLACK_MAX_TEXT_CHARS, split_for_slack
 from src.config import get_settings
+from src.database import make_engine  # noqa: E402
 from src.models import GrantbotPostedFoa
 from src.services.grants import fetch_opportunity_detail, list_posted_opportunities
 
@@ -407,7 +408,7 @@ async def run_grantbot(
     Returns list of posted opportunities.
     """
     settings = get_settings()
-    engine = create_async_engine(settings.database_url)
+    engine = make_engine(settings.database_url)
     session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
     try:

@@ -11,10 +11,11 @@ import uuid
 from datetime import UTC, datetime, timedelta, timezone
 
 from sqlalchemy import select, update
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from src.agent.ids import WRITER_WORKER, set_default_writer_id
 from src.config import get_settings
+from src.database import make_engine
 from src.models import Job, User
 from src.services.profile_pipeline import run_profile_pipeline
 
@@ -249,7 +250,7 @@ async def run_worker():
     global _shutdown
 
     settings = get_settings()
-    engine = create_async_engine(settings.database_url, echo=False)
+    engine = make_engine(settings.database_url)
     session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
     logger.info("Worker started, polling every %ds", settings.worker_poll_interval)

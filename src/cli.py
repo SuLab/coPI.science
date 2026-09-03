@@ -17,11 +17,12 @@ def _run(coro):
 
 async def _get_db():
     """Get an async database session."""
-    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
     from src.config import get_settings
+    from src.database import make_engine
     settings = get_settings()
-    engine = create_async_engine(settings.database_url)
+    engine = make_engine(settings.database_url)
     factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     return engine, factory
 

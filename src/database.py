@@ -12,14 +12,35 @@ class Base(DeclarativeBase):
     pass
 
 
+def make_engine(url: str, **overrides):
+    """Build an async engine with pool defaults tuned for long-lived processes.
+
+    pool_pre_ping issues a lightweight probe before handing out a pooled
+    connection, so a connection left stale by a DB restart/failover is
+    discarded and replaced instead of surfacing as a 500 on first use.
+    pool_recycle forces connections older than 1800s to be replaced, ahead of
+    typical infra idle-connection kill windows. pool_timeout bounds how long
+    a checkout waits when the pool is exhausted. Explicit ``overrides`` (e.g.
+    pool_size/max_overflow) win over these defaults. See issue #25 P3.
+
+    These defaults assume a QueuePool-family pool (SQLAlchemy's async default);
+    passing ``poolclass=NullPool`` alongside them raises ``TypeError`` (NullPool
+    accepts none of pool_size/pool_timeout/pool_recycle) — no current caller does
+    this, so it is a documentation note, not a guard.
+    """
+    kwargs = {
+        "echo": False,
+        "pool_pre_ping": True,
+        "pool_recycle": 1800,
+        "pool_timeout": 30,
+    }
+    kwargs.update(overrides)
+    return create_async_engine(url, **kwargs)
+
+
 def _get_engine():
     settings = get_settings()
-    return create_async_engine(
-        settings.database_url,
-        echo=False,
-        pool_size=5,
-        max_overflow=10,
-    )
+    return make_engine(settings.database_url, pool_size=5, max_overflow=10)
 
 
 _engine = None
