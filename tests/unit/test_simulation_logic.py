@@ -2043,3 +2043,68 @@ class TestPollInboundFromDbGuardsTheHandler:
             "the row's content must still be appended even though its "
             "PI-specific side effects failed"
         )
+
+
+# ---------------------------------------------------------------
+# _flush_llm_logs re-queue on failure (COR-11)
+# ---------------------------------------------------------------
+
+class TestFlushLlmLogsRequeuesOnFailure:
+    """A failed flush must not drop the batch — the #30 sliding-window rate
+    limiter rebuilds call_times from llm_call_logs on restart
+    (_rebuild_agent_state step 4b), so a silently dropped flush under-counts
+    an agent's in-window calls and lets it exceed its allowance after a
+    restart. See COR-11."""
+
+    class _FailingDB:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        def add(self, obj):
+            pass
+
+        async def commit(self):
+            raise RuntimeError("db is down")
+
+    @pytest.mark.asyncio
+    async def test_a_failed_flush_requeues_instead_of_dropping(self):
+        import uuid as uuid_mod
+
+        from src.agent.agent import Agent
+
+        agent = Agent("su", "SuBot", "Andrew Su")
+        engine = SimulationEngine(agents=[agent], slack_clients={})
+        engine.session_factory = lambda: self._FailingDB()
+        engine.simulation_run_id = uuid_mod.uuid4()
+        entry = {"agent_id": "su", "phase": "phase4", "model": "x"}
+        engine._llm_log_buffer = [entry]
+
+        await engine._flush_llm_logs()
+
+        assert engine._llm_log_buffer == [entry]
+
+    @pytest.mark.asyncio
+    async def test_a_requeue_prepends_ahead_of_newly_buffered_entries(self):
+        # Entries appended DURING the failed flush's await must stay after the
+        # re-queued (older) batch, preserving chronological order — the same
+        # guarantee _flush_persisted's prepend gives.
+        import uuid as uuid_mod
+
+        from src.agent.agent import Agent
+
+        agent = Agent("su", "SuBot", "Andrew Su")
+        engine = SimulationEngine(agents=[agent], slack_clients={})
+        engine.session_factory = lambda: self._FailingDB()
+        engine.simulation_run_id = uuid_mod.uuid4()
+        old_entry = {"agent_id": "su", "phase": "phase4", "model": "x", "tag": "old"}
+        engine._llm_log_buffer = [old_entry]
+
+        await engine._flush_llm_logs()
+        # Simulate a new call logged after the failed flush returned.
+        new_entry = {"agent_id": "su", "phase": "phase5", "model": "x", "tag": "new"}
+        engine._llm_log_buffer.append(new_entry)
+
+        assert engine._llm_log_buffer == [old_entry, new_entry]

@@ -4896,7 +4896,19 @@ class SimulationEngine:
                 await db.commit()
             logger.debug("Flushed %d LLM call logs to DB", len(batch))
         except Exception as exc:
-            logger.warning("Failed to flush LLM call logs: %s", exc)
+            # Re-queue instead of dropping (mirrors _flush_persisted,
+            # :3946-3950): the #30 sliding-window rate limiter rebuilds
+            # call_times from llm_call_logs on restart (_rebuild_agent_state
+            # step 4b, :4353-4393), so a silently dropped flush under-counts
+            # an agent's in-window calls and lets it exceed its allowance
+            # after a restart. Prepend so entries buffered while this flush
+            # was in flight stay in chronological order after the retry.
+            # See COR-11.
+            self._llm_log_buffer[0:0] = batch
+            logger.warning(
+                "Failed to flush %d LLM call logs, re-queued for retry: %s",
+                len(batch), exc,
+            )
 
     def _sync_profiles_from_disk(self) -> None:
         """Reload any agent whose profile files changed on disk since last turn.
