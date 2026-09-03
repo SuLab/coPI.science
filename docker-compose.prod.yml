@@ -2,6 +2,8 @@ services:
   postgres:
     image: postgres:15
     restart: unless-stopped
+    mem_limit: 512m
+    cpus: 1.0
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-copi}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
@@ -26,6 +28,8 @@ services:
     build:
       context: .
     restart: "no"
+    mem_limit: 256m
+    cpus: 0.5
     command: ["python", "-m", "alembic", "upgrade", "head"]
     env_file: .env
     environment:
@@ -51,6 +55,8 @@ services:
     build:
       context: .
     restart: unless-stopped
+    mem_limit: 384m
+    cpus: 1.0
     command: ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000"]
     expose:
       - "8000"
@@ -87,6 +93,8 @@ services:
     build:
       context: .
     restart: unless-stopped
+    mem_limit: 512m
+    cpus: 0.5
     command: ["python", "-m", "src.worker.main"]
     env_file: .env
     environment:
@@ -97,6 +105,7 @@ services:
       ENVIRONMENT: ${ENVIRONMENT:-production}
     volumes:
       - ./profiles:/app/profiles
+      - ./prompts:/app/prompts
     depends_on:
       postgres:
         condition: service_healthy
@@ -113,6 +122,8 @@ services:
   agent:
     build:
       context: .
+    mem_limit: 512m
+    cpus: 1.0
     command: ["python", "-m", "src.agent.main"]
     env_file: .env
     environment:
@@ -142,6 +153,8 @@ services:
     build:
       context: .
     restart: unless-stopped
+    mem_limit: 256m
+    cpus: 0.5
     command: ["python", "-m", "src.agent.grantbot", "scheduler", "--run-hour", "8", "--max-per-channel", "1"]
     env_file: .env
     environment:
@@ -170,6 +183,8 @@ services:
   nginx:
     image: nginx:1.27-alpine
     restart: unless-stopped
+    mem_limit: 64m
+    cpus: 0.25
     ports:
       - "80:80"
       - "443:443"
@@ -211,6 +226,8 @@ services:
   certbot:
     image: certbot/certbot:latest
     restart: unless-stopped
+    mem_limit: 32m
+    cpus: 0.1
     volumes:
       - ./certbot/conf:/etc/letsencrypt
       - ./certbot/www:/var/www/certbot
