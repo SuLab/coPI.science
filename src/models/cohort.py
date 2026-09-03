@@ -51,7 +51,8 @@ class Cohort(Base):
 
     # Relationships
     memberships: Mapped[list["CohortMembership"]] = relationship(
-        "CohortMembership", back_populates="cohort", cascade="all, delete-orphan"
+        "CohortMembership", back_populates="cohort", cascade="all, delete-orphan",
+        passive_deletes=True,
     )
     created_by_user: Mapped["User | None"] = relationship(
         "User", foreign_keys=[created_by]

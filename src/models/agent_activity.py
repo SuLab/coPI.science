@@ -55,13 +55,16 @@ class SimulationRun(Base):
 
     # Relationships
     messages: Mapped[list["AgentMessage"]] = relationship(
-        "AgentMessage", back_populates="simulation_run", cascade="all, delete-orphan"
+        "AgentMessage", back_populates="simulation_run", cascade="all, delete-orphan",
+        passive_deletes=True,
     )
     channels: Mapped[list["AgentChannel"]] = relationship(
-        "AgentChannel", back_populates="simulation_run", cascade="all, delete-orphan"
+        "AgentChannel", back_populates="simulation_run", cascade="all, delete-orphan",
+        passive_deletes=True,
     )
     llm_call_logs: Mapped[list["LlmCallLog"]] = relationship(
-        "LlmCallLog", back_populates="simulation_run", cascade="all, delete-orphan"
+        "LlmCallLog", back_populates="simulation_run", cascade="all, delete-orphan",
+        passive_deletes=True,
     )
 
     def __repr__(self) -> str:
@@ -165,7 +168,8 @@ class AgentChannel(Base):
         "SimulationRun", back_populates="channels"
     )
     private_members: Mapped[list["PrivateChannelMember"]] = relationship(
-        "PrivateChannelMember", back_populates="agent_channel", cascade="all, delete-orphan"
+        "PrivateChannelMember", back_populates="agent_channel", cascade="all, delete-orphan",
+        passive_deletes=True,
     )
 
     def __repr__(self) -> str:
@@ -279,7 +283,7 @@ class PrivateChannelMember(Base):
     agent_id: Mapped[str | None] = mapped_column(String(50), nullable=True)
     user_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
-        ForeignKey("users.id", ondelete="SET NULL"),
+        ForeignKey("users.id", ondelete="CASCADE"),
         nullable=True,
     )
     role: Mapped[str] = mapped_column(String(10), nullable=False)  # 'bot', 'pi', 'delegate'

@@ -49,19 +49,20 @@ class User(Base):
 
     # Relationships
     profile: Mapped["ResearcherProfile | None"] = relationship(
-        "ResearcherProfile", back_populates="user", uselist=False, cascade="all, delete-orphan"
+        "ResearcherProfile", back_populates="user", uselist=False,
+        cascade="all, delete-orphan", passive_deletes=True,
     )
     publications: Mapped[list["Publication"]] = relationship(
-        "Publication", back_populates="user", cascade="all, delete-orphan"
+        "Publication", back_populates="user", cascade="all, delete-orphan", passive_deletes=True
     )
     jobs: Mapped[list["Job"]] = relationship(
-        "Job", back_populates="user", cascade="all, delete-orphan"
+        "Job", back_populates="user", cascade="all, delete-orphan", passive_deletes=True
     )
     agent: Mapped["AgentRegistry | None"] = relationship(
         "AgentRegistry", back_populates="user", uselist=False, foreign_keys="AgentRegistry.user_id"
     )
     delegated_agents: Mapped[list["AgentDelegate"]] = relationship(
-        "AgentDelegate", back_populates="user", cascade="all, delete-orphan"
+        "AgentDelegate", back_populates="user", cascade="all, delete-orphan", passive_deletes=True
     )
 
     def __repr__(self) -> str:

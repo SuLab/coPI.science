@@ -51,12 +51,13 @@ class AgentRegistry(Base):
         "User", foreign_keys=[user_id], back_populates="agent"
     )
     delegates: Mapped[list["AgentDelegate"]] = relationship(
-        "AgentDelegate", back_populates="agent", cascade="all, delete-orphan"
+        "AgentDelegate", back_populates="agent", cascade="all, delete-orphan", passive_deletes=True
     )
     invitations: Mapped[list["DelegateInvitation"]] = relationship(
         "DelegateInvitation",
         foreign_keys="DelegateInvitation.agent_registry_id",
         cascade="all, delete-orphan",
+        passive_deletes=True,
     )
 
     def __repr__(self) -> str:

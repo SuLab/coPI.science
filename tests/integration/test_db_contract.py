@@ -260,25 +260,28 @@ async def test_simulation_run_delete_cascades_children(db_session):
 
 
 # --------------------------------------------------------------------------
-# 6. DAT-1: deleting a User who is a PI member of a private channel drives
-#    private_channel_members.user_id -> NULL (FK SET NULL) on a row whose
-#    agent_id is ALSO NULL, violating the CHECK -> the DELETE raises.
+# 6. DAT-1 (issue #25 D1, fixed): private_channel_members.user_id is now
+#    ondelete="CASCADE" (0026), so deleting a role="pi" member's user no
+#    longer drives user_id -> NULL against a row whose agent_id is also
+#    NULL (which used to violate pcm_exactly_one_of_agent_or_user).
 # --------------------------------------------------------------------------
 
-async def test_dat1_deleting_pi_member_user_violates_pcm_check(db_session):
+async def test_dat1_deleting_pi_member_user_cascades_pcm_row(db_session):
+    # DAT-1 (issue #25 D1, fixed): private_channel_members.user_id is now
+    # ondelete="CASCADE" (0026), so deleting a role="pi" member's user no
+    # longer drives user_id -> NULL against a row whose agent_id is also
+    # NULL (which used to violate pcm_exactly_one_of_agent_or_user). The
+    # delete must now succeed and the membership row must be gone.
     ch = await factories.make_agent_channel(db_session, visibility="collab_private")
     u = await factories.make_user(db_session)
-    await factories.make_private_channel_member(
+    m = await factories.make_private_channel_member(
         db_session, channel=ch, agent_id=None, user_id=u.id, role="pi"
     )
-    with pytest.raises(IntegrityError) as ei:
-        async with db_session.begin_nested():
-            await db_session.execute(
-                text("DELETE FROM users WHERE id = :id"), {"id": u.id}
-            )
-    # Lock the SPECIFIC constraint that fires, so a future schema change that makes a
-    # different IntegrityError fire first can't silently re-point what "DAT-1" pins.
-    assert "pcm_exactly_one_of_agent_or_user" in str(ei.value)
+    await db_session.execute(text("DELETE FROM users WHERE id = :id"), {"id": u.id})
+    survived = await db_session.scalar(
+        select(func.count()).select_from(PrivateChannelMember).where(PrivateChannelMember.id == m.id)
+    )
+    assert survived == 0
 
 
 async def test_user_delete_cascades_researcher_profile(db_session):
