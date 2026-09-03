@@ -183,3 +183,103 @@ async def test_fetch_orcid_works_swallows_timeout_returns_empty():
     route = respx.get(f"{BASE}/{OID}/works").mock(side_effect=httpx.TimeoutException("t"))
     assert await orcid.fetch_orcid_works(OID) == []
     assert route.called
+
+
+# ---- null-container tolerance (COR-15: ORCID sends explicit `null`, not a missing key) ----
+
+
+def _record_all_null_containers():
+    return {
+        "person": {
+            "name": {"given-names": None, "family-name": None},
+            "emails": None,
+            "researcher-urls": None,
+        },
+        "activities-summary": {
+            "employments": {
+                "affiliation-group": [
+                    {
+                        "summaries": [
+                            {
+                                "employment-summary": {
+                                    "end-date": None,
+                                    "display-index": None,
+                                    "organization": None,
+                                    "department-name": None,
+                                }
+                            }
+                        ]
+                    }
+                ]
+            }
+        },
+    }
+
+
+@respx.mock
+async def test_fetch_orcid_profile_tolerates_null_containers():
+    respx.get(f"{BASE}/{OID}/record").mock(
+        return_value=httpx.Response(200, json=_record_all_null_containers())
+    )
+    prof = await orcid.fetch_orcid_profile(OID)
+    assert prof["name"] == OID  # given-names and family-name both null -> falls back to the id
+    assert prof.get("institution") is None  # organization: null
+    assert "lab_website" not in prof  # researcher-urls: null
+    assert "email" not in prof  # emails: null
+
+
+@respx.mock
+async def test_fetch_orcid_grants_tolerates_a_null_title_container():
+    data = {"group": [{"funding-summary": [{"title": None}]}]}
+    respx.get(f"{BASE}/{OID}/fundings").mock(return_value=httpx.Response(200, json=data))
+    assert await orcid.fetch_orcid_grants(OID) == []
+
+
+@respx.mock
+async def test_fetch_orcid_works_tolerates_null_containers_and_a_non_numeric_year():
+    data = {
+        "group": [
+            {
+                "work-summary": [
+                    {
+                        "title": None,
+                        "type": "journal-article",
+                        "publication-date": {"year": {"value": None}},
+                        "external-ids": None,
+                    }
+                ]
+            }
+        ]
+    }
+    respx.get(f"{BASE}/{OID}/works").mock(return_value=httpx.Response(200, json=data))
+    works = await orcid.fetch_orcid_works(OID)
+    assert works == [
+        {"title": "", "year": None, "pmid": None, "doi": None, "type": "journal-article"}
+    ]
+
+
+@respx.mock
+async def test_fetch_orcid_works_tolerates_a_null_external_id_type():
+    data = {
+        "group": [
+            {
+                "work-summary": [
+                    {
+                        "title": {"title": {"value": "T"}},
+                        "type": "journal-article",
+                        "publication-date": None,
+                        "external-ids": {
+                            "external-id": [
+                                {"external-id-type": None, "external-id-value": "31000000"},
+                                {"external-id-type": "pmid", "external-id-value": "31000001"},
+                            ]
+                        },
+                    }
+                ]
+            }
+        ]
+    }
+    respx.get(f"{BASE}/{OID}/works").mock(return_value=httpx.Response(200, json=data))
+    works = await orcid.fetch_orcid_works(OID)
+    # the null-typed id is skipped, not fatal, and does not block the valid one after it
+    assert works[0]["pmid"] == "31000001"
