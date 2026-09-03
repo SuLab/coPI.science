@@ -2771,6 +2771,96 @@ class TestDailyCapDoesNotBlockBypassEligibleCandidates:
             "the chosen action was not itself bypass-eligible"
         )
 
+    @pytest.mark.asyncio
+    async def test_a_funding_candidate_already_in_active_threads_does_not_unlock_the_cap(
+        self, monkeypatch,
+    ):
+        # A funding candidate the agent already replied to (Phase 4) sits in
+        # active_threads and is filtered out of available_posts by the
+        # availability loop above — it must not unlock the cap for an
+        # otherwise-capped turn, or the agent burns an Opus call every turn
+        # for the rest of the day only for the post-LLM re-check to reject
+        # whatever the LLM chooses. See fix round 1, I1.
+        from unittest.mock import AsyncMock
+
+        from src.agent.message_log import LogEntry
+        from src.agent.state import PostRef, ThreadState
+
+        engine, agent = self._engine_at_cap()
+        engine.message_log.append(LogEntry(
+            ts="999.0", channel="funding-opportunities", sender_agent_id="grantbot",
+            sender_name="GrantBot", content="New funding opportunity :moneybag:",
+            posted_at=0.0, is_bot=True,
+        ))
+        agent.state.interesting_posts.append(PostRef(
+            post_id="999.0", channel="funding-opportunities", sender_agent_id="grantbot",
+            content_snippet="x", posted_at=0.0,
+        ))
+        agent.state.active_threads["999.0"] = ThreadState(
+            thread_id="999.0", channel="funding-opportunities", other_agent_id="grantbot",
+        )
+        fake_llm = AsyncMock(return_value='```json\n{"action": "skip"}\n```')
+        monkeypatch.setattr("src.agent.simulation.generate_agent_response", fake_llm)
+
+        await engine._phase5_new_post(agent)
+
+        fake_llm.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_funding_candidate_handled_in_phase4_does_not_unlock_the_cap(
+        self, monkeypatch,
+    ):
+        # Same as above, but the candidate was handled this very turn (Phase
+        # 4 already replied to it), so it arrives via phase4_thread_ids
+        # instead of active_threads.
+        from unittest.mock import AsyncMock
+
+        from src.agent.message_log import LogEntry
+        from src.agent.state import PostRef
+
+        engine, agent = self._engine_at_cap()
+        engine.message_log.append(LogEntry(
+            ts="999.0", channel="funding-opportunities", sender_agent_id="grantbot",
+            sender_name="GrantBot", content="New funding opportunity :moneybag:",
+            posted_at=0.0, is_bot=True,
+        ))
+        agent.state.interesting_posts.append(PostRef(
+            post_id="999.0", channel="funding-opportunities", sender_agent_id="grantbot",
+            content_snippet="x", posted_at=0.0,
+        ))
+        fake_llm = AsyncMock(return_value='```json\n{"action": "skip"}\n```')
+        monkeypatch.setattr("src.agent.simulation.generate_agent_response", fake_llm)
+
+        await engine._phase5_new_post(agent, phase4_thread_ids={"999.0"})
+
+        fake_llm.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_an_actionable_funding_candidate_still_bypasses_the_cap(self, monkeypatch):
+        # Control: the same funding candidate, still actionable (not already
+        # handled this turn or a prior one), must still bypass the cap.
+        from unittest.mock import AsyncMock
+
+        from src.agent.message_log import LogEntry
+        from src.agent.state import PostRef
+
+        engine, agent = self._engine_at_cap()
+        engine.message_log.append(LogEntry(
+            ts="999.0", channel="funding-opportunities", sender_agent_id="grantbot",
+            sender_name="GrantBot", content="New funding opportunity :moneybag:",
+            posted_at=0.0, is_bot=True,
+        ))
+        agent.state.interesting_posts.append(PostRef(
+            post_id="999.0", channel="funding-opportunities", sender_agent_id="grantbot",
+            content_snippet="x", posted_at=0.0,
+        ))
+        fake_llm = AsyncMock(return_value='```json\n{"action": "skip"}\n```')
+        monkeypatch.setattr("src.agent.simulation.generate_agent_response", fake_llm)
+
+        await engine._phase5_new_post(agent)
+
+        fake_llm.assert_awaited_once()
+
 
 # ---------------------------------------------------------------
 # has_pi_directive must survive a turn where Phase 5 ran but made no

@@ -2246,32 +2246,7 @@ class SimulationEngine:
         # every subsequent turn re-fires Phase 5, burning an LLM call per turn.
         agent.state.last_phase5_action_time = time.time()
 
-        # Daily post cap — skipped for PI-priority, funding, or private-
-        # channel candidates, matching the random-skip and blocked_for_regular
-        # bypasses a few lines below. _count_today_posts already excludes
-        # collab_private posts from the count itself; this also lets a
-        # PI-priority or funding-eligible turn through even once that (already
-        # private-excluding) count reaches the cap. See E7a.
-        has_pi_priority_candidate = any(
-            p.pi_priority for p in agent.state.interesting_posts
-        )
-        has_funding_candidate = any(
-            self.message_log.is_funding_thread(p.post_id)
-            for p in agent.state.interesting_posts
-        )
-        has_private_candidate = any(
-            self._channel_visibility.get(p.channel) == VISIBILITY_COLLAB_PRIVATE
-            for p in agent.state.interesting_posts
-        )
         today_posts = self._count_today_posts(agent)
-        if (
-            not has_pi_priority_candidate
-            and not has_funding_candidate
-            and not has_private_candidate
-            and today_posts >= settings.daily_post_cap
-        ):
-            logger.debug("[%s] Phase 5: Skipped (daily cap %d/%d)", agent.agent_id, today_posts, settings.daily_post_cap)
-            return
 
         # Check preconditions
         at_thread_threshold = self._non_funding_thread_count(agent) >= settings.active_thread_threshold
@@ -2344,6 +2319,28 @@ class SimulationEngine:
                 )
                 continue
             available_posts.append(post)
+
+        # Daily post cap (E7a) — bypassed only by an ACTIONABLE PI-priority,
+        # funding or collab_private candidate, i.e. one that survived the
+        # availability filter above. Computing the bypass over the raw
+        # interesting_posts list let a candidate the agent had already
+        # replied to (active_threads / phase4_thread_ids) or that the
+        # allowed-set rule excludes unlock an LLM call every turn while
+        # capped, only for the post-LLM re-check below to reject the
+        # result. _count_today_posts already excludes collab_private posts
+        # from the count itself.
+        has_bypass_candidate = any(
+            p.pi_priority
+            or self.message_log.is_funding_thread(p.post_id)
+            or self._channel_visibility.get(p.channel) == VISIBILITY_COLLAB_PRIVATE
+            for p in available_posts
+        )
+        if not has_bypass_candidate and today_posts >= settings.daily_post_cap:
+            logger.debug(
+                "[%s] Phase 5: Skipped (daily cap %d/%d)",
+                agent.agent_id, today_posts, settings.daily_post_cap,
+            )
+            return
 
         # If blocked and no available posts to reply to, still allow Phase 5
         # so the agent can create funding collaboration posts (Option B)
@@ -2556,7 +2553,7 @@ class SimulationEngine:
                     )
                     return
 
-            # The daily cap was bypassed at the top of this method because a
+            # The daily cap was bypassed above because a
             # bypass-eligible candidate existed (E7a). Re-check against the
             # action the LLM actually chose, exactly as blocked_for_regular
             # does above — otherwise one funding/PI-priority candidate in

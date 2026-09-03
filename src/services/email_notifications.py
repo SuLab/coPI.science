@@ -201,14 +201,29 @@ async def check_and_send_notifications(session_factory: async_sessionmaker) -> i
         users = result.scalars().all()
 
         for user in users:
+            # Captured before the try: a failure inside _process_user_notifications may
+            # have poisoned the session (e.g. a flush-time IntegrityError), which expires
+            # every attribute of every session-tracked object -- including user's primary
+            # key. On this ASYNC session, touching an expired attribute after that (even
+            # AFTER an explicit db.rollback()) raises MissingGreenlet rather than silently
+            # re-querying, so the except block below must not read user.id directly.
+            # Reproduced against a real Postgres fixture: bare `user.id` in the except's
+            # logger call crashes; the plain local captured here does not.
+            user_id = user.id
             try:
                 sent = await _process_user_notifications(user, db)
                 if sent:
                     sent_count += 1
+                # Per-item commit (V4-1): the sweep shares ONE session, so a later
+                # user's failure must not be able to discard a row for a user whose
+                # email has ALREADY gone out. Commit each item, roll back only the
+                # item that failed. (Dossier C.7 per-item poller pattern.)
+                await db.commit()
             except Exception as exc:
+                await db.rollback()
                 logger.error(
                     "Error processing notifications for user %s: %s",
-                    user.id,
+                    user_id,
                     exc,
                     exc_info=True,
                 )
@@ -710,18 +725,18 @@ async def check_and_send_status_overviews(session_factory: async_sessionmaker) -
         )
         users = result.scalars().all()
         for user in users:
+            user_id = user.id
             try:
                 pref = await get_or_create_pref(user.id, "status_overview", db)
-                if not pref.enabled:
-                    continue
-                if not _is_time_to_send(pref.frequency, pref.last_sent_at):
-                    continue
-                if await _send_status_overview(user, pref, db):
-                    sent_count += 1
+                if pref.enabled and _is_time_to_send(pref.frequency, pref.last_sent_at):
+                    if await _send_status_overview(user, pref, db):
+                        sent_count += 1
+                await db.commit()
             except Exception as exc:
+                await db.rollback()
                 logger.error(
                     "Error sending status overview for user %s: %s",
-                    user.id, exc, exc_info=True,
+                    user_id, exc, exc_info=True,
                 )
         await db.commit()
     return sent_count
@@ -905,14 +920,17 @@ async def check_and_send_new_proposal_emails(session_factory: async_sessionmaker
         )
         proposals = list(td_result.scalars().all())
         for td in proposals:
+            td_id = td.id
             for agent_id_str in (td.agent_a, td.agent_b):
                 try:
                     if await _maybe_send_new_proposal(td, agent_id_str, db):
                         sent_count += 1
+                    await db.commit()
                 except Exception as exc:
+                    await db.rollback()
                     logger.error(
                         "Error sending new-proposal email (proposal %s, agent %s): %s",
-                        td.id, agent_id_str, exc, exc_info=True,
+                        td_id, agent_id_str, exc, exc_info=True,
                     )
         await db.commit()
     return sent_count
