@@ -19,6 +19,13 @@ BASE = "https://pub.orcid.org/v3.0"
 OID = "0000-0002-1825-0097"
 
 
+@pytest.fixture(autouse=True)
+def _no_retry_backoff(monkeypatch):
+    """These tests pin parse/error-swallow behaviour, not the retry loop (issue #23 COR-29a) —
+    zero the backoff so a mocked 5xx/timeout doesn't add ~3.5s of real sleep per test."""
+    monkeypatch.setattr(orcid, "_RETRY_BACKOFF", 0)
+
+
 def _record():
     return {
         "person": {

@@ -5,9 +5,15 @@ from typing import Any
 
 import httpx
 
+from src.services.http_retry import get_with_retry
+
 logger = logging.getLogger(__name__)
 
 ORCID_API_BASE = "https://pub.orcid.org/v3.0"
+
+# Overridable by tests (see test_orcid_contract.py) — the retry loop's own
+# exponential backoff, not the ORCID request timeout.
+_RETRY_BACKOFF = 0.5
 
 
 async def fetch_orcid_record(orcid_id: str) -> dict[str, Any]:
@@ -15,8 +21,7 @@ async def fetch_orcid_record(orcid_id: str) -> dict[str, Any]:
     url = f"{ORCID_API_BASE}/{orcid_id}/record"
     headers = {"Accept": "application/json"}
     async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.get(url, headers=headers)
-        resp.raise_for_status()
+        resp = await get_with_retry(client, url, headers=headers, backoff=_RETRY_BACKOFF)
         return resp.json()
 
 
@@ -79,8 +84,7 @@ async def fetch_orcid_grants(orcid_id: str) -> list[str]:
     headers = {"Accept": "application/json"}
     async with httpx.AsyncClient(timeout=30) as client:
         try:
-            resp = await client.get(url, headers=headers)
-            resp.raise_for_status()
+            resp = await get_with_retry(client, url, headers=headers, backoff=_RETRY_BACKOFF)
             data = resp.json()
         except Exception as exc:
             logger.warning("Failed to fetch ORCID grants for %s: %s", orcid_id, exc)
@@ -101,8 +105,7 @@ async def fetch_orcid_works(orcid_id: str) -> list[dict[str, Any]]:
     headers = {"Accept": "application/json"}
     async with httpx.AsyncClient(timeout=30) as client:
         try:
-            resp = await client.get(url, headers=headers)
-            resp.raise_for_status()
+            resp = await get_with_retry(client, url, headers=headers, backoff=_RETRY_BACKOFF)
             data = resp.json()
         except Exception as exc:
             logger.warning("Failed to fetch ORCID works for %s: %s", orcid_id, exc)
