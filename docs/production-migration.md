@@ -1,11 +1,14 @@
-# Production migration to alembic 0024 (`org1-parity`)
+# Production migration runbook (0018 → 0024, and 0024 → 0028)
 
 **Audience: an operator or agent who has not done any of the analysis behind this.**
 You do not need to understand the branch to run this. You do need to follow the order,
 and you need to stop when something says STOP.
 
 Supported starting points: **0018** (`main` before PR19), **0019**, **0020** and **0021**.
-All four are tested end to end.
+All four are tested end to end. **0024** — where a deployment sits after completing this
+runbook once — is also a supported starting point: the same tooling (`run_migration.sh`,
+`preflight.py`, `postflight.py`) covers the later 0024 → 0028 chain, and §10 below documents
+that path plus the routine, gate-free path for deploys that add no new revision.
 
 **If your deployment tracks `main`, you are at 0021** — that is `origin/main`'s own alembic
 head, since PR19 merged 0019, 0020 and 0021. Starting there is the *easiest* case: the
@@ -541,7 +544,139 @@ partial state to repair.
 
 ---
 
-## 10. Quick reference
+## 10. Routine deploys after 0024
+
+Everything above this point covers the 0018 → 0024 chain and the gated tooling it was
+built for. Once a deployment is at 0024, most future deploys need no operator ceremony at
+all — a `migrate` one-shot compose service runs `alembic upgrade head` before `app`,
+`worker` or `grantbot` start, on every `docker compose up`. That service lands in the same
+pull request as this section, alongside the 0025–0028 revisions it exists to apply. Only a
+migration big enough to need a window (ACCESS EXCLUSIVE locks, a long-running backfill,
+anything that would block writers for more than a few seconds) still goes through the
+gated path below.
+
+### 10.1 The routine path: the `migrate` one-shot service
+
+`docker compose $C up -d --build app worker grantbot` now builds and runs `migrate` to
+completion first; `app`, `worker` and `grantbot` each declare
+`depends_on.migrate.condition: service_completed_successfully`, so they do not start until
+`migrate` exits 0. `migrate`'s command is exactly `python -m alembic upgrade head` — if the
+database is already at head (the common case for most deploys, which change application
+code but no schema), alembic prints that there is nothing to do and the container still
+exits 0, so this step never blocks a code-only deploy. `docker compose $C ps -a` shows
+`migrate: Exited (0)` and `docker compose $C logs migrate` should never contain a
+traceback or `AccessDeniedException` (that error means `docker-compose.override.yml` is
+missing the `migrate` service's `json-file` logging entry — see the "Compose file set"
+section of `CLAUDE.md`).
+
+`agent` is not gated on `migrate`: it is started later, via `docker compose --profile
+agent run`, well after `up -d --build app worker` has already driven `migrate` to
+completion.
+
+### 10.2 The gated path: `run_migration.sh --via-run`
+
+Use this path instead of the routine one whenever the migration itself needs a window —
+i.e. whenever it is not safe to let `app`/`worker`/`grantbot` keep running (and taking
+writes) while it applies. The full runbook for this is Part R of the deploy guide; the
+load-bearing commands are:
+
+Stop every writer first, in this order — `agent-run` (gracefully, so the in-flight turn
+flushes to Postgres), then `grantbot`/`worker` (worker inserts into `publications`), then
+`app` last so the no-web-service window is as short as possible:
+
+```bash
+cd /home/ubuntu/copi-python && . /tmp/deploy.env && [ -n "$C" ] || { echo "deploy.env missing — redo R.1"; exit 1; }
+mkdir -p logs
+docker logs agent-run > logs/run_$(date +%s).log 2>&1 || true
+ls -t logs/run_*.log | tail -n +11 | xargs -r rm -f
+docker stop -t 30 agent-run || true ; docker rm agent-run || true   # SIGTERM + 30 s flushes the in-flight turn to Postgres
+docker compose $C stop grantbot worker                              # worker inserts into publications
+# app goes LAST so the no-web-service window is as short as possible — but it MUST go:
+#  - preflight check 7 BLOCKs on any idle-in-transaction session (preflight.py:474-494) and its own
+#    remediation list says `docker compose stop app worker grantbot`;
+#  - the alembic chain is ONE transaction, so 0025's ACCESS EXCLUSIVE on publications, 0026's ACCESS
+#    EXCLUSIVE on private_channel_members + SHARE ROW EXCLUSIVE on users, and 0027's SHARE on 13 tables
+#    are all held until the last statement commits.
+docker compose $C stop app
+# nginx now returns 502 (static `upstream app { server app:8000; }`) and goes unhealthy. EXPECTED for the
+# window; do not restart nginx here.
+docker compose $C exec -T postgres psql -U copi -d copi -c \
+  "select pid, state, now()-xact_start as age, left(query,60) from pg_stat_activity
+    where datname=current_database() and pid<>pg_backend_pid() and backend_type='client backend'"
+# expect: no rows (or only this psql). Anything else must be understood before applying the migration.
+```
+
+If the container runs as a non-root user, fix bind-mount ownership before continuing (the
+image's UID owns `profiles`/`data`; the bind mounts shadow that):
+
+```bash
+cd /home/ubuntu/copi-python && . /tmp/deploy.env && [ -n "$C" ] || { echo "deploy.env missing — redo R.1"; exit 1; }
+sudo chown -R 10001:10001 profiles data      # UID fixed in Dockerfile Task 27.8; bind mounts shadow the image dirs
+ls -ld profiles data                          # 10001 10001
+```
+
+With every writer stopped, apply the migration with `--via-run` — it runs the same
+preflight/alembic/postflight steps as always, but through `docker compose run --rm
+--no-deps -T` one-off containers built from the *new* image, since `app` is stopped and
+there is no running container left to `exec` into:
+
+```bash
+cd /home/ubuntu/copi-python && . /tmp/deploy.env && [ -n "$C" ] || { echo "deploy.env missing — redo R.1"; exit 1; }
+PW="$(grep -m1 '^POSTGRES_PASSWORD=' .env | cut -d= -f2-)"
+PW_ENC="$(python3 -c 'import sys,urllib.parse;print(urllib.parse.quote(sys.argv[1],safe=""))' "$PW")"
+export DATABASE_URL="postgresql+asyncpg://copi:${PW_ENC}@postgres:5432/copi"   # in-network DSN, password percent-encoded
+unset PW PW_ENC
+# Rehearsal first (writes nothing; every step runs in a one-off container from the NEW image):
+./scripts/migrate/run_migration.sh --via-run --backup-verified-elsewhere "copi-backup run $(date -u +%FT%TZ) -> $PRE_DEPLOY_DUMP"
+# Expect: the masked DSN line shows host `postgres`, db `copi`; exit 0 (or 2 with only WARN lines you can explain).
+# Exit 1 = BLOCKED: read the check name, fix, re-run. Check 7 (blocking sessions) => something is still connected: stop the writers again.
+ls -l backups/preflight_snapshot.json          # written by the rehearsal on the HOST (bind-mounted by --via-run)
+./scripts/migrate/run_migration.sh --via-run --apply --backup-verified-elsewhere "copi-backup run $(date -u +%FT%TZ) -> $PRE_DEPLOY_DUMP"
+# Expect: "alembic_version = 0028" read back, postflight 0 FAIL, exit 0.
+ls -l backups/preflight_snapshot.json          # newer than the rehearsal's
+unset DATABASE_URL
+docker compose $C exec -T postgres psql -U copi -d copi -c 'select * from alembic_version'   # 0028
+```
+
+If alembic reports `LockNotAvailableError`, something is still connected: `docker compose $C ps -a`,
+confirm `agent-run` is gone and **app, worker and grantbot are stopped**, re-run the `pg_stat_activity`
+query, then re-run `--apply`. If it still times out,
+`ALEMBIC_LOCK_TIMEOUT_MS=60000 ./scripts/migrate/run_migration.sh --via-run --apply ...` (the knob
+bounds lock *wait*, not statement duration). If postflight prints any FAIL: **do not deploy code**;
+the chain is one transaction and nothing is half-applied.
+
+Before recreating `app`, `worker` and `grantbot` on the new image, confirm the routine
+path's `migrate` service agrees the database is now at head:
+
+```bash
+cd /home/ubuntu/copi-python && . /tmp/deploy.env && [ -n "$C" ] || { echo "deploy.env missing — redo R.1"; exit 1; }
+docker compose $C run --rm --no-deps -T migrate python -m alembic current    # prints 0028 (head)
+```
+
+### 10.3 Both paths are idempotent
+
+Neither path re-applies a migration that has already run. `run_migration.sh` treats "already
+at head" as success (exit 0), not a no-op error, and so does the `migrate` service's plain
+`alembic upgrade head` — running either one twice in a row, or running the gated path after
+the routine path already brought the database to head, is safe and does nothing the second
+time. This is what makes the routine path safe to run unconditionally on every
+`docker compose up`: a deploy that ships no new revision just pays the cost of alembic
+checking the stamped revision against head and finding nothing to do.
+
+### 10.4 Where the preflight snapshot lands
+
+`--via-run` bind-mounts a host directory into each one-off container so that the ephemeral
+preflight, alembic and postflight containers — which do not share filesystem state with
+each other the way a single long-running container would — can still hand off the
+preflight row-count snapshot. That snapshot is written to `backups/preflight_snapshot.json`
+on the host (the default `MIGRATE_BACKUP_DIR`, gitignored); postflight reads it back from
+the same path to verify counts after the migration applies. A fresh, newer timestamp on
+that file after `--apply` (as in the commands above) is confirmation postflight had the
+rehearsal's snapshot to compare against.
+
+---
+
+## 11. Quick reference
 
 | | |
 |---|---|
@@ -559,7 +694,7 @@ dry-run unless given `--apply`; all must be run with `PYTHONPATH=/app` inside th
 
 ---
 
-## 11. What has been tested, and what has not
+## 12. What has been tested, and what has not
 
 Tested end to end on seeded production-like databases:
 
