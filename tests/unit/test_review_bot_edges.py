@@ -100,9 +100,10 @@ def test_truncated_json_with_no_recoverable_target_is_out_of_scope():
     ["unparseable_rubric_1.txt", "unparseable_rubric_2.txt", "unparseable_rubric_3.txt"],
 )
 def test_real_unparseable_opus_replies_keep_their_declared_target(fixture_name, caplog):
-    """Regression from the 2026-09-03 live evaluation: 3 of 12 real replies
-    embedded an unescaped quote inside a JSON string, and all three lost a
-    genuine `rubric` target to the out_of_scope fallback."""
+    """Regression from the 2026-09-03 live evaluation: 3 of 12 real replies were
+    invalid JSON — a premature object close, an unterminated object, and an
+    unescaped quote inside a string value — and all three lost a genuine
+    `rubric` target to the out_of_scope fallback. See the fixture README."""
     raw = (ROOT / "tests/fixtures/review_bot_replies" / fixture_name).read_text()
     with pytest.raises(json.JSONDecodeError):
         json.loads(raw)  # the fixture must really be malformed
