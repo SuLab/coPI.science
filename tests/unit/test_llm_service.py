@@ -140,3 +140,12 @@ async def test_make_decision_parses_json_from_response(monkeypatch):
 
     decision = await llm.make_decision("sys", [{"role": "user", "content": "decide"}])
     assert decision == {"action": "skip", "reasoning": "no fit"}
+
+
+def test_extract_json_is_public():
+    """issue #26 C4: scripts/generate_sparsedata_user.py imported the private
+    _extract_json because no public alternative existed. extract_json must be
+    the same function as _extract_json (an alias, not a copy), so the two
+    names can never drift apart."""
+    assert llm.extract_json is llm._extract_json
+    assert llm.extract_json('{"a": 1}') == {"a": 1}

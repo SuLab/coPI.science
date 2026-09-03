@@ -54,7 +54,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from src.config import get_settings
 from src.models import AgentRegistry, Publication, ResearcherProfile, User
-from src.services.llm import _extract_json, get_anthropic_client
+from src.services.llm import extract_json, get_anthropic_client
 from src.services.orcid import fetch_orcid_profile, fetch_orcid_works
 from src.services.profile_export import export_profile_to_markdown
 from src.services.pubmed import convert_dois_to_pmids, fetch_pubmed_records, normalize_doi
@@ -499,7 +499,7 @@ def _synthesize(context_text: str, name: str) -> dict[str, Any]:
     )
     response_text = message.content[0].text
     try:
-        return _extract_json(response_text)
+        return extract_json(response_text)
     except ValueError:
         logger.error("Sparse synthesis JSON parse failed for %s; raw:\n%s", name, response_text)
         raise

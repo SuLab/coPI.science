@@ -119,7 +119,7 @@ Return ONLY the markdown profile content — no JSON, no code fences."""
         raise
 
 
-def _extract_json(text: str) -> dict[str, Any]:
+def extract_json(text: str) -> dict[str, Any]:
     """Extract JSON object from LLM response text."""
     # Try direct parse first
     text = text.strip()
@@ -167,6 +167,9 @@ def _extract_json(text: str) -> dict[str, Any]:
             pass
 
     raise ValueError(f"Could not extract JSON from LLM response: {text[:200]}")
+
+
+_extract_json = extract_json  # back-compat alias (#26 C4) — same function, not a copy.
 
 
 async def generate_agent_response(
