@@ -2559,3 +2559,112 @@ class TestRebuildOneAgentState:
         await engine._rebuild_one_agent_state("su")
 
         assert "300.0" not in su.state.active_threads
+
+
+# ---------------------------------------------------------------
+# The daily post cap must not block a PI-priority, funding, or
+# private-channel candidate — #20 E7a
+# ---------------------------------------------------------------
+
+class TestDailyCapDoesNotBlockBypassEligibleCandidates:
+    """PI-priority, funding, and private-channel candidates already bypass the
+    random skip and the unreviewed-proposal block a few lines later in this
+    same function — the daily post cap must not be the one gate that still
+    blocks them outright. See E7a."""
+
+    def _engine_at_cap(self):
+        import time
+
+        from src.agent.agent import Agent
+        from src.agent.message_log import LogEntry
+        from src.config import get_settings
+
+        agent = Agent("a", "ABot", "A PI")
+        engine = SimulationEngine(agents=[agent], slack_clients={})
+        cap = get_settings().daily_post_cap
+        now = time.time()
+        for i in range(cap):
+            engine.message_log.append(LogEntry(
+                ts=f"{now + i}.0", channel="general", sender_agent_id="a", sender_name="ABot",
+                content=f"post {i}", posted_at=now + i, is_bot=True,
+            ))
+        return engine, agent
+
+    @pytest.mark.asyncio
+    async def test_a_pi_priority_candidate_bypasses_the_cap(self, monkeypatch):
+        from unittest.mock import AsyncMock
+
+        from src.agent.state import PostRef
+
+        engine, agent = self._engine_at_cap()
+        agent.state.interesting_posts.append(PostRef(
+            post_id="999.0", channel="general", sender_agent_id="b",
+            content_snippet="x", posted_at=0.0, pi_priority=True,
+        ))
+        fake_llm = AsyncMock(return_value='```json\n{"action": "skip"}\n```')
+        monkeypatch.setattr("src.agent.simulation.generate_agent_response", fake_llm)
+
+        await engine._phase5_new_post(agent)
+
+        fake_llm.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_an_ordinary_candidate_still_hits_the_cap(self, monkeypatch):
+        # Control: the cap must still apply to a plain, non-exempt candidate.
+        from unittest.mock import AsyncMock
+
+        from src.agent.state import PostRef
+
+        engine, agent = self._engine_at_cap()
+        agent.state.interesting_posts.append(PostRef(
+            post_id="999.0", channel="general", sender_agent_id="b",
+            content_snippet="x", posted_at=0.0,
+        ))
+        fake_llm = AsyncMock(return_value='```json\n{"action": "skip"}\n```')
+        monkeypatch.setattr("src.agent.simulation.generate_agent_response", fake_llm)
+
+        await engine._phase5_new_post(agent)
+
+        fake_llm.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_funding_candidate_does_not_make_the_cap_unenforceable_for_an_ordinary_post(
+        self, monkeypatch,
+    ):
+        # The bypass at the top of the method is keyed on interesting_posts
+        # CONTAINING a bypass-eligible candidate, not on the LLM actually
+        # choosing it, so the LLM still gets called here — the point is that
+        # the ordinary top-level post it chooses must not actually land.
+        # Without the downstream re-check, one funding post sitting in
+        # interesting_posts would make the cap unenforceable for every OTHER
+        # action too.
+        from unittest.mock import AsyncMock
+
+        from src.agent.state import PostRef
+
+        engine, agent = self._engine_at_cap()
+        agent.state.interesting_posts.append(PostRef(
+            post_id="999.0", channel="funding-opportunities", sender_agent_id="grantbot",
+            content_snippet="x", posted_at=0.0,
+        ))
+        engine.message_log.is_funding_thread = lambda post_id: post_id == "999.0"
+        response = (
+            "```json\n"
+            '{"action": "post", "channel": "general"}\n'
+            "```\n"
+            "<slack_message>\n"
+            "An ordinary top-level post.\n"
+            "</slack_message>\n"
+        )
+        monkeypatch.setattr(
+            "src.agent.simulation.generate_agent_response",
+            AsyncMock(return_value=response),
+        )
+        posts_before = len(engine.message_log._entries)
+
+        await engine._phase5_new_post(agent)
+
+        assert len(engine.message_log._entries) == posts_before, (
+            "an ordinary post landed even though the daily cap was reached and "
+            "the chosen action was not itself bypass-eligible"
+        )
