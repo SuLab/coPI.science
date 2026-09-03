@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Guided production migration 0024 → 0028 (and any later head) (branch cohort-db-conversations).
-# Supported starting points: 0018 (main before PR19), 0019, 0020 and 0021.
+# Supported starting points: 0018 (main before PR19), 0019, 0020, 0021, 0023 and 0024.
 # 0021 is origin/main's own alembic head, so that is where a deployment tracking main is.
 #
 # READ docs/production-migration.md BEFORE RUNNING THIS. This script is the
