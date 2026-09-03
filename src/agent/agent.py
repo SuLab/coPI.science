@@ -11,6 +11,7 @@ from src.agent.roles import DEFAULT_ROLE, load_role, resolve_prompt_path
 from src.agent.state import AgentState, ThreadState
 from src.agent.thread_guidance import phase4_guidance
 from src.models.agent_activity import VISIBILITY_COLLAB_PRIVATE, VISIBILITY_PUBLIC
+from src.services.atomic_write import atomic_write_text
 
 logger = logging.getLogger(__name__)
 
@@ -708,7 +709,7 @@ Use these to reference other labs' work in conversations. Include links when cit
             memory_path = PROFILES_DIR / "memory" / self.agent_id / "public.md"
         try:
             memory_path.parent.mkdir(parents=True, exist_ok=True)
-            memory_path.write_text(new_memory + "\n", encoding="utf-8")
+            atomic_write_text(memory_path, new_memory + "\n", encoding="utf-8")
             # Best-effort cleanup of the legacy unpartitioned file so subsequent
             # loads go through the new path — only on public writes, and only
             # if we just wrote to the partitioned location.
@@ -735,7 +736,7 @@ Use these to reference other labs' work in conversations. Include links when cit
         profile_path = PROFILES_DIR / "private" / f"{self.agent_id}.md"
         try:
             profile_path.parent.mkdir(parents=True, exist_ok=True)
-            profile_path.write_text(new_profile + "\n", encoding="utf-8")
+            atomic_write_text(profile_path, new_profile + "\n", encoding="utf-8")
             self._private_profile = None  # Invalidate cache
         except Exception as exc:
             logger.error("[%s] Failed to update private profile: %s", self.agent_id, exc)

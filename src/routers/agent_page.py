@@ -27,6 +27,7 @@ from src.models import (
     ThreadDecision,
     User,
 )
+from src.services.atomic_write import atomic_write_text
 from src.services.profile_export import export_profile_to_markdown
 from src.services.validators import is_valid_email
 
@@ -1126,18 +1127,23 @@ async def save_private_profile(
     if agent.status != "active":
         return RedirectResponse(url="/agent", status_code=302)
 
-    profile_path = PROFILES_DIR / "private" / f"{agent.agent_id}.md"
-    profile_path.parent.mkdir(parents=True, exist_ok=True)
-    profile_path.write_text(content)
-
-    # Persist to DB — use the PI's user_id, not the delegate's
+    # Persist to DB FIRST (COR-24: disk must never be ahead of the DB) — use the
+    # PI's user_id, not the delegate's. Create the row if this is the first
+    # private-profile save for this PI: `if profile:` used to make a missing row
+    # a silent, permanent disk-only write with no DB record at all.
     profile_result = await db.execute(
         select(ResearcherProfile).where(ResearcherProfile.user_id == agent.user_id)
     )
     profile = profile_result.scalar_one_or_none()
-    if profile:
-        profile.private_profile_md = content.strip() or None
-        await db.commit()
+    if not profile:
+        profile = ResearcherProfile(user_id=agent.user_id)
+        db.add(profile)
+    profile.private_profile_md = content.strip() or None
+    await db.commit()
+
+    profile_path = PROFILES_DIR / "private" / f"{agent.agent_id}.md"
+    profile_path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_text(profile_path, content, encoding="utf-8")
 
     # Record revision
     from src.services.profile_versioning import create_revision

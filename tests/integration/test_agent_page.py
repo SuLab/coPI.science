@@ -1025,6 +1025,29 @@ async def test_saving_the_private_profile_persists_to_db_disk_and_a_revision(
     assert revisions[0].mechanism == "web"
 
 
+async def test_first_private_profile_save_creates_the_missing_profile_row(
+    client, db_session
+):
+    """Before this fix, `if profile:` made a first-ever private save (no
+    ResearcherProfile row yet) a silent, permanent disk-only write."""
+    pi, _agent = await _agent_for(
+        db_session, name="No Profile", email="noprof@example.org",
+        agent_id="tstnoprof", bot_name="NoProfBot",
+    )
+    await db_session.flush()
+
+    r = await client.post(
+        "/agent/tstnoprof/profile/save",
+        headers=_auth(pi.id),
+        data={"content": "first ever private instructions"},
+    )
+    assert r.status_code == 302
+    profile = (await db_session.execute(
+        select(ResearcherProfile).where(ResearcherProfile.user_id == pi.id)
+    )).scalar_one()
+    assert profile.private_profile_md == "first ever private instructions"
+
+
 async def test_saving_the_public_profile_updates_the_pis_profile_not_the_editors(
     client, db_session, world, delegated
 ):

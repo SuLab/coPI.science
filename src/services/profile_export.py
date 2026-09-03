@@ -5,6 +5,7 @@ import re
 from pathlib import Path
 
 from src.models import Publication, ResearcherProfile, User
+from src.services.atomic_write import atomic_write_text
 
 logger = logging.getLogger(__name__)
 
@@ -115,7 +116,7 @@ def export_profile_to_markdown(
     path = PROFILES_DIR / f"{agent_id}.md"
     try:
         PROFILES_DIR.mkdir(parents=True, exist_ok=True)
-        path.write_text("\n".join(lines), encoding="utf-8")
+        atomic_write_text(path, "\n".join(lines), encoding="utf-8")
         logger.info("Exported profile for %s to %s", user.name, path)
         return path
     except Exception as exc:
@@ -139,7 +140,7 @@ def export_private_profile(
     path = PRIVATE_PROFILES_DIR / f"{agent_id}.md"
     try:
         PRIVATE_PROFILES_DIR.mkdir(parents=True, exist_ok=True)
-        path.write_text(profile.private_profile_md + "\n", encoding="utf-8")
+        atomic_write_text(path, profile.private_profile_md + "\n", encoding="utf-8")
         logger.info("Exported private profile for %s to %s", user.name, path)
         return path
     except Exception as exc:
