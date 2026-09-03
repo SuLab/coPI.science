@@ -35,11 +35,19 @@ class _FakeResult:
 
 
 class _FakeRequest:
-    """Just enough of a Starlette Request for client_ip() / the rate limiter."""
+    """Just enough of a Starlette Request for client_ip() / the rate limiter.
 
-    def __init__(self):
+    `host` defaults to a fresh uuid per instance (Task 24 test minor, V5):
+    `_waitlist_limiter` in src/routers/public.py is a MODULE-GLOBAL
+    SlidingWindowRateLimiter keyed by client_ip() -- shared across every test in the
+    whole run, not just this file. A fixed "127.0.0.1" would let one test's calls
+    count against another's budget depending on run order. Pass an explicit `host`
+    only when a test needs two requests to land in the SAME bucket.
+    """
+
+    def __init__(self, host: str | None = None):
         self.headers: dict[str, str] = {}
-        self.client = types.SimpleNamespace(host="127.0.0.1")
+        self.client = types.SimpleNamespace(host=host or f"127.0.0.1-{uuid.uuid4()}")
 
 
 def _stub_templates(monkeypatch):
@@ -108,6 +116,10 @@ async def test_waitlist_submit_survives_a_lost_race_on_email(monkeypatch):
     )
     assert db.rolled_back is True
     assert len(db.added) == 1, "the row must still be staged before the race is caught"
+    assert db.commits == 1, (
+        "commit() must be attempted exactly once -- a caught IntegrityError must not "
+        "be retried, and the guard must not skip calling commit() altogether"
+    )
 
 
 class _ReviewRaceSession:
@@ -181,3 +193,14 @@ async def test_review_proposal_survives_a_lost_race_via_autoflush():
     assert ei.value.detail == "Already reviewed"
     assert db.rolled_back is True
     assert len(db.added) == 1, "the review row must still be staged before the guard rolls back"
+    # V4-4b / Task 21.13 reconciliation item 2 (COORD_A.md): unlike a bare 24.2-only
+    # guard, the except arm here does a SECOND commit after rollback() -- it retires
+    # the race LOSER's own outstanding notification, which rollback() would otherwise
+    # discard. This supersedes the 24.2-review carried minor "assert db.committed is
+    # False" (progress.md): that pinned the pre-21.13 shape, where the except arm
+    # never committed at all. committed=True now pins that the recovery commit
+    # actually ran, not just the (rolled-back) one inside the try.
+    assert db.committed is True, (
+        "the except arm's own retire-then-commit for the race loser's notification "
+        "never ran"
+    )
