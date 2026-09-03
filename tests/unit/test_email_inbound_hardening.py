@@ -118,6 +118,31 @@ def test_plain_text_part_still_wins_over_html():
     assert _extract_reply_body(_msg(raw)) == "3 sounds great"
 
 
+def test_unknown_declared_charset_falls_back_instead_of_raising():
+    raw = (
+        "From: pi@scripps.edu\n"
+        'Content-Type: text/plain; charset="unknown-8bit"\n'
+        "\n"
+        "3 sounds great\n"
+    )
+    body = _extract_reply_body(_msg(raw))
+    assert "3 sounds great" in body
+
+
+def test_a_garbled_but_known_charset_still_decodes_lossily():
+    """Control: a KNOWN charset with genuinely undecodable bytes must still use
+    errors='replace' rather than raising — this pins that the fix didn't remove the
+    existing fallback for the case it always handled correctly."""
+    raw_bytes = (
+        b"From: pi@scripps.edu\n"
+        b'Content-Type: text/plain; charset="utf-8"\n'
+        b"\n"
+        b"3 sounds great \xff\xfe garbled\n"
+    )
+    body = _extract_reply_body(email.message_from_bytes(raw_bytes))
+    assert "3 sounds great" in body
+
+
 # --- Auto-submitted mail is dropped before any processing --------------------
 
 

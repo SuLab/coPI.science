@@ -1,5 +1,6 @@
 """Inbound email processing for proposal review via email reply."""
 
+import codecs
 import email
 import json
 import logging
@@ -385,6 +386,13 @@ def _extract_email_address(from_header: str) -> str | None:
 
 def _decode_part(part: email.message.Message) -> str:
     charset = part.get_content_charset() or "utf-8"
+    try:
+        codecs.lookup(charset)
+    except LookupError:
+        logger.warning(
+            "Unknown charset %r on inbound email part; decoding as utf-8 (COR-19.3)", charset
+        )
+        charset = "utf-8"
     payload = part.get_payload(decode=True) or b""
     return payload.decode(charset, errors="replace")
 
