@@ -647,6 +647,92 @@ class TestPrivateChannelFinalization:
 
 
 # ---------------------------------------------------------------
+# _check_thread_outcome — a ✅ must confirm the other agent's MOST RECENT
+# message, not any stale :memo: (#20 COR-3)
+# ---------------------------------------------------------------
+
+class TestCheckThreadOutcomeRequiresTheMostRecentMemo:
+    """A `✅` must confirm the other agent's LATEST message, not merely the
+    latest one of theirs that happens to contain `:memo:`. If they've said
+    something else since (renegotiating, asking a question, anything), that
+    memo is stale and today's code wrongly finalizes it anyway."""
+
+    @pytest.fixture(autouse=True)
+    def _no_live_llm_or_disk(self, monkeypatch, tmp_path):
+        """_close_thread ends in _update_agent_memory, which calls the real
+        Anthropic API and writes profiles/memory/<id>/public.md. Stub both:
+        this is tests/unit."""
+        from unittest.mock import AsyncMock
+
+        import src.agent.agent as agent_mod
+        monkeypatch.setattr(agent_mod, "PROFILES_DIR", tmp_path)
+        monkeypatch.setattr(
+            "src.agent.simulation.generate_agent_response",
+            AsyncMock(return_value="## Working Memory\n1. nothing.\n"),
+        )
+
+    def _engine_with_thread(self):
+        from src.agent.agent import Agent
+        from src.agent.message_log import LogEntry
+        from src.agent.state import ThreadState
+
+        a = Agent("a", "ABot", "A PI")
+        b = Agent("b", "BBot", "B PI")
+        engine = SimulationEngine(agents=[a, b], slack_clients={})
+        engine.message_log.append(LogEntry(
+            ts="1.0", channel="general", sender_agent_id="b", sender_name="BBot",
+            content="kickoff", posted_at=1.0, is_bot=True,
+        ))
+        engine.message_log.append(LogEntry(
+            ts="2.0", channel="general", sender_agent_id="b", sender_name="BBot",
+            content=":memo: Summary: proposal v1", thread_ts="1.0", posted_at=2.0, is_bot=True,
+        ))
+        thread = ThreadState(thread_id="1.0", channel="general", other_agent_id="b")
+        return engine, a, thread
+
+    async def test_a_later_non_memo_message_from_the_other_agent_blocks_finalization(self):
+        from src.agent.message_log import LogEntry
+
+        engine, a, thread = self._engine_with_thread()
+        # b spoke again AFTER the memo, and it was not a revised memo — the
+        # memo is stale, so a's later ✅ must not confirm it.
+        engine.message_log.append(LogEntry(
+            ts="3.0", channel="general", sender_agent_id="b", sender_name="BBot",
+            content="actually, let's use a different budget number",
+            thread_ts="1.0", posted_at=3.0, is_bot=True,
+        ))
+
+        await engine._check_thread_outcome(a, thread, "Sounds great, thanks! ✅")
+
+        assert a.state.pending_proposals == []
+        assert thread.status != "closed"
+        assert "1.0" not in engine._closed_thread_ids
+
+    async def test_a_confirming_tick_right_after_the_memo_still_finalizes(self):
+        # Control: the ordinary happy path (memo is genuinely the other
+        # agent's latest message) must keep working.
+        engine, a, thread = self._engine_with_thread()
+
+        await engine._check_thread_outcome(a, thread, "Sounds great, thanks! ✅")
+
+        assert len(a.state.pending_proposals) == 1
+        assert a.state.pending_proposals[0].summary_text == ":memo: Summary: proposal v1"
+        assert thread.status == "closed"
+
+    async def test_a_reply_carrying_both_a_tick_and_a_memo_stays_closed(self):
+        # A confirm-plus-revised-summary reply (both ✅ and :memo: in the same
+        # message) must not fall through into the :memo:/⏸️ re-checks below
+        # the ✅ branch and un-close (or double-close) the thread. See COR-3's
+        # `break`-vs-`return` regression.
+        engine, a, thread = self._engine_with_thread()
+
+        await engine._check_thread_outcome(a, thread, "Agreed ✅ — :memo: Summary: v2")
+
+        assert thread.status == "closed"
+        assert len(engine._prior_threads[tuple(sorted(["a", "b"]))]) == 1
+
+
+# ---------------------------------------------------------------
 # mint_ts — monotonic, unique, ts-shaped ids (DB-primary store)
 # ---------------------------------------------------------------
 

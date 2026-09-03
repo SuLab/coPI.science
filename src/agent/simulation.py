@@ -1541,10 +1541,16 @@ class SimulationEngine:
         """Check if a thread should be closed based on the latest reply."""
         # Check for ✅ confirmation of a :memo: Summary
         if "✅" in latest_reply:
-            # Look back in thread history for the latest :memo: Summary from the other agent
+            # The memo must be the OTHER agent's MOST RECENT message in the
+            # thread — not merely the most recent one of theirs that happens
+            # to contain :memo:. If they have said anything else since (a
+            # renegotiation, a question, anything), that memo is stale and
+            # this ✅ is not confirming it. See COR-3.
             history = self.message_log.get_thread_history(thread.thread_id)
             for entry in reversed(history):
-                if entry.sender_agent_id == thread.other_agent_id and ":memo:" in entry.content:
+                if entry.sender_agent_id != thread.other_agent_id:
+                    continue
+                if ":memo:" in entry.content:
                     # Proposal confirmed!
                     logger.info(
                         "[%s] Thread %s: proposal confirmed with ✅",
@@ -1566,6 +1572,9 @@ class SimulationEngine:
                     ))
                     await self._close_thread(agent, thread, "proposal", summary_text)
                     return
+                # The other agent's latest message is NOT a memo — this ✅ is
+                # not confirming anything. Stop before an older memo. (COR-3)
+                break
 
         # Check if this agent posted a :memo: Summary
         if ":memo:" in latest_reply:
