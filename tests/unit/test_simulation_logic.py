@@ -2668,3 +2668,50 @@ class TestDailyCapDoesNotBlockBypassEligibleCandidates:
             "an ordinary post landed even though the daily cap was reached and "
             "the chosen action was not itself bypass-eligible"
         )
+
+
+# ---------------------------------------------------------------
+# has_pi_directive must survive a turn where Phase 5 ran but made no
+# LLM call — #20 E7b
+# ---------------------------------------------------------------
+
+class TestHasPiDirectiveClearedOnlyWhenActedOn:
+    """The flag must survive a turn where Phase 5 ran (because of it) but made
+    no LLM call — otherwise the directive that triggered Phase 5 is dropped
+    without ever influencing a prompt. See E7b."""
+
+    def _engine_with_stubbed_phases(self, phase5_makes_a_call: bool):
+        from unittest.mock import AsyncMock
+
+        from src.agent.agent import Agent
+
+        agent = Agent("a", "ABot", "A PI")
+        engine = SimulationEngine(agents=[agent], slack_clients={})
+        agent.state.has_pi_directive = True
+        engine._phase1_channel_discovery = lambda a: None
+        engine._phase2_scan_filter = AsyncMock(return_value=None)
+        engine._phase3_activate_threads = lambda a: None
+        engine._phase4_reply_threads = AsyncMock(return_value=set())
+
+        async def _phase5(agent_arg, phase4_thread_ids=None):
+            if phase5_makes_a_call:
+                agent_arg.api_call_count += 1  # simulates a real LLM call attempt
+
+        engine._phase5_new_post = _phase5
+        return engine, agent
+
+    @pytest.mark.asyncio
+    async def test_flag_survives_a_turn_where_phase5_made_no_call(self):
+        engine, agent = self._engine_with_stubbed_phases(phase5_makes_a_call=False)
+
+        await engine._run_turn(agent)
+
+        assert agent.state.has_pi_directive is True
+
+    @pytest.mark.asyncio
+    async def test_flag_clears_once_phase5_actually_calls_the_llm(self):
+        engine, agent = self._engine_with_stubbed_phases(phase5_makes_a_call=True)
+
+        await engine._run_turn(agent)
+
+        assert agent.state.has_pi_directive is False

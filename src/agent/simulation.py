@@ -1046,16 +1046,32 @@ class SimulationEngine:
         has_new_work = has_interesting or has_phase4_work or phase2_ran or has_pi
 
         if has_new_work or spontaneous_ready:
+            api_calls_before_phase5 = agent.api_call_count
             await self._phase5_new_post(agent, phase4_thread_ids)
+            phase5_acted = agent.api_call_count > api_calls_before_phase5
         else:
+            phase5_acted = False
             logger.debug(
                 "[%s] Phase 5: Skipped (no state change, spontaneous in %ds)",
                 agent.agent_id,
                 int(spontaneous_interval - since_last_action),
             )
 
-        # Clear PI directive flag after the turn
-        agent.state.has_pi_directive = False
+        # Clear the PI directive flag only once it has actually been acted
+        # on — Phase 5 (the flag's only trigger, via has_new_work) made a
+        # real LLM call this turn. If Phase 5 bailed out early (daily cap,
+        # random skip, blocked with nothing available) the directive is
+        # preserved so a later turn retries it, instead of being silently
+        # dropped having influenced no prompt at all. See E7b.
+        # Known trade-off (red-team m5): this is a latch, not a retry-with-
+        # backoff — an agent PERMANENTLY unable to get Phase 5 to act (stuck
+        # blocked with nothing bypass-eligible available, or sustained
+        # rate-limiting) never clears the flag. Cheap (no LLM cost — Phase 5
+        # still bails out before any API call in that state) but unbounded;
+        # a turn counter or TTL would cap it if that ever proves to matter in
+        # practice.
+        if agent.state.has_pi_directive and phase5_acted:
+            agent.state.has_pi_directive = False
 
         # Update cursor. Bounded by the log's own high-water mark, not the wall
         # clock: MessageLog filters on `posted_at <= since`, and an external
