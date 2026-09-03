@@ -127,25 +127,30 @@ async def profile_save(
     # leave the stored value alone). The raw form can. See issue #22 COR-22.
     form = await request.form()
 
-    # Validate the email up front so a bad value rejects the whole submission
-    # before anything is persisted.
-    email_clean = (email or "").strip().lower()
-    if email_clean != (current_user.email or ""):
-        if email_clean:
-            if not is_valid_email(email_clean):
-                return RedirectResponse(
-                    url="/profile/edit?error=invalid_email", status_code=302
+    # Only touch email if the client actually sent the field — same presence
+    # gate as the profile fields below. A POST that omits `email` must not
+    # silently NULL User.email (nullable+unique, so nothing would raise). See
+    # issue #22 COR-22 fix round 1.
+    if "email" in form:
+        # Validate the email up front so a bad value rejects the whole submission
+        # before anything is persisted.
+        email_clean = (email or "").strip().lower()
+        if email_clean != (current_user.email or ""):
+            if email_clean:
+                if not is_valid_email(email_clean):
+                    return RedirectResponse(
+                        url="/profile/edit?error=invalid_email", status_code=302
+                    )
+                existing = await db.execute(
+                    select(User).where(
+                        User.email == email_clean, User.id != current_user.id
+                    )
                 )
-            existing = await db.execute(
-                select(User).where(
-                    User.email == email_clean, User.id != current_user.id
-                )
-            )
-            if existing.scalar_one_or_none():
-                return RedirectResponse(
-                    url="/profile/edit?error=email_taken", status_code=302
-                )
-        current_user.email = email_clean or None
+                if existing.scalar_one_or_none():
+                    return RedirectResponse(
+                        url="/profile/edit?error=email_taken", status_code=302
+                    )
+            current_user.email = email_clean or None
 
     # Update user fields
     if name:

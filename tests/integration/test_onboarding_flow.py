@@ -911,6 +911,40 @@ async def test_profile_save_partial_post_does_not_blank_omitted_fields(client, d
     assert prof["keywords"] == ["old-kw"]
 
 
+async def test_profile_save_partial_post_does_not_blank_email(client, db_session):
+    """Fix round 1: `email` used the same Form("") pattern as the other
+    fields but was still assigned unconditionally, so a POST that omits it
+    silently NULLed User.email (nullable+unique, so nothing would raise)."""
+    u = await factories.make_user(db_session, name="Keep", email="keep@example.org")
+    await db_session.flush()
+
+    r = await client.post(
+        "/profile/save",
+        headers=_auth(u.id),
+        data={"name": "Keep", "department": "New Dept"},
+    )
+    assert r.status_code == 302
+
+    user = await _user_row(db_session, u.id)
+    assert user["email"] == "keep@example.org"  # omitted -> untouched
+    assert user["department"] == "New Dept"      # present -> updated
+
+
+async def test_profile_save_still_clears_email_the_user_emptied(client, db_session):
+    """Control for the fix above: an explicit empty email (the field IS
+    present in the POST) is a deliberate clear and must still be written —
+    this is today's behaviour and must not regress."""
+    u = await factories.make_user(db_session, name="Clr", email="clr@example.org")
+    await db_session.flush()
+
+    r = await client.post(
+        "/profile/save", headers=_auth(u.id),
+        data={"name": "Clr", "email": ""},
+    )
+    assert r.status_code == 302
+    assert (await _user_row(db_session, u.id))["email"] is None
+
+
 async def test_onboarding_save_profile_partial_post_does_not_blank_omitted_fields(
     client, db_session
 ):
@@ -987,6 +1021,25 @@ async def test_profile_save_resets_a_previously_failed_synthesis_validated_flag(
             "name": "Keep", "email": "keep@example.org",
             "research_summary": "hand-edited summary", "techniques": "t1",
         },
+    )
+    assert r.status_code == 302
+    assert (await _prof(db_session, u.id))["synthesis_validated"] is None
+
+
+async def test_onboarding_save_profile_resets_a_previously_failed_synthesis_validated_flag(
+    client, db_session
+):
+    """Mirrors test_profile_save_resets_a_previously_failed_synthesis_validated_flag
+    for /onboarding/save-profile — same stored_is_worth_keeping gate
+    (profile_pipeline.py:389, `is not False`)."""
+    u = await factories.make_user(db_session, email="ob-reset@example.org")
+    await factories.make_profile(db_session, user=u, synthesis_validated=False)
+    await db_session.flush()
+
+    r = await client.post(
+        "/onboarding/save-profile",
+        headers=_auth(u.id),
+        data={"email": "ob-reset@example.org", "research_summary": "hand-edited"},
     )
     assert r.status_code == 302
     assert (await _prof(db_session, u.id))["synthesis_validated"] is None
