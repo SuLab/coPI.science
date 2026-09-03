@@ -157,6 +157,12 @@ class Settings(BaseSettings):
     # Email notification scheduling
     notification_check_interval: int = 300  # seconds (5 minutes)
     inbound_poll_interval: int = 60  # seconds
+    # How long an unanswered proposal_review reminder stays outstanding before it is marked
+    # 'expired' (src/models/email_notification.py's status comment already documents this value
+    # as valid; nothing wrote it until #21 V4-3/V4-4a). Chosen to match FREQUENCY_INTERVALS'
+    # "biweekly" cadence — long enough that a PI on any frequency has had at least one more
+    # regularly-scheduled nudge before being written off.
+    email_notification_expiry_days: int = 14
 
     # Slack bot tokens — one per agent
     slack_bot_token_su: str = ""

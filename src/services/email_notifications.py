@@ -259,10 +259,27 @@ async def _process_user_notifications(user: User, db: AsyncSession) -> bool:
             EmailNotification.status == "sent",
         )
     )
-    if outstanding.scalar_one_or_none():
-        # There's already an unanswered email — check engagement and maybe downgrade
-        await _check_engagement_and_downgrade(user, tracker, db)
-        return False
+    outstanding_notification = outstanding.scalar_one_or_none()
+    if outstanding_notification:
+        settings = get_settings()
+        age = datetime.now(UTC) - outstanding_notification.sent_at
+        if age < timedelta(days=settings.email_notification_expiry_days):
+            # There's already an unanswered email, still within the reply window — check
+            # engagement and maybe downgrade, but don't pile on a second reminder.
+            await _check_engagement_and_downgrade(user, tracker, db)
+            return False
+        # V4-3/V4-4a: the PI never answered within the reply window. Retire the row (it was
+        # immortal before — 'expired' was declared on the model but nothing ever wrote it) and
+        # fall through: the slot is free again, so a new reminder below can go out and continue
+        # the missed-email tally (the pre-existing increment on a successful send, below) instead
+        # of being stuck here forever after the very first miss. The re-send below reconciles
+        # THIS SAME row rather than inserting a new one (Task 21.11's upsert) — a plain second
+        # INSERT would collide with uq_email_notification_user_thread_category.
+        outstanding_notification.status = "expired"
+        logger.info(
+            "Expired unanswered proposal_review notification %s for user %s",
+            outstanding_notification.id, user.id,
+        )
 
     # Get unreviewed proposals
     proposals = await _get_unreviewed_proposals_for_user(user, db)
