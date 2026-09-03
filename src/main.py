@@ -26,6 +26,9 @@ class AgentBadgeMiddleware(BaseHTTPMiddleware):
     """Inject unreviewed proposal count into request.state for nav badge."""
 
     async def dispatch(self, request: Request, call_next):
+        path = request.url.path
+        if path == "/api/health" or path.startswith("/static/"):
+            return await call_next(request)
         request.state.posthog_api_key = get_settings().posthog_api_key
         request.state.agent_badge_count = 0
         user_id_str = request.session.get("user_id") if "session" in request.scope else None
