@@ -400,7 +400,17 @@ class PIHandler:
         client = self.slack_clients.get(agent_id)
         slack_ts = None
         if client and client.is_connected:
-            result = client.send_dm(pi_slack_id, text)
+            # slack_sdk re-raises non-HTTP transport failures unchanged
+            # (_call_with_retry only catches SlackApiError) — this is the
+            # real unguarded raise on the _poll_inbound_from_db ->
+            # handle_channel_tag -> _send_dm chain (COR-10(3)). The DB record
+            # below still gets written on failure, so the DM survives as a
+            # DB-only row exactly like the Slack-off path.
+            try:
+                result = client.send_dm(pi_slack_id, text)
+            except Exception as exc:
+                logger.error("[%s] Failed to send PI DM via Slack: %s", agent_id, exc)
+                result = None
             if isinstance(result, dict):
                 slack_ts = result.get("ts")
         else:

@@ -1971,3 +1971,75 @@ class TestPollPiDmsGuardsPerAgent:
         await engine._poll_pi_dms()  # must not raise
 
         assert working_client.polled, "the second agent's DMs were never polled"
+
+
+# ---------------------------------------------------------------
+# _poll_inbound_from_db handler guard (COR-10(3))
+# ---------------------------------------------------------------
+
+class TestPollInboundFromDbGuardsTheHandler:
+    """A raise inside _handle_pi_inbound_entry (e.g. handle_channel_tag's
+    Slack send failing) must not crash _poll_inbound_from_db — the row is
+    still appended to the log (conversation content is never lost) but the
+    PI-specific side effects for that one row are logged and skipped. See
+    COR-10(3)."""
+
+    @pytest.mark.asyncio
+    async def test_a_raising_handler_does_not_stop_the_poll(self, monkeypatch):
+        from unittest.mock import AsyncMock
+
+        from src.agent.agent import Agent
+
+        agent = Agent("su", "SuBot", "Andrew Su")
+        engine = SimulationEngine(agents=[agent], slack_clients={})
+        engine._handle_pi_inbound_entry = AsyncMock(side_effect=ConnectionError("boom"))
+
+        class _Row:
+            created_at = None
+            message_ts = "1.0"
+            channel_name = "general"
+            agent_id = None
+            sender_name = "Some PI"
+            content = "hello"
+            thread_ts = None
+            posted_at = 1.0
+            is_bot = False
+            visibility = "public"
+
+        # Drive the per-row loop directly rather than mocking the DB query —
+        # this is the exact segment the item targets and needs no session.
+        # `_pi_inbox_cursor` keeps its default (EPOCH_UTC, a datetime —
+        # simulation.py:412); it is subtracted from a timedelta when building
+        # the WHERE clause, so overriding it with a float raises a TypeError
+        # that the surrounding try/except would swallow before this test's
+        # scenario is even reached.
+        rows = [_Row()]
+
+        # Monkeypatch the DB-fetch half so this stays a pure unit test; the
+        # per-row processing loop below it is real, unmodified code.
+        class _FakeDB:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+            async def execute(self, *a, **kw):
+                class _R:
+                    def scalars(self_inner):
+                        return self_inner
+
+                    def all(self_inner):
+                        return rows
+
+                return _R()
+
+        engine.session_factory = lambda: _FakeDB()
+        engine.simulation_run_id = "run-1"
+
+        await engine._poll_inbound_from_db()  # must not raise
+
+        assert engine.message_log.get_entry("1.0") is not None, (
+            "the row's content must still be appended even though its "
+            "PI-specific side effects failed"
+        )

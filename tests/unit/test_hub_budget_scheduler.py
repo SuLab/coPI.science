@@ -636,6 +636,33 @@ class TestPIHandlerAccounting:
         assert eng._within_rate_limit(agent, time.time()) is False
 
 
+class TestSendDmGuardsTheSlackCall:
+    """A transport error sending a PI DM via Slack must not raise out of
+    _send_dm — slack_sdk re-raises non-HTTP transport failures unchanged
+    (_call_with_retry only catches SlackApiError), and this is the real
+    unguarded raise on the _poll_inbound_from_db -> handle_channel_tag ->
+    _send_dm chain. See COR-10(3)."""
+
+    async def test_a_transport_error_does_not_stop_the_dm(self):
+        from src.agent import pi_handler as ph
+
+        class _RaisingClient:
+            is_connected = True
+
+            def send_dm(self, user_id, text):
+                raise ConnectionError("simulated transport failure")
+
+        agent = Agent(agent_id="su", bot_name="SuBot", pi_name="Andrew Su")
+        handler = ph.PIHandler(
+            agents={"su": agent},
+            slack_clients={"su": _RaisingClient()},
+            pi_slack_id_to_agent_ids={"U1": ["su"]},
+            message_log=MessageLog(),
+        )
+
+        await handler._send_dm("su", "U1", "hello")  # must not raise
+
+
 class TestRateSettingGuards:
     """F4. `roles.py` rejects a non-positive per-role override; the global
     settings had no such guard. `llm_calls_per_load_per_window=0` makes

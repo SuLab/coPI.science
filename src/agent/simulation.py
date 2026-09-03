@@ -3074,7 +3074,20 @@ class SimulationEngine:
                 logger.info("External bot message in #%s: %.60s", entry.channel, entry.content[:60])
             else:
                 logger.info("PI (web) message in #%s: %.60s", entry.channel, entry.content[:60])
-                await self._handle_pi_inbound_entry(entry)
+                try:
+                    await self._handle_pi_inbound_entry(entry)
+                except Exception as exc:
+                    # The row's content is already in the log above and stays
+                    # there — dropping it would make every future Phase
+                    # 2/3/4/5 scan blind to a message that really exists. What
+                    # is lost here is only this row's PI-specific side effects
+                    # (proposal-review clearing, reopen, pi_context, @bot tag
+                    # routing) — logged so it's visible, not silently eaten.
+                    # See COR-10(3).
+                    logger.error(
+                        "[%s] Failed to apply PI inbound side effects for %s: %s",
+                        entry.channel, entry.thread_ts or entry.ts, exc,
+                    )
 
     async def _handle_pi_inbound_entry(self, entry: LogEntry) -> None:
         """Apply PI-message side effects, derived from the thread (no Slack map).
