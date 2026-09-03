@@ -220,6 +220,100 @@ async def test_help_emails_are_capped_per_notification(
     assert review.rating == 1
 
 
+# --- 2b. Commit before the confirmation send (COR-19.6) ------------------------
+
+
+async def test_review_confirmation_failure_does_not_roll_back_the_already_committed_review(
+    engine, monkeypatch, sent_emails,
+):
+    """COR-19.6: db.commit() must happen before the SES confirmation send inside
+    process_inbound_email, so a send failure (which propagates to poll_inbound_emails'
+    per-object except — it does not delete the S3 object, and retries) can't also roll
+    back a review that already succeeded. Needs a REAL committing session (not the
+    rollback-on-teardown db_session fixture): the defect only shows up across the
+    poller's async-with session boundary, which the shared db_session fixture papers
+    over (attribute mutations are visible in-session whether or not a real commit ran).
+    """
+    from sqlalchemy import select, text
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    token = "commitfirst" + "f" * 40
+
+    async def _boom(*a, **k):
+        raise RuntimeError("SES throttled")
+
+    monkeypatch.setattr(inbound, "_send_review_confirmation", _boom)
+    _classifies_as(monkeypatch, {"category": "review", "rating": 3})
+
+    async with factory() as db:
+        recipient, agent, td, notification = await _world(
+            db, recipient_email="pi.commit2@scripps.edu", token=token
+        )
+        await db.commit()
+        notif_id, td_id, agent_id, recipient_id, owner_id, td_run_id = (
+            notification.id, td.id, agent.id, recipient.id, agent.user_id,
+            td.simulation_run_id,
+        )
+
+    try:
+        # Mirrors exactly what poll_inbound_emails does: one committing session,
+        # process_inbound_email raising past its own internal commit.
+        with pytest.raises(RuntimeError):
+            async with factory() as db:
+                await process_inbound_email(
+                    _raw_reply(token, "pi.commit2@scripps.edu", "3 sounds great"), db,
+                )
+                await db.commit()  # mirrors poll_inbound_emails's own commit call
+
+        # A FRESH session/connection must see the review as durably committed — proving
+        # process_inbound_email's own commit landed before the send that then failed,
+        # not merely flushed-and-later-lost when the session above closed.
+        async with factory() as verify_db:
+            notif = await verify_db.get(EmailNotification, notif_id)
+            assert notif.status == "responded", (
+                "the review's own commit must precede the confirmation send, so a send "
+                "failure does not roll back work that already succeeded"
+            )
+            reviews = (await verify_db.execute(
+                select(ProposalReview).where(ProposalReview.thread_decision_id == td_id)
+            )).scalars().all()
+            assert len(reviews) == 1 and reviews[0].rating == 3
+    finally:
+        async with factory() as cleanup_db:
+            await cleanup_db.execute(
+                text("DELETE FROM proposal_reviews WHERE thread_decision_id = :t"), {"t": td_id}
+            )
+            await cleanup_db.execute(
+                text("DELETE FROM email_notifications WHERE id = :i"), {"i": notif_id}
+            )
+            await cleanup_db.execute(text("DELETE FROM thread_decisions WHERE id = :t"), {"t": td_id})
+            await cleanup_db.execute(text("DELETE FROM agents WHERE id = :a"), {"a": agent_id})
+            await cleanup_db.execute(
+                text("DELETE FROM users WHERE id IN (:r, :o)"), {"r": recipient_id, "o": owner_id}
+            )
+            # _world() (via factories.make_thread_decision) creates a SimulationRun when no run
+            # is passed — thread_decisions.simulation_run_id is CASCADE only in the OTHER
+            # direction, so without this delete the run survives every run of this test,
+            # permanently, in the session-scoped test database. get_latest_run_id
+            # (src/services/pi_inbox.py:26-30) and _latest_simulation_run_id
+            # (src/services/private_channels.py:200-215) both resolve "the latest run" by
+            # `ORDER BY started_at DESC LIMIT 1`, so a leaked row is exactly the shape that
+            # makes another suite flaky.
+            await cleanup_db.execute(
+                text("DELETE FROM simulation_runs WHERE id = :r"), {"r": td_run_id}
+            )
+            await cleanup_db.commit()
+
+        # Leak guard: if a future change to _world() starts sharing a run across tests (or
+        # this cleanup is ever trimmed), this catches the leak here instead of it silently
+        # reappearing as flakiness in an unrelated suite.
+        async with factory() as check_db:
+            assert await check_db.scalar(
+                text("SELECT count(*) FROM simulation_runs WHERE id = :r"), {"r": td_run_id}
+            ) == 0, "this test committed a simulation_runs row it did not clean up"
+
+
 # --- 3. Confirmations do not pretend to be reply-able --------------------------
 
 
