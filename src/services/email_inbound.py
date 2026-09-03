@@ -366,7 +366,7 @@ async def process_inbound_email(raw_email: bytes, db: AsyncSession) -> None:
                 db=db,
             )
             await record_engagement(user.id, db)
-            await mark_notification_responded(user.id, td.id, "review", db)
+            await mark_notification_responded(notification.agent_registry_id, td.id, "review", db)
             # Commit BEFORE the SES confirmation send (COR-19.6): a send failure must not
             # roll back a review that already succeeded. A retry after this point takes the
             # "already responded" early return above (:284-286) and does nothing — the PI
@@ -386,7 +386,7 @@ async def process_inbound_email(raw_email: bytes, db: AsyncSession) -> None:
             db=db,
         )
         await record_engagement(user.id, db)
-        await mark_notification_responded(user.id, td.id, "instruction", db)
+        await mark_notification_responded(notification.agent_registry_id, td.id, "instruction", db)
         # Commit before the final confirmation send (COR-19.6), same reasoning as the
         # review branch above. NOTE — residual, out of scope for this task (see the
         # Design decision note above): _handle_instruction's OWN internal side effects

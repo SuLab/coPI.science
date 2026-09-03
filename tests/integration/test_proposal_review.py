@@ -56,6 +56,7 @@ from src.agent.state import ThreadState
 from src.config import get_settings
 from src.models import (
     AgentChannel,
+    AgentDelegate,
     AgentMessage,
     AgentRegistry,
     EmailEngagementTracker,
@@ -729,6 +730,46 @@ async def test_reviewing_on_the_web_retires_the_outstanding_email_notification(
     )).scalar_one_or_none()
     if tracker is not None:
         assert tracker.consecutive_missed == 0
+
+
+async def test_a_delegates_review_also_retires_the_pis_own_notification(
+    client, db_session, lab, proposal,
+):
+    """V4-4b: mark_notification_responded is scoped to agent_registry_id, not the
+    responding user, so a delegate's review also retires the PI's own outstanding
+    reminder about the same agent's proposal. Without this the PI's row stayed 'sent'
+    forever, with no way to clear it themselves — a second /review hits 'Already
+    reviewed' before mark_notification_responded ever runs (agent_page.py's
+    existing-review check matches on thread_decision_id + agent_id, not on who is
+    asking).
+    """
+    delegate = await factories.make_user(
+        db_session, name="Deledda Delegate", email="delegate@lab.test"
+    )
+    db_session.add(AgentDelegate(agent_registry_id=lab.reg_a_id, user_id=delegate.id))
+
+    pi_notification = EmailNotification(
+        user_id=lab.pi_a_id, thread_decision_id=proposal.id,
+        agent_registry_id=lab.reg_a_id, reply_token=f"tok-{uuid.uuid4().hex}",
+        category="proposal_review", status="sent",
+    )
+    db_session.add(pi_notification)
+    await db_session.flush()
+    pi_notification_id = pi_notification.id
+
+    r = await client.post(
+        f"/agent/alpha/proposals/{proposal.id}/review",
+        data={"rating": "3", "comment": ""}, headers=_auth(delegate.id),
+    )
+    assert r.status_code == 302
+
+    db_session.expire_all()
+    notif = await db_session.get(EmailNotification, pi_notification_id)
+    assert notif.status == "responded", (
+        "the delegate's review did not retire the PI's own outstanding notification "
+        "for this proposal — the PI would be nagged forever, with no self-service way "
+        "to clear it"
+    )
 
 
 # ---------------------------------------------------------------------------

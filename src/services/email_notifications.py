@@ -648,16 +648,22 @@ async def record_engagement(user_id, db: AsyncSession) -> None:
 
 
 async def mark_notification_responded(
-    user_id, thread_decision_id, response_type: str, db: AsyncSession
+    agent_registry_id, thread_decision_id, response_type: str, db: AsyncSession
 ) -> None:
-    """Mark outstanding email notifications for this user+proposal as responded.
+    """Mark outstanding email notifications for this AGENT's proposal as responded.
 
-    Clears any category (proposal_review reminder and/or new_proposal alert) so a
-    single web review retires every outstanding email about that proposal.
+    Scoped to agent_registry_id, not the responding user (V4-4b): a ProposalReview is
+    unique per (thread_decision_id, agent_id), not per responder, so ANY authorized
+    response — the owning PI's or a delegate's — retires every recipient's outstanding
+    reminder about this agent's copy of the decision. Without this, a delegate's review
+    left the PI's own notification 'sent' forever, since only the responder's row was
+    ever touched. Scoped to agent_registry_id rather than thread_decision_id alone
+    because a proposal has up to two independent per-agent decisions (agent_a and
+    agent_b) and must not cross-retire the other agent's notifications.
     """
     result = await db.execute(
         select(EmailNotification).where(
-            EmailNotification.user_id == user_id,
+            EmailNotification.agent_registry_id == agent_registry_id,
             EmailNotification.thread_decision_id == thread_decision_id,
             EmailNotification.status == "sent",
         )

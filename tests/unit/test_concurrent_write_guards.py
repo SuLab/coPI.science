@@ -27,6 +27,12 @@ class _FakeResult:
     def scalar_one_or_none(self):
         return self._value
 
+    def scalars(self):
+        return self
+
+    def all(self):
+        return [] if self._value is None else [self._value]
+
 
 class _FakeRequest:
     """Just enough of a Starlette Request for client_ip() / the rate limiter."""
@@ -124,6 +130,8 @@ class _ReviewRaceSession:
         self._calls += 1
         if self._calls == self._raise_at:
             raise self._raise_exc
+        if not self._select_results:
+            return _FakeResult(None)  # post-guard cleanup selects (V4-4b's except arm)
         return _FakeResult(self._select_results.pop(0))
 
     def add(self, obj):
@@ -148,7 +156,10 @@ async def test_review_proposal_survives_a_lost_race_via_autoflush():
     pattern) would not catch it; the guard must span from db.add through commit."""
     pi_id = uuid.uuid4()
     td_id = uuid.uuid4()
-    agent = types.SimpleNamespace(agent_id="alpha", user_id=pi_id, status="active")
+    agent_registry_id = uuid.uuid4()
+    agent = types.SimpleNamespace(
+        id=agent_registry_id, agent_id="alpha", user_id=pi_id, status="active"
+    )
     td = types.SimpleNamespace(id=td_id, agent_a="alpha", agent_b="beta")
     current_user = types.SimpleNamespace(id=pi_id, name="PI Alpha")
 

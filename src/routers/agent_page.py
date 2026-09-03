@@ -526,17 +526,35 @@ async def review_proposal(
         )
     )
     if existing.scalar_one_or_none():
+        # A delegate (or the PI) may have already reviewed. Retire the current user's
+        # own outstanding notification about this proposal before rejecting --
+        # otherwise whoever loses this race has no other web path to clear their
+        # notification (V4-4b).
+        from src.services.email_notifications import mark_notification_responded, record_engagement
+        await record_engagement(current_user.id, db)
+        await mark_notification_responded(agent.id, thread_decision_id, "review", db)
+        await db.commit()
         raise HTTPException(status_code=400, detail="Already reviewed")
 
-    review = ProposalReview(
-        thread_decision_id=thread_decision_id,
-        agent_id=agent.agent_id,
-        user_id=agent.user_id,  # Always the PI
-        delegate_user_id=current_user.id if not is_owner else None,
-        reviewed_by_user_id=current_user.id,
-        rating=rating,
-        comment=comment.strip() or None,
-        submitted_via="web",
+    # current_user.id / agent.id captured BEFORE the try (V4-4b, Task 21.13): the
+    # loser's own db.add()/flush() failure expires every attribute of every object
+    # this session is tracking, INCLUDING current_user's and agent's primary keys --
+    # reproduced directly against a real Postgres fixture: bare current_user.id /
+    # agent.id in the except arm below, even AFTER its own db.rollback(), raises
+    # sqlalchemy.exc.MissingGreenlet on this async session (same class of bug as Task
+    # 21.2/21.10's rollback fixes; there is no implicit re-fetch on an AsyncSession).
+    # Names avoid colliding with the `agent_id` path parameter (the string slug, e.g.
+    # "alpha") already in scope.
+    current_user_id = current_user.id
+    agent_registry_id = agent.id
+
+    # Import hoisted ABOVE the try (V4-4b, Task 21.13): the except arm below also
+    # needs record_engagement/mark_notification_responded to retire the race LOSER's
+    # own notification, and a local import inside the try body is not in scope in the
+    # except.
+    from src.services.email_notifications import (
+        mark_notification_responded,
+        record_engagement,
     )
 
     # V5: two concurrent first-time reviews for the same (thread_decision, agent)
@@ -547,19 +565,32 @@ async def review_proposal(
     # IntegrityError surfaces there. The guard therefore has to span from db.add
     # through commit, not just wrap commit() the way the vote endpoint does.
     try:
+        review = ProposalReview(
+            thread_decision_id=thread_decision_id,
+            agent_id=agent.agent_id,
+            user_id=agent.user_id,  # Always the PI
+            delegate_user_id=current_user_id if not is_owner else None,
+            reviewed_by_user_id=current_user_id,
+            rating=rating,
+            comment=comment.strip() or None,
+            submitted_via="web",
+        )
         db.add(review)
 
         # Record engagement and mark any outstanding email notification as responded
-        from src.services.email_notifications import (
-            mark_notification_responded,
-            record_engagement,
-        )
-        await record_engagement(current_user.id, db)
-        await mark_notification_responded(current_user.id, thread_decision_id, "review", db)
+        await record_engagement(current_user_id, db)
+        await mark_notification_responded(agent_registry_id, thread_decision_id, "review", db)
 
         await db.commit()
     except IntegrityError:
         await db.rollback()
+        # Someone else (the PI or another delegate) won the race. Their review is the
+        # decision for this agent, so still retire THIS responder's outstanding
+        # notification (V4-4b) before bouncing them -- the rollback above threw away
+        # the retire that ran inside the try.
+        await record_engagement(current_user_id, db)
+        await mark_notification_responded(agent_registry_id, thread_decision_id, "review", db)
+        await db.commit()
         raise HTTPException(status_code=400, detail="Already reviewed") from None
 
     return RedirectResponse(url=f"/agent/{agent_id}/dashboard", status_code=302)
@@ -641,6 +672,12 @@ async def reopen_proposal(
             "(existing review id=%s, refined_in_channel=%s)",
             td.thread_id, agent.agent_id, already_reviewed.id, td.refined_in_channel,
         )
+        # Same reasoning as review_proposal's "Already reviewed" branch (V4-4b):
+        # retire the current user's own outstanding notification before bouncing them.
+        from src.services.email_notifications import mark_notification_responded, record_engagement
+        await record_engagement(current_user.id, db)
+        await mark_notification_responded(agent.id, thread_decision_id, "instruction", db)
+        await db.commit()
         return RedirectResponse(url=f"/agent/{agent_id}/dashboard", status_code=302)
 
     settings = get_settings()
@@ -761,7 +798,7 @@ async def reopen_proposal(
     # Record engagement and mark any outstanding email notification as responded
     from src.services.email_notifications import mark_notification_responded, record_engagement
     await record_engagement(current_user.id, db)
-    await mark_notification_responded(current_user.id, thread_decision_id, "instruction", db)
+    await mark_notification_responded(agent.id, thread_decision_id, "instruction", db)
 
     await db.commit()
 
