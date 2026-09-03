@@ -9,6 +9,8 @@ bot that provisions cleanly, connects cleanly, and then fails one specific API c
 runtime — and fixing it needs a manifest change *and* a manual reinstall of every bot.
 """
 
+import inspect
+import threading
 import time
 
 import httpx
@@ -16,18 +18,159 @@ import pytest
 from sqlalchemy import select
 
 from src.models import AppSetting
+from src.services import slack_provisioning
 from src.services.admin_provisioning import _config_token
-from src.services.slack_provisioning import BOT_SCOPES, create_app, exchange_code
-
-pytestmark = pytest.mark.integration
+from src.services.slack_provisioning import (
+    BOT_SCOPES,
+    create_app,
+    create_app_async,
+    exchange_code,
+)
 
 
 class _Resp:
-    def __init__(self, payload):
+    def __init__(self, payload, headers=None):
         self._payload = payload
+        self.headers = headers or {}
 
     def json(self):
         return self._payload
+
+
+# --- issue #24 C2: off the event loop, capped, no wasted final sleep ------------------
+
+
+async def test_create_app_async_runs_off_the_event_loop(monkeypatch):
+    """The sync retry loop (including its internal time.sleep) must run on a worker
+    thread, not the loop's thread -- a single rate-limited manifest create would
+    otherwise freeze every other request for the sleep's duration."""
+    loop_thread = threading.get_ident()
+    seen: dict[str, int] = {}
+
+    def _post(url, **kw):
+        seen["thread"] = threading.get_ident()
+        return _Resp({"ok": True, "app_id": "A1",
+                      "credentials": {"client_id": "c", "client_secret": "s"},
+                      "oauth_authorize_url": "u"})
+
+    monkeypatch.setattr(httpx, "post", _post)
+    out = await create_app_async("t", "su", "SuBot", "PI", "https://x/cb")
+
+    assert out["app_id"] == "A1"
+    assert seen["thread"] != loop_thread, (
+        "create_app ran on the event loop's own thread -- a rate-limited manifest "
+        "create would freeze every other request in the process"
+    )
+
+
+def test_a_ratelimited_manifest_create_caps_retry_after(monkeypatch):
+    """Slack can ask for far more than a minute (measured up to 4500s across five
+    retries) -- capping bounds how long a single admin click can tie up a thread."""
+    slept: list[float] = []
+    monkeypatch.setattr(time, "sleep", lambda d: slept.append(d))
+    calls = []
+
+    def _post(url, **kw):
+        calls.append(url)
+        if len(calls) == 1:
+            return _Resp({"ok": False, "error": "ratelimited"},
+                        headers={"Retry-After": "900"})
+        return _Resp({"ok": True, "app_id": "A1",
+                      "credentials": {"client_id": "c", "client_secret": "s"},
+                      "oauth_authorize_url": "u"})
+
+    monkeypatch.setattr(httpx, "post", _post)
+    assert create_app("t", "su", "SuBot", "PI", "https://x/cb")["app_id"] == "A1"
+    assert slept == [slack_provisioning._MAX_MANIFEST_RETRY_AFTER], (
+        f"slept {slept} instead of capping at {slack_provisioning._MAX_MANIFEST_RETRY_AFTER}s"
+    )
+
+
+def test_the_final_retry_does_not_sleep(monkeypatch):
+    """The old code slept once more, uselessly, right before giving up and raising --
+    max_rate_limit_retries=1 makes every ratelimited response the final one, so any
+    sleep here is the defect this pins."""
+    slept: list[float] = []
+    monkeypatch.setattr(time, "sleep", lambda d: slept.append(d))
+    monkeypatch.setattr(
+        httpx, "post",
+        lambda url, **kw: _Resp({"ok": False, "error": "ratelimited", "retry_after": 5}),
+    )
+
+    with pytest.raises(RuntimeError, match="still rate-limited after 1 retries"):
+        create_app("t", "su", "SuBot", "PI", "https://x/cb", max_rate_limit_retries=1)
+
+    assert slept == [], f"slept {slept} on the final iteration before raising"
+
+
+def test_every_blocking_entry_point_has_an_async_twin():
+    """C2-10: a future call site must not be able to pick the blocking variant by accident.
+    Mirrors tests/unit/test_slack_web.py::test_every_sync_entry_point_has_an_async_wrapper.
+    slack_provisioning has no __all__, so this asserts on coroutine-ness instead of a name list."""
+    for name in ("lookup_team_id", "rotate_config_token", "create_app", "exchange_code"):
+        twin = getattr(slack_provisioning, f"{name}_async", None)
+        assert twin is not None, f"missing {name}_async"
+        assert inspect.iscoroutinefunction(twin), f"{name}_async is not a coroutine function"
+
+
+async def test_exchange_code_async_runs_off_the_event_loop(monkeypatch):
+    """The three single-shot twins (lookup_team_id_async, rotate_config_token_async,
+    exchange_code_async) need the same thread-identity proof as create_app_async: a twin that
+    dropped asyncio.to_thread would be caught by nothing else -- Task 24.4's tests monkeypatch
+    these out entirely, so they never observe which thread the call actually ran on."""
+    loop_thread = threading.get_ident()
+    seen: dict[str, int] = {}
+
+    def _post(url, **kw):
+        seen["thread"] = threading.get_ident()
+        return _Resp({"ok": True, "access_token": "xoxb-good"})
+
+    monkeypatch.setattr(httpx, "post", _post)
+    assert await slack_provisioning.exchange_code_async(
+        "cid", "csec", "code", "https://x/cb"
+    ) == "xoxb-good"
+    assert seen["thread"] != loop_thread, (
+        "exchange_code ran on the event loop's own thread"
+    )
+
+
+async def test_lookup_team_id_async_runs_off_the_event_loop(monkeypatch):
+    """Same proof as above for lookup_team_id_async -- the second of the three single-shot
+    twins with no other test coverage. lookup_team_id calls auth.test via httpx.post (not
+    .get), so this patches the same seam create_app_async's test does."""
+    loop_thread = threading.get_ident()
+    seen: dict[str, int] = {}
+
+    def _post(url, **kw):
+        seen["thread"] = threading.get_ident()
+        return _Resp({"ok": True, "team_id": "T123"})
+
+    monkeypatch.setattr(httpx, "post", _post)
+    assert await slack_provisioning.lookup_team_id_async("xoxb-t") == "T123"
+    assert seen["thread"] != loop_thread, (
+        "lookup_team_id ran on the event loop's own thread"
+    )
+
+
+async def test_rotate_config_token_async_runs_off_the_event_loop(monkeypatch):
+    """Same proof as above for rotate_config_token_async -- the third of the three single-shot
+    twins with no other test coverage."""
+    loop_thread = threading.get_ident()
+    seen: dict[str, int] = {}
+
+    def _post(url, **kw):
+        seen["thread"] = threading.get_ident()
+        return _Resp({
+            "ok": True, "token": "xoxe.xoxp-new", "refresh_token": "xoxe-1-new",
+            "exp": 43200,
+        })
+
+    monkeypatch.setattr(httpx, "post", _post)
+    got = await slack_provisioning.rotate_config_token_async("xoxe-1-old")
+    assert got == ("xoxe.xoxp-new", "xoxe-1-new", 43200)
+    assert seen["thread"] != loop_thread, (
+        "rotate_config_token ran on the event loop's own thread"
+    )
 
 
 # --- the manifest -------------------------------------------------------------------
@@ -172,6 +315,7 @@ def test_exchange_code_surfaces_a_slack_error(monkeypatch):
 # --- config-token rotation --------------------------------------------------------
 
 
+@pytest.mark.integration
 async def test_rotation_persists_the_whole_triple(db_session, monkeypatch):
     """SEC-10. The refresh token just spent is dead; if only some of the three KV rows
     land, app-config access is lost with no way back to the old pair."""
@@ -190,6 +334,7 @@ async def test_rotation_persists_the_whole_triple(db_session, monkeypatch):
     assert int(rows["slack_config_token_exp"]) > time.time()
 
 
+@pytest.mark.integration
 async def test_a_cached_token_is_reused_and_does_not_rotate(db_session, monkeypatch):
     """Control for the test above, and the property that makes provisioning usable at
     all: rotation must be RARE. A _config_token that rotated on every call would satisfy
@@ -210,6 +355,7 @@ async def test_a_cached_token_is_reused_and_does_not_rotate(db_session, monkeypa
     assert len(calls) == 1, f"rotated {len(calls)} times across two calls"
 
 
+@pytest.mark.integration
 async def test_an_expiring_token_is_rotated_before_it_dies(db_session, monkeypatch):
     """The cache must not hand out a token that expires mid-request."""
     db_session.add(AppSetting(key="slack_config_token", value="xoxe.xoxp-OLD"))
@@ -225,6 +371,7 @@ async def test_an_expiring_token_is_rotated_before_it_dies(db_session, monkeypat
     assert await _config_token(db_session) == "xoxe.xoxp-FRESH"
 
 
+@pytest.mark.integration
 async def test_a_valid_cached_token_is_returned_untouched(db_session, monkeypatch):
     """Control for the expiry test: a token with plenty of life left must NOT rotate."""
     db_session.add(AppSetting(key="slack_config_token", value="xoxe.xoxp-STILLGOOD"))

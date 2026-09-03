@@ -8,16 +8,33 @@ where the resulting ``xoxb-`` token is stored.
 
 Functions here are transport-only (httpx) and raise ``RuntimeError`` on Slack
 API errors; callers handle presentation/logging.
+
+The core is synchronous, matching ``slack_web.py``'s split (``AgentSlackClient``
+uses ``slack_sdk``; this module uses raw ``httpx`` for the manifest/OAuth API,
+which ``slack_sdk`` doesn't cover). **Async callers (the admin routes, via
+``admin_provisioning.py``) MUST use the ``_async`` wrappers at the bottom of
+this module, not the sync functions** — ``create_app``'s retry loop alone can
+block for minutes on a rate-limited response (issue #24 C2).
 """
 
+import asyncio
 import logging
 import time
 
 import httpx
 
+from src.agent.retry_after import parse_retry_after
+
 logger = logging.getLogger(__name__)
 
 SLACK_API = "https://slack.com/api"
+
+# Cap on how long a single apps.manifest.create rate-limit wait may run, even
+# though it now happens on a worker thread (asyncio.to_thread) rather than the
+# event loop — an unbounded Slack-supplied Retry-After (issue #24 C2-3 measured
+# up to 4500s) would otherwise still tie up that thread and the admin's request
+# for an unreasonable time. Mirrors slack_web._MAX_RETRY_AFTER.
+_MAX_MANIFEST_RETRY_AFTER = 30.0
 
 # All scopes the bots actually use — derived from AgentSlackClient + routers/podcast.
 BOT_SCOPES = [
@@ -82,6 +99,7 @@ def create_app(
     redirect_uri: str,
     max_rate_limit_retries: int = 5,
     scopes: list[str] | None = None,
+    retry_after_cap: float = _MAX_MANIFEST_RETRY_AFTER,
 ) -> dict:
     """Create one Slack app via the Manifest API.
 
@@ -140,13 +158,24 @@ def create_app(
                 "client_secret": creds["client_secret"],
                 "oauth_url": data["oauth_authorize_url"],
             }
-        if data.get("error") == "ratelimited":
-            wait = int(data.get("retry_after", 0) or resp.headers.get("Retry-After", 60))
-            logger.warning("apps.manifest.create rate limited — waiting %ds before retry", wait)
-            time.sleep(wait)
-        else:
+        if data.get("error") != "ratelimited":
             detail = data.get("errors") or data.get("error", "unknown")
             raise RuntimeError(f"apps.manifest.create failed: {detail}")
+        # C2: don't sleep on the last attempt -- the old code slept once more,
+        # uselessly, right before giving up and raising below.
+        if attempt == max_rate_limit_retries - 1:
+            break
+        raw_retry_after = data.get("retry_after") or resp.headers.get("Retry-After")
+        wait = parse_retry_after(
+            str(raw_retry_after) if raw_retry_after is not None else None,
+            default=60.0,
+            cap=retry_after_cap,
+        )
+        logger.warning(
+            "apps.manifest.create rate limited — waiting %.0fs before retry (capped at %.0fs)",
+            wait, retry_after_cap,
+        )
+        time.sleep(wait)
     raise RuntimeError(
         f"apps.manifest.create: still rate-limited after {max_rate_limit_retries} retries"
     )
@@ -178,3 +207,53 @@ def exchange_code(
         # and a user-facing ?slack_error= redirect. See SEC-9.
         raise RuntimeError("Unexpected token format from Slack (expected xoxb-...)")
     return token
+
+
+# ---------------------------------------------------------------------------
+# issue #24 C2: every function above is synchronous httpx, and create_app's
+# retry loop alone can now sleep up to max_rate_limit_retries * 30s (capped,
+# see _MAX_MANIFEST_RETRY_AFTER) between rate-limited attempts. Called directly
+# from an `async def` route (admin_provisioning.py), that blocks the whole
+# event loop -- the single uvicorn worker has nothing else to run -- so every
+# other request the process is serving freezes for as long as Slack keeps
+# rate-limiting. asyncio.to_thread moves the whole call (including its
+# internal time.sleep) to a worker thread; mirrors slack_web.py:267-300.
+# ---------------------------------------------------------------------------
+
+
+async def lookup_team_id_async(bot_token: str) -> str | None:
+    """``lookup_team_id`` off the event loop."""
+    return await asyncio.to_thread(lookup_team_id, bot_token)
+
+
+async def rotate_config_token_async(refresh_token: str) -> tuple[str, str, int]:
+    """``rotate_config_token`` off the event loop."""
+    return await asyncio.to_thread(rotate_config_token, refresh_token)
+
+
+async def create_app_async(
+    config_token: str,
+    agent_id: str,
+    bot_name: str,
+    pi_name: str,
+    redirect_uri: str,
+    max_rate_limit_retries: int = 5,
+    scopes: list[str] | None = None,
+) -> dict:
+    """``create_app`` off the event loop, including its internal retry sleeps."""
+    return await asyncio.to_thread(
+        create_app, config_token, agent_id, bot_name, pi_name, redirect_uri,
+        max_rate_limit_retries=max_rate_limit_retries, scopes=scopes,
+    )
+
+
+async def exchange_code_async(
+    client_id: str,
+    client_secret: str,
+    code: str,
+    redirect_uri: str,
+) -> str:
+    """``exchange_code`` off the event loop."""
+    return await asyncio.to_thread(
+        exchange_code, client_id, client_secret, code, redirect_uri
+    )
