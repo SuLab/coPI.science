@@ -11,6 +11,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import delete as sa_delete
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -224,8 +225,18 @@ async def admin_delete_user(
         raise HTTPException(status_code=400, detail="Cannot delete your own account")
 
     name = user.name
-    await db.delete(user)
-    await db.commit()
+    try:
+        await db.delete(user)
+        await db.commit()
+    except IntegrityError as exc:
+        # Defense in depth: 0026 (issue #25 D1) makes the PCM case impossible, but
+        # any OTHER lingering FK reference should surface as a clean 409, not a
+        # raw 500 — see the equivalent pattern in agent_page.py's message-write path.
+        await db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="User could not be deleted due to a database conflict; please retry.",
+        ) from exc
     logger.info("Admin %s deleted user %s (%s)", current_user.name, name, user_id)
     return RedirectResponse(url="/admin/users", status_code=302)
 

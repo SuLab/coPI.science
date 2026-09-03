@@ -24,6 +24,7 @@ from datetime import UTC, datetime
 import pytest
 from itsdangerous import TimestampSigner
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from src.config import get_settings
 from src.models import Job, User
@@ -457,3 +458,17 @@ async def test_impersonating_an_unknown_orcid_creates_an_allowed_user(
     assert "Fetched Newcomer" not in _rendered_names(pending_page.text)
     allowed_page = await client.get("/admin/users?access_filter=allowed", headers=h)
     assert "Fetched Newcomer" in _rendered_names(allowed_page.text)
+
+
+async def test_admin_delete_user_returns_409_on_integrity_error(
+    client, db_session, admin, monkeypatch
+):
+    target = await factories.make_user(db_session)
+
+    async def _boom(*a, **kw):
+        raise IntegrityError("DELETE FROM users", {}, Exception("simulated FK violation"))
+
+    monkeypatch.setattr(db_session, "commit", _boom)
+
+    r = await client.post(f"/admin/users/{target.id}/delete", headers=_auth(admin.id))
+    assert r.status_code == 409

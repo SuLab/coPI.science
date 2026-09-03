@@ -2,10 +2,11 @@
 
 import logging
 
-from fastapi import APIRouter, Depends, Form, Request
+from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.database import get_db
@@ -259,8 +260,15 @@ async def delete_account(
     if confirm.lower() != "delete":
         return RedirectResponse(url="/profile/delete-account?error=1", status_code=302)
 
-    await db.delete(current_user)
-    await db.commit()
+    try:
+        await db.delete(current_user)
+        await db.commit()
+    except IntegrityError as exc:
+        await db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="Account could not be deleted due to a database conflict; please retry.",
+        ) from exc
 
     request.session.clear()
     response = RedirectResponse(url="/login?deleted=1", status_code=302)

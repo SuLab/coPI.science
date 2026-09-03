@@ -31,6 +31,7 @@ from types import SimpleNamespace
 import pytest
 from itsdangerous import TimestampSigner, URLSafeTimedSerializer
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 
 from src.config import get_settings
 from src.models import (
@@ -1069,6 +1070,19 @@ async def test_delete_account_needs_the_confirmation_word(client, db_session):
             select(func.count()).select_from(Publication).where(Publication.user_id == u.id)
         )
     ).scalar_one() == 0
+
+
+async def test_delete_account_returns_409_on_integrity_error(client, db_session, monkeypatch):
+    u = await factories.make_user(db_session)
+    h = _auth(u.id)
+
+    async def _boom(*a, **kw):
+        raise IntegrityError("DELETE FROM users", {}, Exception("simulated FK violation"))
+
+    monkeypatch.setattr(db_session, "commit", _boom)
+
+    r = await client.post("/profile/delete-account", headers=h, data={"confirm": "delete"})
+    assert r.status_code == 409
 
 
 # ---------------------------------------------------------------------------
