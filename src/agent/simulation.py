@@ -1514,6 +1514,13 @@ class SimulationEngine:
                 },
                 on_retry=agent.record_api_call,
             )
+            # build_phase4_prompt already injected this as "authoritative" PI
+            # direction (agent.py:461-467) into the prompt this call just sent
+            # — clear it here, not right after build_phase4_prompt returns, so
+            # a transport/LLM error on THIS call (swallowed by Phase 4's
+            # asyncio.gather(return_exceptions=True) fan-out) does not lose
+            # the guidance having reached no prompt at all. See E7c / m4.
+            thread.pi_context = None
 
             # Extract message from <slack_message> tags, fall back to preamble stripping
             response_text = _extract_slack_message(response_text)

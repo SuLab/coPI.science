@@ -2715,3 +2715,81 @@ class TestHasPiDirectiveClearedOnlyWhenActedOn:
         await engine._run_turn(agent)
 
         assert agent.state.has_pi_directive is False
+
+
+# ---------------------------------------------------------------
+# thread.pi_context must not survive past the one prompt it was
+# injected into — #20 E7c
+# ---------------------------------------------------------------
+
+class TestPiContextClearedAfterInjection:
+    """thread.pi_context must not survive past the one prompt it was injected
+    into — otherwise it is re-injected as 'authoritative' into every future
+    reply on the thread. See E7c."""
+
+    @pytest.mark.asyncio
+    async def test_pi_context_is_cleared_after_the_reply_attempt(self, monkeypatch):
+        from unittest.mock import AsyncMock
+
+        from src.agent.agent import Agent
+        from src.agent.message_log import LogEntry
+        from src.agent.state import ThreadState
+
+        a = Agent("a", "ABot", "A PI")
+        b = Agent("b", "BBot", "B PI")
+        engine = SimulationEngine(agents=[a, b], slack_clients={})
+        engine.message_log.append(LogEntry(
+            ts="1.0", channel="general", sender_agent_id="b", sender_name="BBot",
+            content="root", posted_at=1.0, is_bot=True,
+        ))
+        thread = ThreadState(
+            thread_id="1.0", channel="general", other_agent_id="b",
+            pi_context="please look at X",
+        )
+        # A response with no <slack_message> tags -> _extract_slack_message
+        # yields empty -> the reply is never posted. The clear must still
+        # have happened, since injection (not posting) is what this task
+        # gates on.
+        monkeypatch.setattr(
+            "src.agent.simulation.generate_with_tools",
+            AsyncMock(return_value="no tags here"),
+        )
+
+        await engine._reply_to_thread(a, thread)
+
+        assert thread.pi_context is None
+
+    @pytest.mark.asyncio
+    async def test_pi_context_survives_a_transport_error_on_the_llm_call(self, monkeypatch):
+        # Phase 4 dispatches _reply_to_thread inside
+        # asyncio.gather(*tasks, return_exceptions=True) (:1332) — an error
+        # here is swallowed by the caller. If the clear ran before
+        # generate_with_tools (as an earlier draft of this task had it), the
+        # guidance would be lost having reached no prompt at all. The
+        # corrected placement (right after the call succeeds) must leave
+        # pi_context untouched here, for a later turn to retry. See red-team m4.
+        from unittest.mock import AsyncMock
+
+        from src.agent.agent import Agent
+        from src.agent.message_log import LogEntry
+        from src.agent.state import ThreadState
+
+        a = Agent("a", "ABot", "A PI")
+        b = Agent("b", "BBot", "B PI")
+        engine = SimulationEngine(agents=[a, b], slack_clients={})
+        engine.message_log.append(LogEntry(
+            ts="1.0", channel="general", sender_agent_id="b", sender_name="BBot",
+            content="root", posted_at=1.0, is_bot=True,
+        ))
+        thread = ThreadState(
+            thread_id="1.0", channel="general", other_agent_id="b",
+            pi_context="please look at X",
+        )
+        monkeypatch.setattr(
+            "src.agent.simulation.generate_with_tools",
+            AsyncMock(side_effect=RuntimeError("transport error")),
+        )
+
+        await engine._reply_to_thread(a, thread)
+
+        assert thread.pi_context == "please look at X"
