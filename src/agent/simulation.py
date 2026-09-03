@@ -2346,86 +2346,88 @@ class SimulationEngine:
         # Temporarily replace interesting_posts for prompt building
         original_posts = agent.state.interesting_posts
         agent.state.interesting_posts = available_posts
+        try:
+            # Build prompt — include agent's recent posts for dedup
+            recent_entries = self.message_log.get_agent_top_level_posts(agent.agent_id, limit=10)
+            recent_posts = [
+                {"channel": e.channel, "content_snippet": e.content[:150]}
+                for e in recent_entries
+            ]
 
-        # Build prompt — include agent's recent posts for dedup
-        recent_entries = self.message_log.get_agent_top_level_posts(agent.agent_id, limit=10)
-        recent_posts = [
-            {"channel": e.channel, "content_snippet": e.content[:150]}
-            for e in recent_entries
-        ]
+            # Pre-load cached FOA text for funding posts so Phase 5 has full context
+            foa_contexts: dict[str, str] = {}
+            funding_thread_summaries: dict[str, str] = {}
+            for post in available_posts:
+                if post.foa_number:
+                    foa_text = format_foa_for_prompt(post.foa_number)
+                    if foa_text:
+                        foa_contexts[post.post_id] = foa_text
+                if self.message_log.is_funding_thread(post.post_id):
+                    summary = summarize_funding_thread(
+                        self.message_log, post.post_id, viewer_agent_id=agent.agent_id,
+                    )
+                    if not summary.is_empty():
+                        funding_thread_summaries[post.post_id] = format_funding_thread_summary(summary)
 
-        # Pre-load cached FOA text for funding posts so Phase 5 has full context
-        foa_contexts: dict[str, str] = {}
-        funding_thread_summaries: dict[str, str] = {}
-        for post in available_posts:
-            if post.foa_number:
-                foa_text = format_foa_for_prompt(post.foa_number)
-                if foa_text:
-                    foa_contexts[post.post_id] = foa_text
-            if self.message_log.is_funding_thread(post.post_id):
-                summary = summarize_funding_thread(
-                    self.message_log, post.post_id, viewer_agent_id=agent.agent_id,
-                )
-                if not summary.is_empty():
-                    funding_thread_summaries[post.post_id] = format_funding_thread_summary(summary)
+            # Also pre-load FOAs from active/closed threads for Option B
+            # (starting a new funding collab from a previously seen FOA)
+            thread_foa_contexts: dict[str, str] = {}
+            for ts in agent.state.active_threads.values():
+                if ts.foa_number and ts.foa_number not in thread_foa_contexts:
+                    foa_text = format_foa_for_prompt(ts.foa_number)
+                    if foa_text:
+                        thread_foa_contexts[ts.foa_number] = foa_text
 
-        # Also pre-load FOAs from active/closed threads for Option B
-        # (starting a new funding collab from a previously seen FOA)
-        thread_foa_contexts: dict[str, str] = {}
-        for ts in agent.state.active_threads.values():
-            if ts.foa_number and ts.foa_number not in thread_foa_contexts:
-                foa_text = format_foa_for_prompt(ts.foa_number)
-                if foa_text:
-                    thread_foa_contexts[ts.foa_number] = foa_text
+            # Resolve the visibility context for the prompt. Phase 5 now also drives
+            # collab_private refinement (flat follow-ups). When the agent's only
+            # actionable posts are in a private channel, build the prompt in that
+            # channel's context so the Private Channel Rules — including the
+            # converge-on-a-revised-:memo:-Summary instruction — are injected and the
+            # dedup context is filtered for that visibility. Mixed/empty cases stay
+            # public (the default for new public posts).
+            private_available = [
+                p for p in available_posts
+                if self._channel_visibility.get(p.channel) == VISIBILITY_COLLAB_PRIVATE
+            ]
+            public_available = [
+                p for p in available_posts
+                if self._channel_visibility.get(p.channel) != VISIBILITY_COLLAB_PRIVATE
+            ]
+            private_channel_id = None
+            if private_available and not public_available:
+                current_visibility = VISIBILITY_COLLAB_PRIVATE
+                private_channel_id = self._channel_id_map.get(private_available[0].channel)
+            else:
+                current_visibility = VISIBILITY_PUBLIC
+            prior_threads = self._get_prior_threads_for_agent(
+                agent.agent_id, current_visibility=current_visibility,
+            )
 
-        # Resolve the visibility context for the prompt. Phase 5 now also drives
-        # collab_private refinement (flat follow-ups). When the agent's only
-        # actionable posts are in a private channel, build the prompt in that
-        # channel's context so the Private Channel Rules — including the
-        # converge-on-a-revised-:memo:-Summary instruction — are injected and the
-        # dedup context is filtered for that visibility. Mixed/empty cases stay
-        # public (the default for new public posts).
-        private_available = [
-            p for p in available_posts
-            if self._channel_visibility.get(p.channel) == VISIBILITY_COLLAB_PRIVATE
-        ]
-        public_available = [
-            p for p in available_posts
-            if self._channel_visibility.get(p.channel) != VISIBILITY_COLLAB_PRIVATE
-        ]
-        private_channel_id = None
-        if private_available and not public_available:
-            current_visibility = VISIBILITY_COLLAB_PRIVATE
-            private_channel_id = self._channel_id_map.get(private_available[0].channel)
-        else:
-            current_visibility = VISIBILITY_PUBLIC
-        prior_threads = self._get_prior_threads_for_agent(
-            agent.agent_id, current_visibility=current_visibility,
-        )
+            # funding_only strips the prompt to funding actions. Only apply when
+            # the agent is actually funding-restricted — if any available post is
+            # non-funding (e.g., a private-channel handover that also bypasses
+            # blocking), the LLM needs the regular reply path.
+            has_available_non_funding = any(
+                not self.message_log.is_funding_thread(p.post_id)
+                for p in available_posts
+            )
+            funding_only = blocked_for_regular and not has_available_non_funding
 
-        # funding_only strips the prompt to funding actions. Only apply when
-        # the agent is actually funding-restricted — if any available post is
-        # non-funding (e.g., a private-channel handover that also bypasses
-        # blocking), the LLM needs the regular reply path.
-        has_available_non_funding = any(
-            not self.message_log.is_funding_thread(p.post_id)
-            for p in available_posts
-        )
-        funding_only = blocked_for_regular and not has_available_non_funding
-
-        system_prompt, messages = agent.build_phase5_prompt(
-            recent_posts=recent_posts,
-            foa_contexts=foa_contexts,
-            thread_foa_contexts=thread_foa_contexts,
-            prior_threads=prior_threads,
-            funding_only=funding_only,
-            funding_thread_summaries=funding_thread_summaries,
-            visibility=current_visibility,
-            channel_id=private_channel_id,
-        )
-
-        # Restore
-        agent.state.interesting_posts = original_posts
+            system_prompt, messages = agent.build_phase5_prompt(
+                recent_posts=recent_posts,
+                foa_contexts=foa_contexts,
+                thread_foa_contexts=thread_foa_contexts,
+                prior_threads=prior_threads,
+                funding_only=funding_only,
+                funding_thread_summaries=funding_thread_summaries,
+                visibility=current_visibility,
+                channel_id=private_channel_id,
+            )
+        finally:
+            # Restore unconditionally — a raise anywhere above must not
+            # permanently narrow interesting_posts to this turn's filtered
+            # subset. See E7d.
+            agent.state.interesting_posts = original_posts
 
         # Mid-turn rate gate (E6-1) — see _phase4_reply_threads for the same
         # check and its rationale. Phase 5 runs after Phase 4 in the same

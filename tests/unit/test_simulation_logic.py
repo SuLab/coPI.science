@@ -2793,3 +2793,52 @@ class TestPiContextClearedAfterInjection:
         await engine._reply_to_thread(a, thread)
 
         assert thread.pi_context == "please look at X"
+
+
+# ---------------------------------------------------------------
+# The interesting_posts swap during Phase-5 prompt-building must be
+# restored even if prompt-building raises — #20 E7d
+# ---------------------------------------------------------------
+
+class TestInterestingPostsRestoredOnException:
+    """A raise anywhere between the interesting_posts swap and its restore
+    must not leave the agent permanently narrowed to that turn's filtered
+    subset. See E7d."""
+
+    @pytest.mark.asyncio
+    async def test_a_raise_during_prompt_building_still_restores_the_full_list(self):
+        from src.agent.agent import Agent
+        from src.agent.state import PostRef, ThreadState
+        from src.config import get_settings
+
+        agent = Agent("a", "ABot", "A PI")
+        engine = SimulationEngine(agents=[agent], slack_clients={})
+
+        # Block the agent so a non-priority post is excluded from
+        # available_posts, making the swap a STRICT subset of the original —
+        # otherwise this turn's filtered list can coincidentally equal the
+        # full one and the test would pass for the wrong reason.
+        threshold = get_settings().active_thread_threshold
+        for i in range(threshold):
+            agent.state.active_threads[f"t{i}"] = ThreadState(
+                thread_id=f"t{i}", channel="general", other_agent_id="b", status="active",
+            )
+        orig_ineligible = PostRef(
+            post_id="orig.0", channel="general", sender_agent_id="b",
+            content_snippet="x", posted_at=0.0,
+        )
+        avail_eligible = PostRef(
+            post_id="avail.0", channel="general", sender_agent_id="b",
+            content_snippet="y", posted_at=1.0, pi_priority=True,
+        )
+        agent.state.interesting_posts = [orig_ineligible, avail_eligible]
+
+        def _raise(*a, **kw):
+            raise RuntimeError("boom in prompt building")
+
+        engine._get_prior_threads_for_agent = _raise
+
+        with pytest.raises(RuntimeError):
+            await engine._phase5_new_post(agent)
+
+        assert [p.post_id for p in agent.state.interesting_posts] == ["orig.0", "avail.0"]
