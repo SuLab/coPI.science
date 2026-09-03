@@ -324,12 +324,18 @@ async def run_profile_pipeline(
 
     # Step 8: Validation
     update_progress("step8", "Validating synthesized profile...")
-    validated = _validate_profile(synthesized)
+    try:
+        validated = _validate_profile(synthesized)
+    except Exception as exc:
+        logger.error("Profile validation crashed for %s: %s", user.name, exc)
+        validated = False
 
     if not validated and synthesized:
         # Re-try with stricter prompt (simplified: use same call again)
         logger.warning("Profile validation failed for %s, retrying...", user.name)
         try:
+            # Prompt text intentionally unchanged (no prompt changes in this PR); the
+            # gate below is the lenient _MIN_SUMMARY_WORDS-_MAX_SUMMARY_WORDS range.
             synthesized = await synthesize_profile(
                 context_text + "\n\nIMPORTANT: Ensure research_summary is 150-250 words.",
                 user.name,
@@ -436,8 +442,8 @@ async def run_profile_pipeline(
                 update_progress(
                     "unvalidated",
                     "The generated profile did not meet the quality checks "
-                    "(150-250 word summary, 3+ techniques, 1+ disease area). "
-                    "It was saved as a draft for you to edit.",
+                    f"({_MIN_SUMMARY_WORDS}-{_MAX_SUMMARY_WORDS} word summary, 3+ techniques, "
+                    "1+ disease area). It was saved as a draft for you to edit.",
                 )
             if evidence_pub_count == 0:
                 # Nothing the researcher wrote reached the prompt, so whatever the
@@ -577,6 +583,10 @@ def _dedup_pmids(orcid_works: list[dict[str, Any]]) -> tuple[list[str], set[str]
     return pmids, seen
 
 
+_MIN_SUMMARY_WORDS = 100
+_MAX_SUMMARY_WORDS = 350
+
+
 def _validate_profile(profile: dict[str, Any]) -> bool:
     """
     Validate synthesized profile fields.
@@ -585,20 +595,32 @@ def _validate_profile(profile: dict[str, Any]) -> bool:
     if not profile:
         return False
 
-    research_summary = profile.get("research_summary", "")
-    word_count = len(research_summary.split())
-    if word_count < 100 or word_count > 350:
+    research_summary = profile.get("research_summary")
+    if not isinstance(research_summary, str):
         logger.warning(
-            "Research summary word count %d outside 150-250 range", word_count
+            "research_summary is %s, not a string", type(research_summary).__name__
+        )
+        return False
+    word_count = len(research_summary.split())
+    if word_count < _MIN_SUMMARY_WORDS or word_count > _MAX_SUMMARY_WORDS:
+        logger.warning(
+            "Research summary word count %d outside %d-%d range",
+            word_count, _MIN_SUMMARY_WORDS, _MAX_SUMMARY_WORDS,
         )
         return False
 
     techniques = profile.get("techniques", [])
+    if not isinstance(techniques, list):
+        logger.warning("techniques is %s, not a list", type(techniques).__name__)
+        return False
     if len(techniques) < 3:
         logger.warning("Only %d techniques found (min 3)", len(techniques))
         return False
 
     disease_areas = profile.get("disease_areas", [])
+    if not isinstance(disease_areas, list):
+        logger.warning("disease_areas is %s, not a list", type(disease_areas).__name__)
+        return False
     if not disease_areas:
         logger.warning("No disease areas found")
         return False
