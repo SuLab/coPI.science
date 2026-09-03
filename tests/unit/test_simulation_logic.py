@@ -2355,3 +2355,140 @@ class TestMidTurnRateGate:
         await engine._phase5_new_post(agent)
 
         fake_llm.assert_not_awaited()
+
+
+# ---------------------------------------------------------------
+# A roster re-add restores state from the DB instead of a fresh, empty
+# Agent — E6(2)
+# ---------------------------------------------------------------
+
+class TestRebuildOneAgentState:
+    """A roster re-add previously built a bare Agent() with empty AgentState —
+    the unreviewed-proposal block evaporated, active_threads/cursors/
+    call_times/api_call_count all reset to zero. This restores exactly one
+    agent's state from the DB + message_log, without touching anyone else's
+    (see design note above for why _rebuild_agent_state() itself is unsafe
+    to call mid-simulation). See E6(2)."""
+
+    def _ordered_fake_db(self, responses):
+        class _FakeDB:
+            def __init__(self):
+                self._responses = list(responses)
+            async def __aenter__(self):
+                return self
+            async def __aexit__(self, *exc):
+                return False
+            async def execute(self, *a, **kw):
+                payload = self._responses.pop(0)
+                class _R:
+                    def __init__(self_inner, payload_):
+                        self_inner.payload = payload_
+                    def scalars(self_inner):
+                        class _S:
+                            def all(self_inner2):
+                                return self_inner.payload
+                        return _S()
+                    def all(self_inner):
+                        return self_inner.payload
+                    def scalar(self_inner):
+                        return self_inner.payload
+                    def __iter__(self_inner):
+                        return iter(self_inner.payload)
+                return _R(payload)
+        return _FakeDB
+
+    @pytest.mark.asyncio
+    async def test_restores_proposals_calls_and_the_active_thread(self):
+        import uuid as uuid_mod
+        from datetime import UTC, datetime, timedelta
+
+        from src.agent.agent import Agent
+        from src.agent.message_log import LogEntry
+
+        now = datetime.now(UTC)
+
+        class _TD:
+            def __init__(self, **kw):
+                self.__dict__.update(kw)
+
+        class _LLM:
+            def __init__(self, **kw):
+                self.__dict__.update(kw)
+
+        decision = _TD(
+            id=uuid_mod.uuid4(), thread_id="100.0", channel="general",
+            agent_a="su", agent_b="wiseman", outcome="proposal",
+            summary_text="a shared aim", decided_at=now - timedelta(minutes=5),
+        )
+        # 5 DB reads, in the order _rebuild_one_agent_state issues them (red-team
+        # M3 — this task's original single unscoped/unwindowed LlmCallLog read
+        # is corrected to the same shape _rebuild_agent_state's steps 4/4b use):
+        # ThreadDecision rows, ProposalReview rows (none yet — unreviewed), the
+        # (thread_id, reopened_at) rows for the B6 restoration (none reopened here),
+        # an all-time-scoped-to-this-run COUNT(*) scalar, and a SEPARATE windowed
+        # query — which a real DB would already have filtered to just the
+        # in-window row, so the fake's payload reflects that, not a raw dump
+        # of every row for later Python-side filtering.
+        responses = [
+            [decision],
+            [],
+            [],
+            2,
+            [_LLM(created_at=now - timedelta(seconds=10))],
+        ]
+        FakeDB = self._ordered_fake_db(responses)
+
+        su = Agent("su", "SuBot", "Andrew Su")
+        engine = SimulationEngine(agents=[su], slack_clients={})
+        engine.session_factory = FakeDB
+        engine.simulation_run_id = uuid_mod.uuid4()
+        engine.message_log.append(LogEntry(
+            ts="100.0", channel="general", sender_agent_id="su", sender_name="SuBot",
+            content="root post", posted_at=100.0, is_bot=True,
+        ))
+        engine.message_log.append(LogEntry(
+            ts="200.0", channel="general", sender_agent_id="wiseman", sender_name="WisemanBot",
+            content="a reply", thread_ts="100.0", posted_at=200.0, is_bot=True,
+        ))
+
+        await engine._rebuild_one_agent_state("su")
+
+        assert len(su.state.pending_proposals) == 1
+        assert su.state.pending_proposals[0].thread_id == "100.0"
+        assert su.state.pending_proposals[0].reviewed is False
+        assert su.api_call_count == 2
+        assert len(su.state.call_times) == 1  # only the in-window call
+        assert "100.0" in su.state.active_threads
+        assert su.state.last_seen_cursor == engine.message_log.latest_timestamp == 200.0
+
+    @pytest.mark.asyncio
+    async def test_a_closed_thread_is_not_restored_into_active_threads(self):
+        # In production the startup rebuild puts every decided thread into
+        # _closed_thread_ids (:4166-4186) before a roster re-add can ever
+        # happen — the test above never exercises that guard (its thread
+        # starts with _closed_thread_ids empty, a combination production
+        # cannot reach). See red-team m6.
+        import uuid as uuid_mod
+
+        from src.agent.agent import Agent
+        from src.agent.message_log import LogEntry
+
+        FakeDB = self._ordered_fake_db([[], [], [], 0, []])   # 5 reads: decisions, reviews, reopened, count, window
+
+        su = Agent("su", "SuBot", "Andrew Su")
+        engine = SimulationEngine(agents=[su], slack_clients={})
+        engine.session_factory = FakeDB
+        engine.simulation_run_id = uuid_mod.uuid4()
+        engine._closed_thread_ids.add("300.0")
+        engine.message_log.append(LogEntry(
+            ts="300.0", channel="general", sender_agent_id="su", sender_name="SuBot",
+            content="a decided root", posted_at=300.0, is_bot=True,
+        ))
+        engine.message_log.append(LogEntry(
+            ts="301.0", channel="general", sender_agent_id="wiseman", sender_name="WisemanBot",
+            content="a reply", thread_ts="300.0", posted_at=301.0, is_bot=True,
+        ))
+
+        await engine._rebuild_one_agent_state("su")
+
+        assert "300.0" not in su.state.active_threads

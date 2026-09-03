@@ -4878,6 +4878,183 @@ class SimulationEngine:
                     agent.agent_id, at, pp, unrev, agent.api_call_count,
                 )
 
+    async def _rebuild_one_agent_state(self, agent_id: str) -> None:
+        """Reconstruct ONE agent's state from the DB + message_log.
+
+        Used when a roster re-add builds a fresh ``Agent()`` with empty
+        ``AgentState`` — an inactive->active flip previously discarded
+        pending_proposals (the unreviewed-proposal block evaporated),
+        active_threads, last_seen_cursor (-> 0.0, a full rescan from epoch),
+        and call_times/api_call_count (the rate limiter and legacy cap both
+        silently reset). Deliberately NOT ``_rebuild_agent_state()`` — that
+        method's cursor step sets every agent's last_seen_cursor to the log's
+        current high-water mark, which is only safe once, at startup, before
+        any agent has taken a turn; called mid-simulation it would
+        fast-forward every OTHER already-running agent's cursor too, skipping
+        content they had not scanned yet. Every read and the cursor write
+        here are scoped to `agent_id` alone. See E6(2).
+        """
+        agent = self.agents.get(agent_id)
+        if not agent or not self.session_factory or not self.simulation_run_id:
+            return
+        try:
+            from sqlalchemy import func as sa_func
+            from sqlalchemy import or_ as sa_or
+            from sqlalchemy import select as sa_select
+
+            cutoff = datetime.now(UTC) - timedelta(
+                seconds=get_settings().llm_rate_window_seconds
+            )
+            async with self.session_factory() as db:
+                decisions = (await db.execute(
+                    sa_select(ThreadDecision).where(
+                        ThreadDecision.outcome == "proposal",
+                        sa_or(
+                            ThreadDecision.agent_a == agent_id,
+                            ThreadDecision.agent_b == agent_id,
+                        ),
+                    )
+                )).scalars().all()
+                reviewed_result = await db.execute(
+                    sa_select(ProposalReview.thread_decision_id).where(
+                        ProposalReview.agent_id == agent_id,
+                    )
+                )
+                reviewed_ids = {r.thread_decision_id for r in reviewed_result}
+                # Reopened-and-not-since-re-closed threads for this agent (COR-13 / B6):
+                # the same restoration _rebuild_agent_state's "2." loop does (Task 20.10),
+                # or a re-added agent's reopened thread comes back with no reply budget
+                # and no PI guidance and is re-closed as 'timeout' on its first Phase 4.
+                reopened_rows = (await db.execute(
+                    sa_select(ThreadDecision.thread_id, ThreadDecision.reopened_at).where(
+                        sa_or(
+                            ThreadDecision.agent_a == agent_id,
+                            ThreadDecision.agent_b == agent_id,
+                        ),
+                    )
+                )).all()
+                reopened_thread_ids = {
+                    r.thread_id for r in reopened_rows if r.reopened_at is not None
+                }
+                # Mirrors _rebuild_agent_state's steps 4 and 4b exactly (red-team
+                # M3): an all-time COUNT scoped to THIS simulation_run_id for
+                # api_call_count, and a SEPARATE windowed query for the live
+                # throttle. Unscoped-by-run + unwindowed (this task's original
+                # single `sa_select(LlmCallLog.created_at).where(agent_id==...)`
+                # read) would give a re-added agent a LIFETIME cross-run
+                # api_call_count — immediately benching it under any non-zero
+                # --budget via _agent_within_budget, and corrupting
+                # SimulationRun.total_api_calls — while also pulling every
+                # historical row for that agent into Python on every roster flip.
+                call_count = (await db.execute(
+                    sa_select(sa_func.count(LlmCallLog.id)).where(
+                        LlmCallLog.simulation_run_id == self.simulation_run_id,
+                        LlmCallLog.agent_id == agent_id,
+                    )
+                )).scalar() or 0
+                window_rows = (await db.execute(
+                    sa_select(LlmCallLog.created_at)
+                    .where(
+                        LlmCallLog.simulation_run_id == self.simulation_run_id,
+                        LlmCallLog.agent_id == agent_id,
+                        LlmCallLog.created_at >= cutoff,
+                    )
+                    .order_by(LlmCallLog.created_at)
+                )).all()
+
+                # Latest decision per thread — an agent can have several
+                # propose/reopen/re-propose rows for the same thread_id.
+                latest_by_thread: dict[str, ThreadDecision] = {}
+                for td in decisions:
+                    current = latest_by_thread.get(td.thread_id)
+                    td_ts = td.decided_at.timestamp() if td.decided_at else 0.0
+                    cur_ts = (
+                        current.decided_at.timestamp()
+                        if current and current.decided_at else -1.0
+                    )
+                    if current is None or td_ts > cur_ts:
+                        latest_by_thread[td.thread_id] = td
+
+                agent.state.pending_proposals = []
+                for td in latest_by_thread.values():
+                    other = td.agent_b if agent_id == td.agent_a else td.agent_a
+                    agent.state.pending_proposals.append(ProposalRef(
+                        thread_id=td.thread_id,
+                        channel=td.channel,
+                        other_agent_id=other,
+                        summary_text=td.summary_text or "",
+                        proposed_at=td.decided_at.timestamp() if td.decided_at else 0.0,
+                        reviewed=td.id in reviewed_ids,
+                        thread_decision_id=td.id,
+                    ))
+
+                agent.api_call_count = call_count
+                agent.state.call_times.clear()
+                for r in window_rows:
+                    agent.state.call_times.append(r.created_at.timestamp())
+
+            # active_threads from the in-memory message_log (already loaded
+            # at startup and kept live since) — mirrors _rebuild_agent_state's
+            # own reconstruction loop (:4190-4243), scoped to this agent only.
+            for entry in self.message_log._entries:
+                if entry.sender_agent_id != agent_id:
+                    continue
+                thread_id = entry.thread_ts or entry.ts
+                if thread_id in self._closed_thread_ids:
+                    continue
+                if thread_id in agent.state.active_threads:
+                    continue
+                if self._channel_visibility.get(entry.channel) == VISIBILITY_COLLAB_PRIVATE:
+                    continue
+                if entry.thread_ts is None:
+                    history = self.message_log.get_thread_history(thread_id)
+                    if len(history) <= 1:
+                        continue
+                root = self.message_log.get_entry(thread_id)
+                if not root:
+                    continue
+                other_id = root.sender_agent_id if root.sender_agent_id != agent_id else None
+                if not other_id:
+                    for h in self.message_log.get_thread_history(thread_id):
+                        if h.sender_agent_id and h.sender_agent_id != agent_id:
+                            other_id = h.sender_agent_id
+                            break
+                if not other_id:
+                    continue
+                msg_count = self.message_log.get_thread_message_count(thread_id)
+                history = self.message_log.get_thread_history(thread_id)
+                last_sender = history[-1].sender_agent_id if history else None
+                offset = 0
+                pi_context = None
+                if thread_id in reopened_thread_ids:
+                    # Task 20.10's restoration: a reopened thread gets a fresh reply
+                    # budget from the reopen point and carries the PI's guidance.
+                    offset = msg_count
+                    for h in history:
+                        if h.sender_agent_id is None:
+                            pi_context = h.content
+                agent.state.active_threads[thread_id] = ThreadState(
+                    thread_id=thread_id,
+                    channel=entry.channel,
+                    other_agent_id=other_id,
+                    message_count=msg_count,
+                    has_pending_reply=(last_sender is not None and last_sender != agent_id),
+                    message_count_offset=offset,
+                    pi_context=pi_context,
+                )
+
+            agent.state.last_seen_cursor = self.message_log.latest_timestamp
+            logger.info(
+                "[roster] Rebuilt state for re-added agent %s: %d active thread(s), "
+                "%d proposal(s), %d API call(s)",
+                agent_id, len(agent.state.active_threads),
+                len(agent.state.pending_proposals), agent.api_call_count,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[roster] Failed to rebuild state for re-added agent %s: %s", agent_id, exc,
+            )
+
     def _infer_agent_id(self, name: str) -> str | None:
         """Try to infer agent_id from a bot name or display name."""
         name_lower = name.lower()
@@ -5137,6 +5314,11 @@ class SimulationEngine:
                 self.slack_clients[aid] = client
                 self._bot_name_to_id[agent.bot_name.lower()] = aid
                 logger.info("[roster] Added newly-active agent %s to live roster", aid)
+                # A fresh Agent() has empty AgentState — restore whatever this
+                # agent already has on record (pending_proposals, active
+                # threads, cursor, call ledger) rather than silently
+                # discarding it on an inactive->active flip. See E6(2).
+                await self._rebuild_one_agent_state(aid)
 
             # Rebuild cross-agent derived structures after any membership change.
             self.message_log.set_bot_name_map(self._bot_name_to_id)

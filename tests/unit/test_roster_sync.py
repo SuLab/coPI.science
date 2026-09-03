@@ -132,6 +132,15 @@ class TestSyncRosterFromDb:
         assert "wiseman" in engine.slack_clients
         assert engine._bot_name_to_id["wisemanbot"] == "wiseman"
 
+    async def test_a_newly_added_agent_gets_its_state_rebuilt(self, monkeypatch):
+        _patch_client(monkeypatch)
+        engine = _make_engine([_row("su"), _row("wiseman")], existing_agents=["su"])
+        engine._rebuild_one_agent_state = AsyncMock()
+
+        await engine._sync_roster_from_db()
+
+        engine._rebuild_one_agent_state.assert_awaited_once_with("wiseman")
+
     async def test_removes_inactivated_agent(self, monkeypatch):
         _patch_client(monkeypatch)
         engine = _make_engine([_row("su")], existing_agents=["su", "wiseman"])
