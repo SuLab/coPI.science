@@ -125,8 +125,16 @@ async def execute_tool(
                 settings = get_settings()
                 if thread_state.abstracts_other >= settings.max_abstracts_other_per_thread:
                     return "Rate limit: you have used all your abstract retrievals for other labs in this thread."
+            result = await fetch_abstract(tool_input["pmid_or_doi"])
+            if "error" in result:
+                return result["error"]
+            # Only a resolved paper counts against the thread's budget (issue
+            # #23 COR-30): the old code incremented before the fetch, so a bad
+            # PMID/DOI or a transient PubMed failure still spent the thread's
+            # abstract allowance on nothing.
+            if thread_state:
                 thread_state.abstracts_other += 1
-            return await _execute_retrieve_abstract(tool_input["pmid_or_doi"])
+            return _format_abstract_result(result)
 
         elif tool_name == "retrieve_full_text":
             if thread_state:
@@ -134,8 +142,12 @@ async def execute_tool(
                 settings = get_settings()
                 if thread_state.full_text >= settings.max_full_text_per_thread:
                     return "Rate limit: you have used all your full-text retrievals in this thread."
+            result = await fetch_full_text(tool_input["pmid_or_doi"])
+            if "error" in result:
+                return result["error"]
+            if thread_state:
                 thread_state.full_text += 1
-            return await _execute_retrieve_full_text(tool_input["pmid_or_doi"])
+            return _format_full_text_result(result)
 
         elif tool_name == "retrieve_foa":
             return await _execute_retrieve_foa(tool_input["foa_number"])
@@ -205,6 +217,11 @@ async def _execute_retrieve_abstract(pmid_or_doi: str) -> str:
     result = await fetch_abstract(pmid_or_doi)
     if "error" in result:
         return result["error"]
+    return _format_abstract_result(result)
+
+
+def _format_abstract_result(result: dict[str, Any]) -> str:
+    """Render a successful ``fetch_abstract`` result for the tool-use reply."""
     # Title/abstract come from PubMed — untrusted external text (SEC-14).
     parts = [
         f"Title: {delimit(result['title'], 'paper_title')}",
@@ -236,6 +253,11 @@ async def _execute_retrieve_full_text(pmid_or_doi: str) -> str:
     result = await fetch_full_text(pmid_or_doi)
     if "error" in result:
         return result["error"]
+    return _format_full_text_result(result)
+
+
+def _format_full_text_result(result: dict[str, Any]) -> str:
+    """Render a successful ``fetch_full_text`` result for the tool-use reply."""
     # Title/abstract/methods come from PubMed/PMC — untrusted external text (SEC-14).
     parts = [
         f"Title: {delimit(result['title'], 'paper_title')}",
