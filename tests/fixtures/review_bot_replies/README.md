@@ -27,17 +27,24 @@ output, not just hand-written malformed JSON.
 | `unparseable_rubric_2.txt` | `baseline_scientific_gap_2` | `Expecting ',' delimiter` | 4201 = EOF | unterminated object — the reply just ends after `…a dimension anchor."` with no closing brace at all, despite `stop_reason=end_turn` |
 | `unparseable_rubric_3.txt` | `transcript_unavailable_0` | `Expecting ',' delimiter` | 984 (not EOF) | unescaped `"` inside a string value — `do not use the words "independent validation" in \`rationale\`` |
 
-Truncation: fixtures 2 and 3 are truncated to `JSONDecodeError.pos + 200`
+Truncation: the rule is `min(len(payload), JSONDecodeError.pos + 200)`
 characters of the original captured payload — long enough to (a) still
 start with `{"target": "rubric"` / `{"target":"rubric"`, (b) still fail
 `json.loads` for the same reason the original did, and (c) stay small.
-**Fixture 1 is truncated to 2200 characters, not 2002** (`pos + 200`): at
-2002 chars the file's first `}` falls at offset 1801, and
+**Fixture 2 is untruncated** — its `pos` (4201) is exactly `len(payload)`
+(EOF), so `pos + 200` exceeds the original length and `min()` returns the
+payload exactly as captured; there is no tail past the model's own stopping
+point to cut. Fixture 3 (`pos` 984) is a genuine `pos + 200` = 1184-character
+cut. **Fixture 1 is truncated to 2200 characters, not 2002** (`pos + 200`):
+at 2002 chars the file's first `}` falls at offset 1801, and
 `extract_json`'s last-resort brace-matching branch parses `raw[0:1802]` as
 a VALID object — so a fixture cut there would exercise the pre-existing
 success path instead of the recovery under test. 2200 chars is past the
-file's *second* `}` (offset 2178, the close of a nested markdown-fence
-quote inside `suggestion`) and short of its true final `}` (offset 3614),
-so `extract_json` still fails on it exactly as it does on the untruncated
-original. Do not "normalize" this to the documented `pos + 200` rule —
-`assert body == raw` will fail.
+file's *second* `}` (offset 2178 — the closing brace of the inline
+`{rubric}` placeholder, which lies inside the `rationale` value, not
+`suggestion`: the premature close at offset ~1802 already ended the
+object's only two real keys, `target` and `suggestion`, before `rationale`
+begins at offset 1803) and short of its true final `}` (offset 3614), so
+`extract_json` still fails on it exactly as it does on the untruncated
+original. Do not "normalize" this to the documented rule — `assert body ==
+raw` will fail.
