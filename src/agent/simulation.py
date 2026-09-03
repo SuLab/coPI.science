@@ -1579,6 +1579,15 @@ class SimulationEngine:
                         )
                     return
 
+                # The draft cleared both funding validators this turn. Reset
+                # here rather than only on a later successful post (issue #23
+                # COR-28b'): a draft suppressed for an unrelated reason (dedup,
+                # a transient Slack failure) used to leave a stale reject
+                # streak in place, so two rejections caused by the ack/
+                # announcement detectors' known false positives could
+                # permanently back the thread off even after it recovered.
+                thread.funding_reject_count = 0
+
             # Authorship guard (issue #29): reject drafts claiming authorship
             # the publication records cannot verify — mirrors the funding
             # validators' reject-and-back-off pattern, but applies to EVERY
