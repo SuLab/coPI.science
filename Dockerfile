@@ -8,10 +8,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libpq-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python dependencies
-COPY pyproject.toml .
+# Install Python dependencies from the hash-pinned lockfile first — this layer
+# only invalidates when requirements.lock changes, not on every src/ edit (#27 I4).
+COPY pyproject.toml requirements.lock ./
+RUN pip install --no-cache-dir --require-hashes -r requirements.lock
 COPY src/ src/
-RUN pip install --no-cache-dir .
+RUN pip install --no-cache-dir --no-deps .
 
 # Copy source
 COPY . .
