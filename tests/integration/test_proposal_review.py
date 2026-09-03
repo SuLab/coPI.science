@@ -1114,6 +1114,83 @@ async def test_an_explicit_web_reopen_upgrades_the_engines_implicit_rating_marke
     )
 
 
+async def test_reopen_leaves_a_concurrent_real_review_alone(
+    client, db_session, lab, proposal, monkeypatch,
+):
+    """D6/COR-13 fix round 1 (ruling-D6-implicit-review-upsert.md): the SECOND
+    `ProposalReview` SELECT in `reopen_proposal` happens AFTER
+    `migrate_public_thread_to_private` -- a multi-call Slack round-trip -- precisely
+    because a row can appear or change in that window. Pre-fix the branch was
+    `if existing_row is not None: <upgrade>`, so a REAL review filed concurrently (the
+    PI rating on the still-rendered dashboard, a delegate, or an e-mail reply) while the
+    migration ran got overwritten with rating=0 / "[Reopened] ..." / submitted_via="web"
+    / a fresh reviewed_at.
+
+    Control: `test_an_explicit_web_reopen_upgrades_the_engines_implicit_rating_marker`
+    above pins that an untouched -1 marker IS still upgraded.
+    """
+    implicit = ProposalReview(
+        thread_decision_id=proposal.id,
+        agent_id="alpha",
+        user_id=lab.pi_a_id,
+        rating=-1,
+        comment=None,
+        submitted_via="engine",
+        reviewed_at=datetime(2020, 1, 1, tzinfo=UTC),
+    )
+    db_session.add(implicit)
+    await db_session.flush()
+    implicit_id = implicit.id
+
+    async def _migrate_then_race(
+        db, *, thread_decision, creator_agent_id, creator_pi_user, guidance_text,
+    ):
+        # While this (fake) Slack round-trip is "in flight", a real review is filed
+        # for the SAME (thread_decision, agent) -- the ruling's exact race window.
+        real_review = (await db.execute(
+            select(ProposalReview).where(
+                ProposalReview.thread_decision_id == thread_decision.id,
+                ProposalReview.agent_id == creator_agent_id,
+            )
+        )).scalar_one()
+        real_review.rating = 3
+        real_review.comment = "Rated for real while the migration ran."
+        real_review.submitted_via = "web"
+        await db.commit()
+        return SimpleNamespace(channel_name="fake-priv-channel-race")
+
+    monkeypatch.setattr(
+        "src.services.private_channels.migrate_public_thread_to_private",
+        _migrate_then_race,
+    )
+
+    r = await client.post(
+        f"/agent/alpha/proposals/{proposal.id}/reopen",
+        data={"guidance": "Actually, let's narrow the scope first."},
+        headers=_auth(lab.pi_a_id),
+    )
+    assert r.status_code == 302, r.text[:400]
+
+    db_session.expire_all()
+    rows = (await db_session.execute(
+        select(ProposalReview).where(ProposalReview.thread_decision_id == proposal.id)
+    )).scalars().all()
+    assert len(rows) == 1, (
+        f"the reopen must not insert a second row alongside the concurrent real "
+        f"review: {rows}"
+    )
+    (review,) = rows
+    assert review.id == implicit_id
+    assert review.rating == 3, (
+        "a real review filed while the migration ran was overwritten by the reopen's "
+        "rating=0 marker — the ruling requires it be left alone"
+    )
+    assert review.comment == "Rated for real while the migration ran.", (
+        "the concurrent real review's comment was clobbered by '[Reopened] ...'"
+    )
+    assert review.submitted_via == "web"
+
+
 async def test_reopen_is_idempotent_under_a_replayed_post(
     client, db_session, lab, proposal, slack_off,
 ):

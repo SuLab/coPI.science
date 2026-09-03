@@ -530,8 +530,8 @@ async def review_proposal(
     )
     existing_row = existing.scalar_one_or_none()
     if existing_row is not None and existing_row.rating != -1:
-        # A delegate (or the PI) may have already reviewed. Retire the current user's
-        # own outstanding notification about this proposal before rejecting --
+        # A delegate (or the PI) may have already reviewed. Retire every recipient's
+        # outstanding notification for this agent + proposal before rejecting --
         # otherwise whoever loses this race has no other web path to clear their
         # notification (V4-4b).
         from src.services.email_notifications import mark_notification_responded, record_engagement
@@ -575,7 +575,9 @@ async def review_proposal(
     # (thread_decision_id, agent_id)). id is left untouched; reviewed_at is bumped to
     # record when the explicit action happened, not when the engine wrote the
     # implicit marker. An update cannot raise IntegrityError (no new row), so the
-    # guard below is simply inert on this path.
+    # guard below is simply inert on this path -- no serialization on this path,
+    # two simultaneous first explicit reviews over a -1 marker both update, last
+    # writer wins (accepted by the D6 ruling).
     try:
         if existing_row is not None:
             existing_row.user_id = agent.user_id  # Always the PI
@@ -680,7 +682,7 @@ async def reopen_proposal(
     # replay would migrate the thread a second time and mint a duplicate
     # priv-…-N channel (or, in legacy mode, re-post the guidance to the public
     # thread). A reopen writes a rating=0 ProposalReview in the same commit as
-    # refined_in_channel, so the presence of *any* review by this agent means
+    # refined_in_channel, so any *explicit* review (rating ≠ -1) by this agent means
     # the proposal was already acted on — treat the resubmission as a no-op and
     # redirect without touching Slack.
     already_reviewed = (await db.execute(
@@ -696,7 +698,8 @@ async def reopen_proposal(
             td.thread_id, agent.agent_id, already_reviewed.id, td.refined_in_channel,
         )
         # Same reasoning as review_proposal's "Already reviewed" branch (V4-4b):
-        # retire the current user's own outstanding notification before bouncing them.
+        # retire every recipient's outstanding notification for this agent + proposal
+        # before bouncing them.
         from src.services.email_notifications import mark_notification_responded, record_engagement
         await record_engagement(current_user.id, db)
         await mark_notification_responded(agent.id, thread_decision_id, "instruction", db)
@@ -806,19 +809,7 @@ async def reopen_proposal(
         )
     )
     existing_row = existing.scalar_one_or_none()
-    if existing_row is not None:
-        # D6/COR-13: existing_row.rating == -1 here (the != -1 case returned early
-        # above) -- the engine's implicit marker, upgraded in place instead of a
-        # second insert. id is left untouched; reviewed_at is bumped to record when
-        # the explicit action happened.
-        existing_row.user_id = agent.user_id  # Always the PI
-        existing_row.delegate_user_id = current_user.id if not is_owner else None
-        existing_row.reviewed_by_user_id = current_user.id
-        existing_row.rating = 0  # 0 = reopened with guidance, not a rating
-        existing_row.comment = f"[Reopened] {guidance[:500]}"
-        existing_row.submitted_via = "web"
-        existing_row.reviewed_at = datetime.now(UTC)
-    else:
+    if existing_row is None:
         review = ProposalReview(
             thread_decision_id=thread_decision_id,
             agent_id=agent.agent_id,
@@ -830,6 +821,30 @@ async def reopen_proposal(
             submitted_via="web",
         )
         db.add(review)
+    elif existing_row.rating == -1:
+        # D6/COR-13: this SELECT happens AFTER migrate_public_thread_to_private (a
+        # multi-call Slack round-trip), so -- unlike the first SELECT above, whose
+        # != -1 case returns early -- the invariant is re-checked here rather than
+        # assumed: a real review can be filed by the PI, a delegate, or an e-mail
+        # reply while that round-trip is in flight. Only the engine's implicit
+        # marker (rating == -1) is safe to upgrade in place; id is left untouched,
+        # reviewed_at is bumped to record when the explicit action happened.
+        existing_row.user_id = agent.user_id  # Always the PI
+        existing_row.delegate_user_id = current_user.id if not is_owner else None
+        existing_row.reviewed_by_user_id = current_user.id
+        existing_row.rating = 0  # 0 = reopened with guidance, not a rating
+        existing_row.comment = f"[Reopened] {guidance[:500]}"
+        existing_row.submitted_via = "web"
+        existing_row.reviewed_at = datetime.now(UTC)
+    else:
+        # A real review was filed for this (thread_decision, agent) while the
+        # migration ran -- leave it alone rather than overwrite it with the
+        # reopen marker (D6/COR-13).
+        logger.warning(
+            "Proposal %s gained a review (rating=%s) while the reopen migration "
+            "ran -- leaving it alone",
+            td.thread_id, existing_row.rating,
+        )
 
     # Record engagement and mark any outstanding email notification as responded
     from src.services.email_notifications import mark_notification_responded, record_engagement
