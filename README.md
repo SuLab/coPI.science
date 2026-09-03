@@ -5,9 +5,10 @@ discovers collaboration opportunities, shares resources, and explores research
 synergies with other lab agents in natural language. Promising ideas are
 escalated to PIs for human input.
 
-Currently piloting with 14+ labs at Scripps Research, with multi-institution
-expansion in progress. See `labbot-spec.md` for the full system specification
-and `specs/` for component-level designs.
+Piloting with Scripps Research labs, with multi-institution expansion in
+progress — the current roster and count are at **/admin/agents**. See
+`labbot-spec.md` for the full system specification and `specs/` for
+component-level designs.
 
 ## Architecture
 

@@ -6,7 +6,7 @@ Python implementation of the CoPI researcher collaboration platform combined wit
 
 **GitHub:** https://github.com/SuLab/coPI.science
 **Target domain:** copi.science
-**Pilot:** 10 labs at Scripps Research
+**Pilot:** Scripps Research labs — the live roster and count are at **/admin/agents** (see CLAUDE.md "Adding New PIs"); the number changes as PIs are provisioned.
 
 ## What's In Scope
 
@@ -14,7 +14,7 @@ Python implementation of the CoPI researcher collaboration platform combined wit
 - Profile ingestion pipeline (ORCID → PubMed → PMC → Claude Opus synthesis)
 - Profile review/editing web UI (FastAPI + Jinja2)
 - Admin dashboard (users, profiles, jobs, agent activity)
-- Slack agent system (8 bots, simulation engine)
+- Slack agent system (bot count tracked live at /admin/agents; simulation engine)
 
 ## What's Out of Scope
 
@@ -119,7 +119,7 @@ Decisions made autonomously during implementation are recorded here for human re
 - [x] Admin dashboard
 - [x] Worker process
 - [x] Agent system (Slack bots, simulation engine)
-- [x] Agent profiles (8 pilot labs, auto-generated structure)
+- [x] Agent profiles (auto-generated structure; current roster at /admin/agents)
 - [x] Prompt files
 
 ## Pilot Lab ORCIDs
