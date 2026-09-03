@@ -337,6 +337,18 @@ class SimulationEngine:
 
         # Closed thread IDs — prevents Phase 3 from re-activating decided threads
         self._closed_thread_ids: set[str] = set()
+        # Thread ids whose Slack parent is confirmed gone (ThreadNotFound /
+        # silent thread_ts drop), set by _evict_dead_thread. In-process only,
+        # deliberately not persisted or derived on rebuild — a durable marker
+        # is a follow-up. Unlike _closed_thread_ids (which _reopen_thread
+        # legitimately discards for a PI-reopened thread), a dead thread must
+        # never be un-tombstoned: _poll_inbound_from_db and
+        # _handle_pi_inbound_entry consult this set to refuse to re-hydrate or
+        # reopen a thread whose history was purged from the log, which is what
+        # closed the resurrection loop found in COR-1c fix round 1 (C1) — a
+        # PI row inside the 5-minute inbound lookback would otherwise
+        # re-trigger _hydrate_thread_from_db + _reopen_thread every tick.
+        self._dead_thread_ids: set[str] = set()
         # Already-accounted-for marker for the _prior_threads append (Phase 5
         # dedup context) — like _closed_thread_ids, but ALSO covers a
         # reopened-and-not-yet-reclosed thread, which _rebuild_agent_state
@@ -1930,14 +1942,28 @@ class SimulationEngine:
         # NOT a discard, and an ADD rather than a no-op (red-team m1): a dead
         # thread (Slack deleted the parent) must come out of this eviction
         # CLOSED regardless of whether it already was — it gains nothing from
-        # being reopenable (its history is gone from the log two lines below),
-        # and marking it closed makes the eviction durable through
-        # _rebuild_agent_state's own closed-thread accounting, which is what
-        # keeps a restart from resurrecting it. The old `.discard()` here
-        # un-closed a thread the outcome machinery had already finalized,
-        # which is what let a stale ThreadDecision keep scheduling replies to
-        # a grave. See COR-1c.
+        # being reopenable (its history is gone from the log two lines below).
+        # The old `.discard()` here un-closed a thread the outcome machinery
+        # had already finalized, which is what let a stale ThreadDecision keep
+        # scheduling replies to a grave. See COR-1c.
+        #
+        # Both this marker and _dead_thread_ids below are in-process only:
+        # _rebuild_agent_state derives its closed-thread set from
+        # ThreadDecision rows, and eviction writes none, so a restart still
+        # re-hydrates a dead thread from the DB (pre-existing behaviour, not a
+        # regression this task introduces — a durable eviction marker is a
+        # deliberate follow-up, not in scope here).
         self._closed_thread_ids.add(thread_id)
+        # Tombstone: unlike _closed_thread_ids, NEVER discarded for this
+        # thread_id. Without it, _poll_inbound_from_db's 5-minute lookback
+        # would re-ingest a PI's DB row for this now-purged thread (the
+        # dedup-by-get_entry check no longer finds it) and
+        # _handle_pi_inbound_entry would see thread_id in _closed_thread_ids
+        # and call _hydrate_thread_from_db + _reopen_thread — resurrecting a
+        # thread whose Slack parent is gone, which fails to post again,
+        # re-evicts, and repeats every tick until the row ages out of the
+        # lookback. See COR-1c fix round 1 (C1).
+        self._dead_thread_ids.add(thread_id)
         purged = self.message_log.purge_thread(thread_id)
         if evicted_from or purged:
             logger.info(
@@ -3016,6 +3042,17 @@ class SimulationEngine:
                 # Already known (the engine itself appended and flushed it, or a
                 # prior poll ingested it) — skip re-processing.
                 continue
+            if r.message_ts in self._dead_thread_ids or (
+                r.thread_ts and r.thread_ts in self._dead_thread_ids
+            ):
+                # Tombstoned: _evict_dead_thread already purged this thread from
+                # the log, so the dedup check above no longer catches it and
+                # this row would otherwise be re-ingested every tick within the
+                # lookback window. Re-appending it (and, for a PI row, running
+                # _handle_pi_inbound_entry) would re-hydrate and reopen a
+                # thread whose Slack parent is gone — a resurrection loop. See
+                # COR-1c fix round 1 (C1).
+                continue
             entry = LogEntry(
                 ts=r.message_ts,
                 channel=r.channel_name,
@@ -3042,6 +3079,16 @@ class SimulationEngine:
         participants rather than a Slack user→agent mapping, so it works with
         Slack off.
         """
+        # Tombstoned: this thread's Slack parent is confirmed gone
+        # (_evict_dead_thread). _poll_inbound_from_db already skips tombstoned
+        # rows before calling here, but this guard is defense-in-depth against
+        # any other caller — no hydrate, no reopen of a thread whose history
+        # was purged from the log. See COR-1c fix round 1 (C1).
+        if entry.ts in self._dead_thread_ids or (
+            entry.thread_ts and entry.thread_ts in self._dead_thread_ids
+        ):
+            return
+
         # Clears any pending proposal on this thread (keyed purely by thread id).
         self._check_pi_proposal_review(entry)
 

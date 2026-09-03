@@ -162,3 +162,19 @@ class TestEvictDeadThread:
             assert len(ag.state.active_threads) == 1
             assert len(ag.state.interesting_posts) == 1
             assert len(ag.state.pending_proposals) == 1
+
+    def test_evicting_a_never_closed_thread_still_closes_and_tombstones_it(self):
+        # Unlike engine_with_agents' fixture (which pre-closes dead_ts before
+        # eviction runs), this thread was never in _closed_thread_ids — the
+        # .add() must still land, and the new tombstone (_dead_thread_ids)
+        # must be set regardless of prior closed-state. See COR-1c fix round 1.
+        dead_ts = "1776900000.000200"
+        agent = Agent(agent_id="su", pi_name="Su", bot_name="SuBot")
+        engine = SimulationEngine(agents=[agent], slack_clients={})
+        assert dead_ts not in engine._closed_thread_ids
+        assert dead_ts not in engine._dead_thread_ids
+
+        engine._evict_dead_thread(dead_ts)
+
+        assert dead_ts in engine._closed_thread_ids
+        assert dead_ts in engine._dead_thread_ids

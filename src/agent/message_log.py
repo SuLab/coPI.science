@@ -209,7 +209,7 @@ class MessageLog:
                 kept.append(entry)
         self._entries = kept
         if removed:
-            # latest_timestamp (:470-479) returns _max_posted_at directly —
+            # latest_timestamp (:504-513) returns _max_posted_at directly —
             # recompute it so a purge of the newest thread doesn't leave the
             # cursor Task 20.7 derives from latest_timestamp sitting above
             # every surviving entry (red-team m1). Conservative either way

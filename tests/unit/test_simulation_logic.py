@@ -1501,3 +1501,103 @@ class TestPhase3ActivationSetsMessageCountOffset:
         # this newly-tagged agent at 0, not at the pre-existing 12 (which
         # would close the thread as "timeout" before it ever replied).
         assert 12 - thread.message_count_offset == 0
+
+
+# ---------------------------------------------------------------
+# Tombstoned dead threads must not be resurrected by the inbound DB poller
+# — COR-1c fix round 1 (C1)
+# ---------------------------------------------------------------
+
+class TestTombstonedThreadIsNotResurrected:
+    """_evict_dead_thread purges a dead thread's log entries and adds it to
+    _dead_thread_ids. Without the tombstone check, _poll_inbound_from_db's
+    5-minute lookback would re-ingest a PI row for that thread (the
+    dedup-by-get_entry check no longer finds the purged entry) and
+    _handle_pi_inbound_entry would see the thread in _closed_thread_ids and
+    re-hydrate + reopen it — resurrecting a thread whose Slack parent is gone."""
+
+    class _FakeScalars:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def all(self):
+            return self._rows
+
+    class _FakeResult:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def scalars(self):
+            return TestTombstonedThreadIsNotResurrected._FakeScalars(self._rows)
+
+    class _FakeDB:
+        def __init__(self, rows):
+            self._rows = rows
+
+        async def execute(self, _stmt):
+            return TestTombstonedThreadIsNotResurrected._FakeResult(self._rows)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+    def _engine_with_pi_row_on_dead_thread(self, monkeypatch, dead_ts):
+        import types
+        import uuid
+        from datetime import UTC, datetime
+        from unittest.mock import AsyncMock
+
+        from src.agent.agent import Agent
+
+        row = types.SimpleNamespace(
+            message_ts="500.000001", thread_ts=dead_ts, created_at=datetime.now(UTC),
+            channel_name="general", agent_id=None, sender_name="PI su",
+            content="please revisit the budget line", posted_at=500.000001,
+            is_bot=False, visibility="public",
+        )
+        agent = Agent("su", "SuBot", "Andrew Su")
+        engine = SimulationEngine(
+            agents=[agent], slack_clients={},
+            session_factory=lambda: self._FakeDB([row]),
+            simulation_run_id=uuid.uuid4(),
+        )
+        # Mirror what _evict_dead_thread would have left behind: purged from
+        # the log, closed, and tombstoned.
+        engine._closed_thread_ids.add(dead_ts)
+        engine._dead_thread_ids.add(dead_ts)
+        engine._hydrate_thread_from_db = AsyncMock()
+        engine._reopen_thread = AsyncMock()
+        engine._update_agent_memory = AsyncMock()
+        return engine
+
+    @pytest.mark.asyncio
+    async def test_poll_inbound_from_db_skips_a_tombstoned_row(self, monkeypatch):
+        dead_ts = "1776900000.000100"
+        engine = self._engine_with_pi_row_on_dead_thread(monkeypatch, dead_ts)
+
+        await engine._poll_inbound_from_db()
+
+        assert engine.message_log.get_entry("500.000001") is None
+        engine._hydrate_thread_from_db.assert_not_awaited()
+        engine._reopen_thread.assert_not_awaited()
+        engine._update_agent_memory.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_handle_pi_inbound_entry_returns_early_for_a_tombstoned_thread(self, monkeypatch):
+        from src.agent.message_log import LogEntry
+
+        dead_ts = "1776900000.000100"
+        engine = self._engine_with_pi_row_on_dead_thread(monkeypatch, dead_ts)
+        entry = LogEntry(
+            ts="500.000001", channel="general", sender_agent_id=None,
+            sender_name="PI su", content="please revisit", thread_ts=dead_ts,
+            posted_at=500.000001, is_bot=False,
+        )
+
+        await engine._handle_pi_inbound_entry(entry)
+
+        engine._hydrate_thread_from_db.assert_not_awaited()
+        engine._reopen_thread.assert_not_awaited()
+        engine._update_agent_memory.assert_not_awaited()
