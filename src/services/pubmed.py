@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import re
+import time
 import xml.etree.ElementTree as ET
 from typing import Any
 
@@ -73,14 +74,46 @@ def reconcile_pub_doi(
 # Rate limiting: NCBI's policy caps anonymous traffic at 3 req/s and API-keyed
 # traffic at 10 req/s. Two long-lived semaphores (rather than one resized at
 # call time) because the key/no-key split is a per-process constant, and a
-# Semaphore is safe to construct outside a running loop in py3.10+. Both are a
-# shade under NCBI's ceiling.
+# Semaphore is safe to construct outside a running loop in py3.10+. The
+# semaphore only bounds how many NCBI requests may be in flight at once — it
+# does NOT bound the aggregate rate: N slots each sleeping `interval` seconds
+# in the old code allowed up to N/interval requests per second, well past
+# NCBI's ceiling (keyless peaked at ~5.9 req/s against a 3 req/s limit). The
+# actual ceiling is enforced by `_pace_ncbi` below, a module-level
+# monotonic-clock gate that spaces request STARTS at least `interval` seconds
+# apart, process-wide, regardless of how many callers are in flight.
 _NCBI_SEMAPHORES = {True: asyncio.Semaphore(8), False: asyncio.Semaphore(2)}
-_NCBI_PACING_SECONDS = {True: 0.12, False: 0.34}
+_NCBI_PACING_SECONDS = {True: 0.12, False: 0.34}  # 8.3 req/s / 2.9 req/s aggregate ceilings
 
 # Overridable by tests (see test_pubmed_contract.py) — the retry loop's own
-# exponential backoff, not the per-call pacing sleep above.
+# exponential backoff, not the pacing gate above.
 _RETRY_BACKOFF = 0.5
+
+# Shared clock state for `_pace_ncbi`. The lock is created lazily on first use
+# (rather than at import time) so construction never binds to an event loop
+# that isn't running yet.
+_ncbi_gate_lock: asyncio.Lock | None = None
+_ncbi_last_start = 0.0
+
+
+async def _pace_ncbi(interval: float) -> None:
+    """Space NCBI request starts at least `interval` seconds apart, process-wide.
+
+    Enforces the E-utilities ceiling (3 req/s anonymous, 10 req/s with an api_key)
+    regardless of how many callers are in flight — the semaphore alone does not:
+    N slots each sleeping `interval` allow N/interval requests per second. (#23 COR-29b,
+    review fix round 1.)
+    """
+    global _ncbi_gate_lock, _ncbi_last_start
+    if _ncbi_gate_lock is None:
+        _ncbi_gate_lock = asyncio.Lock()
+    async with _ncbi_gate_lock:
+        now = time.monotonic()
+        wait = _ncbi_last_start + interval - now
+        if wait > 0:
+            await asyncio.sleep(wait)
+            now = time.monotonic()
+        _ncbi_last_start = now
 
 
 # NCBI's E-utilities usage policy requires every request to identify the caller with
@@ -94,10 +127,12 @@ _NCBI_TOOL = "copi-science"
 async def _ncbi_get(url: str, params: dict[str, Any]) -> httpx.Response:
     """Make a rate-limited, identified, retried GET request to NCBI.
 
-    Retries a transient failure (COR-29a) through the shared ``get_with_retry`` helper. The
-    per-call pacing sleep runs in a ``finally`` — unconditionally, success or exhausted-retries
-    failure (COR-29b) — because the old code slept only after ``raise_for_status()`` succeeded,
-    which skipped the self-imposed pacing exactly when NCBI was already throttling us.
+    Retries a transient failure (COR-29a) through the shared ``get_with_retry`` helper. Pacing
+    (COR-29b) happens via ``_pace_ncbi`` immediately before the request is sent, inside the
+    semaphore slot, so it gates every call's start regardless of outcome. Retried attempts inside
+    ``get_with_retry`` are not paced again here — its own exponential backoff (>=0.5s) already
+    exceeds the pacing interval (<=0.34s), so it never presses harder on the ceiling than a single
+    paced call would.
     """
     settings = get_settings()
     has_key = bool(settings.ncbi_api_key)
@@ -106,13 +141,9 @@ async def _ncbi_get(url: str, params: dict[str, Any]) -> httpx.Response:
     params.setdefault("tool", _NCBI_TOOL)
     params.setdefault("email", settings.ncbi_contact_email or settings.ses_sender_email)
     async with _NCBI_SEMAPHORES[has_key]:
+        await _pace_ncbi(_NCBI_PACING_SECONDS[has_key])
         async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
-            try:
-                return await get_with_retry(
-                    client, url, params=params, backoff=_RETRY_BACKOFF
-                )
-            finally:
-                await asyncio.sleep(_NCBI_PACING_SECONDS[has_key])
+            return await get_with_retry(client, url, params=params, backoff=_RETRY_BACKOFF)
 
 
 async def fetch_pubmed_records(pmids: list[str]) -> list[dict[str, Any]]:

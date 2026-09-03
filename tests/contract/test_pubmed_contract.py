@@ -7,6 +7,9 @@ failure — at a rate keyed on whether NCBI_API_KEY is set; these tests zero the
 retry backoff to stay fast.
 """
 
+import asyncio
+import time
+
 import httpx
 import pytest
 import respx
@@ -18,14 +21,22 @@ pytestmark = pytest.mark.contract
 EUTILS = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
 IDCONV = "https://pmc.ncbi.nlm.nih.gov/tools/idconv/api/v1/articles"
 
+_UNPACED_TESTS = {
+    "test_semaphores_are_sized_by_api_key_presence",
+    "test_ncbi_pacing_spaces_concurrent_starts",
+}
+
 
 @pytest.fixture(autouse=True)
-def _no_retry_backoff(monkeypatch):
-    """These tests pin parse/error-swallow behaviour, not the retry loop (issue #23 COR-29a) —
-    zero the backoff so a mocked 5xx doesn't add ~3.5s of real sleep per test. The per-call pacing
-    sleep (COR-29b) is left alone; it is small and already accepted overhead per the module
-    docstring above ("a touch slow but deterministic")."""
+def _no_retry_backoff(monkeypatch, request):
+    """Zero the retry loop's backoff (issue #23 COR-29a) so a mocked 5xx doesn't add ~3.5s of real
+    sleep per test, and — except for the two tests below that need real values — also zero the
+    NCBI pacing gate (COR-29b) and reset its shared clock, so the other ~10 tests that reach
+    _ncbi_get don't each pay the pacing interval too."""
     monkeypatch.setattr(pubmed, "_RETRY_BACKOFF", 0)
+    if request.node.name not in _UNPACED_TESTS:
+        monkeypatch.setattr(pubmed, "_NCBI_PACING_SECONDS", {True: 0.0, False: 0.0})
+        monkeypatch.setattr(pubmed, "_ncbi_last_start", 0.0)
 
 
 def test_semaphores_are_sized_by_api_key_presence():
@@ -35,6 +46,45 @@ def test_semaphores_are_sized_by_api_key_presence():
     assert pubmed._NCBI_SEMAPHORES[True]._value == 8
     assert pubmed._NCBI_PACING_SECONDS[False] == 0.34
     assert pubmed._NCBI_PACING_SECONDS[True] == 0.12
+
+
+@respx.mock
+async def test_ncbi_pacing_spaces_concurrent_starts(monkeypatch):
+    """COR-29b, review fix round 1: the rate ceiling must hold under concurrency. With the old
+    in-slot sleep, N semaphore slots each sleeping `interval` allow N/interval requests per
+    second — on this pre-fix code, 2 keyless slots and instant mocked responses let two pairs of
+    the four concurrent starts land within ~1ms of each other (measured over 50 runs, max
+    observed min-gap 0.0009s), nowhere close to the thresholds below. The shared monotonic-clock
+    gate must instead space every call's START at least `interval` seconds apart, process-wide,
+    regardless of how many callers are in flight.
+
+    Thresholds are looser than `interval` itself because the recorded timestamp is the mocked
+    HTTP call, one `await` past the gate release (through client construction and
+    ``get_with_retry``) — real, if small, per-call scheduling overhead that can reorder which
+    call's dispatch lands first without violating the gate. Measured over 300 runs at this
+    interval, the worst observed adjacent gap was 78% of `interval` and the worst total span 96%
+    of `3 * interval`; the 50%/85% thresholds below leave ample margin above that noise floor
+    while still failing hard (by ~50x) on the pre-fix behavior above.
+    """
+    interval = 0.1
+    monkeypatch.setattr(pubmed, "_NCBI_PACING_SECONDS", {True: interval, False: interval})
+    monkeypatch.setattr(pubmed, "_ncbi_last_start", 0.0)
+    starts: list[float] = []
+
+    def _record_start(request):
+        starts.append(time.monotonic())
+        return httpx.Response(200, text=EFETCH_XML)
+
+    respx.get(f"{EUTILS}/efetch.fcgi").mock(side_effect=_record_start)
+    await asyncio.gather(
+        *(pubmed._ncbi_get(f"{EUTILS}/efetch.fcgi", {}) for _ in range(4))
+    )
+
+    starts.sort()
+    # starts[1:] is deliberately one element shorter (classic pairwise idiom) — strict=False.
+    gaps = [b - a for a, b in zip(starts, starts[1:], strict=False)]
+    assert all(gap >= interval * 0.5 for gap in gaps), gaps
+    assert starts[-1] - starts[0] >= 3 * interval * 0.85
 
 EFETCH_XML = """<?xml version="1.0"?>
 <PubmedArticleSet>
