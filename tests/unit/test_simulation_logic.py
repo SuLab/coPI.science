@@ -1817,6 +1817,20 @@ class TestPersistImplicitProposalReview:
         async def __aexit__(self, *exc):
             return False
 
+    class _CountingFactory:
+        """Counts how many times the session factory itself is invoked —
+        distinct from _FakeDB's internal `execute` call count — so a test can
+        assert the function returned before ever opening a session, not just
+        that it happened to survive whatever the session raised."""
+
+        def __init__(self, db):
+            self._db = db
+            self.calls = 0
+
+        def __call__(self):
+            self.calls += 1
+            return self._db
+
     def _engine(self, fake_db):
         from src.agent.agent import Agent
 
@@ -1826,14 +1840,38 @@ class TestPersistImplicitProposalReview:
 
     @pytest.mark.asyncio
     async def test_none_thread_decision_id_is_a_no_op(self):
-        # No session_factory needed at all: the function must return before
-        # touching the DB when the caller has no decision id to key against.
+        # The guard must return before ever calling the session factory when
+        # the caller has no decision id to key against. Asserting on a call
+        # counter (rather than a factory that raises) is load-bearing: a
+        # raising factory would be silently swallowed by the function's own
+        # blanket `except Exception`, making the test pass even if the early
+        # guard were deleted. See COR-5 fix round 1 (I1).
         from src.agent.agent import Agent
 
         engine = SimulationEngine(agents=[Agent("victim", "VictimBot", "Victim PI")], slack_clients={})
-        engine.session_factory = lambda: (_ for _ in ()).throw(AssertionError("must not touch the DB"))
+        factory = self._CountingFactory(db=None)
+        engine.session_factory = factory
 
         await engine._persist_implicit_proposal_review("victim", None)
+
+        assert factory.calls == 0
+
+    @pytest.mark.asyncio
+    async def test_a_real_decision_id_does_open_a_session(self):
+        # Mirror of the no-op test above: with a real thread_decision_id and
+        # a registered PI user, the factory IS invoked (exactly once).
+        import uuid as uuid_mod
+
+        user_id = uuid_mod.uuid4()
+        decision_id = uuid_mod.uuid4()
+        fake_db = self._FakeDB(user_id=user_id, existing_review_id=None)
+        factory = self._CountingFactory(fake_db)
+        engine = self._engine(fake_db)
+        engine.session_factory = factory
+
+        await engine._persist_implicit_proposal_review("victim", decision_id)
+
+        assert factory.calls == 1
 
     @pytest.mark.asyncio
     async def test_writes_a_rating_minus_one_row_keyed_on_the_proposals_decision_id(self):
