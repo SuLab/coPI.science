@@ -36,7 +36,16 @@ JOB_RETRY_BACKOFF_CAP_SECONDS = 300.0
 # Stale-processing reaper (COR-18a/b): a worker that dies mid-job (OOM, SIGKILL, host
 # crash) leaves its claimed row committed 'processing' forever — claim_job only ever
 # selects 'pending' rows, so nothing else in the system will ever pick it back up.
-JOB_STALE_PROCESSING_THRESHOLD_SECONDS = 900   # 15 minutes
+#
+# 3600s, not 900s (controller ruling, #23.12 review): after Tasks 23.11/23.12/23.13 every
+# outbound HTTP client this pipeline calls retries. One _ncbi_get can take up to 4 attempts
+# × 60s timeout + backoff ≈ 243s, and convert_dois_to_pmids issues one such call per
+# unresolved DOI SEQUENTIALLY, on top of up to 10 PMC methods fetches and three retried
+# ORCID calls — so under a sustained NCBI/ORCID brownout a single profile job can
+# legitimately exceed 900s. A purely time-based reaper set at 900s would re-queue a job
+# whose worker is still running it, causing duplicate synthesis + LLM spend. A heartbeat
+# (periodic started_at bump) is the full fix; raising the threshold is a stopgap.
+JOB_STALE_PROCESSING_THRESHOLD_SECONDS = 3600   # 1 hour
 JOB_REAP_CHECK_INTERVAL_SECONDS = 300           # mirrors notification_check_interval's cadence
 
 
@@ -73,6 +82,16 @@ async def reap_stale_jobs(session_factory: async_sessionmaker) -> int:
     'processing' by claim_job — claim_job only ever selects 'pending' rows, so nothing else in
     the system will ever pick this job back up (COR-18a/b). started_at is the column claim_job
     already writes and nothing has read until now.
+
+    Single-replica invariant: this reaper is only safe because run_worker is serial and
+    single-replica. It is reached only after process_job returns (see run_worker's loop), so a
+    call to this function can never see this SAME process's own in-flight row — by the time it
+    runs, this process has no job 'processing'. With 2+ worker replicas that guarantee is gone: a
+    job legitimately still running on one replica, past the threshold, would be reaped out from
+    under it by another replica's reaper and executed a second time. Before running more than one
+    worker replica, either add a heartbeat (a periodic started_at bump from inside process_job
+    while the job is still in flight) or raise JOB_STALE_PROCESSING_THRESHOLD_SECONDS above the
+    worst-case job duration across ALL replicas, not just one.
     """
     reaped = 0
     threshold = datetime.now(UTC) - timedelta(
@@ -171,8 +190,10 @@ async def process_job(job_id: uuid.UUID, job_type: str, job_attempts: int, job_m
             # A failure in run_profile_pipeline may have poisoned the transaction
             # (e.g. a flush-time IntegrityError) — roll back before writing the
             # failure record, or this commit itself raises PendingRollbackError,
-            # which escapes process_job and strands the job in 'processing'
-            # forever (COR-17; see tests/integration/test_worker.py).
+            # which escapes process_job and strands the job in 'processing' until
+            # the stale-processing reaper re-queues it after
+            # JOB_STALE_PROCESSING_THRESHOLD_SECONDS (COR-17; see
+            # tests/integration/test_worker.py).
             await db.rollback()
             # rollback() expires every instrumented attribute on `job` (SQLAlchemy does this
             # unconditionally, regardless of expire_on_commit). On a SYNC session the very next

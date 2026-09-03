@@ -155,6 +155,16 @@ class _Harness:
                 "AND coalesce(payload->>'tag', '') <> :t"
             ), {"t": TAG})
 
+    async def foreign_processing_jobs(self) -> int:
+        """Mirrors foreign_pending_jobs(): reap_stale_jobs has no payload->>'tag' filter, so a
+        leaked 'processing' row from another suite would be fair game for this file's reaper
+        tests."""
+        async with self.factory() as db:
+            return await db.scalar(text(
+                "SELECT count(*) FROM jobs WHERE status = 'processing' "
+                "AND coalesce(payload->>'tag', '') <> :t"
+            ), {"t": TAG})
+
 
 @pytest.fixture
 async def wk(engine, pg_url):
@@ -415,6 +425,10 @@ async def test_a_failing_job_retries_to_max_attempts_and_then_dies(wk, monkeypat
         "button on the onboarding page never appears"
     )
     assert state.attempts == 3
+    assert state.completed_at is None, (
+        "an exhausted (failed) job got a completed_at stamp (COR-18d) — it never completed, "
+        "and templates/admin/jobs.html's 'Completed' column would lie about it"
+    )
     row = await wk.job(jid)
     assert "pipeline exploded (T5.2)" in (row.last_error or ""), (
         f"the failure reason was not recorded: {row.last_error!r}"
@@ -447,13 +461,19 @@ async def test_a_failing_job_retries_to_max_attempts_and_then_dies(wk, monkeypat
 async def test_a_retried_job_backs_off_instead_of_being_reclaimed_immediately(wk, monkeypatch):
     """COR-18c: after a failure that leaves a job 'pending', process_job must not return so fast
     that the very next claim_job reclaims the SAME job with zero delay — all max_attempts would
-    burn back-to-back. Uses attempts=1 (base delay, no need to wait through the whole exponential
-    ladder) and a tiny base so the test doesn't actually sleep for the real production delay.
+    burn back-to-back. Drives three retries of the SAME job to pin the actual exponential
+    ladder (base * 2**(attempts-1), capped), not just "some delay happened":
+
+      * attempts=1 (base delay) — a tiny base so the test doesn't pay the real production delay.
+      * attempts=2 — must be ~2x the first delay, not a constant repeat of the base (kills a
+        constant-backoff mutant).
+      * attempts=3, with the cap patched below the (now huge) base*2**2 — must be clamped to the
+        cap, not the uncapped exponential value (kills a dropped-min(cap, ...) mutant).
     """
     monkeypatch.setattr(worker_main, "JOB_RETRY_BACKOFF_BASE_SECONDS", 0.2)
     monkeypatch.setattr(worker_main, "JOB_RETRY_BACKOFF_CAP_SECONDS", 5.0)
     uid = await wk.new_user()
-    jid = await wk.enqueue(uid, max_attempts=3)
+    jid = await wk.enqueue(uid, max_attempts=5)
 
     async def always_fails(user_id, db, job=None):
         raise RuntimeError("still failing (T5 backoff)")
@@ -462,6 +482,7 @@ async def test_a_retried_job_backs_off_instead_of_being_reclaimed_immediately(wk
 
     async with wk.factory() as db:
         job = await worker_main.claim_job(db)
+    assert job.attempts == 1
     start = time.monotonic()
     await worker_main.process_job(job.id, job.type, job.attempts, job.max_attempts, wk.factory)
     elapsed = time.monotonic() - start
@@ -469,6 +490,40 @@ async def test_a_retried_job_backs_off_instead_of_being_reclaimed_immediately(wk
     assert elapsed >= 0.2, (
         f"process_job returned after {elapsed:.3f}s for a job going back to 'pending' — the "
         "backoff sleep did not run, so the next claim_job would reclaim it immediately"
+    )
+    assert (await wk.job_state(jid)).status == "pending"
+
+    # Second retry: the ladder must double (base * 2**(2-1) = 0.4s), not repeat the base.
+    async with wk.factory() as db:
+        job2 = await worker_main.claim_job(db)
+    assert job2.id == jid and job2.attempts == 2
+    start2 = time.monotonic()
+    await worker_main.process_job(job2.id, job2.type, job2.attempts, job2.max_attempts, wk.factory)
+    elapsed2 = time.monotonic() - start2
+
+    assert 0.4 <= elapsed2 < 0.8, (
+        f"process_job slept {elapsed2:.3f}s on the second retry — the exponential ladder "
+        "(base * 2**(attempts-1)) should have roughly doubled to ~0.4s, not stayed at the base "
+        "(a constant-backoff mutant) or grown some other way"
+    )
+    assert (await wk.job_state(jid)).status == "pending"
+
+    # Third retry, with a huge base and a tiny cap: the delay must be clamped to the cap
+    # (0.1s), not the uncapped exponential value (0.2 * 2**2 == 0.8s, or 100 * 2**2 with the
+    # patched base below == 400s).
+    monkeypatch.setattr(worker_main, "JOB_RETRY_BACKOFF_BASE_SECONDS", 100.0)
+    monkeypatch.setattr(worker_main, "JOB_RETRY_BACKOFF_CAP_SECONDS", 0.1)
+    async with wk.factory() as db:
+        job3 = await worker_main.claim_job(db)
+    assert job3.id == jid and job3.attempts == 3
+    start3 = time.monotonic()
+    await worker_main.process_job(job3.id, job3.type, job3.attempts, job3.max_attempts, wk.factory)
+    elapsed3 = time.monotonic() - start3
+
+    assert elapsed3 < 1.0, (
+        f"process_job slept {elapsed3:.3f}s despite JOB_RETRY_BACKOFF_CAP_SECONDS=0.1 with a "
+        "huge base — the min(cap, ...) clamp was dropped and the uncapped exponential value "
+        "was used instead"
     )
     assert (await wk.job_state(jid)).status == "pending"
 
@@ -544,7 +599,8 @@ async def test_process_job_swallows_the_failure_so_the_next_job_still_runs(wk, m
     """T5.3 (unit-of-the-loop half) — `process_job` must not propagate.
 
     If it raised, `run_worker`'s outer handler would catch it but the job's status would
-    never be written, leaving it stuck in 'processing' with no reaper.
+    never be written, leaving it stuck in 'processing' until the stale-processing reaper
+    re-queues it after `JOB_STALE_PROCESSING_THRESHOLD_SECONDS`.
 
     The crasher is given `max_attempts=1` so it reaches a terminal state in one round
     and the queue moves on; the retry behaviour itself is T5.2's subject.
@@ -601,6 +657,10 @@ async def test_run_worker_loop_survives_a_crashing_job(wk, pg_url, monkeypatch):
     assert await wk.foreign_pending_jobs() == 0, (
         "there are pending jobs in this database that this file did not enqueue; "
         "run_worker would claim them"
+    )
+    assert await wk.foreign_processing_jobs() == 0, (
+        "there are 'processing' jobs in this database that this file did not enqueue; "
+        "run_worker's wired-in stale-processing reaper would touch them"
     )
 
     uid_bad = await wk.new_user("T5 loop crasher")
@@ -851,6 +911,9 @@ async def test_a_database_error_in_the_pipeline_is_recorded_and_the_job_is_retri
         f"the job is {state.status!r}; a database error in the pipeline must be recorded and "
         "retried like any other failure, not leave the job stranded in 'processing'"
     )
+    assert state.completed_at is None, (
+        "a retried (pending) job got a completed_at stamp (COR-18d) — it has not completed"
+    )
     row = await wk.job(jid)
     assert row.last_error, (
         f"the failure reason never reached the row: {row.last_error!r}"
@@ -888,6 +951,10 @@ async def test_reap_stale_jobs_requeues_a_job_stuck_in_processing(wk):
     ever pick it back up. The reaper uses the started_at column claim_job already writes and
     nothing else reads.
     """
+    assert await wk.foreign_processing_jobs() == 0, (
+        "there are 'processing' jobs in this database that this file did not enqueue; "
+        "reap_stale_jobs has no payload->>'tag' filter and would touch them"
+    )
     uid = await wk.new_user()
     jid = await wk.enqueue(uid, max_attempts=3)
     stale_started_at = datetime.now(UTC) - timedelta(
@@ -914,6 +981,10 @@ async def test_reap_stale_jobs_marks_an_exhausted_stale_job_failed_not_pending(w
     """A stale job that already used its last attempt must not be re-queued into an infinite
     claim/crash loop — it goes to the same terminal 'failed' state COR-18e gives an exhausted job
     on the normal failure path (Task 21.3)."""
+    assert await wk.foreign_processing_jobs() == 0, (
+        "there are 'processing' jobs in this database that this file did not enqueue; "
+        "reap_stale_jobs has no payload->>'tag' filter and would touch them"
+    )
     uid = await wk.new_user()
     jid = await wk.enqueue(uid, max_attempts=1)
     stale_started_at = datetime.now(UTC) - timedelta(
@@ -935,6 +1006,10 @@ async def test_reap_stale_jobs_marks_an_exhausted_stale_job_failed_not_pending(w
 async def test_reap_stale_jobs_leaves_a_recently_claimed_job_alone(wk):
     """Control: a job that is genuinely still being worked on (started_at recent) must not be
     reaped out from under the worker actually processing it."""
+    assert await wk.foreign_processing_jobs() == 0, (
+        "there are 'processing' jobs in this database that this file did not enqueue; "
+        "reap_stale_jobs has no payload->>'tag' filter and would touch them"
+    )
     uid = await wk.new_user()
     jid = await wk.enqueue(uid)
     async with wk.factory() as db:
