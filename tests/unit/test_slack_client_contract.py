@@ -1043,3 +1043,26 @@ def test_an_unconnected_client_raises_rather_than_calling_a_missing_endpoint():
     c = AgentSlackClient(agent_id="su", bot_token="xoxb-test")
     with pytest.raises(SlackNotConnected):
         c._api("auth_test")
+
+
+def test_resolve_user_name_reads_the_nested_profile_display_name():
+    """Slack's users.info nests display_name under `user.profile`, not at the top level (V7d) — the
+    top-level object only carries `name`/`real_name`, which is exactly what agent_page.py's own
+    consumer of the same shape reads. The dead top-level branch meant every resolution silently fell
+    through to real_name/user_id."""
+    fake = RecordingSlackClient(
+        responses={"users_info": {"ok": True, "user": {
+            "id": "U123", "real_name": "Real Name",
+            "profile": {"display_name": "Display Name"},
+        }}},
+    )
+    assert _client(fake).resolve_user_name("U123") == "Display Name"
+
+
+def test_resolve_user_name_falls_back_to_real_name_with_no_display_name():
+    fake = RecordingSlackClient(
+        responses={"users_info": {"ok": True, "user": {
+            "id": "U123", "real_name": "Real Name", "profile": {},
+        }}},
+    )
+    assert _client(fake).resolve_user_name("U123") == "Real Name"

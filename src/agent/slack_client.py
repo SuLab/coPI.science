@@ -666,7 +666,11 @@ class AgentSlackClient:
         try:
             info = self._api("users_info", user=user_id)
             user = info.get("user", {})
-            return user.get("display_name") or user.get("real_name") or user_id
+            return (
+                user.get("profile", {}).get("display_name")
+                or user.get("real_name")
+                or user_id
+            )
         except SlackApiError:
             return user_id
 
