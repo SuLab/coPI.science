@@ -44,8 +44,13 @@ def test_every_prod_service_including_migrate_has_the_json_file_log_override():
 
 
 EXPECTED_MEM = {
-    "postgres": "512m", "app": "384m", "worker": "512m", "agent": "512m",
-    "grantbot": "256m", "nginx": "64m", "certbot": "32m",
+    "migrate": "256m", "app": "384m", "worker": "512m", "agent": "768m",
+    "grantbot": "256m", "nginx": "128m", "certbot": "128m",
+}
+
+EXPECTED_CPUS = {
+    "migrate": 0.5, "app": 1.0, "worker": 0.5, "agent": 1.0,
+    "grantbot": 0.5, "nginx": 1.0, "certbot": 0.1,
 }
 
 
@@ -53,20 +58,45 @@ def test_every_prod_service_has_a_memory_and_cpu_ceiling():
     services = _prod_compose()["services"]
     for name, mem in EXPECTED_MEM.items():
         assert services[name].get("mem_limit") == mem, name
-        assert services[name].get("cpus"), f"{name} has no cpus limit"
+    for name, cpus in EXPECTED_CPUS.items():
+        assert services[name].get("cpus") == cpus, name
+
+
+def test_postgres_has_no_resource_limit():
+    # Decision D24: postgres stays uncapped. A cgroup mem_limit on a ~2.3 GB
+    # database also caps its page cache, and an OOM-killed backend restarts
+    # the whole cluster -- worse than the unbounded-growth failure mode the
+    # other services' limits guard against.
+    postgres = _prod_compose()["services"]["postgres"]
+    assert "mem_limit" not in postgres
+    assert "cpus" not in postgres
 
 
 def test_the_copi_python_mem_limits_sum_comfortably_under_the_host_total():
     # Part R.1: the prod host has ~3.7 GB RAM and also runs the separate
     # blackbird stack. A sum near or over the physical total defeats the
     # purpose of a per-container ceiling — the kernel OOM killer fires
-    # first, before any cgroup limit does.
+    # first, before any cgroup limit does. postgres is deliberately excluded
+    # (D24, uncapped). The nightly verified-backup container
+    # (scripts/backup/copi_backup.py, --memory=768m) and the blackbird stack
+    # share whatever headroom remains under 3072m.
     services = _prod_compose()["services"]
-    names = (*EXPECTED_MEM, "migrate")
-    total_mib = sum(int(services[name]["mem_limit"].rstrip("mg")) for name in names)
+
+    def _mib(v: str) -> int:
+        return int(v[:-1]) * (1024 if v[-1] in "gG" else 1)
+
+    total_mib = sum(_mib(services[name]["mem_limit"]) for name in EXPECTED_MEM)
     assert total_mib <= 3072, f"copi-python mem_limits sum to {total_mib}m, want <= 3072m"
 
 
 def test_worker_mounts_prompts_like_app_and_agent_do():
     worker_volumes = _prod_compose()["services"]["worker"]["volumes"]
     assert "./prompts:/app/prompts" in worker_volumes
+
+
+def test_agent_has_a_stop_grace_period_for_clean_shutdown_flush():
+    # An OOM kill is SIGKILL and skips the shutdown flush that persists the
+    # in-flight turn; the runbook's `docker stop -t 30` relies on this being
+    # set (dev's docker-compose.yml already has it).
+    agent = _prod_compose()["services"]["agent"]
+    assert agent.get("stop_grace_period") == "30s"

@@ -2,8 +2,10 @@ services:
   postgres:
     image: postgres:15
     restart: unless-stopped
-    mem_limit: 512m
-    cpus: 1.0
+    # Decision D24: no mem_limit/cpus here. A cgroup mem cap on a ~2.3 GB
+    # database also caps its page cache, and an OOM-killed backend restarts
+    # the whole cluster -- worse than the failure mode caps elsewhere guard
+    # against.
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-copi}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
@@ -122,8 +124,11 @@ services:
   agent:
     build:
       context: .
-    mem_limit: 512m
+    mem_limit: 768m
     cpus: 1.0
+    # An OOM kill is SIGKILL and skips the shutdown flush that persists the
+    # in-flight turn; the runbook's `docker stop -t 30` relies on this.
+    stop_grace_period: 30s
     command: ["python", "-m", "src.agent.main"]
     env_file: .env
     environment:
@@ -183,8 +188,12 @@ services:
   nginx:
     image: nginx:1.27-alpine
     restart: unless-stopped
-    mem_limit: 64m
-    cpus: 0.25
+    # nginx.conf declares 40 MiB of shared zones (three limit_*_zone 10m +
+    # ssl_session_cache shared:SSL:10m) plus master + workers + proxy
+    # buffers; 64m OOMs under load. 1.0 cpus so a hard CFS quota doesn't
+    # throttle TLS termination for all three vhosts even on an idle host.
+    mem_limit: 128m
+    cpus: 1.0
     ports:
       - "80:80"
       - "443:443"
@@ -226,7 +235,10 @@ services:
   certbot:
     image: certbot/certbot:latest
     restart: unless-stopped
-    mem_limit: 32m
+    # certbot's import graph alone exceeds 32 MiB; PID 1 is a shell loop, so
+    # the OOM killer takes the python child silently and renewals stop while
+    # the container still reports "running".
+    mem_limit: 128m
     cpus: 0.1
     volumes:
       - ./certbot/conf:/etc/letsencrypt
