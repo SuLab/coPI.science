@@ -1007,6 +1007,38 @@ async def test_pi_cannot_reply_into_a_thread_their_agent_never_joined(client, db
     )
     assert resp.status_code == 403
     assert "thread" in resp.json()["detail"].lower()
+    written = (await db_session.execute(
+        select(AgentMessage).where(
+            AgentMessage.thread_ts == "1700000000.000100",
+            AgentMessage.is_bot.is_(False),
+        )
+    )).scalars().all()
+    assert written == [], (
+        "a PI whose agent never joined this thread wrote into it: "
+        f"{[m.content for m in written]}"
+    )
+
+
+async def test_pi_cannot_reply_into_an_unknown_thread(client, db_session, world):
+    """The fail-closed branch: a thread_ts naming no root at all is refused, not
+    just one the PI's agent didn't join."""
+    resp = await client.post(
+        f"/agent/{world.agent.agent_id}/message",
+        data={"channel_name": "general", "content": "looks good", "thread_ts": "9999999999.999999"},
+        headers=_auth(world.pi.id),
+    )
+    assert resp.status_code == 403
+    assert "thread" in resp.json()["detail"].lower()
+    written = (await db_session.execute(
+        select(AgentMessage).where(
+            AgentMessage.thread_ts == "9999999999.999999",
+            AgentMessage.is_bot.is_(False),
+        )
+    )).scalars().all()
+    assert written == [], (
+        "a PI addressed a nonexistent thread and it was written anyway: "
+        f"{[m.content for m in written]}"
+    )
 
 
 async def test_pi_can_reply_into_their_own_agents_thread(client, db_session, world):
@@ -1020,6 +1052,13 @@ async def test_pi_can_reply_into_their_own_agents_thread(client, db_session, wor
         headers=_auth(world.pi.id),
     )
     assert resp.status_code == 302
+    saved = (await db_session.execute(
+        select(AgentMessage).where(
+            AgentMessage.channel_name == "general",
+            AgentMessage.is_bot.is_(False),
+        )
+    )).scalar_one()
+    assert saved.thread_ts == "1700000000.000300"
 
 
 async def test_sending_a_dm_records_an_inbound_pi_dm(client, db_session, world):

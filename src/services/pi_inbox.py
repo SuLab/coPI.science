@@ -115,6 +115,14 @@ async def pi_may_reply_in_thread(
     the web form must name a thread the PI's own agent actually participates in.
     Requires (a) the thread root to exist in this run and channel and (b) at least
     one message in the thread from ``agent_id``. Unknown threads are refused.
+
+    PI-authored rows carry ``agent_id=NULL`` (``record_pi_message``), so a thread in
+    which only the PI has spoken is refused today; that is unreachable via the web
+    UI, which always submits ``thread_ts=""``, but a future UI wiring would need the
+    participant clause to also accept ``is_bot IS FALSE`` rows whose
+    ``sender_name == f"{pi_name} (PI)"``. The participant clause is deliberately
+    ts-only (no ``sender_name``/user check) to mirror how ``MessageLog.get_thread_history``
+    resolves a thread's membership.
     """
     root = (await db.execute(
         select(AgentMessage.id)
