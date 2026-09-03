@@ -21,7 +21,6 @@ import argparse
 import asyncio
 import hashlib
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 
 from sqlalchemy import select
@@ -30,6 +29,7 @@ from src.database import get_session_factory
 from src.models import AgentRegistry, ResearcherProfile, User
 from src.services.llm import synthesize_profile
 from src.services.profile_export import export_profile_to_markdown
+from src.services.profile_pipeline import _validate_profile, apply_synthesis
 from src.services.profile_versioning import create_revision
 
 DEFAULT_CONTEXT_DIR = Path("data/profile_context")
@@ -109,14 +109,13 @@ async def _run(
         print(f"  diseases: {len(synthesized.get('disease_areas', []))}", flush=True)
         print(f"  targets: {len(synthesized.get('key_targets', []))}", flush=True)
 
-        profile.research_summary = synthesized.get("research_summary", "")
-        profile.techniques = synthesized.get("techniques", [])
-        profile.experimental_models = synthesized.get("experimental_models", [])
-        profile.disease_areas = synthesized.get("disease_areas", [])
-        profile.key_targets = synthesized.get("key_targets", [])
-        profile.keywords = synthesized.get("keywords", [])
+        validated = _validate_profile(synthesized)
+        applied = apply_synthesis(profile, synthesized, validated=validated)
+        if not applied:
+            print("  SKIPPED: validation gate kept the existing stored profile", flush=True)
+            return 1
+
         profile.profile_version = (profile.profile_version or 0) + 1
-        profile.profile_generated_at = datetime.now(timezone.utc)
         profile.raw_abstracts_hash = hashlib.sha256(context.encode()).hexdigest()
 
         await db.flush()

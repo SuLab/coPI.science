@@ -16,7 +16,6 @@ import asyncio
 import hashlib
 import logging
 import sys
-from datetime import datetime, timezone
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -25,6 +24,7 @@ from src.config import get_settings
 from src.models import AgentRegistry, Publication, ResearcherProfile, User
 from src.services.llm import synthesize_profile
 from src.services.profile_export import export_profile_to_markdown
+from src.services.profile_pipeline import _validate_profile, apply_synthesis
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("resynth")
@@ -73,14 +73,12 @@ async def _process(orcid: str, db: AsyncSession) -> str:
         logger.error("%s: synthesis failed: %s", user.name, exc)
         return f"{user.name}: synthesis_failed: {exc}"
 
-    profile.research_summary = synthesized.get("research_summary", profile.research_summary)
-    profile.techniques = synthesized.get("techniques", profile.techniques)
-    profile.experimental_models = synthesized.get("experimental_models", profile.experimental_models)
-    profile.disease_areas = synthesized.get("disease_areas", profile.disease_areas)
-    profile.key_targets = synthesized.get("key_targets", profile.key_targets)
-    profile.keywords = synthesized.get("keywords", profile.keywords)
+    validated = _validate_profile(synthesized)
+    applied = apply_synthesis(profile, synthesized, validated=validated)
+    if not applied:
+        return f"{user.name}: kept existing profile (validation gate); synthesis discarded"
+
     profile.profile_version = (profile.profile_version or 0) + 1
-    profile.profile_generated_at = datetime.now(timezone.utc)
     abstracts = "\n".join(p.abstract or "" for p in pubs)
     profile.raw_abstracts_hash = hashlib.sha256(abstracts.encode()).hexdigest()
     await db.flush()

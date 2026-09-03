@@ -420,17 +420,10 @@ async def run_profile_pipeline(
                 f"the new synthesis {reason}.",
             )
         else:
-            profile.research_summary = synthesized.get("research_summary", "")
-            profile.techniques = synthesized.get("techniques", [])
-            profile.experimental_models = synthesized.get("experimental_models", [])
-            profile.disease_areas = synthesized.get("disease_areas", [])
-            profile.key_targets = synthesized.get("key_targets", [])
-            profile.keywords = synthesized.get("keywords", [])
-            profile.synthesis_validated = validated
-            profile.evidence_pmid_count = evidence_pmid_count
-            profile.evidence_pub_count = evidence_pub_count
-            profile.profile_version = (profile.profile_version or 0) + 1
-            profile.profile_generated_at = datetime.now(UTC)
+            if apply_synthesis(profile, synthesized, validated=validated):
+                profile.evidence_pmid_count = evidence_pmid_count
+                profile.evidence_pub_count = evidence_pub_count
+                profile.profile_version = (profile.profile_version or 0) + 1
 
             if not validated:
                 logger.error(
@@ -632,4 +625,45 @@ def _validate_profile(profile: dict[str, Any]) -> bool:
         logger.warning("No disease areas found")
         return False
 
+    return True
+
+
+def apply_synthesis(
+    profile: ResearcherProfile, synthesized: dict[str, Any], *, validated: bool
+) -> bool:
+    """Apply a synthesized profile's fields to `profile` if it passes the same
+    keep-what-you-have gate `run_profile_pipeline` uses, so a script-driven
+    resynthesis can't do what only the pipeline used to protect against:
+    overwrite a stored, validated profile with one that failed validation
+    (issue #22 COR-22 residual — the four scripts/ synthesizers previously wrote
+    `profile.research_summary` etc. directly with no gate and no provenance).
+
+    Does NOT touch `evidence_pmid_count`/`evidence_pub_count` — those describe
+    *how the synthesis was grounded*, which only `run_profile_pipeline` (the only
+    caller that does its own ORCID/PubMed fetch) can compute; script callers leave
+    the existing evidence counts as they are.
+
+    Returns True if the fields were applied (and `profile.synthesis_validated`
+    updated), False if the existing stored profile was kept unchanged.
+    """
+    if not synthesized:
+        return False
+
+    stored_is_worth_keeping = (
+        (profile.profile_version or 0) > 0
+        and bool(profile.research_summary)
+        and profile.synthesis_validated is not False
+    )
+    if stored_is_worth_keeping and not validated:
+        return False
+
+    techniques = synthesized.get("techniques", [])
+    profile.research_summary = synthesized.get("research_summary", "")
+    profile.techniques = techniques if isinstance(techniques, list) else []
+    profile.experimental_models = synthesized.get("experimental_models", [])
+    profile.disease_areas = synthesized.get("disease_areas", [])
+    profile.key_targets = synthesized.get("key_targets", [])
+    profile.keywords = synthesized.get("keywords", [])
+    profile.synthesis_validated = validated
+    profile.profile_generated_at = datetime.now(UTC)
     return True
