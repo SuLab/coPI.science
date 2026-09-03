@@ -1601,3 +1601,212 @@ class TestTombstonedThreadIsNotResurrected:
         engine._hydrate_thread_from_db.assert_not_awaited()
         engine._reopen_thread.assert_not_awaited()
         engine._update_agent_memory.assert_not_awaited()
+
+
+# ---------------------------------------------------------------
+# _check_pi_proposal_review only clears a proposal the sender is verified
+# to own, and persists a ProposalReview row — COR-5
+# ---------------------------------------------------------------
+
+class TestCheckPiProposalReviewRequiresAuthorization:
+    """Only an agent in `authorized_agent_ids` may have its pending-proposal
+    block cleared — the caller is responsible for proving the actual sender
+    owns that agent. Without this, any message landing in the right
+    thread_id clears the block for whichever agent(s) happen to be waiting
+    on it, regardless of who sent it. See COR-5."""
+
+    def _engine_with_pending_proposal(self):
+        from src.agent.agent import Agent
+        from src.agent.state import ProposalRef
+
+        victim = Agent("victim", "VictimBot", "Victim PI")
+        engine = SimulationEngine(agents=[victim], slack_clients={})  # no session_factory -> DB write is a no-op
+        victim.state.pending_proposals.append(ProposalRef(
+            thread_id="1.0", channel="general", other_agent_id="someone",
+            summary_text="x", proposed_at=0.0,
+        ))
+        return engine, victim
+
+    def _entry(self):
+        from src.agent.message_log import LogEntry
+        return LogEntry(
+            ts="2.0", channel="general", sender_agent_id=None, sender_name="Random Human",
+            content="anything", thread_ts="1.0", posted_at=2.0, is_bot=False,
+        )
+
+    @pytest.mark.asyncio
+    async def test_an_unauthorized_sender_does_not_clear_the_block(self):
+        engine, victim = self._engine_with_pending_proposal()
+
+        await engine._check_pi_proposal_review(self._entry(), authorized_agent_ids={"attacker"})
+
+        assert victim.state.pending_proposals[0].reviewed is False
+
+    @pytest.mark.asyncio
+    async def test_the_owning_agents_pi_does_clear_the_block(self):
+        engine, victim = self._engine_with_pending_proposal()
+
+        await engine._check_pi_proposal_review(self._entry(), authorized_agent_ids={"victim"})
+
+        assert victim.state.pending_proposals[0].reviewed is True
+
+    @pytest.mark.asyncio
+    async def test_an_empty_authorized_set_clears_nothing(self):
+        # The Slack path passes set(pi_agent_ids) verbatim — an unrecognized
+        # Slack user_id (not any registered PI) yields an empty set, and this
+        # must be a true no-op, not "everyone is authorized by default".
+        engine, victim = self._engine_with_pending_proposal()
+
+        await engine._check_pi_proposal_review(self._entry(), authorized_agent_ids=set())
+
+        assert victim.state.pending_proposals[0].reviewed is False
+
+
+class TestHandlePiInboundEntryDerivesAuthorizationFromThreadParticipants:
+    """The DB/web path has no sender identity on the row itself, so it must
+    derive the authorized set from the thread's actual participants rather
+    than trusting every agent in the roster."""
+
+    @pytest.mark.asyncio
+    async def test_only_a_thread_participant_gets_unblocked(self):
+        from src.agent.agent import Agent
+        from src.agent.message_log import LogEntry
+        from src.agent.state import ProposalRef
+
+        participant = Agent("participant", "ParticipantBot", "Participant PI")
+        bystander = Agent("bystander", "BystanderBot", "Bystander PI")
+        engine = SimulationEngine(agents=[participant, bystander], slack_clients={})
+        # Both happen to have a pending proposal keyed to the SAME thread_id —
+        # contrived, but it isolates exactly what the participant-derivation
+        # guards: only an agent who actually posted in the thread is eligible.
+        for ag in (participant, bystander):
+            ag.state.pending_proposals.append(ProposalRef(
+                thread_id="1.0", channel="general", other_agent_id="other",
+                summary_text="x", proposed_at=0.0,
+            ))
+        engine.message_log.append(LogEntry(
+            ts="1.0", channel="general", sender_agent_id="participant", sender_name="ParticipantBot",
+            content="the original proposal thread", posted_at=1.0, is_bot=True,
+        ))
+        pi_entry = LogEntry(
+            ts="2.0", channel="general", sender_agent_id=None, sender_name="Some PI",
+            content="looks good", thread_ts="1.0", posted_at=2.0, is_bot=False,
+        )
+
+        await engine._handle_pi_inbound_entry(pi_entry)
+
+        assert participant.state.pending_proposals[0].reviewed is True
+        assert bystander.state.pending_proposals[0].reviewed is False
+
+
+class TestPersistImplicitProposalReview:
+    """_persist_implicit_proposal_review writes a rating=-1 ProposalReview row
+    keyed on the ProposalRef's own thread_decision_id (the same unified key
+    _sync_proposal_reviews_from_db uses — COR-13), never overwrites an
+    existing row for that (thread_decision_id, agent_id) pair, and is a
+    no-op (not an error) when there is nothing to key against."""
+
+    class _FakeResult:
+        def __init__(self, value):
+            self._value = value
+
+        def scalar_one_or_none(self):
+            return self._value
+
+    class _FakeDB:
+        def __init__(self, *, user_id, existing_review_id=None):
+            self._user_id = user_id
+            self._existing_review_id = existing_review_id
+            self.added: list = []
+            self.committed = False
+
+        async def execute(self, stmt):
+            # First call resolves AgentRegistry.user_id, second resolves the
+            # existing-review check — distinguished by call order, mirroring
+            # the two selects in _persist_implicit_proposal_review.
+            if not hasattr(self, "_calls"):
+                self._calls = 0
+            self._calls += 1
+            if self._calls == 1:
+                return TestPersistImplicitProposalReview._FakeResult(self._user_id)
+            return TestPersistImplicitProposalReview._FakeResult(self._existing_review_id)
+
+        def add(self, obj):
+            self.added.append(obj)
+
+        async def commit(self):
+            self.committed = True
+
+        async def rollback(self):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+    def _engine(self, fake_db):
+        from src.agent.agent import Agent
+
+        engine = SimulationEngine(agents=[Agent("victim", "VictimBot", "Victim PI")], slack_clients={})
+        engine.session_factory = lambda: fake_db
+        return engine
+
+    @pytest.mark.asyncio
+    async def test_none_thread_decision_id_is_a_no_op(self):
+        # No session_factory needed at all: the function must return before
+        # touching the DB when the caller has no decision id to key against.
+        from src.agent.agent import Agent
+
+        engine = SimulationEngine(agents=[Agent("victim", "VictimBot", "Victim PI")], slack_clients={})
+        engine.session_factory = lambda: (_ for _ in ()).throw(AssertionError("must not touch the DB"))
+
+        await engine._persist_implicit_proposal_review("victim", None)
+
+    @pytest.mark.asyncio
+    async def test_writes_a_rating_minus_one_row_keyed_on_the_proposals_decision_id(self):
+        import uuid as uuid_mod
+
+        user_id = uuid_mod.uuid4()
+        decision_id = uuid_mod.uuid4()
+        fake_db = self._FakeDB(user_id=user_id, existing_review_id=None)
+        engine = self._engine(fake_db)
+
+        await engine._persist_implicit_proposal_review("victim", decision_id)
+
+        assert len(fake_db.added) == 1
+        row = fake_db.added[0]
+        assert row.thread_decision_id == decision_id
+        assert row.agent_id == "victim"
+        assert row.user_id == user_id
+        assert row.rating == -1
+        assert row.submitted_via == "engine"
+        assert fake_db.committed is True
+
+    @pytest.mark.asyncio
+    async def test_skips_the_insert_if_a_review_already_exists(self):
+        import uuid as uuid_mod
+
+        user_id = uuid_mod.uuid4()
+        decision_id = uuid_mod.uuid4()
+        fake_db = self._FakeDB(user_id=user_id, existing_review_id=uuid_mod.uuid4())
+        engine = self._engine(fake_db)
+
+        await engine._persist_implicit_proposal_review("victim", decision_id)
+
+        assert fake_db.added == []
+        assert fake_db.committed is False
+
+    @pytest.mark.asyncio
+    async def test_no_registered_pi_user_skips_the_write(self):
+        import uuid as uuid_mod
+
+        decision_id = uuid_mod.uuid4()
+        fake_db = self._FakeDB(user_id=None)
+        engine = self._engine(fake_db)
+
+        await engine._persist_implicit_proposal_review("victim", decision_id)
+
+        assert fake_db.added == []
+        assert fake_db.committed is False

@@ -2956,8 +2956,13 @@ class SimulationEngine:
                         ch_name, sender_name, msg.get("text", "")[:60],
                     )
 
-                    # Check if PI message references a proposal (clears pending block)
-                    self._check_pi_proposal_review(entry)
+                    # Check if PI message references a proposal (clears pending block).
+                    # pi_agent_ids (computed above at the human-message branch) is the
+                    # authorization: only agents THIS Slack user is a registered PI/
+                    # delegate for. See COR-5.
+                    await self._check_pi_proposal_review(
+                        entry, authorized_agent_ids=set(pi_agent_ids),
+                    )
 
                     # PI-specific handling — apply to all agents this PI controls
                     for pi_agent_id in pi_agent_ids:
@@ -3089,8 +3094,19 @@ class SimulationEngine:
         ):
             return
 
-        # Clears any pending proposal on this thread (keyed purely by thread id).
-        self._check_pi_proposal_review(entry)
+        # Clears any pending proposal on this thread. The DB/web row carries no
+        # sender identity (AgentMessage has no user_id column), so the
+        # authorized set is derived from the thread's own participants —
+        # only an agent who actually posted in this thread can be unblocked
+        # by a message landing in it. See COR-5.
+        thread_participants: set[str] = set()
+        if entry.thread_ts:
+            thread_participants = {
+                e.sender_agent_id
+                for e in self.message_log.get_thread_history(entry.thread_ts)
+                if e.sender_agent_id
+            }
+        await self._check_pi_proposal_review(entry, authorized_agent_ids=thread_participants)
 
         thread_ts = entry.thread_ts
         if thread_ts:
@@ -3121,13 +3137,31 @@ class SimulationEngine:
             self.agents[tagged_id].state.has_pi_directive = True
             await self._pi_handler.handle_channel_tag(tagged_id, entry)
 
-    def _check_pi_proposal_review(self, entry: LogEntry) -> None:
-        """Check if a PI message clears a pending proposal for any agent."""
+    async def _check_pi_proposal_review(
+        self, entry: LogEntry, *, authorized_agent_ids: set[str],
+    ) -> None:
+        """Check if a PI message clears a pending proposal for an owned agent.
+
+        Only clears proposals belonging to an agent in `authorized_agent_ids`
+        — the set of agents the actual sender is verified to own/represent.
+        Without this, any message landing in the right thread_id cleared the
+        block for whichever agent was waiting on it, regardless of who sent
+        it — including another lab's PI, or (on the Slack channel poller) any
+        workspace human at all. See COR-5.
+        """
         thread_ts = entry.thread_ts
-        if not thread_ts:
+        if not thread_ts or not authorized_agent_ids:
             return
 
-        for agent in self.agents.values():
+        # list(...), not a bare dict-values iteration: this method is now
+        # async with an await inside the loop body
+        # (_persist_implicit_proposal_review), and _sync_roster_from_db can
+        # mutate self.agents from the same main-loop task. No live "dict
+        # changed size during iteration" exists today, but the loop is now
+        # interruptible where it previously was not — a free hedge.
+        for agent in list(self.agents.values()):
+            if agent.agent_id not in authorized_agent_ids:
+                continue
             for proposal in agent.state.pending_proposals:
                 if proposal.thread_id == thread_ts and not proposal.reviewed:
                     proposal.reviewed = True
@@ -3135,6 +3169,80 @@ class SimulationEngine:
                         "[%s] Proposal in thread %s reviewed by PI",
                         agent.agent_id, thread_ts,
                     )
+                    await self._persist_implicit_proposal_review(
+                        agent.agent_id, proposal.thread_decision_id,
+                    )
+
+    async def _persist_implicit_proposal_review(
+        self, agent_id: str, thread_decision_id: uuid.UUID | None,
+    ) -> None:
+        """Best-effort ProposalReview row for a review cleared by thread
+        engagement rather than the explicit review form.
+
+        `thread_decision_id` comes straight off the `ProposalRef` (the same
+        unified review key `_sync_proposal_reviews_from_db` uses — COR-13),
+        not a fresh lookup by thread_id: after a re-propose cycle mints a new
+        ThreadDecision for the same thread_id, re-deriving by thread_id could
+        pick the wrong (stale) decision. `None` (a proposal whose ThreadDecision
+        write never landed) means in-memory-only — nothing to persist against.
+
+        rating=-1 is a dedicated sentinel — never confused with the explicit
+        1-4 star rating or the reopen-with-guidance sentinel rating=0 (see
+        _sync_proposal_reviews_from_db) — so this can never accidentally
+        trigger a thread reopen. Skips the insert entirely if a review
+        already exists for this (thread_decision, agent) pair (the unique
+        constraint allows only one, and an explicit rating or reopen-with-
+        guidance submission must not be clobbered). Never raises — this is
+        called from pollers that must keep running on a DB hiccup; the
+        in-memory `reviewed` flag (set by the caller before this runs) is
+        the source of truth for the current process regardless.
+        """
+        if not self.session_factory or thread_decision_id is None:
+            return
+        try:
+            from sqlalchemy import select as sa_select
+            from sqlalchemy.exc import IntegrityError
+
+            from src.models import AgentRegistry
+
+            async with self.session_factory() as db:
+                user_id = (await db.execute(
+                    sa_select(AgentRegistry.user_id).where(AgentRegistry.agent_id == agent_id)
+                )).scalar_one_or_none()
+                if not user_id:
+                    logger.debug(
+                        "[%s] No registered PI user — implicit proposal review is "
+                        "in-memory only", agent_id,
+                    )
+                    return
+
+                existing = (await db.execute(
+                    sa_select(ProposalReview.id).where(
+                        ProposalReview.thread_decision_id == thread_decision_id,
+                        ProposalReview.agent_id == agent_id,
+                    )
+                )).scalar_one_or_none()
+                if existing:
+                    return  # Already reviewed by something — never overwrite it.
+
+                db.add(ProposalReview(
+                    thread_decision_id=thread_decision_id,
+                    agent_id=agent_id,
+                    user_id=user_id,
+                    rating=-1,
+                    submitted_via="engine",
+                ))
+                try:
+                    await db.commit()
+                except IntegrityError:
+                    # Lost a race against a concurrent review write for the
+                    # same (thread_decision_id, agent_id) pair.
+                    await db.rollback()
+        except Exception as exc:
+            logger.warning(
+                "[%s] Failed to persist implicit proposal review for decision %s: %s",
+                agent_id, thread_decision_id, exc,
+            )
 
     async def _reopen_thread(self, agent_id: str, thread_ts: str, pi_entry: LogEntry) -> None:
         """Reopen a closed thread when a PI posts in it."""
@@ -3462,11 +3570,17 @@ class SimulationEngine:
                     thread_id, channel_name, sender_name, msg.get("text", "")[:60],
                 )
 
-                # Mark proposal as reviewed
-                self._check_pi_proposal_review(entry)
+                # Mark proposal as reviewed — only for agents this PI actually
+                # owns. The `user_id not in pi_user_ids` guard above only
+                # proves the sender is SOME registered PI, not that they own
+                # the specific agent whose proposal is on this thread. See
+                # COR-5.
+                pi_agent_ids = self._pi_slack_id_to_agent_ids.get(user_id, [])
+                await self._check_pi_proposal_review(
+                    entry, authorized_agent_ids=set(pi_agent_ids),
+                )
 
                 # Reopen the thread for all PI's agents
-                pi_agent_ids = self._pi_slack_id_to_agent_ids.get(user_id, [])
                 for pi_agent_id in pi_agent_ids:
                     if thread_id in self._closed_thread_ids:
                         await self._reopen_thread(pi_agent_id, thread_id, entry)
