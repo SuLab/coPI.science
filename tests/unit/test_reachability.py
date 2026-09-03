@@ -109,10 +109,6 @@ ROUTE_ALLOWLIST: dict[tuple[str, str], str] = {
     ("GET", "/docs/oauth2-redirect"): "FastAPI-generated; used by Swagger UI's own JS.",
     ("GET", "/redoc"): "FastAPI-generated ReDoc UI; entered by typing the URL.",
     ("GET", "/openapi.json"): "FastAPI-generated schema; fetched by /docs and /redoc JS.",
-    ("GET", "/api/health"): (
-        "Liveness probe, not a page link: docker-compose/nginx and any uptime check "
-        "hit it directly. Defined inline in src/main.py create_app()."
-    ),
     ("GET", "/admin"): (
         "Bare-URL alias an admin types by hand: src/routers/admin.py stacks "
         "@router.get('') and @router.get('/users') on the same admin_users handler, and "
