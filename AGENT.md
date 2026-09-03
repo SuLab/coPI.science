@@ -4,7 +4,7 @@
 
 Python implementation of the CoPI researcher collaboration platform combined with the LabAgent multi-agent Slack system. ORCID OAuth, profile generation pipeline, profile editing UI, admin dashboard, and Slack-based AI agent simulation.
 
-**GitHub:** https://github.com/andrewsu/coPI-python-opus
+**GitHub:** https://github.com/SuLab/coPI.science
 **Target domain:** copi.science
 **Pilot:** 10 labs at Scripps Research
 
@@ -20,8 +20,12 @@ Python implementation of the CoPI researcher collaboration platform combined wit
 
 - Matching engine (pairwise proposal generation)
 - Swipe interface
-- Notifications (email)
 - Daily digest
+
+## What Email Actually Does (in scope, built)
+
+`src/services/email.py`, `email_inbound.py`, `email_notifications.py` —
+proposal-review emails, reply intake, unsubscribe/settings.
 
 ## Key Specs
 
@@ -73,8 +77,8 @@ templates/                  # Jinja2 HTML templates
 Decisions made autonomously during implementation are recorded here for human review.
 
 ### 2026-03-20: Admin impersonation endpoint location
-**Decision:** Admin impersonation routes placed at `/api/admin/impersonate` (POST) and `/api/admin/impersonate/stop` (POST) rather than inside the `/admin` router prefix.
-**Reason:** The impersonate stop button posts from any page (including non-admin pages when impersonating), so a clean `/api/admin/` prefix was clearer. Both routes still require is_admin verification.
+**Decision:** Admin impersonation routes are `POST /admin/impersonate` and `POST /admin/impersonate/stop` (`src/routers/admin.py`, mounted under the `/admin` prefix in `src/main.py`). *(Corrected 2026-09: this entry originally described an `/api/`-prefixed design that was never what shipped — see issue #26 DOC-3.)*
+**Reason:** The impersonate-stop button posts from any page (including non-admin pages when impersonating). Both routes still require is_admin verification.
 
 ### 2026-03-20: Login page GET /login serves both redirect and HTML
 **Decision:** `/login` GET route redirects directly to ORCID OAuth if not already logged in. The login.html page has its sign-in button also pointing to `/login` (which re-triggers the redirect).
