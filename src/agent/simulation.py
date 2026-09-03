@@ -1395,21 +1395,36 @@ class SimulationEngine:
         # consulted only once, at turn selection (_turn_eligible, :891/893).
         # Phase 4 fans every active thread out in one gather with per-retry
         # booking, so a turn could overshoot the sliding-window allowance by
-        # as many threads as were open. Filter sequentially before dispatch:
-        # once exhausted, drop the remaining threads for THIS turn rather
-        # than aborting it — has_pending_reply stays True on a dropped
-        # thread (set above), so it is retried next turn exactly like a
-        # failed/empty reply already is.
+        # as many threads as were open.
+        #
+        # Fix-round-1 (I1): a per-thread `_within_rate_limit()` loop here is
+        # semantically all-or-nothing, not a real cap — nothing books a call
+        # between iterations (that only happens once each dispatched thread's
+        # generate_agent_response call actually lands, well after this whole
+        # batch has been dispatched), so _within_rate_limit(agent, now) is
+        # pure and returns the SAME answer on every iteration: either every
+        # thread passes or (once the deque is pruned) every thread fails.
+        # Measured: allowance 1 + three pending threads dispatched all three.
+        #
+        # A headroom slice, not a per-item re-check: call _within_rate_limit
+        # once for its pruning side effect (it drops expired entries from
+        # agent.state.call_times), then compute how many calls are actually
+        # still free under the allowance and take exactly that many threads —
+        # the same allowance/load expression _within_rate_limit itself uses.
+        # Threads beyond the slice keep has_pending_reply=True (set above) and
+        # are retried next turn exactly like a failed/empty reply already is.
         now = time.time()
-        eligible_threads: list[ThreadState] = []
-        for thread in threads_to_reply:
-            if not self._within_rate_limit(agent, now):
-                logger.info(
-                    "[%s] Phase 4: rate-limited, skipping %d remaining thread(s) this turn",
-                    agent.agent_id, len(threads_to_reply) - len(eligible_threads),
-                )
-                break
-            eligible_threads.append(thread)
+        self._within_rate_limit(agent, now)
+        headroom = (
+            int(self._calls_per_load(agent) * self._agent_load(agent))
+            - len(agent.state.call_times)
+        )
+        eligible_threads = threads_to_reply[: max(0, headroom)]
+        if len(eligible_threads) < len(threads_to_reply):
+            logger.info(
+                "[%s] Phase 4: rate-limited, skipping %d remaining thread(s) this turn",
+                agent.agent_id, len(threads_to_reply) - len(eligible_threads),
+            )
 
         # Run replies in parallel
         tasks = [

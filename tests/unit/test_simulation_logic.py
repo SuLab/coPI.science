@@ -2368,7 +2368,17 @@ class TestMidTurnRateGate:
     exhausted the window can overshoot its allowance arbitrarily. See E6(1)."""
 
     @pytest.mark.asyncio
-    async def test_phase4_stops_dispatching_once_the_window_is_exhausted(self):
+    async def test_phase4_caps_dispatch_to_the_rate_limit_headroom(self):
+        # Fix round 1 / I1: a per-thread `_within_rate_limit()` re-check is
+        # semantically all-or-nothing — nothing books a call between
+        # iterations (booking only happens once a dispatched thread's
+        # generate_agent_response call actually lands, well after this whole
+        # batch is dispatched), so the check returns the SAME answer on every
+        # pass. A probe with allowance 1 and three pending threads dispatched
+        # all three under that design. The fix is a headroom slice, not a
+        # per-item re-check: take exactly as many threads as the allowance
+        # still has room for (allowance 1 here) and drop the rest for this
+        # turn — they keep has_pending_reply=True and retry next turn.
         from unittest.mock import AsyncMock
 
         from src.agent.agent import Agent
@@ -2379,9 +2389,33 @@ class TestMidTurnRateGate:
         agent.state.active_threads = {
             "1.0": ThreadState(thread_id="1.0", channel="general", other_agent_id="b", has_pending_reply=True),
             "2.0": ThreadState(thread_id="2.0", channel="general", other_agent_id="b", has_pending_reply=True),
+            "3.0": ThreadState(thread_id="3.0", channel="general", other_agent_id="b", has_pending_reply=True),
         }
         engine._reply_to_thread = AsyncMock()
-        engine._within_rate_limit = lambda a, now: False  # exhausted from turn 0
+        engine._calls_per_load = lambda a: 1
+        engine._agent_load = lambda a: 1
+
+        await engine._phase4_reply_threads(agent)
+
+        assert engine._reply_to_thread.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_phase4_dispatches_nothing_at_zero_allowance(self):
+        # Headroom slice, not per-item re-check: allowance 0 must dispatch
+        # none, not just stop partway through.
+        from unittest.mock import AsyncMock
+
+        from src.agent.agent import Agent
+        from src.agent.state import ThreadState
+
+        agent = Agent("a", "ABot", "A PI")
+        engine = SimulationEngine(agents=[agent], slack_clients={})
+        agent.state.active_threads = {
+            "1.0": ThreadState(thread_id="1.0", channel="general", other_agent_id="b", has_pending_reply=True),
+        }
+        engine._reply_to_thread = AsyncMock()
+        engine._calls_per_load = lambda a: 0
+        engine._agent_load = lambda a: 1
 
         await engine._phase4_reply_threads(agent)
 
@@ -2401,7 +2435,8 @@ class TestMidTurnRateGate:
             "1.0": ThreadState(thread_id="1.0", channel="general", other_agent_id="b", has_pending_reply=True),
         }
         engine._reply_to_thread = AsyncMock()
-        engine._within_rate_limit = lambda a, now: True
+        engine._calls_per_load = lambda a: 5
+        engine._agent_load = lambda a: 1
 
         await engine._phase4_reply_threads(agent)
 
