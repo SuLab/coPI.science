@@ -4,9 +4,11 @@ import pytest
 
 from src.agent.ids import (
     WRITER_ENGINE,
+    WRITER_ENGINE_AUX,
     WRITER_GRANTBOT,
     WRITER_SLOT_MODULUS,
     WRITER_WEB,
+    WRITER_WORKER,
     TsMinter,
     default_writer_id,
     mint_local_ts,
@@ -95,6 +97,23 @@ class TestWriterSlots:
             TsMinter(WRITER_SLOT_MODULUS)
         with pytest.raises(ValueError):
             TsMinter(-1)
+
+    def test_five_writer_slots_are_distinct_residues(self):
+        """R1: every process that can mint a canonical id owns a residue class no
+        other minter uses — engine, web, grantbot, the engine's own module-default
+        (PI DMs), and now the worker."""
+        slots = {
+            "WRITER_ENGINE": WRITER_ENGINE,
+            "WRITER_WEB": WRITER_WEB,
+            "WRITER_GRANTBOT": WRITER_GRANTBOT,
+            "WRITER_ENGINE_AUX": WRITER_ENGINE_AUX,
+            "WRITER_WORKER": WRITER_WORKER,
+        }
+        assert len(set(slots.values())) == len(slots), (
+            f"two writer constants share a residue class: {slots}"
+        )
+        for name, value in slots.items():
+            assert 0 <= value < WRITER_SLOT_MODULUS, f"{name}={value} out of range"
 
 
 class TestModuleDefaultMinter:

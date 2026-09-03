@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from src.agent.ids import WRITER_WORKER, set_default_writer_id
 from src.config import get_settings
 from src.models import Job, User
 from src.services.profile_pipeline import run_profile_pipeline
@@ -176,6 +177,12 @@ async def run_worker():
 
 
 def main():
+    # Claim this process's canonical-id writer slot before anything mints. The
+    # worker only mints when handling an inbound-email PI reply (record_pi_message /
+    # migrate_public_thread_to_private, both gated on ENABLE_INBOUND_EMAIL) — without
+    # this it mints in the module default's WRITER_WEB residue class and can collide
+    # with the web app (R1). See src/agent/ids.py.
+    set_default_writer_id(WRITER_WORKER)
     signal.signal(signal.SIGTERM, _handle_sigterm)
     signal.signal(signal.SIGINT, _handle_sigterm)
     asyncio.run(run_worker())

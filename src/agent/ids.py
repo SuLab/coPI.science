@@ -48,6 +48,8 @@ WRITER_ENGINE = 0        # SimulationEngine._ts_minter (agent_messages)
 WRITER_WEB = 1           # web app process (PI messages + DMs)
 WRITER_GRANTBOT = 2      # grantbot process (funding posts)
 WRITER_ENGINE_AUX = 3    # module default inside the engine process (PI DMs)
+WRITER_WORKER = 4        # worker process (PI messages/DMs from inbound-email replies, when
+                         # ENABLE_INBOUND_EMAIL is on) — see src/worker/main.py:main()
 
 
 def _fmt(us: int) -> str:

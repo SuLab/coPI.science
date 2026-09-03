@@ -63,8 +63,11 @@ by **reusing the existing schema** wherever possible.
    float, which cannot hold microsecond precision at current epoch magnitudes)
    and strictly advance; the high-water mark is seeded at rebuild from
    `max(posted_at)` so minted ids sort after restored history. This preserves
-   `posted_at = float(ts)` ordering. Three processes mint into the same run — the
-   engine, the web app and GrantBot — so each minter also owns a **writer slot**:
+   `posted_at = float(ts)` ordering. Five writer-slot claims exist today (`src/agent/ids.py`):
+   the engine's own minter (`WRITER_ENGINE`), the engine process's module-default minter used for PI
+   DMs (`WRITER_ENGINE_AUX`), the web app (`WRITER_WEB`), GrantBot (`WRITER_GRANTBOT`), and the worker
+   (`WRITER_WORKER`, only reachable once `ENABLE_INBOUND_EMAIL` is on). Each minter also owns a
+   **writer slot**:
    ids are quantized to `WRITER_SLOT_MODULUS` (100 µs) and the writer id occupies
    the low microsecond digits, giving every writer its own residue class. Without
    this, two processes minting in the same microsecond produce the identical id,

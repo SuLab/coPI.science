@@ -124,10 +124,11 @@ from typing import Any, NoReturn
 
 #: Writer slot used for renumbered ids. ``src/agent/ids.py`` gives every minter a
 #: residue class of the microsecond field so two processes can never mint the
-#: same id; 0-3 are claimed by the engine, the web app, GrantBot and the engine's
-#: module-default minter. 99 is claimed here, at the far end of the range, so a
-#: remediated id cannot collide with anything a running system mints -- and so a
-#: renumbered id is recognisable as remediated at a glance.
+#: same id; 0-4 are claimed by the engine (twice: its own minter and the
+#: module-default used for PI DMs), the web app, GrantBot and the worker. 99 is
+#: claimed here, at the far end of the range, so a remediated id cannot collide
+#: with anything a running system mints -- and so a renumbered id is
+#: recognisable as remediated at a glance.
 REMEDIATION_WRITER_SLOT = 99
 
 #: What this tool assumes ``src/agent/ids.py`` uses. If the loaded module says

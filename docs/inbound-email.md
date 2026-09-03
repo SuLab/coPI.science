@@ -81,7 +81,15 @@ Then, in this order:
    `_amazonses` TXT verification record if the domain was newly verified.
 2. Attach the printed S3 policy to `copi-ec2-ses-role`.
 3. Re-run `--check` until all layers are OK.
-4. Set `ENABLE_INBOUND_EMAIL=true` in the prod `.env` and recreate BOTH the
+4. **Prerequisite (land before this step, not after):** the worker must already claim its own
+   canonical-id writer slot (`WRITER_WORKER` in `src/agent/ids.py`, claimed in
+   `src/worker/main.py:main()`) — otherwise it mints PI-reply messages in the web app's residue
+   class and a same-microsecond collision silently drops one of the two messages (the
+   `uq_agent_messages_run_ts` conflict handler's resolution; unrecoverable now that the DB is the
+   only durable store). Landed as part of #21 V11 — if this line still says "not yet landed" when
+   you read it, stop and land it first.
+
+   Set `ENABLE_INBOUND_EMAIL=true` in the prod `.env` and recreate BOTH the
    worker (polling + proposal/reminder emails) and the app (the welcome email
    reads the same flag for its reply-vs-dashboard copy — recreating only the
    worker leaves new signups being told the dashboard is the only way in):
