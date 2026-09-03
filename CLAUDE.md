@@ -121,6 +121,17 @@ they can decide whether to restart.** Roster changes — activating/inactivating
 setting a new `slack_bot_token` in `AgentRegistry` — do NOT need a restart; they're
 picked up live by `_sync_roster_from_db`.
 
+**One-time Slack-ts repair (legacy rows).** A workspace that predates the DB-primary
+conversation model may have `agent_messages` rows with `slack_ts IS NULL`. Replies to
+threads rooted on those rows are silently kept off Slack — `_slack_parent_ts`
+(`src/agent/simulation.py`) returns `None` for a legacy root and callers skip the
+mirror rather than guess a timestamp Slack never issued. Run
+`scripts/backfill_slack_ts.py --apply` once, before your next restart, to ask Slack
+which timestamps actually exist and repair them (safe to re-run; read-only against
+Slack otherwise). `docs/production-migration.md` §8 Step 8 walks through this as an
+ordered pre-deploy step for a *fresh* migration; if your workspace is already at head
+and has never run it, run it manually — nothing else will prompt you to.
+
 ## Adding New PIs
 
 **The `AgentRegistry` table is the single source of truth for the agent roster.**
