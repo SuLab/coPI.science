@@ -93,6 +93,15 @@ _ACK_PHRASES = [
 ]
 _ACK_RE = re.compile("|".join(_ACK_PHRASES), re.IGNORECASE)
 
+# A message this long is presumed substantive even if it opens with an ack
+# phrase — see is_acknowledgment_only_funding_reply (issue #23 COR-28b).
+# 10, not a rounder-looking 12: the issue's own reproduction ("Agreed, we can
+# send the plasmids and the mice next week.") is 11 words, and a threshold
+# that does not flip that sentence does not close this finding. Verified safe
+# against every TestAcknowledgmentOnly.test_positive_cases fixture — the
+# longest ("Sounds good — see you there.") is 6 words.
+_ACK_SUBSTANTIVE_WORD_COUNT = 10
+
 
 def _strip_for_ack_check(text: str) -> str:
     """Strip markdown/emoji/whitespace to the first substantive token."""
@@ -125,6 +134,13 @@ def is_acknowledgment_only_funding_reply(text: str) -> bool:
         return False
     # A question is substantive engagement, not an ack.
     if "?" in stripped:
+        return False
+    # A reply this long is doing more than acknowledging, even one that opens
+    # with an ack phrase and never touches the (necessarily incomplete) marker
+    # vocabulary above (issue #23 COR-28b): "Agreed, we can send the plasmids
+    # and the mice next week." was rejected as ack-only for lacking a listed
+    # noun.
+    if len(stripped.split()) >= _ACK_SUBSTANTIVE_WORD_COUNT:
         return False
     cleaned = _strip_for_ack_check(stripped)
     if not cleaned:

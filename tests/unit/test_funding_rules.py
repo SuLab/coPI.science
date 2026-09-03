@@ -115,6 +115,21 @@ class TestAcknowledgmentOnly:
     def test_negative_cases(self, text):
         assert is_acknowledgment_only_funding_reply(text) is False
 
+    @pytest.mark.parametrize("text", [
+        # COR-28b's literal reproduction from findings/issue_23.md:30 — 11 words,
+        # so a 12-word threshold does not fix this at all; 10 does.
+        "Agreed, we can send the plasmids and the mice next week.",
+        # the general failure mode: vocabulary the fixed marker list misses,
+        # demonstrated with a materially longer, equally vocabulary-avoiding sentence.
+        "Agreed, we can package up the mice and the plasmids and ship them "
+        "to your team early next week.",
+    ])
+    def test_a_substantive_reply_starting_with_an_ack_word_is_not_rejected(self, text):
+        # COR-28b: opens with "Agreed" (an ack phrase) and contains none of
+        # _SUBSTANTIVE_MARKERS_RE's fixed vocabulary, but is unambiguously a
+        # real logistics commitment, not a bare acknowledgment.
+        assert is_acknowledgment_only_funding_reply(text) is False
+
 
 # ---------------------------------------------------------------
 # Thread summarizer
