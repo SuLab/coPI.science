@@ -2108,3 +2108,75 @@ class TestFlushLlmLogsRequeuesOnFailure:
         engine._llm_log_buffer.append(new_entry)
 
         assert engine._llm_log_buffer == [old_entry, new_entry]
+
+
+# ---------------------------------------------------------------
+# _phase5_new_post — a reply's channel must come from the target post, not
+# the LLM's free-form field (#20 COR-9b)
+# ---------------------------------------------------------------
+
+class TestPhase5ReplyChannelComesFromTheTargetPost:
+    """A reply's channel must be derived from the post it targets, never from
+    the LLM's free-form `channel` field — otherwise a reply 'targeting' a
+    collab_private post while declaring 'general' posts publicly and
+    persists as public, leaking private-channel content into the public
+    memory-synthesis segment. See COR-9b."""
+
+    def _engine(self, monkeypatch):
+        from src.agent.agent import Agent
+        from src.agent.message_log import LogEntry
+        from src.config import get_settings
+        from src.models.agent_activity import VISIBILITY_COLLAB_PRIVATE
+
+        # Hermetic against a local .env with PHASE5_SKIP_PROBABILITY set
+        # nonzero (red-team m7) — agent "a" has no pi_priority candidate to
+        # bypass the random skip on its own, and the test below asserts the
+        # LLM path actually ran. Default is 0.0 (config.py:330).
+        monkeypatch.setattr(get_settings(), "phase5_skip_probability", 0.0)
+        a = Agent("a", "ABot", "A PI")
+        b = Agent("b", "BBot", "B PI")
+        engine = SimulationEngine(agents=[a, b], slack_clients={})
+        engine._channel_visibility["priv-chan"] = VISIBILITY_COLLAB_PRIVATE
+        engine.message_log.append(LogEntry(
+            ts="100.0", channel="priv-chan", sender_agent_id="b", sender_name="BBot",
+            content="original private post", posted_at=100.0, is_bot=True,
+        ))
+        return engine, a
+
+    def _stub_response(self, declared_channel="general"):
+        return (
+            "```json\n"
+            f'{{"action": "reply", "channel": "{declared_channel}", "target_post_id": "100.0"}}\n'
+            "```\n"
+            "<slack_message>\n"
+            "Sounds interesting, let's collaborate.\n"
+            "</slack_message>\n"
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_reply_ignores_the_llms_channel_and_uses_the_targets(self, monkeypatch):
+        from unittest.mock import AsyncMock
+
+        from src.models.agent_activity import VISIBILITY_COLLAB_PRIVATE
+
+        engine, a = self._engine(monkeypatch)
+        monkeypatch.setattr(
+            "src.agent.simulation.generate_agent_response",
+            AsyncMock(return_value=self._stub_response("general")),
+        )
+
+        await engine._phase5_new_post(a)
+
+        posts = [e for e in engine.message_log._entries if e.sender_agent_id == "a"]
+        assert len(posts) == 1
+        assert posts[0].channel == "priv-chan"
+        # A collab_private channel is FLAT (see _phase5_new_post's private-reply
+        # branch, :2368-2380): correcting the channel routes THIS reply down
+        # that branch instead of the general-purpose threaded one, so it posts
+        # with no thread_ts. That is the point of the fix, not an artifact of
+        # the test — pre-fix this same call landed in #general, threaded onto
+        # the private root's ts, and persisted visibility='public', leaking a
+        # collab_private reply's content into the public memory-synthesis
+        # segment. See red-team B5.
+        assert posts[0].thread_ts is None
+        assert posts[0].visibility == VISIBILITY_COLLAB_PRIVATE

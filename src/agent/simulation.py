@@ -2414,6 +2414,18 @@ class SimulationEngine:
             target_post_id = action_data.get("target_post_id")
             post_type = action_data.get("post_type", "")
 
+            # A reply's channel is the target post's real channel, never the
+            # LLM's free-form field — trusting the LLM here let a reply
+            # "targeting" a collab_private post declare "general" and post
+            # publicly while still threading onto the private root's ts. Falls
+            # back to the LLM's value only if the target isn't in the log
+            # (e.g. windowed out) — better to trust it than refuse to reply.
+            # See COR-9b.
+            if action == "reply" and target_post_id:
+                target_entry = self.message_log.get_entry(target_post_id)
+                if target_entry:
+                    channel = target_entry.channel
+
             # Turn-taking enforcement for private channels: reject any action
             # that would post back-to-back with our previous private-channel
             # message. Belt-and-braces — the available_posts pre-filter also
