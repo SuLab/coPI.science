@@ -57,6 +57,13 @@ _RECENT_REPLY_TIMES: dict[str, list[float]] = {}
 # single long-lived process and a restart merely resets the count).
 _HELP_EMAILS_SENT: dict[str, int] = {}
 
+# notification id -> instruction-failure emails sent (in-memory, like the help-email rate
+# limiter above). Caps the PI-facing email at one per notification: the raise below keeps
+# the S3 object, so this site is re-entered on every poll until the object is quarantined
+# (COR-32) and migrate_public_thread_to_private is not idempotent — see the refined_in_channel
+# guard added to _handle_instruction below.
+_INSTRUCTION_FAILURE_EMAILS_SENT: dict[str, int] = {}
+
 # s3 key -> consecutive processing failures (in-memory; resets on restart).
 _S3_FAILURE_COUNTS: dict[str, int] = {}
 
@@ -646,6 +653,37 @@ async def _handle_review(
     )
 
 
+class InstructionApplyFailed(Exception):
+    """Raised by `_handle_instruction` for a retryable failure to apply a PI's email
+    instruction (no active simulation run, no bot token, channel missing, or an
+    unexpected exception in the migrate/post step). The PI has already been emailed an
+    explanation by the time this is raised — raising (instead of returning False) tells
+    process_inbound_email's poller caller to retry the whole message rather than
+    silently marking the notification responded and deleting the S3 object (COR-32).
+    """
+
+
+def _notify_instruction_failure(
+    user: User, agent: AgentRegistry, notification: EmailNotification
+) -> None:
+    """PI-facing explanation for a retryable _handle_instruction failure (COR-32).
+
+    Capped at one email per notification: the raise below keeps the S3 object, so this
+    site is re-entered on every poll until the object is quarantined.
+    """
+    key = str(notification.id)
+    if _INSTRUCTION_FAILURE_EMAILS_SENT.get(key):
+        return
+    _INSTRUCTION_FAILURE_EMAILS_SENT[key] = 1
+    _send_simple_email(
+        user.email,
+        f"Couldn't apply your {agent.bot_name} instruction",
+        "We ran into a problem applying your instruction to this proposal. "
+        "We'll retry automatically; if you don't hear back soon, please try "
+        "again from your dashboard at copi.science.",
+    )
+
+
 async def _handle_instruction(
     user: User,
     notification: EmailNotification,
@@ -673,6 +711,20 @@ async def _handle_instruction(
         select(AgentRegistry).where(AgentRegistry.id == notification.agent_registry_id)
     )
     agent = agent_result.scalar_one()
+
+    # Retry safety (COR-32): raising below instead of returning False means the S3 object
+    # is kept and process_inbound_email re-runs. migrate_public_thread_to_private is NOT
+    # idempotent (it creates a Slack channel before most of its DB work, and raises on
+    # partial failure — see private_channels.py:415-419), and the ProposalReview guard
+    # below only catches a COMPLETED reopen. refined_in_channel is set by the migration,
+    # so it is the marker for "a previous attempt already got that far" — a retry must not
+    # mint a second private channel.
+    if td.refined_in_channel:
+        logger.info(
+            "Proposal %s already migrated to %s by an earlier attempt — not re-migrating",
+            td.thread_id, td.refined_in_channel,
+        )
+        return False
 
     if agent.status != "active":
         logger.info(
@@ -756,7 +808,8 @@ async def _handle_instruction(
                     logger.info("Email guidance for %s written to DB inbox (Slack off)", td.thread_id)
                     return True
                 logger.error("No simulation run to record email guidance for %s", td.thread_id)
-                return False
+                _notify_instruction_failure(user, agent, notification)
+                raise InstructionApplyFailed(f"no active simulation run for {td.thread_id}")
 
             # The channel lookup goes through the boundary. It used to read a
             # single 200-item page of the paginated conversations.list, so a
@@ -773,12 +826,14 @@ async def _handle_instruction(
             bot_token = token_for_agent_row(agent)
             if not bot_token:
                 logger.error("No bot token for agent %s", agent.agent_id)
-                return False
+                _notify_instruction_failure(user, agent, notification)
+                raise InstructionApplyFailed(f"no bot token for agent {agent.agent_id}")
 
             channel_id = (await list_channel_ids_async(bot_token)).get(td.channel)
             if not channel_id:
                 logger.error("Channel #%s not found for instruction posting", td.channel)
-                return False
+                _notify_instruction_failure(user, agent, notification)
+                raise InstructionApplyFailed(f"channel #{td.channel} not found")
 
             await post_message_async(
                 bot_token,
@@ -791,9 +846,12 @@ async def _handle_instruction(
                 "(enable_private_refinement=False)",
                 user.name, td.thread_id, agent.agent_id,
             )
+    except InstructionApplyFailed:
+        raise  # already handled (emailed the PI) at the specific site above
     except Exception as exc:
         logger.error("Failed to reopen proposal from email: %s", exc, exc_info=True)
-        return False
+        _notify_instruction_failure(user, agent, notification)
+        raise InstructionApplyFailed(f"unexpected error reopening {td.thread_id}") from exc
 
     # rating=0 "reopened" review (mirrors the web flow — the migration sets
     # refined_in_channel on the ThreadDecision but leaves the review to us).

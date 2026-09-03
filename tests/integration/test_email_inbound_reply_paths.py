@@ -314,6 +314,101 @@ async def test_review_confirmation_failure_does_not_roll_back_the_already_commit
             ) == 0, "this test committed a simulation_runs row it did not clean up"
 
 
+# --- 2c. A failed instruction post notifies the PI and is retried (COR-32) -----
+
+
+async def test_a_retryable_instruction_failure_notifies_the_pi_and_does_not_retire_the_notification(
+    db_session, monkeypatch, sent_emails,
+):
+    """COR-32: a `_handle_instruction` failure that previously returned False silently (no
+    post, no email, but the notification was retired and the S3 object deleted) must now
+    email the PI and leave the notification retryable. Forces the blanket except by making
+    migrate_public_thread_to_private raise — the DEFAULT-config path
+    (enable_private_refinement=True, td.origin_visibility='public', both factory defaults),
+    reachable in production today, not just the legacy flag-off path.
+    """
+    token = "instrfail" + "e" * 40
+    recipient, agent, td, notification = await _world(
+        db_session, recipient_email="pi.instr@scripps.edu", token=token
+    )
+    monkeypatch.setattr(inbound, "_INSTRUCTION_FAILURE_EMAILS_SENT", {})
+    _classifies_as(monkeypatch, {"category": "instruction", "instruction": "focus on X"})
+
+    async def _boom(*a, **k):
+        raise RuntimeError("Slack outage")
+
+    # migrate_public_thread_to_private is imported with a LOCAL `from ... import` inside
+    # _handle_instruction, so it is looked up fresh at call time — patching the source
+    # module's attribute (not email_inbound's namespace, which has no such name at
+    # module scope) is what actually takes effect.
+    monkeypatch.setattr(
+        "src.services.private_channels.migrate_public_thread_to_private", _boom
+    )
+
+    with pytest.raises(inbound.InstructionApplyFailed):
+        await process_inbound_email(
+            _raw_reply(token, "pi.instr@scripps.edu", "please focus on X"), db_session,
+        )
+
+    assert notification.status == "sent", "the notification must stay retryable, not retired"
+    assert await _reviews(db_session) == []
+    (mail,) = sent_emails
+    assert mail["to"] == recipient.email
+    assert "instruction" in mail["subject"].lower()
+
+    # COR-32 retry cap: process_inbound_email is re-entered on every poll until the S3
+    # object is quarantined (MAX_S3_PROCESS_ATTEMPTS) — migrate_public_thread_to_private
+    # keeps raising on each retry in this test, so _handle_instruction keeps raising too,
+    # but the PI must not get a second identical failure email for the same notification.
+    with pytest.raises(inbound.InstructionApplyFailed):
+        await process_inbound_email(
+            _raw_reply(token, "pi.instr@scripps.edu", "please focus on X"), db_session,
+        )
+    assert len(sent_emails) == 1, "a second retry sent a second identical failure email"
+
+
+async def test_a_previously_migrated_proposal_is_not_re_migrated_on_retry(
+    db_session, monkeypatch, sent_emails,
+):
+    """COR-32: migrate_public_thread_to_private is NOT idempotent — a retry after an earlier
+    attempt already migrated the thread (refined_in_channel set by that earlier attempt, but
+    the review never got added because something failed after the migration) must not mint a
+    SECOND private Slack channel. The ProposalReview guard just above this one in
+    _handle_instruction only catches a COMPLETED reopen; refined_in_channel is the only marker
+    available for a migration that started but never finished."""
+    token = "instrretry" + "f" * 39
+    recipient, agent, td, notification = await _world(
+        db_session, recipient_email="pi.instr2@scripps.edu", token=token
+    )
+    td.refined_in_channel = "priv-c1234567"
+    await db_session.flush()
+
+    # A bare raise here would be swallowed by _handle_instruction's own blanket
+    # except-and-return-False (pre-fix), which would make this assertion pass for the
+    # WRONG reason. Track the call directly instead.
+    called: list[bool] = []
+
+    async def _must_not_run(*a, **k):
+        called.append(True)
+        raise RuntimeError("migrate_public_thread_to_private must not run on a retry")
+
+    monkeypatch.setattr(
+        "src.services.private_channels.migrate_public_thread_to_private", _must_not_run
+    )
+
+    reopened = await inbound._handle_instruction(
+        user=recipient, notification=notification, td=td,
+        instruction="focus on X", db=db_session,
+    )
+
+    assert called == [], (
+        "migrate_public_thread_to_private ran again on a retry — refined_in_channel, set by "
+        "an earlier attempt, should have short-circuited before reaching it"
+    )
+    assert reopened is False
+    assert sent_emails == [], "no NEW failure email is needed — this is not a new failure"
+
+
 # --- 3. Confirmations do not pretend to be reply-able --------------------------
 
 
