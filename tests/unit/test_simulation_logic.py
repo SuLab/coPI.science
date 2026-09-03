@@ -1463,6 +1463,14 @@ class TestPhase3ActivationSetsMessageCountOffset:
     agent gets a fresh reply budget starting from the thread's size at
     activation time, exactly like the reopen paths already do."""
 
+    @pytest.fixture(autouse=True)
+    def _hermetic_profiles(self, monkeypatch, tmp_path):
+        # Driving the real _reply_to_thread below reads agent profile/memory
+        # files (build_phase4_prompt -> build_thread_reply_system_prompt).
+        # Point PROFILES_DIR at an empty tmp dir so nothing under the repo's
+        # real profiles/ is read, and nothing is ever written there.
+        monkeypatch.setattr("src.agent.agent.PROFILES_DIR", tmp_path)
+
     def _engine_with_capped_funding_thread(self):
         from src.agent.agent import Agent
         from src.agent.message_log import LogEntry
@@ -1490,17 +1498,80 @@ class TestPhase3ActivationSetsMessageCountOffset:
         ))
         return engine, c
 
-    def test_tag_path_sets_the_offset_to_the_current_count(self):
+    def _engine_with_capped_reply_thread(self):
+        """Same 12-message shape as the tag-path helper, but the root is
+        authored by the agent under test (CBot) and every reply comes from
+        someone else — this is what makes get_replies_to_agent_posts fire
+        the REPLY path in _phase3_activate_threads instead of the tag path."""
+        from src.agent.agent import Agent
+        from src.agent.message_log import LogEntry
+
+        a = Agent("a", "ABot", "A PI")
+        b = Agent("b", "BBot", "B PI")
+        c = Agent("c", "CBot", "C PI")
+        engine = SimulationEngine(agents=[a, b, c], slack_clients={})
+        engine.message_log.append(LogEntry(
+            ts="1.0", channel="general", sender_agent_id="c", sender_name="CBot",
+            content="Initial post from C", posted_at=1.0, is_bot=True,
+        ))
+        senders = ["b", "a"] * 5  # 10 replies -> 11 messages so far
+        for i, sender in enumerate(senders, start=2):
+            engine.message_log.append(LogEntry(
+                ts=f"{i}.0", channel="general", sender_agent_id=sender, sender_name=sender,
+                content=f"reply {i}", thread_ts="1.0", posted_at=float(i), is_bot=True,
+            ))
+        # 12th message (the cap) — one more reply from BBot, no tag needed:
+        # CBot authored the root, so the reply path activates it for CBot.
+        engine.message_log.append(LogEntry(
+            ts="12.0", channel="general", sender_agent_id="b", sender_name="BBot",
+            content="One more reply", thread_ts="1.0", posted_at=12.0, is_bot=True,
+        ))
+        return engine, c
+
+    async def _reply_and_assert_no_timeout_close(self, engine, agent, thread, monkeypatch):
+        """Drive the real Phase-4 reply path and prove the fresh offset does
+        its actual job: a newly-activated agent must NOT get an instant
+        "timeout" close on a thread that was already at the cap before it
+        joined. generate_with_tools is stubbed (Anthropic-free) to return an
+        empty draft, which _reply_to_thread treats as an empty-response
+        skip — a clean return that never reaches _post_message or
+        _update_agent_memory, so stubbing those is just a belt-and-braces
+        guard against a future code path change reaching them."""
+        from unittest.mock import AsyncMock
+
+        close_mock = AsyncMock()
+        monkeypatch.setattr(engine, "_close_thread", close_mock)
+        monkeypatch.setattr(engine, "_update_agent_memory", AsyncMock())
+
+        async def fake_generate(**kwargs):
+            return ""
+
+        monkeypatch.setattr("src.agent.simulation.generate_with_tools", fake_generate)
+
+        await engine._reply_to_thread(agent, thread)
+
+        close_mock.assert_not_awaited()
+
+    async def test_tag_path_sets_the_offset_to_the_current_count(self, monkeypatch):
         engine, c = self._engine_with_capped_funding_thread()
 
         engine._phase3_activate_threads(c)
 
         thread = c.state.active_threads["1.0"]
         assert thread.message_count_offset == 12
-        # Prove the practical effect: _reply_to_thread's recompute would start
+        # Prove the practical effect: _reply_to_thread's recompute starts
         # this newly-tagged agent at 0, not at the pre-existing 12 (which
         # would close the thread as "timeout" before it ever replied).
-        assert 12 - thread.message_count_offset == 0
+        await self._reply_and_assert_no_timeout_close(engine, c, thread, monkeypatch)
+
+    async def test_reply_path_sets_the_offset_to_the_current_count(self, monkeypatch):
+        engine, c = self._engine_with_capped_reply_thread()
+
+        engine._phase3_activate_threads(c)
+
+        thread = c.state.active_threads["1.0"]
+        assert thread.message_count_offset == 12
+        await self._reply_and_assert_no_timeout_close(engine, c, thread, monkeypatch)
 
 
 # ---------------------------------------------------------------
