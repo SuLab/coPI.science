@@ -22,6 +22,31 @@ services:
         awslogs-create-group: "true"
         awslogs-region: ${AWS_REGION:-us-east-2}
 
+  migrate:
+    build:
+      context: .
+    restart: "no"
+    command: ["python", "-m", "alembic", "upgrade", "head"]
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-copi}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-copi}
+      SECRET_KEY: ${SECRET_KEY:?Set a strong random SECRET_KEY in .env}
+      ENVIRONMENT: ${ENVIRONMENT:-production}
+      # Same knob run_migration.sh already reads (alembic/env.py:66) — a
+      # routine `alembic upgrade head` here should never need to wait long,
+      # but give it the same override surface as the gated runbook.
+      ALEMBIC_LOCK_TIMEOUT_MS: ${ALEMBIC_LOCK_TIMEOUT_MS:-10000}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    logging:
+      driver: awslogs
+      options:
+        awslogs-group: /copi/migrate
+        tag: migrate
+        awslogs-create-group: "true"
+        awslogs-region: ${AWS_REGION:-us-east-2}
+
   app:
     build:
       context: .
@@ -42,6 +67,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen(\\\"http://127.0.0.1:8000/api/health\\\")\""]
       interval: 30s
@@ -73,6 +100,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     logging:
       driver: awslogs
       options:
@@ -128,6 +157,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     logging:
       driver: awslogs
       options:

@@ -32,3 +32,6 @@ services:
   certbot:
     logging:
       driver: json-file
+  migrate:
+    logging:
+      driver: json-file
