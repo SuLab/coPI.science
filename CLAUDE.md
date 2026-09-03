@@ -126,11 +126,12 @@ conversation model may have `agent_messages` rows with `slack_ts IS NULL`. Repli
 threads rooted on those rows are silently kept off Slack — `_slack_parent_ts`
 (`src/agent/simulation.py`) returns `None` for a legacy root and callers skip the
 mirror rather than guess a timestamp Slack never issued. Run
-`scripts/backfill_slack_ts.py --apply` once, before your next restart, to ask Slack
-which timestamps actually exist and repair them (safe to re-run; read-only against
-Slack otherwise). `docs/production-migration.md` §8 Step 8 walks through this as an
-ordered pre-deploy step for a *fresh* migration; if your workspace is already at head
-and has never run it, run it manually — nothing else will prompt you to.
+`docker compose exec app python scripts/backfill_slack_ts.py --apply` once, before your
+next restart, to ask Slack which timestamps actually exist and repair them (safe to
+re-run; read-only against Slack otherwise). `docs/production-migration.md` §8 Step 8
+walks through this as an ordered step after the migration and before the app-code
+deploy for a *fresh* migration; if your workspace is already at head and has never run
+it, run it manually — nothing else will prompt you to.
 
 ## Adding New PIs
 

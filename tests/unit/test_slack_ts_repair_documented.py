@@ -12,12 +12,20 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
+_WRAPPED_COMMAND = "docker compose exec app python scripts/backfill_slack_ts.py --apply"
+
+
 def test_claude_md_mentions_the_repair_script():
     text = (REPO_ROOT / "CLAUDE.md").read_text()
-    assert "backfill_slack_ts.py" in text
-    assert "--apply" in text
+    assert _WRAPPED_COMMAND in text, (
+        "CLAUDE.md must tell the operator to run the repair through "
+        "docker compose exec, per the repo convention (#26 DOC-7)"
+    )
 
 
 def test_readme_mentions_the_repair_script():
     text = (REPO_ROOT / "README.md").read_text()
-    assert "backfill_slack_ts.py" in text
+    assert _WRAPPED_COMMAND in text, (
+        "README.md must tell the operator to run the repair through "
+        "docker compose exec, per the repo convention (#26 DOC-7)"
+    )
