@@ -33,6 +33,17 @@ MAX_REPLIES_PER_TOKEN_PER_HOUR = 10
 # Processing attempts per S3 object before it is quarantined under failed/.
 MAX_S3_PROCESS_ATTEMPTS = 3
 
+# Safety cap on list_objects_v2 pagination, mirroring the MAX_PAGES pattern in
+# src/agent/slack_client.py:133 — a real inbound bucket should never approach this,
+# but an unbounded while-loop following a cursor forever is one bug away from a hang.
+# Capped at 20 (1,000 objects/poll at MaxKeys=50), not 200: poll_inbound_emails runs
+# synchronously inside run_worker's main loop (worker/main.py) with its own DB session
+# per object and, for a real reply, an LLM classification call — at 200 pages (10,000
+# objects) a single poll could block the job queue and every other throttled check for
+# an unacceptably long time. 1,000 objects/poll is still far more than a real backlog
+# should ever reach.
+_MAX_S3_LIST_PAGES = 20
+
 # Help emails per notification. Unparseable replies deliberately never consume
 # the token, so without a ceiling a confused sender (or an autoresponder the
 # RFC 3834 gate misses) trades help emails with us at the rate limiter's pace
@@ -163,8 +174,24 @@ async def poll_inbound_emails(session_factory: async_sessionmaker) -> int:
         bucket = settings.ses_inbound_s3_bucket
         prefix = settings.ses_inbound_s3_prefix
 
-        response = s3.list_objects_v2(Bucket=bucket, Prefix=prefix, MaxKeys=50)
-        objects = response.get("Contents", [])
+        objects: list[dict] = []
+        continuation_token = None
+        for _page in range(_MAX_S3_LIST_PAGES):
+            kwargs = {"Bucket": bucket, "Prefix": prefix, "MaxKeys": 50}
+            if continuation_token:
+                kwargs["ContinuationToken"] = continuation_token
+            response = s3.list_objects_v2(**kwargs)
+            objects.extend(response.get("Contents", []))
+            if not response.get("IsTruncated"):
+                break
+            continuation_token = response.get("NextContinuationToken")
+            if not continuation_token:
+                break
+        else:
+            logger.warning(
+                "Stopped paginating inbound S3 listing after %d pages — bucket may have "
+                "more objects than a single poll can enumerate", _MAX_S3_LIST_PAGES,
+            )
 
         for obj in objects:
             key = obj["Key"]

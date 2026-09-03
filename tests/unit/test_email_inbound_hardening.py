@@ -246,12 +246,24 @@ class _FakeS3:
         self.objects = {k: b"raw email bytes" for k in keys}
         self.copied: list[tuple[str, str]] = []
         self.deleted: list[str] = []
+        self.list_calls: list[dict] = []
 
-    def list_objects_v2(self, Bucket, Prefix, MaxKeys):
-        return {
-            "Contents": [{"Key": k} for k in sorted(self.objects)],
-            "KeyCount": len(self.objects),
-        }
+    def list_objects_v2(self, Bucket, Prefix, MaxKeys, ContinuationToken=None):
+        """Real pagination by key order, so a >MaxKeys backlog exercises more than
+        one page — the pre-fix caller never passed ContinuationToken at all, so
+        this stays 100% backward compatible with every existing single-page test."""
+        self.list_calls.append({"ContinuationToken": ContinuationToken})
+        all_keys = sorted(self.objects)
+        start = int(ContinuationToken) if ContinuationToken else 0
+        page = all_keys[start : start + MaxKeys]
+        end = start + len(page)
+        result = {"Contents": [{"Key": k} for k in page], "KeyCount": len(page)}
+        if end < len(all_keys):
+            result["IsTruncated"] = True
+            result["NextContinuationToken"] = str(end)
+        else:
+            result["IsTruncated"] = False
+        return result
 
     def get_object(self, Bucket, Key):
         import io
@@ -314,6 +326,29 @@ async def test_a_transient_failure_is_retried_not_quarantined(monkeypatch):
 
     assert fake.copied == []
     assert "inbound/flaky" in fake.objects  # still there for the next poll
+
+
+async def test_list_objects_v2_is_paginated_across_multiple_pages(monkeypatch):
+    keys = [f"inbound/msg-{i:03d}" for i in range(120)]
+    fake = _FakeS3(keys)
+    monkeypatch.setattr("boto3.client", lambda *a, **k: fake)
+    monkeypatch.setattr(inbound, "_S3_FAILURE_COUNTS", {})
+
+    processed: list[bytes] = []
+
+    async def _record(raw, db):
+        processed.append(raw)
+
+    monkeypatch.setattr(inbound, "process_inbound_email", _record)
+    count = await poll_inbound_emails(_NullSessionFactory())
+
+    assert count == 120, (
+        f"only {count}/120 objects were processed — the listing stopped after the first page"
+    )
+    assert len(fake.deleted) == 120
+    assert len(fake.list_calls) >= 3, (
+        f"expected at least 3 pages of 50 for 120 keys, got {len(fake.list_calls)} list_objects_v2 calls"
+    )
 
 
 # --- The LLM-classified rating is coerced to int, rejecting bool ------------
