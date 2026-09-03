@@ -8,7 +8,7 @@ import logging
 import signal
 import sys
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timedelta, timezone
 
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -32,6 +32,12 @@ _shutdown = False
 # SimpleNamespace(...) stand-in for get_settings() in this test file to grow a new field.
 JOB_RETRY_BACKOFF_BASE_SECONDS = 5.0
 JOB_RETRY_BACKOFF_CAP_SECONDS = 300.0
+
+# Stale-processing reaper (COR-18a/b): a worker that dies mid-job (OOM, SIGKILL, host
+# crash) leaves its claimed row committed 'processing' forever — claim_job only ever
+# selects 'pending' rows, so nothing else in the system will ever pick it back up.
+JOB_STALE_PROCESSING_THRESHOLD_SECONDS = 900   # 15 minutes
+JOB_REAP_CHECK_INTERVAL_SECONDS = 300           # mirrors notification_check_interval's cadence
 
 
 def _handle_sigterm(*args):
@@ -58,6 +64,53 @@ async def claim_job(db: AsyncSession) -> Job | None:
     job.attempts += 1
     await db.commit()
     return job
+
+
+async def reap_stale_jobs(session_factory: async_sessionmaker) -> int:
+    """Re-queue jobs stuck in 'processing' longer than the stale threshold.
+
+    A worker that dies mid-job (OOM, SIGKILL, host crash) leaves its claimed row committed
+    'processing' by claim_job — claim_job only ever selects 'pending' rows, so nothing else in
+    the system will ever pick this job back up (COR-18a/b). started_at is the column claim_job
+    already writes and nothing has read until now.
+    """
+    reaped = 0
+    threshold = datetime.now(UTC) - timedelta(
+        seconds=JOB_STALE_PROCESSING_THRESHOLD_SECONDS
+    )
+    async with session_factory() as db:
+        result = await db.execute(
+            select(Job).where(Job.status == "processing", Job.started_at < threshold)
+        )
+        stale_jobs = result.scalars().all()
+
+    for job_id in (j.id for j in stale_jobs):
+        try:
+            async with session_factory() as db:
+                job = (await db.execute(select(Job).where(Job.id == job_id))).scalar_one()
+                if job.status != "processing" or job.started_at is None or job.started_at >= threshold:
+                    continue  # claimed/completed by a live worker between the SELECT and here
+                if job.attempts >= job.max_attempts:
+                    job.status = "failed"
+                    logger.warning(
+                        "Reaped stale job %s (attempts exhausted) after over %ds in 'processing'",
+                        job.id, JOB_STALE_PROCESSING_THRESHOLD_SECONDS,
+                    )
+                else:
+                    job.status = "pending"
+                    logger.warning(
+                        "Reaped stale job %s stuck in 'processing' for over %ds — re-queued",
+                        job.id, JOB_STALE_PROCESSING_THRESHOLD_SECONDS,
+                    )
+                job.last_error = (
+                    f"Reaped: stuck in 'processing' for over "
+                    f"{JOB_STALE_PROCESSING_THRESHOLD_SECONDS}s (worker likely crashed)"
+                )
+                await db.commit()
+                reaped += 1
+        except Exception as exc:
+            logger.error("Failed to reap job %s: %s", job_id, exc, exc_info=True)
+    return reaped
 
 
 async def execute_generate_profile(job: Job, db: AsyncSession) -> None:
@@ -182,6 +235,7 @@ async def run_worker():
 
     last_notification_check = 0.0
     last_inbound_check = 0.0
+    last_reap_check = 0.0
 
     while not _shutdown:
         try:
@@ -195,8 +249,19 @@ async def run_worker():
                 # No jobs, sleep before polling again
                 await asyncio.sleep(settings.worker_poll_interval)
 
-            # Email notification check (throttled)
             now = asyncio.get_event_loop().time()
+
+            # Stale-processing reaper (throttled) — COR-18a/b
+            if now - last_reap_check >= JOB_REAP_CHECK_INTERVAL_SECONDS:
+                last_reap_check = now
+                try:
+                    reaped = await reap_stale_jobs(session_factory)
+                    if reaped:
+                        logger.warning("Reaped %d stale job(s) stuck in 'processing'", reaped)
+                except Exception as exc:
+                    logger.error("Stale-job reaper error: %s", exc, exc_info=True)
+
+            # Email notification check (throttled)
             if now - last_notification_check >= settings.notification_check_interval:
                 last_notification_check = now
                 try:

@@ -878,6 +878,78 @@ async def test_a_database_error_in_the_pipeline_is_recorded_and_the_job_is_retri
 
 
 # ---------------------------------------------------------------------------
+# T5.6 — the stale-processing reaper
+# ---------------------------------------------------------------------------
+
+
+async def test_reap_stale_jobs_requeues_a_job_stuck_in_processing(wk):
+    """COR-18a/b: a job whose worker died mid-run (crash, OOM, SIGKILL) is left 'processing'
+    forever — claim_job only ever looks at 'pending' rows, so nothing else in the system will
+    ever pick it back up. The reaper uses the started_at column claim_job already writes and
+    nothing else reads.
+    """
+    uid = await wk.new_user()
+    jid = await wk.enqueue(uid, max_attempts=3)
+    stale_started_at = datetime.now(UTC) - timedelta(
+        seconds=worker_main.JOB_STALE_PROCESSING_THRESHOLD_SECONDS + 60
+    )
+    async with wk.factory() as db:
+        job = (await db.execute(select(Job).where(Job.id == jid))).scalar_one()
+        job.status = "processing"
+        job.started_at = stale_started_at
+        job.attempts = 1
+        await db.commit()
+
+    reaped = await worker_main.reap_stale_jobs(wk.factory)
+
+    assert reaped == 1
+    state = await wk.job_state(jid)
+    assert state.status == "pending", (
+        f"a job stuck in 'processing' for longer than the stale threshold is {state.status!r}, "
+        "not re-queued — nothing will ever pick it up"
+    )
+
+
+async def test_reap_stale_jobs_marks_an_exhausted_stale_job_failed_not_pending(wk):
+    """A stale job that already used its last attempt must not be re-queued into an infinite
+    claim/crash loop — it goes to the same terminal 'failed' state COR-18e gives an exhausted job
+    on the normal failure path (Task 21.3)."""
+    uid = await wk.new_user()
+    jid = await wk.enqueue(uid, max_attempts=1)
+    stale_started_at = datetime.now(UTC) - timedelta(
+        seconds=worker_main.JOB_STALE_PROCESSING_THRESHOLD_SECONDS + 60
+    )
+    async with wk.factory() as db:
+        job = (await db.execute(select(Job).where(Job.id == jid))).scalar_one()
+        job.status = "processing"
+        job.started_at = stale_started_at
+        job.attempts = 1  # == max_attempts: this attempt was the last one
+        await db.commit()
+
+    reaped = await worker_main.reap_stale_jobs(wk.factory)
+
+    assert reaped == 1
+    assert (await wk.job_state(jid)).status == "failed"
+
+
+async def test_reap_stale_jobs_leaves_a_recently_claimed_job_alone(wk):
+    """Control: a job that is genuinely still being worked on (started_at recent) must not be
+    reaped out from under the worker actually processing it."""
+    uid = await wk.new_user()
+    jid = await wk.enqueue(uid)
+    async with wk.factory() as db:
+        job = (await db.execute(select(Job).where(Job.id == jid))).scalar_one()
+        job.status = "processing"
+        job.started_at = datetime.now(UTC)
+        await db.commit()
+
+    reaped = await worker_main.reap_stale_jobs(wk.factory)
+
+    assert reaped == 0
+    assert (await wk.job_state(jid)).status == "processing"
+
+
+# ---------------------------------------------------------------------------
 # T5.5 — execute_monthly_refresh
 # ---------------------------------------------------------------------------
 
