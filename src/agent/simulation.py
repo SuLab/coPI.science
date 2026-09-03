@@ -3451,6 +3451,25 @@ class SimulationEngine:
                     agent_id, thread_ts, channel,
                 )
                 return False
+            if result is None:
+                # A connected client attempted the post and Slack refused it (a
+                # handled SlackApiError other than thread_not_found — msg_too_long,
+                # is_archived, not_in_channel, invalid_auth, ...): AgentSlackClient
+                # logs the reason and returns None. That None is indistinguishable
+                # by *value* from the disconnected/MOCK path below, which also
+                # leaves `result` at its initial None — but the two must not be
+                # treated the same: MOCK is an intentional no-Slack-call skip that
+                # still records the message as a DB-only row (Slack-off simulation
+                # mode); this is a connected client that tried and failed. Falling
+                # through to the shared mint-a-ts-and-persist logic below would
+                # count the turn and let the thread-outcome checks act on a
+                # message that does not exist on Slack. See COR-1b.
+                logger.error(
+                    "[%s] Slack post to #%s failed (connected client, no result) "
+                    "— not recording a phantom message for it",
+                    agent_id, channel,
+                )
+                return False
         else:
             logger.info("[%s] MOCK post to #%s: %s...", agent_id, channel, text[:60])
 

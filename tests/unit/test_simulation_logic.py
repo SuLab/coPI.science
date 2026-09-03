@@ -988,6 +988,74 @@ class TestPostMessageSuppressesEmptyText:
 
 
 # ---------------------------------------------------------------
+# _post_message — a connected client's genuinely failed post must not be
+# confused with the disconnected/MOCK path (#20 COR-1b).
+# ---------------------------------------------------------------
+
+class TestPostMessageDistinguishesConnectedFailureFromMock:
+    """A connected client whose chat.postMessage genuinely fails must not be
+    treated like the disconnected/MOCK path — no ts minted, no LogEntry written,
+    `posted` must come back False so callers don't count the turn or close threads."""
+
+    def _engine_with_failing_client(self, error_code="msg_too_long"):
+        from unittest.mock import MagicMock
+
+        from src.agent.agent import Agent
+        from src.agent.slack_client import AgentSlackClient
+        from tests.fakes import slack_error
+
+        agent = Agent("su", "SuBot", "Andrew Su")
+        client = AgentSlackClient(agent_id="su", bot_token="xoxb-real-token")
+        client._client = MagicMock()  # is_connected -> True (AgentSlackClient.is_connected == self._client is not None)
+        client._client.chat_postMessage.side_effect = slack_error(error_code)
+        engine = SimulationEngine(agents=[agent], slack_clients={"su": client})
+        return engine
+
+    @pytest.mark.asyncio
+    async def test_a_swallowed_non_thread_not_found_error_returns_false_and_writes_nothing(self):
+        engine = self._engine_with_failing_client("msg_too_long")
+
+        posted = await engine._post_message("su", "general", "a real message")
+
+        assert posted is False
+        assert engine.message_log._entries == []
+
+    @pytest.mark.asyncio
+    async def test_connected_failure_is_not_confused_with_the_mock_path(self):
+        # Control: the same text through a *disconnected* client (slack_clients={})
+        # is the MOCK path and legitimately mints a ts + writes a row. This proves
+        # the fix distinguishes on the client's connectedness, not merely on the
+        # text or the error.
+        from src.agent.agent import Agent
+        mock_engine = SimulationEngine(agents=[Agent("su", "SuBot", "Andrew Su")], slack_clients={})
+        posted = await mock_engine._post_message("su", "general", "a real message")
+        assert posted is True
+        assert len(mock_engine.message_log._entries) == 1
+
+    @pytest.mark.asyncio
+    async def test_thread_not_found_also_returns_false_and_evicts_the_dead_thread(self):
+        # COR-1a's own fix (a reply to a deleted parent returns False rather
+        # than minting a phantom entry) already landed at 18ba52c, but no
+        # test pins it — this task builds the exact doubles needed to add one
+        # at near-zero cost. See red-team m7 (coverage-matrix gap).
+        from src.agent.message_log import LogEntry
+
+        engine = self._engine_with_failing_client("thread_not_found")
+        engine.message_log.append(LogEntry(
+            ts="1.0", channel="general", sender_agent_id="other", sender_name="Other",
+            content="root", posted_at=1.0, is_bot=True, slack_ts="1.0",
+        ))
+        evicted: list[str] = []
+        engine._evict_dead_thread = evicted.append
+
+        posted = await engine._post_message("su", "general", "a reply", thread_ts="1.0")
+
+        assert posted is False
+        assert evicted == ["1.0"]
+        assert [e.ts for e in engine.message_log._entries] == ["1.0"]
+
+
+# ---------------------------------------------------------------
 # ProposalRef.thread_decision_id — COR-13 unified review key
 # ---------------------------------------------------------------
 
