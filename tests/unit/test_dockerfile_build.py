@@ -24,3 +24,14 @@ def test_dependencies_install_from_the_lockfile_before_source_is_copied():
         "deps must install from requirements.lock BEFORE src/ is copied, so a "
         "source-only change doesn't bust the dependency layer"
     )
+
+
+def test_two_stage_build_with_a_slim_runtime():
+    text = _dockerfile()
+    assert text.count("FROM python:3.11-slim") == 2, "expected a builder stage and a runtime stage"
+    assert "AS builder" in text
+    assert "--from=builder" in text
+    runtime_section = text[text.rindex("FROM python:3.11-slim"):]
+    assert "gcc" not in runtime_section
+    assert "libpq-dev" not in runtime_section
+    assert "libpq5" in runtime_section
