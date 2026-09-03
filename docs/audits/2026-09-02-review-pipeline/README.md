@@ -156,20 +156,20 @@ D3 had a residual window a reviewer found after the fix landed (Ruling R4 in `pr
 
 **Mid-plan discovery.** The real-model evaluation the plan mandated (§7) surfaced a fifth defect nobody had specified: 3 of the 12 live `claude-opus-5` replies were invalid JSON, and `_parse_model_output` degraded every one of them straight to `out_of_scope`, discarding a `rubric` target the model had actually named. Fixed in `fd44c76` (`_LEADING_TARGET_RE`: recover the declared `target` from an unparseable reply's leading key rather than defaulting) and corrected in `14db51e` (the three failure causes were mis-attributed in the first write-up; see §7's headline finding for the corrected, `json.loads`-verified causes) plus `b3b940d` (one lingering docstring). Pinned by `tests/unit/test_review_bot_edges.py::test_real_unparseable_opus_replies_keep_their_declared_target` against the three fixtures in `tests/fixtures/review_bot_replies/`.
 
-**CI evidence.** Full `scripts/ci.sh` passed on the host at commit `6aa7c70` (log: `logs/ci_review_hardening_20260903.log`):
+**CI evidence.** `scripts/ci.sh` ran twice on the host, once mid-branch and once as the closing gate:
 
-| check | result |
-|---|---|
-| alembic heads | single head, `0042` |
-| upgrade -> downgrade -> upgrade round trip | clean (head -> `0018` -> head), throwaway Postgres created and destroyed |
-| ruff (test suite) | all checks passed, zero findings |
-| ruff (`src/` ratchet) | 221 findings against a 231 ceiling |
-| pytest | 3416 passed, 93 skipped, 0 failed |
-| coverage | 84.25% against a 60% floor |
-| snapshots | 13 passed |
-| wall time | 704.96s |
+| check | `6aa7c70` (mid-branch, log: `logs/ci_review_hardening_20260903.log`) | `d0b3b41` (closing gate, log: `logs/ci_review_hardening_final_20260903.log`) |
+|---|---|---|
+| alembic heads | single head, `0042` | single head, `0042` |
+| upgrade -> downgrade -> upgrade round trip | clean (head -> `0018` -> head), throwaway Postgres created and destroyed | clean, same shape |
+| ruff (test suite) | all checks passed, zero findings | all checks passed, zero findings |
+| ruff (`src/` ratchet) | 221 findings against a 231 ceiling | 221 findings against a 231 ceiling |
+| pytest | 3416 passed, 93 skipped, 0 failed | 3422 passed, 93 skipped, 0 failed |
+| coverage | 84.25% against a 60% floor | 84.26% against a 60% floor |
+| snapshots | 13 passed | 13 passed |
+| wall time | 704.96s | 685.78s |
 
-Three commits (`fd44c76`, `14db51e`, `b3b940d`) landed after that run — all review-bot/test/docs changes, no migration touched — so a re-run of `scripts/ci.sh` at HEAD is the closing gate before this branch is mergeable, not this recorded run by itself.
+The closing run at `d0b3b41` is the branch's actual CI evidence: both lint gates are clean, the schema is still a single head at `0042` with a clean round-trip, and the suite passed in full. The 6-test delta from 3416 to 3422 passed is exactly the three commits that landed after the mid-branch run (`fd44c76`, `14db51e`, `b3b940d` — the `_LEADING_TARGET_RE` fix, its cause-attribution correction, and one docstring fix, all review-bot/test/docs changes with no migration) plus the Task 10 documentation commit (`d0b3b41` itself, which touched no `src/`/`tests/` code and so could not itself change the pass count).
 
 **Known limitations, deliberately left.**
 

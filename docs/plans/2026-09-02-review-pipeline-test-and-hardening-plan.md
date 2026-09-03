@@ -879,7 +879,7 @@ def test_specialist_label_variants_are_out_of_scope(label):
 
 
 def test_truncated_json_with_no_recoverable_target_is_out_of_scope():
-    raw = '{"target": "scout_hub", "suggestion": "the model ran out of tok'
+    raw = '{"suggestion": "the model ran out of tok'
     assert review_bot._parse_model_output(raw) == ("out_of_scope", raw)
 
 

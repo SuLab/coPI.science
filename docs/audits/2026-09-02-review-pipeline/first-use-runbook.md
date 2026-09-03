@@ -7,8 +7,40 @@ step below names the exact command or query to run; do not skip a verification
 step because it "should" be true.
 
 Preconditions (verify, do not assume):
-- The branch's fixes are deployed: worker AND agent images rebuilt, web tier and
-  worker recreated, per CLAUDE.md's "Before restarting" sequence.
+- The branch's fixes are deployed, using CLAUDE.md's "Before restarting"
+  build order: `docker compose -f docker-compose.prod.yml build blackbird-app
+  worker`, then `docker compose -f docker-compose.prod.yml --profile agent
+  build agent` (build only, nothing is started by either command). This
+  branch adds no migration (still `0042`), so there is no `alembic upgrade
+  head` step here; go straight to `docker compose -f docker-compose.prod.yml
+  up -d --force-recreate blackbird-app worker` once both builds finish.
+  Rebuilding the `agent` image is part of the same deploy, but restarting
+  the simulation run afterward is a separate operator decision - do not
+  couple the two.
+
+  This build step is load-bearing, not routine. `blackbird-app`, `worker`
+  and `agent` are three INDEPENDENT images (`docker-compose.prod.yml`: each
+  has its own `build: context: .` and there is no shared `image:` tag). The
+  D1/D2 dedupe fix (`enqueue_analysis_if_absent`,
+  `src/services/assessment_reviews.py`) is reached from
+  `submit_feedback`/`edit_feedback` in `src/routers/reviews.py` - the WEB
+  TIER, not the worker. A worker-only rebuild, or a `blackbird-app`
+  container recreated off its OLD image, leaves the pre-fix dedupe live on
+  the one write path reviewers actually use, and every DB query later in
+  this runbook can still read clean, by coincidence, on a quiet day. Verify
+  the running `blackbird-app` container actually has the fix before
+  proceeding:
+
+  ```
+  docker compose -f docker-compose.prod.yml exec -T blackbird-app python -c "import inspect, src.services.assessment_reviews as m; print('.in_(' not in inspect.getsource(m.enqueue_analysis_if_absent))"
+  ```
+
+  must print `True`. (The pre-fix function filtered on
+  `Job.status.in_(("pending", "processing"))`; the fix narrows this to
+  `Job.status == "pending"` only, so the literal substring `.in_(` is gone
+  from the fixed function's source and present nowhere else in it - checked
+  against both the old and new source before writing this down.)
+
   `docker logs copi-blackbird-worker-1 | grep -c "Requeued"` prints a number
   (0 is fine) - the boot sweep ran.
 - `docker inspect copi-blackbird-worker-1 --format '{{.Config.StopTimeout}}'`
@@ -70,8 +102,9 @@ Step 3 - second reviewer, same assessment:
 
 Step 4 - cost:
 - Read the Anthropic console for the calls (there is no in-app telemetry - see
-  CLAUDE.md's review-bot paragraph). Expect roughly 40-60k input tokens and
-  under 8k output per call.
+  CLAUDE.md's review-bot paragraph). Expect roughly 47k-65k input tokens
+  (mean ~60k across the 12 evaluation calls in §7; 7 of those 12 came in
+  above 60k) and under 8k output per call.
 
 Standing checks (run whenever the pipeline is in use):
 - `SELECT count(*) FROM jobs WHERE status='processing' AND started_at < now() - interval '30 minutes';` -> 0
