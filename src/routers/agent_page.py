@@ -464,7 +464,18 @@ async def request_agent(
         status="pending",
     )
     db.add(agent)
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError as exc:
+        # Lost a race on the agent_id unique constraint — another request
+        # committed the same derived identity between our SELECT and our
+        # commit. Retrying would recompute the identical candidate from the
+        # same now-stale read, so fail fast instead of looping. See #26 C1.
+        await db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="An agent request for this identity is already in progress, please retry",
+        ) from exc
 
     return RedirectResponse(url="/agent", status_code=302)
 

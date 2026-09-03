@@ -24,6 +24,7 @@ import re
 import uuid
 from dataclasses import dataclass, field
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 from urllib.parse import unquote
 
 import pytest
@@ -374,6 +375,34 @@ async def test_signup_third_same_initial_collision_gets_a_numeric_suffix(
     third_agent = await _agent_of(db_session, third)
     assert third_agent.agent_id == "pwu2"
     assert third_agent.bot_name == "PWu2Bot"
+
+
+async def test_signup_returns_409_on_a_lost_identity_race(client, db_session, monkeypatch):
+    """Two concurrent signups can both pass derive_agent_identity's SELECT
+    before either commits (TOCTOU on the agent_id unique constraint). Force
+    the race by making derive_agent_identity return an id that's already
+    taken, and assert the handler converts the resulting IntegrityError into
+    a 409, not a raw 500 (issue #26 C1: no try/except existed on this commit
+    at all)."""
+    monkeypatch.setattr(
+        "src.routers.agent_page.derive_agent_identity",
+        AsyncMock(return_value=("racer", "RacerBot")),
+    )
+    other_user = await factories.make_user(
+        db_session, name="Already There", email="already@example.org"
+    )
+    await factories.make_agent(
+        db_session, user=other_user, agent_id="racer", bot_name="RacerBot",
+        pi_name="Already There", status="pending",
+    )
+
+    user = await factories.make_user(db_session, name="Race Newcomer", email="race@example.org")
+    await factories.make_profile(db_session, user=user)
+    await db_session.flush()
+
+    r = await client.post("/agent/request", headers=_auth(user.id))
+    assert r.status_code == 409
+    assert (await _agent_of(db_session, user)) is None
 
 
 async def test_signup_needs_a_completed_profile(client, db_session):
