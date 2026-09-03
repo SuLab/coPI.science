@@ -625,24 +625,37 @@ async def _handle_review(
             ProposalReview.agent_id == agent.agent_id,
         )
     )
-    if existing.scalar_one_or_none():
+    existing_row = existing.scalar_one_or_none()
+    if existing_row is not None and existing_row.rating != -1:
         logger.info("Proposal %s already reviewed for agent %s", td.id, agent.agent_id)
         return
 
     # Determine if this is the PI or a delegate
     is_owner = agent.user_id == user.id
 
-    review = ProposalReview(
-        thread_decision_id=td.id,
-        agent_id=agent.agent_id,
-        user_id=agent.user_id,  # Always the PI
-        delegate_user_id=user.id if not is_owner else None,
-        reviewed_by_user_id=user.id,
-        rating=rating,
-        comment=comment.strip() or None,
-        submitted_via="email",
-    )
-    db.add(review)
+    if existing_row is not None:
+        # D6/COR-13: a rating=-1 row is the engine's implicit marker (Task 20.9), not a
+        # real review — upgrade it in place rather than inserting a second row
+        # (proposal_reviews has a real UNIQUE (thread_decision_id, agent_id)). id and
+        # reviewed_at are left untouched.
+        existing_row.user_id = agent.user_id  # Always the PI
+        existing_row.delegate_user_id = user.id if not is_owner else None
+        existing_row.reviewed_by_user_id = user.id
+        existing_row.rating = rating
+        existing_row.comment = comment.strip() or None
+        existing_row.submitted_via = "email"
+    else:
+        review = ProposalReview(
+            thread_decision_id=td.id,
+            agent_id=agent.agent_id,
+            user_id=agent.user_id,  # Always the PI
+            delegate_user_id=user.id if not is_owner else None,
+            reviewed_by_user_id=user.id,
+            rating=rating,
+            comment=comment.strip() or None,
+            submitted_via="email",
+        )
+        db.add(review)
     await db.flush()
     logger.info(
         "Email review created: user=%s agent=%s rating=%d proposal=%s",
@@ -749,7 +762,8 @@ async def _handle_instruction(
             ProposalReview.agent_id == agent.agent_id,
         )
     )
-    if already.scalar_one_or_none() is not None:
+    already_row = already.scalar_one_or_none()
+    if already_row is not None and already_row.rating != -1:
         logger.info(
             "Ignoring duplicate email reopen of proposal %s by %s (already acted on)",
             td.thread_id, agent.agent_id,
@@ -856,17 +870,28 @@ async def _handle_instruction(
     # rating=0 "reopened" review (mirrors the web flow — the migration sets
     # refined_in_channel on the ThreadDecision but leaves the review to us).
     is_owner = agent.user_id == user.id
-    review = ProposalReview(
-        thread_decision_id=td.id,
-        agent_id=agent.agent_id,
-        user_id=agent.user_id,
-        delegate_user_id=user.id if not is_owner else None,
-        reviewed_by_user_id=user.id,
-        rating=0,  # 0 = reopened with guidance
-        comment=f"[Reopened via email] {instruction[:500]}",
-        submitted_via="email",
-    )
-    db.add(review)
+    if already_row is not None:
+        # D6/COR-13: already_row.rating == -1 here (the != -1 case returned False
+        # above) — the engine's implicit marker, upgraded in place instead of a
+        # second insert. id and reviewed_at are left untouched.
+        already_row.user_id = agent.user_id
+        already_row.delegate_user_id = user.id if not is_owner else None
+        already_row.reviewed_by_user_id = user.id
+        already_row.rating = 0  # 0 = reopened with guidance
+        already_row.comment = f"[Reopened via email] {instruction[:500]}"
+        already_row.submitted_via = "email"
+    else:
+        review = ProposalReview(
+            thread_decision_id=td.id,
+            agent_id=agent.agent_id,
+            user_id=agent.user_id,
+            delegate_user_id=user.id if not is_owner else None,
+            reviewed_by_user_id=user.id,
+            rating=0,  # 0 = reopened with guidance
+            comment=f"[Reopened via email] {instruction[:500]}",
+            submitted_via="email",
+        )
+        db.add(review)
     return True
 
 

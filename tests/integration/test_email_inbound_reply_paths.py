@@ -409,6 +409,169 @@ async def test_a_previously_migrated_proposal_is_not_re_migrated_on_retry(
     assert sent_emails == [], "no NEW failure email is needed — this is not a new failure"
 
 
+# --- 2d. D6: an implicit rating=-1 marker is upgraded, not "already acted on" --
+
+
+async def test_explicit_email_review_upgrades_the_engines_implicit_rating_marker(
+    db_session, monkeypatch, sent_emails,
+):
+    """D6/COR-13: Task 20.9 has the engine persist an implicit
+    ProposalReview(rating=-1, submitted_via="engine") the first time a PI engages a
+    proposal thread. That row is NOT "already acted on" — pre-ruling, `_handle_review`'s
+    `if existing: return` silently dropped the PI's real rating reply forever (the
+    unique constraint on (thread_decision_id, agent_id) means a second insert isn't an
+    option either). The first explicit e-mail review must upgrade that row in place."""
+    token = "d6review" + "a" * 41
+    recipient, agent, td, notification = await _world(
+        db_session, recipient_email="pi.d6a@scripps.edu", token=token
+    )
+    implicit = ProposalReview(
+        thread_decision_id=td.id,
+        agent_id=agent.agent_id,
+        user_id=agent.user_id,
+        rating=-1,
+        comment=None,
+        submitted_via="engine",
+    )
+    db_session.add(implicit)
+    await db_session.flush()
+    implicit_id = implicit.id
+
+    _classifies_as(monkeypatch, {"category": "review", "rating": 3, "comment": "great"})
+
+    await process_inbound_email(
+        _raw_reply(token, "pi.d6a@scripps.edu", "3 great"), db_session
+    )
+
+    reviews = await _reviews(db_session)
+    assert len(reviews) == 1, "the implicit marker must be upgraded in place, not duplicated"
+    (review,) = reviews
+    assert review.id == implicit_id, "the same row must be reused (upsert, not a second insert)"
+    assert review.rating == 3
+    assert review.comment == "great"
+    assert review.submitted_via == "email"
+    assert review.reviewed_by_user_id == recipient.id
+    assert notification.status == "responded"
+    # Every side effect that follows a fresh insert must still fire.
+    assert len(sent_emails) == 1, "_send_review_confirmation must still fire on the upgrade path"
+
+
+async def test_explicit_email_reopen_upgrades_the_engines_implicit_rating_marker(
+    db_session, monkeypatch, sent_emails,
+):
+    """D6/COR-13: same rule for the other writer in this file. Pre-ruling,
+    `_handle_instruction`'s `if already: return False` treated the engine's implicit
+    rating=-1 row as a completed reopen and silently dropped the PI's real instruction —
+    the guidance post never ran and the PI was told nothing."""
+    token = "d6instr" + "b" * 43
+    recipient, agent, td, notification = await _world(
+        db_session, recipient_email="pi.d6b@scripps.edu", token=token
+    )
+    implicit = ProposalReview(
+        thread_decision_id=td.id,
+        agent_id=agent.agent_id,
+        user_id=agent.user_id,
+        rating=-1,
+        comment=None,
+        submitted_via="engine",
+    )
+    db_session.add(implicit)
+    await db_session.flush()
+    implicit_id = implicit.id
+
+    calls: list[str] = []
+
+    class _MigrateResult:
+        channel_name = "priv-d6instr"
+
+    async def _migrate_stub(
+        db, *, thread_decision, creator_agent_id, creator_pi_user, guidance_text
+    ):
+        calls.append(guidance_text)
+        thread_decision.refined_in_channel = _MigrateResult.channel_name
+        return _MigrateResult()
+
+    monkeypatch.setattr(
+        "src.services.private_channels.migrate_public_thread_to_private", _migrate_stub
+    )
+
+    reopened = await inbound._handle_instruction(
+        user=recipient, notification=notification, td=td,
+        instruction="focus on X", db=db_session,
+    )
+
+    assert reopened is True
+    assert calls == ["focus on X"], "the guidance post must actually run, not be skipped"
+
+    reviews = await _reviews(db_session)
+    assert len(reviews) == 1, "the implicit marker must be upgraded in place, not duplicated"
+    (review,) = reviews
+    assert review.id == implicit_id, "the same row must be reused (upsert, not a second insert)"
+    assert review.rating == 0
+    assert review.comment == "[Reopened via email] focus on X"
+    assert review.submitted_via == "email"
+    assert review.reviewed_by_user_id == recipient.id
+
+
+async def test_an_explicit_rating_still_blocks_a_duplicate_review_and_reopen_by_email(
+    db_session, monkeypatch, sent_emails,
+):
+    """Control for the D6 upgrade above: a row with a REAL rating (not the engine's
+    rating=-1 marker) keeps today's rejection for both writers in this file — the
+    unqualified "already acted on" short-circuit still applies once a PI (or a prior
+    e-mail action) has actually reviewed or reopened."""
+    token = "d6control" + "c" * 41
+    recipient, agent, td, notification = await _world(
+        db_session, recipient_email="pi.d6c@scripps.edu", token=token
+    )
+    explicit = ProposalReview(
+        thread_decision_id=td.id,
+        agent_id=agent.agent_id,
+        user_id=agent.user_id,
+        rating=3,
+        comment="already rated",
+        submitted_via="email",
+    )
+    db_session.add(explicit)
+    await db_session.flush()
+    explicit_id = explicit.id
+
+    _classifies_as(monkeypatch, {"category": "review", "rating": 4})
+    await process_inbound_email(
+        _raw_reply(token, "pi.d6c@scripps.edu", "4 excellent"), db_session
+    )
+
+    reviews = await _reviews(db_session)
+    assert len(reviews) == 1
+    assert reviews[0].id == explicit_id
+    assert reviews[0].rating == 3, "a real existing rating must not be overwritten"
+    # process_inbound_email's own caller-side bookkeeping is unchanged by D6 — it
+    # always marks the notification responded and sends a confirmation once the
+    # classifier extracts a valid rating, regardless of whether _handle_review
+    # actually wrote anything. Only _handle_review's own write behavior is under
+    # test here.
+    assert notification.status == "responded"
+    assert len(sent_emails) == 1
+
+    async def _must_not_run(*a, **k):
+        raise AssertionError("migrate_public_thread_to_private must not run — already acted on")
+
+    monkeypatch.setattr(
+        "src.services.private_channels.migrate_public_thread_to_private", _must_not_run
+    )
+
+    reopened = await inbound._handle_instruction(
+        user=recipient, notification=notification, td=td,
+        instruction="focus on Y", db=db_session,
+    )
+
+    assert reopened is False
+    reviews = await _reviews(db_session)
+    assert len(reviews) == 1
+    assert reviews[0].id == explicit_id
+    assert reviews[0].rating == 3, "the existing explicit review must be untouched"
+
+
 # --- 3. Confirmations do not pretend to be reply-able --------------------------
 
 
