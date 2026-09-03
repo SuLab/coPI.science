@@ -136,7 +136,7 @@ class _ReviewRaceSession:
         self._calls = 0
         self.added: list[object] = []
         self.rolled_back = False
-        self.committed = False
+        self.commits = 0
 
     async def execute(self, _stmt):
         self._calls += 1
@@ -150,7 +150,7 @@ class _ReviewRaceSession:
         self.added.append(obj)
 
     async def commit(self):
-        self.committed = True
+        self.commits += 1
 
     async def rollback(self):
         self.rolled_back = True
@@ -198,9 +198,9 @@ async def test_review_proposal_survives_a_lost_race_via_autoflush():
     # the race LOSER's own outstanding notification, which rollback() would otherwise
     # discard. This supersedes the 24.2-review carried minor "assert db.committed is
     # False" (progress.md): that pinned the pre-21.13 shape, where the except arm
-    # never committed at all. committed=True now pins that the recovery commit
-    # actually ran, not just the (rolled-back) one inside the try.
-    assert db.committed is True, (
+    # never committed at all. `commits == 1` now pins that exactly the recovery commit
+    # ran -- not the (rolled-back) one inside the try, and not a retry of either.
+    assert db.commits == 1, (
         "the except arm's own retire-then-commit for the race loser's notification "
         "never ran"
     )

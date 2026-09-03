@@ -809,9 +809,15 @@ async def test_a_delegates_review_also_retires_the_pis_own_notification(
         agent_registry_id=lab.reg_a_id, reply_token=f"tok-{uuid.uuid4().hex}",
         category="proposal_review", status="sent",
     )
-    db_session.add(pi_notification)
+    other_agents_notification = EmailNotification(
+        user_id=lab.pi_b_id, thread_decision_id=proposal.id,
+        agent_registry_id=lab.reg_b_id, reply_token=f"tok-{uuid.uuid4().hex}",
+        category="proposal_review", status="sent",
+    )
+    db_session.add_all([pi_notification, other_agents_notification])
     await db_session.flush()
     pi_notification_id = pi_notification.id
+    other_agents_notification_id = other_agents_notification.id
 
     r = await client.post(
         f"/agent/alpha/proposals/{proposal.id}/review",
@@ -825,6 +831,12 @@ async def test_a_delegates_review_also_retires_the_pis_own_notification(
         "the delegate's review did not retire the PI's own outstanding notification "
         "for this proposal — the PI would be nagged forever, with no self-service way "
         "to clear it"
+    )
+    other_notif = await db_session.get(EmailNotification, other_agents_notification_id)
+    assert other_notif.status == "sent", (
+        "reviewing alpha's copy of the proposal retired beta's own outstanding "
+        "notification too -- mark_notification_responded must stay scoped to "
+        "agent_registry_id, not cross-retire the other agent on the same proposal"
     )
 
 
