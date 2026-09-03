@@ -26,6 +26,13 @@ logger = logging.getLogger(__name__)
 
 _shutdown = False
 
+# Exponential backoff between retry attempts of the SAME job. Module constants, not Settings
+# fields, so a test can monkeypatch worker_main.JOB_RETRY_BACKOFF_BASE_SECONDS directly (mirrors
+# src/services/slack_web.py's _BACKOFF_BASE) without needing every existing bespoke
+# SimpleNamespace(...) stand-in for get_settings() in this test file to grow a new field.
+JOB_RETRY_BACKOFF_BASE_SECONDS = 5.0
+JOB_RETRY_BACKOFF_CAP_SECONDS = 300.0
+
 
 def _handle_sigterm(*args):
     global _shutdown
@@ -99,17 +106,68 @@ async def process_job(job_id: uuid.UUID, job_type: str, job_attempts: int, job_m
             logger.info("Job %s completed", job.id)
 
         except Exception as exc:
-            logger.error("Job %s failed: %s", job.id, exc, exc_info=True)
+            # job.id (not job_id, the function's own parameter) is UNSAFE here: a flush
+            # failure anywhere in this session (e.g. run_profile_pipeline's own db.flush())
+            # expires every attribute of every object tracked by the session, INCLUDING
+            # job's primary key, before this except block ever runs — reproduced directly:
+            # accessing job.id at this exact point, before any rollback, raises
+            # sqlalchemy.exc.PendingRollbackError ("this Session's transaction has been
+            # rolled back due to a previous exception during flush"). process_job already
+            # has the id as a plain parameter; use that instead of touching the ORM object.
+            logger.error("Job %s failed: %s", job_id, exc, exc_info=True)
+            # A failure in run_profile_pipeline may have poisoned the transaction
+            # (e.g. a flush-time IntegrityError) — roll back before writing the
+            # failure record, or this commit itself raises PendingRollbackError,
+            # which escapes process_job and strands the job in 'processing'
+            # forever (COR-17; see tests/integration/test_worker.py).
+            await db.rollback()
+            # rollback() expires every instrumented attribute on `job` (SQLAlchemy does this
+            # unconditionally, regardless of expire_on_commit). On a SYNC session the very next
+            # attribute access would trigger an implicit lazy SELECT; on this ASYNC session
+            # (AsyncSession, no greenlet context outside an explicit `await`) that same implicit
+            # access instead raises `sqlalchemy.exc.MissingGreenlet` — mirror the dossier's C.2
+            # pattern (re-fetch via an explicit, awaitable refresh rather than touching the
+            # stale object's attributes bare):
+            await db.refresh(job)
             job.last_error = str(exc)[:2000]
 
             if job.attempts >= job.max_attempts:
-                job.status = "dead"
-                logger.warning("Job %s marked as dead after %d attempts", job.id, job.attempts)
+                # 'failed' (not 'dead'): the enum's 'failed' value is what
+                # templates/onboarding/profile_review.html's self-service "Try
+                # Again" button keys on (COR-18e/f) — 'dead' matches no branch
+                # there and rendered a blank page with no explanation.
+                job.status = "failed"
+                logger.warning("Job %s marked as failed after %d attempts", job.id, job.attempts)
+                await db.commit()
             else:
                 job.status = "pending"  # Will be retried
-
-            job.completed_at = datetime.now(timezone.utc)
-            await db.commit()
+                await db.commit()
+                # Exponential backoff so the next claim_job (ordered by enqueued_at) doesn't
+                # reclaim THIS job again immediately — without this all max_attempts burn
+                # back-to-back with zero delay (COR-18c).
+                delay = min(
+                    JOB_RETRY_BACKOFF_CAP_SECONDS,
+                    JOB_RETRY_BACKOFF_BASE_SECONDS * (2 ** max(0, job.attempts - 1)),
+                )
+                logger.info(
+                    "Job %s will retry in %.1fs (attempt %d/%d)",
+                    job.id, delay, job.attempts, job.max_attempts,
+                )
+                # Sleep in 1s slices so a SIGTERM (_shutdown, set by _handle_sigterm) is
+                # honoured instead of blocking run_worker's whole loop for up to
+                # JOB_RETRY_BACKOFF_CAP_SECONDS: docker-compose.prod.yml's worker service
+                # sets no stop_grace_period, so Docker's 10s SIGKILL default would otherwise
+                # hard-kill the container mid-backoff on a `docker compose up -d --build
+                # worker` recreate (no data lost either way — the commit above already
+                # landed — but this makes the shutdown graceful instead of a hard kill).
+                waited = 0.0
+                while waited < delay and not _shutdown:
+                    step = min(1.0, delay - waited)
+                    await asyncio.sleep(step)
+                    waited += step
+            # completed_at is NOT set here (COR-18d): it now means "genuinely completed",
+            # matching how templates/admin/jobs.html and user_detail.html display it. A job
+            # that failed or is retrying has not completed.
 
 
 async def run_worker():

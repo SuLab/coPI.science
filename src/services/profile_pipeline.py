@@ -345,13 +345,12 @@ async def run_profile_pipeline(
     #     lets the exception reach process_job, which retries up to
     #     Job.max_attempts (default 3) — three more full LLM+NCBI runs for a
     #     formatting miss the retry above already tried to fix — and then sets
-    #     status='dead'. templates/onboarding/profile_review.html keys its "Try
-    #     Again" control on job_status == 'failed', which src/worker/main.py never
-    #     assigns (it only ever writes 'pending' or 'dead'), so a dead job falls
-    #     through to that template's `elif profile` branch and the PI is shown the
-    #     review form with empty fields and no explanation. Raising would also
-    #     skip step 9b, the markdown export and create_revision below, costing the
-    #     private-profile seed and the audit trail.
+    #     status='failed' (#21 COR-18e/f). templates/onboarding/profile_review.html
+    #     keys its "Try Again" control on exactly that job_status == 'failed', so a
+    #     job that exhausts its attempts here now reaches that control and the PI
+    #     sees the retry button and an explanation, not the blank body this comment
+    #     used to describe. Raising would also skip step 9b, the markdown export and
+    #     create_revision below, costing the private-profile seed and the audit trail.
     #   * Storing nothing is indistinguishable from "the pipeline never ran" and
     #     throws away the only draft the PI has to edit. (It would not cause the
     #     /onboarding re-enqueue loop: that self-heal is gated on `job is None and

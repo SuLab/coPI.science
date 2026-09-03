@@ -389,6 +389,8 @@ async def test_a_failing_job_retries_to_max_attempts_and_then_dies(wk, monkeypat
     attempts=2 with its profile written — so "terminal state" is not being reached by a
     retry mechanism that simply never retries.
     """
+    monkeypatch.setattr(worker_main, "JOB_RETRY_BACKOFF_BASE_SECONDS", 0.05)
+    monkeypatch.setattr(worker_main, "JOB_RETRY_BACKOFF_CAP_SECONDS", 1.0)
     uid = await wk.new_user()
     jid = await wk.enqueue(uid, max_attempts=3)
 
@@ -407,9 +409,10 @@ async def test_a_failing_job_retries_to_max_attempts_and_then_dies(wk, monkeypat
         f"attempts did not increment once per execution: {seen_attempts}"
     )
     state = await wk.job_state(jid)
-    assert state.status == "dead", (
-        f"a job that failed max_attempts times is {state.status!r}, not 'dead' — "
-        "nothing will ever move it out of the queue's way"
+    assert state.status == "failed", (
+        f"a job that failed max_attempts times is {state.status!r}, not 'failed' — "
+        "nothing will ever move it out of the queue's way, AND the self-service retry "
+        "button on the onboarding page never appears"
     )
     assert state.attempts == 3
     row = await wk.job(jid)
@@ -439,6 +442,61 @@ async def test_a_failing_job_retries_to_max_attempts_and_then_dies(wk, monkeypat
     assert await wk.profile_count(uid2) == 1, (
         "the retry was accounted for but the work never landed"
     )
+
+
+async def test_a_retried_job_backs_off_instead_of_being_reclaimed_immediately(wk, monkeypatch):
+    """COR-18c: after a failure that leaves a job 'pending', process_job must not return so fast
+    that the very next claim_job reclaims the SAME job with zero delay — all max_attempts would
+    burn back-to-back. Uses attempts=1 (base delay, no need to wait through the whole exponential
+    ladder) and a tiny base so the test doesn't actually sleep for the real production delay.
+    """
+    monkeypatch.setattr(worker_main, "JOB_RETRY_BACKOFF_BASE_SECONDS", 0.2)
+    monkeypatch.setattr(worker_main, "JOB_RETRY_BACKOFF_CAP_SECONDS", 5.0)
+    uid = await wk.new_user()
+    jid = await wk.enqueue(uid, max_attempts=3)
+
+    async def always_fails(user_id, db, job=None):
+        raise RuntimeError("still failing (T5 backoff)")
+
+    monkeypatch.setattr(worker_main, "run_profile_pipeline", always_fails)
+
+    async with wk.factory() as db:
+        job = await worker_main.claim_job(db)
+    start = time.monotonic()
+    await worker_main.process_job(job.id, job.type, job.attempts, job.max_attempts, wk.factory)
+    elapsed = time.monotonic() - start
+
+    assert elapsed >= 0.2, (
+        f"process_job returned after {elapsed:.3f}s for a job going back to 'pending' — the "
+        "backoff sleep did not run, so the next claim_job would reclaim it immediately"
+    )
+    assert (await wk.job_state(jid)).status == "pending"
+
+
+async def test_an_exhausted_job_does_not_back_off(wk, monkeypatch):
+    """A job going terminal ('failed') needs no delay — nothing will ever reclaim it, so sleeping
+    here would only slow the worker down for no reason."""
+    monkeypatch.setattr(worker_main, "JOB_RETRY_BACKOFF_BASE_SECONDS", 5.0)
+    monkeypatch.setattr(worker_main, "JOB_RETRY_BACKOFF_CAP_SECONDS", 30.0)
+    uid = await wk.new_user()
+    jid = await wk.enqueue(uid, max_attempts=1)
+
+    async def always_fails(user_id, db, job=None):
+        raise RuntimeError("terminal failure (T5 backoff control)")
+
+    monkeypatch.setattr(worker_main, "run_profile_pipeline", always_fails)
+
+    async with wk.factory() as db:
+        job = await worker_main.claim_job(db)
+    start = time.monotonic()
+    await worker_main.process_job(job.id, job.type, job.attempts, job.max_attempts, wk.factory)
+    elapsed = time.monotonic() - start
+
+    assert elapsed < 1.0, (
+        f"process_job slept {elapsed:.3f}s for a job that just went terminal ('failed') — "
+        "nothing will ever reclaim it, so there is nothing to back off from"
+    )
+    assert (await wk.job_state(jid)).status == "failed"
 
 
 async def test_claim_job_will_not_claim_a_job_whose_attempts_are_exhausted(wk):
@@ -512,7 +570,7 @@ async def test_process_job_swallows_the_failure_so_the_next_job_still_runs(wk, m
     # Must return normally, not raise.
     first = await _one_round(wk.factory)
     assert first is not None and first.id == j_bad
-    assert (await wk.job_state(j_bad)).status == "dead"
+    assert (await wk.job_state(j_bad)).status == "failed"
 
     second = await _one_round(wk.factory)
     assert second is not None and second.id == j_good, (
@@ -559,6 +617,7 @@ async def test_run_worker_loop_survives_a_crashing_job(wk, pg_url, monkeypatch):
         return await write(user_id, db, job)
 
     monkeypatch.setattr(worker_main, "run_profile_pipeline", crash_for_bad)
+    monkeypatch.setattr(worker_main, "JOB_RETRY_BACKOFF_BASE_SECONDS", 0.1)
     monkeypatch.setattr(worker_main, "get_settings", lambda: SimpleNamespace(
         database_url=pg_url,
         worker_poll_interval=0.05,
@@ -587,7 +646,7 @@ async def test_run_worker_loop_survives_a_crashing_job(wk, pg_url, monkeypatch):
         "died, stalled, or is retrying the crasher forever"
     )
     bad = await wk.job_state(j_bad)
-    assert bad.status == "dead" and bad.attempts == 2, (
+    assert bad.status == "failed" and bad.attempts == 2, (
         f"the crashing job ended {bad.status!r} after {bad.attempts} attempts"
     )
     assert await wk.profile_count(uid_good) == 1
@@ -712,14 +771,15 @@ async def test_a_crash_after_partial_work_leaves_a_retryable_job(wk, monkeypatch
     A pipeline that gets partway (profile row added and flushed) and then raises must
     not leave the job 'completed'. It must be retryable.
 
-    NOTE — observed side effect, reported not fixed: `process_job`'s except branch
-    commits the *same* session the pipeline was using, so the pipeline's partial writes
-    are committed alongside the failure record instead of being rolled back. This test
-    pins that behaviour rather than asserting the behaviour we would prefer; see the
-    task report.
+    COR-17 fixed: `process_job`'s except branch now rolls back before recording the
+    failure, so a pipeline's partial (flushed-but-uncommitted) writes are discarded
+    along with the failed transaction, instead of being committed alongside the
+    failure bookkeeping.
 
     Control: the identical pipeline without the raise completes and is not retried.
     """
+    monkeypatch.setattr(worker_main, "JOB_RETRY_BACKOFF_BASE_SECONDS", 0.05)
+    monkeypatch.setattr(worker_main, "JOB_RETRY_BACKOFF_CAP_SECONDS", 1.0)
     uid = await wk.new_user("T5 partial")
     jid = await wk.enqueue(uid)
 
@@ -750,31 +810,27 @@ async def test_a_crash_after_partial_work_leaves_a_retryable_job(wk, monkeypatch
     assert (await wk.job_state(jid2)).status == "completed"
     assert await wk.profile_count(uid2) == 1
 
-    # Characterization of the partial write described above.
-    assert leaked == 1, (
-        "the partial profile write was rolled back — good, but the docstring and the "
-        "T5 report describing the except-branch commit are now out of date"
+    # COR-17 fixed: the except branch now rolls back before recording the failure, so a
+    # pipeline's partial (flushed-but-uncommitted) writes are discarded along with the
+    # failed transaction instead of being committed alongside the failure bookkeeping.
+    assert leaked == 0, (
+        "a partial profile write from a crashed pipeline attempt survived the failure "
+        "commit — COR-17's rollback should have discarded it along with that transaction"
     )
 
 
-async def test_a_database_error_in_the_pipeline_orphans_the_job_in_processing(wk, monkeypatch):
-    """T5.3/T5.4 — the one crash `process_job`'s error handling does not survive.
+async def test_a_database_error_in_the_pipeline_is_recorded_and_the_job_is_retried(wk, monkeypatch):
+    """COR-17: a flush-time DB error (unique violation on researcher_profiles.user_id, the real
+    pipeline's own failure mode at step 6 if two generate_profile jobs for one user ever race) must
+    not escape process_job. Rolling back before writing the failure record lets that same commit
+    succeed, so the job ends 'pending' (retryable) with last_error recorded — not stranded in
+    'processing' with nothing to reap it.
 
-    Every other failure is caught, recorded and retried. A failure that poisons the
-    transaction is different: `process_job`'s except branch writes `last_error` and
-    commits *the same session*, and that commit raises in turn. The exception escapes
-    `process_job`, no status is written, and because `claim_job` only ever looks at
-    'pending' rows the job is stranded in 'processing' with nothing in the system to
-    reap it. `run_worker`'s outer handler keeps the worker alive, so this is silent.
-
-    The real pipeline reaches this shape at step 6 — `db.add(ResearcherProfile(...))`
-    then `flush()`, with `researcher_profiles.user_id` unique and no try/except — if two
-    generate_profile jobs for one user are ever in flight together.
-
-    Characterization, reported not fixed. Control: the same claim/process pair with a
-    plain Python error does record 'pending' and is retried, so "stranded in processing"
-    is a property of the database error and not of the harness.
+    Control: a plain Python error through the identical path is recorded and retried exactly the
+    same way, so this isn't testing a harness quirk specific to DB errors.
     """
+    monkeypatch.setattr(worker_main, "JOB_RETRY_BACKOFF_BASE_SECONDS", 0.05)
+    monkeypatch.setattr(worker_main, "JOB_RETRY_BACKOFF_CAP_SECONDS", 1.0)
     uid = await wk.new_user("T5 db error")
     async with wk.factory() as db:
         db.add(ResearcherProfile(user_id=uid, research_summary="already here"))
@@ -787,19 +843,20 @@ async def test_a_database_error_in_the_pipeline_orphans_the_job_in_processing(wk
 
     monkeypatch.setattr(worker_main, "run_profile_pipeline", duplicate_profile)
 
-    claimed = await _one_round_expecting_escape(wk.factory)
+    claimed = await _one_round(wk.factory)
     assert claimed is not None and claimed.id == jid
 
     state = await wk.job_state(jid)
-    assert state.status == "processing", (
-        f"the job is {state.status!r}; if the error handler now survives a database "
-        "error this test should assert 'pending' and the bug report is stale"
+    assert state.status == "pending", (
+        f"the job is {state.status!r}; a database error in the pipeline must be recorded and "
+        "retried like any other failure, not leave the job stranded in 'processing'"
     )
-    assert (await wk.job(jid)).last_error is None, (
-        "the failure reason reached the row after all — the handler's commit succeeded"
+    row = await wk.job(jid)
+    assert row.last_error, (
+        f"the failure reason never reached the row: {row.last_error!r}"
     )
 
-    # CONTROL: a non-database error through the identical path is recorded and retried.
+    # CONTROL: a non-database error through the identical path is recorded and retried the same way.
     uid2 = await wk.new_user("T5 db error control")
     jid2 = await wk.enqueue(uid2)
 
@@ -807,24 +864,17 @@ async def test_a_database_error_in_the_pipeline_orphans_the_job_in_processing(wk
         raise RuntimeError("a plain error (T5 control)")
 
     monkeypatch.setattr(worker_main, "run_profile_pipeline", plain_error)
-    claimed2 = await _one_round(wk.factory)
-    assert claimed2 is not None and claimed2.id == jid2
+    # Not _one_round(): job1 just went back to 'pending' with attempts < max_attempts, and
+    # claim_job orders by enqueued_at with no backoff-elapsed filter (Task 21.3's Coordinator
+    # note: option (a) delays job1's OWN retries but does not let claim_job skip an
+    # in-backoff job for a different one) — job1, enqueued first, would win the very next
+    # claim_job() call every time, so _one_round() here would silently re-process job1
+    # again instead of job2. Drive job2 directly by id instead (the same shape Task 21.3's
+    # own new tests use), which isolates this control from job1's queue position.
+    await worker_main.process_job(jid2, "generate_profile", 0, 3, wk.factory)
     state2 = await wk.job_state(jid2)
     assert state2.status == "pending"
     assert "a plain error (T5 control)" in ((await wk.job(jid2)).last_error or "")
-
-
-async def _one_round_expecting_escape(factory) -> Job | None:
-    """`_one_round`, asserting that `process_job` raises rather than handling it."""
-    async with factory() as db:
-        job = await worker_main.claim_job(db)
-    assert job is not None
-    with pytest.raises(Exception) as exc:  # noqa: B017 - the type is the finding
-        await worker_main.process_job(job.id, job.type, job.attempts, job.max_attempts, factory)
-    assert "PendingRollbackError" in type(exc.value).__name__ or "rollback" in str(exc.value), (
-        f"process_job raised {type(exc.value).__name__}: {exc.value}"
-    )
-    return job
 
 
 # ---------------------------------------------------------------------------
@@ -901,6 +951,8 @@ async def test_monthly_refresh_for_a_missing_user_fails_loudly(wk, monkeypatch):
     Control in the same test: a refresh for a real user completes, so "did not complete"
     is a property of the missing user and not of the refresh type being unsupported.
     """
+    monkeypatch.setattr(worker_main, "JOB_RETRY_BACKOFF_BASE_SECONDS", 0.05)
+    monkeypatch.setattr(worker_main, "JOB_RETRY_BACKOFF_CAP_SECONDS", 1.0)
     called = []
 
     async def should_not_run(user_id, db, job=None):
@@ -937,6 +989,8 @@ async def test_a_job_with_no_user_at_all_fails_loudly(wk, monkeypatch):
     arrives from `uuid.UUID("None")` instead. Reported, not fixed. The property that
     matters is asserted first: the job does not complete.
     """
+    monkeypatch.setattr(worker_main, "JOB_RETRY_BACKOFF_BASE_SECONDS", 0.05)
+    monkeypatch.setattr(worker_main, "JOB_RETRY_BACKOFF_CAP_SECONDS", 1.0)
     called = []
 
     async def should_not_run(user_id, db, job=None):
@@ -1033,6 +1087,8 @@ async def test_an_unknown_job_type_is_rejected_loudly_by_the_dispatcher(wk, monk
     Control: the same harness with a legal type runs the pipeline and completes — so a
     failure above is the unknown type and not the doctoring mechanism.
     """
+    monkeypatch.setattr(worker_main, "JOB_RETRY_BACKOFF_BASE_SECONDS", 0.05)
+    monkeypatch.setattr(worker_main, "JOB_RETRY_BACKOFF_CAP_SECONDS", 1.0)
     uid = await wk.new_user("T5 unknown type")
     jid = await wk.enqueue(uid)
     ran = []

@@ -32,19 +32,15 @@ Design notes that keep this gate from crying wolf (a noisy gate gets deleted):
     ``test_route_allowlist_has_no_stale_entries`` fails if an allowlisted route becomes
     referenced. A stale suppression is the same bug wearing a disguise.
 
-Known false negative, recorded because it is not hypothetical. This gate is static: a
-link counts as a credit if it appears in a reachable template, and nothing here
-evaluates the Jinja condition the link sits under. A control behind a branch that never
-holds is therefore invisible to it. There is a live instance:
-``POST /onboarding/retry`` (src/routers/onboarding.py:317) has exactly one control in
-the app — the "Try Again" form at templates/onboarding/profile_review.html:53 — and it
-sits inside ``{% elif job_status == 'failed' %}``. ``job_status`` is
-``Job.status``, and src/worker/main.py only ever writes 'processing', 'completed',
-'dead' or 'pending'; ``'failed'`` is permitted by the enum (src/models/job.py:23) and
-assigned by nothing in src/. So the retry button is unreachable at runtime while this
-gate reports the route as referenced. Closing it would mean evaluating template
-conditions against the values src/ can actually produce — a different and much larger
-analysis, and one that would cry wolf. Left as a false negative on purpose (the same
+Known false negative in general (see the general argument below), but the specific example
+this note used to cite is now FIXED: ``POST /onboarding/retry``
+(src/routers/onboarding.py:317) has exactly one control in the app — the "Try Again" form
+at templates/onboarding/profile_review.html:53, inside ``{% elif job_status == 'failed' %}``
+— and as of #21 COR-18e/f, src/worker/main.py DOES write 'failed' on exhaustion, so this
+control is now reachable at runtime. This gate is still static (it cannot evaluate the
+Jinja condition a link sits under in general), so a DIFFERENT branch could still hide a
+live control from it the same way this one used to — the general argument for why the
+``KNOWN_*`` escape hatch exists still applies. Left as a false negative on purpose (the same
 trade recorded above: false negatives leave a future orphan, false positives get the
 gate deleted), but recorded so the next reader does not mistake this gate's silence for
 proof that every control is live.
