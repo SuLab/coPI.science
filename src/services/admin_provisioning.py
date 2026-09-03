@@ -19,9 +19,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.config import get_settings
 from src.models import AgentRegistry, AppSetting, SlackAppProvision
 from src.services.slack_provisioning import (
-    create_app,
-    exchange_code,
-    lookup_team_id,
+    create_app_async,
+    exchange_code_async,
+    lookup_team_id_async,
 )
 
 logger = logging.getLogger(__name__)
@@ -94,9 +94,14 @@ async def _config_token(db: AsyncSession, *, force_rotate: bool = False) -> str:
     refresh = await _kv_get(db, _KEY_REFRESH) or settings.slack_config_refresh_token
 
     if refresh:
+        # C2: release the pooled connection before the Slack round trip. The
+        # SELECTs above are the only DB work so far, and rotate_config_token_async
+        # can now retry/backoff off the event loop -- but only if it isn't also
+        # holding a checked-out connection for the duration.
+        await db.commit()
         try:
-            from src.services.slack_provisioning import rotate_config_token
-            new_token, new_refresh, exp = rotate_config_token(refresh)
+            from src.services.slack_provisioning import rotate_config_token_async
+            new_token, new_refresh, exp = await rotate_config_token_async(refresh)
         except Exception as exc:
             raise ProvisioningError(f"Could not rotate the Slack config token: {exc}")
         # Persist the whole new triple atomically: the refresh we just consumed
@@ -129,8 +134,8 @@ async def start_provisioning(db: AsyncSession, agent: AgentRegistry) -> str:
     """
     redirect_uri = _redirect_uri()
 
-    def _create(token: str) -> dict:
-        return create_app(
+    async def _create(token: str) -> dict:
+        return await create_app_async(
             config_token=token,
             agent_id=agent.agent_id,
             bot_name=agent.bot_name,
@@ -143,14 +148,20 @@ async def start_provisioning(db: AsyncSession, agent: AgentRegistry) -> str:
     # rotations rare and means a rotation is never "spent" on a manifest error
     # (SEC-10).
     config_token = await _config_token(db)
+    # C2: release the pooled connection before the blocking Slack round trip.
+    # _config_token either just ran read-only SELECTs (cached-token path) or
+    # already committed its own writes (rotate path); either way this commit
+    # is safe and returns the connection to the pool for create_app's duration.
+    await db.commit()
     try:
-        app = _create(config_token)
+        app = await _create(config_token)
     except Exception as exc:
         if any(slug in str(exc) for slug in _AUTH_ERRORS):
             logger.info("Config token rejected (%s) — rotating and retrying", exc)
             config_token = await _config_token(db, force_rotate=True)
+            await db.commit()
             try:
-                app = _create(config_token)
+                app = await _create(config_token)
             except Exception as exc2:
                 raise ProvisioningError(f"Could not create the Slack app: {exc2}")
         else:
@@ -181,7 +192,8 @@ async def start_provisioning(db: AsyncSession, agent: AgentRegistry) -> str:
     extra = {"state": state, "redirect_uri": redirect_uri}
     team_token = await get_any_bot_token(db)
     if team_token:
-        team_id = lookup_team_id(team_token)
+        await db.commit()
+        team_id = await lookup_team_id_async(team_token)
         if team_id:
             extra["team"] = team_id
     return app["oauth_url"] + "&" + urlencode(extra)
@@ -208,8 +220,10 @@ async def complete_provisioning(db: AsyncSession, state: str, code: str) -> Agen
         await db.commit()
         raise ProvisioningError("Agent no longer exists.")
 
+    # C2: release the pooled connection before the blocking Slack round trip.
+    await db.commit()
     try:
-        token = exchange_code(
+        token = await exchange_code_async(
             prov.client_id, prov.client_secret, code, _redirect_uri()
         )
     except Exception as exc:
