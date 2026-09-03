@@ -41,6 +41,10 @@ def _raw_reply(token: str, from_addr: str, body: str) -> bytes:
 @pytest.fixture(autouse=True)
 def _fresh_rate_limit(monkeypatch):
     monkeypatch.setattr(inbound, "_RECENT_REPLY_TIMES", {})
+    # Minor 8 (fix round A): without this, the one-email cap set by an earlier test
+    # in the same process leaks into a later test keyed by an unrelated notification
+    # id colliding only by bad luck — cheap insurance, mirrors the rate-limit reset.
+    inbound._INSTRUCTION_FAILURE_EMAILS_SENT.clear()
 
 
 @pytest.fixture
@@ -63,6 +67,12 @@ def _classifies_as(monkeypatch, classification: dict):
         return {"rating": None, "comment": "", "instruction": "", **classification}
 
     monkeypatch.setattr(inbound, "classify_reply", _classify)
+
+
+async def _slack_on(*a, **k):
+    """Stub for `slack_tokens.slack_globally_enabled`, forcing the legacy Slack path
+    (rather than the DB-only "Slack off" branch) in the fix-round COR-32 tests below."""
+    return True
 
 
 async def _world(db_session, *, recipient_email, token):
@@ -314,27 +324,33 @@ async def test_review_confirmation_failure_does_not_roll_back_the_already_commit
             ) == 0, "this test committed a simulation_runs row it did not clean up"
 
 
-# --- 2c. A failed instruction post notifies the PI and is retried (COR-32) -----
+# --- 2c. A failed instruction post notifies the PI (COR-32 fix round) ----------
 
 
-async def test_a_retryable_instruction_failure_notifies_the_pi_and_does_not_retire_the_notification(
+async def test_a_terminal_migration_failure_notifies_the_pi_and_retires_the_notification(
     db_session, monkeypatch, sent_emails,
 ):
-    """COR-32: a `_handle_instruction` failure that previously returned False silently (no
-    post, no email, but the notification was retired and the S3 object deleted) must now
-    email the PI and leave the notification retryable. Forces the blanket except by making
-    migrate_public_thread_to_private raise — the DEFAULT-config path
-    (enable_private_refinement=True, td.origin_visibility='public', both factory defaults),
-    reachable in production today, not just the legacy flag-off path.
+    """COR-32 fix round, Critical #1: migrate_public_thread_to_private creates a real
+    Slack channel (and DB rows) before most of its work — it is NOT idempotent. Letting
+    a failure inside it raise (21.9's original fix) meant the S3 object retried up to
+    MAX_S3_PROCESS_ATTEMPTS times, minting up to that many orphan channels. A failure
+    here must instead be terminal: notify the PI with the "will not be retried" wording
+    and return False so the caller retires the notification and commits as usual — at
+    most ONE orphan channel results, matching pre-COR-32 parity, except the PI now finds
+    out. Forces the failure on the DEFAULT-config path (enable_private_refinement=True,
+    td.origin_visibility='public', both factory defaults) — reachable in production
+    today, not just the legacy flag-off path.
     """
     token = "instrfail" + "e" * 40
     recipient, agent, td, notification = await _world(
         db_session, recipient_email="pi.instr@scripps.edu", token=token
     )
-    monkeypatch.setattr(inbound, "_INSTRUCTION_FAILURE_EMAILS_SENT", {})
     _classifies_as(monkeypatch, {"category": "instruction", "instruction": "focus on X"})
 
+    calls: list[bool] = []
+
     async def _boom(*a, **k):
+        calls.append(True)
         raise RuntimeError("Slack outage")
 
     # migrate_public_thread_to_private is imported with a LOCAL `from ... import` inside
@@ -345,68 +361,95 @@ async def test_a_retryable_instruction_failure_notifies_the_pi_and_does_not_reti
         "src.services.private_channels.migrate_public_thread_to_private", _boom
     )
 
-    with pytest.raises(inbound.InstructionApplyFailed):
-        await process_inbound_email(
-            _raw_reply(token, "pi.instr@scripps.edu", "please focus on X"), db_session,
-        )
+    await process_inbound_email(
+        _raw_reply(token, "pi.instr@scripps.edu", "please focus on X"), db_session,
+    )
 
-    assert notification.status == "sent", "the notification must stay retryable, not retired"
+    assert calls == [True]
+    assert notification.status == "responded", "a terminal failure retires the notification"
     assert await _reviews(db_session) == []
     (mail,) = sent_emails
     assert mail["to"] == recipient.email
     assert "instruction" in mail["subject"].lower()
+    assert "will not be retried" in mail["body"]
 
-    # COR-32 retry cap: process_inbound_email is re-entered on every poll until the S3
-    # object is quarantined (MAX_S3_PROCESS_ATTEMPTS) — migrate_public_thread_to_private
-    # keeps raising on each retry in this test, so _handle_instruction keeps raising too,
-    # but the PI must not get a second identical failure email for the same notification.
-    with pytest.raises(inbound.InstructionApplyFailed):
-        await process_inbound_email(
-            _raw_reply(token, "pi.instr@scripps.edu", "please focus on X"), db_session,
-        )
-    assert len(sent_emails) == 1, "a second retry sent a second identical failure email"
+    # The notification is already retired, so a second reply on the same token hits
+    # process_inbound_email's own "already responded" early return and never reaches
+    # _handle_instruction (let alone the migration) again.
+    await process_inbound_email(
+        _raw_reply(token, "pi.instr@scripps.edu", "please focus on X"), db_session,
+    )
+    assert calls == [True], "a second reply on an already-retired notification re-ran the migration"
+    assert len(sent_emails) == 1, "a second reply sent a second failure email"
 
 
-async def test_a_previously_migrated_proposal_is_not_re_migrated_on_retry(
+async def test_a_legacy_pre_slack_failure_still_raises_and_retries(
     db_session, monkeypatch, sent_emails,
 ):
-    """COR-32: migrate_public_thread_to_private is NOT idempotent — a retry after an earlier
-    attempt already migrated the thread (refined_in_channel set by that earlier attempt, but
-    the review never got added because something failed after the migration) must not mint a
-    SECOND private Slack channel. The ProposalReview guard just above this one in
-    _handle_instruction only catches a COMPLETED reopen; refined_in_channel is the only marker
-    available for a migration that started but never finished."""
-    token = "instrretry" + "f" * 39
+    """COR-32 fix round, rule 2: the three legacy failures that happen BEFORE any Slack
+    mutation (no simulation run, no bot token, channel not found) are still safe to
+    retry — unlike the migration failure above, nothing irreversible has happened yet.
+    This exercises "no bot token": settings.enable_private_refinement=False routes into
+    the legacy branch, slack_globally_enabled is stubbed True (skip the DB-only path),
+    and a freshly-factoried agent has no bot token in the DB or in the test env's
+    ``.env`` fallback."""
+    token = "legacyfail" + "h" * 39
     recipient, agent, td, notification = await _world(
-        db_session, recipient_email="pi.instr2@scripps.edu", token=token
+        db_session, recipient_email="pi.instr3@scripps.edu", token=token
     )
-    td.refined_in_channel = "priv-c1234567"
-    await db_session.flush()
+    monkeypatch.setattr(get_settings(), "enable_private_refinement", False)
+    monkeypatch.setattr("src.services.slack_tokens.slack_globally_enabled", _slack_on)
+    _classifies_as(monkeypatch, {"category": "instruction", "instruction": "focus on X"})
 
-    # A bare raise here would be swallowed by _handle_instruction's own blanket
-    # except-and-return-False (pre-fix), which would make this assertion pass for the
-    # WRONG reason. Track the call directly instead.
-    called: list[bool] = []
+    with pytest.raises(inbound.InstructionApplyFailed):
+        await process_inbound_email(
+            _raw_reply(token, "pi.instr3@scripps.edu", "please focus on X"), db_session,
+        )
 
-    async def _must_not_run(*a, **k):
-        called.append(True)
-        raise RuntimeError("migrate_public_thread_to_private must not run on a retry")
+    assert notification.status == "sent", "a safe-to-retry failure must not retire the notification"
+    assert await _reviews(db_session) == []
+    (mail,) = sent_emails
+    assert mail["to"] == recipient.email
+    assert "We'll retry automatically" in mail["body"]
+    assert "will not be retried" not in mail["body"]
 
-    monkeypatch.setattr(
-        "src.services.private_channels.migrate_public_thread_to_private", _must_not_run
+
+async def test_a_failed_failure_notification_send_does_not_consume_the_cap(
+    db_session, monkeypatch,
+):
+    """Minor 3: _INSTRUCTION_FAILURE_EMAILS_SENT must be set only when the send
+    actually succeeded. Pre-fix, a failed send (SES throttled, allowlist suppression,
+    ...) still consumed the cap, so the PI could end up with ZERO failure emails ever,
+    forever, for that notification even though the underlying problem might later be
+    fixed. Same "no bot token" legacy failure as above, replayed twice."""
+    token = "capnoteat" + "j" * 40
+    recipient, agent, td, notification = await _world(
+        db_session, recipient_email="pi.instr4@scripps.edu", token=token
     )
+    monkeypatch.setattr(get_settings(), "enable_private_refinement", False)
+    monkeypatch.setattr("src.services.slack_tokens.slack_globally_enabled", _slack_on)
+    _classifies_as(monkeypatch, {"category": "instruction", "instruction": "focus on X"})
 
-    reopened = await inbound._handle_instruction(
-        user=recipient, notification=notification, td=td,
-        instruction="focus on X", db=db_session,
-    )
+    sent: list[dict] = []
+    outcomes = iter([False, True])
 
-    assert called == [], (
-        "migrate_public_thread_to_private ran again on a retry — refined_in_channel, set by "
-        "an earlier attempt, should have short-circuited before reaching it"
-    )
-    assert reopened is False
-    assert sent_emails == [], "no NEW failure email is needed — this is not a new failure"
+    def _send(to_email, subject, text_body, reply_to=None):
+        sent.append({"to": to_email, "subject": subject, "body": text_body})
+        return next(outcomes)
+
+    monkeypatch.setattr(inbound, "_send_simple_email", _send)
+
+    with pytest.raises(inbound.InstructionApplyFailed):
+        await process_inbound_email(
+            _raw_reply(token, "pi.instr4@scripps.edu", "please focus on X"), db_session,
+        )
+    assert len(sent) == 1, "the first (failed) send must still be attempted"
+
+    with pytest.raises(inbound.InstructionApplyFailed):
+        await process_inbound_email(
+            _raw_reply(token, "pi.instr4@scripps.edu", "please focus on X"), db_session,
+        )
+    assert len(sent) == 2, "the cap must not have been consumed by the earlier failed send"
 
 
 # --- 2d. D6: an implicit rating=-1 marker is upgraded, not "already acted on" --
