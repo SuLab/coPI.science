@@ -31,7 +31,9 @@ from sqlalchemy import text
 
 from src.database import get_session_factory
 
-# Defaults preserve the original Cabo behavior.
+# Default reproduces the original 40-PI Cabo run window; pass --start for any
+# other window (see the Schultz example in the module docstring above). This
+# is not a hardcoded date awaiting parameterization — --start already does that.
 DEFAULT_START = "2026-05-01"
 DEFAULT_OUT = "/app/data/cabo_viz"
 DEFAULT_LABEL = "40-PI Cabo run"
