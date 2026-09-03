@@ -1301,6 +1301,7 @@ async def save_public_profile(
         profile.key_targets = _parse_list(key_targets)
     if "keywords" in form:
         profile.keywords = _parse_list(keywords)
+    profile.synthesis_validated = None
     profile.profile_version = (profile.profile_version or 0) + 1
 
     await db.commit()

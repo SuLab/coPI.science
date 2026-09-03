@@ -175,6 +175,10 @@ async def profile_save(
         profile.key_targets = _parse_list(key_targets)
     if "keywords" in form:
         profile.keywords = _parse_list(keywords)
+    # A hand edit through the web UI is not a synthesis at all — None ("unknown /
+    # not a synthesis") rather than False, so profile_pipeline.py's
+    # stored_is_worth_keeping gate (`is not False`) protects it on the next run.
+    profile.synthesis_validated = None
     profile.profile_version = (profile.profile_version or 0) + 1
 
     await db.commit()

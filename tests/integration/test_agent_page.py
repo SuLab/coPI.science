@@ -1205,6 +1205,28 @@ async def test_save_public_profile_still_clears_a_field_the_user_emptied(client,
     assert profile.techniques == []
 
 
+async def test_save_public_profile_resets_synthesis_validated(client, db_session, world):
+    profile = (await db_session.execute(
+        select(ResearcherProfile).where(ResearcherProfile.user_id == world.pi.id)
+    )).scalar_one()
+    profile.research_summary = "old summary"
+    profile.techniques = ["old-t"]
+    profile.synthesis_validated = False
+    await db_session.flush()
+
+    r = await client.post(
+        f"/agent/{OWNER_AGENT}/public-profile/save",
+        headers=_auth(world.pi.id),
+        data={"research_summary": "hand-edited", "techniques": "t1"},
+    )
+    assert r.status_code == 302
+
+    profile = (await db_session.execute(
+        select(ResearcherProfile).where(ResearcherProfile.user_id == world.pi.id)
+    )).scalar_one()
+    assert profile.synthesis_validated is None
+
+
 async def test_connect_slack_stores_the_pis_slack_user_id(client, db_session, world, slack):
     world.agent.slack_bot_token = "xoxb-fake-for-tests"
     await db_session.flush()

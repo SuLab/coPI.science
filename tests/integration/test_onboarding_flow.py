@@ -176,6 +176,7 @@ async def _prof(db, uid):
                 ResearcherProfile.private_profile_md,
                 ResearcherProfile.private_profile_seed,
                 ResearcherProfile.profile_version,
+                ResearcherProfile.synthesis_validated,
             ).where(ResearcherProfile.user_id == uid)
         )
     ).mappings().first()
@@ -965,6 +966,29 @@ async def test_onboarding_save_profile_still_clears_a_field_the_user_emptied(cli
     prof = await _prof(db_session, u.id)
     assert prof["research_summary"] == ""
     assert prof["techniques"] == []
+
+
+async def test_profile_save_resets_a_previously_failed_synthesis_validated_flag(
+    client, db_session
+):
+    """V6-22a: without this, a PI's hand-edit of a profile the pipeline had marked
+    synthesis_validated=False stays False forever, so the NEXT pipeline run's
+    stored_is_worth_keeping gate (profile_pipeline.py:389, `is not False`) treats
+    the PI's own edit as not worth protecting."""
+    u = await factories.make_user(db_session, name="Keep", email="keep@example.org")
+    await factories.make_profile(db_session, user=u, synthesis_validated=False)
+    await db_session.flush()
+
+    r = await client.post(
+        "/profile/save",
+        headers=_auth(u.id),
+        data={
+            "name": "Keep", "email": "keep@example.org",
+            "research_summary": "hand-edited summary", "techniques": "t1",
+        },
+    )
+    assert r.status_code == 302
+    assert (await _prof(db_session, u.id))["synthesis_validated"] is None
 
 
 async def test_profile_save_rejects_a_bad_or_taken_email_and_persists_nothing(

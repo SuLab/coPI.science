@@ -158,6 +158,7 @@ async def save_profile(
         profile.key_targets = parse_list(key_targets)
     if "keywords" in form:
         profile.keywords = parse_list(keywords)
+    profile.synthesis_validated = None
     profile.profile_version = (profile.profile_version or 0) + 1
 
     await db.commit()
