@@ -201,9 +201,11 @@ PLANNED_OBJECTS: tuple[PlannedObject, ...] = (
     PlannedObject("0023", "column", "evidence_pub_count", "researcher_profiles"),
     # 0024_add_agent_role
     PlannedObject("0024", "column", "role", "agents"),
+    # 0025_publications_unique_user_pmid
+    PlannedObject("0025", "constraint", "uq_publications_user_pmid", "publications"),
 )
 
-REVISION_ORDER = ("0018", "0019", "0020", "0021", "0022", "0023", "0024")
+REVISION_ORDER = ("0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025")
 
 
 def planned_objects_between(current: str, target: str) -> tuple[PlannedObject, ...]:
