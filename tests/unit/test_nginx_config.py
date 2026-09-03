@@ -50,3 +50,17 @@ def test_dead_next_static_cache_block_is_removed():
     text = _nginx_conf()
     assert "/_next/static/" not in text
     assert "proxy_cache_valid" not in text, "proxy_cache_valid with no proxy_cache_path is inert"
+
+
+def test_devel_and_blackbird_https_vhosts_are_rate_limited():
+    text = _nginx_conf()
+    for name in ("devel.copi.science", "blackbird.copi.science"):
+        block = _https_block(text, name)
+        assert "limit_conn conn_perip" in block, f"{name} has no connection cap"
+        assert "limit_req zone=req_general" in block, f"{name} has no request-rate cap"
+
+
+def test_blackbird_https_vhost_has_the_same_tls_hardening_as_the_others():
+    block = _https_block(_nginx_conf(), "blackbird.copi.science")
+    for directive in ("ssl_ciphers", "ssl_stapling on", "ssl_stapling_verify on", "resolver "):
+        assert directive in block, f"blackbird vhost is missing {directive!r}"
