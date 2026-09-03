@@ -1245,11 +1245,18 @@ class SimulationEngine:
                     root = self.message_log.get_entry(thread_id)
                     if root:
                         foa_num = extract_foa_number(root.content)
+                # message_count_offset mirrors the reopen paths (_reopen_thread,
+                # the web reopen): a thread already at or near the message cap
+                # when this agent is first tagged/replied-into it must not
+                # instantly close as "timeout" before the agent gets a chance
+                # to post. See COR-2.
+                existing_count = self.message_log.get_thread_message_count(thread_id)
                 agent.state.active_threads[thread_id] = ThreadState(
                     thread_id=thread_id,
                     channel=entry.channel,
                     other_agent_id=other_id,
-                    message_count=self.message_log.get_thread_message_count(thread_id),
+                    message_count=existing_count,
+                    message_count_offset=existing_count,
                     has_pending_reply=True,
                     foa_number=foa_num,
                 )
@@ -1286,11 +1293,13 @@ class SimulationEngine:
                     root = self.message_log.get_entry(thread_id)
                     if root:
                         foa_num = extract_foa_number(root.content)
+                existing_count = self.message_log.get_thread_message_count(thread_id)
                 agent.state.active_threads[thread_id] = ThreadState(
                     thread_id=thread_id,
                     channel=entry.channel,
                     other_agent_id=other_id,
-                    message_count=self.message_log.get_thread_message_count(thread_id),
+                    message_count=existing_count,
+                    message_count_offset=existing_count,
                     has_pending_reply=True,
                     foa_number=foa_num,
                 )

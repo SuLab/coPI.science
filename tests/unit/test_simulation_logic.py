@@ -1455,3 +1455,49 @@ class TestRunTurnAdvancesCursorFromTheLog:
         await engine._run_turn(agent)
 
         assert agent.state.last_seen_cursor == engine.message_log.latest_timestamp == 1000.0
+
+
+class TestPhase3ActivationSetsMessageCountOffset:
+    """A funding thread that already has 12 messages (the cap) must not
+    instantly time out for an agent Phase 3 just activated into it — that
+    agent gets a fresh reply budget starting from the thread's size at
+    activation time, exactly like the reopen paths already do."""
+
+    def _engine_with_capped_funding_thread(self):
+        from src.agent.agent import Agent
+        from src.agent.message_log import LogEntry
+
+        a = Agent("a", "ABot", "A PI")
+        b = Agent("b", "BBot", "B PI")
+        c = Agent("c", "CBot", "C PI")
+        engine = SimulationEngine(agents=[a, b, c], slack_clients={})
+        engine.message_log.append(LogEntry(
+            ts="1.0", channel="general", sender_agent_id="a", sender_name="ABot",
+            content=":moneybag: Funding opportunity XYZ", posted_at=1.0, is_bot=True,
+        ))
+        senders = ["b", "a"] * 5  # 10 replies -> 11 messages so far
+        for i, sender in enumerate(senders, start=2):
+            engine.message_log.append(LogEntry(
+                ts=f"{i}.0", channel="general", sender_agent_id=sender, sender_name=sender,
+                content=f"reply {i}", thread_ts="1.0", posted_at=float(i), is_bot=True,
+            ))
+        # 12th message (the cap) tags CBot — funding threads are open to all
+        # (get_thread_allowed_agents returns None), so the allowed-set guard
+        # does not block the new participant.
+        engine.message_log.append(LogEntry(
+            ts="12.0", channel="general", sender_agent_id="b", sender_name="BBot",
+            content="Let's bring in @CBot for this", thread_ts="1.0", posted_at=12.0, is_bot=True,
+        ))
+        return engine, c
+
+    def test_tag_path_sets_the_offset_to_the_current_count(self):
+        engine, c = self._engine_with_capped_funding_thread()
+
+        engine._phase3_activate_threads(c)
+
+        thread = c.state.active_threads["1.0"]
+        assert thread.message_count_offset == 12
+        # Prove the practical effect: _reply_to_thread's recompute would start
+        # this newly-tagged agent at 0, not at the pre-existing 12 (which
+        # would close the thread as "timeout" before it ever replied).
+        assert 12 - thread.message_count_offset == 0
