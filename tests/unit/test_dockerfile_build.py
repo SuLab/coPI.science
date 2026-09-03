@@ -35,3 +35,12 @@ def test_two_stage_build_with_a_slim_runtime():
     assert "gcc" not in runtime_section
     assert "libpq-dev" not in runtime_section
     assert "libpq5" in runtime_section
+
+
+def test_runtime_stage_drops_to_a_non_root_fixed_uid():
+    text = _dockerfile()
+    assert "USER 10001" in text
+    assert "useradd" in text and "10001" in text
+    user_idx = text.rindex("USER 10001")
+    copy_idx = text.rindex("COPY . .")
+    assert copy_idx < user_idx, "USER must be set after the app tree is copied in"

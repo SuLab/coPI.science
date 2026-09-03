@@ -33,7 +33,14 @@ COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/pytho
 COPY --from=builder /usr/local/bin /usr/local/bin
 COPY . .
 
-RUN mkdir -p profiles/public profiles/private prompts logs static
+# Fixed UID so it matches whatever the prod host chowns the bind-mounted
+# profiles/data trees to (see this task's Deploy note) — a plain chown
+# target on the host, not a real host account.
+RUN useradd --uid 10001 --no-create-home --shell /usr/sbin/nologin copi \
+    && mkdir -p profiles/public profiles/private prompts logs static \
+    && chown -R 10001:10001 /app
+
+USER 10001
 
 EXPOSE 8000
 
