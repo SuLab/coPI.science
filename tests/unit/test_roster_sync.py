@@ -209,6 +209,43 @@ class TestSyncRosterFromDb:
 
         assert engine.slack_clients["su"] is before
 
+    async def test_surviving_agent_bot_name_and_pi_name_edits_go_live(self, monkeypatch):
+        """DOC-B residual: renaming a live agent's bot_name/pi_name in AgentRegistry
+        must be picked up without a restart. Before the fix, the surviving-agent
+        loop diffed `role` only; bot_name/pi_name were read only in the `to_add`
+        branch, so a DB rename was invisible until the process restarted.
+        """
+        _patch_client(monkeypatch)
+        renamed = _row("su")
+        renamed.bot_name = "NewSuBot"
+        renamed.pi_name = "New Name"
+        engine = _make_engine([renamed], existing_agents=["su"])
+
+        await engine._sync_roster_from_db()
+
+        agent = engine.agents["su"]
+        assert agent.bot_name == "NewSuBot"
+        assert agent.pi_name == "New Name"
+        assert engine._bot_name_to_id.get("newsubot") == "su"
+        assert "subot" not in engine._bot_name_to_id
+
+    async def test_existing_client_is_rebuilt_when_its_token_rotates(self, monkeypatch):
+        """Red-team residual: the old `continue` on 'aid in self.slack_clients'
+        skipped a TOKEN ROTATION on an already-connected agent entirely — the
+        agent kept posting with the stale (about-to-be-revoked) token until a
+        restart. Rebuild the client when the desired token no longer matches
+        the connected client's token.
+        """
+        _patch_client(monkeypatch)
+        engine = _make_engine([_row("su", token="xoxb-rotated")], existing_agents=["su"])
+        before = engine.slack_clients["su"]
+
+        await engine._sync_roster_from_db()
+
+        after = engine.slack_clients["su"]
+        assert after is not before
+        assert after.bot_token == "xoxb-rotated"
+
     async def test_throttle_skips_within_interval(self, monkeypatch):
         _patch_client(monkeypatch)
         import time

@@ -5313,16 +5313,39 @@ class SimulationEngine:
 
             desired = {r.agent_id: r for r in rows}
 
-            # Role-diff for surviving agents (agents present in both current and
-            # desired). Must run even when to_add/to_remove are empty, or a role
-            # reassignment on a running agent is invisible until the next add/remove.
-            role_changed = False
+            # Role/name-diff for surviving agents (agents present in both current
+            # and desired). Must run even when to_add/to_remove are empty, or a
+            # reassignment on a running agent is invisible until the next
+            # add/remove. bot_name/pi_name used to be read only in the to_add
+            # branch below (#26 DOC-B): a DB rename of a live agent never
+            # reached the Agent object or _bot_name_to_id until a restart.
+            roster_changed = False
+            bot_name_changed = False
             for aid, agent in self.agents.items():
                 r = desired.get(aid)
-                if r is not None and getattr(r, "role", "pi_lab") != agent.role:
+                if r is None:
+                    continue
+                if getattr(r, "role", "pi_lab") != agent.role:
                     logger.info("[roster] %s role %s -> %s", aid, agent.role, r.role)
                     agent.role = r.role
-                    role_changed = True
+                    roster_changed = True
+                if r.bot_name != agent.bot_name:
+                    old_key = agent.bot_name.lower()
+                    if self._bot_name_to_id.get(old_key) == aid:
+                        self._bot_name_to_id.pop(old_key, None)
+                    logger.info(
+                        "[roster] %s bot_name %s -> %s", aid, agent.bot_name, r.bot_name,
+                    )
+                    agent.bot_name = r.bot_name
+                    self._bot_name_to_id[agent.bot_name.lower()] = aid
+                    roster_changed = True
+                    bot_name_changed = True
+                if r.pi_name != agent.pi_name:
+                    logger.info(
+                        "[roster] %s pi_name %s -> %s", aid, agent.pi_name, r.pi_name,
+                    )
+                    agent.pi_name = r.pi_name
+                    roster_changed = True
 
             # Token-diff for surviving agents. `main.py` admits every active
             # agent to self.agents regardless of token, so an agent provisioned
@@ -5336,7 +5359,7 @@ class SimulationEngine:
             if self.slack_enabled:
                 for aid in self.agents:
                     r = desired.get(aid)
-                    if r is None or aid in self.slack_clients:
+                    if r is None:
                         continue
                     token = (
                         r.slack_bot_token
@@ -5345,16 +5368,23 @@ class SimulationEngine:
                     )
                     if not is_valid_token(token):
                         continue  # still tokenless — retry on a later tick
+                    existing = self.slack_clients.get(aid)
+                    if existing is not None and existing.bot_token == token:
+                        continue  # already connected with the current token
                     client = AgentSlackClient(agent_id=aid, bot_token=token)
                     if not client.connect():
                         logger.warning(
-                            "[roster] Slack connect failed adopting %s — will retry", aid,
+                            "[roster] Slack %s failed for %s — will retry",
+                            "reconnect" if existing is not None else "connect adopting",
+                            aid,
                         )
                         continue
                     self.slack_clients[aid] = client
                     logger.info(
-                        "[roster] Adopted Slack client for %s (token provisioned "
-                        "after startup)", aid,
+                        "[roster] %s Slack client for %s (token %s)",
+                        "Rebuilt" if existing is not None else "Adopted",
+                        aid,
+                        "rotated" if existing is not None else "provisioned after startup",
                     )
 
             current = set(self.agents)
@@ -5363,11 +5393,14 @@ class SimulationEngine:
             if not to_remove and not to_add:
                 # Recompute the gate FIRST: _recompute_allowed_sender_ids ends by
                 # refreshing the directory (step 4), so after this line the
-                # directory already agrees with the gate. The role branch stays
-                # because a role change alters the directory's *contents*
-                # (pi_name headings) without moving the gate at all.
+                # directory already agrees with the gate. The role/name branch
+                # stays because a role or name change alters the directory's
+                # *contents* (pi_name headings, bot_name lookups) without moving
+                # the gate at all.
                 await self._recompute_allowed_sender_ids()
-                if role_changed:
+                if bot_name_changed:
+                    self.message_log.set_bot_name_map(self._bot_name_to_id)
+                if roster_changed:
                     self.refresh_lab_directories()
                 return
 
