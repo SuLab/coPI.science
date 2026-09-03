@@ -23,6 +23,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -86,6 +87,15 @@ _STATIC_TARGETS: frozenset[str] = frozenset(
 )
 
 _SPECIALIST_TARGET_PREFIX = "specialist:"
+
+#: Recovers the `target` from a reply whose JSON is otherwise unparseable.
+#: Anchored at the start and requiring `target` to be the object's FIRST key,
+#: so it can only ever read the model's own declared target, never a word
+#: quoted later in the prose. Measured need (2026-09-03 evaluation): 3 of 12
+#: live Opus replies embedded an unescaped `"` inside a string value, which
+#: `extract_json` cannot repair; all three had lost a real `rubric` target to
+#: the `out_of_scope` fallback.
+_LEADING_TARGET_RE = re.compile(r'^\s*\{\s*"target"\s*:\s*"([^"\\]+)"')
 
 
 def _prompt_file_set() -> list[str]:
@@ -283,7 +293,11 @@ def _parse_model_output(raw: str) -> tuple[str, str]:
     `raw_response` always keeps the model's exact text regardless; this is
     what keeps a defaulted row reviewable rather than dropped. A valid
     `target` whose `suggestion`/`rationale` compose to a blank body degrades
-    to ``(target, raw)`` for the same reason.
+    to ``(target, raw)`` for the same reason. One exception: when the reply is
+    unparseable but its FIRST key is a valid `target`, that target is
+    recovered and paired with `raw` (`_LEADING_TARGET_RE`) — a malformed reply
+    still names the file it is about, and mislabelling a real suggestion as
+    `out_of_scope` hides it on the suggestions page.
     """
     try:
         parsed = extract_json(raw)
@@ -291,6 +305,23 @@ def _parse_model_output(raw: str) -> tuple[str, str]:
         parsed = None
     if not isinstance(parsed, dict):
         parsed = None
+
+    if parsed is None:
+        # The JSON did not parse. Before defaulting, try to read the target the
+        # model declared as its first key: a reply that is only malformed
+        # DEEPER IN still tells us which prompt file it is about, and filing a
+        # real `rubric` suggestion as `out_of_scope` is the more damaging
+        # error. The body stays `raw` either way — nothing here reconstructs
+        # a suggestion, it only recovers the label.
+        match = _LEADING_TARGET_RE.match(raw)
+        if match and _is_valid_target(match.group(1)):
+            logger.warning(
+                "review bot: the model's reply was not valid JSON; recovered "
+                "target %r from its leading key and stored the raw text",
+                match.group(1),
+            )
+            return match.group(1), raw
+        return "out_of_scope", raw
 
     target = parsed.get("target") if parsed else None
     if not _is_valid_target(target):

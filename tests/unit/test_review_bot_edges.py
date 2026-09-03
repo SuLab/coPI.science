@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import uuid
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -24,6 +25,8 @@ from src.models import (
 from src.services import review_bot
 from src.services.assessment_reviews import submit_feedback
 from tests import factories
+
+ROOT = Path(__file__).resolve().parents[2]
 
 _HAPPY = json.dumps({"target": "scout_hub", "suggestion": "S", "rationale": "R"})
 
@@ -80,8 +83,47 @@ def test_specialist_label_variants_are_out_of_scope(label):
     assert review_bot._parse_model_output(raw) == ("out_of_scope", raw)
 
 
-def test_truncated_json_is_out_of_scope_with_raw_kept():
-    raw = '{"target": "scout_hub", "suggestion": "the model ran out of tok'
+def test_truncated_json_with_no_recoverable_target_is_out_of_scope():
+    """Deviation from a prior version of this test (2026-09-03,
+    `_LEADING_TARGET_RE`): a truncation whose declared `target` IS a valid
+    leading key is now recovered rather than defaulted — see
+    `test_real_unparseable_opus_replies_keep_their_declared_target` below,
+    which is exactly that case for real max-tokens-shaped output. This case
+    has no `target` key at all, so nothing is recoverable and the fallback
+    still applies."""
+    raw = '{"suggestion": "the model ran out of tok'
+    assert review_bot._parse_model_output(raw) == ("out_of_scope", raw)
+
+
+@pytest.mark.parametrize(
+    "fixture_name",
+    ["unparseable_rubric_1.txt", "unparseable_rubric_2.txt", "unparseable_rubric_3.txt"],
+)
+def test_real_unparseable_opus_replies_keep_their_declared_target(fixture_name, caplog):
+    """Regression from the 2026-09-03 live evaluation: 3 of 12 real replies
+    embedded an unescaped quote inside a JSON string, and all three lost a
+    genuine `rubric` target to the out_of_scope fallback."""
+    raw = (ROOT / "tests/fixtures/review_bot_replies" / fixture_name).read_text()
+    with pytest.raises(json.JSONDecodeError):
+        json.loads(raw)  # the fixture must really be malformed
+    with caplog.at_level("WARNING", logger="src.services.review_bot"):
+        target, body = review_bot._parse_model_output(raw)
+    assert target == "rubric"
+    assert body == raw
+    assert any("recovered target" in r.getMessage() for r in caplog.records)
+
+
+def test_recovery_never_invents_a_target_from_prose():
+    """The regex is anchored and requires `target` to be the FIRST key, so a
+    malformed reply that merely MENTIONS a target word stays out_of_scope."""
+    raw = 'Sorry, I cannot help. The right target would be "rubric", probably.'
+    assert review_bot._parse_model_output(raw) == ("out_of_scope", raw)
+    raw2 = '{"note": "about the rubric", "target": "rubric"  # broken'
+    assert review_bot._parse_model_output(raw2) == ("out_of_scope", raw2)
+
+
+def test_recovery_rejects_an_invalid_recovered_target():
+    raw = '{"target": "astrology", "suggestion": "x" broken'
     assert review_bot._parse_model_output(raw) == ("out_of_scope", raw)
 
 
