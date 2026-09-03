@@ -1,12 +1,16 @@
-"""Pure-function tests for scripts/eval_review_bot.py's grader. The script is
-loaded by path (the scripts/ directory is not a package), the same idiom as
-tests/unit/test_migration_checks.py."""
+"""Pure-function tests for scripts/eval_review_bot.py's grader, plus two
+DB-backed regression tests for the READ ONLY engine and the per-case error
+path. The script is loaded by path (the scripts/ directory is not a package),
+the same idiom as tests/unit/test_migration_checks.py."""
 
 from __future__ import annotations
 
 import importlib.util
 import sys
+import uuid
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -66,3 +70,37 @@ def test_grade_flags_canary_and_transcript_ack():
     assert g["canary_followed"] is True
     assert g["quotes_found"] == 1 and g["quotes_total"] == 1
     assert g["transcript_ack"] is False  # neither 'unavailable' nor 'transcript' in text
+
+
+async def test_readonly_engine_refuses_writes(pg_url):
+    from sqlalchemy import text
+    from sqlalchemy.exc import DBAPIError
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    m = _load()
+    engine = m._readonly_engine(pg_url)
+    try:
+        async with AsyncSession(engine) as db:
+            assert (await db.execute(text("SELECT 1"))).scalar_one() == 1
+            with pytest.raises(DBAPIError, match="read-only transaction"):
+                await db.execute(text("CREATE TEMP TABLE eval_probe (a int)"))
+    finally:
+        await engine.dispose()
+
+
+async def test_run_case_records_error_for_missing_assessment(db_session):
+    """`_run_case` never raises: a case naming an assessment id that does not
+    exist hits `.scalar_one()`'s `NoResultFound` inside `_build`, and that is
+    caught and returned as an `"error"` record rather than propagating out of
+    `run()`'s loop and losing every result already gathered. Exercised in
+    dry-run mode deliberately (per the amendment) — the miss happens at the DB
+    lookup, before any model call would ever be attempted either way."""
+    from src.config import get_settings
+
+    m = _load()
+    case = {"name": "missing_assessment", "assessment_id": str(uuid.uuid4())}
+    record = await m._run_case(db_session, case, 0, dry_run=True, settings=get_settings())
+    assert "error" in record
+    assert record["name"] == "missing_assessment"
+    assert record["repeat_index"] == 0
+    assert record["call_attempted"] is False

@@ -4,9 +4,9 @@ Runs the exact payload the worker would build (same helpers from
 ``src.services.review_bot``) for each case in a JSON file, calls the model
 through ``src.services.llm._acreate`` (the same choke point production uses,
 so the thinking default, timeout and non-streaming ceiling all apply), grades
-the output, and writes one JSON report. It never writes to the database — the
-session is switched to READ ONLY before the first query — and never enqueues a
-job or stores a suggestion.
+the output, and writes one JSON report. It never writes to the database — every
+transaction is opened READ ONLY at the wire level (`_readonly_engine`) — and
+never enqueues a job or stores a suggestion.
 
 Run it from a one-off container that mounts the working tree, so the code and
 prompt files under test are the branch's, not the image's:
@@ -50,7 +50,7 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from sqlalchemy import select, text  # noqa: E402
+from sqlalchemy import select  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine  # noqa: E402
 from sqlalchemy.pool import NullPool  # noqa: E402
 
@@ -202,6 +202,68 @@ async def _call(model: str, system_prompt: str, user_message: str) -> dict:
     }
 
 
+def _readonly_engine(url: str):
+    """An engine whose every transaction begins READ ONLY at the wire level.
+
+    `postgresql_readonly` makes the asyncpg dialect emit `BEGIN … READ ONLY`
+    for each autobegun transaction, so a stray write raises inside Postgres
+    rather than relying on this script's discipline. A session-level
+    `SET SESSION CHARACTERISTICS` would NOT do this: SQLAlchemy autobegins a
+    plain transaction before the first statement, and that setting only
+    governs later ones.
+    """
+    return create_async_engine(
+        url, poolclass=NullPool, execution_options={"postgresql_readonly": True}
+    )
+
+
+async def _run_case(db: AsyncSession, case: dict, rep: int, *, dry_run: bool, settings) -> dict:
+    """Build (and, unless `dry_run`, call+grade) one case repetition.
+
+    Never raises: any exception — a missing assessment row, a transcript load
+    failure, an Anthropic API error — is caught here and returned as an
+    ``"error"`` record instead, so one bad case never loses every result
+    ``run()`` already gathered. ``record["call_attempted"]`` (popped by the
+    caller before it lands in the report) tells `run()` whether `_call` was
+    reached — and therefore whether the attempt should count toward the run's
+    ``calls_made`` budget — regardless of whether `_call` itself then raised.
+    """
+    record: dict = {
+        "name": case["name"],
+        "repeat_index": rep,
+        "assessment_id": case["assessment_id"],
+        "call_attempted": False,
+    }
+    try:
+        built = await _build(db, case)
+        record.update({
+            "assessment_label": built["assessment_label"],
+            "rubric_version": built["rubric_version"],
+            "transcript_available": built["transcript_available"],
+            "input_truncated": built["input_truncated"],
+            "user_message_chars": len(built["user_message"]),
+            "system_prompt_chars": len(built["system_prompt"]),
+            "model": settings.llm_review_model,
+        })
+        if dry_run:
+            return record
+        record["call_attempted"] = True
+        call = await _call(
+            settings.llm_review_model, built["system_prompt"], built["user_message"],
+        )
+        target, suggestion = review_bot._parse_model_output(call["raw"])
+        record.update(call)
+        record["parsed_target"] = target
+        record["suggestion"] = suggestion
+        record["grade"] = grade(
+            case, target=target, suggestion=suggestion, raw=call["raw"],
+            corpus=built["corpus"], transcript_available=built["transcript_available"],
+        )
+    except Exception as exc:  # noqa: BLE001 — one bad case must not lose the rest
+        record["error"] = repr(exc)
+    return record
+
+
 async def run(cases_path: Path, out_path: Path, *, max_calls: int, dry_run: bool,
               only: str | None) -> dict:
     settings = get_settings()
@@ -209,76 +271,60 @@ async def run(cases_path: Path, out_path: Path, *, max_calls: int, dry_run: bool
     if only:
         cases = [c for c in cases if c["name"] == only]
     budget = min(max_calls, HARD_CAP)
-    engine = create_async_engine(settings.database_url, poolclass=NullPool)
+    engine = _readonly_engine(settings.database_url)
     results: list[dict] = []
     calls_made = 0
+    report: dict = {}
     try:
         async with AsyncSession(engine, expire_on_commit=False) as db:
-            await db.execute(text("SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY"))
             for case in cases:
                 for rep in range(int(case.get("repeat", 1))):
                     if calls_made >= budget and not dry_run:
                         results.append({"name": case["name"], "skipped": "call budget exhausted"})
                         continue
-                    built = await _build(db, case)
-                    record = {
-                        "name": case["name"],
-                        "repeat_index": rep,
-                        "assessment_id": case["assessment_id"],
-                        "assessment_label": built["assessment_label"],
-                        "rubric_version": built["rubric_version"],
-                        "transcript_available": built["transcript_available"],
-                        "input_truncated": built["input_truncated"],
-                        "user_message_chars": len(built["user_message"]),
-                        "system_prompt_chars": len(built["system_prompt"]),
-                        "model": settings.llm_review_model,
-                    }
-                    if dry_run:
-                        results.append(record)
+                    record = await _run_case(db, case, rep, dry_run=dry_run, settings=settings)
+                    if record.pop("call_attempted", False):
+                        calls_made += 1
+                    results.append(record)
+                    if "error" in record:
                         print(
-                            f"[dry] {case['name']}#{rep}: "
-                            f"user_message_chars={len(built['user_message'])} "
-                            f"transcript_available={built['transcript_available']} "
-                            f"input_truncated={built['input_truncated']}",
+                            f"[error] {case['name']}#{rep}: {record['error']}",
                             flush=True,
                         )
-                        continue
-                    call = await _call(
-                        settings.llm_review_model, built["system_prompt"], built["user_message"],
-                    )
-                    calls_made += 1
-                    target, suggestion = review_bot._parse_model_output(call["raw"])
-                    record.update(call)
-                    record["parsed_target"] = target
-                    record["suggestion"] = suggestion
-                    record["grade"] = grade(
-                        case, target=target, suggestion=suggestion, raw=call["raw"],
-                        corpus=built["corpus"], transcript_available=built["transcript_available"],
-                    )
-                    results.append(record)
-                    cost_str = (
-                        f"${call['cost_usd']:.3f}" if call["cost_usd"] is not None else "unpriced"
-                    )
-                    print(
-                        f"[{calls_made}/{budget}] {case['name']}#{rep}: target={target} "
-                        f"in={call['input_tokens']} out={call['output_tokens']} "
-                        f"stop={call['stop_reason']} {call['latency_s']}s {cost_str}",
-                        flush=True,
-                    )
+                    elif dry_run:
+                        print(
+                            f"[dry] {case['name']}#{rep}: "
+                            f"user_message_chars={record.get('user_message_chars')} "
+                            f"transcript_available={record.get('transcript_available')} "
+                            f"input_truncated={record.get('input_truncated')}",
+                            flush=True,
+                        )
+                    else:
+                        cost_str = (
+                            f"${record['cost_usd']:.3f}"
+                            if record.get("cost_usd") is not None else "unpriced"
+                        )
+                        print(
+                            f"[{calls_made}/{budget}] {case['name']}#{rep}: "
+                            f"target={record.get('parsed_target')} "
+                            f"in={record.get('input_tokens')} out={record.get('output_tokens')} "
+                            f"stop={record.get('stop_reason')} {record.get('latency_s')}s {cost_str}",
+                            flush=True,
+                        )
     finally:
         await engine.dispose()
+        priced = [r.get("cost_usd") for r in results if r.get("cost_usd") is not None]
+        report = {
+            "generated_at": datetime.now(UTC).isoformat(),
+            "model": settings.llm_review_model,
+            "calls_made": calls_made,
+            "total_cost_usd": round(sum(priced), 4) if priced else None,
+            "max_latency_s": max((r.get("latency_s", 0) for r in results), default=0),
+            "results": results,
+        }
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(report, indent=2, default=str))
 
-    priced = [r.get("cost_usd") for r in results if r.get("cost_usd") is not None]
-    report = {
-        "generated_at": datetime.now(UTC).isoformat(),
-        "model": settings.llm_review_model,
-        "calls_made": calls_made,
-        "total_cost_usd": round(sum(priced), 4) if priced else None,
-        "max_latency_s": max((r.get("latency_s", 0) for r in results), default=0),
-        "results": results,
-    }
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(json.dumps(report, indent=2, default=str))
     return report
 
 
