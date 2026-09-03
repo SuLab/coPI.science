@@ -14,15 +14,15 @@ prompt files under test are the branch's, not the image's:
     DC="docker compose -f docker-compose.prod.yml"
     $DC run --rm --no-deps \
       -v "$PWD/src:/app/src:ro" -v "$PWD/scripts:/app/scripts:ro" \
-      -v "$PWD/data:/app/data:ro" -v "$PWD/docs:/app/docs" \
+      -v "$PWD/docs:/app/docs" \
       blackbird-app python scripts/eval_review_bot.py \
-        --cases data/review_bot_eval_cases.json \
+        --cases scripts/review_bot_eval_cases.json \
         --out docs/audits/2026-09-02-review-pipeline/eval-results.json
 
 ``--dry-run`` builds and grades nothing but reports payload sizes; ``--max-calls``
 is hard-capped at 12 in code (the operator's ceiling for this evaluation).
 
-Case schema (``data/review_bot_eval_cases.json`` is a list of these):
+Case schema (``scripts/review_bot_eval_cases.json`` is a list of these):
     name                     unique label
     assessment_id            opportunity_assessments.id (UUID string)
     feedback                 [{"reviewer_name", "score", "comment"}] (mode is always learn)
@@ -284,7 +284,7 @@ async def run(cases_path: Path, out_path: Path, *, max_calls: int, dry_run: bool
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("--cases", type=Path, default=Path("data/review_bot_eval_cases.json"))
+    parser.add_argument("--cases", type=Path, default=Path("scripts/review_bot_eval_cases.json"))
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--max-calls", type=int, default=HARD_CAP)
     parser.add_argument("--dry-run", action="store_true")
