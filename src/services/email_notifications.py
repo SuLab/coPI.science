@@ -198,19 +198,25 @@ async def check_and_send_notifications(session_factory: async_sessionmaker) -> i
                 User.email.isnot(None),
             )
         )
-        users = result.scalars().all()
+        # V4-1 fix round 1: ids only -- NOT the ORM objects -- are captured before the
+        # loop. Session.rollback() expires every object in the identity map, not just
+        # the one that failed, so a pre-loaded object from THIS bulk query can be
+        # expired by an EARLIER iteration's rollback by the time this iteration reads
+        # it. Each id is re-loaded fresh, inside the guarded block below, right before
+        # use. See tests/integration/test_email_notification_sweeps_resilience.py.
+        user_ids = [u.id for u in result.scalars().all()]
 
-        for user in users:
-            # Captured before the try: a failure inside _process_user_notifications may
-            # have poisoned the session (e.g. a flush-time IntegrityError), which expires
-            # every attribute of every session-tracked object -- including user's primary
-            # key. On this ASYNC session, touching an expired attribute after that (even
-            # AFTER an explicit db.rollback()) raises MissingGreenlet rather than silently
-            # re-querying, so the except block below must not read user.id directly.
-            # Reproduced against a real Postgres fixture: bare `user.id` in the except's
-            # logger call crashes; the plain local captured here does not.
-            user_id = user.id
+        for user_id in user_ids:
             try:
+                user = (
+                    await db.execute(
+                        select(User)
+                        .options(selectinload(User.agent))
+                        .where(User.id == user_id)
+                    )
+                ).scalar_one_or_none()
+                if user is None:
+                    continue  # deleted between the bulk SELECT and here
                 sent = await _process_user_notifications(user, db)
                 if sent:
                     sent_count += 1
@@ -766,10 +772,19 @@ async def check_and_send_status_overviews(session_factory: async_sessionmaker) -
         result = await db.execute(
             select(User).options(selectinload(User.agent)).where(User.email.isnot(None))
         )
-        users = result.scalars().all()
-        for user in users:
-            user_id = user.id
+        # V4-1 fix round 1: re-load by id inside the guarded block below -- see the
+        # comment in check_and_send_notifications above for why the pre-loaded object
+        # cannot be trusted after an earlier iteration's rollback.
+        user_ids = [u.id for u in result.scalars().all()]
+        for user_id in user_ids:
             try:
+                user = (
+                    await db.execute(
+                        select(User).options(selectinload(User.agent)).where(User.id == user_id)
+                    )
+                ).scalar_one_or_none()
+                if user is None:
+                    continue  # deleted between the bulk SELECT and here
                 pref = await get_or_create_pref(user.id, "status_overview", db)
                 if pref.enabled and _is_time_to_send(pref.frequency, pref.last_sent_at):
                     if await _send_status_overview(user, pref, db):
@@ -961,11 +976,25 @@ async def check_and_send_new_proposal_emails(session_factory: async_sessionmaker
                 ThreadDecision.decided_at >= cutoff,
             )
         )
-        proposals = list(td_result.scalars().all())
-        for td in proposals:
-            td_id = td.id
-            for agent_id_str in (td.agent_a, td.agent_b):
+        # V4-1 fix round 1: only plain ids are captured before the loop -- see the
+        # comment in check_and_send_notifications above for why the pre-loaded object
+        # cannot be trusted after an earlier iteration's rollback. Unlike the other two
+        # sweeps, each td has TWO guarded slots (one per agent side), each with its own
+        # try/except, so the row is re-loaded once per SLOT, not once per proposal: a
+        # failure on the first slot must not leave the second slot's td stale either.
+        td_ids = [td.id for td in td_result.scalars().all()]
+        for td_id in td_ids:
+            for which in ("agent_a", "agent_b"):
+                agent_id_str = which  # fallback for logging if the re-load itself fails
                 try:
+                    td = (
+                        await db.execute(
+                            select(ThreadDecision).where(ThreadDecision.id == td_id)
+                        )
+                    ).scalar_one_or_none()
+                    if td is None:
+                        continue  # deleted between the bulk SELECT and here
+                    agent_id_str = getattr(td, which)
                     if await _maybe_send_new_proposal(td, agent_id_str, db):
                         sent_count += 1
                     await db.commit()

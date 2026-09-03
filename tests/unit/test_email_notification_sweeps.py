@@ -2,6 +2,14 @@
 No DB: session_factory is a small fake that records commit()/rollback() calls in order, standing
 in for "a second user's failure must not be able to discard an earlier user's already-committed
 work" without needing real Postgres to reproduce the shared-session hazard.
+
+Fix round 1 (#21 V4-1 review Critical #1): each sweep now captures only plain ids before the
+loop and re-loads the row inside the guarded block (src/worker/main.py's reap_stale_jobs
+pattern), rather than reading an attribute off the object the bulk query returned. These fakes'
+`execute()` therefore has to answer TWO different query shapes in order: the initial bulk
+SELECT (`.scalars().all()`), then one per-item reload (`.scalar_one_or_none()`) for each id in
+turn -- a fake has no SQL to introspect, so it distinguishes purely by call order, which is
+safe here because both queries process items in the same fixed order this file provides.
 """
 
 import pytest
@@ -35,6 +43,10 @@ async def test_an_earlier_users_committed_row_survives_a_later_users_failure(mon
             self.id = i
 
     class _Sess:
+        def __init__(self):
+            self._users = [_U("u1"), _U("u2")]
+            self._calls = 0
+
         async def commit(self):
             events.append("commit")
 
@@ -42,14 +54,27 @@ async def test_an_earlier_users_committed_row_survives_a_later_users_failure(mon
             events.append("rollback")
 
         async def execute(self, *a, **k):
-            class _R:
-                def scalars(s):
-                    return s
+            call = self._calls
+            self._calls += 1
+            if call == 0:
+                users = self._users
 
-                def all(s):
-                    return [_U("u1"), _U("u2")]
+                class _Bulk:
+                    def scalars(s):
+                        return s
 
-            return _R()
+                    def all(s):
+                        return users
+
+                return _Bulk()
+
+            user = self._users[call - 1]
+
+            class _Reload:
+                def scalar_one_or_none(s):
+                    return user
+
+            return _Reload()
 
     seen = []
 
@@ -87,6 +112,10 @@ async def test_check_and_send_status_overviews_commits_an_earlier_users_send_bef
         last_sent_at = None
 
     class _Sess:
+        def __init__(self):
+            self._users = [_U("u1"), _U("u2")]
+            self._calls = 0
+
         async def commit(self):
             events.append("commit")
 
@@ -94,14 +123,27 @@ async def test_check_and_send_status_overviews_commits_an_earlier_users_send_bef
             events.append("rollback")
 
         async def execute(self, *a, **k):
-            class _R:
-                def scalars(s):
-                    return s
+            call = self._calls
+            self._calls += 1
+            if call == 0:
+                users = self._users
 
-                def all(s):
-                    return [_U("u1"), _U("u2")]
+                class _Bulk:
+                    def scalars(s):
+                        return s
 
-            return _R()
+                    def all(s):
+                        return users
+
+                return _Bulk()
+
+            user = self._users[call - 1]
+
+            class _Reload:
+                def scalar_one_or_none(s):
+                    return user
+
+            return _Reload()
 
     async def _fake_pref(user_id, category, db):
         return _Pref()
@@ -142,6 +184,10 @@ async def test_check_and_send_new_proposal_emails_commits_an_earlier_agents_send
         outcome = "proposal"
 
     class _Sess:
+        def __init__(self):
+            self._td = _TD()
+            self._calls = 0
+
         async def commit(self):
             events.append("commit")
 
@@ -149,14 +195,25 @@ async def test_check_and_send_new_proposal_emails_commits_an_earlier_agents_send
             events.append("rollback")
 
         async def execute(self, *a, **k):
-            class _R:
-                def scalars(s):
-                    return s
+            call = self._calls
+            self._calls += 1
+            td = self._td
+            if call == 0:
 
-                def all(s):
-                    return [_TD()]
+                class _Bulk:
+                    def scalars(s):
+                        return s
 
-            return _R()
+                    def all(s):
+                        return [td]
+
+                return _Bulk()
+
+            class _Reload:
+                def scalar_one_or_none(s):
+                    return td
+
+            return _Reload()
 
     seen = []
 
