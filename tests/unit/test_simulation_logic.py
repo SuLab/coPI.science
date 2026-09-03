@@ -2564,6 +2564,73 @@ class TestRebuildOneAgentState:
         assert su.state.last_seen_cursor == engine.message_log.latest_timestamp == 200.0
 
     @pytest.mark.asyncio
+    async def test_a_bystander_agent_is_left_untouched(self):
+        # Fix round 1 / I2: every read AND the only write that matters
+        # (last_seen_cursor) must be scoped to the single agent_id being
+        # rebuilt. A second, unrelated agent's cursor, call_times and
+        # pending_proposals must come out exactly as they went in.
+        import uuid as uuid_mod
+        from datetime import UTC, datetime, timedelta
+
+        from src.agent.agent import Agent
+        from src.agent.message_log import LogEntry
+        from src.agent.state import ProposalRef
+
+        now = datetime.now(UTC)
+
+        class _TD:
+            def __init__(self, **kw):
+                self.__dict__.update(kw)
+
+        class _LLM:
+            def __init__(self, **kw):
+                self.__dict__.update(kw)
+
+        decision = _TD(
+            id=uuid_mod.uuid4(), thread_id="100.0", channel="general",
+            agent_a="su", agent_b="wiseman", outcome="proposal",
+            summary_text="a shared aim", decided_at=now - timedelta(minutes=5),
+        )
+        responses = [
+            [decision],
+            [],
+            [],
+            2,
+            [_LLM(created_at=now - timedelta(seconds=10))],
+        ]
+        FakeDB = self._ordered_fake_db(responses)
+
+        su = Agent("su", "SuBot", "Andrew Su")
+        wiseman = Agent("wiseman", "WisemanBot", "Wiseman PI")
+        wiseman.state.last_seen_cursor = 999.0
+        wiseman.state.call_times.append(now.timestamp())
+        wiseman.state.pending_proposals.append(ProposalRef(
+            thread_id="500.0", channel="general", other_agent_id="su",
+            summary_text="a bystander's own proposal", proposed_at=0.0,
+        ))
+        bystander_cursor = wiseman.state.last_seen_cursor
+        bystander_call_times = list(wiseman.state.call_times)
+        bystander_proposals = list(wiseman.state.pending_proposals)
+
+        engine = SimulationEngine(agents=[su, wiseman], slack_clients={})
+        engine.session_factory = FakeDB
+        engine.simulation_run_id = uuid_mod.uuid4()
+        engine.message_log.append(LogEntry(
+            ts="100.0", channel="general", sender_agent_id="su", sender_name="SuBot",
+            content="root post", posted_at=100.0, is_bot=True,
+        ))
+        engine.message_log.append(LogEntry(
+            ts="200.0", channel="general", sender_agent_id="wiseman", sender_name="WisemanBot",
+            content="a reply", thread_ts="100.0", posted_at=200.0, is_bot=True,
+        ))
+
+        await engine._rebuild_one_agent_state("su")
+
+        assert wiseman.state.last_seen_cursor == bystander_cursor
+        assert list(wiseman.state.call_times) == bystander_call_times
+        assert wiseman.state.pending_proposals == bystander_proposals
+
+    @pytest.mark.asyncio
     async def test_a_closed_thread_is_not_restored_into_active_threads(self):
         # In production the startup rebuild puts every decided thread into
         # _closed_thread_ids (:4166-4186) before a roster re-add can ever
