@@ -17,6 +17,13 @@ SEARCH_URL = "https://api.grants.gov/v1/api/search2"
 DETAIL_URL = "https://api.grants.gov/v1/api/fetchOpportunity"
 
 
+@pytest.fixture(autouse=True)
+def _no_retry_backoff(monkeypatch):
+    """Zero the retry backoff (issue #23 COR-29a) so the two tests that mock a 500 don't add
+    ~3.5s of real sleep each."""
+    monkeypatch.setattr(grants, "_RETRY_BACKOFF", 0)
+
+
 def _search_payload(hits, hit_count=None):
     return {
         "errorcode": 0,

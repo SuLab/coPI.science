@@ -5,10 +5,16 @@ from typing import Any
 
 import httpx
 
+from src.services.http_retry import post_with_retry
+
 logger = logging.getLogger(__name__)
 
 SEARCH_URL = "https://api.grants.gov/v1/api/search2"
 DETAIL_URL = "https://api.grants.gov/v1/api/fetchOpportunity"
+
+# Overridable by tests (see test_grants_contract.py) — the retry loop's own
+# exponential backoff, not any request timeout.
+_RETRY_BACKOFF = 0.5
 
 # Agencies most relevant to biomedical research
 BIOMEDICAL_AGENCIES = ["HHS-NIH11", "NSF"]
@@ -37,8 +43,9 @@ async def list_posted_opportunities(
                 "rows": page_size,
                 "startRecordNum": start,
             }
-            resp = await client.post(SEARCH_URL, json=payload)
-            resp.raise_for_status()
+            resp = await post_with_retry(
+                client, SEARCH_URL, json=payload, backoff=_RETRY_BACKOFF
+            )
             raw = resp.json()
 
             data = raw.get("data", raw)
@@ -91,8 +98,7 @@ async def search_opportunities(
         payload["agencies"] = "|".join(agencies)
 
     async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.post(SEARCH_URL, json=payload)
-        resp.raise_for_status()
+        resp = await post_with_retry(client, SEARCH_URL, json=payload, backoff=_RETRY_BACKOFF)
         raw = resp.json()
 
     # Response is nested: {errorcode, msg, data: {hitCount, oppHits: [...]}}
@@ -127,8 +133,9 @@ async def search_opportunities(
 async def fetch_opportunity_detail(opp_id: str) -> dict[str, Any] | None:
     """Fetch full details for a single opportunity by its Grants.gov ID."""
     async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.post(DETAIL_URL, json={"oppId": opp_id})
-        resp.raise_for_status()
+        resp = await post_with_retry(
+            client, DETAIL_URL, json={"oppId": opp_id}, backoff=_RETRY_BACKOFF
+        )
         raw = resp.json()
 
     data = raw.get("data", raw)
