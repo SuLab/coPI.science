@@ -211,7 +211,7 @@ def exchange_code(
 
 # ---------------------------------------------------------------------------
 # issue #24 C2: every function above is synchronous httpx, and create_app's
-# retry loop alone can now sleep up to max_rate_limit_retries * 30s (capped,
+# retry loop alone can now sleep up to (max_rate_limit_retries - 1) * 30s (capped,
 # see _MAX_MANIFEST_RETRY_AFTER) between rate-limited attempts. Called directly
 # from an `async def` route (admin_provisioning.py), that blocks the whole
 # event loop -- the single uvicorn worker has nothing else to run -- so every

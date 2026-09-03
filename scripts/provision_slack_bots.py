@@ -442,6 +442,7 @@ def main():
                 app = create_app(
                     config_token, lab["id"], lab["name"], lab["pi"], redirect_uri,
                     scopes=scopes,
+                    retry_after_cap=900.0,  # a host operator can wait; the web path cannot (#24 C2-3)
                 )
                 created.append(app)
                 # Persist immediately (0600) so an interruption mid-run doesn't

@@ -86,6 +86,34 @@ def test_a_ratelimited_manifest_create_caps_retry_after(monkeypatch):
     )
 
 
+def test_a_ratelimited_manifest_create_honors_an_explicit_retry_after_cap(monkeypatch):
+    """Bulk provisioning (scripts/provision_slack_bots.py) passes
+    retry_after_cap=900.0 -- a host operator can wait that long; the web path
+    (whose caller relies on the 30s default tested above) cannot. Pin that the
+    override actually reaches the sleep rather than the call silently keeping
+    the default cap."""
+    slept: list[float] = []
+    monkeypatch.setattr(time, "sleep", lambda d: slept.append(d))
+    calls = []
+
+    def _post(url, **kw):
+        calls.append(url)
+        if len(calls) == 1:
+            return _Resp({"ok": False, "error": "ratelimited"},
+                        headers={"Retry-After": "900"})
+        return _Resp({"ok": True, "app_id": "A1",
+                      "credentials": {"client_id": "c", "client_secret": "s"},
+                      "oauth_authorize_url": "u"})
+
+    monkeypatch.setattr(httpx, "post", _post)
+    assert create_app(
+        "t", "su", "SuBot", "PI", "https://x/cb", retry_after_cap=900.0,
+    )["app_id"] == "A1"
+    assert slept == [900.0], (
+        f"slept {slept} instead of honoring the explicit retry_after_cap=900.0 override"
+    )
+
+
 def test_the_final_retry_does_not_sleep(monkeypatch):
     """The old code slept once more, uselessly, right before giving up and raising --
     max_rate_limit_retries=1 makes every ratelimited response the final one, so any

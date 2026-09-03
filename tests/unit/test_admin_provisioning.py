@@ -139,10 +139,15 @@ async def test_start_provisioning_releases_the_connection_before_create_app(monk
 
     async def _fake_get_any_bot_token(_db):
         events.append("get_any_bot_token")
-        return None
+        return "xoxb-t"
+
+    async def _fake_lookup_team_id_async(_token):
+        events.append("lookup_team_id_async")
+        return "T123"
 
     monkeypatch.setattr(ap, "_config_token", _fake_config_token)
     monkeypatch.setattr(ap, "create_app_async", _fake_create_app_async)
+    monkeypatch.setattr(ap, "lookup_team_id_async", _fake_lookup_team_id_async)
     monkeypatch.setattr(
         "src.services.slack_tokens.get_any_bot_token", _fake_get_any_bot_token
     )
@@ -152,10 +157,18 @@ async def test_start_provisioning_releases_the_connection_before_create_app(monk
     )
     await ap.start_provisioning(_EventDB(), agent)
 
-    ordered = [e for e in events if e in ("db.commit", "create_app_async")]
+    ordered = [
+        e for e in events
+        if e in ("db.commit", "create_app_async", "lookup_team_id_async")
+    ]
     assert ordered[0] == "db.commit", (
         f"event order was {events} -- the config-token SELECTs must be committed "
         "(releasing the pooled connection) before the blocking create_app call"
+    )
+    lookup_idx = ordered.index("lookup_team_id_async")
+    assert ordered[lookup_idx - 1] == "db.commit", (
+        f"event order was {events} -- get_any_bot_token's SELECT must be committed "
+        "(releasing the pooled connection) before the blocking lookup_team_id_async call"
     )
 
 
