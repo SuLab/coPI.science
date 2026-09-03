@@ -28,7 +28,12 @@
 # carries the new source, so `exec` has nothing to target. It also skips Step 1's "service
 # must be running" check, and passes the preflight snapshot to postflight through a bind
 # mount — each `--rm` container is ephemeral, so without the mount postflight would not
-# see the file the (separate) preflight container wrote.
+# see the file the (separate) preflight container wrote. If Step 3 takes a real dump
+# (--apply without --backup-verified-elsewhere), that dump's path is translated onto the
+# same bind mount before it is handed to preflight, for the same reason — this only works
+# when --backup-dir and the snapshot's directory (MIGRATE_SNAPSHOT, or --backup-dir by
+# default) are the same directory; if you have pointed them at two different places,
+# --via-run --apply refuses to guess and asks for --backup-verified-elsewhere instead.
 #
 # --backup-verified-elsewhere is the ONLY way to skip taking a dump, and it makes
 # you write down what you are asserting instead. There is deliberately no bare
@@ -240,7 +245,30 @@ else
     exit "$EX_OPERATIONAL"
   fi
   echo "    PASS  ${SZ} bytes on the host, ${TOC_N} restorable objects in the TOC"
-  EXTRA_PREFLIGHT+=(--backup-path "$BACKUP_FILE")
+  BACKUP_PATH_ARG="$BACKUP_FILE"
+  if [[ "$VIA_RUN" == "1" ]]; then
+    # $BACKUP_FILE is a HOST path. Each --via-run step is a fresh --rm container
+    # with only $SNAP_HOST_DIR bind-mounted at /migrate-state — prod bakes the
+    # repo into the image, so there is no repo bind mount for the dump to ride
+    # in on otherwise. When $BACKUP_DIR is the same directory the snapshot lives
+    # in (true by default: both default to $BACKUP_DIR), the dump already landed
+    # inside that mount and can be addressed as /migrate-state/<basename>. If
+    # --backup-dir or MIGRATE_SNAPSHOT point the two at different directories,
+    # no mount reaches the dump — refuse to guess (preflight's find_backup()
+    # would otherwise silently return None and BLOCK right after a good dump).
+    BACKUP_HOST_DIR="$(cd "$BACKUP_DIR" && pwd)"
+    if [[ "$BACKUP_HOST_DIR" == "$SNAP_HOST_DIR" ]]; then
+      BACKUP_PATH_ARG="/migrate-state/$(basename "$BACKUP_FILE")"
+    else
+      echo "BLOCKED: --via-run cannot hand the dump at $BACKUP_FILE into the" >&2
+      echo "  preflight container: --backup-dir ($BACKUP_DIR) and the snapshot's" >&2
+      echo "  directory ($SNAP_HOST_DIR, from MIGRATE_SNAPSHOT) differ, so only one" >&2
+      echo "  of the two is bind-mounted at /migrate-state. Re-run with the two" >&2
+      echo "  directories matching, or with --backup-verified-elsewhere \"$BACKUP_FILE\"." >&2
+      exit "$EX_OPERATIONAL"
+    fi
+  fi
+  EXTRA_PREFLIGHT+=(--backup-path "$BACKUP_PATH_ARG")
 fi
 
 # --------------------------------------------------------------------------
