@@ -26,6 +26,16 @@ def _entry(ts, agent_id, name, content, thread_ts=None, channel="funding-opportu
     )
 
 
+def test_foa_cache_and_funding_rules_share_the_same_compiled_pattern():
+    """Regression guard for issue #23 COR-27: both call sites must be backed by the one shared
+    pattern, not independently-maintained copies that can re-diverge."""
+    from src.agent import foa_cache, funding_rules
+    from src.agent.foa_pattern import FOA_NUMBER_RE
+
+    assert foa_cache.FOA_PATTERN is FOA_NUMBER_RE
+    assert funding_rules._FOA_NUMBER_RE is FOA_NUMBER_RE
+
+
 # ---------------------------------------------------------------
 # Announcement-only detector
 # ---------------------------------------------------------------

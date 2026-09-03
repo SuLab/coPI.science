@@ -339,11 +339,35 @@ Respond with ONLY a JSON array of FOA numbers:
             cleaned = cleaned[start:end + 1]
 
         selected = json.loads(cleaned)
-        logger.info("Selected %d of %d opportunities", len(selected), len(opportunities))
-        return selected[:max_select]
+        if not isinstance(selected, list):
+            raise ValueError(
+                f"selection response was not a JSON list: {type(selected).__name__}"
+            )
+        validated: list[str | int] = []
+        for item in selected:
+            if isinstance(item, bool) or not isinstance(item, (str, int)):
+                raise ValueError(f"selection contained a non-FOA-key element: {item!r}")
+            if item in opportunities:
+                validated.append(item)
+        logger.info("Selected %d of %d opportunities", len(validated), len(opportunities))
+        return validated[:max_select]
     except Exception as exc:
-        logger.warning("Selection failed: %s — falling back to all", exc)
-        return list(opportunities.keys())[:max_select]
+        # Hard-fail (issue #23 COR-26a/COR-26b): the old fallback posted every
+        # opportunity's key on ANY parse failure — up to `max_select` UNVETTED
+        # FOAs, exactly what a selection step exists to prevent. Returning []
+        # means this run posts nothing AND (because run_grantbot returns
+        # normally) the scheduler marks the day complete, so the next attempt is
+        # tomorrow's run, not the next 15-minute tick. That is the accepted
+        # trade: a quiet day beats a day of FOAs nobody reviewed. To retry the
+        # same day instead, this would have to raise so `_mark_run_complete()`
+        # (grantbot.py:777) is skipped — deliberately not done, since the
+        # scheduler's `except` would then retry a deterministic parse bug ~64
+        # times a day.
+        logger.error(
+            "Selection failed (%s) — refusing to post unvetted opportunities this run",
+            exc,
+        )
+        return []
 
 
 async def _draft_post(

@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from src.agent.foa_pattern import FOA_NUMBER_RE as _FOA_NUMBER_RE
 from src.agent.message_log import LogEntry, MessageLog, is_funding_post
 
 
@@ -91,8 +92,6 @@ _ACK_PHRASES = [
     r"^:\+1:",
 ]
 _ACK_RE = re.compile("|".join(_ACK_PHRASES), re.IGNORECASE)
-
-_FOA_NUMBER_RE = re.compile(r"\b(PA[RS]?-\d{2}-\d{3,4}|RFA-[A-Z]{2,3}-\d{2}-\d{3,4})\b")
 
 
 def _strip_for_ack_check(text: str) -> str:

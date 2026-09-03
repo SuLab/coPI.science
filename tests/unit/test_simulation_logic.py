@@ -2887,7 +2887,7 @@ class TestHasPiDirectiveClearedOnlyWhenActedOn:
 
         async def _phase5(agent_arg, phase4_thread_ids=None):
             if phase5_makes_a_call:
-                agent_arg.api_call_count += 1  # simulates a real LLM call attempt
+                agent_arg.record_api_call()  # simulates a real LLM call attempt
 
         engine._phase5_new_post = _phase5
         return engine, agent
@@ -2918,6 +2918,14 @@ class TestPiContextClearedAfterInjection:
     """thread.pi_context must not survive past the one prompt it was injected
     into — otherwise it is re-injected as 'authoritative' into every future
     reply on the thread. See E7c."""
+
+    @pytest.fixture(autouse=True)
+    def _hermetic_profiles(self, monkeypatch, tmp_path):
+        # Driving the real _reply_to_thread below reads agent profile/memory
+        # files (build_phase4_prompt -> build_thread_reply_system_prompt).
+        # Point PROFILES_DIR at an empty tmp dir so nothing under the repo's
+        # real profiles/ is read, and nothing is ever written there.
+        monkeypatch.setattr("src.agent.agent.PROFILES_DIR", tmp_path)
 
     @pytest.mark.asyncio
     async def test_pi_context_is_cleared_after_the_reply_attempt(self, monkeypatch):

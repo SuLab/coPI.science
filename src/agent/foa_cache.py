@@ -7,18 +7,14 @@ hitting the Grants.gov API every time.
 
 import json
 import logging
-import re
 from pathlib import Path
 from typing import Any
+
+from src.agent.foa_pattern import FOA_NUMBER_RE as FOA_PATTERN
 
 logger = logging.getLogger(__name__)
 
 CACHE_DIR = Path("data/foa_cache")
-
-# Matches standard FOA formats: RFA-AI-27-019, PAR-24-293, DE-FOA-0003456, etc.
-FOA_PATTERN = re.compile(
-    r"\b((?:RFA|PAR|PA|NOT|OTA|RFI|DE-FOA)-[A-Z]{2,4}-\d{2,4}-\d{2,5})\b"
-)
 
 
 def cache_foa(foa_number: str, opportunity: dict[str, Any]) -> None:
