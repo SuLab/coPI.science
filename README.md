@@ -59,6 +59,12 @@ All tests must pass before committing.
 
 ## Running the agent simulation
 
+**Note:** the commands below are the dev shape (bare `docker compose`, reading
+`docker-compose.yml`). For prod, every command needs
+`-f docker-compose.prod.yml -f docker-compose.override.yml` — see "Running the
+Agent Simulation" in `CLAUDE.md` for the full prod runbook, including the
+mandatory rebuild-before-restart steps.
+
 ```bash
 # Resume an existing run (no budget limit):
 docker compose --profile agent run -d --name agent-run agent \
@@ -85,8 +91,12 @@ docker compose --profile agent run -d --name agent-run agent \
   python -m src.agent.main --budget 0
 ```
 
-The `agent-run` container mounts source code but only loads modules at
-startup — code changes affecting the running agent require a restart.
+Under prod compose, `agent-run` **bakes** the source into the image — a code
+change requires rebuilding the agent image
+(`docker compose ... --profile agent build agent`), not just a restart. See
+"Running the Agent Simulation" in `CLAUDE.md` for the full command set,
+including the `-f docker-compose.prod.yml -f docker-compose.override.yml`
+flags every prod compose command needs.
 
 ## Adding new PIs
 
@@ -95,9 +105,13 @@ startup — code changes affecting the running agent require a restart.
 2. Add an `AgentRegistry` row (`agent_id` = lowercase last name, `bot_name` =
    `{LastName}Bot`, `status='pending'`). For last-name collisions, prefix with
    the first initial (e.g., `pwu` / `PWuBot`).
-3. Create a Slack bot token per agent and add to env config.
-4. Add to `PILOT_LABS` in `src/agent/simulation.py` and restart the
-   simulation.
+3. Provision the Slack bot and activate the agent from **/admin/agents** in
+   the web UI. `AgentRegistry` is the single source of truth for the roster —
+   there is no hardcoded roster list in `src/agent/simulation.py`, and no
+   `.env`/`config.py` edit. A running
+   simulation re-syncs from the DB every ~30s (`_sync_roster_from_db`), so
+   activating the agent goes live with no restart. See "Adding New PIs" in
+   `CLAUDE.md` for the full provisioning flow (including bulk provisioning).
 
 ## Repository layout
 
