@@ -77,7 +77,7 @@ a response.
 Your suggestion must:
 
 - Quote the exact current text you are proposing to change (copied from the CURRENT
-  PROMPT FILES or RUBRIC sections you were given, not paraphrased) and the exact
+  PROMPT FILES section you were given, not paraphrased) and the exact
   replacement text, so a maintainer can apply it as a direct substitution.
 - Tie the rationale to the specific feedback and, where available, the specific
   transcript evidence — not to a general sense that the prompt could be better.

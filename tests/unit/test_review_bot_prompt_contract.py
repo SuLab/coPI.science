@@ -42,6 +42,7 @@ def test_prompt_does_not_promise_a_rubric_section_or_five_sections():
     assert "**RUBRIC**" not in PROMPT
     assert "five sections" not in PROMPT
     assert "prompts/rubric/blackbird-rubric.toml" in PROMPT
+    assert "RUBRIC section" not in PROMPT
 
 
 def _targets_in(text: str) -> set[str]:
