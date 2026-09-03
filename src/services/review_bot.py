@@ -23,11 +23,12 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.agent.specialists import SPECIALIST_DOMAINS
@@ -87,6 +88,17 @@ _STATIC_TARGETS: frozenset[str] = frozenset(
 
 _SPECIALIST_TARGET_PREFIX = "specialist:"
 
+#: Recovers the `target` from a reply whose JSON is otherwise unparseable.
+#: Anchored at the start and requiring `target` to be the object's FIRST key,
+#: so it can only ever read the model's own declared target, never a word
+#: quoted later in the prose. Measured need (2026-09-03 evaluation): 3 of 12
+#: live Opus replies emitted invalid JSON — a premature object close, an
+#: unterminated object, and an unescaped `"` inside a string value — none of
+#: which `extract_json` can repair (by design: it finds objects that are
+#: there, it does not repair broken ones); all three had lost a real
+#: `rubric` target to the `out_of_scope` fallback.
+_LEADING_TARGET_RE = re.compile(r'^\s*\{\s*"target"\s*:\s*"([^"\\]+)"')
+
 
 def _prompt_file_set() -> list[str]:
     """Every prompt file the bot reads, resolved at CALL time.
@@ -139,25 +151,50 @@ def _render_transcript(
     """``(text, input_truncated)`` for the INTERVIEW TRANSCRIPT section.
 
     `thread_id is None` is `load_interview_thread`'s own signal that the
-    thread could not be reconstructed — a normal outcome (`--fresh` wipes
-    `agent_messages`, never `opportunity_assessments`) — and the literal
+    thread could not be reconstructed — a normal outcome for a verdict whose
+    messages are missing (a NULL ``slack_ts``, or a run whose messages were
+    deleted by a pre-2026-08-22 ``--fresh``) — and the literal
     ``TRANSCRIPT: unavailable`` block is what tells the model that plainly,
     rather than silently rendering an empty transcript that looks like an
     interview with nothing in it.
+
+    Every line is prefixed with ``> ``. The transcript is the one section
+    built from text other people wrote (PIs, lab bots, humans in the Slack
+    channel) and it is NOT JSON-escaped the way FEEDBACK is, so without the
+    prefix a message containing ``## CURRENT PROMPT FILES`` or ``--- FILE:``
+    would read to the model as a section boundary or a prompt file. With it,
+    nothing inside the transcript can start a line the way the real
+    boundaries do. `prompts/review-bot.md` tells the model about the prefix.
     """
     if thread_id is None:
         return "TRANSCRIPT: unavailable", False
 
-    full_text = "\n".join(f"{m.sender_name or m.agent_id}: {m.content}" for m in messages)
+    lines: list[str] = []
+    for m in messages:
+        who = m.sender_name or m.agent_id
+        body_lines = (m.content or "").splitlines() or [""]
+        for i, line in enumerate(body_lines):
+            lines.append(f"> {who}: {line}" if i == 0 else f"> {line}")
+    full_text = "\n".join(lines)
     if len(full_text) <= TRANSCRIPT_CHAR_BUDGET:
         return full_text, False
 
     head_chars = int(TRANSCRIPT_CHAR_BUDGET * 0.6)
     tail_chars = TRANSCRIPT_CHAR_BUDGET - head_chars
+    tail = full_text[-tail_chars:]
+    # Re-anchor the tail to a line boundary: a raw offset slice can land
+    # mid-line, and since the ELIDED marker ends in "\n\n" whatever the tail
+    # starts with begins a line at column 0 -- if that happens to be right
+    # after a quoted line's "> " prefix, the forged heading it was quoting
+    # reaches column 0 for real. Dropping the partial first line keeps every
+    # surviving line "> "-prefixed, so the quoting invariant holds across
+    # elision too (2026-09-02 review finding).
+    if "\n" in tail:
+        tail = tail[tail.index("\n") + 1:]
     elided = (
         full_text[:head_chars]
         + "\n\n... [ELIDED — transcript truncated to fit the review bot's character budget] ...\n\n"
-        + full_text[-tail_chars:]
+        + tail
     )
     return elided, True
 
@@ -256,7 +293,13 @@ def _parse_model_output(raw: str) -> tuple[str, str]:
     comes back as a list from `extract_json`, per its own docstring), or a
     `target` that fails validation — degrades to ``("out_of_scope", raw)``.
     `raw_response` always keeps the model's exact text regardless; this is
-    what keeps a defaulted row reviewable rather than dropped.
+    what keeps a defaulted row reviewable rather than dropped. A valid
+    `target` whose `suggestion`/`rationale` compose to a blank body degrades
+    to ``(target, raw)`` for the same reason. One exception: when the reply is
+    unparseable but its FIRST key is a valid `target`, that target is
+    recovered and paired with `raw` (`_LEADING_TARGET_RE`) — a malformed reply
+    still names the file it is about, and mislabelling a real suggestion as
+    `out_of_scope` hides it on the suggestions page.
     """
     try:
         parsed = extract_json(raw)
@@ -265,13 +308,44 @@ def _parse_model_output(raw: str) -> tuple[str, str]:
     if not isinstance(parsed, dict):
         parsed = None
 
-    target = parsed.get("target") if parsed else None
+    if parsed is None:
+        # The JSON did not parse. Before defaulting, try to read the target the
+        # model declared as its first key: a reply that is only malformed
+        # DEEPER IN still tells us which prompt file it is about, and filing a
+        # real `rubric` suggestion as `out_of_scope` is the more damaging
+        # error. The body stays `raw` either way — nothing here reconstructs
+        # a suggestion, it only recovers the label.
+        match = _LEADING_TARGET_RE.match(raw)
+        if match and _is_valid_target(match.group(1)):
+            logger.warning(
+                "review bot: the model's reply was not valid JSON; recovered "
+                "target %r from its leading key and stored the raw text",
+                match.group(1),
+            )
+            return match.group(1), raw
+        return "out_of_scope", raw
+
+    target = parsed.get("target")
     if not _is_valid_target(target):
         return "out_of_scope", raw
 
     assert isinstance(target, str)  # narrowed by _is_valid_target above
     body = _compose_suggestion_body(parsed.get("suggestion"), parsed.get("rationale"))
+    if not body.strip():
+        # A valid target with nothing to show: keep the model's own text so
+        # the row is reviewable instead of a blank card (audit 2026-09-02).
+        return target, raw
     return target, body
+
+
+async def _load_assessment(
+    db: AsyncSession, assessment_id: uuid.UUID
+) -> OpportunityAssessment | None:
+    return (
+        await db.execute(
+            select(OpportunityAssessment).where(OpportunityAssessment.id == assessment_id)
+        )
+    ).scalar_one_or_none()
 
 
 async def execute_review_analysis(job: Job, db: AsyncSession) -> None:
@@ -303,11 +377,34 @@ async def execute_review_analysis(job: Job, db: AsyncSession) -> None:
         )
         return
 
-    assessment = (
-        await db.execute(
-            select(OpportunityAssessment).where(OpportunityAssessment.id == assessment_id)
-        )
-    ).scalar_one_or_none()
+    assessment = await _load_assessment(db, assessment_id)
+    if assessment is None:
+        # The engine's supersession re-point (`_retire_superseded_verdict`)
+        # rewrites this job's payload to the replacement id in the SAME
+        # transaction that deletes the retired row. If that landed between
+        # the worker's job fetch and this lookup, the in-memory payload is
+        # stale — re-read it once before concluding there is nothing to do
+        # (2026-09-02 plan, ruling R4). Best-effort: the jobs row itself can
+        # vanish at any await (user deletion cascades it), in which case the
+        # refresh raises and the original miss stands.
+        try:
+            await db.refresh(job, attribute_names=["payload"])
+        except Exception:  # noqa: BLE001 — a vanished row is the documented case
+            logger.info("review bot: job %s could not be re-read after an assessment miss", job.id)
+        else:
+            refreshed_raw = (job.payload or {}).get("assessment_id")
+            try:
+                refreshed_id = uuid.UUID(str(refreshed_raw)) if refreshed_raw else None
+            except (ValueError, AttributeError, TypeError):
+                refreshed_id = None
+            if refreshed_id is not None and refreshed_id != assessment_id:
+                logger.info(
+                    "review bot: job %s was re-pointed from assessment %s to %s while "
+                    "in flight; retrying the lookup",
+                    job.id, assessment_id, refreshed_id,
+                )
+                assessment_id = refreshed_id
+                assessment = await _load_assessment(db, assessment_id)
     if assessment is None:
         # Normal, not an error: a later sidecar can supersede and delete a
         # provisional verdict minutes after a review was left on it.
@@ -392,8 +489,35 @@ async def execute_review_analysis(job: Job, db: AsyncSession) -> None:
             raw_response=raw,
         )
     )
-    for review in reviews:
-        review.consumed_at = now
+    # Stamp ONLY the rows this job analyzed, and only if they still read exactly
+    # as snapshotted. A row edited while the model call was in flight
+    # (`edit_feedback` resets consumed_at and changes the content) or deleted in
+    # that window matches nothing here and stays unconsumed for the job the
+    # edit/submit path already enqueued (the dedupe counts PENDING jobs only).
+    # A Core UPDATE rather than `review.consumed_at = now` on the ORM objects,
+    # because the ORM write would overwrite whatever the concurrent edit stored
+    # (audit 2026-09-02, D2).
+    stamped = 0
+    for review, snap in zip(reviews, feedback_snapshot, strict=True):
+        result = await db.execute(
+            update(AssessmentReview)
+            .where(
+                AssessmentReview.id == review.id,
+                AssessmentReview.consumed_at.is_(None),
+                AssessmentReview.feedback_mode == "learn",
+                AssessmentReview.score == snap["score"],
+                AssessmentReview.comment == snap["comment"],
+            )
+            .values(consumed_at=now)
+        )
+        stamped += result.rowcount or 0
+    if stamped != len(reviews):
+        logger.warning(
+            "review bot: stamped %d of %d feedback rows consumed for assessment %s "
+            "(job %s); the rest were edited or deleted while the model call was in "
+            "flight and stay unconsumed for the next job",
+            stamped, len(reviews), assessment.id, job.id,
+        )
 
     # One commit covering both the new suggestion row and every consumed_at —
     # consumption and the suggestion must land together or not at all.

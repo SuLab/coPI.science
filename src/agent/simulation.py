@@ -53,6 +53,7 @@ from src.models import (
     AssessmentReview,
     AssessmentReviewAssignment,
     AssessmentReviewEvent,
+    Job,
     LlmCallLog,
     OpportunityAssessment,
     PromptChangeSuggestion,
@@ -4717,8 +4718,8 @@ class SimulationEngine:
         ``AssessmentReviewEvent``, ``AssessmentReviewAssignment`` or
         ``PromptChangeSuggestion`` row a human attached to the row being
         retired is re-pointed onto the replacement BEFORE the delete, in the
-        same transaction — otherwise a human's review of a provisional verdict
-        is silently lost to the CASCADE the moment a later reply supersedes it.
+        same transaction — and so is the payload of any pending or processing
+        ``review_feedback_analysis`` ``Job`` that names the retired id.
         When it is ``None`` the re-point is skipped and the retired row's
         review rows CASCADE away with it: there is no live replacement row yet
         to re-point them onto, and stamping them onto a row that may never
@@ -4847,6 +4848,36 @@ class SimulationEngine:
                                AssessmentReviewAssignment.assignee_user_id.not_in(existing))
                         .values(assessment_id=replacement_id)
                     )
+                    # The job queue is the FOURTH place the retired id lives.
+                    # A review job still queued against it would run after
+                    # this delete, find no assessment, complete as a no-op and
+                    # leave the re-pointed 'learn' rows above unconsumed with
+                    # nothing left to consume them (audit 2026-09-02, D3).
+                    # 'processing' is included deliberately: a job mid-flight
+                    # whose suggestion INSERT then fails on the deleted FK is
+                    # retried by the worker, and the retry must run against
+                    # the replacement.
+                    retired_ids = [
+                        str(row) for row in (
+                            await db.execute(
+                                sa_select(OpportunityAssessment.id).where(
+                                    *self._superseded_row_filter(
+                                        agent_id, thread, superseded,
+                                    )
+                                )
+                            )
+                        ).scalars().all()
+                    ]
+                    if retired_ids:
+                        await db.execute(
+                            sa_update(Job)
+                            .where(
+                                Job.type == "review_feedback_analysis",
+                                Job.status.in_(("pending", "processing")),
+                                Job.payload["assessment_id"].astext.in_(retired_ids),
+                            )
+                            .values(payload={"assessment_id": str(replacement_id)})
+                        )
                 result = await db.execute(
                     sa_delete(OpportunityAssessment).where(
                         *self._superseded_row_filter(agent_id, thread, superseded)

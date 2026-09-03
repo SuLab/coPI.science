@@ -36,9 +36,10 @@ async def load_interview_thread(
     depending on which side minted it — so both are tried.
 
     Returns ``(None, [])`` whenever the thread cannot be reconstructed, which
-    is a NORMAL outcome, not an error: ``--fresh`` wipes ``agent_messages`` and
-    never wipes ``opportunity_assessments``, so an older verdict legitimately
-    outlives its own transcript. The caller renders the verdict either way.
+    is a NORMAL outcome, not an error: a verdict can outlive its messages (a
+    NULL ``slack_ts``, or a run whose ``agent_messages`` a pre-2026-08-22
+    ``--fresh`` deleted — ``--fresh`` has deleted nothing since). The caller
+    renders the verdict either way.
     """
     if not assessment.slack_ts:
         return None, []

@@ -37,6 +37,7 @@ from src.models import (
     AssessmentReview,
     AssessmentReviewAssignment,
     AssessmentReviewEvent,
+    Job,
     OpportunityAssessment,
     PromptChangeSuggestion,
     SimulationRun,
@@ -381,3 +382,66 @@ async def test_persist_returns_false_none_with_no_db():
     )
     assert held is False
     assert replacement_id is None
+
+
+@pytest.mark.asyncio
+async def test_supersession_re_points_the_pending_review_job(engine):
+    """A review left on a provisional verdict enqueues a job whose payload
+    names THAT verdict's id. The re-point must move the job too, or it runs
+    after the delete, finds no assessment, completes as a no-op, and the
+    re-pointed review stays unconsumed with nothing left to consume it
+    (audit 2026-09-02, D3). Finished jobs are history and stay put; jobs of
+    other types are never touched."""
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    run_id = await _new_run(factory)
+    stub = _stub(factory, run_id)
+    stub._seed_consults_from_db = _no_seed
+    thread = _thread()
+    job_ids: list = []
+    try:
+        held_a, a_id = await SimulationEngine._persist_assessment(
+            stub, "blackbird", "general", _verdict(3), slack_ts="1.1", thread=thread,
+        )
+        assert held_a is True and a_id is not None
+
+        async with factory() as db:
+            queued = Job(
+                type="review_feedback_analysis", payload={"assessment_id": str(a_id)},
+            )
+            in_flight = Job(
+                type="review_feedback_analysis", status="processing",
+                payload={"assessment_id": str(a_id)},
+            )
+            finished = Job(
+                type="review_feedback_analysis", status="completed",
+                payload={"assessment_id": str(a_id)},
+            )
+            other_type = Job(type="generate_profile", payload={"assessment_id": str(a_id)})
+            db.add_all([queued, in_flight, finished, other_type])
+            await db.flush()
+            job_ids = [queued.id, in_flight.id, finished.id, other_type.id]
+            await db.commit()
+
+        superseded = _HeldVerdict(ordinal=1, final=False, slack_ts="1.1", announced=False)
+        held_b, b_id = await SimulationEngine._persist_assessment(
+            stub, "blackbird", "general", _verdict(4), slack_ts="2.2", thread=thread,
+        )
+        assert held_b is True and b_id is not None
+
+        await SimulationEngine._retire_superseded_verdict(
+            stub, "blackbird", thread, superseded,
+            replacement_ordinal=2, replacement_id=b_id,
+        )
+
+        async with factory() as check:
+            payloads = [(await check.get(Job, jid)).payload for jid in job_ids]
+        assert payloads[0] == {"assessment_id": str(b_id)}, "pending job not re-pointed"
+        assert payloads[1] == {"assessment_id": str(b_id)}, "processing job not re-pointed"
+        assert payloads[2] == {"assessment_id": str(a_id)}, "completed job must stay history"
+        assert payloads[3] == {"assessment_id": str(a_id)}, "other job types must be untouched"
+    finally:
+        async with factory() as db:
+            if job_ids:
+                await db.execute(sa_delete(Job).where(Job.id.in_(job_ids)))
+            await db.commit()
+        await _cleanup(factory, run_id)

@@ -228,7 +228,7 @@ class PromptChangeSuggestion(Base):
     #: (provenance). NOT NULL: a suggestion always names the feedback that
     #: produced it.
     feedback_snapshot: Mapped[list] = mapped_column(JSONB, nullable=False)
-    #: 'scout_hub' / 'pi_lab' / 'specialist:<domain>' / 'out_of_scope'.
+    #: 'scout_hub' / 'pi_lab' / 'specialist:<domain>' / 'rubric' / 'out_of_scope'.
     target: Mapped[str] = mapped_column(String(40), nullable=False)
     #: [{path, sha256_12}] for every prompt file the bot read.
     prompt_files: Mapped[list] = mapped_column(JSONB, nullable=False)

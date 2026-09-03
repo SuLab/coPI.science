@@ -8,9 +8,9 @@ import logging
 import signal
 import sys
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select, update
+from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from src.config import get_settings
@@ -51,6 +51,67 @@ async def claim_job(db: AsyncSession) -> Job | None:
     job.attempts += 1
     await db.commit()
     return job
+
+
+#: A job left in 'processing' longer than this is treated as abandoned by a
+#: worker that no longer exists. The worker now has a 330 s `stop_grace_period`
+#: (working-tree `docker-compose.prod.yml`), which covers ONE 300 s Anthropic
+#: read timeout and no more: the SDK retries twice on top of that
+#: (`DEFAULT_MAX_RETRIES = 2`, never overridden in `src/services/llm.py`), so a
+#: deploy landing on the retry tail is still SIGKILLed with the row still
+#: 'processing'. Nothing else ever resets that status, `claim_job` only takes
+#: 'pending', and the review enqueue dedupe used to count it as live (audit
+#: 2026-09-02, D4) — the boot sweep below is what reclaims the row when that
+#: happens, and the grace period only makes it happen less often. The longest
+#: legitimate job is a review analysis that hits the read timeout on all three
+#: SDK attempts (~15 min); 30 min leaves that margin.
+STALE_PROCESSING_SECONDS = 1800
+
+#: How often `run_worker` re-checks (it also checks once at boot with 0).
+STALE_CHECK_INTERVAL_SECONDS = 60
+
+
+async def requeue_stale_processing_jobs(
+    db: AsyncSession, *, older_than_seconds: int = STALE_PROCESSING_SECONDS
+) -> int:
+    """Return abandoned 'processing' rows to the queue; returns how many moved.
+
+    Rows whose attempts are exhausted go to 'dead' rather than 'pending': a
+    pending row `claim_job` can never take (attempts >= max_attempts) would sit
+    in the queue forever, and `enqueue_analysis_if_absent` counts pending rows
+    when deciding whether to enqueue. A NULL `started_at` on a processing row
+    is treated as stale too — `claim_job` always sets it, so NULL means the
+    row was never claimed by this code path.
+    """
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(seconds=older_than_seconds)
+    stale = (
+        Job.status == "processing",
+        or_(Job.started_at.is_(None), Job.started_at <= cutoff),
+    )
+    note = (
+        "requeued: found in 'processing' past the stale cutoff with no worker on it "
+        "(the previous worker exited mid-job)"
+    )
+    dead = await db.execute(
+        update(Job)
+        .where(*stale, Job.attempts >= Job.max_attempts)
+        .values(status="dead", last_error=note, completed_at=now)
+    )
+    pending = await db.execute(
+        update(Job)
+        .where(*stale, Job.attempts < Job.max_attempts)
+        .values(status="pending", last_error=note)
+    )
+    await db.commit()
+    n_dead = dead.rowcount or 0
+    n_pending = pending.rowcount or 0
+    if n_dead or n_pending:
+        logger.warning(
+            "Requeued %d stale processing job(s): %d back to pending, %d dead",
+            n_dead + n_pending, n_pending, n_dead,
+        )
+    return n_dead + n_pending
 
 
 async def execute_generate_profile(job: Job, db: AsyncSession) -> None:
@@ -153,6 +214,12 @@ async def run_worker():
 
     logger.info("Worker started, polling every %ds", settings.worker_poll_interval)
 
+    # Boot: this is the only worker instance, so every 'processing' row is a
+    # zombie from a previous process — take them all, whatever their age.
+    async with session_factory() as db:
+        await requeue_stale_processing_jobs(db, older_than_seconds=0)
+    last_stale_check = asyncio.get_event_loop().time()
+
     last_notification_check = 0.0
     last_inbound_check = 0.0
 
@@ -198,6 +265,12 @@ async def run_worker():
                     await poll_inbound_emails(session_factory)
                 except Exception as exc:
                     logger.error("Inbound email check error: %s", exc, exc_info=True)
+
+            # Stale-processing sweep (throttled).
+            if now - last_stale_check >= STALE_CHECK_INTERVAL_SECONDS:
+                last_stale_check = now
+                async with session_factory() as db:
+                    await requeue_stale_processing_jobs(db)
 
         except Exception as exc:
             logger.error("Worker loop error: %s", exc, exc_info=True)

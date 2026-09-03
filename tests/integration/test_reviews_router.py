@@ -22,6 +22,7 @@ from src.models import (
     SimulationRun,
 )
 from src.routers import reviews as reviews_router
+from src.services.assessment_reviews import _MAX_COMMENT_CHARS
 from tests import factories
 from tests.integration.test_manager_access import auth_headers
 
@@ -257,6 +258,75 @@ async def test_only_the_author_can_edit(client, db_session):
 
     jobs = (await db_session.execute(select(Job))).scalars().all()
     assert len(jobs) == 1
+
+
+async def test_editing_log_only_to_learn_enqueues_the_analysis_job(client, db_session):
+    """The "actually, learn from this one" path, asserted for its own sake.
+
+    ``test_only_the_author_can_edit`` above happens to drive the same transition,
+    but it is about authorship and checks only that SOME job exists. This pins the
+    behaviour itself: a ``log_only`` submission buys no model call, and flipping it
+    to ``learn`` on edit enqueues exactly one ``review_feedback_analysis`` job
+    naming that assessment. ``edit_feedback`` is the only writer of that job for an
+    already-stored row, so a regression here silently costs the reviewer the
+    analysis they just asked for.
+    """
+    reviewer = await factories.make_user(db_session, user_role=USER_ROLE_REVIEWER)
+    assessment = await _seed_assessment(db_session)
+
+    submitted = await client.post(
+        f"/reviews/assessments/{assessment.id}/feedback",
+        data={"score": "3", "comment": "noting it, no need to learn", "feedback_mode": "log_only"},
+        headers=auth_headers(reviewer.id),
+        follow_redirects=False,
+    )
+    assert submitted.status_code == 302, submitted.text
+    assert (await db_session.execute(select(Job))).scalars().all() == []
+
+    review = (await db_session.execute(select(AssessmentReview))).scalar_one()
+    edited = await client.post(
+        f"/reviews/feedback/{review.id}/edit",
+        data={"score": "2", "comment": "on reflection, learn from this", "feedback_mode": "learn"},
+        headers=auth_headers(reviewer.id),
+        follow_redirects=False,
+    )
+    assert edited.status_code == 302, edited.text
+
+    jobs = (await db_session.execute(select(Job))).scalars().all()
+    assert len(jobs) == 1
+    assert jobs[0].type == "review_feedback_analysis"
+    assert jobs[0].status == "pending"
+    assert jobs[0].payload == {"assessment_id": str(assessment.id)}
+
+    await db_session.refresh(review)
+    assert review.feedback_mode == "learn"
+    assert review.consumed_at is None
+
+
+async def test_an_overlong_comment_is_truncated_not_rejected(client, db_session):
+    """A reviewer pasting a transcript still gets a saved row, just a clipped one.
+
+    ``_MAX_COMMENT_CHARS`` is imported rather than hardcoded so this tracks the
+    cap instead of restating it. The cap is silent — there is no error and no
+    flash — so without this test a change to it (or its removal, which would push
+    an unbounded comment into every subsequent bot payload) would go unnoticed.
+    """
+    reviewer = await factories.make_user(db_session, user_role=USER_ROLE_REVIEWER)
+    assessment = await _seed_assessment(db_session)
+    overlong = "x" * (_MAX_COMMENT_CHARS + 500) + "TAIL-THAT-MUST-NOT-SURVIVE"
+
+    r = await client.post(
+        f"/reviews/assessments/{assessment.id}/feedback",
+        data={"score": "4", "comment": overlong, "feedback_mode": "log_only"},
+        headers=auth_headers(reviewer.id),
+        follow_redirects=False,
+    )
+    assert r.status_code == 302, r.text
+
+    review = (await db_session.execute(select(AssessmentReview))).scalar_one()
+    assert len(review.comment) == _MAX_COMMENT_CHARS
+    assert review.comment == overlong[:_MAX_COMMENT_CHARS]
+    assert "TAIL-THAT-MUST-NOT-SURVIVE" not in review.comment
 
 
 async def test_only_an_admin_can_delete(client, db_session):

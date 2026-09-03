@@ -781,9 +781,33 @@ row and surfaced at `/manager/prompt-suggestions` for a human (admin or
 manager; a reviewer cannot see this page) to read and act on manually. The
 bot's LLM calls are, by design, unlogged (no `llm_call_logs` row — that emit
 gate needs a callback only the simulation engine installs) and unthrottled (no
-rate limiter in front of it): the cost signal lives on the suggestion row
-itself, not in the usual telemetry tables, so do not go looking for these
+rate limiter in front of it): the suggestion row records only `model`,
+`transcript_available` and `input_truncated` — no token counts anywhere — so
+the Anthropic console is the only cost record; do not go looking for these
 calls in `llm_call_logs` or in any per-window rate-limit accounting.
+
+**Review-job lifecycle guarantees (2026-09-02 hardening,
+`docs/audits/2026-09-02-review-pipeline/`).** `enqueue_analysis_if_absent`
+dedupes against PENDING jobs only — a `processing` job has already
+snapshotted its rows and cannot cover feedback written while it waits on the
+model. The handler stamps `consumed_at` with a content-conditional UPDATE, so
+a row edited or deleted mid-call is left for the job the edit already
+enqueued (one WARNING names the count). `_retire_superseded_verdict`
+re-points queued job payloads along with the four review tables. The worker
+requeues every `processing` row at boot and any older than 30 minutes every
+60 s (`requeue_stale_processing_jobs`, `src/worker/main.py`); exhausted ones
+go `dead`. The worker's `stop_grace_period: 330s` (working-tree compose edit,
+like the others in the two-stack box) exists so a deploy no longer SIGKILLs a
+review call at 10 s. A reply that is not valid JSON keeps its declared
+`target` via a leading-key regex (`_LEADING_TARGET_RE`,
+`src/services/review_bot.py`) rather than defaulting to `out_of_scope`, and
+logs one WARNING naming the recovered target — measured at 3 of 12 live
+`claude-opus-5` replies in the 2026-09-02 evaluation. The worker's boot sweep
+assumes a SINGLE worker instance: `older_than_seconds=0` at boot requeues
+every `processing` row regardless of age, with no way to tell a genuinely
+abandoned row from one a concurrently running second worker is still
+handling — so an ad-hoc second worker would have its live job requeued out
+from under it and processed twice.
 
 **Editing the rubric takes effect on restart, not on rebuild.** `prompts/` is
 bind-mounted into `blackbird-app` and `agent`, the two services that read it as a
