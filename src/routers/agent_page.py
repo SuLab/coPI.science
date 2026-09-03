@@ -502,6 +502,8 @@ async def review_proposal(
     inactive agent's owner can still review proposals generated before the
     agent was parked.
     """
+    from datetime import datetime
+
     if rating < 1 or rating > 4:
         raise HTTPException(status_code=400, detail="Rating must be 1-4")
 
@@ -525,7 +527,8 @@ async def review_proposal(
             ProposalReview.agent_id == agent.agent_id,
         )
     )
-    if existing.scalar_one_or_none():
+    existing_row = existing.scalar_one_or_none()
+    if existing_row is not None and existing_row.rating != -1:
         # A delegate (or the PI) may have already reviewed. Retire the current user's
         # own outstanding notification about this proposal before rejecting --
         # otherwise whoever loses this race has no other web path to clear their
@@ -564,18 +567,35 @@ async def review_proposal(
     # which is record_engagement's SELECT, not the final commit -- so the loser's
     # IntegrityError surfaces there. The guard therefore has to span from db.add
     # through commit, not just wrap commit() the way the vote endpoint does.
+    #
+    # D6/COR-13: existing_row is not None here only when its rating == -1 (the != -1
+    # case returned 400 above) -- the engine's implicit marker (Task 20.9), upgraded
+    # in place instead of a second insert (proposal_reviews has a real UNIQUE
+    # (thread_decision_id, agent_id)). id is left untouched; reviewed_at is bumped to
+    # record when the explicit action happened, not when the engine wrote the
+    # implicit marker. An update cannot raise IntegrityError (no new row), so the
+    # guard below is simply inert on this path.
     try:
-        review = ProposalReview(
-            thread_decision_id=thread_decision_id,
-            agent_id=agent.agent_id,
-            user_id=agent.user_id,  # Always the PI
-            delegate_user_id=current_user_id if not is_owner else None,
-            reviewed_by_user_id=current_user_id,
-            rating=rating,
-            comment=comment.strip() or None,
-            submitted_via="web",
-        )
-        db.add(review)
+        if existing_row is not None:
+            existing_row.user_id = agent.user_id  # Always the PI
+            existing_row.delegate_user_id = current_user_id if not is_owner else None
+            existing_row.reviewed_by_user_id = current_user_id
+            existing_row.rating = rating
+            existing_row.comment = comment.strip() or None
+            existing_row.submitted_via = "web"
+            existing_row.reviewed_at = datetime.now(UTC)
+        else:
+            review = ProposalReview(
+                thread_decision_id=thread_decision_id,
+                agent_id=agent.agent_id,
+                user_id=agent.user_id,  # Always the PI
+                delegate_user_id=current_user_id if not is_owner else None,
+                reviewed_by_user_id=current_user_id,
+                rating=rating,
+                comment=comment.strip() or None,
+                submitted_via="web",
+            )
+            db.add(review)
 
         # Record engagement and mark any outstanding email notification as responded
         await record_engagement(current_user_id, db)
@@ -618,6 +638,8 @@ async def reopen_proposal(
     guidance verbatim into the origin thread. Retained as an emergency
     rollback lever during early rollout.
     """
+    from datetime import datetime
+
     from src.config import get_settings
 
     guidance = guidance.strip()
@@ -666,7 +688,7 @@ async def reopen_proposal(
             ProposalReview.agent_id == agent.agent_id,
         )
     )).scalar_one_or_none()
-    if already_reviewed is not None:
+    if already_reviewed is not None and already_reviewed.rating != -1:
         logger.info(
             "Ignoring duplicate reopen of proposal %s by %s "
             "(existing review id=%s, refined_in_channel=%s)",
@@ -782,7 +804,20 @@ async def reopen_proposal(
             ProposalReview.agent_id == agent.agent_id,
         )
     )
-    if not existing.scalar_one_or_none():
+    existing_row = existing.scalar_one_or_none()
+    if existing_row is not None:
+        # D6/COR-13: existing_row.rating == -1 here (the != -1 case returned early
+        # above) -- the engine's implicit marker, upgraded in place instead of a
+        # second insert. id is left untouched; reviewed_at is bumped to record when
+        # the explicit action happened.
+        existing_row.user_id = agent.user_id  # Always the PI
+        existing_row.delegate_user_id = current_user.id if not is_owner else None
+        existing_row.reviewed_by_user_id = current_user.id
+        existing_row.rating = 0  # 0 = reopened with guidance, not a rating
+        existing_row.comment = f"[Reopened] {guidance[:500]}"
+        existing_row.submitted_via = "web"
+        existing_row.reviewed_at = datetime.now(UTC)
+    else:
         review = ProposalReview(
             thread_decision_id=thread_decision_id,
             agent_id=agent.agent_id,

@@ -32,15 +32,18 @@ anywhere; "reviewed" is the *existence* of a `ProposalReview` row for
 
 Both edges are one-way and mutually exclusive: the endpoints reject any second action
 by the same agent (`/review` with 400 "Already reviewed", `/reopen` with a silent
-redirect), and a uniqueness constraint backs it at the DB level. The two agents on a
-proposal transition independently. `rating=0` is not reachable through `/review` —
-the form validates 1..4 — so it is genuinely a reopen sentinel and not a rating.
+redirect), and a uniqueness constraint backs it at the DB level — except that the
+engine's implicit `rating=-1` marker is upgraded in place by the first explicit action.
+The two agents on a proposal transition independently. `rating=0` is not reachable
+through `/review` — the form validates 1..4 — so it is genuinely a reopen sentinel and
+not a rating.
 """
 
 import base64
 import html
 import json
 import uuid
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import boto3
@@ -524,6 +527,59 @@ async def test_a_decided_review_cannot_be_re_decided(
     )).scalars().all()) == [2, 4]
 
 
+async def test_an_explicit_web_review_upgrades_the_engines_implicit_rating_marker(
+    client, db_session, lab, proposal,
+):
+    """D6/COR-13 (ruling-D6-implicit-review-upsert.md): Task 20.9 has the engine
+    persist an implicit ProposalReview(rating=-1, submitted_via="engine") the first
+    time a PI engages a proposal thread in Slack/DB. That row is NOT "already acted
+    on" — pre-ruling, the SELECT guard above treated ANY existing row as terminal and
+    returned 400 "Already reviewed", making the review form 20.9c re-shows a dead end.
+    The first explicit web review must upgrade that row in place instead.
+
+    Control for the same file: `test_a_decided_review_cannot_be_re_decided` above pins
+    that an existing REAL rating (!= -1) still produces today's 400 rejection.
+    """
+    implicit = ProposalReview(
+        thread_decision_id=proposal.id,
+        agent_id="alpha",
+        user_id=lab.pi_a_id,
+        rating=-1,
+        comment=None,
+        submitted_via="engine",
+        reviewed_at=datetime(2020, 1, 1, tzinfo=UTC),
+    )
+    db_session.add(implicit)
+    await db_session.flush()
+    implicit_id, old_reviewed_at = implicit.id, implicit.reviewed_at
+
+    r = await client.post(
+        f"/agent/alpha/proposals/{proposal.id}/review",
+        data={"rating": "3", "comment": "great"}, headers=_auth(lab.pi_a_id),
+    )
+    assert r.status_code == 302, r.text[:400]
+
+    db_session.expire_all()
+    rows = (await db_session.execute(
+        select(ProposalReview).where(ProposalReview.thread_decision_id == proposal.id)
+    )).scalars().all()
+    assert len(rows) == 1, (
+        f"the implicit marker must be upgraded in place, not duplicated: {rows}"
+    )
+    (review,) = rows
+    assert review.id == implicit_id, "the same row must be reused (upsert, not a second insert)"
+    assert review.rating == 3
+    assert review.comment == "great"
+    assert review.submitted_via == "web"
+    assert review.user_id == lab.pi_a_id
+    assert review.reviewed_by_user_id == lab.pi_a_id
+    assert review.delegate_user_id is None, "the PI acted in person"
+    assert review.reviewed_at > old_reviewed_at, (
+        "reviewed_at must be bumped to when the explicit action happened, not left at "
+        "the engine's implicit-marker timestamp"
+    )
+
+
 async def test_a_review_cannot_be_filed_against_someone_elses_proposal(
     client, db_session, lab, llm, proposal,
 ):
@@ -997,6 +1053,64 @@ async def test_a_rated_proposal_cannot_then_be_reopened_by_the_same_agent(
         AgentChannel.visibility == VISIBILITY_COLLAB_PRIVATE
     ))) == 1, (
         "beta's reopen created nothing either, so the assertion above proves nothing"
+    )
+
+
+async def test_an_explicit_web_reopen_upgrades_the_engines_implicit_rating_marker(
+    client, db_session, lab, proposal, slack_off,
+):
+    """D6/COR-13 (ruling-D6-implicit-review-upsert.md): same rule for reopen_proposal.
+    Pre-ruling, the `already_reviewed` guard treated the engine's implicit rating=-1
+    row as a completed reopen and silently redirected — the Slack migration never ran
+    and the PI's guidance was dropped.
+
+    Control for the same file: `test_a_rated_proposal_cannot_then_be_reopened_by_the_
+    same_agent` above pins that an existing REAL rating (!= -1) still swallows the
+    reopen.
+    """
+    implicit = ProposalReview(
+        thread_decision_id=proposal.id,
+        agent_id="alpha",
+        user_id=lab.pi_a_id,
+        rating=-1,
+        comment=None,
+        submitted_via="engine",
+        reviewed_at=datetime(2020, 1, 1, tzinfo=UTC),
+    )
+    db_session.add(implicit)
+    await db_session.flush()
+    implicit_id, old_reviewed_at = implicit.id, implicit.reviewed_at
+
+    guidance = "Actually, let's narrow the scope first."
+    r = await client.post(
+        f"/agent/alpha/proposals/{proposal.id}/reopen",
+        data={"guidance": guidance}, headers=_auth(lab.pi_a_id),
+    )
+    assert r.status_code == 302, r.text[:400]
+
+    db_session.expire_all()
+    td = await _decision(db_session, proposal.thread_id)
+    assert td.refined_in_channel is not None, (
+        "the Slack migration never ran — the implicit marker was treated as an "
+        "already-completed reopen"
+    )
+
+    rows = (await db_session.execute(
+        select(ProposalReview).where(ProposalReview.thread_decision_id == proposal.id)
+    )).scalars().all()
+    assert len(rows) == 1, (
+        f"the implicit marker must be upgraded in place, not duplicated: {rows}"
+    )
+    (review,) = rows
+    assert review.id == implicit_id, "the same row must be reused (upsert, not a second insert)"
+    assert review.rating == 0
+    assert review.comment.startswith("[Reopened] "), review.comment
+    assert guidance in review.comment
+    assert review.submitted_via == "web"
+    assert review.reviewed_by_user_id == lab.pi_a_id
+    assert review.reviewed_at > old_reviewed_at, (
+        "reviewed_at must be bumped to when the explicit action happened, not left at "
+        "the engine's implicit-marker timestamp"
     )
 
 

@@ -98,7 +98,7 @@ class ProposalReview(Base):
     comment: Mapped[str | None] = mapped_column(Text, nullable=True)
     submitted_via: Mapped[str] = mapped_column(
         String(10), nullable=False, default="web"
-    )  # web, email
+    )  # web, email, engine (implicit rating=-1 marker, upgraded in place by the first explicit action)
     reviewed_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
