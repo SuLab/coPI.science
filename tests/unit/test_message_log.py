@@ -422,3 +422,45 @@ class TestOrderingIsByPostedAtNotInsertion:
         tie.ts = "10-b"  # distinct id, identical posted_at
         log.append(tie)
         assert log.get_last_bot_sender_in_channel("priv-x") == "su"
+
+
+class TestPurgeThread:
+    def _log_with_thread(self):
+        from src.agent.message_log import LogEntry, MessageLog
+
+        log = MessageLog()
+        root = LogEntry(
+            ts="1.0", channel="general", sender_agent_id="grantbot", sender_name="GrantBot",
+            content="root", posted_at=1.0, is_bot=True,
+        )
+        reply = LogEntry(
+            ts="2.0", channel="general", sender_agent_id="su", sender_name="SuBot",
+            content="a reply", thread_ts="1.0", posted_at=2.0, is_bot=True,
+        )
+        unrelated = LogEntry(
+            ts="3.0", channel="general", sender_agent_id="wu", sender_name="WuBot",
+            content="unrelated root", posted_at=3.0, is_bot=True,
+        )
+        log.append(root)
+        log.append(reply)
+        log.append(unrelated)
+        return log
+
+    def test_purge_removes_the_root_and_every_reply(self):
+        log = self._log_with_thread()
+
+        removed = log.purge_thread("1.0")
+
+        assert removed == 2
+        assert log.get_entry("1.0") is None
+        assert log.get_entry("2.0") is None
+        assert log.get_entry("3.0") is not None
+        assert [e.ts for e in log._entries] == ["3.0"]
+
+    def test_purge_of_an_unknown_thread_is_a_noop(self):
+        log = self._log_with_thread()
+
+        removed = log.purge_thread("9999999999.999999")
+
+        assert removed == 0
+        assert len(log._entries) == 3

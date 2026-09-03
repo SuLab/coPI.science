@@ -1860,11 +1860,22 @@ class SimulationEngine:
             if removed:
                 evicted_from += 1
         self._poll_cursors.pop(f"proposal_thread:{thread_id}", None)
-        self._closed_thread_ids.discard(thread_id)
-        if evicted_from:
+        # NOT a discard, and an ADD rather than a no-op (red-team m1): a dead
+        # thread (Slack deleted the parent) must come out of this eviction
+        # CLOSED regardless of whether it already was — it gains nothing from
+        # being reopenable (its history is gone from the log two lines below),
+        # and marking it closed makes the eviction durable through
+        # _rebuild_agent_state's own closed-thread accounting, which is what
+        # keeps a restart from resurrecting it. The old `.discard()` here
+        # un-closed a thread the outcome machinery had already finalized,
+        # which is what let a stale ThreadDecision keep scheduling replies to
+        # a grave. See COR-1c.
+        self._closed_thread_ids.add(thread_id)
+        purged = self.message_log.purge_thread(thread_id)
+        if evicted_from or purged:
             logger.info(
-                "Evicted dead thread %s from %d agent(s)' state",
-                thread_id, evicted_from,
+                "Evicted dead thread %s from %d agent(s)' state (purged %d log entries)",
+                thread_id, evicted_from, purged,
             )
 
     async def _sync_private_channels_from_db(self) -> None:

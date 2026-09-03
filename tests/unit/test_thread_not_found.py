@@ -14,6 +14,7 @@ import pytest
 from slack_sdk.errors import SlackApiError
 
 from src.agent.agent import Agent
+from src.agent.message_log import LogEntry
 from src.agent.simulation import SimulationEngine
 from src.agent.slack_client import AgentSlackClient, ThreadNotFound
 from src.agent.state import PostRef, ProposalRef, ThreadState
@@ -133,6 +134,10 @@ class TestEvictDeadThread:
 
     def test_evicts_from_all_agents(self, engine_with_agents):
         engine, dead_ts, a, b = engine_with_agents
+        engine.message_log.append(LogEntry(
+            ts=dead_ts, channel="single-cell-omics", sender_agent_id="other",
+            sender_name="OtherBot", content="dead root", posted_at=0.0, is_bot=True,
+        ))
         engine._evict_dead_thread(dead_ts)
 
         for ag in (a, b):
@@ -141,7 +146,13 @@ class TestEvictDeadThread:
             assert not any(p.thread_id == dead_ts for p in ag.state.pending_proposals)
 
         assert f"proposal_thread:{dead_ts}" not in engine._poll_cursors
-        assert dead_ts not in engine._closed_thread_ids
+        # INVERTED: eviction must not un-close a thread the outcome machinery
+        # (or, as here, the test fixture) already marked closed. The old
+        # assertion (`dead_ts not in engine._closed_thread_ids`) pinned the
+        # `.discard()` call this task removes.
+        assert dead_ts in engine._closed_thread_ids
+        # NEW: the dead root's own log entry is purged too, not just agent state.
+        assert engine.message_log.get_entry(dead_ts) is None
 
     def test_unknown_thread_id_is_noop(self, engine_with_agents):
         engine, _, a, b = engine_with_agents

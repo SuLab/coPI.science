@@ -186,6 +186,40 @@ class MessageLog:
         """
         return self._by_ts.get(ts)
 
+    def purge_thread(self, thread_id: str) -> int:
+        """Remove every entry belonging to a thread whose Slack parent is dead.
+
+        Called only from ``SimulationEngine._evict_dead_thread`` when Slack has
+        reported the root deleted (ThreadNotFound / silent thread_ts drop).
+        Removes the root itself (``ts == thread_id``) and every reply
+        (``thread_ts == thread_id``) from the in-memory log, so Phase 2/3/4/5
+        and the prior-thread context stop acting on history that no longer
+        exists on Slack. The corresponding ``agent_messages`` DB rows are left
+        alone — they are the historical record of what really got sent; this
+        only purges the *working* copy the engine reasons from. Returns the
+        number of entries removed.
+        """
+        removed = 0
+        kept: list[LogEntry] = []
+        for entry in self._entries:
+            if entry.ts == thread_id or entry.thread_ts == thread_id:
+                self._by_ts.pop(entry.ts, None)
+                removed += 1
+            else:
+                kept.append(entry)
+        self._entries = kept
+        if removed:
+            # latest_timestamp (:470-479) returns _max_posted_at directly —
+            # recompute it so a purge of the newest thread doesn't leave the
+            # cursor Task 20.7 derives from latest_timestamp sitting above
+            # every surviving entry (red-team m1). Conservative either way
+            # (nothing gets re-scanned that shouldn't be), but state and log
+            # would otherwise silently disagree.
+            self._max_posted_at = max(
+                (e.posted_at for e in self._entries), default=0.0,
+            )
+        return removed
+
     def get_new_top_level_posts(
         self,
         since: float,
