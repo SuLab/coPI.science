@@ -182,6 +182,44 @@ def test_retry_after_header_is_honoured(monkeypatch):
     assert slept == [17], f"slept {slept}, expected Slack's Retry-After of 17"
 
 
+def test_a_non_integer_retry_after_does_not_escape_as_valueerror(monkeypatch):
+    """V7e: a non-integer Retry-After (HTTP-date, float string, negative) used to raise ValueError
+    *inside* the `except SlackApiError:` block, escaping post_message's `except SlackApiError` entirely
+    and crashing the turn — exactly when Slack is already throttling us."""
+    slept = []
+    monkeypatch.setattr(time, "sleep", lambda s: slept.append(s))
+    fake = RecordingSlackClient(
+        responses={"chat_postMessage": {"ok": True, "ts": "1.20"}},
+        errors={"chat_postMessage": [
+            slack_error("ratelimited", retry_after="Wed, 21 Oct 2015 07:28:00 GMT")
+        ]},
+    )
+    assert _client(fake).post_message("general", "hi") is not None
+    assert slept == [0.0]
+
+
+def test_a_huge_retry_after_is_capped(monkeypatch):
+    slept = []
+    monkeypatch.setattr(time, "sleep", lambda s: slept.append(s))
+    fake = RecordingSlackClient(
+        responses={"chat_postMessage": {"ok": True, "ts": "1.21"}},
+        errors={"chat_postMessage": [slack_error("ratelimited", retry_after="99999999")]},
+    )
+    _client(fake).post_message("general", "hi")
+    assert slept == [30.0]
+
+
+def test_a_negative_retry_after_does_not_crash_time_sleep(monkeypatch):
+    slept = []
+    monkeypatch.setattr(time, "sleep", lambda s: slept.append(s))
+    fake = RecordingSlackClient(
+        responses={"chat_postMessage": {"ok": True, "ts": "1.22"}},
+        errors={"chat_postMessage": [slack_error("ratelimited", retry_after="-5")]},
+    )
+    _client(fake).post_message("general", "hi")
+    assert slept == [0.0]
+
+
 # --- what actually goes on the wire ------------------------------------------------
 
 

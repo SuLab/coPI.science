@@ -27,6 +27,8 @@ from typing import Any
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
+from src.agent.retry_after import parse_retry_after
+
 logger = logging.getLogger(__name__)
 
 
@@ -117,6 +119,7 @@ def markdown_to_mrkdwn(text: str) -> str:
     return text
 
 MAX_RETRIES = 3
+MAX_RETRY_AFTER = 30.0
 
 # How many times to attempt private-channel creation. Attempt 0 uses a plain
 # timestamp suffix; later attempts add random entropy to survive the (extremely
@@ -328,9 +331,13 @@ class AgentSlackClient:
             except SlackApiError as exc:
                 if exc.response.get("error") == "ratelimited":
                     last_exc = exc
-                    retry_after = int(exc.response.headers.get("Retry-After", 5))
+                    retry_after = parse_retry_after(
+                        exc.response.headers.get("Retry-After"),
+                        default=5.0,
+                        cap=MAX_RETRY_AFTER,
+                    )
                     logger.warning(
-                        "[%s] Rate limited, retrying in %ds (attempt %d/%d)",
+                        "[%s] Rate limited, retrying in %.1fs (attempt %d/%d)",
                         self.agent_id, retry_after, attempt + 1, MAX_RETRIES,
                     )
                     time.sleep(retry_after)
