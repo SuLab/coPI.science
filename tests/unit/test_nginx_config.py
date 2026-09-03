@@ -64,3 +64,21 @@ def test_blackbird_https_vhost_has_the_same_tls_hardening_as_the_others():
     block = _https_block(_nginx_conf(), "blackbird.copi.science")
     for directive in ("ssl_ciphers", "ssl_stapling on", "ssl_stapling_verify on", "resolver "):
         assert directive in block, f"blackbird vhost is missing {directive!r}"
+
+
+CSP_RO = "Content-Security-Policy-Report-Only"
+
+
+def test_csp_report_only_on_all_three_https_vhosts():
+    text = _nginx_conf()
+    for name in ("${DOMAIN}", "devel.copi.science", "blackbird.copi.science"):
+        block = _https_block(text, name)
+        assert CSP_RO in block, f"{name} has no {CSP_RO} header"
+
+
+def test_no_enforcing_csp_added_at_the_nginx_layer():
+    # Report-Only only, by decision — an enforcing CSP from nginx would break
+    # base.html's inline PostHog bootstrap and the Tailwind CDN <script>
+    # before those are audited (#27 I5).
+    text = _nginx_conf()
+    assert 'add_header Content-Security-Policy "' not in text
