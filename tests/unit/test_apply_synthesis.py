@@ -67,3 +67,28 @@ def test_does_not_touch_evidence_counts():
     apply_synthesis(p, {"research_summary": "x"}, validated=True)
     assert p.evidence_pub_count == 7
     assert p.evidence_pmid_count == 9
+
+
+def test_a_versioned_profile_with_no_summary_is_not_worth_protecting():
+    """_stored_is_worth_keeping (issue #22 COR-22 fix round: the shared
+    predicate extracted out of run_profile_pipeline/apply_synthesis) requires
+    `bool(profile.research_summary)`; a versioned, previously-validated
+    profile whose summary is the empty string (not None) is not worth
+    protecting either — mutation-kill for that leg of the predicate, not just
+    `profile_version > 0` or `synthesis_validated is not False`."""
+    p = _profile(profile_version=3, research_summary="", synthesis_validated=True)
+    applied = apply_synthesis(p, {"research_summary": "new"}, validated=False)
+    assert applied is True
+    assert p.research_summary == "new"
+
+
+def test_missing_keywords_key_defaults_to_empty_list():
+    """A validated synthesis dict that simply omits the `keywords` key (as
+    opposed to supplying a non-list value, already covered for `techniques`)
+    must still leave p.keywords == [] — pins the missing-key convention
+    apply_synthesis uses for every optional field."""
+    p = _profile()
+    apply_synthesis(
+        p, {"research_summary": "x", "techniques": ["a", "b", "c"]}, validated=True
+    )
+    assert p.keywords == []

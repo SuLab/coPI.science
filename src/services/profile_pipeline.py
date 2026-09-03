@@ -411,13 +411,7 @@ async def run_profile_pipeline(
     evidence_pub_count = len(pubs_for_synthesis)
 
     if synthesized:
-        stored_is_worth_keeping = (
-            (profile.profile_version or 0) > 0
-            and bool(profile.research_summary)
-            # A stored profile already known to have failed validation is not
-            # worth protecting. NULL (legacy/unknown) is.
-            and profile.synthesis_validated is not False
-        )
+        stored_is_worth_keeping = _stored_is_worth_keeping(profile)
         lost_evidence = evidence_pub_count == 0 and (profile.evidence_pub_count or 0) > 0
         if stored_is_worth_keeping and (not validated or lost_evidence):
             reason = (
@@ -613,6 +607,22 @@ def _dedup_pmids(orcid_works: list[dict[str, Any]]) -> tuple[list[str], set[str]
     return pmids, seen
 
 
+def _stored_is_worth_keeping(profile: ResearcherProfile) -> bool:
+    """Whether `profile` already holds a synthesis worth protecting from being
+    overwritten by a new one that failed validation or lost evidence (issue
+    #22 COR-22 residual: this predicate used to be duplicated verbatim between
+    `run_profile_pipeline` and `apply_synthesis`).
+
+    A stored profile already known to have failed validation is not worth
+    protecting. NULL (legacy/unknown, or PI-edited) is.
+    """
+    return (
+        (profile.profile_version or 0) > 0
+        and bool(profile.research_summary)
+        and profile.synthesis_validated is not False
+    )
+
+
 _MIN_SUMMARY_WORDS = 100
 _MAX_SUMMARY_WORDS = 350
 
@@ -659,7 +669,7 @@ def _validate_profile(profile: dict[str, Any] | None) -> bool:
 
 
 def apply_synthesis(
-    profile: ResearcherProfile, synthesized: dict[str, Any], *, validated: bool
+    profile: ResearcherProfile, synthesized: dict[str, Any] | None, *, validated: bool
 ) -> bool:
     """Apply a synthesized profile's fields to `profile` if it passes the same
     keep-what-you-have gate `run_profile_pipeline` uses, so a script-driven
@@ -679,12 +689,7 @@ def apply_synthesis(
     if not synthesized:
         return False
 
-    stored_is_worth_keeping = (
-        (profile.profile_version or 0) > 0
-        and bool(profile.research_summary)
-        and profile.synthesis_validated is not False
-    )
-    if stored_is_worth_keeping and not validated:
+    if _stored_is_worth_keeping(profile) and not validated:
         return False
 
     techniques = synthesized.get("techniques", [])
