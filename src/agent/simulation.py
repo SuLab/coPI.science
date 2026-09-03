@@ -1375,10 +1375,30 @@ class SimulationEngine:
             agent.agent_id, len(threads_to_reply),
         )
 
+        # Mid-turn rate gate (E6-1): _within_rate_limit was previously
+        # consulted only once, at turn selection (_turn_eligible, :891/893).
+        # Phase 4 fans every active thread out in one gather with per-retry
+        # booking, so a turn could overshoot the sliding-window allowance by
+        # as many threads as were open. Filter sequentially before dispatch:
+        # once exhausted, drop the remaining threads for THIS turn rather
+        # than aborting it — has_pending_reply stays True on a dropped
+        # thread (set above), so it is retried next turn exactly like a
+        # failed/empty reply already is.
+        now = time.time()
+        eligible_threads: list[ThreadState] = []
+        for thread in threads_to_reply:
+            if not self._within_rate_limit(agent, now):
+                logger.info(
+                    "[%s] Phase 4: rate-limited, skipping %d remaining thread(s) this turn",
+                    agent.agent_id, len(threads_to_reply) - len(eligible_threads),
+                )
+                break
+            eligible_threads.append(thread)
+
         # Run replies in parallel
         tasks = [
             self._reply_to_thread(agent, thread)
-            for thread in threads_to_reply
+            for thread in eligible_threads
         ]
         await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -2362,6 +2382,14 @@ class SimulationEngine:
 
         # Restore
         agent.state.interesting_posts = original_posts
+
+        # Mid-turn rate gate (E6-1) — see _phase4_reply_threads for the same
+        # check and its rationale. Phase 5 runs after Phase 4 in the same
+        # turn, so it needs its own check even though _turn_eligible already
+        # passed at turn selection.
+        if not self._within_rate_limit(agent, time.time()):
+            logger.info("[%s] Phase 5: rate-limited, skipping this turn", agent.agent_id)
+            return
 
         agent.record_api_call()
         try:

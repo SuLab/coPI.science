@@ -2288,3 +2288,70 @@ class TestRemainingLogEntryWritersStampVisibility:
         entries = [e for e in engine.message_log._entries if e.thread_ts == "100.0"]
         assert len(entries) == 1
         assert entries[0].visibility == VISIBILITY_COLLAB_PRIVATE
+
+
+# ---------------------------------------------------------------
+# A mid-turn rate check before each Phase 4/5 LLM call — E6(1)
+# ---------------------------------------------------------------
+
+class TestMidTurnRateGate:
+    """The sliding-window limiter must also gate Phase 4/5 LLM calls mid-turn,
+    not just at turn selection (_turn_eligible) — otherwise an agent with
+    several active threads (Phase 4) or a Phase 5 call right after Phase 4
+    exhausted the window can overshoot its allowance arbitrarily. See E6(1)."""
+
+    @pytest.mark.asyncio
+    async def test_phase4_stops_dispatching_once_the_window_is_exhausted(self):
+        from unittest.mock import AsyncMock
+
+        from src.agent.agent import Agent
+        from src.agent.state import ThreadState
+
+        agent = Agent("a", "ABot", "A PI")
+        engine = SimulationEngine(agents=[agent], slack_clients={})
+        agent.state.active_threads = {
+            "1.0": ThreadState(thread_id="1.0", channel="general", other_agent_id="b", has_pending_reply=True),
+            "2.0": ThreadState(thread_id="2.0", channel="general", other_agent_id="b", has_pending_reply=True),
+        }
+        engine._reply_to_thread = AsyncMock()
+        engine._within_rate_limit = lambda a, now: False  # exhausted from turn 0
+
+        await engine._phase4_reply_threads(agent)
+
+        engine._reply_to_thread.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_phase4_still_dispatches_when_within_the_window(self):
+        # Control: the gate must not block the ordinary case.
+        from unittest.mock import AsyncMock
+
+        from src.agent.agent import Agent
+        from src.agent.state import ThreadState
+
+        agent = Agent("a", "ABot", "A PI")
+        engine = SimulationEngine(agents=[agent], slack_clients={})
+        agent.state.active_threads = {
+            "1.0": ThreadState(thread_id="1.0", channel="general", other_agent_id="b", has_pending_reply=True),
+        }
+        engine._reply_to_thread = AsyncMock()
+        engine._within_rate_limit = lambda a, now: True
+
+        await engine._phase4_reply_threads(agent)
+
+        engine._reply_to_thread.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_phase5_skips_its_llm_call_when_the_window_is_exhausted(self, monkeypatch):
+        from unittest.mock import AsyncMock
+
+        from src.agent.agent import Agent
+
+        agent = Agent("a", "ABot", "A PI")
+        engine = SimulationEngine(agents=[agent], slack_clients={})
+        engine._within_rate_limit = lambda a, now: False
+        fake_llm = AsyncMock(return_value='```json\n{"action": "skip"}\n```')
+        monkeypatch.setattr("src.agent.simulation.generate_agent_response", fake_llm)
+
+        await engine._phase5_new_post(agent)
+
+        fake_llm.assert_not_awaited()
