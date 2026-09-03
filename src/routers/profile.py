@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.database import get_db
 from src.dependencies import get_current_user
 from src.models import Job, Publication, ResearcherProfile, User
+from src.services.profile_pipeline import bump_profile_version
 from src.services.validators import is_valid_email
 
 logger = logging.getLogger(__name__)
@@ -168,6 +169,7 @@ async def profile_save(
     if not profile:
         profile = ResearcherProfile(user_id=current_user.id)
         db.add(profile)
+        await db.flush()  # row must exist before the atomic version UPDATE below
 
     if "research_summary" in form:
         profile.research_summary = research_summary
@@ -185,7 +187,7 @@ async def profile_save(
     # not a synthesis") rather than False, so profile_pipeline.py's
     # stored_is_worth_keeping gate (`is not False`) protects it on the next run.
     profile.synthesis_validated = None
-    profile.profile_version = (profile.profile_version or 0) + 1
+    profile.profile_version = await bump_profile_version(db, profile.id)
 
     await db.commit()
 

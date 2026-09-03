@@ -19,7 +19,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import Update, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.models import Job, Publication, ResearcherProfile, User
@@ -432,7 +432,7 @@ async def run_profile_pipeline(
             if apply_synthesis(profile, synthesized, validated=validated):
                 profile.evidence_pmid_count = evidence_pmid_count
                 profile.evidence_pub_count = evidence_pub_count
-                profile.profile_version = (profile.profile_version or 0) + 1
+                profile.profile_version = await bump_profile_version(db, profile.id)
 
             if not validated:
                 logger.error(
@@ -702,3 +702,35 @@ def apply_synthesis(
     profile.synthesis_validated = validated
     profile.profile_generated_at = datetime.now(UTC)
     return True
+
+
+def bump_profile_version_stmt(profile_id: uuid.UUID) -> Update:
+    """UPDATE ... SET profile_version = COALESCE(profile_version, 0) + 1 RETURNING it."""
+    return (
+        update(ResearcherProfile)
+        .where(ResearcherProfile.id == profile_id)
+        .values(profile_version=func.coalesce(ResearcherProfile.profile_version, 0) + 1)
+        .returning(ResearcherProfile.profile_version)
+    )
+
+
+async def bump_profile_version(db: AsyncSession, profile_id: uuid.UUID) -> int:
+    """Atomically increment ResearcherProfile.profile_version and return the new
+    value (issue #22 C1). SQL-side `COALESCE(...) + 1`, not a Python
+    read-modify-write — the profile row is loaded well before this point (often
+    many awaited calls earlier), so `(profile.profile_version or 0) + 1` in
+    Python silently drops a concurrent writer's increment.
+
+    The row must already exist (flushed) — callers creating a brand-new
+    ResearcherProfile must `await db.flush()` after `db.add(profile)` before
+    calling this.
+
+    Callers assign the return value back to `profile.profile_version` (see the
+    call sites below) — that re-dirties the ORM attribute, so the same integer
+    this call already wrote gets written again at the next flush. Harmless (the
+    row lock serializes concurrent bumps and each session writes the value it
+    atomically obtained), but don't "optimize" it away: the assignment is what
+    keeps the in-memory `profile` object's `profile_version` in sync with the DB
+    for the rest of the request.
+    """
+    return (await db.execute(bump_profile_version_stmt(profile_id))).scalar_one()

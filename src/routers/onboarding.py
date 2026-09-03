@@ -16,6 +16,7 @@ from src.services.profile_export import (
     PRIVATE_PROFILES_DIR,
     export_private_profile,
 )
+from src.services.profile_pipeline import bump_profile_version
 from src.services.validators import is_valid_email
 
 logger = logging.getLogger(__name__)
@@ -145,6 +146,7 @@ async def save_profile(
     if not profile:
         profile = ResearcherProfile(user_id=current_user.id)
         db.add(profile)
+        await db.flush()
 
     if "research_summary" in form:
         profile.research_summary = research_summary
@@ -159,7 +161,7 @@ async def save_profile(
     if "keywords" in form:
         profile.keywords = parse_list(keywords)
     profile.synthesis_validated = None
-    profile.profile_version = (profile.profile_version or 0) + 1
+    profile.profile_version = await bump_profile_version(db, profile.id)
 
     await db.commit()
 

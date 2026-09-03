@@ -29,6 +29,7 @@ from src.models import (
 )
 from src.services.atomic_write import atomic_write_text
 from src.services.profile_export import export_profile_to_markdown
+from src.services.profile_pipeline import bump_profile_version
 from src.services.validators import is_valid_email
 
 logger = logging.getLogger(__name__)
@@ -1394,6 +1395,7 @@ async def save_public_profile(
     if not profile:
         profile = ResearcherProfile(user_id=agent.user_id)
         db.add(profile)
+        await db.flush()
 
     if "research_summary" in form:
         profile.research_summary = research_summary
@@ -1408,7 +1410,7 @@ async def save_public_profile(
     if "keywords" in form:
         profile.keywords = _parse_list(keywords)
     profile.synthesis_validated = None
-    profile.profile_version = (profile.profile_version or 0) + 1
+    profile.profile_version = await bump_profile_version(db, profile.id)
 
     await db.commit()
 
