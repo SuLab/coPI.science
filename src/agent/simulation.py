@@ -1045,8 +1045,22 @@ class SimulationEngine:
         # Clear PI directive flag after the turn
         agent.state.has_pi_directive = False
 
-        # Update cursor
-        agent.state.last_seen_cursor = time.time()
+        # Update cursor. Bounded by the log's own high-water mark, not the wall
+        # clock: MessageLog filters on `posted_at <= since`, and an external
+        # writer (a Slack human, the web app, GrantBot — each minting posted_at
+        # from its own clock) can commit a row whose posted_at is behind
+        # `time.time()` by the time this turn ends. A wall-clock cursor would
+        # already be past that row's posted_at, filtering it out of every
+        # future scan forever. `latest_timestamp` never exceeds what is
+        # actually in the log, which removes the wall-clock/DB-clock skew this
+        # bug is named for — though a late-arriving row is only rescued by
+        # this bound when it also happens to be the newest thing in the log at
+        # that moment; a row that commits after the cursor advanced but stays
+        # below the log's max is still filtered by `posted_at <= since`
+        # elsewhere. `_poll_inbound_from_db`'s `PI_INBOX_LOOKBACK` window is
+        # the real belt-and-braces for that narrower residual case (red-team
+        # m3). See COR-6.
+        agent.state.last_seen_cursor = self.message_log.latest_timestamp
 
         return agent.api_call_count > api_calls_before
 

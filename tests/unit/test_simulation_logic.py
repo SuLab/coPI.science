@@ -1419,3 +1419,39 @@ class TestPrivateChannelOutcomeRunsOnlyWhenPosted:
         engine._check_private_channel_outcome.assert_awaited_once_with(
             agent, "priv-chan", ":memo: Summary confirmed. ✅",
         )
+
+
+class TestRunTurnAdvancesCursorFromTheLog:
+    """The scan cursor must never advance past the newest message actually in
+    the log — a wall-clock cursor can outrun a message an external writer
+    (Slack human, the web app, GrantBot) posts with a lagging or skewed clock,
+    filtering it out of every future scan forever. See COR-6."""
+
+    def _engine_with_stubbed_phases(self):
+        from unittest.mock import AsyncMock
+
+        from src.agent.agent import Agent
+        from src.agent.message_log import LogEntry
+
+        agent = Agent("su", "SuBot", "Andrew Su")
+        engine = SimulationEngine(agents=[agent], slack_clients={})
+        engine.message_log.append(LogEntry(
+            ts="1000.0", channel="general", sender_agent_id="other", sender_name="Other",
+            content="an old message", posted_at=1000.0, is_bot=True,
+        ))
+        # Stub every phase so _run_turn completes with no LLM/Slack/DB calls —
+        # this task is only about the cursor line at the end of the method.
+        engine._phase1_channel_discovery = lambda a: None
+        engine._phase2_scan_filter = AsyncMock(return_value=None)
+        engine._phase3_activate_threads = lambda a: None
+        engine._phase4_reply_threads = AsyncMock(return_value=set())
+        engine._phase5_new_post = AsyncMock(return_value=None)
+        return engine, agent
+
+    @pytest.mark.asyncio
+    async def test_cursor_is_bounded_by_the_logs_latest_timestamp(self):
+        engine, agent = self._engine_with_stubbed_phases()
+
+        await engine._run_turn(agent)
+
+        assert agent.state.last_seen_cursor == engine.message_log.latest_timestamp == 1000.0
