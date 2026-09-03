@@ -21,9 +21,9 @@ from src.agent.message_log import LogEntry, MessageLog, is_funding_post
 # Intent + future-post phrases that indicate the agent is merely announcing
 # a forthcoming spin-off post instead of creating it.
 _ANNOUNCEMENT_PHRASES = [
-    r"\bi['']?ll (start|post|create|put up|open|spin ?up|spin ?off|draft|kick off)\b",
+    r"\bi['’ʼ]?ll (start|post|create|put up|open|spin ?up|spin ?off|draft|kick off)\b",
     r"\bi will (start|post|create|put up|open|spin ?up|spin ?off|draft|kick off)\b",
-    r"\bi'?m (going|about) to (start|post|create|put up|open|spin ?up|spin ?off)\b",
+    r"\bi['’ʼ]?m (going|about) to (start|post|create|put up|open|spin ?up|spin ?off)\b",
     r"\bgoing up now\b",
     r"\bposting (it |the )?(now|shortly|next)\b",
     r"\blook (out )?for (my|the|it)\b",

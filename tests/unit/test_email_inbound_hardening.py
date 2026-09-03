@@ -314,3 +314,50 @@ async def test_a_transient_failure_is_retried_not_quarantined(monkeypatch):
 
     assert fake.copied == []
     assert "inbound/flaky" in fake.objects  # still there for the next poll
+
+
+# --- The LLM-classified rating is coerced to int, rejecting bool ------------
+
+
+class TestCoerceRating:
+    def test_accepts_a_numeric_string(self):
+        assert inbound._coerce_rating("3") == 3
+
+    def test_accepts_a_numeric_string_with_surrounding_space(self):
+        assert inbound._coerce_rating(" 3 ") == 3
+
+    def test_accepts_a_whole_float(self):
+        assert inbound._coerce_rating(3.0) == 3
+
+    def test_accepts_a_whole_float_as_a_string(self):
+        assert inbound._coerce_rating("3.0") == 3
+
+    def test_accepts_a_real_int(self):
+        assert inbound._coerce_rating(3) == 3
+
+    def test_rejects_bool_even_though_bool_is_an_int_subclass(self):
+        assert inbound._coerce_rating(True) is None
+        assert inbound._coerce_rating(False) is None
+
+    def test_rejects_a_fractional_value(self):
+        assert inbound._coerce_rating(2.5) is None
+
+    def test_rejects_unparseable_strings_and_none(self):
+        assert inbound._coerce_rating("abc") is None
+        assert inbound._coerce_rating(None) is None
+
+
+async def test_classify_reply_coerces_a_string_rating_to_int(monkeypatch):
+    """End-to-end through classify_reply: a model that returns the rating as a numeric
+    string ('3') must come back as int 3, not a string the :322 guard would TypeError on."""
+    from tests.fakes import FakeAnthropic, text_response
+
+    fake = FakeAnthropic(responses=[
+        text_response('{"category": "review", "rating": "3", "comment": "", "instruction": ""}')
+    ])
+    monkeypatch.setattr("src.services.llm.get_anthropic_client", lambda: fake)
+
+    result = await inbound.classify_reply("3 sounds great", "A proposal.")
+
+    assert result["rating"] == 3
+    assert isinstance(result["rating"], int) and not isinstance(result["rating"], bool)

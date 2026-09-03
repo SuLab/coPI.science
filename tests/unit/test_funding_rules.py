@@ -49,6 +49,12 @@ class TestAnnouncementOnly:
         "Thread wrapped. Moving to the dedicated thread.",
         "Posting it now — look for my post shortly.",
         "Confirmed — I'll post a new :moneybag: thread tagging you.",
+        # COR-28a: curly (U+2019) and modifier-letter (U+02BC) apostrophes must
+        # be caught exactly like the ASCII form — LLM output and Slack's own
+        # smart-quote autocorrect routinely produce the curly form.
+        "I’ll spin up a dedicated thread.",
+        "Iʼll spin up a dedicated thread.",
+        "I’m going to start a new thread.",
     ])
     def test_positive_cases(self, text):
         assert is_announcement_only_funding_reply(text) is True

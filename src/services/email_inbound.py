@@ -454,6 +454,34 @@ def _extract_reply_body(msg: email.message.Message) -> str:
     return "\n".join(cleaned).strip()
 
 
+def _coerce_rating(value) -> int | None:
+    """Coerce an LLM-classified rating to int, or None if it doesn't parse.
+
+    The classification prompt asks for "an integer 1-4", but json.loads hands back
+    whatever JSON type the model actually emitted: a numeric string ("3"), a float
+    (3.0), or — pathologically — a bool. bool is an int subclass (True == 1), so the
+    :322 guard would otherwise silently accept it as a rating; reject it
+    explicitly. A fractional value (2.5) is not a real 1-4 rating either.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value) if value.is_integer() else None
+    if isinstance(value, str):
+        stripped = value.strip()
+        try:
+            return int(stripped)
+        except ValueError:
+            try:
+                as_float = float(stripped)
+            except ValueError:
+                return None
+            return int(as_float) if as_float.is_integer() else None
+    return None
+
+
 async def classify_reply(body: str, proposal_summary: str) -> dict:
     """Classify an email reply using Sonnet LLM.
 
@@ -521,7 +549,9 @@ Respond with only the JSON object, no other text."""
             response_text = re.sub(r"^```(?:json)?\n?", "", response_text)
             response_text = re.sub(r"\n?```$", "", response_text)
 
-        return json.loads(response_text)
+        result = json.loads(response_text)
+        result["rating"] = _coerce_rating(result.get("rating"))
+        return result
     except Exception as exc:
         logger.error("LLM classification failed: %s", exc)
         return {"category": "unparseable", "rating": None, "comment": "", "instruction": ""}
