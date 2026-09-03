@@ -2143,6 +2143,26 @@ class TestPhase5ReplyChannelComesFromTheTargetPost:
         ))
         return engine, a
 
+    def _public_engine(self, monkeypatch, channel="general"):
+        # Control setup: same shape as _engine, but the target post lives in
+        # a channel with no _channel_visibility entry — resolves to
+        # VISIBILITY_PUBLIC via _resolve_channel_visibility's default. Used
+        # to pin that the target-post-channel fix does not change behaviour
+        # for the (overwhelmingly common) public-to-public reply case.
+        from src.agent.agent import Agent
+        from src.agent.message_log import LogEntry
+        from src.config import get_settings
+
+        monkeypatch.setattr(get_settings(), "phase5_skip_probability", 0.0)
+        a = Agent("a", "ABot", "A PI")
+        b = Agent("b", "BBot", "B PI")
+        engine = SimulationEngine(agents=[a, b], slack_clients={})
+        engine.message_log.append(LogEntry(
+            ts="100.0", channel=channel, sender_agent_id="b", sender_name="BBot",
+            content="original public post", posted_at=100.0, is_bot=True,
+        ))
+        return engine, a
+
     def _stub_response(self, declared_channel="general"):
         return (
             "```json\n"
@@ -2171,7 +2191,7 @@ class TestPhase5ReplyChannelComesFromTheTargetPost:
         assert len(posts) == 1
         assert posts[0].channel == "priv-chan"
         # A collab_private channel is FLAT (see _phase5_new_post's private-reply
-        # branch, :2368-2380): correcting the channel routes THIS reply down
+        # branch, :2554-2576): correcting the channel routes THIS reply down
         # that branch instead of the general-purpose threaded one, so it posts
         # with no thread_ts. That is the point of the fix, not an artifact of
         # the test — pre-fix this same call landed in #general, threaded onto
@@ -2180,6 +2200,53 @@ class TestPhase5ReplyChannelComesFromTheTargetPost:
         # segment. See red-team B5.
         assert posts[0].thread_ts is None
         assert posts[0].visibility == VISIBILITY_COLLAB_PRIVATE
+
+    @pytest.mark.asyncio
+    async def test_public_reply_still_threads_when_the_llm_agrees_on_channel(self, monkeypatch):
+        # Control (finding I1): the target-post-channel correction must not
+        # change the ordinary public-to-public reply path — a reply to a
+        # public post whose LLM-declared channel matches the target's real
+        # channel still threads onto the target and persists as public.
+        from unittest.mock import AsyncMock
+
+        engine, a = self._public_engine(monkeypatch, channel="general")
+        engine._update_agent_memory = AsyncMock()
+        monkeypatch.setattr(
+            "src.agent.simulation.generate_agent_response",
+            AsyncMock(return_value=self._stub_response("general")),
+        )
+
+        await engine._phase5_new_post(a)
+
+        posts = [e for e in engine.message_log._entries if e.sender_agent_id == "a"]
+        assert len(posts) == 1
+        assert posts[0].channel == "general"
+        assert posts[0].thread_ts == "100.0"
+        assert posts[0].visibility == "public"
+
+    @pytest.mark.asyncio
+    async def test_public_reply_lands_in_the_targets_channel_not_the_llms_declared_channel(
+        self, monkeypatch,
+    ):
+        # Control (finding I1): the LLM declares a DIFFERENT public channel
+        # than the target's — the fix must still route to the target's real
+        # channel (channel-a), not the LLM's free-form field (channel-b).
+        from unittest.mock import AsyncMock
+
+        engine, a = self._public_engine(monkeypatch, channel="channel-a")
+        engine._update_agent_memory = AsyncMock()
+        monkeypatch.setattr(
+            "src.agent.simulation.generate_agent_response",
+            AsyncMock(return_value=self._stub_response("channel-b")),
+        )
+
+        await engine._phase5_new_post(a)
+
+        posts = [e for e in engine.message_log._entries if e.sender_agent_id == "a"]
+        assert len(posts) == 1
+        assert posts[0].channel == "channel-a"
+        assert posts[0].thread_ts == "100.0"
+        assert posts[0].visibility == "public"
 
 
 # ---------------------------------------------------------------
