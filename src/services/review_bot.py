@@ -169,10 +169,20 @@ def _render_transcript(
 
     head_chars = int(TRANSCRIPT_CHAR_BUDGET * 0.6)
     tail_chars = TRANSCRIPT_CHAR_BUDGET - head_chars
+    tail = full_text[-tail_chars:]
+    # Re-anchor the tail to a line boundary: a raw offset slice can land
+    # mid-line, and since the ELIDED marker ends in "\n\n" whatever the tail
+    # starts with begins a line at column 0 -- if that happens to be right
+    # after a quoted line's "> " prefix, the forged heading it was quoting
+    # reaches column 0 for real. Dropping the partial first line keeps every
+    # surviving line "> "-prefixed, so the quoting invariant holds across
+    # elision too (2026-09-02 review finding).
+    if "\n" in tail:
+        tail = tail[tail.index("\n") + 1:]
     elided = (
         full_text[:head_chars]
         + "\n\n... [ELIDED — transcript truncated to fit the review bot's character budget] ...\n\n"
-        + full_text[-tail_chars:]
+        + tail
     )
     return elided, True
 
