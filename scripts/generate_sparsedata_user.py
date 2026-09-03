@@ -170,13 +170,15 @@ async def _resolve_agent_id(name: str, db: AsyncSession) -> str:
     if coll.scalar_one_or_none() is None:
         return candidate
     initial = name.strip()[0].lower() if name.strip() else "x"
-    candidate = f"{initial}{base}"
-    coll = await db.execute(select(AgentRegistry).where(AgentRegistry.agent_id == candidate))
+    prefixed = f"{initial}{base}"
+    coll = await db.execute(select(AgentRegistry).where(AgentRegistry.agent_id == prefixed))
     if coll.scalar_one_or_none() is None:
-        return candidate
-    # Last resort: numeric suffix
+        return prefixed
+    # Last resort: numeric suffix appended to the PREFIXED candidate (issue
+    # #26 C2/D22 — this used to restart from the bare stem, diverging from
+    # agent_page.derive_agent_identity on a third same-initial collision).
     for i in range(2, 20):
-        candidate = f"{base}{i}"
+        candidate = f"{prefixed}{i}"
         coll = await db.execute(
             select(AgentRegistry).where(AgentRegistry.agent_id == candidate)
         )

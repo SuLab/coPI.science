@@ -47,7 +47,10 @@ def _slugify_last_name(name: str) -> str:
 async def _resolve_agent_id(name: str, db: AsyncSession) -> str:
     """Same collision logic as scripts/generate_sparsedata_user.py + agent_page.py.
 
-    Order: bare last name → first-initial prefix → numeric suffix.
+    Order: bare last name -> first-initial prefix -> numeric suffix appended
+    to the PREFIXED candidate (agent_page.derive_agent_identity, issue #26
+    C1/C2 — the numeric branch used to restart from the bare stem, diverging
+    from the web path on a third same-initial collision).
     """
     base = _slugify_last_name(name)
     candidate = base
@@ -55,12 +58,12 @@ async def _resolve_agent_id(name: str, db: AsyncSession) -> str:
     if coll.scalar_one_or_none() is None:
         return candidate
     initial = name.strip()[0].lower() if name.strip() else "x"
-    candidate = f"{initial}{base}"
-    coll = await db.execute(select(AgentRegistry).where(AgentRegistry.agent_id == candidate))
+    prefixed = f"{initial}{base}"
+    coll = await db.execute(select(AgentRegistry).where(AgentRegistry.agent_id == prefixed))
     if coll.scalar_one_or_none() is None:
-        return candidate
+        return prefixed
     for i in range(2, 20):
-        candidate = f"{base}{i}"
+        candidate = f"{prefixed}{i}"
         coll = await db.execute(
             select(AgentRegistry).where(AgentRegistry.agent_id == candidate)
         )
@@ -72,9 +75,13 @@ async def _resolve_agent_id(name: str, db: AsyncSession) -> str:
 def _bot_name_for(agent_id: str, name: str) -> str:
     last = name.strip().split()[-1]
     last_alpha = "".join(c for c in last if c.isalpha())
-    if agent_id.lower() == last_alpha.lower():
-        return f"{last_alpha.capitalize()}Bot"
-    return f"{agent_id[0].upper()}{last_alpha.capitalize()}Bot"
+    # Strip a numeric suffix (issue #26 C2): agent_id[0] of "pwu2" is "p", but
+    # the "2" belongs before "Bot" (PWu2Bot), matching derive_agent_identity.
+    stem = "".join(c for c in agent_id if not c.isdigit())
+    suffix = agent_id[len(stem):]
+    if stem.lower() == last_alpha.lower():
+        return f"{last_alpha.capitalize()}{suffix}Bot"
+    return f"{agent_id[0].upper()}{last_alpha.capitalize()}{suffix}Bot"
 
 
 def _parse_orcids_file(path: Path) -> list[str]:
