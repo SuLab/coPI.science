@@ -164,6 +164,10 @@ async def test_profile_pipeline_golden_master(db_session, monkeypatch, snapshot)
         orcid="0000-0002-1825-0097",
         institution=None,
         department=None,
+        # Still onboarding (fix round: Step 9b's seed generation is now gated
+        # on this), matching every other GM fixture in this file that expects
+        # the private-seed call to fire on a first run.
+        onboarding_complete=False,
     )
 
     profile = await profile_pipeline.run_profile_pipeline(user.id, db_session)
@@ -352,6 +356,7 @@ async def test_profile_pipeline_rerun_increments_version_and_updates_pubs(
 
     user = await factories.make_user(
         db_session, name="Ada Lovelace", orcid="0000-0002-1825-0100",
+        onboarding_complete=False,  # still onboarding: Step 9b's seed call fires
     )
 
     first = await profile_pipeline.run_profile_pipeline(user.id, db_session)
@@ -442,6 +447,7 @@ async def test_profile_pipeline_stores_the_retry_not_the_rejected_first_synthesi
 
     user = await factories.make_user(
         db_session, name="Ada Lovelace", orcid="0000-0002-1825-0101",
+        onboarding_complete=False,  # still onboarding: Step 9b's seed call fires
     )
     profile = await profile_pipeline.run_profile_pipeline(user.id, db_session)
 
@@ -496,6 +502,7 @@ async def test_profile_pipeline_marks_a_profile_that_fails_validation_twice(
 
     user = await factories.make_user(
         db_session, name="Ada Lovelace", orcid="0000-0002-1825-0102",
+        onboarding_complete=False,  # still onboarding: Step 9b's seed call fires
     )
     job = await _make_job(db_session, user)
     profile = await profile_pipeline.run_profile_pipeline(user.id, db_session, job=job)
@@ -554,6 +561,7 @@ async def test_profile_pipeline_rerun_that_fails_validation_keeps_the_stored_pro
 
     user = await factories.make_user(
         db_session, name="Ada Lovelace", orcid="0000-0002-1825-0103",
+        onboarding_complete=False,  # still onboarding: Step 9b's seed call fires
     )
     first = await profile_pipeline.run_profile_pipeline(user.id, db_session)
     first_version = first.profile_version
@@ -772,6 +780,7 @@ async def test_profile_pipeline_pubmed_outage_on_rerun_keeps_the_grounded_profil
 
     user = await factories.make_user(
         db_session, name="Ada Lovelace", orcid="0000-0002-1825-0107",
+        onboarding_complete=False,  # still onboarding: Step 9b's seed call fires
     )
     first = await profile_pipeline.run_profile_pipeline(user.id, db_session)
     first_version = first.profile_version
@@ -804,21 +813,46 @@ async def test_a_pmid_listed_twice_by_orcid_inserts_exactly_one_publication(
 ):
     """V1-16b/c: one ORCID works listing naming the same PMID twice must not
     db.add() two Publication rows (post-0025 that is an IntegrityError that
-    aborts the whole pipeline run)."""
+    aborts the whole pipeline run), and must not feed the same publication
+    into the synthesis context twice (fix-round Minor 3: `_dedup_pmids`
+    upstream dedupes the PMID *list*, but `fetch_pubmed_records` can itself
+    hand back the same record more than once for one requested PMID — that is
+    what actually exercises the in-loop `existing_pubs[pmid] = pub` update,
+    not `_dedup_pmids`)."""
     _install_fakes(monkeypatch)
 
     async def dupe_works(orcid_id):
         return [{"pmid": "1001", "doi": None}, {"pmid": "1001", "doi": None}]
 
     async def echo_records(pmids):
-        return [
-            {"pmid": p, "doi": None, "title": "T", "abstract": "A", "journal": "J",
-             "year": 1843, "pub_types": ["Journal Article"], "pmcid": None}
-            for p in pmids
-        ]
+        # Return each requested PMID's record TWICE regardless of how many
+        # times it appears in `pmids` (which is already deduped by the time it
+        # gets here) — this is what makes the assertion depend on the in-loop
+        # existing_pubs update rather than only on _dedup_pmids.
+        records = []
+        for p in pmids:
+            rec = {
+                "pmid": p, "doi": None, "title": "T", "abstract": "A", "journal": "J",
+                "year": 1843, "pub_types": ["Journal Article"], "pmcid": None,
+            }
+            records.append(rec)
+            records.append(rec)
+        return records
 
     monkeypatch.setattr(profile_pipeline, "fetch_orcid_works", dupe_works)
     monkeypatch.setattr(profile_pipeline, "fetch_pubmed_records", echo_records)
+
+    # Observe the assembled synthesis context (data, not prompt text) without
+    # replacing the real context builder.
+    contexts: list[str] = []
+    real_ctx = profile_pipeline._build_synthesis_context
+
+    def recording_ctx(**kwargs):
+        out = real_ctx(**kwargs)
+        contexts.append(out)
+        return out
+
+    monkeypatch.setattr(profile_pipeline, "_build_synthesis_context", recording_ctx)
 
     user = await factories.make_user(db_session, name="Dupe Lovelace")
     await profile_pipeline.run_profile_pipeline(user.id, db_session)
@@ -828,6 +862,11 @@ async def test_a_pmid_listed_twice_by_orcid_inserts_exactly_one_publication(
     )).scalars().all()
     assert len(rows) == 1
 
+    # The residual the duplicated-record case exposes: the SAME record must
+    # not be appended twice to pubs_for_synthesis, which would duplicate its
+    # heading in the assembled context.
+    assert contexts[0].count("### T (J, 1843)") == 1
+
 
 async def test_first_run_exports_the_private_seed_to_disk(db_session, monkeypatch, tmp_path):
     """COR-23: an admin-seeded lab whose PI never visits /onboarding/private-profile
@@ -836,6 +875,11 @@ async def test_first_run_exports_the_private_seed_to_disk(db_session, monkeypatc
     This is the only test in this file with an AgentRegistry, so it is also the only
     one that reaches the export at all — hence the explicit export-dir patching (the
     rest of the file never writes, so it never needed it).
+
+    Control for the fix-round gate on Step 9b's GENERATION (contrast with
+    test_pi_who_cleared_their_private_profile_does_not_get_a_new_seed):
+    onboarding_complete=False (an admin-seeded PI who never onboarded) still
+    gets a seed generated and exported.
     """
     from src.services import profile_export
 
@@ -843,7 +887,9 @@ async def test_first_run_exports_the_private_seed_to_disk(db_session, monkeypatc
     monkeypatch.setattr(profile_export, "PRIVATE_PROFILES_DIR", tmp_path / "private")
     _install_fakes(monkeypatch)
 
-    user = await factories.make_user(db_session, name="Ada Lovelace")
+    user = await factories.make_user(
+        db_session, name="Ada Lovelace", onboarding_complete=False
+    )
     agent = await factories.make_agent(
         db_session, user=user, agent_id="gmseed", bot_name="GmSeedBot"
     )
@@ -855,3 +901,72 @@ async def test_first_run_exports_the_private_seed_to_disk(db_session, monkeypatc
     assert profile.private_profile_seed            # the pipeline generated one
     written = (tmp_path / "private" / f"{agent.agent_id}.md").read_text(encoding="utf-8")
     assert written.strip() == _PRIVATE_SEED.strip()
+
+
+async def test_pi_who_cleared_their_private_profile_does_not_get_a_new_seed(
+    db_session, monkeypatch, tmp_path
+):
+    """Fix round (COR-23): a PI who has completed onboarding and then cleared
+    both private_profile_md and private_profile_seed — POST
+    /onboarding/private-profile with a blank form does exactly that, and also
+    sets onboarding_complete=True (onboarding.py:save_private_profile) — must
+    NOT have Step 9b synthesize a fresh seed on the next pipeline run (a
+    regenerate, an admin re-enqueue, or a monthly refresh). Regenerating would
+    silently push model-authored instructions back to the agent for a PI who
+    deliberately turned them off. Contrast with
+    test_first_run_exports_the_private_seed_to_disk (onboarding_complete=False):
+    an admin-seeded PI who never onboarded still gets a seed.
+    """
+    from src.services import profile_export
+
+    monkeypatch.setattr(profile_export, "PROFILES_DIR", tmp_path / "public")
+    monkeypatch.setattr(profile_export, "PRIVATE_PROFILES_DIR", tmp_path / "private")
+    fake_llm = _install_fakes(monkeypatch)
+
+    user = await factories.make_user(
+        db_session, name="Ada Lovelace", onboarding_complete=True
+    )
+    agent = await factories.make_agent(
+        db_session, user=user, agent_id="gmcleared", bot_name="GmClearedBot"
+    )
+    await db_session.flush()
+
+    profile = await profile_pipeline.run_profile_pipeline(user.id, db_session)
+
+    assert profile.private_profile_md is None
+    assert profile.private_profile_seed is None
+    # Only the public-profile synthesis call happened; the private-seed
+    # response scripted into _install_fakes's FakeAnthropic was never reached.
+    assert len(fake_llm.calls) == 1
+    assert not (tmp_path / "private" / f"{agent.agent_id}.md").exists()
+
+
+async def test_a_json_array_synthesis_response_does_not_crash_the_pipeline(
+    db_session, monkeypatch
+):
+    """Minor 2 (fix round): extract_json's ```json fenced-block branch parses
+    whatever valid JSON is inside the fence, so a malformed LLM response whose
+    fence wraps a JSON ARRAY (not an object) makes synthesize_profile return a
+    list. Before the isinstance guard added in this fix round, that list
+    passed profile.get(...)-free through `_validate_profile`'s try/except as
+    validated=False (truthy, non-empty), which then made `if not validated and
+    synthesized:` retry, and once the retry's response ran out too (raising
+    inside the second synthesize_profile call, leaving `synthesized` un-
+    reassigned) the pipeline fell through to Step 9 with the raw list and
+    crashed in `apply_synthesis` (`synthesized.get(...)`, list has no such
+    method). The guard normalizes to {} right after the synthesis call, so the
+    pipeline completes exactly as it does on any other unparseable synthesis:
+    nothing stored, one LLM call, no retry, no crash.
+    """
+    _install_fakes(monkeypatch)
+    array_response = "```json\n[1, 2, 3]\n```"
+    fake_llm = FakeAnthropic([array_response])
+    monkeypatch.setattr("src.services.llm.get_anthropic_client", lambda: fake_llm)
+
+    user = await factories.make_user(db_session, name="Array Lovelace")
+    profile = await profile_pipeline.run_profile_pipeline(user.id, db_session)
+
+    assert profile.research_summary is None
+    assert profile.profile_version == 0
+    assert profile.synthesis_validated is None
+    assert len(fake_llm.calls) == 1

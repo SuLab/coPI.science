@@ -187,6 +187,11 @@ async def run_profile_pipeline(
 
     new_publications: list[Publication] = []
     pubs_for_synthesis: list[dict[str, Any]] = []
+    # Tracks which PMIDs already have a record in pubs_for_synthesis, so a PMID
+    # whose pubmed_records entry appears more than once (issue #22 COR-16
+    # residual) contributes its abstract to the synthesis context once, not
+    # once per duplicate record.
+    synthesis_pmids_seen: set[str] = set()
 
     for rec in pubmed_records:
         pmid = rec.get("pmid")
@@ -231,12 +236,14 @@ async def run_profile_pipeline(
             )
             db.add(pub)
             new_publications.append(pub)
-            existing_pubs[pmid] = pub  # COR-16: a PMID repeated later in this same
-            # loop (e.g. two ORCID works resolving to one PMID) must hit the update
-            # branch above, not db.add a second row that collides with
+            # COR-16: a PMID repeated later in this same loop (e.g. two ORCID
+            # works resolving to one PMID) must hit the update branch above,
+            # not db.add a second row that collides with
             # uq_publications_user_pmid (migration 0025).
+            existing_pubs[pmid] = pub
 
-        if is_research and rec.get("abstract"):
+        if is_research and rec.get("abstract") and pmid not in synthesis_pmids_seen:
+            synthesis_pmids_seen.add(pmid)
             pubs_for_synthesis.append(rec)
 
     await db.flush()
@@ -318,6 +325,11 @@ async def run_profile_pipeline(
     synthesized: dict[str, Any] = {}
     try:
         synthesized = await synthesize_profile(context_text, user.name)
+        # extract_json can return a parsed JSON array (or other non-dict) for a
+        # malformed LLM response; normalize so validation/apply_synthesis below
+        # never call a dict method on a non-dict (Minor 2).
+        if not isinstance(synthesized, dict):
+            synthesized = {}
     except Exception as exc:
         logger.error("LLM synthesis failed for %s: %s", user.name, exc)
         update_progress("synthesis_failed", str(exc))
@@ -340,6 +352,9 @@ async def run_profile_pipeline(
                 context_text + "\n\nIMPORTANT: Ensure research_summary is 150-250 words.",
                 user.name,
             )
+            # Same non-dict normalization as the first attempt (Minor 2).
+            if not isinstance(synthesized, dict):
+                synthesized = {}
             validated = _validate_profile(synthesized)
         except Exception as exc:
             logger.error("Retry synthesis failed: %s", exc)
@@ -470,8 +485,23 @@ async def run_profile_pipeline(
     agent_reg = agent_result.scalar_one_or_none()
     agent_id = agent_reg.agent_id if agent_reg else None
 
-    # Step 9b: Generate private profile seed (if no live profile and no existing seed)
-    if not profile.private_profile_md and not profile.private_profile_seed:
+    # Step 9b: Generate private profile seed, but ONLY for a PI who has never
+    # completed onboarding (issue #22 COR-23 fix round). `POST
+    # /onboarding/private-profile` always sets onboarding_complete=True and,
+    # when submitted blank, clears both private_profile_md and
+    # private_profile_seed (onboarding.py:save_private_profile) — that is a
+    # deliberate "no private instructions" choice, not an absence of one yet.
+    # Without this gate, the next pipeline run (regenerate, admin re-enqueue,
+    # monthly refresh) would re-enter this branch, synthesize a fresh seed, and
+    # (since the export below is unconditional) write model-authored private
+    # instructions to disk for an agent whose PI explicitly cleared them. An
+    # admin-seeded PI who never onboarded (onboarding_complete=False) is
+    # unaffected and still gets a seed generated and exported.
+    if (
+        not profile.private_profile_md
+        and not profile.private_profile_seed
+        and not user.onboarding_complete
+    ):
         update_progress("step9b", "Generating agent instructions seed...")
         try:
             seed = await synthesize_private_profile(context_text, user.name)
@@ -587,7 +617,7 @@ _MIN_SUMMARY_WORDS = 100
 _MAX_SUMMARY_WORDS = 350
 
 
-def _validate_profile(profile: dict[str, Any]) -> bool:
+def _validate_profile(profile: dict[str, Any] | None) -> bool:
     """
     Validate synthesized profile fields.
     Returns True if valid.
