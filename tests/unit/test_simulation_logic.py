@@ -733,6 +733,59 @@ class TestCheckThreadOutcomeRequiresTheMostRecentMemo:
 
 
 # ---------------------------------------------------------------
+# _is_finalize_marker — shared by the public and private ✅ checks (#20 COR-4)
+# ---------------------------------------------------------------
+
+class TestFinalizeMarkerIsSharedAcrossPublicAndPrivate:
+    """Both the public thread path and the private-channel path must accept the
+    same two spellings of the finalize signal — today only the private path
+    does; the public path matches raw ✅ only."""
+
+    @pytest.fixture(autouse=True)
+    def _no_live_llm_or_disk(self, monkeypatch, tmp_path):
+        """_close_thread ends in _update_agent_memory, which calls the real
+        Anthropic API and writes profiles/memory/<id>/public.md. Stub both:
+        this is tests/unit. See red-team B2."""
+        from unittest.mock import AsyncMock
+
+        import src.agent.agent as agent_mod
+        monkeypatch.setattr(agent_mod, "PROFILES_DIR", tmp_path)
+        monkeypatch.setattr(
+            "src.agent.simulation.generate_agent_response",
+            AsyncMock(return_value="## Working Memory\n1. nothing.\n"),
+        )
+
+    def test_is_finalize_marker_accepts_both_forms(self):
+        engine = SimulationEngine(agents=[], slack_clients={})
+        assert engine._is_finalize_marker("✅") is True
+        assert engine._is_finalize_marker("Sounds good :white_check_mark:") is True
+        assert engine._is_finalize_marker("no marker here") is False
+
+    async def test_public_thread_path_accepts_the_shortcode_form(self):
+        from src.agent.agent import Agent
+        from src.agent.message_log import LogEntry
+        from src.agent.state import ThreadState
+
+        a = Agent("a", "ABot", "A PI")
+        b = Agent("b", "BBot", "B PI")
+        engine = SimulationEngine(agents=[a, b], slack_clients={})
+        engine.message_log.append(LogEntry(
+            ts="1.0", channel="general", sender_agent_id="b", sender_name="BBot",
+            content="kickoff", posted_at=1.0, is_bot=True,
+        ))
+        engine.message_log.append(LogEntry(
+            ts="2.0", channel="general", sender_agent_id="b", sender_name="BBot",
+            content=":memo: Summary: proposal v1", thread_ts="1.0", posted_at=2.0, is_bot=True,
+        ))
+        thread = ThreadState(thread_id="1.0", channel="general", other_agent_id="b")
+
+        await engine._check_thread_outcome(a, thread, "Sounds great :white_check_mark:")
+
+        assert len(a.state.pending_proposals) == 1
+        assert thread.status == "closed"
+
+
+# ---------------------------------------------------------------
 # mint_ts — monotonic, unique, ts-shaped ids (DB-primary store)
 # ---------------------------------------------------------------
 

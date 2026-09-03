@@ -1532,6 +1532,20 @@ class SimulationEngine:
                 agent.agent_id, thread.thread_id, exc,
             )
 
+    @staticmethod
+    def _is_finalize_marker(text: str) -> bool:
+        """True when ``text`` carries the proposal-confirmation signal.
+
+        Accepts both the raw emoji and Slack's shortcode — the LLM is asked
+        for the unicode form (agent.py, prompts/phase4-thread-reply.md,
+        prompts/agent-system.md) but nothing stops it emitting the shortcode
+        on its own, and a missed match here means a silent grind to the
+        12-message timeout close instead of a clean finalize. See COR-4.
+        Shared by the public (_check_thread_outcome) and private
+        (_check_private_channel_outcome) paths so they can't drift again.
+        """
+        return "✅" in text or ":white_check_mark:" in text
+
     async def _check_thread_outcome(
         self,
         agent: Agent,
@@ -1540,7 +1554,7 @@ class SimulationEngine:
     ) -> None:
         """Check if a thread should be closed based on the latest reply."""
         # Check for ✅ confirmation of a :memo: Summary
-        if "✅" in latest_reply:
+        if self._is_finalize_marker(latest_reply):
             # The memo must be the OTHER agent's MOST RECENT message in the
             # thread — not merely the most recent one of theirs that happens
             # to contain :memo:. If they have said anything else since (a
@@ -1719,7 +1733,7 @@ class SimulationEngine:
         """
         if channel in self._finalized_private_channels:
             return
-        if "✅" not in message_text and ":white_check_mark:" not in message_text:
+        if not self._is_finalize_marker(message_text):
             return
         cid = self._channel_id_map.get(channel)
         if not cid:
