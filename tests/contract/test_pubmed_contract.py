@@ -2,8 +2,9 @@
 
 Pins the efetch-XML parse path, the esummary/idconv JSON paths, and the
 swallow-and-continue error behavior. respx intercepts the internal httpx client;
-_ncbi_get sleeps ~0.12s per *successful* call (rate limit), so these are a touch
-slow but deterministic.
+_ncbi_get retries a transient failure and paces every call — success or
+failure — at a rate keyed on whether NCBI_API_KEY is set; these tests zero the
+retry backoff to stay fast.
 """
 
 import httpx
@@ -16,6 +17,24 @@ pytestmark = pytest.mark.contract
 
 EUTILS = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
 IDCONV = "https://pmc.ncbi.nlm.nih.gov/tools/idconv/api/v1/articles"
+
+
+@pytest.fixture(autouse=True)
+def _no_retry_backoff(monkeypatch):
+    """These tests pin parse/error-swallow behaviour, not the retry loop (issue #23 COR-29a) —
+    zero the backoff so a mocked 5xx doesn't add ~3.5s of real sleep per test. The per-call pacing
+    sleep (COR-29b) is left alone; it is small and already accepted overhead per the module
+    docstring above ("a touch slow but deterministic")."""
+    monkeypatch.setattr(pubmed, "_RETRY_BACKOFF", 0)
+
+
+def test_semaphores_are_sized_by_api_key_presence():
+    """COR-29c: a keyless deployment must use the smaller semaphore/slower pacing; a keyed one
+    the larger/faster pair. Both must exist regardless of the current settings' key."""
+    assert pubmed._NCBI_SEMAPHORES[False]._value == 2
+    assert pubmed._NCBI_SEMAPHORES[True]._value == 8
+    assert pubmed._NCBI_PACING_SECONDS[False] == 0.34
+    assert pubmed._NCBI_PACING_SECONDS[True] == 0.12
 
 EFETCH_XML = """<?xml version="1.0"?>
 <PubmedArticleSet>

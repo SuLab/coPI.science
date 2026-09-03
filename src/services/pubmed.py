@@ -9,6 +9,7 @@ from typing import Any
 import httpx
 
 from src.config import get_settings
+from src.services.http_retry import get_with_retry
 
 logger = logging.getLogger(__name__)
 
@@ -69,8 +70,17 @@ def reconcile_pub_doi(
         return assigned, "ok"
     return auth, "corrected"
 
-# Rate limiting: with API key 10/s, without 3/s
-_request_semaphore = asyncio.Semaphore(8)  # Conservative limit
+# Rate limiting: NCBI's policy caps anonymous traffic at 3 req/s and API-keyed
+# traffic at 10 req/s. Two long-lived semaphores (rather than one resized at
+# call time) because the key/no-key split is a per-process constant, and a
+# Semaphore is safe to construct outside a running loop in py3.10+. Both are a
+# shade under NCBI's ceiling.
+_NCBI_SEMAPHORES = {True: asyncio.Semaphore(8), False: asyncio.Semaphore(2)}
+_NCBI_PACING_SECONDS = {True: 0.12, False: 0.34}
+
+# Overridable by tests (see test_pubmed_contract.py) — the retry loop's own
+# exponential backoff, not the per-call pacing sleep above.
+_RETRY_BACKOFF = 0.5
 
 
 # NCBI's E-utilities usage policy requires every request to identify the caller with
@@ -82,18 +92,27 @@ _NCBI_TOOL = "copi-science"
 
 
 async def _ncbi_get(url: str, params: dict[str, Any]) -> httpx.Response:
-    """Make a rate-limited, identified GET request to NCBI."""
+    """Make a rate-limited, identified, retried GET request to NCBI.
+
+    Retries a transient failure (COR-29a) through the shared ``get_with_retry`` helper. The
+    per-call pacing sleep runs in a ``finally`` — unconditionally, success or exhausted-retries
+    failure (COR-29b) — because the old code slept only after ``raise_for_status()`` succeeded,
+    which skipped the self-imposed pacing exactly when NCBI was already throttling us.
+    """
     settings = get_settings()
-    if settings.ncbi_api_key:
+    has_key = bool(settings.ncbi_api_key)
+    if has_key:
         params["api_key"] = settings.ncbi_api_key
     params.setdefault("tool", _NCBI_TOOL)
     params.setdefault("email", settings.ncbi_contact_email or settings.ses_sender_email)
-    async with _request_semaphore:
+    async with _NCBI_SEMAPHORES[has_key]:
         async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
-            resp = await client.get(url, params=params)
-            resp.raise_for_status()
-            await asyncio.sleep(0.12)  # ~8 req/s
-            return resp
+            try:
+                return await get_with_retry(
+                    client, url, params=params, backoff=_RETRY_BACKOFF
+                )
+            finally:
+                await asyncio.sleep(_NCBI_PACING_SECONDS[has_key])
 
 
 async def fetch_pubmed_records(pmids: list[str]) -> list[dict[str, Any]]:
