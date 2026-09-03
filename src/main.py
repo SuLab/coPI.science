@@ -3,9 +3,9 @@
 import logging
 import uuid
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 
@@ -152,7 +152,18 @@ def create_app() -> FastAPI:
 
     @application.get("/api/health")
     async def health():
-        """Health check endpoint."""
+        """Health check endpoint. Probes the DB so a broken schema or a
+        downed Postgres is never reported healthy (#27 I2 — on 2026-07-30
+        this route returned 200 while every ORM read of agent_messages
+        raised UndefinedColumnError, and nginx's depends_on: service_healthy
+        let traffic through regardless)."""
+        try:
+            session_factory = get_session_factory()
+            async with session_factory() as db:
+                await db.execute(text("SELECT 1"))
+        except Exception as exc:
+            logger.warning("Health check DB probe failed: %s", exc)
+            raise HTTPException(status_code=503, detail="database unavailable") from exc
         return {"status": "ok"}
 
     return application
