@@ -874,6 +874,99 @@ async def test_profile_save_persists_user_and_profile_fields_and_bumps_the_versi
     assert prof["profile_version"] == 4
 
 
+async def test_profile_save_partial_post_does_not_blank_omitted_fields(client, db_session):
+    u = await factories.make_user(
+        db_session, name="Keep", email="keep@example.org",
+        institution="Old Institute", department="Old Dept",
+    )
+    await factories.make_profile(
+        db_session, user=u,
+        research_summary="old summary", techniques=["old-t"],
+        experimental_models=["old-m"], disease_areas=["old-d"],
+        key_targets=["old-k"], keywords=["old-kw"],
+    )
+    await db_session.flush()
+
+    # A crafted/partial POST — templates never send one, but the route must not
+    # assume that. Omits institution, research_summary and techniques.
+    r = await client.post(
+        "/profile/save",
+        headers=_auth(u.id),
+        data={"name": "Keep", "email": "keep@example.org", "department": "New Dept"},
+    )
+    assert r.status_code == 302
+
+    user = await _user_row(db_session, u.id)
+    assert user["institution"] == "Old Institute"  # omitted -> untouched
+    assert user["department"] == "New Dept"        # present -> updated
+
+    prof = await _prof(db_session, u.id)
+    assert prof["research_summary"] == "old summary"
+    assert prof["techniques"] == ["old-t"]
+    assert prof["experimental_models"] == ["old-m"]
+    assert prof["disease_areas"] == ["old-d"]
+    assert prof["key_targets"] == ["old-k"]
+    assert prof["keywords"] == ["old-kw"]
+
+
+async def test_onboarding_save_profile_partial_post_does_not_blank_omitted_fields(
+    client, db_session
+):
+    u = await factories.make_user(db_session, email="ob@example.org")
+    await factories.make_profile(
+        db_session, user=u, research_summary="old summary", techniques=["old-t"],
+    )
+    await db_session.flush()
+
+    r = await client.post(
+        "/onboarding/save-profile",
+        headers=_auth(u.id),
+        data={"email": "ob@example.org", "keywords": "new-kw"},
+    )
+    assert r.status_code == 302
+
+    prof = await _prof(db_session, u.id)
+    assert prof["research_summary"] == "old summary"
+    assert prof["techniques"] == ["old-t"]
+    assert prof["keywords"] == ["new-kw"]
+
+
+async def test_profile_save_still_clears_a_field_the_user_emptied(client, db_session):
+    """The other half of V6-form1..4: an EMPTY value is a deliberate clear and must
+    still be written. FastAPI maps "" to the parameter default, so a value-based
+    guard (`Form(None)` + `is not None`) would silently ignore it."""
+    u = await factories.make_user(db_session, name="Clr", email="clr@example.org",
+                                  institution="Old Institute")
+    await factories.make_profile(db_session, user=u, research_summary="old", techniques=["t"])
+    await db_session.flush()
+
+    r = await client.post(
+        "/profile/save", headers=_auth(u.id),
+        data={"name": "Clr", "email": "clr@example.org", "institution": "",
+              "research_summary": "", "techniques": ""},
+    )
+    assert r.status_code == 302
+    assert (await _user_row(db_session, u.id))["institution"] is None
+    prof = await _prof(db_session, u.id)
+    assert prof["research_summary"] == ""
+    assert prof["techniques"] == []
+
+
+async def test_onboarding_save_profile_still_clears_a_field_the_user_emptied(client, db_session):
+    u = await factories.make_user(db_session, email="ob-clr@example.org")
+    await factories.make_profile(db_session, user=u, research_summary="old", techniques=["t"])
+    await db_session.flush()
+
+    r = await client.post(
+        "/onboarding/save-profile", headers=_auth(u.id),
+        data={"email": "ob-clr@example.org", "research_summary": "", "techniques": ""},
+    )
+    assert r.status_code == 302
+    prof = await _prof(db_session, u.id)
+    assert prof["research_summary"] == ""
+    assert prof["techniques"] == []
+
+
 async def test_profile_save_rejects_a_bad_or_taken_email_and_persists_nothing(
     client, db_session
 ):

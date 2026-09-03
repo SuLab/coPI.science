@@ -118,6 +118,7 @@ async def save_profile(
     current_user: User = Depends(get_current_user),
 ):
     """Save profile edits from onboarding."""
+    form = await request.form()
 
     # Email is required at onboarding. Validate before persisting anything so a
     # bad value rejects the whole submission (mirrors profile_save on /profile).
@@ -145,12 +146,18 @@ async def save_profile(
         profile = ResearcherProfile(user_id=current_user.id)
         db.add(profile)
 
-    profile.research_summary = research_summary
-    profile.techniques = parse_list(techniques)
-    profile.experimental_models = parse_list(experimental_models)
-    profile.disease_areas = parse_list(disease_areas)
-    profile.key_targets = parse_list(key_targets)
-    profile.keywords = parse_list(keywords)
+    if "research_summary" in form:
+        profile.research_summary = research_summary
+    if "techniques" in form:
+        profile.techniques = parse_list(techniques)
+    if "experimental_models" in form:
+        profile.experimental_models = parse_list(experimental_models)
+    if "disease_areas" in form:
+        profile.disease_areas = parse_list(disease_areas)
+    if "key_targets" in form:
+        profile.key_targets = parse_list(key_targets)
+    if "keywords" in form:
+        profile.keywords = parse_list(keywords)
     profile.profile_version = (profile.profile_version or 0) + 1
 
     await db.commit()

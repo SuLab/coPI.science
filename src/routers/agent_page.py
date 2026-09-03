@@ -1275,6 +1275,7 @@ async def save_public_profile(
     current_user: User = Depends(get_current_user),
 ):
     """Save public profile changes (PI or delegate)."""
+    form = await request.form()
     agent, is_owner = await get_agent_with_access(agent_id, db, current_user)
     if agent.status != "active":
         return RedirectResponse(url="/agent", status_code=302)
@@ -1288,12 +1289,18 @@ async def save_public_profile(
         profile = ResearcherProfile(user_id=agent.user_id)
         db.add(profile)
 
-    profile.research_summary = research_summary
-    profile.techniques = _parse_list(techniques)
-    profile.experimental_models = _parse_list(experimental_models)
-    profile.disease_areas = _parse_list(disease_areas)
-    profile.key_targets = _parse_list(key_targets)
-    profile.keywords = _parse_list(keywords)
+    if "research_summary" in form:
+        profile.research_summary = research_summary
+    if "techniques" in form:
+        profile.techniques = _parse_list(techniques)
+    if "experimental_models" in form:
+        profile.experimental_models = _parse_list(experimental_models)
+    if "disease_areas" in form:
+        profile.disease_areas = _parse_list(disease_areas)
+    if "key_targets" in form:
+        profile.key_targets = _parse_list(key_targets)
+    if "keywords" in form:
+        profile.keywords = _parse_list(keywords)
     profile.profile_version = (profile.profile_version or 0) + 1
 
     await db.commit()

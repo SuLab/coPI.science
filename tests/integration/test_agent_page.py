@@ -1153,6 +1153,58 @@ async def test_saving_the_public_profile_updates_the_pis_profile_not_the_editors
     assert delegate_profile.research_summary == "Delegate's own"
 
 
+async def test_save_public_profile_partial_post_does_not_blank_omitted_fields(
+    client, db_session, world
+):
+    """The `world` fixture already gives `world.pi` a ResearcherProfile
+    (`factories.make_profile(db_session, user=pi)` in the fixture itself) — and
+    `researcher_profiles.user_id` is UNIQUE, so a second `factories.make_profile(...,
+    user=world.pi, ...)` here would raise IntegrityError at flush. Mutate the row
+    the fixture already created instead."""
+    profile = (await db_session.execute(
+        select(ResearcherProfile).where(ResearcherProfile.user_id == world.pi.id)
+    )).scalar_one()
+    profile.research_summary = "old summary"
+    profile.techniques = ["old-t"]
+    await db_session.flush()
+
+    r = await client.post(
+        f"/agent/{OWNER_AGENT}/public-profile/save",
+        headers=_auth(world.pi.id),
+        data={"keywords": "new-kw"},
+    )
+    assert r.status_code == 302
+
+    profile = (await db_session.execute(
+        select(ResearcherProfile).where(ResearcherProfile.user_id == world.pi.id)
+    )).scalar_one()
+    assert profile.research_summary == "old summary"
+    assert profile.techniques == ["old-t"]
+    assert profile.keywords == ["new-kw"]
+
+
+async def test_save_public_profile_still_clears_a_field_the_user_emptied(client, db_session, world):
+    profile = (await db_session.execute(
+        select(ResearcherProfile).where(ResearcherProfile.user_id == world.pi.id)
+    )).scalar_one()
+    profile.research_summary = "old"
+    profile.techniques = ["t"]
+    await db_session.flush()
+
+    r = await client.post(
+        f"/agent/{OWNER_AGENT}/public-profile/save",
+        headers=_auth(world.pi.id),
+        data={"research_summary": "", "techniques": ""},
+    )
+    assert r.status_code == 302
+
+    profile = (await db_session.execute(
+        select(ResearcherProfile).where(ResearcherProfile.user_id == world.pi.id)
+    )).scalar_one()
+    assert profile.research_summary == ""
+    assert profile.techniques == []
+
+
 async def test_connect_slack_stores_the_pis_slack_user_id(client, db_session, world, slack):
     world.agent.slack_bot_token = "xoxb-fake-for-tests"
     await db_session.flush()

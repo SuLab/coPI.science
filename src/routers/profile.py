@@ -120,6 +120,12 @@ async def profile_save(
     current_user: User = Depends(get_current_user),
 ):
     """Save profile changes."""
+    # Which fields the client actually SENT. FastAPI maps an empty Form value to
+    # the parameter default, so `Form(None)` cannot tell "the user cleared this
+    # box" (must write "") from "the field was not in the POST at all" (must
+    # leave the stored value alone). The raw form can. See issue #22 COR-22.
+    form = await request.form()
+
     # Validate the email up front so a bad value rejects the whole submission
     # before anything is persisted.
     email_clean = (email or "").strip().lower()
@@ -143,9 +149,9 @@ async def profile_save(
     # Update user fields
     if name:
         current_user.name = name
-    if institution is not None:
+    if "institution" in form:
         current_user.institution = institution or None
-    if department is not None:
+    if "department" in form:
         current_user.department = department or None
 
     # Update profile fields
@@ -157,12 +163,18 @@ async def profile_save(
         profile = ResearcherProfile(user_id=current_user.id)
         db.add(profile)
 
-    profile.research_summary = research_summary
-    profile.techniques = _parse_list(techniques)
-    profile.experimental_models = _parse_list(experimental_models)
-    profile.disease_areas = _parse_list(disease_areas)
-    profile.key_targets = _parse_list(key_targets)
-    profile.keywords = _parse_list(keywords)
+    if "research_summary" in form:
+        profile.research_summary = research_summary
+    if "techniques" in form:
+        profile.techniques = _parse_list(techniques)
+    if "experimental_models" in form:
+        profile.experimental_models = _parse_list(experimental_models)
+    if "disease_areas" in form:
+        profile.disease_areas = _parse_list(disease_areas)
+    if "key_targets" in form:
+        profile.key_targets = _parse_list(key_targets)
+    if "keywords" in form:
+        profile.keywords = _parse_list(keywords)
     profile.profile_version = (profile.profile_version or 0) + 1
 
     await db.commit()
