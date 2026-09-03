@@ -835,7 +835,7 @@ def test_planned_objects_matches_what_the_migration_files_actually_create():
         "column": re.compile(r'add_column\(\s*\n?\s*"[^"]+",\s*\n?\s*sa\.Column\("([^"]+)"'),
         "constraint": re.compile(r'create_unique_constraint\(\s*\n?\s*"([^"]+)"'),
     }
-    for revision in ("0019", "0020", "0021", "0022", "0023", "0024", "0025"):
+    for revision in ("0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027"):
         matches = list(versions_dir.glob(f"{revision}_*.py"))
         assert len(matches) == 1, (revision, matches)
         source = matches[0].read_text()

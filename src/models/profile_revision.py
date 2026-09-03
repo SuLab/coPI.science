@@ -49,6 +49,7 @@ class ProfileRevision(Base):
             "profile_type",
             created_at.desc(),
         ),
+        Index("ix_profile_revisions_changed_by_user_id", "changed_by_user_id"),
     )
 
     def __repr__(self) -> str:

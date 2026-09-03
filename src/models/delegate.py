@@ -3,7 +3,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, String, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, String, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -12,6 +12,10 @@ from src.database import Base
 
 class DelegateInvitation(Base):
     __tablename__ = "delegate_invitations"
+    __table_args__ = (
+        Index("ix_delegate_invitations_invited_by_user_id", "invited_by_user_id"),
+        Index("ix_delegate_invitations_accepted_by_user_id", "accepted_by_user_id"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
@@ -90,6 +94,8 @@ class AgentDelegate(Base):
     invitation: Mapped["DelegateInvitation | None"] = relationship("DelegateInvitation")
 
     __table_args__ = (
+        Index("ix_agent_delegates_user_id", "user_id"),
+        Index("ix_agent_delegates_invitation_id", "invitation_id"),
         # One delegation relationship per user per agent
         {"comment": "unique constraint on (agent_registry_id, user_id) added in migration"},
     )

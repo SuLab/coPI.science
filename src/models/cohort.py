@@ -25,7 +25,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import JSON, DateTime, ForeignKey, String, Text, func
+from sqlalchemy import JSON, DateTime, ForeignKey, Index, String, Text, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -34,6 +34,9 @@ from src.database import Base
 
 class Cohort(Base):
     __tablename__ = "cohorts"
+    __table_args__ = (
+        Index("ix_cohorts_created_by", "created_by"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
@@ -92,6 +95,7 @@ class CohortMembership(Base):
     )
 
     __table_args__ = (
+        Index("ix_cohort_memberships_added_by", "added_by"),
         # One membership row per (cohort, agent)
         {"comment": "unique constraint on (cohort_id, agent_id) added in migration"},
     )
@@ -128,6 +132,9 @@ class CohortAuditEvent(Base):
     """
 
     __tablename__ = "cohort_audit_events"
+    __table_args__ = (
+        Index("ix_cohort_audit_events_actor_id", "actor_id"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4

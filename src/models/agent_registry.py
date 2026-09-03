@@ -3,7 +3,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, SmallInteger, String, Text, func
+from sqlalchemy import DateTime, ForeignKey, Index, SmallInteger, String, Text, func
 from sqlalchemy.dialects.postgresql import ARRAY, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -12,6 +12,9 @@ from src.database import Base
 
 class AgentRegistry(Base):
     __tablename__ = "agents"
+    __table_args__ = (
+        Index("ix_agents_approved_by", "approved_by"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
@@ -104,6 +107,9 @@ class ProposalReview(Base):
     thread_decision: Mapped["ThreadDecision"] = relationship("ThreadDecision")
 
     __table_args__ = (
+        Index("ix_proposal_reviews_user_id", "user_id"),
+        Index("ix_proposal_reviews_delegate_user_id", "delegate_user_id"),
+        Index("ix_proposal_reviews_reviewed_by_user_id", "reviewed_by_user_id"),
         # Each agent can only review a thread decision once
         {"comment": "unique constraint on (thread_decision_id, agent_id) added in migration"},
     )

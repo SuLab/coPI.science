@@ -203,9 +203,38 @@ PLANNED_OBJECTS: tuple[PlannedObject, ...] = (
     PlannedObject("0024", "column", "role", "agents"),
     # 0025_publications_unique_user_pmid
     PlannedObject("0025", "constraint", "uq_publications_user_pmid", "publications"),
+    # 0026_pcm_user_cascade recreates an existing FK under its original name — not a
+    # new object, so it gets no PlannedObject entry (see the migration's docstring).
+    # 0027_fk_and_badge_indexes
+    PlannedObject("0027", "index", "ix_access_allowlist_added_by_user_id", "access_allowlist"),
+    PlannedObject("0027", "index", "ix_agent_delegates_user_id", "agent_delegates"),
+    PlannedObject("0027", "index", "ix_agent_delegates_invitation_id", "agent_delegates"),
+    PlannedObject("0027", "index", "ix_agents_approved_by", "agents"),
+    PlannedObject("0027", "index", "ix_cohort_audit_events_actor_id", "cohort_audit_events"),
+    PlannedObject("0027", "index", "ix_cohort_memberships_added_by", "cohort_memberships"),
+    PlannedObject("0027", "index", "ix_cohorts_created_by", "cohorts"),
+    PlannedObject(
+        "0027", "index", "ix_delegate_invitations_invited_by_user_id", "delegate_invitations"
+    ),
+    PlannedObject(
+        "0027", "index", "ix_delegate_invitations_accepted_by_user_id", "delegate_invitations"
+    ),
+    PlannedObject("0027", "index", "ix_email_notifications_thread_decision_id", "email_notifications"),
+    PlannedObject("0027", "index", "ix_email_notifications_agent_registry_id", "email_notifications"),
+    PlannedObject("0027", "index", "ix_private_channel_members_user_id", "private_channel_members"),
+    PlannedObject(
+        "0027", "index", "ix_private_channel_members_added_by_user_id", "private_channel_members"
+    ),
+    PlannedObject("0027", "index", "ix_profile_revisions_changed_by_user_id", "profile_revisions"),
+    PlannedObject("0027", "index", "ix_proposal_reviews_user_id", "proposal_reviews"),
+    PlannedObject("0027", "index", "ix_proposal_reviews_delegate_user_id", "proposal_reviews"),
+    PlannedObject("0027", "index", "ix_proposal_reviews_reviewed_by_user_id", "proposal_reviews"),
+    PlannedObject("0027", "index", "ix_slack_app_provisions_agent_registry_id", "slack_app_provisions"),
+    PlannedObject("0027", "index", "ix_thread_decisions_agent_a_outcome", "thread_decisions"),
+    PlannedObject("0027", "index", "ix_thread_decisions_agent_b_outcome", "thread_decisions"),
 )
 
-REVISION_ORDER = ("0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025")
+REVISION_ORDER = ("0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027")
 
 
 def planned_objects_between(current: str, target: str) -> tuple[PlannedObject, ...]:

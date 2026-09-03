@@ -3,7 +3,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -59,6 +59,8 @@ class EmailNotification(Base):
     agent: Mapped["AgentRegistry"] = relationship("AgentRegistry")
 
     __table_args__ = (
+        Index("ix_email_notifications_thread_decision_id", "thread_decision_id"),
+        Index("ix_email_notifications_agent_registry_id", "agent_registry_id"),
         # One notification per user per proposal per category
         {"comment": "unique constraint on (user_id, thread_decision_id, category) added in migration"},
     )

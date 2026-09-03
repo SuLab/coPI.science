@@ -212,6 +212,10 @@ class LlmCallLog(Base):
 
 class ThreadDecision(Base):
     __tablename__ = "thread_decisions"
+    __table_args__ = (
+        Index("ix_thread_decisions_agent_a_outcome", "agent_a", "outcome"),
+        Index("ix_thread_decisions_agent_b_outcome", "agent_b", "outcome"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
@@ -270,6 +274,8 @@ class PrivateChannelMember(Base):
             unique=True,
             postgresql_where="user_id IS NOT NULL",
         ),
+        Index("ix_private_channel_members_user_id", "user_id"),
+        Index("ix_private_channel_members_added_by_user_id", "added_by_user_id"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
