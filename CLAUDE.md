@@ -17,6 +17,12 @@ docker compose exec -T -e TEST_DATABASE_URL=postgresql+asyncpg://copi:copi@postg
   app python -m pytest tests/ -v
 ```
 
+**Note (2026-09, #27 I3):** the command above works against the **dev** compose file, whose
+`.:/app` bind mount supplies `tests/`. `tests/` is excluded from the built image by
+`.dockerignore`, so the same command against a prod-built container reports
+"file or directory not found: tests/". Run the suite on the host (`./scripts/ci.sh`) or with the
+dev compose file.
+
 The named database must already exist — the suite migrates it, it does not create
 it. Add a fresh scratch DB with
 `docker compose exec -T postgres createdb -U copi copi_xN`, and give concurrent
@@ -73,7 +79,7 @@ docker compose $C --profile agent run -d --name agent-run agent python -m src.ag
 On resume the sim fetches Slack history for each bot in roster order before reaching
 turn 1. Slack throttles this hard — expect ~10 minutes of
 `[<first-agent>] Rate limited, retrying in 10s (attempt 1/3)` before the first
-`=== Turn 1 ===`. Repeated `attempt 1/3` (never `2/3`) means each call 429s once then
+`=== Turn 1: <agent> ===`. Repeated `attempt 1/3` (never `2/3`) means each call 429s once then
 succeeds on retry — that is forward progress, not a hang.
 
 **Before restarting**, always save logs and rebuild containers:

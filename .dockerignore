@@ -15,3 +15,26 @@ venv
 # Secrets — never in an image layer (compose injects these at runtime via env_file)
 .env
 .env.*
+
+# Bloat + secrets that COPY . . would otherwise bake into every image layer
+# (#27 I3). backups/ is the sharp one: it holds full production pg_dumps AND,
+# as of 2026-08-10, a plaintext prod .env (125 SLACK_BOT_TOKEN_*,
+# POSTGRES_PASSWORD, SLACK_CONFIG_TOKEN/_REFRESH_TOKEN) that the .env/.env.*
+# patterns above do not catch — it has no leading dot and sits two
+# directories down. See scratchpad findings/issue_27.md I3-b.
+backups
+.venv-test
+.venv*
+tests
+.notes
+mutants
+build
+.hypothesis
+.ruff_cache
+.coverage
+.mutmut-cache
+.playwright-mcp
+copi.egg-info
+.superpowers
+**/.env*
+docs/specs
