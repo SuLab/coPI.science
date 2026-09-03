@@ -41,6 +41,12 @@ class _FakeDb:
     async def flush(self):
         pass
 
+    async def execute(self, *a, **k):
+        class _Result:
+            def scalar_one_or_none(self):
+                return None
+        return _Result()
+
 
 @pytest.fixture
 def ses(monkeypatch):
@@ -159,3 +165,63 @@ def test_welcome_email_describes_replying_when_inbound_is_enabled(monkeypatch):
     _, msg = build_welcome_email("pi@lab.test", "Ada")
     _, text, _ = _parts(msg.as_string())
     assert "Reply with a rating" in text
+
+
+# --- V4-2: no phantom EmailNotification row on a failed/suppressed send -------
+
+
+async def test_review_reminder_does_not_log_a_notification_when_ses_fails(monkeypatch):
+    monkeypatch.setattr(get_settings(), "enable_inbound_email", False)
+    monkeypatch.setattr(get_settings(), "outbound_email_allowlist", "")
+
+    class _BoomingSES:
+        def send_raw_email(self, **kwargs):
+            raise RuntimeError("SES throttled")
+
+    monkeypatch.setattr("boto3.client", lambda *a, **k: _BoomingSES())
+    user, agent, td = _lab()
+    db = _FakeDb()
+
+    ok = await send_proposal_notification(
+        user=user, thread_decision=td, agent=agent,
+        other_bot_name="BetaBot", total_unreviewed=1, db=db,
+    )
+
+    assert ok is False
+    assert db.added == [], (
+        "an EmailNotification row (status='sent') was created even though the SES send failed — "
+        "a phantom 'sent' row permanently blocks re-sending this proposal_review reminder"
+    )
+
+
+async def test_new_proposal_alert_does_not_log_a_notification_when_ses_fails(monkeypatch):
+    monkeypatch.setattr(get_settings(), "enable_inbound_email", False)
+    monkeypatch.setattr(get_settings(), "outbound_email_allowlist", "")
+
+    class _BoomingSES:
+        def send_raw_email(self, **kwargs):
+            raise RuntimeError("SES throttled")
+
+    monkeypatch.setattr("boto3.client", lambda *a, **k: _BoomingSES())
+    user, agent, td = _lab()
+    db = _FakeDb()
+
+    sent = await _send_new_proposal_email(user, td, agent, "BetaBot", db)
+
+    assert sent is False
+    assert db.added == []
+
+
+async def test_new_proposal_alert_does_not_log_a_notification_when_allowlist_suppressed(monkeypatch):
+    """The sharper form of the bug: an allowlist-suppressed send must not create a phantom
+    row either, or widening the allowlist later never lets this recipient through (the dedup
+    check in _maybe_send_new_proposal matches on the row's existence, not its status)."""
+    monkeypatch.setattr(get_settings(), "enable_inbound_email", False)
+    monkeypatch.setattr(get_settings(), "outbound_email_allowlist", "someone-else@example.org")
+    user, agent, td = _lab()
+    db = _FakeDb()
+
+    sent = await _send_new_proposal_email(user, td, agent, "BetaBot", db)
+
+    assert sent is False
+    assert db.added == []

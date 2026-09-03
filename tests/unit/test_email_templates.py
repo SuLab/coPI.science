@@ -158,6 +158,12 @@ async def test_new_proposal_email_uses_shared_footer(monkeypatch):
         async def flush(self):
             pass
 
+        async def execute(self, *a, **k):
+            class _Result:
+                def scalar_one_or_none(self):
+                    return None
+            return _Result()
+
     user = types.SimpleNamespace(id=uuid.uuid4(), email="pi@example.com")
     agent = types.SimpleNamespace(id=uuid.uuid4(), agent_id="su", bot_name="SuBot")
     td = types.SimpleNamespace(

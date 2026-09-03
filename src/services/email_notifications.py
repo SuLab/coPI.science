@@ -2,7 +2,7 @@
 
 import logging
 import secrets
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 
 from itsdangerous import URLSafeTimedSerializer
 from sqlalchemy import select
@@ -342,18 +342,6 @@ async def send_proposal_notification(
 
     reply_token = secrets.token_urlsafe(48)  # 64-char base64
 
-    # Create notification record
-    notification = EmailNotification(
-        user_id=user.id,
-        thread_decision_id=thread_decision.id,
-        agent_registry_id=agent.id,
-        reply_token=reply_token,
-        category="proposal_review",
-        status="sent",
-    )
-    db.add(notification)
-    await db.flush()
-
     # Build email. Soliciting a reply is only honest when the inbound pipeline
     # is actually on — otherwise PIs answer a dead reply domain and get
     # silence (this is exactly what happened on prod through 2026-08).
@@ -504,6 +492,38 @@ async def send_proposal_notification(
             agent.bot_name,
             thread_decision.id,
         )
+        # Log the notification only now that SES actually accepted it (V4-2). The write
+        # must not be able to un-send mail that already went out:
+        # uq_email_notification_user_thread_category (migration 0016) means a PREVIOUS
+        # row for this (user, proposal, 'proposal_review') — e.g. one Task 21.12's expiry
+        # sweep just marked 'expired', or one an earlier _handle_instruction failure
+        # already marked 'responded' for a still-unreviewed proposal (M1) — makes a plain
+        # INSERT fail. Reconcile that row instead of blindly inserting.
+        result = await db.execute(
+            select(EmailNotification).where(
+                EmailNotification.user_id == user.id,
+                EmailNotification.thread_decision_id == thread_decision.id,
+                EmailNotification.category == "proposal_review",
+            )
+        )
+        notification = result.scalar_one_or_none()
+        if notification is None:
+            db.add(EmailNotification(
+                user_id=user.id,
+                thread_decision_id=thread_decision.id,
+                agent_registry_id=agent.id,
+                reply_token=reply_token,
+                category="proposal_review",
+                status="sent",
+            ))
+        else:
+            notification.reply_token = reply_token
+            notification.agent_registry_id = agent.id
+            notification.status = "sent"
+            notification.response_type = None
+            notification.responded_at = None
+            notification.sent_at = datetime.now(UTC)
+        await db.flush()
         return True
     except Exception as exc:
         logger.error("Failed to send proposal notification to %s: %s", user.email, exc)
@@ -1010,17 +1030,6 @@ async def _send_new_proposal_email(
     settings = get_settings()
     reply_token = secrets.token_urlsafe(48)
 
-    notification = EmailNotification(
-        user_id=user.id,
-        thread_decision_id=td.id,
-        agent_registry_id=agent.id,
-        reply_token=reply_token,
-        category="new_proposal",
-        status="sent",
-    )
-    db.add(notification)
-    await db.flush()
-
     summary = td.summary_text or "(No summary available)"
     channel = td.channel or "unknown"
     # Same gating as send_proposal_notification: never solicit a reply while
@@ -1086,6 +1095,36 @@ async def _send_new_proposal_email(
         reply_to=reply_to, unsubscribe_url=unsubscribe_url,
     )
     if sent:
+        # Log the notification only now that _send_html_email actually sent it (V4-2): its
+        # OWN allowlist check runs before this point, so a suppressed recipient never gets a
+        # phantom row that would block a resend once the allowlist is widened. Same
+        # reconcile-not-insert shape as send_proposal_notification, and for the same reason
+        # (uq_email_notification_user_thread_category, B3/M1).
+        result = await db.execute(
+            select(EmailNotification).where(
+                EmailNotification.user_id == user.id,
+                EmailNotification.thread_decision_id == td.id,
+                EmailNotification.category == "new_proposal",
+            )
+        )
+        notification = result.scalar_one_or_none()
+        if notification is None:
+            db.add(EmailNotification(
+                user_id=user.id,
+                thread_decision_id=td.id,
+                agent_registry_id=agent.id,
+                reply_token=reply_token,
+                category="new_proposal",
+                status="sent",
+            ))
+        else:
+            notification.reply_token = reply_token
+            notification.agent_registry_id = agent.id
+            notification.status = "sent"
+            notification.response_type = None
+            notification.responded_at = None
+            notification.sent_at = datetime.now(UTC)
+        await db.flush()
         logger.info(
             "New-proposal email sent to %s for %s (proposal %s)",
             user.email, agent.bot_name, td.id,
