@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Guided production migration to alembic head 0023 (branch cohort-db-conversations).
+# Guided production migration 0024 → 0028 (and any later head) (branch cohort-db-conversations).
 # Supported starting points: 0018 (main before PR19), 0019, 0020 and 0021.
 # 0021 is origin/main's own alembic head, so that is where a deployment tracking main is.
 #
@@ -53,7 +53,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT"
 
 APPLY=0
-TARGET="0024"
+TARGET="0028"
 DSN="${DATABASE_URL:-}"
 BACKUP_DIR="${MIGRATE_BACKUP_DIR:-backups}"
 SVC="${MIGRATE_SERVICE:-app}"

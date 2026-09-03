@@ -71,7 +71,7 @@ EXIT_OK = 0
 EXIT_BLOCKED = 1
 EXIT_WARN = 2
 
-DEFAULT_TARGET = "0024"
+DEFAULT_TARGET = "0028"
 #: 0023 is supported because it is where a deployment that already took the cohort
 #: migration sits. org1 is at 0018 (see docs/production-migration.md); do not read
 #: this tuple as a statement about any one deployment's current stamp.
@@ -86,11 +86,13 @@ DEFAULT_TARGET = "0024"
 #: already exists, so duplicates cannot be present and there is no 0019 index build to
 #: wait on. All that remains is 0022 (three empty tables) and 0023 (three columns on the
 #: small researcher_profiles).
-SUPPORTED_START_REVISIONS = ("0018", "0019", "0020", "0021", "0023")
+#:
+#: 0024 = where org1 sits after the 08-14 deploy.
+SUPPORTED_START_REVISIONS = ("0018", "0019", "0020", "0021", "0023", "0024")
 
 #: Start revisions at which migration 0019 has already run, so the expensive
 #: ACCESS EXCLUSIVE index build on agent_messages is behind us.
-POST_0019_STARTS = ("0020", "0021")
+POST_0019_STARTS = ("0020", "0021", "0023", "0024")
 
 #: Tables whose row counts are snapshotted for postflight. Empty = every user table.
 SNAPSHOT_SCHEMA = "public"
@@ -1648,10 +1650,12 @@ async def check_sizing(conn, rev: str | None = None):
     """agent_messages row count, size, and the estimated lock window.
 
     The estimate is a function of the 0019 index build, so it only applies when 0019 is
-    still pending. Starting from 0020/0021 that cost is already paid and the remaining
-    chain (0022's three empty tables, 0023's three columns on a small table) does not
-    scale with agent_messages at all — quoting the row-scaled number there would tell an
-    operator to book an outage they do not need.
+    still pending. Starting from 0020/0021/0023/0024 that cost is already paid, but the
+    remaining chain to 0028 is not a no-op: 0025 adds a UNIQUE constraint on publications
+    (an ACCESS EXCLUSIVE index build scaled by that table's row count, not
+    agent_messages'), 0026 drops/recreates one FK, 0027 runs 20 non-concurrent
+    CREATE INDEXes, and 0028 adds one nullable column. So this branch sizes
+    publications instead of quoting the (already-paid) 0019 cost.
     """
     title = "Sizing and expected lock window"
     if not await table_exists(conn, "agent_messages"):
@@ -1659,22 +1663,23 @@ async def check_sizing(conn, rev: str | None = None):
     rows = int(await fetch_one_value(conn, "SELECT count(*) FROM agent_messages"))
     if rev in POST_0019_STARTS:
         heap = int(await fetch_one_value(conn, "SELECT pg_relation_size('agent_messages')"))
+        pubs = (
+            int(await fetch_one_value(conn, "SELECT count(*) FROM publications"))
+            if await table_exists(conn, "publications")
+            else 0
+        )
+        status, tail = sizing_status(pubs, estimate_lock_window_ms(pubs)[1])
         return (
             title,
-            PASS,
-            f"agent_messages: {rows:,} rows, heap {heap / 1e6:.1f} MB — but 0019 has "
-            f"already run at {rev}, so its ACCESS EXCLUSIVE index build is behind you. "
-            f"What remains is 0022 (three empty tables) and 0023 (three columns on "
-            f"researcher_profiles); neither scales with agent_messages. Measured at ~2s "
-            f"at every size tested.",
-            [],
-            {
-                "agent_messages_rows": rows,
-                "agent_messages_heap_bytes": heap,
-                "estimated_lock_window_ms_low": 0,
-                "estimated_lock_window_ms_high": 2000,
-                "index_build_already_done": True,
-            },
+            status,
+            f"agent_messages: {rows:,} rows, heap {heap / 1e6:.1f} MB — 0019 is behind you at {rev}. "
+            f"What remains for {rev}->0028: 0025 ADD CONSTRAINT UNIQUE on publications ({pubs:,} rows, "
+            f"ACCESS EXCLUSIVE for the whole index build); 0026 drop/recreate of one FK (ACCESS EXCLUSIVE "
+            f"on private_channel_members, SHARE ROW EXCLUSIVE on users); 0027's 20 non-concurrent CREATE "
+            f"INDEXes (SHARE on 13 tables); 0028 one nullable ADD COLUMN. The chain is ONE transaction, so "
+            f"every lock is held until the last statement commits. {tail}",
+            ["Stop app, worker, grantbot and agent-run before --apply (runbook R.4)."],
+            {"agent_messages_rows": rows, "publications_rows": pubs},
         )
     heap = int(await fetch_one_value(conn, "SELECT pg_relation_size('agent_messages')"))
     total = int(await fetch_one_value(conn, "SELECT pg_total_relation_size('agent_messages')"))

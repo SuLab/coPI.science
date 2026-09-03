@@ -220,7 +220,7 @@ def test_revision_status_passes_at_a_supported_starting_point(rev):
     assert pf.revision_status(rev, "0023")[0] == pf.PASS
 
 
-@pytest.mark.parametrize("rev", ["0001", "0017", "0022", "0024", "abcdef"])
+@pytest.mark.parametrize("rev", ["0001", "0017", "0022", "abcdef"])
 def test_revision_status_blocks_anywhere_else(rev):
     status, reason = pf.revision_status(rev, "0023")
     assert status == pf.BLOCK
@@ -228,8 +228,8 @@ def test_revision_status_blocks_anywhere_else(rev):
 
 
 def test_supported_start_revisions_are_exactly_the_documented_set():
-    assert pf.SUPPORTED_START_REVISIONS == ("0018", "0019", "0020", "0021", "0023")
-    assert pf.DEFAULT_TARGET == "0024"
+    assert pf.SUPPORTED_START_REVISIONS == ("0018", "0019", "0020", "0021", "0023", "0024")
+    assert pf.DEFAULT_TARGET == "0028"
 
 
 def test_0021_is_supported_because_that_is_origin_mains_own_alembic_head():
@@ -251,7 +251,7 @@ def test_0021_is_supported_because_that_is_origin_mains_own_alembic_head():
 
 def test_sizing_does_not_quote_the_0019_index_build_once_0019_has_run():
     """The row-scaled lock estimate only applies while 0019 is still pending."""
-    assert pf.POST_0019_STARTS == ("0020", "0021")
+    assert pf.POST_0019_STARTS == ("0020", "0021", "0023", "0024")
     for rev in pf.POST_0019_STARTS:
         assert rev in pf.SUPPORTED_START_REVISIONS
 
@@ -956,6 +956,31 @@ def test_revision_order_covers_the_supported_range():
     assert list(pf.REVISION_ORDER) == sorted(pf.REVISION_ORDER)
 
 
+def test_revision_order_ends_at_the_repo_head():
+    import re
+
+    versions = Path(__file__).resolve().parents[2] / "alembic" / "versions"
+    heads = []
+    for p in sorted(versions.glob("0*.py")):
+        m = re.search(r'^revision(?::\s*str)?\s*=\s*"(\d{4})"', p.read_text(), re.M)
+        assert m, p
+        heads.append(m.group(1))
+    assert pf.REVISION_ORDER[-1] == max(heads)
+    assert pf.DEFAULT_TARGET == pf.REVISION_ORDER[-1]
+
+
+def test_0024_is_a_supported_start_because_org1_sits_there():
+    assert "0024" in pf.SUPPORTED_START_REVISIONS
+
+
+def test_new_chain_objects_are_planned():
+    names = {o.name for o in pf.planned_objects_between("0024", pf.DEFAULT_TARGET)}
+    assert "uq_publications_user_pmid" in names            # 0025
+    assert "ix_thread_decisions_agent_a_outcome" in names  # 0027 badge composite
+    assert "ix_agent_delegates_user_id" in names           # 0027 FK index
+    assert "reopened_at" in names                          # 0028
+
+
 # --------------------------------------------------------------------------- #
 # Query builders
 # --------------------------------------------------------------------------- #
@@ -1128,7 +1153,7 @@ def test_postflight_status_aliases_are_the_same_tokens_preflight_uses():
 def test_preflight_parser_defaults():
     args = pf.build_parser().parse_args([])
     assert args.database_url is None
-    assert args.target == "0024"
+    assert args.target == "0028"
     assert args.json is False
     assert args.snapshot is None
     assert args.backup_path is None
@@ -1169,7 +1194,7 @@ def test_preflight_parser_accepts_the_documented_interface():
 def test_postflight_parser_defaults_and_shape():
     args = po.build_parser().parse_args([])
     assert args.database_url is None
-    assert args.target == "0024"
+    assert args.target == "0028"
     assert args.json is False
     assert args.snapshot is None
     assert args.allow_row_growth is False

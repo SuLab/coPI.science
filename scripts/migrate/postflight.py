@@ -127,6 +127,8 @@ EXPECTED_COLUMNS: tuple[tuple[str, str, str, bool, str | None], ...] = (
     # 0024. NOT NULL with a server_default, so every existing agent reads as pi_lab
     # — which is exactly the pre-0024 behaviour.
     ("agents", "role", "character varying", False, "'pi_lab'::character varying"),
+    # 0028 — nullable, no default; NULL means "never reopened".
+    ("thread_decisions", "reopened_at", "timestamp with time zone", True, ""),
 )
 
 EXPECTED_TABLES = ("pi_dm_messages", "cohorts", "cohort_memberships", "cohort_audit_events")
@@ -158,6 +160,32 @@ EXPECTED_INDEXES: dict[str, str] = {
     "ix_cohort_audit_events_cohort_id": "USING btree (cohort_id)",
     "ix_cohort_audit_events_created_at": "USING btree (created_at)",
     "uq_cohort_membership_cohort_agent": "USING btree (cohort_id, agent_id)",
+    # 0025 — a UNIQUE constraint also materialises a unique index of the same name
+    # (the existing uq_* entries appear in both dicts for the same reason, and
+    # test_postflight_expects_an_index_for_every_index_the_chain_creates requires it).
+    "uq_publications_user_pmid": "USING btree (user_id, pmid)",
+    # 0027 (copy the column lists from the literal op.create_index calls in
+    # alembic/versions/0027_fk_and_badge_indexes.py)
+    "ix_access_allowlist_added_by_user_id": "USING btree (added_by_user_id)",
+    "ix_agent_delegates_user_id": "USING btree (user_id)",
+    "ix_agent_delegates_invitation_id": "USING btree (invitation_id)",
+    "ix_agents_approved_by": "USING btree (approved_by)",
+    "ix_cohort_audit_events_actor_id": "USING btree (actor_id)",
+    "ix_cohort_memberships_added_by": "USING btree (added_by)",
+    "ix_cohorts_created_by": "USING btree (created_by)",
+    "ix_delegate_invitations_invited_by_user_id": "USING btree (invited_by_user_id)",
+    "ix_delegate_invitations_accepted_by_user_id": "USING btree (accepted_by_user_id)",
+    "ix_email_notifications_thread_decision_id": "USING btree (thread_decision_id)",
+    "ix_email_notifications_agent_registry_id": "USING btree (agent_registry_id)",
+    "ix_private_channel_members_user_id": "USING btree (user_id)",
+    "ix_private_channel_members_added_by_user_id": "USING btree (added_by_user_id)",
+    "ix_profile_revisions_changed_by_user_id": "USING btree (changed_by_user_id)",
+    "ix_proposal_reviews_user_id": "USING btree (user_id)",
+    "ix_proposal_reviews_delegate_user_id": "USING btree (delegate_user_id)",
+    "ix_proposal_reviews_reviewed_by_user_id": "USING btree (reviewed_by_user_id)",
+    "ix_slack_app_provisions_agent_registry_id": "USING btree (agent_registry_id)",
+    "ix_thread_decisions_agent_a_outcome": "USING btree (agent_a, outcome)",
+    "ix_thread_decisions_agent_b_outcome": "USING btree (agent_b, outcome)",
 }
 
 #: constraint name -> (table, pg_get_constraintdef)
@@ -169,6 +197,19 @@ EXPECTED_CONSTRAINTS: dict[str, tuple[str, str]] = {
     "uq_cohort_membership_cohort_agent": (
         "cohort_memberships",
         "UNIQUE (cohort_id, agent_id)",
+    ),
+    # 0025
+    "uq_publications_user_pmid": ("publications", "UNIQUE (user_id, pmid)"),
+    # 0026 flips this FK from SET NULL to CASCADE; added_by_user_id is the contrast case
+    # that must NOT change. (Both FKs were created unnamed in 0011, so Postgres named
+    # them <table>_<column>_fkey.)
+    "private_channel_members_user_id_fkey": (
+        "private_channel_members",
+        "FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE",
+    ),
+    "private_channel_members_added_by_user_id_fkey": (
+        "private_channel_members",
+        "FOREIGN KEY (added_by_user_id) REFERENCES users(id) ON DELETE SET NULL",
     ),
 }
 
