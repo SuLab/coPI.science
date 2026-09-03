@@ -122,9 +122,23 @@ def test_recovery_never_invents_a_target_from_prose():
     assert review_bot._parse_model_output(raw2) == ("out_of_scope", raw2)
 
 
-def test_recovery_rejects_an_invalid_recovered_target():
+def test_recovery_rejects_an_invalid_recovered_target(caplog):
     raw = '{"target": "astrology", "suggestion": "x" broken'
-    assert review_bot._parse_model_output(raw) == ("out_of_scope", raw)
+    with caplog.at_level("WARNING", logger="src.services.review_bot"):
+        result = review_bot._parse_model_output(raw)
+    assert result == ("out_of_scope", raw)
+    # A future refactor that logs the "recovered target" warning BEFORE
+    # validating the candidate against `_is_valid_target` must fail here.
+    assert not any("recovered target" in r.getMessage() for r in caplog.records)
+
+
+def test_recovery_is_not_rubric_specific():
+    """The three real fixtures above all happen to be `rubric`; pin that the
+    mechanism itself recovers ANY valid leading target, not just that one."""
+    raw = '{"target": "scout_hub", "suggestion": "the model ran out of tok'
+    assert review_bot._parse_model_output(raw) == ("scout_hub", raw)
+    raw2 = '{"target": "specialist:legal", "suggestion": "the model ran out of tok'
+    assert review_bot._parse_model_output(raw2) == ("specialist:legal", raw2)
 
 
 # ---------------------------------------------------------------------------

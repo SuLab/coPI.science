@@ -92,9 +92,11 @@ _SPECIALIST_TARGET_PREFIX = "specialist:"
 #: Anchored at the start and requiring `target` to be the object's FIRST key,
 #: so it can only ever read the model's own declared target, never a word
 #: quoted later in the prose. Measured need (2026-09-03 evaluation): 3 of 12
-#: live Opus replies embedded an unescaped `"` inside a string value, which
-#: `extract_json` cannot repair; all three had lost a real `rubric` target to
-#: the `out_of_scope` fallback.
+#: live Opus replies emitted invalid JSON — a premature object close, an
+#: unterminated object, and an unescaped `"` inside a string value — none of
+#: which `extract_json` can repair (by design: it finds objects that are
+#: there, it does not repair broken ones); all three had lost a real
+#: `rubric` target to the `out_of_scope` fallback.
 _LEADING_TARGET_RE = re.compile(r'^\s*\{\s*"target"\s*:\s*"([^"\\]+)"')
 
 
@@ -323,7 +325,7 @@ def _parse_model_output(raw: str) -> tuple[str, str]:
             return match.group(1), raw
         return "out_of_scope", raw
 
-    target = parsed.get("target") if parsed else None
+    target = parsed.get("target")
     if not _is_valid_target(target):
         return "out_of_scope", raw
 
