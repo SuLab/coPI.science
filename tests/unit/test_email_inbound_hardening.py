@@ -143,6 +143,29 @@ def test_a_garbled_but_known_charset_still_decodes_lossily():
     assert "3 sounds great" in body
 
 
+def test_a_bytes_to_bytes_codec_charset_falls_back_to_utf8():
+    """`base64` is a real codec name, but a bytes-to-bytes one: `.decode("base64")`
+    raises `LookupError: ... not a text encoding`, not the plain "unknown encoding"
+    LookupError an unrecognized name raises. The guarded decode in _decode_part must
+    catch this shape too, not just codecs.lookup's original probe case."""
+    raw = (
+        b"From: pi@scripps.edu\n"
+        b'Content-Type: text/plain; charset="base64"\n'
+        b"\n"
+        b"3 sounds great\n"
+    )
+    body = inbound._decode_part(email.message_from_bytes(raw))
+    assert "3 sounds great" in body
+
+
+def test_a_nul_containing_charset_falls_back_to_utf8():
+    """A charset value with an embedded NUL raises ValueError from .decode() (not
+    LookupError) — the guarded decode in _decode_part must catch both."""
+    raw = b'From: pi@scripps.edu\nContent-Type: text/plain; charset="utf-8\x00"\n\n3 sounds great\n'
+    body = inbound._decode_part(email.message_from_bytes(raw))
+    assert "3 sounds great" in body
+
+
 # --- Auto-submitted mail is dropped before any processing --------------------
 
 
@@ -351,6 +374,90 @@ async def test_list_objects_v2_is_paginated_across_multiple_pages(monkeypatch):
     )
 
 
+class _StuckCursorS3:
+    """Always claims IsTruncated with the SAME NextContinuationToken — a buggy or
+    misbehaving S3-compatible endpoint. Without a cursor-repeat guard, poll_inbound_emails
+    would fetch this same page _MAX_S3_LIST_PAGES times."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def list_objects_v2(self, Bucket, Prefix, MaxKeys, ContinuationToken=None):
+        self.calls += 1
+        return {
+            "Contents": [{"Key": "inbound/msg-stuck"}],
+            "IsTruncated": True,
+            "NextContinuationToken": "stuck-token",
+        }
+
+    def get_object(self, Bucket, Key):
+        import io
+
+        return {"Body": io.BytesIO(b"raw email bytes")}
+
+    def delete_object(self, Bucket, Key):
+        pass
+
+
+async def test_a_repeated_continuation_token_stops_pagination(monkeypatch):
+    fake = _StuckCursorS3()
+    monkeypatch.setattr("boto3.client", lambda *a, **k: fake)
+    monkeypatch.setattr(inbound, "_S3_FAILURE_COUNTS", {})
+
+    async def _record(raw, db):
+        pass
+
+    monkeypatch.setattr(inbound, "process_inbound_email", _record)
+    count = await poll_inbound_emails(_NullSessionFactory())
+
+    assert fake.calls == 2, (
+        "pagination must stop as soon as the continuation token repeats, not loop "
+        "up to _MAX_S3_LIST_PAGES times"
+    )
+    assert count == 1, "the same key fetched across the two (pre-stop) pages must be processed only once"
+
+
+async def test_duplicate_keys_across_pages_are_processed_once(monkeypatch):
+    """De-duplicated independently of the cursor-repeat guard above: S3 listing
+    consistency can hand back the same key on two different (genuinely advancing)
+    pages — each key must still be processed exactly once."""
+    pages = [
+        {"Contents": [{"Key": "inbound/msg-a"}, {"Key": "inbound/msg-b"}],
+         "IsTruncated": True, "NextContinuationToken": "page2"},
+        {"Contents": [{"Key": "inbound/msg-b"}, {"Key": "inbound/msg-c"}],
+         "IsTruncated": False},
+    ]
+    seen_calls: list[dict] = []
+
+    class _OverlapS3:
+        def list_objects_v2(self, Bucket, Prefix, MaxKeys, ContinuationToken=None):
+            seen_calls.append({"ContinuationToken": ContinuationToken})
+            return pages[len(seen_calls) - 1]
+
+        def get_object(self, Bucket, Key):
+            import io
+
+            return {"Body": io.BytesIO(b"raw email bytes")}
+
+        def delete_object(self, Bucket, Key):
+            pass
+
+    fake = _OverlapS3()
+    monkeypatch.setattr("boto3.client", lambda *a, **k: fake)
+    monkeypatch.setattr(inbound, "_S3_FAILURE_COUNTS", {})
+
+    processed: list[bytes] = []
+
+    async def _record(raw, db):
+        processed.append(raw)
+
+    monkeypatch.setattr(inbound, "process_inbound_email", _record)
+    count = await poll_inbound_emails(_NullSessionFactory())
+
+    assert len(seen_calls) == 2, "both pages must still be fetched — dedup happens after listing"
+    assert count == 3, "msg-a, msg-b (once, not twice), msg-c — 3 distinct keys"
+
+
 # --- The LLM-classified rating is coerced to int, rejecting bool ------------
 
 
@@ -381,10 +488,17 @@ class TestCoerceRating:
         assert inbound._coerce_rating("abc") is None
         assert inbound._coerce_rating(None) is None
 
+    def test_passes_through_an_out_of_range_int_unchanged(self):
+        """_coerce_rating only type-coerces; range validation is process_inbound_email's
+        job (see test_an_out_of_range_rating_falls_back_to_the_help_email_path in
+        test_email_inbound_reply_paths.py, which pins what happens to it downstream)."""
+        assert inbound._coerce_rating(7) == 7
+
 
 async def test_classify_reply_coerces_a_string_rating_to_int(monkeypatch):
     """End-to-end through classify_reply: a model that returns the rating as a numeric
-    string ('3') must come back as int 3, not a string the :322 guard would TypeError on."""
+    string ('3') must come back as int 3, not a string process_inbound_email's own
+    `rating < 1 or rating > 4` guard would TypeError on."""
     from tests.fakes import FakeAnthropic, text_response
 
     fake = FakeAnthropic(responses=[

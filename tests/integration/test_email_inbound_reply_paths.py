@@ -232,6 +232,32 @@ async def test_help_emails_are_capped_per_notification(
     assert review.rating == 1
 
 
+async def test_an_out_of_range_rating_falls_back_to_the_help_email_path(
+    db_session, monkeypatch, sent_emails,
+):
+    """COR-19.4 coercion pin: _coerce_rating(7) == 7 passes an out-of-range int
+    through unchanged — it IS a real int, just not a valid 1-4 rating.
+    process_inbound_email's own `rating < 1 or rating > 4` guard is what rejects it,
+    downgrading the category to "unparseable" so it falls into the help-email path
+    rather than TypeErroring or silently filing a rating=7 review."""
+    assert inbound._coerce_rating(7) == 7
+    token = "outofrange" + "k" * 39
+    recipient, _, _, notification = await _world(
+        db_session, recipient_email="pi.iota@scripps.edu", token=token
+    )
+    _classifies_as(monkeypatch, {"category": "review", "rating": 7})
+
+    await process_inbound_email(
+        _raw_reply(token, "pi.iota@scripps.edu", "7 off the scale"), db_session
+    )
+
+    assert await _reviews(db_session) == []
+    assert notification.status == "sent"
+    (mail,) = sent_emails
+    assert mail["to"] == recipient.email
+    assert "could not process" in mail["subject"].lower()
+
+
 # --- 2b. Commit before the confirmation send (COR-19.6) ------------------------
 
 

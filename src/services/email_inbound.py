@@ -1,6 +1,5 @@
 """Inbound email processing for proposal review via email reply."""
 
-import codecs
 import email
 import json
 import logging
@@ -35,8 +34,9 @@ MAX_REPLIES_PER_TOKEN_PER_HOUR = 10
 MAX_S3_PROCESS_ATTEMPTS = 3
 
 # Safety cap on list_objects_v2 pagination, mirroring the MAX_PAGES pattern in
-# src/agent/slack_client.py:133 — a real inbound bucket should never approach this,
-# but an unbounded while-loop following a cursor forever is one bug away from a hang.
+# AgentSlackClient._paginate (src/agent/slack_client.py) — a real inbound bucket
+# should never approach this, but an unbounded while-loop following a cursor
+# forever is one bug away from a hang.
 # Capped at 20 (1,000 objects/poll at MaxKeys=50), not 200: poll_inbound_emails runs
 # synchronously inside run_worker's main loop (worker/main.py) with its own DB session
 # per object and, for a real reply, an LLM classification call — at 200 pages (10,000
@@ -192,19 +192,29 @@ async def poll_inbound_emails(session_factory: async_sessionmaker) -> int:
             objects.extend(response.get("Contents", []))
             if not response.get("IsTruncated"):
                 break
-            continuation_token = response.get("NextContinuationToken")
-            if not continuation_token:
+            next_token = response.get("NextContinuationToken")
+            # Cursor-repeat guard: a misbehaving S3-compatible endpoint that hands
+            # back the SAME token as the one just used would otherwise loop fetching
+            # the same page _MAX_S3_LIST_PAGES times before the bound above kicks in.
+            if not next_token or next_token == continuation_token:
                 break
+            continuation_token = next_token
         else:
             logger.warning(
                 "Stopped paginating inbound S3 listing after %d pages — bucket may have "
                 "more objects than a single poll can enumerate", _MAX_S3_LIST_PAGES,
             )
 
+        # De-duplicate keys before processing: the cursor-repeat guard above can
+        # itself hand back one overlapping page, and ordinary listing consistency
+        # (a concurrent PUT during pagination) can too — either way, a key must be
+        # processed at most once per poll.
+        seen: set[str] = set()
         for obj in objects:
             key = obj["Key"]
-            if key == prefix:  # Skip the prefix itself
+            if key == prefix or key in seen:  # Skip the prefix itself and dupes
                 continue
+            seen.add(key)
 
             try:
                 email_obj = s3.get_object(Bucket=bucket, Key=key)
@@ -448,15 +458,18 @@ def _extract_email_address(from_header: str) -> str | None:
 
 def _decode_part(part: email.message.Message) -> str:
     charset = part.get_content_charset() or "utf-8"
+    payload = part.get_payload(decode=True) or b""
     try:
-        codecs.lookup(charset)
-    except LookupError:
+        return payload.decode(charset, errors="replace")
+    except (LookupError, ValueError):
+        # LookupError: an unrecognized charset name, or a real but bytes-to-bytes
+        # codec (e.g. "base64") that .decode() refuses outright. ValueError: a
+        # charset string .decode() can't use at all (e.g. one with an embedded NUL).
+        # The old codecs.lookup(charset) probe only ever caught the first case.
         logger.warning(
             "Unknown charset %r on inbound email part; decoding as utf-8 (COR-19.3)", charset
         )
-        charset = "utf-8"
-    payload = part.get_payload(decode=True) or b""
-    return payload.decode(charset, errors="replace")
+        return payload.decode("utf-8", errors="replace")
 
 
 def _html_to_text(html_body: str) -> str:
@@ -516,14 +529,17 @@ def _extract_reply_body(msg: email.message.Message) -> str:
     return "\n".join(cleaned).strip()
 
 
-def _coerce_rating(value) -> int | None:
+def _coerce_rating(value: object) -> int | None:
     """Coerce an LLM-classified rating to int, or None if it doesn't parse.
 
     The classification prompt asks for "an integer 1-4", but json.loads hands back
     whatever JSON type the model actually emitted: a numeric string ("3"), a float
-    (3.0), or — pathologically — a bool. bool is an int subclass (True == 1), so the
-    :322 guard would otherwise silently accept it as a rating; reject it
-    explicitly. A fractional value (2.5) is not a real 1-4 rating either.
+    (3.0), or — pathologically — a bool. bool is an int subclass (True == 1), so
+    process_inbound_email's `rating < 1 or rating > 4` guard would otherwise
+    silently accept it as a rating; reject it explicitly. A fractional value (2.5)
+    is not a real 1-4 rating either. An out-of-range int (7) is NOT rejected here —
+    it passes through unchanged; process_inbound_email's own range guard is what
+    downgrades it to "unparseable".
     """
     if isinstance(value, bool):
         return None
