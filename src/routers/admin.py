@@ -117,8 +117,6 @@ async def admin_users(
         # Profile status
         if not profile:
             profile_status = "no_profile"
-        elif profile.pending_profile:
-            profile_status = "pending_update"
         elif profile.research_summary:
             profile_status = "complete"
         else:

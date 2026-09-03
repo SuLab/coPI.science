@@ -141,10 +141,12 @@ Edits save immediately (AJAX or form post) and bump `profile_version`.
 2. Diffs against stored publications
 3. If new publications found: runs synthesis pipeline to generate candidate profile
 4. Compares candidate profile arrays against current profile
-5. If any array changed: stores candidate as `pending_profile`, emails user (if enabled)
+5. NOT IMPLEMENTED as a review queue: `pending_profile` has no writer (issue #22 V6-pend).
+   A differing candidate is written directly to the live profile fields, gated by
+   `_validate_profile`.
 6. If no arrays changed: stores new publications but does not bother user
-7. User sees side-by-side comparison of current vs candidate, can accept/edit/dismiss
-8. If ignored for 30 days: auto-dismiss, retry next month
+7. (removed — no side-by-side review exists to accept/edit/dismiss)
+8. (removed — nothing is staged, so nothing auto-dismisses)
 
 ## Settings
 

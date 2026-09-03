@@ -57,7 +57,10 @@ One per user. Contains LLM-synthesized fields and user-submitted content.
 
 **Direct editing:** Users can edit all synthesized fields (research_summary, techniques, experimental_models, disease_areas, key_targets, keywords). Edits bump `profile_version`. Grant titles are from ORCID and not directly editable.
 
-**Pending profile updates:** When the monthly refresh pipeline generates a candidate that differs from the current profile, it is stored in `pending_profile`. The user is shown a side-by-side comparison and can accept, edit, or dismiss. If ignored for 30 days, auto-dismiss.
+**Pending profile updates:** NOT IMPLEMENTED. `pending_profile`/`pending_profile_created_at`
+exist on the table but have no writer anywhere in `src/` or `scripts/` (issue #22 V6-pend) — a
+monthly refresh writes directly to the live profile fields, gated by `_validate_profile`, not to
+a side-by-side review queue. See `templates/profile/view.html`'s removed-banner comment.
 
 ### Publication
 
