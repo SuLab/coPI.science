@@ -1919,3 +1919,55 @@ class TestPersistImplicitProposalReview:
 
         assert fake_db.added == []
         assert fake_db.committed is False
+
+
+# ---------------------------------------------------------------
+# _poll_pi_dms per-agent guard (COR-10(1))
+# ---------------------------------------------------------------
+
+class TestPollPiDmsGuardsPerAgent:
+    """A transport error polling one agent's PI DMs (a raw socket/SSL/DNS
+    error the slack_sdk re-raises unchanged — see slack_client.py's
+    _call_with_retry, which only catches SlackApiError) must not kill the
+    whole simulation. Both sibling pollers already guard per-item; this one
+    didn't. See COR-10(1)."""
+
+    class _RaisingDmClient:
+        is_connected = True
+
+        def poll_dm_messages(self, user_id, oldest="0"):
+            raise ConnectionError("simulated transport failure")
+
+    class _WorkingDmClient:
+        is_connected = True
+
+        def __init__(self):
+            self.polled = []
+
+        def poll_dm_messages(self, user_id, oldest="0"):
+            self.polled.append((user_id, oldest))
+            return []
+
+    @pytest.mark.asyncio
+    async def test_a_transport_error_for_one_agent_does_not_stop_the_poll(self):
+        import uuid as uuid_mod
+
+        from src.agent.agent import Agent
+
+        failing = Agent("failing", "FailingBot", "Failing PI")
+        working = Agent("working", "WorkingBot", "Working PI")
+        working_client = self._WorkingDmClient()
+        engine = SimulationEngine(
+            agents=[failing, working],
+            slack_clients={"failing": self._RaisingDmClient(), "working": working_client},
+            session_factory=lambda: None,
+            simulation_run_id=uuid_mod.uuid4(),
+        )
+        # Insertion order matters: "failing" must be polled BEFORE "working" so
+        # a bug that propagates the exception would never reach the second
+        # agent at all.
+        engine._pi_slack_id_to_agent_ids = {"U_PI1": ["failing"], "U_PI2": ["working"]}
+
+        await engine._poll_pi_dms()  # must not raise
+
+        assert working_client.polled, "the second agent's DMs were never polled"

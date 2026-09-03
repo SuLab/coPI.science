@@ -3349,7 +3349,17 @@ class SimulationEngine:
                     continue
 
                 oldest = self._dm_poll_cursors.get(agent_id, default_cursor)
-                messages = client.poll_dm_messages(pi_slack_id, oldest=oldest)
+                # slack_sdk re-raises non-HTTP transport failures (socket/SSL/
+                # DNS errors) unchanged — _call_with_retry only catches
+                # SlackApiError (slack_client.py:310-341) — so an unguarded
+                # call here kills the whole simulation on one flaky network
+                # blip. Both sibling pollers already guard per-item; this one
+                # didn't. See COR-10(1).
+                try:
+                    messages = client.poll_dm_messages(pi_slack_id, oldest=oldest)
+                except Exception as exc:
+                    logger.error("[%s] Failed to poll PI DMs: %s", agent_id, exc)
+                    continue
 
                 for msg in messages:
                     ts = msg.get("ts", "")
