@@ -273,7 +273,7 @@ Respond with ONLY a JSON array of FOA numbers:
         # tomorrow's run, not the next 15-minute tick. That is the accepted
         # trade: a quiet day beats a day of FOAs nobody reviewed. To retry the
         # same day instead, this would have to raise so `_mark_run_complete()`
-        # (grantbot.py:777) is skipped — deliberately not done, since the
+        # is skipped — deliberately not done, since the
         # scheduler's `except` would then retry a deterministic parse bug ~64
         # times a day.
         logger.error(
