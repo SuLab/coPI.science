@@ -28,6 +28,7 @@ from src.agent.funding_rules import (
     summarize_funding_thread,
 )
 from src.agent.ids import WRITER_ENGINE, TsMinter
+from src.agent.mentions import BOT_TAG_RE, extract_bot_mentions
 from src.agent.message_log import LogEntry, MessageLog, is_funding_post
 from src.agent.prompt_safety import delimit
 from src.agent.roles import load_role
@@ -223,6 +224,14 @@ UNBLOCK_EXEMPT_AGENTS = {"schultz"}
 # @-tagged must still be resolved against the roster. Possessive/article
 # words that precede "lab(s)" without naming one are excluded.
 _PROSE_LAB_RE = re.compile(r"\b([A-Z][\w-]+)(?:['’]s)?\s+[Ll]abs?\b")
+
+# Same tag pattern as BOT_TAG_RE, wrapped for _strip_disallowed_tags: consumes
+# leading whitespace, and a negative lookbehind so "a@subot.example" or a URL
+# path is never mangled. Built from BOT_TAG_RE.pattern rather than duplicating
+# the literal string, so the two can never drift again (COR-8).
+_DISALLOWED_TAG_STRIP_RE = re.compile(
+    rf"[ \t]*(?<![\w./@-]){BOT_TAG_RE.pattern}", re.IGNORECASE,
+)
 _PROSE_LAB_STOPWORDS = frozenset({
     "our", "my", "their", "your", "his", "her", "its", "the", "a", "an",
     "this", "that", "these", "those", "each", "every", "both", "all", "any",
@@ -299,6 +308,7 @@ class SimulationEngine:
         # uid is the only key that reliably attributes them. Populated by
         # _resolve_service_bot_uids during start(); stays empty when Slack is off.
         self._service_bot_uids: dict[str, str] = {}
+        self.message_log.set_bot_uid_map(self._bot_uid_map())
 
         # agent_id → LabPublicationRecord (publications-table ground truth for
         # the authorship emit guard). Populated by _load_publication_records at
@@ -2520,7 +2530,7 @@ class SimulationEngine:
         # the '@' to start a token, the way a real Slack mention does — without it,
         # "a@subot.example" or a URL path ending in a bot name would be mangled, and
         # this strip now runs on EVERY outbound message.
-        cleaned = re.sub(r"[ \t]*(?<![\w./@-])@(\w+[Bb]ot)\b", _repl, message_text)
+        cleaned = _DISALLOWED_TAG_STRIP_RE.sub(_repl, message_text)
         if not stripped:
             return message_text
 
@@ -2555,7 +2565,7 @@ class SimulationEngine:
             has_records=bool(own_db) or bool(profile_dois),
         )
         tagged: dict[str, LabPublicationRecord] = {}
-        for m in re.finditer(r"@(\w+[Bb]ot)\b", text):
+        for m in BOT_TAG_RE.finditer(text):
             bot_name = m.group(1)
             target_id = self._bot_name_to_id.get(bot_name.lower())
             if target_id is None or target_id == agent.agent_id:
@@ -2827,9 +2837,17 @@ class SimulationEngine:
                               thread.has_pending_reply = True
                               logger.info("[%s] PI posted in active thread %s", pi_agent_id, thread_ts)
 
-                      # PI tagged their bot in a top-level post or reply
-                      bot_name = self.agents[pi_agent_id].bot_name if pi_agent_id in self.agents else None
-                      if bot_name and f"@{bot_name.lower()}" in msg.get("text", "").lower():
+                      # PI tagged their bot in a top-level post or reply —
+                      # either the literal "@BotName" form or a real Slack
+                      # <@Uxxx> mention (what a human typing in Slack actually
+                      # produces once autocomplete fires). See COR-8.
+                      tagged_agent_ids = {
+                          self._bot_name_to_id.get(m, m)
+                          for m in extract_bot_mentions(
+                              msg.get("text", ""), self._bot_uid_map(),
+                          )
+                      }
+                      if pi_agent_id in tagged_agent_ids:
                           await self._pi_handler.handle_channel_tag(pi_agent_id, entry)
 
                     # Update cursor
@@ -4009,10 +4027,15 @@ class SimulationEngine:
         grantbot falls back to SuBot's token when its own is missing, and posts
         made that way are su's — the roster answer is the true one.
         """
+        # getattr, not attribute access: this is now called from __init__ (see
+        # set_bot_uid_map above), and `slack_clients` legitimately holds
+        # partial doubles in the unit suite as well as NullTransport and
+        # AgentSlackClient in production. A transport that cannot name its bot
+        # user simply contributes no uid mapping.
         uid_map = {
-            c.bot_user_id: aid
+            uid: aid
             for aid, c in self.slack_clients.items()
-            if c and c.bot_user_id
+            if c is not None and (uid := getattr(c, "bot_user_id", None))
         }
         for uid, aid in self._service_bot_uids.items():
             uid_map.setdefault(uid, aid)
@@ -4663,6 +4686,7 @@ class SimulationEngine:
 
             # Rebuild cross-agent derived structures after any membership change.
             self.message_log.set_bot_name_map(self._bot_name_to_id)
+            self.message_log.set_bot_uid_map(self._bot_uid_map())
             # Rebuild PI mappings from scratch (clear in place — PIHandler shares
             # this dict by reference; _load_pi_mappings appends, so it must start
             # empty to avoid accumulating duplicates).

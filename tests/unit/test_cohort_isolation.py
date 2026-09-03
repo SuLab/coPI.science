@@ -1000,6 +1000,16 @@ class TestTagHygiene:
         assert eng._strip_disallowed_tags(None, eng.agents["su"]) is None
         assert eng._strip_disallowed_tags("", eng.agents["su"]) == ""
 
+    def test_an_all_caps_mention_of_a_non_cohort_agent_is_stripped(self, monkeypatch):
+        # Same non-mate-mention setup as test_non_mate_mention_is_removed_not_de_atted
+        # above, but ALL CAPS — case-insensitivity must strip it exactly like the
+        # matched-case form does.
+        eng = self._eng(monkeypatch, {"su", "wiseman"})
+        out = eng._strip_disallowed_tags("Great point @CRAVATTBOT, shall we?", eng.agents["su"])
+        assert "CRAVATTBOT" not in out
+        assert "@" not in out
+        assert out == "Great point, shall we?", out
+
     def test_all_outbound_paths_are_covered(self):
         """The strip lives in _post_message, so every caller inherits it — Phase 4
         replies included, which the original Phase-5-only placement missed."""

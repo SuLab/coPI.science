@@ -163,6 +163,28 @@ class TestServiceBotTagsDoNotReserveThreads:
         assert log.get_thread_allowed_agents("2") == {"grantbot", "wiseman"}
 
 
+class TestExtractTaggedAgentResolvesSlackUidMentions:
+    def test_a_uid_mention_resolves_to_the_tagged_agent(self, log):
+        # Slack real bot_user_ids are alnum-only (e.g. "U0AMQGYBFL7"); an
+        # underscore in the fixture uid would silently miss the uid branch of
+        # extract_bot_mentions's regex (`[A-Za-z0-9]+`) and pass for the
+        # wrong reason (the same trap red-team M5 flags for the sibling
+        # mentions.py test — verified by running both forms).
+        log.set_bot_uid_map({"UWISEMAN1": "wiseman"})
+        assert log._extract_tagged_agent("thoughts <@UWISEMAN1>?") == "wiseman"
+
+    def test_an_unmapped_uid_extracts_nothing(self, log):
+        log.set_bot_uid_map({})
+        assert log._extract_tagged_agent("thoughts <@UZZZZZZ>?") is None
+
+    def test_an_unknown_bot_name_still_extracts_nothing(self, log):
+        # Pre-fix behaviour, preserved (red-team B4): get_thread_allowed_agents
+        # locks a thread on this value, so an unrecognised bot name must come
+        # back None, not the raw token — a phantom agent_id must never come
+        # out of here.
+        assert log._extract_tagged_agent("ping @GhostBot") is None
+
+
 # ---------------------------------------------------------------
 # get_new_top_level_posts
 # ---------------------------------------------------------------

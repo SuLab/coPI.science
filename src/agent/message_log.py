@@ -1,10 +1,10 @@
 """Global append-only message log — single source of truth for the simulation."""
 
 import logging
-import re
 from dataclasses import dataclass
 from typing import Callable
 
+from src.agent.mentions import extract_bot_mentions
 from src.services.cohorts import SERVICE_AGENT_IDS
 from src.visibility import VISIBILITY_COLLAB_PRIVATE
 
@@ -114,6 +114,9 @@ class MessageLog:
         self._by_ts: dict[str, LogEntry] = {}  # ts -> entry for fast lookup
         # Map bot_name (lowercase) -> agent_id, set by SimulationEngine
         self._bot_name_to_id: dict[str, str] = {}
+        # Slack bot_user_id -> agent_id, set by SimulationEngine (mirrors
+        # _bot_name_to_id but for real Slack <@Uxxx> mentions). See COR-8.
+        self._bot_uid_to_agent: dict[str, str] = {}
         # Optional persistence hook, invoked once per *new* append. The engine
         # registers this to mirror the log into the DB (the primary store).
         # Kept as a plain callback so this module stays DB-agnostic. See
@@ -127,6 +130,10 @@ class MessageLog:
     def set_bot_name_map(self, mapping: dict[str, str]) -> None:
         """Register bot_name -> agent_id mapping (lowercase keys)."""
         self._bot_name_to_id = dict(mapping)
+
+    def set_bot_uid_map(self, mapping: dict[str, str]) -> None:
+        """Register Slack bot_user_id -> agent_id mapping (COR-8)."""
+        self._bot_uid_to_agent = dict(mapping)
 
     def set_persist_callback(self, cb: Callable[[LogEntry], None] | None) -> None:
         """Register a callback fired after each new append (for DB persistence)."""
@@ -396,20 +403,38 @@ class MessageLog:
         return bool(root and is_funding_post(root.content))
 
     def _extract_tagged_agent(self, content: str) -> str | None:
-        """Extract a tagged agent_id from message content (e.g. @WisemanBot).
+        """Extract a tagged agent_id from message content (e.g. @WisemanBot
+        or a real Slack <@Uxxx> mention).
 
-        Service bots resolve in the name map (ingestion must attribute their
-        posts) but must never come out of here: a non-funding root that leads
-        with @GrantBot would otherwise lock the thread to {poster, grantbot}
-        via get_thread_allowed_agents, and a service bot never replies — the
+        Only the FIRST mention in ``content`` is considered — documented,
+        not desired (see tests/unit/test_message_log.py's
+        TestServiceBotTagsDoNotReserveThreads.
+        test_a_service_tag_shadows_a_later_roster_tag): a service-bot mention
+        earlier in the text shadows a real roster tag later in the same
+        message, same as before this fix.
+
+        Service bots resolve (ingestion must attribute their posts) but must
+        never come out of here: a non-funding root that leads with @GrantBot
+        would otherwise lock the thread to {poster, grantbot} via
+        get_thread_allowed_agents, and a service bot never replies — the
         thread would be dead on arrival.
         """
-        match = re.search(r"@(\w+[Bb]ot)\b", content)
-        if match:
-            bot_name = match.group(1).lower()
-            agent_id = self._bot_name_to_id.get(bot_name)
-            return None if agent_id in SERVICE_AGENT_IDS else agent_id
-        return None
+        mentions = extract_bot_mentions(content, self._bot_uid_to_agent)
+        if not mentions:
+            return None
+        token = mentions[0]
+        # Two namespaces come out of extract_bot_mentions: a lowercased bot
+        # NAME (literal @Tag) and an already-resolved agent_id (a <@Uxxx>
+        # mention). Resolve the first through the name map; accept the second
+        # only if it really is a roster agent_id. An UNKNOWN bot name must
+        # stay unknown — get_thread_allowed_agents locks a thread on this
+        # value, so returning the raw name would lock it to a phantom agent.
+        agent_id = self._bot_name_to_id.get(token)
+        if agent_id is None and token in set(self._bot_name_to_id.values()):
+            agent_id = token
+        if agent_id is None:
+            return None
+        return None if agent_id in SERVICE_AGENT_IDS else agent_id
 
     def has_new_reply_from_other(
         self,

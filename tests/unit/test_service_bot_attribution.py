@@ -518,3 +518,32 @@ class TestStartOrdering:
         eng._rebuild_state_from_slack = _reconcile
         await eng.start()
         assert seen == [{GRANTBOT_UID: "grantbot"}]
+
+
+def _human_msg(ts, user, text):
+    return {"ts": ts, "user": user, "text": text, "thread_ts": None}
+
+
+class TestPiLiteralTagCheckResolvesSlackUidMentions:
+    """PI-literal check inside _poll_slack_for_pi_messages must resolve a real
+    Slack <@Uxxx> mention exactly like the literal "@BotName" form — a human
+    typing "@SuBot" in Slack gets autocompleted to <@Uxxx> before this code
+    ever sees the text. See COR-8."""
+
+    def _engine_with(self, history):
+        eng = _engine(
+            clients={"su": _FakeClient("su", bot_user_id="USUBOT1", history=history)}
+        )
+        eng._channel_id_map = {"funding-opportunities": "C_FUND"}
+        return eng
+
+    async def test_a_uid_mention_triggers_handle_channel_tag(self):
+        eng = self._engine_with(
+            [_human_msg("1700000005.000100", "W_PI", "<@USUBOT1> can you look at this?")]
+        )
+        eng._pi_handler = AsyncMock()
+        eng._pi_slack_id_to_agent_ids = {"W_PI": ["su"]}
+
+        await eng._poll_slack_for_pi_messages()
+
+        eng._pi_handler.handle_channel_tag.assert_awaited_once()
