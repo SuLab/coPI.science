@@ -1153,3 +1153,76 @@ class TestWebGuidanceReopenMintIsIdempotentAcrossRestarts:
         assert "100.0" in agent.state.active_threads, (
             "the ThreadState must still be (re)constructed even though the mint was skipped"
         )
+
+
+# ---------------------------------------------------------------
+# _check_private_channel_outcome must run only when the post landed — COR-1d
+# ---------------------------------------------------------------
+
+class TestPrivateChannelOutcomeRunsOnlyWhenPosted:
+    """A suppressed Phase 5 post (COR-1b's new failure path, an empty-after-strip
+    draft, or an authorship rejection) must not still trigger the private-channel
+    finalization handshake — nothing was actually said in the channel."""
+
+    def _engine(self, monkeypatch):
+        from src.agent.agent import Agent
+        from src.config import get_settings
+        from src.models.agent_activity import VISIBILITY_COLLAB_PRIVATE
+
+        # Hermetic against a local .env with PHASE5_SKIP_PROBABILITY set
+        # nonzero (red-team m7): neither test below has a pi_priority
+        # candidate to bypass the random skip on its own, and both assert the
+        # LLM path actually ran, which a random skip would intermittently
+        # prevent under a non-default setting. Default is 0.0
+        # (config.py:330), so this only guards against a developer override.
+        monkeypatch.setattr(get_settings(), "phase5_skip_probability", 0.0)
+        agent = Agent("su", "SuBot", "Andrew Su")
+        engine = SimulationEngine(agents=[agent], slack_clients={})
+        engine._channel_visibility["priv-chan"] = VISIBILITY_COLLAB_PRIVATE
+        return engine, agent
+
+    def _stub_response(self):
+        return (
+            "```json\n"
+            '{"action": "post", "channel": "priv-chan"}\n'
+            "```\n"
+            "<slack_message>\n"
+            ":memo: Summary confirmed. ✅\n"
+            "</slack_message>\n"
+        )
+
+    @pytest.mark.asyncio
+    async def test_suppressed_post_does_not_check_private_outcome(self, monkeypatch):
+        from unittest.mock import AsyncMock
+
+        engine, agent = self._engine(monkeypatch)
+        monkeypatch.setattr(
+            "src.agent.simulation.generate_agent_response",
+            AsyncMock(return_value=self._stub_response()),
+        )
+        engine._post_message = AsyncMock(return_value=False)
+        engine._check_private_channel_outcome = AsyncMock()
+
+        await engine._phase5_new_post(agent)
+
+        engine._post_message.assert_awaited_once()
+        engine._check_private_channel_outcome.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_real_post_still_checks_private_outcome(self, monkeypatch):
+        from unittest.mock import AsyncMock
+
+        # Control: the guard must not swallow the legitimate case.
+        engine, agent = self._engine(monkeypatch)
+        monkeypatch.setattr(
+            "src.agent.simulation.generate_agent_response",
+            AsyncMock(return_value=self._stub_response()),
+        )
+        engine._post_message = AsyncMock(return_value=True)
+        engine._check_private_channel_outcome = AsyncMock()
+
+        await engine._phase5_new_post(agent)
+
+        engine._check_private_channel_outcome.assert_awaited_once_with(
+            agent, "priv-chan", ":memo: Summary confirmed. ✅",
+        )

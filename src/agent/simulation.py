@@ -2510,8 +2510,13 @@ class SimulationEngine:
             # In a collab_private channel, a :memo: Summary + ✅ handshake
             # finalizes the refined proposal (the flat path has no
             # _check_thread_outcome). Runs for either action since both post flat.
+            # Gated on `posted`: a suppressed post (empty after strip, an
+            # authorship rejection, or COR-1b's connected-client-failed path)
+            # never reached the channel, so there is nothing to finalize against.
+            # See COR-1d.
             if (
-                message_text
+                posted
+                and message_text
                 and self._channel_visibility.get(channel) == VISIBILITY_COLLAB_PRIVATE
             ):
                 await self._check_private_channel_outcome(agent, channel, message_text)
