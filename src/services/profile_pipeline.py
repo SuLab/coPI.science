@@ -111,8 +111,10 @@ async def run_profile_pipeline(
         orcid_works = []
         works_lookup_failed = True
 
-    # Extract PMIDs for works that have them
-    pmids = [w["pmid"] for w in orcid_works if w.get("pmid")]
+    # Extract PMIDs for works that have them. Deduplicated (COR-16): ORCID lists a
+    # work once per activities-summary source, so the same paper linked to two
+    # co-author affiliations reaches this loop as the same PMID twice.
+    pmids, seen_pmids = _dedup_pmids(orcid_works)
 
     # Build PMID → ORCID DOI map so we can prefer ORCID DOIs over PubMed DOIs.
     # PubMed's ArticleId DOIs are sometimes wrong (stale or from a different article).
@@ -144,7 +146,9 @@ async def run_profile_pipeline(
                 resolved_pmid = doi_to_pmid.get(w["doi"])
                 if resolved_pmid:
                     w["pmid"] = resolved_pmid
-                    pmids.append(resolved_pmid)
+                    if resolved_pmid not in seen_pmids:
+                        seen_pmids.add(resolved_pmid)
+                        pmids.append(resolved_pmid)
                     # Track the ORCID DOI that resolved to this PMID
                     pmid_to_orcid_doi[resolved_pmid] = w["doi"]
             logger.info(
@@ -227,6 +231,10 @@ async def run_profile_pipeline(
             )
             db.add(pub)
             new_publications.append(pub)
+            existing_pubs[pmid] = pub  # COR-16: a PMID repeated later in this same
+            # loop (e.g. two ORCID works resolving to one PMID) must hit the update
+            # branch above, not db.add a second row that collides with
+            # uq_publications_user_pmid (migration 0025).
 
         if is_research and rec.get("abstract"):
             pubs_for_synthesis.append(rec)
@@ -270,12 +278,14 @@ async def run_profile_pipeline(
                 methods_by_pmid[rec["pmid"]] = methods_text
                 # Update DB publication with methods text
                 existing_result2 = await db.execute(
-                    select(Publication).where(
+                    select(Publication)
+                    .where(
                         Publication.user_id == user_id,
                         Publication.pmid == rec["pmid"],
                     )
+                    .order_by(Publication.id)
                 )
-                pub = existing_result2.scalar_one_or_none()
+                pub = existing_result2.scalars().first()
                 if pub:
                     pub.methods_text = methods_text[:10000]  # Cap at 10k chars
         except Exception as exc:
@@ -547,6 +557,24 @@ def _build_synthesis_context(
             parts.append(methods[:2000])
 
     return "\n".join(parts)
+
+
+def _dedup_pmids(orcid_works: list[dict[str, Any]]) -> tuple[list[str], set[str]]:
+    """PMIDs from an ORCID works listing, first occurrence only (issue #22 COR-16).
+
+    ORCID lists a work once per activities-summary source, so a paper linked to two
+    co-author affiliations arrives here as the same PMID twice. Returns the ordered
+    list and the seen-set, so the DOI->PMID resolution loop below can keep it up to
+    date instead of appending a PMID the list already has.
+    """
+    pmids: list[str] = []
+    seen: set[str] = set()
+    for w in orcid_works:
+        pmid = w.get("pmid")
+        if pmid and pmid not in seen:
+            seen.add(pmid)
+            pmids.append(pmid)
+    return pmids, seen
 
 
 def _validate_profile(profile: dict[str, Any]) -> bool:

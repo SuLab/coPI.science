@@ -797,3 +797,33 @@ async def test_profile_pipeline_pubmed_outage_on_rerun_keeps_the_grounded_profil
         "a refresh during a PubMed outage replaced a profile grounded in 2 "
         "abstracts with one grounded in none"
     )
+
+
+async def test_a_pmid_listed_twice_by_orcid_inserts_exactly_one_publication(
+    db_session, monkeypatch
+):
+    """V1-16b/c: one ORCID works listing naming the same PMID twice must not
+    db.add() two Publication rows (post-0025 that is an IntegrityError that
+    aborts the whole pipeline run)."""
+    _install_fakes(monkeypatch)
+
+    async def dupe_works(orcid_id):
+        return [{"pmid": "1001", "doi": None}, {"pmid": "1001", "doi": None}]
+
+    async def echo_records(pmids):
+        return [
+            {"pmid": p, "doi": None, "title": "T", "abstract": "A", "journal": "J",
+             "year": 1843, "pub_types": ["Journal Article"], "pmcid": None}
+            for p in pmids
+        ]
+
+    monkeypatch.setattr(profile_pipeline, "fetch_orcid_works", dupe_works)
+    monkeypatch.setattr(profile_pipeline, "fetch_pubmed_records", echo_records)
+
+    user = await factories.make_user(db_session, name="Dupe Lovelace")
+    await profile_pipeline.run_profile_pipeline(user.id, db_session)
+
+    rows = (await db_session.execute(
+        select(Publication).where(Publication.user_id == user.id, Publication.pmid == "1001")
+    )).scalars().all()
+    assert len(rows) == 1
