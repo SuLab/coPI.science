@@ -203,15 +203,17 @@ def _parse_pubmed_xml(xml_text: str) -> list[dict[str, Any]]:
                     record["doi"] = eloc.text
                     break
 
-        # Title
+        # Title. itertext() (not .text) so inline markup (<i>, <sub>, <sup> — gene
+        # symbols, chemical formulas, italicized species names) doesn't truncate
+        # the title at the first child element (issue #22 COR-16).
         title_el = article.find(".//ArticleTitle")
-        record["title"] = (title_el.text or "") if title_el is not None else ""
+        record["title"] = "".join(title_el.itertext()) if title_el is not None else ""
 
-        # Abstract
+        # Abstract — same markup-truncation defect as the title.
         abstract_parts = []
         for abstract_el in article.findall(".//AbstractText"):
             label = abstract_el.get("Label")
-            text = abstract_el.text or ""
+            text = "".join(abstract_el.itertext())
             if label:
                 abstract_parts.append(f"{label}: {text}")
             else:

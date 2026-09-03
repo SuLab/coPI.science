@@ -124,6 +124,44 @@ async def test_fetch_pubmed_records_authors_collective_name_and_skip():
     assert r["authors"] == ["Wu C", "The Consortium Group"]
 
 
+EFETCH_XML_INLINE_MARKUP = """<?xml version="1.0"?>
+<PubmedArticleSet>
+  <PubmedArticle>
+    <MedlineCitation>
+      <PMID>33000000</PMID>
+      <Article>
+        <Journal>
+          <Title>Genes</Title>
+          <JournalIssue><PubDate><Year>2022</Year></PubDate></JournalIssue>
+        </Journal>
+        <ArticleTitle>Role of <i>TP53</i> in cancer</ArticleTitle>
+        <Abstract>
+          <AbstractText Label="BACKGROUND">We studied <i>TP53</i> signaling.</AbstractText>
+          <AbstractText>H<sub>2</sub>O is required.</AbstractText>
+        </Abstract>
+      </Article>
+    </MedlineCitation>
+    <PubmedData>
+      <ArticleIdList>
+        <ArticleId IdType="pubmed">33000000</ArticleId>
+      </ArticleIdList>
+    </PubmedData>
+  </PubmedArticle>
+</PubmedArticleSet>
+"""
+
+
+@respx.mock
+async def test_fetch_pubmed_records_keeps_inline_markup_text_in_title_and_abstract():
+    respx.get(f"{EUTILS}/efetch.fcgi").mock(
+        return_value=httpx.Response(200, text=EFETCH_XML_INLINE_MARKUP)
+    )
+    recs = await pubmed.fetch_pubmed_records(["33000000"])
+    r = recs[0]
+    assert r["title"] == "Role of TP53 in cancer"
+    assert r["abstract"] == "BACKGROUND: We studied TP53 signaling. H2O is required."
+
+
 async def test_fetch_pubmed_records_empty_input_no_http():
     assert await pubmed.fetch_pubmed_records([]) == []
 
