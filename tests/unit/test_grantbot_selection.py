@@ -44,3 +44,14 @@ async def test_a_number_the_llm_invented_is_dropped_not_a_hard_fail(monkeypatch)
     monkeypatch.setattr("src.services.llm.generate_agent_response", fake_generate)
     opps = {"PAR-24-293": {"title": "T1"}}
     assert await grantbot._select_opportunities(opps) == ["PAR-24-293"]
+
+
+def test_dead_profile_search_helpers_are_removed():
+    """COR-26d: these three helpers and PROFILES_DIR had zero callers anywhere in src/, scripts/
+    or tests/ — grantbot's profile-driven keyword search was superseded and never removed. 83 dead
+    lines plus a dead module constant."""
+    for name in (
+        "_load_researcher_profiles", "_extract_list_section",
+        "_build_search_queries", "PROFILES_DIR",
+    ):
+        assert not hasattr(grantbot, name), f"{name} should have been removed"
