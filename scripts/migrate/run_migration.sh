@@ -18,6 +18,17 @@
 #   ./scripts/migrate/run_migration.sh --apply              # back up, migrate, verify
 #   ./scripts/migrate/run_migration.sh --apply \
 #       --backup-verified-elsewhere "nightly base backup + WAL, restore tested 2026-08-04"
+#   ./scripts/migrate/run_migration.sh --via-run --apply \
+#       --backup-verified-elsewhere "nightly base backup + WAL, restore tested 2026-08-04"
+#
+# --via-run runs every in-container step (Step 1's import checks, preflight, alembic,
+# postflight) as a one-off `docker compose run --rm` container built from the CURRENT
+# image, instead of `docker compose exec` against an already-running one. Use it when
+# `app` is stopped for the migration window: the image, not a running container, is what
+# carries the new source, so `exec` has nothing to target. It also skips Step 1's "service
+# must be running" check, and passes the preflight snapshot to postflight through a bind
+# mount — each `--rm` container is ephemeral, so without the mount postflight would not
+# see the file the (separate) preflight container wrote.
 #
 # --backup-verified-elsewhere is the ONLY way to skip taking a dump, and it makes
 # you write down what you are asserting instead. There is deliberately no bare
@@ -53,6 +64,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT"
 
 APPLY=0
+VIA_RUN=0
 TARGET="0028"
 DSN="${DATABASE_URL:-}"
 BACKUP_DIR="${MIGRATE_BACKUP_DIR:-backups}"
@@ -67,6 +79,7 @@ die_usage() { echo "ERROR: $*" >&2; echo "See docs/production-migration.md" >&2;
 while [ $# -gt 0 ]; do
   case "$1" in
     --apply) APPLY=1; shift ;;
+    --via-run) VIA_RUN=1; shift ;;
     --target) TARGET="${2:?--target needs a revision}"; shift 2 ;;
     --database-url) DSN="${2:?--database-url needs a DSN}"; shift 2 ;;
     --backup-dir) BACKUP_DIR="${2:?--backup-dir needs a path}"; shift 2 ;;
@@ -87,6 +100,31 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+# --------------------------------------------------------------------------
+# Resolve the preflight/postflight snapshot path up front (not inside Step 4,
+# where it used to live): `compose_py`, defined next, is called as early as
+# Step 1, and under --via-run it needs the snapshot's host directory for the
+# bind mount before Step 1 runs.
+# --------------------------------------------------------------------------
+SNAP="${MIGRATE_SNAPSHOT:-$BACKUP_DIR/preflight_snapshot.json}"
+mkdir -p "$(dirname "$SNAP")"
+SNAP_HOST_DIR="$(cd "$(dirname "$SNAP")" && pwd)"
+# Under --via-run each step is a --rm container: the snapshot must be addressed through the
+# bind mount, not through the ephemeral image path.
+SNAP_IN_CONTAINER="$SNAP"
+[[ "$VIA_RUN" == "1" ]] && SNAP_IN_CONTAINER="/migrate-state/$(basename "$SNAP")"
+
+compose_py() {   # replaces the inline `docker compose exec ...` in Step 1, run_py(), Step 5 and Step 6
+  if [[ "$VIA_RUN" == "1" ]]; then
+    docker compose run --rm --no-deps -T \
+      -v "$SNAP_HOST_DIR:/migrate-state" \
+      -e MIGRATE_STATE_DIR=/migrate-state \
+      -e PYTHONPATH=/app -e DATABASE_URL="$DSN" "$@"
+  else
+    docker compose exec -T -e PYTHONPATH=/app -e DATABASE_URL="$DSN" "$@"
+  fi
+}
+
 MODE="REHEARSAL (nothing will be written)"
 [ "$APPLY" -eq 1 ] && MODE="APPLY (this will back up and migrate)"
 
@@ -106,13 +144,15 @@ echo "=============================================================="
 # --------------------------------------------------------------------------
 echo
 echo "--- Step 1: the container is running current code ---"
-if ! docker compose ps --status running --services 2>/dev/null | grep -qx "$SVC"; then
+if [[ "$VIA_RUN" == "1" ]]; then
+  echo "    via-run: using a one-off container from the current image"
+elif ! docker compose ps --status running --services 2>/dev/null | grep -qx "$SVC"; then
   echo "BLOCKED: compose service '$SVC' is not running." >&2
   echo "  docker compose up -d --build $SVC" >&2
   exit "$EX_OPERATIONAL"
 fi
-SRC_PATH="$(docker compose exec -T -e PYTHONPATH=/app "$SVC" \
-  python -c 'import src; print(src.__file__)' 2>/dev/null | tr -d '\r')"
+SRC_PATH="$(compose_py "$SVC" \
+  python -c 'import src; print(src.__file__)' 2>/dev/null | tail -n 1 | tr -d '\r')"
 case "$SRC_PATH" in
   /app/src/__init__.py) echo "    PASS  import src -> $SRC_PATH" ;;
   *) echo "BLOCKED: with PYTHONPATH=/app, 'import src' resolved to '${SRC_PATH:-<nothing>}'," >&2
@@ -120,7 +160,7 @@ case "$SRC_PATH" in
      echo "  docker compose up -d --build $SVC" >&2
      exit "$EX_BLOCKED" ;;
 esac
-if ! docker compose exec -T -e PYTHONPATH=/app "$SVC" \
+if ! compose_py "$SVC" \
      python -c 'from src.models import Cohort' >/dev/null 2>&1; then
   echo "BLOCKED: /app/src has no Cohort model — the mounted source predates 0022." >&2
   exit "$EX_BLOCKED"
@@ -149,7 +189,7 @@ fi
 echo "    target: $(printf '%s' "$DSN" | sed -E 's#(//[^:]+):[^@]*@#\1:***@#')"
 
 run_py() {  # run a repo python script inside the container with current code
-  docker compose exec -T -e PYTHONPATH=/app -e DATABASE_URL="$DSN" "$SVC" python "$@"
+  compose_py "$SVC" python "$@"
 }
 
 # --------------------------------------------------------------------------
@@ -208,10 +248,8 @@ fi
 # --------------------------------------------------------------------------
 echo
 echo "--- Step 4: preflight ---"
-SNAP="${MIGRATE_SNAPSHOT:-$BACKUP_DIR/preflight_snapshot.json}"
-mkdir -p "$(dirname "$SNAP")"
 set +e
-run_py scripts/migrate/preflight.py --target "$TARGET" --snapshot "$SNAP" \
+run_py scripts/migrate/preflight.py --target "$TARGET" --snapshot "$SNAP_IN_CONTAINER" \
   "${EXTRA_PREFLIGHT[@]}"
 PF=$?
 set -e
@@ -251,8 +289,7 @@ fi
 echo
 echo "--- Step 5: alembic upgrade $TARGET (lock_timeout ${LOCK_TIMEOUT_MS}ms) ---"
 set +e
-docker compose exec -T -e PYTHONPATH=/app -e DATABASE_URL="$DSN" \
-  -e ALEMBIC_LOCK_TIMEOUT_MS="$LOCK_TIMEOUT_MS" "$SVC" \
+compose_py -e ALEMBIC_LOCK_TIMEOUT_MS="$LOCK_TIMEOUT_MS" "$SVC" \
   python -m alembic upgrade "$TARGET"
 MIG=$?
 set -e
@@ -284,7 +321,7 @@ async def m():
         r = await c.execute(sa.text('select version_num from alembic_version'))
         print((r.scalar() or 'NONE'))
     await e.dispose()
-asyncio.run(m())" 2>/dev/null | tr -d '\r')"
+asyncio.run(m())" 2>/dev/null | tail -n 1 | tr -d '\r')"
 if [ "$STAMP" != "$TARGET" ]; then
   echo "BLOCKED: alembic reported success but alembic_version is '${STAMP:-MISSING}', not $TARGET." >&2
   echo "  Treat this as a silent rollback. Do NOT deploy code. Investigate env.py." >&2
@@ -298,7 +335,7 @@ echo "    PASS  alembic_version = $STAMP (read back from the database)"
 echo
 echo "--- Step 7: postflight ---"
 set +e
-run_py scripts/migrate/postflight.py --target "$TARGET" --snapshot "$SNAP"
+run_py scripts/migrate/postflight.py --target "$TARGET" --snapshot "$SNAP_IN_CONTAINER"
 POST=$?
 set -e
 if [ "$POST" -ne 0 ]; then
@@ -321,6 +358,8 @@ echo "          python scripts/backfill_slack_ts.py            # report first"
 echo "        docker compose exec -T -e PYTHONPATH=/app $SVC \\"
 echo "          python scripts/backfill_slack_ts.py --apply"
 echo "      Read its output. Exit 2 means rows were UNVERIFIED, not absent."
-echo "   9. Deploy the application code, then restart app + worker."
+echo "   9. Deploy the application code, then start (or restart) app + worker."
+echo "      If you migrated with --via-run, this is also when app comes back up —"
+echo "      step 8's 'docker compose exec' needs a running container."
 echo "  10. Start agent-run last."
 echo "=============================================================="
