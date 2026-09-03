@@ -16,6 +16,8 @@ Two defects observed live during the P2 end-to-end test:
    plainly that replies are not monitored.
 """
 
+from datetime import UTC, datetime, timedelta
+
 import pytest
 from sqlalchemy import select
 
@@ -468,6 +470,7 @@ async def test_explicit_email_review_upgrades_the_engines_implicit_rating_marker
     recipient, agent, td, notification = await _world(
         db_session, recipient_email="pi.d6a@scripps.edu", token=token
     )
+    implicit_reviewed_at = datetime.now(UTC) - timedelta(days=3)
     implicit = ProposalReview(
         thread_decision_id=td.id,
         agent_id=agent.agent_id,
@@ -475,6 +478,7 @@ async def test_explicit_email_review_upgrades_the_engines_implicit_rating_marker
         rating=-1,
         comment=None,
         submitted_via="engine",
+        reviewed_at=implicit_reviewed_at,
     )
     db_session.add(implicit)
     await db_session.flush()
@@ -495,6 +499,9 @@ async def test_explicit_email_review_upgrades_the_engines_implicit_rating_marker
     assert review.submitted_via == "email"
     assert review.reviewed_by_user_id == recipient.id
     assert notification.status == "responded"
+    # D6 amendment: reviewed_at must move forward to when the explicit action
+    # happened, not stay frozen at the engine's implicit-marker timestamp.
+    assert review.reviewed_at > implicit_reviewed_at
     # Every side effect that follows a fresh insert must still fire.
     assert len(sent_emails) == 1, "_send_review_confirmation must still fire on the upgrade path"
 
@@ -510,6 +517,7 @@ async def test_explicit_email_reopen_upgrades_the_engines_implicit_rating_marker
     recipient, agent, td, notification = await _world(
         db_session, recipient_email="pi.d6b@scripps.edu", token=token
     )
+    implicit_reviewed_at = datetime.now(UTC) - timedelta(days=3)
     implicit = ProposalReview(
         thread_decision_id=td.id,
         agent_id=agent.agent_id,
@@ -517,6 +525,7 @@ async def test_explicit_email_reopen_upgrades_the_engines_implicit_rating_marker
         rating=-1,
         comment=None,
         submitted_via="engine",
+        reviewed_at=implicit_reviewed_at,
     )
     db_session.add(implicit)
     await db_session.flush()
@@ -554,6 +563,9 @@ async def test_explicit_email_reopen_upgrades_the_engines_implicit_rating_marker
     assert review.comment == "[Reopened via email] focus on X"
     assert review.submitted_via == "email"
     assert review.reviewed_by_user_id == recipient.id
+    # D6 amendment: reviewed_at must move forward to when the explicit reopen
+    # happened, not stay frozen at the engine's implicit-marker timestamp.
+    assert review.reviewed_at > implicit_reviewed_at
 
 
 async def test_an_explicit_rating_still_blocks_a_duplicate_review_and_reopen_by_email(
@@ -567,6 +579,7 @@ async def test_an_explicit_rating_still_blocks_a_duplicate_review_and_reopen_by_
     recipient, agent, td, notification = await _world(
         db_session, recipient_email="pi.d6c@scripps.edu", token=token
     )
+    explicit_reviewed_at = datetime.now(UTC) - timedelta(days=3)
     explicit = ProposalReview(
         thread_decision_id=td.id,
         agent_id=agent.agent_id,
@@ -574,6 +587,7 @@ async def test_an_explicit_rating_still_blocks_a_duplicate_review_and_reopen_by_
         rating=3,
         comment="already rated",
         submitted_via="email",
+        reviewed_at=explicit_reviewed_at,
     )
     db_session.add(explicit)
     await db_session.flush()
@@ -588,6 +602,9 @@ async def test_an_explicit_rating_still_blocks_a_duplicate_review_and_reopen_by_
     assert len(reviews) == 1
     assert reviews[0].id == explicit_id
     assert reviews[0].rating == 3, "a real existing rating must not be overwritten"
+    # D6 amendment control: an already-explicit row's reviewed_at is untouched —
+    # only the rating=-1 upgrade path moves it forward.
+    assert reviews[0].reviewed_at == explicit_reviewed_at
     # process_inbound_email's own caller-side bookkeeping is unchanged by D6 — it
     # always marks the notification responded and sends a confirmation once the
     # classifier extracts a valid rating, regardless of whether _handle_review
@@ -613,6 +630,9 @@ async def test_an_explicit_rating_still_blocks_a_duplicate_review_and_reopen_by_
     assert len(reviews) == 1
     assert reviews[0].id == explicit_id
     assert reviews[0].rating == 3, "the existing explicit review must be untouched"
+    assert reviews[0].reviewed_at == explicit_reviewed_at, (
+        "the already-blocked instruction reopen must not touch reviewed_at either"
+    )
 
 
 # --- 3. Confirmations do not pretend to be reply-able --------------------------

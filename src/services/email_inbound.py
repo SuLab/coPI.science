@@ -6,6 +6,7 @@ import json
 import logging
 import re
 import secrets
+from datetime import UTC, datetime
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -651,14 +652,16 @@ async def _handle_review(
     if existing_row is not None:
         # D6/COR-13: a rating=-1 row is the engine's implicit marker (Task 20.9), not a
         # real review — upgrade it in place rather than inserting a second row
-        # (proposal_reviews has a real UNIQUE (thread_decision_id, agent_id)). id and
-        # reviewed_at are left untouched.
+        # (proposal_reviews has a real UNIQUE (thread_decision_id, agent_id)). id is
+        # left untouched; reviewed_at (amendment) is moved forward to record when the
+        # explicit action happened, not when the engine wrote the implicit marker.
         existing_row.user_id = agent.user_id  # Always the PI
         existing_row.delegate_user_id = user.id if not is_owner else None
         existing_row.reviewed_by_user_id = user.id
         existing_row.rating = rating
         existing_row.comment = comment.strip() or None
         existing_row.submitted_via = "email"
+        existing_row.reviewed_at = datetime.now(UTC)
     else:
         review = ProposalReview(
             thread_decision_id=td.id,
@@ -673,7 +676,8 @@ async def _handle_review(
         db.add(review)
     await db.flush()
     logger.info(
-        "Email review created: user=%s agent=%s rating=%d proposal=%s",
+        "Email review %s: user=%s agent=%s rating=%d proposal=%s",
+        "upgraded" if existing_row is not None else "created",
         user.id,
         agent.agent_id,
         rating,
@@ -935,13 +939,15 @@ async def _handle_instruction(
     if already_row is not None:
         # D6/COR-13: already_row.rating == -1 here (the != -1 case returned False
         # above) — the engine's implicit marker, upgraded in place instead of a
-        # second insert. id and reviewed_at are left untouched.
+        # second insert. id is left untouched; reviewed_at (amendment) is moved
+        # forward to record when the explicit reopen happened.
         already_row.user_id = agent.user_id
         already_row.delegate_user_id = user.id if not is_owner else None
         already_row.reviewed_by_user_id = user.id
         already_row.rating = 0  # 0 = reopened with guidance
         already_row.comment = f"[Reopened via email] {instruction[:500]}"
         already_row.submitted_via = "email"
+        already_row.reviewed_at = datetime.now(UTC)
     else:
         review = ProposalReview(
             thread_decision_id=td.id,
