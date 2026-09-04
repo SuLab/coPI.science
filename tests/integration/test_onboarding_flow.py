@@ -1253,6 +1253,39 @@ async def test_the_private_export_skips_an_empty_private_profile(db_session, exp
     )
 
 
+async def test_the_private_export_deletes_the_file_once_content_is_cleared(
+    db_session, export_dirs
+):
+    """Clear-after-write (#22 COR-23, #29): the 22.6/22.11 re-review found that
+    clearing a private profile nulled the DB columns but left a previously
+    exported profiles/private/{agent_id}.md on disk, which src/agent/agent.py's
+    private_profile property keeps reading — it only falls back to "No private
+    instructions yet." when the file is ABSENT. Removing the file (not just
+    skipping the write) is what makes that fallback correct again.
+    """
+    user = await factories.make_user(db_session)
+    prof = await factories.make_profile(
+        db_session, user=user, private_profile_md="secret behavioural instructions"
+    )
+
+    path = profile_export.export_private_profile(user, prof, "clearpi")
+    assert path == export_dirs.private / "clearpi.md"
+    assert "secret behavioural instructions" in path.read_text(encoding="utf-8")
+
+    # Clear both columns, as the onboarding/agent-page blank-save paths do.
+    prof.private_profile_md = None
+    prof.private_profile_seed = None
+    assert profile_export.export_private_profile(user, prof, "clearpi") is None
+    assert not path.exists(), (
+        "clearing a private profile must delete the exported file, not merely "
+        "skip re-writing it"
+    )
+
+    # Tolerate absence: clearing an already-cleared (file-less) profile must
+    # not raise.
+    assert profile_export.export_private_profile(user, prof, "clearpi") is None
+
+
 async def test_the_export_drops_a_doi_that_contradicts_the_journal(db_session):
     """_validate_doi_journal, through the export. A DOI attributed to the wrong
     journal is a paper attributed to the wrong lab."""
@@ -1401,6 +1434,9 @@ async def test_saving_the_private_profile_writes_the_private_file_and_a_private_
         await db_session.execute(select(func.count()).select_from(ProfileRevision))
     ).scalar_one() == 1
     assert await _flag(db_session, other.id) is True
+    other_prof = await _prof(db_session, other.id)
+    assert other_prof["private_profile_md"] is None
+    assert other_prof["private_profile_seed"] is None
 
 
 # ---------------------------------------------------------------------------

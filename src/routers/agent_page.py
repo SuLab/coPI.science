@@ -1290,12 +1290,21 @@ async def save_private_profile(
     if not profile:
         profile = ResearcherProfile(user_id=agent.user_id)
         db.add(profile)
-    profile.private_profile_md = content.strip() or None
+    stripped = content.strip()
+    profile.private_profile_md = stripped or None
     await db.commit()
 
+    # A blank/whitespace save deletes the exported file rather than writing
+    # whitespace to it (#22 COR-23, #29) — agent.py's private_profile property
+    # falls back to "No private instructions yet." only when the file is
+    # absent, so a stale file left behind after clearing would keep the agent
+    # honouring instructions the PI just deleted.
     profile_path = PROFILES_DIR / "private" / f"{agent.agent_id}.md"
-    profile_path.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write_text(profile_path, content, encoding="utf-8")
+    if stripped:
+        profile_path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_text(profile_path, content, encoding="utf-8")
+    else:
+        profile_path.unlink(missing_ok=True)
 
     # Record revision
     from src.services.profile_versioning import create_revision

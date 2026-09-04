@@ -133,14 +133,26 @@ def export_private_profile(
     Returns the path written, or None if the user has no AgentRegistry entry or
     there is no private content of either kind (COR-23: a seed with nothing
     exported yet must not read to the agent as "no private instructions").
+
+    When there is no content, any previously exported file is removed rather
+    than left in place (#29): src/agent/agent.py's private_profile property
+    falls back to "No private instructions yet." only when the file is
+    ABSENT, so a cleared profile that left a stale file on disk would keep
+    the agent honouring instructions the PI deleted.
     """
     if not agent_id:
         return None
     content = profile.private_profile_md or profile.private_profile_seed
+    path = PRIVATE_PROFILES_DIR / f"{agent_id}.md"
     if not content:
+        try:
+            path.unlink(missing_ok=True)
+        except Exception as exc:
+            logger.error(
+                "Failed to remove cleared private profile for %s: %s", user.name, exc
+            )
         return None
 
-    path = PRIVATE_PROFILES_DIR / f"{agent_id}.md"
     try:
         PRIVATE_PROFILES_DIR.mkdir(parents=True, exist_ok=True)
         atomic_write_text(path, content + "\n", encoding="utf-8")
