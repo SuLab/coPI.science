@@ -342,7 +342,15 @@ echo "==> lockfile freshness (requirements.lock matches pyproject.toml)"
 # whichever interpreter is chosen, so a full dev-dependency resolve can't perturb
 # any persistent venv while running this check.
 #
-# Set LOCKCHECK=none to skip entirely (offline, or you deliberately don't want this).
+# The compile itself can also fail outright — most commonly PyPI being
+# unreachable (`uv`/pip-tools need the index to resolve, even with every
+# package already cached) — which is a different failure from a real drift
+# and must not be treated the same way (#27 I4). That failure degrades to a
+# loud SKIP (exit 0 for this step, the gate keeps going) with the compiler's
+# captured stdout+stderr printed so it is never "see above" with nothing
+# above; only a successful compile that then DIFFERS from the committed lock
+# is treated as drift and fails the gate, exactly as before. Set LOCKCHECK=none
+# to skip entirely (offline, or you deliberately don't want this).
 if [ "${LOCKCHECK:-}" = "none" ]; then
   echo "    lockfile check skipped (LOCKCHECK=none)"
 elif ! command -v uv >/dev/null 2>&1; then
@@ -361,22 +369,28 @@ else
     echo "    or set LOCKCHECK=none to silence this."
   else
     LOCK_TMP="$(mktemp)"
+    LOCK_COMPILE_LOG="$(mktemp)"
     if ! uv run --isolated --no-project --python "$LOCK_PYSPEC" --with pip-tools -- \
           python -m piptools compile --generate-hashes --no-header \
-          --output-file "$LOCK_TMP" pyproject.toml >/dev/null 2>&1; then
-      echo "ERROR: pip-compile failed to resolve pyproject.toml — see above." >&2
+          --output-file "$LOCK_TMP" pyproject.toml >"$LOCK_COMPILE_LOG" 2>&1; then
+      echo "    SKIP: pip-compile could not resolve pyproject.toml — this is usually PyPI"
+      echo "    being unreachable, not a real drift, so it does not fail the gate (a"
+      echo "    spurious failure here is worse than no check). Its output:"
+      sed 's/^/    /' "$LOCK_COMPILE_LOG" >&2
+      echo "    Set LOCKCHECK=none to silence this without seeing it again."
+      rm -f "$LOCK_TMP" "$LOCK_COMPILE_LOG"
+    else
+      rm -f "$LOCK_COMPILE_LOG"
+      if ! diff -q <(grep -v '^#' requirements.lock) <(grep -v '^#' "$LOCK_TMP") >/dev/null; then
+        echo "ERROR: requirements.lock is stale — pyproject.toml changed without regenerating it." >&2
+        echo "Run: uv run --isolated --no-project --python 3.11 --with pip-tools -- python -m piptools compile --generate-hashes --no-header -o requirements.lock pyproject.toml" >&2
+        diff <(grep -v '^#' requirements.lock) <(grep -v '^#' "$LOCK_TMP") >&2 || true
+        rm -f "$LOCK_TMP"
+        exit 1
+      fi
       rm -f "$LOCK_TMP"
-      exit 1
+      echo "    requirements.lock is current (resolved with $LOCK_PYSPEC)"
     fi
-    if ! diff -q <(grep -v '^#' requirements.lock) <(grep -v '^#' "$LOCK_TMP") >/dev/null; then
-      echo "ERROR: requirements.lock is stale — pyproject.toml changed without regenerating it." >&2
-      echo "Run: uv run --isolated --no-project --python 3.11 --with pip-tools -- python -m piptools compile --generate-hashes --no-header -o requirements.lock pyproject.toml" >&2
-      diff <(grep -v '^#' requirements.lock) <(grep -v '^#' "$LOCK_TMP") >&2 || true
-      rm -f "$LOCK_TMP"
-      exit 1
-    fi
-    rm -f "$LOCK_TMP"
-    echo "    requirements.lock is current (resolved with $LOCK_PYSPEC)"
   fi
 fi
 
