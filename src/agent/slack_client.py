@@ -665,9 +665,9 @@ class AgentSlackClient:
             return user_id or "unknown"
         try:
             info = self._api("users_info", user=user_id)
-            user = info.get("user", {})
+            user = info.get("user") or {}
             return (
-                user.get("profile", {}).get("display_name")
+                (user.get("profile") or {}).get("display_name")
                 or user.get("real_name")
                 or user_id
             )
@@ -680,7 +680,7 @@ class AgentSlackClient:
             return False
         try:
             info = self._api("users_info", user=user_id)
-            user = info.get("user", {})
+            user = info.get("user") or {}
             return user.get("is_bot", False)
         except SlackApiError:
             return False

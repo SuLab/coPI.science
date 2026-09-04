@@ -1066,3 +1066,27 @@ def test_resolve_user_name_falls_back_to_real_name_with_no_display_name():
         }}},
     )
     assert _client(fake).resolve_user_name("U123") == "Real Name"
+
+
+def test_resolve_user_name_tolerates_a_null_profile():
+    """M1 (#23 V7e's type-substitution sibling): `dict.get(k, {})` returns the actual value —
+    `None`, not the default `{}` — when Slack sends the key present with a null value
+    (`"profile": null`). The old chained `.get("profile", {}).get("display_name")` then raised
+    `AttributeError` on `None`, which the surrounding `except SlackApiError` does not catch, so it
+    escaped into simulation.py's callers."""
+    fake = RecordingSlackClient(
+        responses={"users_info": {"ok": True, "user": {
+            "id": "U123", "real_name": "Real Name", "profile": None,
+        }}},
+    )
+    assert _client(fake).resolve_user_name("U123") == "Real Name"
+
+
+def test_is_bot_user_tolerates_a_null_user_object():
+    """Same type-substitution class one screen up: `info.get("user", {})` is `None`, not `{}`,
+    when Slack sends `"user": null` — `is_bot_user`'s sibling chained `.get("is_bot", False)`
+    would raise `AttributeError` the same way `resolve_user_name` did."""
+    fake = RecordingSlackClient(
+        responses={"users_info": {"ok": True, "user": None}},
+    )
+    assert _client(fake).is_bot_user("U123") is False
