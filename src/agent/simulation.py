@@ -284,22 +284,21 @@ class SimulationEngine:
         self._dm_poll_cursors: dict[str, str] = {}  # agent_id -> latest DM ts
         self._pi_handler = None  # Initialized in start() after PI mappings loaded
 
-        # Agent name lookups
-        self._bot_name_to_id: dict[str, str] = {
-            a.bot_name.lower(): a.agent_id for a in agents
-        }
-        # GrantBot is a service bot: its own token, no AgentRegistry row, never a
-        # roster slot — so nothing else ever puts it in this map. It is seeded
-        # here because its :moneybag: posts come back in through the same inbound
-        # paths as roster bots, and _entry_allowed fails closed on a bot row with
-        # a NULL agent_id (unattributable ⇒ belongs to no cohort). Without the
+        # Agent name lookups. GrantBot is a service bot: its own token, no
+        # AgentRegistry row, never a roster slot — so nothing else ever puts
+        # it in this map. It is seeded here (via _rebuild_bot_name_map) because
+        # its :moneybag: posts come back in through the same inbound paths as
+        # roster bots, and _entry_allowed fails closed on a bot row with a
+        # NULL agent_id (unattributable ⇒ belongs to no cohort). Without the
         # entry, every funding post is invisible to every gated agent.
         # setdefault, not assignment: a roster PI actually named Grant would own
         # bot_name "GrantBot", and the roster answer must win. Iterated from
         # SERVICE_AGENT_IDS so a second service bot cannot be added to the
         # manifest validator and admin UI while silently missing the engine.
-        for service_id in SERVICE_AGENT_IDS:
-            self._bot_name_to_id.setdefault(service_id, service_id)
+        # See _rebuild_bot_name_map's docstring for why every later mutation
+        # of self.agents also routes back through this same rebuild rather
+        # than an incremental edit.
+        self._rebuild_bot_name_map()
         self.message_log.set_bot_name_map(self._bot_name_to_id)
 
         # Slack bot_user_id -> agent_id for service bots. The name map above is
@@ -5287,6 +5286,29 @@ class SimulationEngine:
                     agent.agent_id,
                 )
 
+    def _rebuild_bot_name_map(self) -> None:
+        """Recompute ``_bot_name_to_id`` from ``self.agents`` and re-seed the
+        SERVICE_AGENT_IDS entries (see __init__'s comment on why the
+        "grantbot" entry matters: it is the only thing that lets
+        _entry_allowed attribute GrantBot's own posts).
+
+        A full rebuild (rather than an incremental pop/set on the one changed
+        key) is the fix for #26 DOC-B's residual bug: a roster agent that had
+        claimed a service-bot name (the roster answer legitimately overrides
+        the seed while it holds the name) and is then renamed AWAY from it
+        must not leave the seed permanently missing — rebuilding from
+        scratch every time re-applies the setdefault unconditionally. It also
+        makes a same-tick swap between two agents' bot_names come out right
+        regardless of processing order, since the result is always derived
+        from the current source of truth (self.agents) rather than a
+        sequence of incremental edits.
+        """
+        self._bot_name_to_id: dict[str, str] = {
+            a.bot_name.lower(): a.agent_id for a in self.agents.values()
+        }
+        for service_id in SERVICE_AGENT_IDS:
+            self._bot_name_to_id.setdefault(service_id, service_id)
+
     async def _sync_roster_from_db(self) -> None:
         """Re-sync the live agent roster from AgentRegistry (status=='active').
 
@@ -5366,14 +5388,10 @@ class SimulationEngine:
                     agent.role = r.role
                     roster_changed = True
                 if r.bot_name != agent.bot_name:
-                    old_key = agent.bot_name.lower()
-                    if self._bot_name_to_id.get(old_key) == aid:
-                        self._bot_name_to_id.pop(old_key, None)
                     logger.info(
                         "[roster] %s bot_name %s -> %s", aid, agent.bot_name, r.bot_name,
                     )
                     agent.bot_name = r.bot_name
-                    self._bot_name_to_id[agent.bot_name.lower()] = aid
                     roster_changed = True
                     bot_name_changed = True
                 if r.pi_name != agent.pi_name:
@@ -5382,6 +5400,12 @@ class SimulationEngine:
                     )
                     agent.pi_name = r.pi_name
                     roster_changed = True
+            if bot_name_changed:
+                # A full rebuild (rather than an incremental pop/set on just
+                # the renamed key) re-applies the SERVICE_AGENT_IDS seed and
+                # gets same-tick swaps right regardless of processing order —
+                # see _rebuild_bot_name_map's docstring.
+                self._rebuild_bot_name_map()
 
             # Token-diff for surviving agents. `main.py` admits every active
             # agent to self.agents regardless of token, so an agent provisioned
@@ -5484,12 +5508,14 @@ class SimulationEngine:
                 self.agents.pop(aid, None)
                 self.slack_clients.pop(aid, None)  # Web API only — no socket to close
                 self._dm_poll_cursors.pop(aid, None)
-                bot_name = next(
-                    (n for n, a in self._bot_name_to_id.items() if a == aid), None
-                )
-                if bot_name:
-                    self._bot_name_to_id.pop(bot_name, None)
                 logger.info("[roster] Removed inactive agent %s from live roster", aid)
+            if to_remove:
+                # Rebuild rather than pop the removed agent's own bot_name key
+                # directly: a removed agent that had claimed a service-bot
+                # name (e.g. an agent literally named GrantBot) must leave the
+                # SERVICE_AGENT_IDS seed reseeded, not missing entirely — see
+                # _rebuild_bot_name_map's docstring.
+                self._rebuild_bot_name_map()
 
             # --- Additions: agent newly active ------------------------------
             for aid in to_add:

@@ -59,3 +59,12 @@ async def test_reject_count_resets_on_a_non_rejected_draft_even_if_suppressed(en
         "suppressed — otherwise a stale streak from an earlier false-positive rejection "
         "survives an unrelated suppression and counts towards backing the thread off"
     )
+
+    # Third turn: a rejected draft after the reset must resume the two-strike
+    # tolerance at count=1 (still below the >=2 backoff threshold), not skip
+    # straight to backing the thread off. Pins that COR-28b' restored the
+    # tolerance rather than merely zeroing the counter once.
+    state["next"] = ack_only_reply
+    await engine._reply_to_thread(good, thread)
+    assert thread.funding_reject_count == 1
+    assert thread.has_pending_reply is True

@@ -236,6 +236,31 @@ class TestSyncRosterFromDb:
         assert engine._bot_name_to_id.get("newsubot") == "su"
         assert "subot" not in engine._bot_name_to_id
 
+    async def test_rename_away_from_service_bot_name_reseeds_the_seed(self, monkeypatch):
+        """#26 DOC-B follow-up: a roster PI's bot_name legitimately overrides the
+        SERVICE_AGENT_IDS seed for "grantbot" while it owns that name (see
+        __init__'s comment — the roster answer must win). But the old
+        incremental rename logic just popped the owned key on a rename away
+        from it, permanently deleting the shared seed entry instead of
+        restoring it — leaving GrantBot's own posts unattributable
+        thereafter. A full _rebuild_bot_name_map() re-applies the
+        SERVICE_AGENT_IDS setdefault every time, so the seed survives.
+        """
+        _patch_client(monkeypatch)
+        engine = _make_engine([_row("su")], existing_agents=["su"])
+        # Simulate a prior tick where this roster agent already claimed the
+        # "grantbot" name (no seed entry survives that claim — see __init__).
+        engine.agents["su"].bot_name = "GrantBot"
+        engine._bot_name_to_id = {"grantbot": "su"}
+
+        await engine._sync_roster_from_db()
+
+        assert engine.agents["su"].bot_name == "SuBot"
+        assert engine._bot_name_to_id.get("grantbot") == "grantbot", (
+            "renaming a roster agent AWAY from a service-bot name must "
+            "reseed the SERVICE_AGENT_IDS entry, not leave it missing"
+        )
+
     async def test_existing_client_is_rebuilt_when_its_token_rotates(self, monkeypatch):
         """Red-team residual: the old `continue` on 'aid in self.slack_clients'
         skipped a TOKEN ROTATION on an already-connected agent entirely — the
