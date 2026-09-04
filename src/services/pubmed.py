@@ -73,15 +73,23 @@ def reconcile_pub_doi(
 
 # Rate limiting: NCBI's policy caps anonymous traffic at 3 req/s and API-keyed
 # traffic at 10 req/s. Two long-lived semaphores (rather than one resized at
-# call time) because the key/no-key split is a per-process constant, and a
-# Semaphore is safe to construct outside a running loop in py3.10+. The
-# semaphore only bounds how many NCBI requests may be in flight at once — it
-# does NOT bound the aggregate rate: N slots each sleeping `interval` seconds
-# in the old code allowed up to N/interval requests per second, well past
-# NCBI's ceiling (keyless peaked at ~5.9 req/s against a 3 req/s limit). The
-# actual ceiling is enforced by `_pace_ncbi` below, a module-level
-# monotonic-clock gate that spaces request STARTS at least `interval` seconds
-# apart, process-wide, regardless of how many callers are in flight.
+# call time) because the key/no-key split is a per-process constant. Constructing
+# a Semaphore outside a running loop is safe in py3.10+, but that alone does not
+# make these loop-independent — like `asyncio.Lock` (see the comment above
+# `_ncbi_next_start`), a Semaphore binds to a loop at its first *contended*
+# acquire, not at construction. The semaphore only bounds how many NCBI requests
+# may be in flight at once — it does NOT bound the aggregate rate: N slots each
+# sleeping `interval` seconds in the old code allowed up to N/interval requests
+# per second, well past NCBI's ceiling (keyless peaked at ~5.9 req/s against a 3
+# req/s limit). The actual ceiling is enforced by `_pace_ncbi` below, a
+# module-level monotonic-clock gate that spaces request STARTS at least
+# `interval` seconds apart, process-wide, regardless of how many callers are in
+# flight.
+# HAZARD (review round 2, deferred): bound at its first contended acquire, so the
+# process must not call asyncio.run() twice with >= N concurrent NCBI calls at
+# the same has_key value (N = that semaphore's size) — a per-loop semaphore map
+# is the full fix; test_pubmed_contract.py mitigates this test-only by rebinding
+# fresh semaphores every test.
 _NCBI_SEMAPHORES = {True: asyncio.Semaphore(8), False: asyncio.Semaphore(2)}
 _NCBI_PACING_SECONDS = {True: 0.12, False: 0.34}  # 8.3 req/s / 2.9 req/s aggregate ceilings
 
@@ -99,7 +107,9 @@ _RETRY_BACKOFF = 0.5
 # does one read-modify-write of `_ncbi_next_start` with no `await` between the
 # read and the write, which is atomic on a single-threaded event loop — nothing
 # else can run between two non-`await` statements — so concurrent callers can't
-# race it, and nothing here is bound to any loop at all.
+# race it, and the cursor itself is never bound to any loop (unlike the
+# semaphores above, which share the Lock's first-contended-acquire hazard — see
+# the HAZARD note above `_NCBI_SEMAPHORES`).
 _ncbi_next_start = 0.0
 
 

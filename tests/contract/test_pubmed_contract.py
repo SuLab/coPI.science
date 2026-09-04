@@ -34,11 +34,23 @@ def _no_retry_backoff(monkeypatch, request):
     """Zero the retry loop's backoff (issue #23 COR-29a) so a mocked 5xx doesn't add ~3.5s of real
     sleep per test, and — except for the two tests below that need real values — also zero the
     NCBI pacing gate (COR-29b) and reset its shared clock, so the other ~10 tests that reach
-    _ncbi_get don't each pay the pacing interval too."""
+    _ncbi_get don't each pay the pacing interval too.
+
+    Also rebinds `_NCBI_SEMAPHORES` to fresh, same-sized Semaphores for every test (Minor 2,
+    review round 2): like `asyncio.Lock`, an `asyncio.Semaphore` binds to a loop at its first
+    *contended* acquire (see the HAZARD comment above `_NCBI_SEMAPHORES` in pubmed.py), and each
+    test function runs its own event loop, so reusing the module-level singletons across tests
+    risks a later test contending a semaphore already bound to an earlier test's (closed) loop
+    and raising "bound to a different event loop"."""
     monkeypatch.setattr(pubmed, "_RETRY_BACKOFF", 0)
     if request.node.name not in _UNPACED_TESTS:
         monkeypatch.setattr(pubmed, "_NCBI_PACING_SECONDS", {True: 0.0, False: 0.0})
         monkeypatch.setattr(pubmed, "_ncbi_next_start", 0.0)
+    monkeypatch.setattr(
+        pubmed,
+        "_NCBI_SEMAPHORES",
+        {key: asyncio.Semaphore(sem._value) for key, sem in pubmed._NCBI_SEMAPHORES.items()},
+    )
 
 
 def test_semaphores_are_sized_by_api_key_presence():
@@ -70,8 +82,8 @@ async def test_ncbi_pacing_spaces_concurrent_starts(monkeypatch):
     interval, the worst observed adjacent gap was 78% of `interval` and the worst total span 96%
     of `3 * interval`; the 50%/85% thresholds below leave ample margin above that noise floor
     while still failing every one of the 50 pre-gate-reproduction runs above — a ~1.9x margin on
-    the gap check and ~1.7x on the span check, not the "~50x" this docstring previously (and
-    wrongly) claimed.
+    the gap check and ~1.6x (environment-dependent; ≥1.5x) on the span check, not the "~50x" this
+    docstring previously (and wrongly) claimed.
     """
     interval = 0.1
     monkeypatch.setattr(pubmed, "_NCBI_PACING_SECONDS", {True: interval, False: interval})
@@ -91,6 +103,42 @@ async def test_ncbi_pacing_spaces_concurrent_starts(monkeypatch):
     gaps = [b - a for a, b in itertools.pairwise(starts)]
     assert all(gap >= interval * 0.5 for gap in gaps), gaps
     assert starts[-1] - starts[0] >= 3 * interval * 0.85
+
+
+def test_pace_ncbi_survives_two_separate_event_loops():
+    """Important 1 (review round 2): pin that `_pace_ncbi`'s lock-free cursor survives being
+    called from two separate event loops in one process — the exact scenario the pre-fix
+    `asyncio.Lock` body (commit 914330b) could not survive.
+
+    `asyncio.Lock` (and `asyncio.Semaphore`) do not bind to a loop at construction; they bind at
+    their first *contended* `acquire()` (see the module-level comment above `_ncbi_next_start` in
+    pubmed.py). Against `git show 914330b:src/services/pubmed.py`, `_pace_ncbi` lazily
+    constructed a module-level singleton `asyncio.Lock` on first call and held it for the
+    process's life. Gathering 3 concurrent `_pace_ncbi` calls guarantees at least one contended
+    `acquire()`, which binds that Lock to whichever loop is running. A second, separate
+    `asyncio.run()` call — a fresh event loop — then contends the same Lock again and raises
+    `RuntimeError: <Lock ...> is bound to a different event loop`. This RED claim is reasoned
+    from the 914330b source and verified in an untracked scratch reproduction, not reproduced by
+    reverting the tracked module: the preamble bans reverting tracked files for RED evidence, and
+    the pre-fix Lock body no longer exists in this tree.
+
+    The shipped cursor holds no loop-bound state at all — `_ncbi_next_start` is a plain float
+    advanced by a non-`await` read-modify-write — so this must pass GREEN against the current
+    code: two separate `asyncio.run()` calls, each gathering 3 concurrent `_pace_ncbi(0.01)`
+    calls (guaranteeing contention-shaped concurrency within each run), both complete without
+    error. This is a sync test (not async) precisely so it can drive two independent
+    `asyncio.run()` event loops itself; the autouse fixture above already resets
+    `_ncbi_next_start` to 0.0 before this test runs (this test's name is not in
+    `_UNPACED_TESTS`), and that reset doesn't need to interfere since each call passes its
+    interval directly rather than reading `_NCBI_PACING_SECONDS`.
+    """
+
+    async def _gather_three():
+        await asyncio.gather(*(pubmed._pace_ncbi(0.01) for _ in range(3)))
+
+    asyncio.run(_gather_three())  # first event loop
+    asyncio.run(_gather_three())  # second, separate event loop — 914330b's Lock couldn't survive this
+
 
 EFETCH_XML = """<?xml version="1.0"?>
 <PubmedArticleSet>
