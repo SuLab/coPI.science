@@ -126,17 +126,23 @@ class TestServiceBotTagsDoNotReserveThreads:
         assert log.get_thread_allowed_agents("1") == {"su", "wiseman"}
 
     def test_a_service_tag_shadows_a_later_roster_tag(self, log):
-        """First-match semantics: re.search stops at the first @...Bot.
+        """First-match semantics, now scoped to routing.
 
-        Documented, not desired — the fallback is the open 2-party rule, so the
-        cost is a thread that anyone may join rather than one nobody can. If
-        _extract_tagged_agent is ever changed to scan past a service mention,
-        update this expectation deliberately.
+        _extract_tagged_agent still stops at the first mention: its remaining
+        caller routes the message to a single agent. Participation no longer
+        does — _extract_tagged_agents filters per mention, so the roster tag
+        after the service tag reserves the thread instead of leaving it open to
+        everyone. This expectation was updated deliberately, as the previous
+        version of this test asked (#20 COR-8): the old None was the *open*
+        2-party fallback, i.e. a thread any agent could join.
         """
         log.append(
             _post("1", "general", "su", "SuBot", "@GrantBot posted this — @WisemanBot?")
         )
-        assert log.get_thread_allowed_agents("1") is None
+        assert log._extract_tagged_agent("@GrantBot posted this — @WisemanBot?") is None
+        allowed = log.get_thread_allowed_agents("1")
+        assert allowed == {"su", "wiseman"}
+        assert not (allowed & SERVICE_AGENT_IDS)
 
     def test_a_roster_tag_still_reserves_the_thread(self, log):
         """Positive control: the exemption must not disarm the tag rule itself."""
@@ -183,6 +189,107 @@ class TestExtractTaggedAgentResolvesSlackUidMentions:
         # back None, not the raw token — a phantom agent_id must never come
         # out of here.
         assert log._extract_tagged_agent("ping @GhostBot") is None
+
+
+# ---------------------------------------------------------------
+# A root that tags more than one bot (#20 COR-8)
+# ---------------------------------------------------------------
+
+@pytest.fixture
+def log_with_two_bots():
+    """A log with BOTH mention maps populated.
+
+    Deliberately not the module `log` fixture: `<@Uxxx>` mentions resolve
+    through the uid map, literal `@Tag` mentions through the name map, and a
+    fixture that sets only one of them makes every assertion below pass
+    vacuously (get_thread_allowed_agents falls through to the 2-party rule and
+    returns None for a human root with no replies).
+    """
+    ml = MessageLog()
+    ml.set_bot_name_map({
+        "subot": "su",
+        "wisemanbot": "wiseman",
+        "cravattbot": "cravatt",
+        **{service_id: service_id for service_id in SERVICE_AGENT_IDS},
+    })
+    ml.set_bot_uid_map({
+        "U111": "su",
+        "U222": "wiseman",
+        "U333": "cravatt",
+        **{f"USVC{n}": s for n, s in enumerate(sorted(SERVICE_AGENT_IDS))},
+    })
+    return ml
+
+
+def _human_entry(ts, content, channel="general", thread_ts=None):
+    """A PI message: sender_agent_id is None and is_bot is False."""
+    return LogEntry(
+        ts=ts,
+        channel=channel,
+        sender_agent_id=None,
+        sender_name="Dr. PI",
+        content=content,
+        thread_ts=thread_ts,
+        posted_at=float(ts),
+        is_bot=False,
+    )
+
+
+class TestMultiTagRootParticipation:
+    """#20 COR-8 asked for tag ROUTING. Locking participation to the *first*
+    translated uid regressed the case the issue exists to fix, and opening the
+    thread instead would break specs/agent-system.md:278-287 ("No third agent
+    may join"). The correct set is the poster plus every tagged agent."""
+
+    def test_a_human_root_tagging_two_bots_allows_exactly_those_two(self, log_with_two_bots):
+        log = log_with_two_bots
+        log.append(_human_entry("100.1", "Hey <@U111> and <@U222>, compare notes"))
+        assert log.get_thread_allowed_agents("100.1") == {"su", "wiseman"}
+
+    def test_a_third_agent_is_still_excluded(self, log_with_two_bots):
+        log = log_with_two_bots
+        log.append(_human_entry("100.2", "<@U111> <@U222> go"))
+        allowed = log.get_thread_allowed_agents("100.2")
+        assert allowed is not None, "a tagged thread must stay reserved, not open to the roster"
+        assert "cravatt" not in allowed
+
+    def test_a_single_tag_root_is_unchanged(self, log_with_two_bots):
+        log = log_with_two_bots
+        log.append(_human_entry("100.3", "<@U111> thoughts?"))
+        assert log.get_thread_allowed_agents("100.3") == {"su"}
+
+    def test_a_bot_root_tagging_two_bots_keeps_the_poster_too(self, log_with_two_bots):
+        log = log_with_two_bots
+        log.append(
+            _post("100.4", "general", "cravatt", "CravattBot",
+                  "@SuBot @WisemanBot — either of you seen this?")
+        )
+        assert log.get_thread_allowed_agents("100.4") == {"cravatt", "su", "wiseman"}
+
+    def test_a_service_tag_beside_a_roster_tag_reserves_only_the_roster_bot(
+        self, log_with_two_bots,
+    ):
+        """The per-mention service exemption survives the multi-tag scan.
+
+        grantbot never takes a turn, so it must not consume a thread slot; the
+        roster bot the PI tagged in the same breath still gets one.
+        """
+        log = log_with_two_bots
+        svc_uid = sorted(k for k in log._bot_uid_to_agent if k.startswith("USVC"))[0]
+        log.append(_human_entry("100.5", f"<@{svc_uid}> found this — <@U222> interested?"))
+        allowed = log.get_thread_allowed_agents("100.5")
+        assert allowed == {"wiseman"}
+        assert not (allowed & SERVICE_AGENT_IDS)
+
+    def test_a_root_tagging_only_service_bots_stays_on_the_two_party_rule(
+        self, log_with_two_bots,
+    ):
+        """Control for the test above: with nothing left after the exemption the
+        tag branch must not fire at all."""
+        log = log_with_two_bots
+        svc_uid = sorted(k for k in log._bot_uid_to_agent if k.startswith("USVC"))[0]
+        log.append(_human_entry("100.6", f"thanks <@{svc_uid}>"))
+        assert log.get_thread_allowed_agents("100.6") is None
 
 
 # ---------------------------------------------------------------

@@ -390,8 +390,8 @@ class MessageLog:
 
         Rules:
         - Funding threads (:moneybag:) are open to all → returns None.
-        - If the root post tags a specific agent, only the poster and tagged
-          agent may participate → returns {poster, tagged}.
+        - If the root post tags agents, only the poster and *every* tagged
+          agent may participate → returns {poster, *tagged}.
         - If no tag, falls back to generic 2-party rule: the first two distinct
           agents to post are the only allowed participants.
         - Returns None if the thread root is not found.
@@ -407,10 +407,16 @@ class MessageLog:
 
         poster_id = root.sender_agent_id
 
-        # Check if root post tags a specific agent (e.g. @WisemanBot)
-        tagged_id = self._extract_tagged_agent(root.content)
-        if tagged_id and tagged_id != poster_id:
-            return {poster_id, tagged_id} if poster_id else {tagged_id}
+        # Check if the root post tags agents (e.g. @WisemanBot, or <@Uxxx>).
+        # EVERY tagged agent reserves a slot, not just the first: a PI who tags
+        # two bots addressed both, and keeping only the first left the second
+        # burning one Phase-5 LLM call per turn on a thread it could never post
+        # in (#20 COR-8). Returning None here instead would open the thread to
+        # the whole roster, which specs/agent-system.md §Thread Participation
+        # Rules forbids ("No third agent may join").
+        tagged = [a for a in self._extract_tagged_agents(root.content) if a != poster_id]
+        if tagged:
+            return {poster_id, *tagged} if poster_id else set(tagged)
 
         # No tag — use generic 2-party rule: first 2 distinct agent_ids in thread.
         # If fewer than 2 participants, the thread is open for anyone to join.
@@ -440,35 +446,63 @@ class MessageLog:
         """Extract a tagged agent_id from message content (e.g. @WisemanBot
         or a real Slack <@Uxxx> mention).
 
-        Only the FIRST mention in ``content`` is considered — documented,
-        not desired (see tests/unit/test_message_log.py's
+        Only the FIRST mention in ``content`` is considered — documented, not
+        desired (see tests/unit/test_message_log.py's
         TestServiceBotTagsDoNotReserveThreads.
         test_a_service_tag_shadows_a_later_roster_tag): a service-bot mention
         earlier in the text shadows a real roster tag later in the same
-        message, same as before this fix.
+        message. Kept because this reads as *routing* — its remaining caller
+        (SimulationEngine's inbound PI-tag route) can only hand the message to
+        one agent. Thread *participation* uses _extract_tagged_agents, which
+        scans them all.
 
         Service bots resolve (ingestion must attribute their posts) but must
         never come out of here: a non-funding root that leads with @GrantBot
-        would otherwise lock the thread to {poster, grantbot} via
+        would otherwise reserve the thread for {poster, grantbot} via
         get_thread_allowed_agents, and a service bot never replies — the
         thread would be dead on arrival.
         """
         mentions = extract_bot_mentions(content, self._bot_uid_to_agent)
         if not mentions:
             return None
-        token = mentions[0]
-        # Two namespaces come out of extract_bot_mentions: a lowercased bot
-        # NAME (literal @Tag) and an already-resolved agent_id (a <@Uxxx>
-        # mention). Resolve the first through the name map; accept the second
-        # only if it really is a roster agent_id. An UNKNOWN bot name must
-        # stay unknown — get_thread_allowed_agents locks a thread on this
-        # value, so returning the raw name would lock it to a phantom agent.
+        return self._resolve_mention_token(mentions[0])
+
+    def _resolve_mention_token(self, token: str) -> str | None:
+        """Resolve one ``extract_bot_mentions`` token to a repliable agent_id.
+
+        Two namespaces come out of extract_bot_mentions: a lowercased bot NAME
+        (literal @Tag) and an already-resolved agent_id (a <@Uxxx> mention).
+        Resolve the first through the name map; accept the second only if it
+        really is a roster agent_id. An UNKNOWN bot name must stay unknown —
+        get_thread_allowed_agents reserves a thread on this value, so returning
+        the raw name would reserve it for a phantom agent.
+
+        Service bots resolve through the name map (ingestion must attribute
+        their posts) but never come out of here — see _extract_tagged_agent.
+        """
         agent_id = self._bot_name_to_id.get(token)
         if agent_id is None and token in set(self._bot_name_to_id.values()):
             agent_id = token
         if agent_id is None:
             return None
         return None if agent_id in SERVICE_AGENT_IDS else agent_id
+
+    def _extract_tagged_agents(self, content: str) -> list[str]:
+        """Every tagged, repliable agent_id in ``content``, in order, deduped.
+
+        The plural form of _extract_tagged_agent, and the only caller is
+        get_thread_allowed_agents. Because it filters per mention rather than
+        stopping at the first, a service-bot mention no longer shadows a roster
+        tag later in the same message (the "documented, not desired" behaviour
+        _extract_tagged_agent still has for tag *routing*, whose consumer can
+        only act on one agent).
+        """
+        tagged: list[str] = []
+        for token in extract_bot_mentions(content, self._bot_uid_to_agent):
+            agent_id = self._resolve_mention_token(token)
+            if agent_id is not None and agent_id not in tagged:
+                tagged.append(agent_id)
+        return tagged
 
     def has_new_reply_from_other(
         self,
