@@ -835,7 +835,8 @@ async def _send_status_overview(
     if proposals:
         rev_result = await db.execute(
             select(ProposalReview.thread_decision_id, ProposalReview.rating).where(
-                ProposalReview.thread_decision_id.in_([td.id for td in proposals])
+                ProposalReview.thread_decision_id.in_([td.id for td in proposals]),
+                ProposalReview.rating != -1,
             )
         )
         for td_id, rating in rev_result.all():

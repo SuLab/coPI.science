@@ -3,7 +3,8 @@
 merely engages a proposal thread) must not silence the PI-facing readers in
 `src/services/email_notifications.py`. This module covers
 `_get_unreviewed_proposals_for_user`, which decides whether a proposal is
-included in the review-request email sweep.
+included in the review-request email sweep, and (part 2) the weekly
+status-overview digest's ratings lookup feeding `_status_label`.
 
 Database is REAL (the rolled-back `db_session` from tests/conftest.py).
 """
@@ -13,7 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 import src.services.email_notifications as en
-from src.models import ProposalReview, User
+from src.models import EmailNotificationPreference, ProposalReview, User
 from tests import factories
 
 pytestmark = pytest.mark.integration
@@ -77,3 +78,51 @@ async def test_unreviewed_query_still_excludes_explicit_reviews(db_session):
     rows = await en._get_unreviewed_proposals_for_user(pi, db_session)
 
     assert rows == []
+
+
+async def test_weekly_digest_labels_implicit_minus_one_reviews_as_awaiting_review(
+    db_session, monkeypatch
+):
+    """The weekly status-overview digest's ratings lookup (feeding `_status_label`)
+    must ignore a lone rating=-1 row too, or `_status_label` falls through its
+    `ratings_by_td.get(td.id)` truthiness check (`[-1]` is truthy) into the literal
+    "reviewed" label — the digest would report a proposal as decided when the PI
+    gave no explicit verdict at all."""
+    user = await factories.make_user(db_session, email="pi.digest@scripps.edu")
+    agent = await factories.make_agent(db_session, user=user)
+    td = await factories.make_thread_decision(
+        db_session,
+        agent_a=agent.agent_id,
+        agent_b="beta",
+        outcome="proposal",
+        summary_text="A promising idea.",
+    )
+    db_session.add(
+        ProposalReview(
+            thread_decision_id=td.id,
+            agent_id=agent.agent_id,
+            user_id=user.id,
+            rating=-1,
+        )
+    )
+    pref = EmailNotificationPreference(user_id=user.id, category="status_overview")
+    db_session.add(pref)
+    await db_session.flush()
+
+    captured: dict = {}
+
+    def _fake_send_html_email(to_email, subject, text_body, html_body, **kwargs):
+        captured["text_body"] = text_body
+        return True
+
+    monkeypatch.setattr(en, "_send_html_email", _fake_send_html_email)
+
+    pi = await _eager(db_session, user.id)
+    sent = await en._send_status_overview(pi, pref, db_session)
+
+    assert sent is True
+    assert "— awaiting your review" in captured["text_body"], (
+        "a proposal whose only review is the engine's implicit rating=-1 marker "
+        f"was not labeled as awaiting review in the digest: {captured['text_body']!r}"
+    )
+    assert "— reviewed" not in captured["text_body"]
