@@ -15,7 +15,11 @@
 #   4. ruff lint of src/ against a CEILING (SRC_LINT_MAX) rather than zero. src/
 #      carries pre-existing style debt, so this is a ratchet: it blocks NEW debt
 #      without demanding the old debt be paid first.
-#   5. Full pytest run — unit + integration + characterization + contract — with
+#   5. requirements.lock freshness: regenerate with pip-compile and diff against the
+#      committed lock (pins only — pip-compile's own header would never match
+#      otherwise), so a pyproject.toml edit can't silently drift from what
+#      actually gets installed (#27 I4). Set LOCKCHECK=none to skip.
+#   6. Full pytest run — unit + integration + characterization + contract — with
 #      branch coverage over src/, failing under COV_MIN (a ratchet floor: raise it as
 #      coverage grows, never lower it).
 #
@@ -25,7 +29,10 @@
 # Overridable env: VENV_PY (python interpreter), COV_MIN (coverage floor %),
 # SRC_LINT_MAX (src/ lint ceiling), CI_MIGRATION_DB (round-trip DSN, or `none` to
 # skip the round trip), MIGCHECK_PORT (host port for the throwaway Postgres),
-# MIGRATION_FLOOR (the revision the round trip downgrades to).
+# MIGRATION_FLOOR (the revision the round trip downgrades to), LOCKCHECK (set to
+# `none` to skip the requirements.lock freshness check — offline, or no Python 3.11
+# interpreter available), LOCKCHECK_PYTHON (pin the interpreter/uv Python spec the
+# check resolves with, instead of auto-detecting one).
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -288,6 +295,71 @@ if [ "$src_findings" -gt "$SRC_LINT_MAX" ]; then
   exit 1
 fi
 echo "    ${src_findings} findings (ceiling ${SRC_LINT_MAX})"
+
+echo "==> lockfile freshness (requirements.lock matches pyproject.toml)"
+# pip-compile's own header defeats a raw file diff: it records the exact command it
+# was invoked with, including the --output-file path, so a scratch regeneration can
+# never byte-match the committed file even when every pin is identical. Fix: diff
+# with comment lines stripped (`grep -v '^#'`) on both sides — verified: two
+# lockfiles differing only in that header's --output-file path fail a raw `diff -q`
+# but are identical once comment lines are stripped (see
+# test_lockfile_comparison_ignores_pip_composes_own_header_but_not_real_pin_drift).
+#
+# pip-compile's resolution is Python-version/platform-sensitive, and the committed
+# requirements.lock was generated (Task 27.4) against a throwaway Python 3.11.14
+# venv (`uv venv --python 3.11.14`) to match the Dockerfile's `python:3.11-slim`
+# base — NOT against $VENV_PY, which is this repo's 3.12 test venv. Re-resolving
+# with $VENV_PY here would show spurious drift on every single run, for everyone,
+# even when nothing actually changed. So this step ALWAYS resolves with a Python
+# 3.11 interpreter, never $VENV_PY:
+#   - LOCKCHECK_PYTHON=<path-or-uv-python-spec> pins the interpreter explicitly.
+#   - otherwise, `uv python find 3.11 --no-python-downloads` locates an
+#     already-installed 3.11 without downloading one.
+#   - if neither uv nor a 3.11 interpreter is found, this step SKIPs with a clear
+#     message rather than failing the gate over missing tooling — a spurious
+#     failure here (from a 3.12-vs-3.11 mismatch) is worse than no check.
+# pip-tools itself does not need to be pre-installed anywhere: `uv run --with
+# pip-tools` supplies it in an ephemeral, isolated environment layered on top of
+# whichever interpreter is chosen, so a full dev-dependency resolve can't perturb
+# any persistent venv while running this check.
+#
+# Set LOCKCHECK=none to skip entirely (offline, or you deliberately don't want this).
+if [ "${LOCKCHECK:-}" = "none" ]; then
+  echo "    lockfile check skipped (LOCKCHECK=none)"
+elif ! command -v uv >/dev/null 2>&1; then
+  echo "    SKIP: uv not found on PATH (needed to run pip-compile against a matching"
+  echo "    Python 3.11 interpreter — see Task 27.4's report). Install uv, or set"
+  echo "    LOCKCHECK=none to silence this."
+else
+  LOCK_PYSPEC="${LOCKCHECK_PYTHON:-}"
+  if [ -z "$LOCK_PYSPEC" ]; then
+    LOCK_PYSPEC="$(uv python find 3.11 --no-python-downloads --no-project 2>/dev/null || true)"
+  fi
+  if [ -z "$LOCK_PYSPEC" ]; then
+    echo "    SKIP: no Python 3.11 interpreter found (requirements.lock was cut against"
+    echo "    3.11 to match the Dockerfile base — see Task 27.4's report). Install one"
+    echo "    with 'uv python install 3.11', set LOCKCHECK_PYTHON=/path/to/python3.11,"
+    echo "    or set LOCKCHECK=none to silence this."
+  else
+    LOCK_TMP="$(mktemp)"
+    if ! uv run --isolated --no-project --python "$LOCK_PYSPEC" --with pip-tools -- \
+          python -m piptools compile --generate-hashes --no-header \
+          --output-file "$LOCK_TMP" pyproject.toml >/dev/null 2>&1; then
+      echo "ERROR: pip-compile failed to resolve pyproject.toml — see above." >&2
+      rm -f "$LOCK_TMP"
+      exit 1
+    fi
+    if ! diff -q <(grep -v '^#' requirements.lock) <(grep -v '^#' "$LOCK_TMP") >/dev/null; then
+      echo "ERROR: requirements.lock is stale — pyproject.toml changed without regenerating it." >&2
+      echo "Run: uv run --isolated --no-project --python 3.11 --with pip-tools -- python -m piptools compile --generate-hashes --no-header -o requirements.lock pyproject.toml" >&2
+      diff <(grep -v '^#' requirements.lock) <(grep -v '^#' "$LOCK_TMP") >&2 || true
+      rm -f "$LOCK_TMP"
+      exit 1
+    fi
+    rm -f "$LOCK_TMP"
+    echo "    requirements.lock is current (resolved with $LOCK_PYSPEC)"
+  fi
+fi
 
 echo "==> pytest (full suite + branch coverage, fail-under=${COV_MIN}%)"
 "$VENV_PY" -m pytest tests/ \
