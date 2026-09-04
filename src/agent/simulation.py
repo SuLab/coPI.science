@@ -248,6 +248,12 @@ ROSTER_POLL_INTERVAL = 30.0    # seconds between AgentRegistry roster re-syncs
 #: the heartbeat row). See _poll_control_plane.
 CONTROL_POLL_INTERVAL = 30.0
 
+# How many consecutive main-loop iterations the proposal target must read
+# "cap reached AND no open interviews" before the run ends. Bridges the brief
+# window between the last pitch and the hub opening its interview thread; a
+# single zero-read is not enough. max_runtime is the independent backstop.
+PROPOSAL_DRAIN_SETTLE_TICKS = 3
+
 # Distinguishes "role has no cached rate yet" from "role's cached rate is None
 # (no override)". A plain dict.get() default cannot tell those apart, so the
 # cache would re-read role.toml from disk on every tick for every default role.
@@ -377,10 +383,19 @@ class SimulationEngine:
         reset_cursors: bool = False,
         slack_enabled: bool = True,
         fresh_start: bool = False,
+        max_proposals: int = 0,
     ):
         self.agents = {a.agent_id: a for a in agents}
         self.slack_clients = slack_clients
         self.max_runtime_minutes = max_runtime_minutes
+        # 0 = off. When >0, the engine stops opening NEW pitches once this many
+        # top-level posts exist this run, then ends the run when every opened
+        # interview has drained (see _proposal_target_drained). Rehydrated on
+        # resume from agent_messages (phase='new_post') so a restart cannot
+        # re-pitch past the cap.
+        self.max_proposals = max_proposals
+        self._proposals_posted = 0
+        self._proposal_drain_streak = 0
         self.budget_cap = budget_cap
         self.session_factory = session_factory
         self.simulation_run_id = simulation_run_id
@@ -854,6 +869,7 @@ class SimulationEngine:
         # non-final — including the ones whose interview is already over. See
         # `_rehydrate_assessed_threads`.
         await self._rehydrate_assessed_threads()
+        await self._rehydrate_proposal_count()
         # Rebuild advanced last_seen_cursor to max(all_messages), which can
         # overshoot messages in private channels (typically older than the
         # latest public chatter). Rewind member-bot cursors so later phases can
@@ -966,7 +982,7 @@ class SimulationEngine:
         """
         turn_count = 0
         consecutive_idle = 0
-        while self._running and self.is_within_time_limit:
+        while self._running and self.is_within_time_limit and not self._proposal_target_drained():
             # EVERY exit from this iteration runs `_drain_and_flush`, which is
             # why the whole body sits in a try/finally rather than ending with
             # the four calls. The drain and the three flushes used to be the
@@ -3159,6 +3175,16 @@ class SimulationEngine:
                 logger.debug("[%s] Phase 5: Skipped (daily cap %d/%d)", agent.agent_id, today_posts, cap)
                 return
 
+            # Proposal-count limit: once the run has posted its target number of
+            # pitches, stop opening new ones and let interviews drain. Checked
+            # here, beside the daily cap, so it costs no LLM call.
+            if self.max_proposals > 0 and self._proposals_posted >= self.max_proposals:
+                logger.info(
+                    "[%s] Phase 5: Skipped (proposal cap %d/%d reached)",
+                    agent.agent_id, self._proposals_posted, self.max_proposals,
+                )
+                return
+
             # Backpressure against STARTING more work than the agent can finish:
             # too many threads open at once. This used to have a second clause
             # (too many of the agent's proposals awaiting web review) and an
@@ -3442,6 +3468,7 @@ class SimulationEngine:
                     )
                 else:
                     agent.message_count += 1
+                    self._proposals_posted += 1
 
                     # No post type reaching here ever carries an assessment
                     # sidecar anymore — the hub is hard-gated out of this
@@ -5114,6 +5141,63 @@ class SimulationEngine:
                 "these threads will be superseded rather than duplicated",
                 len(rows), len(self._assessed_threads),
             )
+
+    async def _rehydrate_proposal_count(self) -> None:
+        """Recover this run's pitch count from the durable store on resume.
+
+        A pitch is a BOT ``agent_messages`` row with ``phase == 'new_post'``
+        for this run — the only top-level post kind (the hub is gated out of
+        Phase 5, ``pi_lab`` is the only other role, and the two other
+        _post_message callers write 'thread_reply' or the panel-note phase).
+        The ``is_bot``/``agent_id`` filters keep parity with the live counter,
+        which only increments in ``_phase5_new_post``: they exclude the rare
+        mirrored human top-level post (``agent_id`` NULL) the Slack poller can
+        record in a seeded channel. Without rehydration a resumed run restarts
+        the in-memory counter at 0 and could pitch a second full batch past the
+        cap.
+        """
+        if not self.session_factory or self.simulation_run_id is None:
+            return
+        from sqlalchemy import func, select
+
+        from src.models import AgentMessage
+        async with self.session_factory() as db:
+            count = (
+                await db.execute(
+                    select(func.count(AgentMessage.id)).where(
+                        AgentMessage.simulation_run_id == self.simulation_run_id,
+                        AgentMessage.phase == "new_post",
+                        AgentMessage.is_bot.is_(True),
+                        AgentMessage.agent_id.isnot(None),
+                    )
+                )
+            ).scalar_one()
+        self._proposals_posted = int(count or 0)
+        logger.info("Rehydrated proposal count: %d pitch(es) this run", self._proposals_posted)
+
+    def _open_interview_count(self) -> int:
+        """Distinct interview threads still open across all agents. The hub is
+        in every interview thread; a distinct-set is robust even if it is not."""
+        open_ids: set[str] = set()
+        for agent in self.agents.values():
+            for tid, t in agent.state.active_threads.items():
+                if t.status == "active":
+                    open_ids.add(tid)
+        return len(open_ids)
+
+    def _proposal_target_drained(self) -> bool:
+        """True once the pitch cap is reached and no interview has been open
+        for PROPOSAL_DRAIN_SETTLE_TICKS consecutive checks. A METHOD, not a
+        property, because it MUTATES ``_proposal_drain_streak`` — call it
+        exactly once per loop iteration (the main-loop condition does)."""
+        if self.max_proposals <= 0 or self._proposals_posted < self.max_proposals:
+            self._proposal_drain_streak = 0
+            return False
+        if self._open_interview_count() > 0:
+            self._proposal_drain_streak = 0
+            return False
+        self._proposal_drain_streak += 1
+        return self._proposal_drain_streak >= PROPOSAL_DRAIN_SETTLE_TICKS
 
     async def _record_assessment_drop(
         self,

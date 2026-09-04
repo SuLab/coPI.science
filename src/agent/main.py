@@ -57,13 +57,14 @@ def main(
     ),
     reset_cursors: bool = typer.Option(False, "--reset-cursors", help="Reset scan cursors so agents re-read all posts"),
     all_agents: bool = typer.Option(False, "--all-agents", help="Run every AgentRegistry row regardless of status (default is status='active' only)"),
+    max_proposals: int = typer.Option(0, "--max-proposals", help="Stop opening new pitches after this many top-level posts, then drain interviews (0 = no limit)"),
 ):
     """Run the turn-based agent simulation."""
     # Claim this process's canonical-id writer slot before anything mints. The
     # engine's own minter owns WRITER_ENGINE; the module default is used here
     # only for PI DM rows, so it takes the aux slot (R1).
     set_default_writer_id(WRITER_ENGINE_AUX)
-    asyncio.run(_run_simulation(max_runtime, budget, mock, no_db, fresh, reset_cursors, all_agents))
+    asyncio.run(_run_simulation(max_runtime, budget, mock, no_db, fresh, reset_cursors, all_agents, max_proposals))
 
 
 #: What `SimulationRun.total_api_calls` counts, said where an operator will read
@@ -159,6 +160,7 @@ async def _run_simulation(
     fresh: bool,
     reset_cursors: bool = False,
     all_agents: bool = False,
+    max_proposals: int = 0,
 ) -> None:
     settings = get_settings()
 
@@ -292,6 +294,7 @@ async def _run_simulation(
             "agent_count": len(agents),
             "active_thread_threshold": settings.active_thread_threshold,
             "max_thread_messages": settings.max_thread_messages,
+            "max_proposals": max_proposals,
         }
 
         if fresh:
@@ -334,6 +337,8 @@ async def _run_simulation(
 
     # Create simulation engine
     runtime_label = f"{max_runtime}m" if max_runtime > 0 else "indefinite"
+    if max_proposals > 0:
+        runtime_label += f", {max_proposals} proposals"
     sim_engine = SimulationEngine(
         agents=agents,
         slack_clients=slack_clients,
@@ -349,6 +354,7 @@ async def _run_simulation(
         # conversations straight back off the transport and attribute them to
         # this run — see SimulationEngine._restore_slack_state.
         fresh_start=fresh,
+        max_proposals=max_proposals,
     )
 
     # Handle shutdown signals

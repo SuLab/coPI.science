@@ -60,6 +60,9 @@
         {% if status_row.detail.max_runtime is defined %}
         <div><dt class="text-gray-500">Max runtime</dt><dd class="font-medium">{{ status_row.detail.max_runtime }}</dd></div>
         {% endif %}
+        {% if status_row.detail.max_proposals is defined %}
+        <div><dt class="text-gray-500">Max proposals</dt><dd class="font-medium">{{ status_row.detail.max_proposals }}</dd></div>
+        {% endif %}
     </dl>
     {% endif %}
     {% endif %}
@@ -90,6 +93,11 @@
             <div>
                 <label class="block text-xs font-medium text-gray-600 mb-1">Max runtime (minutes, 0 = indefinite)</label>
                 <input type="number" name="max_runtime" value="0" min="0"
+                       class="border border-gray-300 rounded px-2 py-1 text-sm w-40">
+            </div>
+            <div>
+                <label class="block text-xs font-medium text-gray-600 mb-1">Max proposals (0 = no limit)</label>
+                <input type="number" name="max_proposals" value="0" min="0"
                        class="border border-gray-300 rounded px-2 py-1 text-sm w-40">
             </div>
             <button type="submit"

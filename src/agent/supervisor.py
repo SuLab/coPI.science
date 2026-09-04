@@ -121,8 +121,10 @@ async def run_supervisor(session_factory=None, run_fn=None, poll_seconds=POLL_SE
                     payload = cmd.payload or {}
                     fresh = bool(payload.get("fresh", False))
                     max_runtime = int(payload.get("max_runtime", 0))
+                    max_proposals = int(payload.get("max_proposals", 0))
                     await upsert_status(db, state="starting",
-                                        detail={"fresh": fresh, "max_runtime": max_runtime})
+                                        detail={"fresh": fresh, "max_runtime": max_runtime,
+                                                "max_proposals": max_proposals})
                     await db.commit()
                     cmd_id = cmd.id
             if cmd is not None and _shutdown:
@@ -143,7 +145,7 @@ async def run_supervisor(session_factory=None, run_fn=None, poll_seconds=POLL_SE
                 logger.info("Shutdown mid-claim — start %s finished stale", cmd_id)
             elif cmd is not None:
                 try:
-                    await run_fn(max_runtime, 0, False, False, fresh, False, False)
+                    await run_fn(max_runtime, 0, False, False, fresh, False, False, max_proposals)
                     outcome, result = "done", "run completed"
                 except Exception as exc:  # noqa: BLE001 — the loop must survive a run
                     logger.exception("Simulation run raised")

@@ -153,14 +153,14 @@ async def test_start_enqueued_after_boot_runs_positionally_and_the_loop_exits(en
         assert status.state == "idle"  # boot staling has committed
 
         async with factory() as db:
-            cmd = SimulationCommand(command="start", payload={"fresh": True, "max_runtime": 60})
+            cmd = SimulationCommand(command="start", payload={"fresh": True, "max_runtime": 60, "max_proposals": 0})
             db.add(cmd)
             await db.commit()
             cmd_id = cmd.id
 
         await asyncio.wait_for(task, timeout=10)
 
-        assert calls == [(60, 0, False, False, True, False, False)]
+        assert calls == [(60, 0, False, False, True, False, False, 0)]
         async with factory() as db:
             row = await db.get(SimulationCommand, cmd_id)
             assert row.status == "done"
@@ -335,7 +335,7 @@ async def test_a_start_enqueued_while_a_run_is_live_is_staled_at_run_end(engine,
     try:
         await run_supervisor(session_factory=hooked_factory, run_fn=stub, max_loops=1)
 
-        assert calls == [(10, 0, False, False, True, False, False)]
+        assert calls == [(10, 0, False, False, True, False, False, 0)]
         async with factory() as db:
             first = await db.get(SimulationCommand, first_holder["id"])
             second = await db.get(SimulationCommand, second_holder["id"])
