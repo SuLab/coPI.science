@@ -123,3 +123,21 @@ async def test_pmid_with_no_pubmed_record_is_reported(db_session):
     report = await backfill(db_session, {"good": ["999"]}, fetch=fetch, apply=True)
 
     assert ("good", "error-no-record", "999") in report
+
+
+async def test_a_pmid_listed_twice_for_one_agent_is_fetched_and_inserted_once(db_session):
+    """#22 I4a: with uq_publications_user_pmid (0025) a repeated input PMID would
+    otherwise abort the whole --apply run at flush() with an IntegrityError, instead
+    of being the harmless no-op it was before the constraint existed. The curated
+    mapping is hand-written JSON, so copy/paste repeats are expected input.
+    """
+    user = await _seed_agent(db_session, "good")
+    fetch = _fake_fetch([REC])
+
+    report = await backfill(
+        db_session, {"good": ["111", "111", " 111 "]}, fetch=fetch, apply=True
+    )
+
+    assert fetch.requested == [["111"]]          # deduped before the network call
+    assert [r for r in report if r[1] == "insert"] == [("good", "insert", "111")]
+    assert await _count_pubs(db_session, user.id) == 1
