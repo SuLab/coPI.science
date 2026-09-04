@@ -470,7 +470,7 @@ async def test_a_retried_job_backs_off_instead_of_being_reclaimed_immediately(wk
       * attempts=3, with the cap patched below the (now huge) base*2**2 — must be clamped to the
         cap, not the uncapped exponential value (kills a dropped-min(cap, ...) mutant).
     """
-    monkeypatch.setattr(worker_main, "JOB_RETRY_BACKOFF_BASE_SECONDS", 0.2)
+    monkeypatch.setattr(worker_main, "JOB_RETRY_BACKOFF_BASE_SECONDS", 0.5)
     monkeypatch.setattr(worker_main, "JOB_RETRY_BACKOFF_CAP_SECONDS", 5.0)
     uid = await wk.new_user()
     jid = await wk.enqueue(uid, max_attempts=5)
@@ -487,13 +487,13 @@ async def test_a_retried_job_backs_off_instead_of_being_reclaimed_immediately(wk
     await worker_main.process_job(job.id, job.type, job.attempts, job.max_attempts, wk.factory)
     elapsed = time.monotonic() - start
 
-    assert elapsed >= 0.2, (
+    assert elapsed >= 0.5, (
         f"process_job returned after {elapsed:.3f}s for a job going back to 'pending' — the "
         "backoff sleep did not run, so the next claim_job would reclaim it immediately"
     )
     assert (await wk.job_state(jid)).status == "pending"
 
-    # Second retry: the ladder must double (base * 2**(2-1) = 0.4s), not repeat the base.
+    # Second retry: the ladder must double (base * 2**(2-1) = 1.0s), not repeat the base.
     async with wk.factory() as db:
         job2 = await worker_main.claim_job(db)
     assert job2.id == jid and job2.attempts == 2
@@ -501,15 +501,22 @@ async def test_a_retried_job_backs_off_instead_of_being_reclaimed_immediately(wk
     await worker_main.process_job(job2.id, job2.type, job2.attempts, job2.max_attempts, wk.factory)
     elapsed2 = time.monotonic() - start2
 
-    # Ratio-based, not absolute bounds (#21 V2): asserting elapsed2 against fixed wall-clock
-    # bounds like `0.4 <= elapsed2 < 0.8` is flaky under load — scheduler jitter on a busy CI
-    # box can push either sleep past a hardcoded edge with no ladder bug at all. Comparing
-    # elapsed2 to the first attempt's own elapsed sidesteps that: a constant-backoff mutant
-    # (elapsed2 ~= elapsed) is still caught, and it self-scales with however slow this run is.
-    assert elapsed2 > 1.5 * elapsed, (
-        f"process_job slept {elapsed2:.3f}s on the second retry vs {elapsed:.3f}s on the "
-        "first — the exponential ladder (base * 2**(attempts-1)) should have roughly doubled, "
-        "not stayed at the base (a constant-backoff mutant) or grown some other way"
+    # Increment-based, not absolute bounds and not a ratio (#21 V2). Absolute bounds like
+    # `1.0 <= elapsed2 < 2.0` are flaky under load. A RATIO (`elapsed2 > 1.5 * elapsed`) is
+    # flaky for a subtler reason and did fail a full-suite run: each measurement is
+    # `overhead + sleep`, where overhead is this harness's real DB work (~0.25s, and higher
+    # when the whole suite is hammering the same Postgres). A constant overhead inflates the
+    # smaller measurement proportionally more, so the ratio sags toward 1 exactly when the box
+    # is busy — observed 0.639s vs 0.451s (ratio 1.42) with a perfectly correct ladder.
+    # The DIFFERENCE cancels that overhead algebraically: elapsed2 - elapsed == base for the
+    # real ladder (2*base - base), and ~= 0 for a constant-backoff mutant, so the mutant is
+    # still killed while jitter has to exceed half the base delay to produce a false failure.
+    increment = elapsed2 - elapsed
+    assert 0.5 * 0.5 < increment < 2.5 * 0.5, (
+        f"process_job slept {elapsed2:.3f}s on the second retry vs {elapsed:.3f}s on the first "
+        f"(increment {increment:.3f}s) — the exponential ladder (base * 2**(attempts-1)) should "
+        "have added one base delay (0.5s), so this is either a constant-backoff mutant "
+        "(increment ~= 0) or some other growth curve"
     )
     assert (await wk.job_state(jid)).status == "pending"
 
