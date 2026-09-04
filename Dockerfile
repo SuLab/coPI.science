@@ -17,9 +17,10 @@ COPY src/ src/
 # --no-build-isolation: build isolation would otherwise fetch a fresh,
 # unhashed setuptools/wheel from PyPI at build time just to satisfy
 # pyproject.toml's [build-system] requires; the base image's preinstalled
-# setuptools/wheel already satisfy it. Follow-up: pin hashed setuptools/wheel
-# into requirements.lock (Task 27.5's owner) so this local install is fully
-# hash-verified too.
+# setuptools/wheel already satisfy it. This local `pip install .` therefore
+# is not hash-verified the way the `-r requirements.lock` install above is
+# (#27 Minor 13) — accepted, since it installs only this repo's own source,
+# not a third-party artifact off the network.
 RUN pip install --no-cache-dir --no-deps --no-build-isolation .
 
 FROM python:3.11-slim AS runtime

@@ -336,6 +336,18 @@ echo "==> lockfile freshness (requirements.lock matches pyproject.toml)"
 # but are identical once comment lines are stripped (see
 # test_lockfile_comparison_ignores_pip_composes_own_header_but_not_real_pin_drift).
 #
+# `--no-header` below already means the committed lock has zero '^#' lines today
+# (verified), so this filter is currently a no-op on real input, not the load-bearing
+# fix it was written for (#27 Minor 14). Kept anyway as a defensive belt-and-braces:
+# it costs nothing when there is nothing to strip, and it means a future pip-tools
+# upgrade that reintroduces header comments (or drops --no-header support) degrades
+# gracefully back to the behaviour this comment describes, instead of turning every
+# push red on a cosmetic header. Trade-off accepted: a newly-appearing pip-compile
+# "packages considered unsafe" comment block (also column-0 `#`) would be silently
+# stripped from both sides too, so that one class of metadata-only change would not
+# be reported as drift — the pins themselves, which are what this gate is for, are
+# never on a `#` line either way.
+#
 # pip-compile's resolution is Python-version/platform-sensitive, and the committed
 # requirements.lock was generated (Task 27.4) against a throwaway Python 3.11.14
 # venv (`uv venv --python 3.11.14`) to match the Dockerfile's `python:3.11-slim`

@@ -187,3 +187,40 @@ def test_blackbird_vhost_has_req_graph_limit_for_collaboration_graph_routes():
     loc_block = block[loc_idx : block.index("}", loc_idx) + 1]
     assert "limit_req zone=req_graph" in loc_block
     assert "proxy_pass http://blackbird_app;" in loc_block
+
+
+# #27 Minor 16: req_general/req_graph/conn_perip were single zones shared across
+# all three vhosts, so one IP's burst against devel or blackbird consumed the
+# primary site's budget (and vice versa). Each vhost must get its own zone.
+def test_rate_limit_zones_are_declared_per_vhost_not_shared():
+    text = _nginx_conf()
+    general_zones = set(re.findall(r"limit_req_zone\s+\$binary_remote_addr\s+zone=(req_general\S*?):", text))
+    graph_zones = set(re.findall(r"limit_req_zone\s+\$binary_remote_addr\s+zone=(req_graph\S*?):", text))
+    conn_zones = set(re.findall(r"limit_conn_zone\s+\$binary_remote_addr\s+zone=(conn_perip\S*?):", text))
+    assert len(general_zones) == 3, f"expected 3 distinct req_general zones (one per vhost): {general_zones}"
+    assert len(conn_zones) == 3, f"expected 3 distinct conn_perip zones (one per vhost): {conn_zones}"
+    # devel serves no collaboration-graph routes; ${DOMAIN} and blackbird do.
+    assert len(graph_zones) == 2, f"expected 2 distinct req_graph zones (main + blackbird): {graph_zones}"
+
+
+def test_each_vhost_uses_only_its_own_rate_limit_zones():
+    text = _nginx_conf()
+    for name in VHOSTS:
+        block = _https_block(text, name)
+        used_general = set(re.findall(r"limit_req zone=(req_general\S*?)\s", block))
+        used_conn = set(re.findall(r"limit_conn (conn_perip\S*?)\s", block))
+        assert len(used_general) == 1, f"{name} must use exactly one req_general zone: {used_general}"
+        assert len(used_conn) == 1, f"{name} must use exactly one conn_perip zone: {used_conn}"
+
+    devel_general = set(
+        re.findall(r"limit_req zone=(req_general\S*?)\s", _https_block(text, "devel.copi.science"))
+    )
+    main_general = set(
+        re.findall(r"limit_req zone=(req_general\S*?)\s", _https_block(text, "${DOMAIN}"))
+    )
+    blackbird_general = set(
+        re.findall(r"limit_req zone=(req_general\S*?)\s", _https_block(text, "blackbird.copi.science"))
+    )
+    assert devel_general != main_general
+    assert devel_general != blackbird_general
+    assert main_general != blackbird_general
