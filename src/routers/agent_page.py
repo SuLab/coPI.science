@@ -1779,16 +1779,23 @@ async def remove_delegate(
         actor_name = current_user.name
 
         sid = None
-        if delegate_email and agent.delegate_slack_ids:
-            try:  # LOOKUP only — no SQL inside the best-effort try
-                from src.services.slack_tokens import get_any_bot_token
-                from src.services.slack_web import lookup_user_by_email_async
+        if delegate_email:
+            # array_remove is a no-op when the id isn't present, so this must not be gated
+            # on the in-memory `agent.delegate_slack_ids` hint: a concurrent append landing
+            # in another session after this session's `agent` was loaded would leave that
+            # hint stale (None/empty) while the DB row already holds the id, and skipping
+            # the lookup here would let the removed delegate's Slack id keep agent-command
+            # authority (src/agent/simulation.py ~4011-4021).
+            from src.services.slack_tokens import get_any_bot_token
 
-                bot_token = await get_any_bot_token(db)
-                if bot_token:
+            bot_token = await get_any_bot_token(db)  # SQL — kept OUTSIDE the try below
+            if bot_token:
+                try:  # LOOKUP only — no SQL inside the best-effort try
+                    from src.services.slack_web import lookup_user_by_email_async
+
                     sid = await lookup_user_by_email_async(bot_token, delegate_email)
-            except Exception as exc:
-                logger.warning("Delegate Slack sync is best-effort; skipped: %s", exc)
+                except Exception as exc:
+                    logger.warning("Delegate Slack sync is best-effort; skipped: %s", exc)
 
         if sid:  # OUTSIDE the swallowing try — a failed UPDATE must not be hidden
             from src.services.delegate_slack_ids import remove_delegate_slack_id_stmt

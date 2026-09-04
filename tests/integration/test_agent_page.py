@@ -29,7 +29,7 @@ from urllib.parse import unquote
 
 import pytest
 from itsdangerous import TimestampSigner
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from src.config import get_settings
 from src.models import (
@@ -885,6 +885,27 @@ async def test_a_delegate_can_link_their_slack_account(client, db_session, world
     assert agent.delegate_slack_ids == ["U-DELEGATE"]
 
 
+async def test_connecting_slack_twice_is_idempotent(client, db_session, world, delegated, slack):
+    """POST /delegates/connect-slack twice with the same stubbed Slack id must not append
+    a second entry — exercises append_delegate_slack_id_stmt's NOT ... ANY() guard at the
+    route level, not just in the unit-level compiled-SQL test (issue #22 C1)."""
+    world.agent.slack_bot_token = "xoxb-fake-for-tests"
+    await db_session.flush()
+    slack.stub("users_lookupByEmail", {"user": {"id": "U-DELEGATE"}})
+
+    for _ in range(2):
+        r = await client.post(
+            f"/agent/{OWNER_AGENT}/delegates/connect-slack",
+            headers=_auth(delegated.user.id),
+        )
+        assert r.status_code == 302 and "slack_error" not in r.headers["location"]
+
+    agent = (await db_session.execute(
+        select(AgentRegistry).where(AgentRegistry.agent_id == OWNER_AGENT)
+    )).scalar_one()
+    assert agent.delegate_slack_ids == ["U-DELEGATE"]
+
+
 async def test_accepting_an_invitation_syncs_the_delegates_slack_id(
     client, db_session, world, slack
 ):
@@ -950,6 +971,51 @@ async def test_removing_a_delegate_also_removes_their_slack_id(
         select(AgentRegistry).where(AgentRegistry.agent_id == OWNER_AGENT)
     )).scalar_one()
     assert agent.delegate_slack_ids == ["U-OTHER"]
+
+
+async def test_removing_a_delegate_removes_authority_even_if_the_in_memory_gate_is_stale(
+    client, db_session, world, delegated, slack
+):
+    """Minor 1 (fix round 1): the route's gate used to read
+    `if delegate_email and agent.delegate_slack_ids:` — when this session's in-memory `agent`
+    was loaded before a concurrent append (e.g. a connect-slack landing in another
+    session/transaction), `agent.delegate_slack_ids` reads stale (None/empty) even though the
+    DB row already holds the id. The old gate then skipped the Slack lookup and the
+    array_remove entirely, so a removed delegate's Slack id stayed in the array and kept
+    agent-command authority (src/agent/simulation.py ~4011-4021).
+
+    Simulated here with a raw UPDATE that bypasses the ORM session (so the already-loaded
+    `world.agent` instance is never touched/expired) — leaving the in-memory attribute at its
+    original None while the DB row is seeded with the delegate's Slack id out from under it.
+    """
+    world.agent.slack_bot_token = "xoxb-fake-for-tests"
+    await db_session.flush()
+    assert world.agent.delegate_slack_ids is None  # baseline the stale in-memory value
+
+    await db_session.execute(
+        text("UPDATE agents SET delegate_slack_ids = ARRAY[:sid] WHERE id = :id"),
+        {"sid": "U-DELEGATE", "id": world.agent.id},
+    )
+    assert world.agent.delegate_slack_ids is None  # still stale after the out-of-band write
+
+    slack.stub("users_lookupByEmail", {"user": {"id": "U-DELEGATE"}})
+
+    r = await client.post(
+        f"/agent/{OWNER_AGENT}/delegates/{delegated.row.id}/remove",
+        headers=_auth(world.pi.id),
+    )
+    assert r.status_code == 302
+
+    # populate_existing=True: without it this select would just return the SAME
+    # already-loaded, never-expired identity-mapped object with its stale cached
+    # value — which would make this assertion measure the ORM cache instead of the
+    # actual on-disk row the bug (and the fix) are about.
+    agent = (await db_session.execute(
+        select(AgentRegistry)
+        .where(AgentRegistry.agent_id == OWNER_AGENT)
+        .execution_options(populate_existing=True)
+    )).scalar_one()
+    assert agent.delegate_slack_ids == []
 
 
 # ===========================================================================

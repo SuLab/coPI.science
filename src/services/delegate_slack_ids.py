@@ -5,6 +5,15 @@ invite.py's accept-invitation) used to read the column into a Python list, mutat
 reassign the whole column — a lost-update race across two awaited Slack lookups. These build
 the SQL-side equivalent (`array_append`/`array_remove`) so two concurrent accepts can't drop
 each other's id.
+
+Caller note: these are ORM-enabled UPDATE statements, so executing one via
+``await session.execute(stmt)`` triggers SQLAlchemy's auto-synchronize and *expires*
+``delegate_slack_ids`` on any in-session instance matching the WHERE clause — do not pass
+``synchronize_session=False`` (that would leave the in-session instance's attribute stale
+instead). Do not read ``agent.delegate_slack_ids`` off that instance afterwards either — the
+attribute is expired, and touching it re-triggers a lazy load that needs its own await
+context. Re-``select`` (with ``execution_options(populate_existing=True)`` if the instance
+might still be cached elsewhere) to see the post-update value instead.
 """
 
 from uuid import UUID
