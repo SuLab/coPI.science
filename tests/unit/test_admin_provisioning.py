@@ -4,6 +4,7 @@ The refresh token is single-use, so the provisioning flow must reuse a cached
 access token until it is about to expire and only rotate when necessary.
 """
 
+import asyncio
 import time
 import types
 import uuid
@@ -97,6 +98,42 @@ async def test_expired_cache_triggers_rotation(kv, monkeypatch):
 
     assert await ap._config_token(db) == "access1"
     assert calls == ["stored_refresh"]
+
+
+# --- issue #24 I1 (SEC-10): shield the rotate-and-persist unit from cancellation -----
+
+
+@pytest.mark.asyncio
+async def test_rotation_survives_cancellation_of_the_awaiting_task(kv, monkeypatch):
+    """If the request task is cancelled while the worker thread is mid-httpx.post
+    (e.g. uvicorn's graceful shutdown during a deploy), Slack has already consumed
+    the single-use refresh token. asyncio.shield must let the persist finish
+    anyway, or both the old and new refresh token become unusable."""
+    started = asyncio.Event()
+
+    async def _slow_rotate_async(refresh):
+        started.set()
+        await asyncio.sleep(0.05)  # stand-in for the in-flight httpx.post
+        return ("access-new", "refresh-new", int(time.time()) + 3600)
+
+    monkeypatch.setattr(
+        "src.services.slack_provisioning.rotate_config_token_async", _slow_rotate_async
+    )
+    db = _FakeDB()
+
+    task = asyncio.ensure_future(ap._config_token(db))
+    await started.wait()
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    # Give the shielded background coroutine a moment to finish persisting.
+    await asyncio.sleep(0.1)
+
+    assert kv[ap._KEY_TOKEN] == "access-new"
+    assert kv[ap._KEY_REFRESH] == "refresh-new"
+    assert int(kv[ap._KEY_TOKEN_EXP]) > time.time()
 
 
 # --- issue #24 C2-7: release the connection before the blocking Slack call -----------

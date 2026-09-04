@@ -9,6 +9,7 @@ Wraps the shared ``slack_provisioning`` helpers with web-flow concerns:
 - writing the resulting bot token onto the ``AgentRegistry`` row.
 """
 
+import asyncio
 import logging
 import secrets
 import time
@@ -48,6 +49,27 @@ _AUTH_ERRORS = (
 
 class ProvisioningError(RuntimeError):
     """Raised for any provisioning failure surfaced to the admin UI."""
+
+
+async def _rotate_and_persist(db: AsyncSession, refresh: str) -> str:
+    """Rotate the config token and persist the new triple in one unit.
+
+    Split out of ``_config_token`` so the caller can wrap this in
+    ``asyncio.shield`` (SEC-10): Slack's refresh token is single-use and is
+    consumed the moment the worker thread's ``httpx.post`` completes, so if the
+    awaiting task is cancelled after that but before these three KV rows land,
+    both the old and the new refresh token become unusable and all Slack
+    provisioning is bricked until an operator mints a fresh pair by hand.
+    """
+    from src.services.slack_provisioning import rotate_config_token_async
+    new_token, new_refresh, exp = await rotate_config_token_async(refresh)
+    # Persist the whole new triple atomically: the refresh we just consumed
+    # is now dead, so the new pair must land together.
+    await _kv_set(db, _KEY_TOKEN, new_token)
+    await _kv_set(db, _KEY_REFRESH, new_refresh)
+    await _kv_set(db, _KEY_TOKEN_EXP, str(exp))
+    await db.commit()
+    return new_token
 
 
 async def _kv_get(db: AsyncSession, key: str) -> str | None:
@@ -100,17 +122,12 @@ async def _config_token(db: AsyncSession, *, force_rotate: bool = False) -> str:
         # holding a checked-out connection for the duration.
         await db.commit()
         try:
-            from src.services.slack_provisioning import rotate_config_token_async
-            new_token, new_refresh, exp = await rotate_config_token_async(refresh)
+            # asyncio.shield: a cancellation of THIS awaiting task (e.g. uvicorn's
+            # graceful shutdown mid-deploy) must not stop the rotate-and-persist
+            # unit once Slack's single-use refresh token has been spent (SEC-10).
+            return await asyncio.shield(_rotate_and_persist(db, refresh))
         except Exception as exc:
             raise ProvisioningError(f"Could not rotate the Slack config token: {exc}")
-        # Persist the whole new triple atomically: the refresh we just consumed
-        # is now dead, so the new pair must land together.
-        await _kv_set(db, _KEY_TOKEN, new_token)
-        await _kv_set(db, _KEY_REFRESH, new_refresh)
-        await _kv_set(db, _KEY_TOKEN_EXP, str(exp))
-        await db.commit()
-        return new_token
 
     # No refresh token at all — fall back to a statically-configured access token.
     token = await _kv_get(db, _KEY_TOKEN) or settings.slack_config_token
