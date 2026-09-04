@@ -37,6 +37,9 @@ build
 # 58 MB, 34 files, created by ci.sh's mypy stage — measured at 88% of the
 # built image's /app tree before this line existed (#27 I5).
 .mypy_cache
+# A stray uv.lock (a `uv` command run without --no-project writes one) is a second,
+# competing lockfile; requirements.lock is the only one the image installs (#27 I5).
+uv.lock
 .playwright-mcp
 copi.egg-info
 .superpowers

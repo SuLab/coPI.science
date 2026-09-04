@@ -57,6 +57,7 @@ MUST_EXCLUDE = [
     ".coverage",
     ".mutmut-cache",
     ".mypy_cache/3.11/src/main.data.json",
+    "uv.lock",
     ".playwright-mcp/page.png",
     "copi.egg-info/PKG-INFO",
     ".superpowers/state.json",
