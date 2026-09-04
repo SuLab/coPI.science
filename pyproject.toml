@@ -41,7 +41,12 @@ dev = [
     "pytest>=8.2.0",
     "pytest-asyncio>=0.23.0",
     "ruff>=0.4.0",
-    "mypy>=1.10.0",
+    # Capped, not just floored (#27 I7): unpinned, this resolved to 2.3.1 here and
+    # any later mypy release that adds a check would turn every push red against
+    # ci.sh's MYPY_MAX ceiling for reasons unrelated to the change. A dev-only
+    # extra, so this cannot make requirements.lock stale (verified: mypy does not
+    # appear in requirements.lock's 1316 lines; it is a runtime-only lockfile).
+    "mypy>=2.3,<2.4",
     "testcontainers[postgres]>=4.0.0",
     "respx>=0.21.0",
     "syrupy>=4.6.0",

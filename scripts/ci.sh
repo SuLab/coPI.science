@@ -66,13 +66,25 @@ COV_MIN="${COV_MIN:-60}"
 SRC_LINT_MAX="${SRC_LINT_MAX:-260}"
 
 # Ceiling on mypy findings (`: error:` lines) in src/, same ratchet shape as
-# SRC_LINT_MAX above: lower it as debt is paid, never raise it to force a push
-# through (#27 I1). Measured 2026-09-04 with the exact command the ratchet below
-# runs (`mypy src --ignore-missing-imports`, counting `: error:` lines): 143,
-# against 27,618 LOC of largely un-annotated FastAPI/SQLAlchemy code — most of the
-# debt is Optional/`| None` narrowing (SQLAlchemy relationship attributes, dict
-# `.get()` results) rather than missing annotations outright.
-MYPY_MAX="${MYPY_MAX:-143}"
+# SRC_LINT_MAX above: a MEASURED COUNT, not a target — lower it as debt is paid.
+# mypy itself is capped in pyproject.toml's dev extra (mypy>=2.3,<2.4, #27 I7)
+# precisely so this number does not move out from under an unrelated push when
+# a new mypy release adds a check. If you deliberately bump the mypy cap,
+# re-measure with the exact command this step runs (`mypy src
+# --ignore-missing-imports`, counting `: error:` lines) and update this default
+# in its OWN commit, with the old and new numbers in the message — do not just
+# raise it to make a red push pass; that is how ratchets rot.
+#
+# Measured 2026-09-04 via `git archive HEAD src` (commit 2170efb) + mypy 2.3.1
+# (the version the new cap resolves to): 145 findings, against ~30,656 LOC of
+# largely un-annotated FastAPI/SQLAlchemy code — most of the debt is
+# Optional/`| None` narrowing (SQLAlchemy relationship attributes, dict
+# `.get()` results) rather than missing annotations outright. 145 is itself
+# provisional: several other fix rounds were still landing on this branch at
+# measurement time (2 of the 145, in http_retry.py, are being fixed by a
+# concurrent round). 150 leaves 5 of slack, the same shape as SRC_LINT_MAX's
+# 6-of-260.
+MYPY_MAX="${MYPY_MAX:-150}"
 
 # Throwaway-Postgres settings for the migration round trip (step 2). The port is
 # published on 127.0.0.1 only. MIGRATION_FLOOR is how far down the round trip goes;
