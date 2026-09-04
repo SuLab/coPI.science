@@ -9,7 +9,10 @@ Since Task 27.8 (commit 5f8aa2b) the image runs as fixed UID 10001
 into the bind-mounted tree. The fix is dev-only: every service in
 docker-compose.yml that runs the app image gets `user: "0:0"` so it runs
 as root inside the container. Prod keeps the image's UID 10001 unchanged —
-docker-compose.prod.yml must have no `user:` key on any service.
+docker-compose.prod.yml must have no `user:` key on any of the services that
+run the app image (app/worker/agent/grantbot/migrate). nginx, certbot and
+postgres run their own upstream images and are out of scope for this
+assertion — it is not this test's job to constrain them.
 """
 
 from pathlib import Path
@@ -21,6 +24,12 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # Services in docker-compose.yml that build/run the app image (Dockerfile).
 # `postgres` uses the upstream postgres:15 image and is excluded.
 APP_IMAGE_SERVICES = ("app", "worker", "agent", "grantbot")
+
+# Services in docker-compose.prod.yml that build/run the app image
+# (Dockerfile). Prod also has a one-shot `migrate` service that dev does not
+# (dev migrates via the app container's entrypoint). nginx/certbot/postgres
+# run upstream images, not this Dockerfile, so they're excluded here.
+PROD_APP_IMAGE_SERVICES = ("app", "worker", "agent", "grantbot", "migrate")
 
 
 def _dev_compose() -> dict:
@@ -47,8 +56,8 @@ def test_postgres_in_dev_compose_has_no_user_override():
 
 def test_prod_compose_has_no_user_key_on_any_service():
     services = _prod_compose()["services"]
-    for name, svc in services.items():
-        assert "user" not in svc, (
+    for name in PROD_APP_IMAGE_SERVICES:
+        assert "user" not in services[name], (
             f"{name} must not set user: in docker-compose.prod.yml — "
             "prod keeps the image's fixed UID 10001"
         )
