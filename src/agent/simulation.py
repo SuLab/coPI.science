@@ -3380,9 +3380,19 @@ class SimulationEngine:
                     sa_select(AgentRegistry.user_id).where(AgentRegistry.agent_id == agent_id)
                 )).scalar_one_or_none()
                 if not user_id:
-                    logger.debug(
-                        "[%s] No registered PI user — implicit proposal review is "
-                        "in-memory only", agent_id,
+                    # #20 I3: ProposalReview.user_id is NOT NULL, so a
+                    # backfilled/bulk-provisioned agent with no linked
+                    # AgentRegistry.user_id can never get a durable row here —
+                    # the block stays in-memory only and _rebuild_agent_state
+                    # re-blocks this agent on the next restart. Raised from
+                    # DEBUG to WARNING so the gap is visible; the durable fix
+                    # (make proposal_reviews.user_id nullable and record
+                    # user_id=NULL, submitted_via='engine') is a follow-up
+                    # migration, not done here.
+                    logger.warning(
+                        "[%s] No registered PI user for thread_decision %s — "
+                        "implicit proposal review is in-memory only and will "
+                        "not survive a restart", agent_id, thread_decision_id,
                     )
                     return
 

@@ -1982,6 +1982,30 @@ class TestPersistImplicitProposalReview:
         assert fake_db.added == []
         assert fake_db.committed is False
 
+    @pytest.mark.asyncio
+    async def test_no_registered_pi_user_logs_a_warning_and_still_returns(self, caplog):
+        # #20 I3: a NULL AgentRegistry.user_id (backfilled/bulk-provisioned
+        # agents) used to no-op at DEBUG, so the block stayed in-memory only
+        # and re-blocked on restart with no visible trace. Raised to WARNING,
+        # naming the agent and the proposal, so the gap is visible; the
+        # function must still return cleanly rather than raise.
+        import logging
+        import uuid as uuid_mod
+
+        decision_id = uuid_mod.uuid4()
+        fake_db = self._FakeDB(user_id=None)
+        engine = self._engine(fake_db)
+
+        with caplog.at_level(logging.WARNING, logger="src.agent.simulation"):
+            await engine._persist_implicit_proposal_review("victim", decision_id)
+
+        warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert len(warnings) == 1
+        message = warnings[0].getMessage()
+        assert "victim" in message
+        assert str(decision_id) in message
+        assert "restart" in message.lower()
+
 
 # ---------------------------------------------------------------
 # _poll_pi_dms per-agent guard (COR-10(1))
