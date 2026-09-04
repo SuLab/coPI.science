@@ -308,6 +308,11 @@ class SimulationEngine:
         # uid is the only key that reliably attributes them. Populated by
         # _resolve_service_bot_uids during start(); stays empty when Slack is off.
         self._service_bot_uids: dict[str, str] = {}
+        # agent_id -> the token _resolve_service_bot_uids last probed with.
+        # Lets _sync_roster_from_db notice a DB-side token rotation on a
+        # service bot (no AgentRegistry status=='active' row, so it never
+        # appears in the roster diff) and re-run the probe. See #23 COR-26c/D10.
+        self._service_bot_tokens: dict[str, str] = {}
         self.message_log.set_bot_uid_map(self._bot_uid_map())
 
         # agent_id → LabPublicationRecord (publications-table ground truth for
@@ -4466,24 +4471,46 @@ class SimulationEngine:
     async def _resolve_service_bot_uids(self) -> None:
         """Learn the Slack uid of each service bot (grantbot today).
 
-        A service bot posts with its own token and has no AgentRegistry row, so no
-        roster client carries its uid and the inbound paths cannot attribute its
-        posts: production shows all 315 of grantbot's :moneybag: posts persisted
-        with agent_id NULL, which _entry_allowed fails closed on. One throwaway
-        auth.test is the only way to get the uid.
+        A service bot never holds an AgentRegistry status=='active' row, so it
+        is never a roster slot and no roster client carries its uid — the
+        inbound paths cannot attribute its posts: production shows all 315 of
+        grantbot's :moneybag: posts persisted with agent_id NULL, which
+        _entry_allowed fails closed on. One throwaway auth.test is the only way
+        to get the uid.
+
+        Token resolution is DB-first, same precedence as grantbot.py itself
+        (#23 COR-26c / D10, Task 23.4): ``get_agent_bot_token(db, "grantbot")``
+        reads the AgentRegistry row's slack_bot_token column (the documented
+        /admin/agents provisioning path) when a session_factory is available,
+        falling back to the dedicated ``slack_bot_token_grantbot`` settings
+        field. NOT ``get_agent_bot_token``'s own internal env fallback — that
+        goes through ``Settings.get_slack_tokens()``, which has no "grantbot"
+        key, so relying on it would silently regress .env-only deployments.
 
         Deliberately NOT reusing grantbot.py's SuBot-token fallback: posts made on
         su's token carry *su's* uid, so mapping that uid to "grantbot" would
         mis-attribute SuBot's own traffic. Every failure mode here (no token, bad
-        token, Slack down) degrades to the pre-existing NULL attribution — it must
-        never abort start().
+        token, DB down, Slack down) degrades to the pre-existing NULL
+        attribution — it must never abort start().
         """
         if not self.slack_enabled:
             return
         from src.agent.slack_client import AgentSlackClient
-        from src.services.slack_tokens import is_valid_token
+        from src.services.slack_tokens import get_agent_bot_token, is_valid_token
 
-        token = getattr(get_settings(), "slack_bot_token_grantbot", "")
+        token: str | None = None
+        if self.session_factory is not None:
+            try:
+                async with self.session_factory() as db:
+                    token = await get_agent_bot_token(db, "grantbot")
+            except Exception as exc:
+                logger.warning(
+                    "grantbot DB token lookup failed — falling back to the "
+                    "settings field: %s", exc,
+                )
+                token = None
+        if not is_valid_token(token):
+            token = getattr(get_settings(), "slack_bot_token_grantbot", "")
         if not is_valid_token(token):
             logger.info(
                 "No usable grantbot token — its funding posts stay unattributed "
@@ -4507,6 +4534,7 @@ class SimulationEngine:
             )
             return
         self._service_bot_uids[probe.bot_user_id] = "grantbot"
+        self._service_bot_tokens["grantbot"] = token
         logger.info("Service bot grantbot resolved to Slack uid %s", probe.bot_user_id)
 
     def _bot_uid_map(self) -> dict[str, str]:
@@ -5282,8 +5310,9 @@ class SimulationEngine:
 
             from src.agent.slack_client import AgentSlackClient
             from src.models import AgentRegistry
-            from src.services.slack_tokens import env_token, is_valid_token
+            from src.services.slack_tokens import env_token, get_agent_bot_token, is_valid_token
 
+            grantbot_db_token: str | None = None
             async with self.session_factory() as db:
                 rows = (await db.execute(
                     sa_select(
@@ -5310,6 +5339,13 @@ class SimulationEngine:
                         "[roster] publication-record load failed (grounding data "
                         "may be stale): %s", exc,
                     )
+
+                # grantbot is a service bot (no status=='active' row above, so
+                # it never appears in `rows`/`desired`); read its token here,
+                # on the session already open, so a rotation can be noticed
+                # below without a second DB round trip. See #23 COR-26c/D10.
+                if self.slack_enabled:
+                    grantbot_db_token = await get_agent_bot_token(db, "grantbot")
 
             desired = {r.agent_id: r for r in rows}
 
@@ -5357,8 +5393,9 @@ class SimulationEngine:
             # above the 7 that had tokens at boot. Adopt them here, before the
             # early return, so the docstring's promise is actually true.
             #
-            # clients_changed tracks whether any Slack client was (re)built this
-            # tick. Every exit path that flushes the bot_name-map snapshot also
+            # clients_changed tracks whether ANY Slack client was (re)built this
+            # tick — a roster rebuild below, or a grantbot uid re-probe further
+            # down. Every exit path that flushes the bot_name-map snapshot also
             # flushes the uid-map snapshot when this is set; skipping that left
             # <@Unew> mentions of a rotated bot unresolved and its posts
             # mis-attributed until a restart (message_log holds a COPY of
@@ -5405,6 +5442,23 @@ class SimulationEngine:
                         aid,
                         "rotated" if existing is not None else "provisioned after startup",
                     )
+
+            # Service-bot (grantbot) uid re-probe: grantbot never carries a
+            # status=='active' AgentRegistry row, so the role/name diff above
+            # and `desired` never see it — a DB-side token rotation on its row
+            # would otherwise go unnoticed until a restart. Compare against the
+            # token the last successful probe used (#23 COR-26c/D10).
+            if (
+                self.slack_enabled
+                and is_valid_token(grantbot_db_token)
+                and grantbot_db_token != self._service_bot_tokens.get("grantbot")
+            ):
+                old_service_bot_uids = dict(self._service_bot_uids)
+                await self._resolve_service_bot_uids()
+                if self._service_bot_uids != old_service_bot_uids:
+                    clients_changed = True
+                # A failed re-probe logs its own reason inside
+                # _resolve_service_bot_uids and keeps the old uid mapping.
 
             current = set(self.agents)
             to_remove = current - set(desired)
