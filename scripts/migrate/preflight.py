@@ -242,6 +242,24 @@ REVISION_ORDER = (
     "0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027", "0028",
 )
 
+def pending_revisions(current: str | None, target: str) -> frozenset[str]:
+    """The revisions an upgrade from ``current`` to ``target`` will actually run.
+
+    Same slice ``planned_objects_pending`` uses, exposed on its own so callers can ask
+    "will 0025 run?" without going through PLANNED_OBJECTS.
+    """
+    try:
+        lo = REVISION_ORDER.index(current)
+    except ValueError:
+        lo = 0
+    try:
+        hi = REVISION_ORDER.index(target)
+    except ValueError:
+        hi = len(REVISION_ORDER) - 1
+    return frozenset(REVISION_ORDER[lo + 1 : hi + 1])
+
+
+
 
 def planned_objects_between(current: str, target: str) -> tuple[PlannedObject, ...]:
     """Objects created by the revisions that will actually run for current -> target.
@@ -1224,14 +1242,29 @@ async def run_preflight(args) -> Report:
         async def _snapshot_check():
             counts = await snapshot_row_counts(conn)
             report.extra["row_counts"] = counts
-            # 0025 deletes duplicate publications on purpose. Record how many, so
+            # 0025 deletes duplicate publications on purpose. Record WHICH rows, so
             # postflight can distinguish that from row loss instead of failing the
-            # verification of a correct migration (measured: 223 rows on production).
-            surplus = await publication_duplicate_surplus(conn)
-            expected_deletions = {"publications": surplus} if surplus else {}
+            # verification of a correct migration (measured: 223 rows on production) —
+            # and so a concurrent deleter inside a duplicate group cannot hide behind a
+            # net count that still adds up. Only record it when 0025 is actually in the
+            # pending set: an expectation recorded for a chain that will not run 0025
+            # would license arbitrary deletions.
+            doomed: list[str] = []
+            keepers: list[str] = []
+            if "0025" in pending_revisions(rev, args.target):
+                doomed, keepers = await publication_duplicate_plan(conn)
+            expected_deletions = {"publications": len(doomed)} if doomed else {}
+            expected_deleted_ids = {"publications": doomed} if doomed else {}
+            expected_kept_ids = {"publications": keepers} if doomed else {}
             report.extra["expected_deletions"] = expected_deletions
             status_, detail_, rem_ = write_snapshot(
-                args, report, counts, rev, expected_deletions=expected_deletions
+                args,
+                report,
+                counts,
+                rev,
+                expected_deletions=expected_deletions,
+                expected_deleted_ids=expected_deleted_ids,
+                expected_kept_ids=expected_kept_ids,
             )
             return (
                 "Row-count snapshot written for postflight",
@@ -1847,23 +1880,47 @@ async def check_legacy_inventory(conn, rev: str | None):
     return (title, status, detail, rem, data)
 
 
-async def publication_duplicate_surplus(conn) -> int:
-    """How many publication rows 0025 will DELETE: one per duplicate beyond the keeper.
+async def publication_duplicate_plan(conn) -> tuple[list[str], list[str]]:
+    """WHICH publication rows 0025 will delete, and which it will keep.
 
-    The same GROUP BY the duplicate check reports, reduced to the single number
-    postflight needs to tell an intentional dedup from row loss (see write_snapshot
-    and compare_row_counts). Returns 0 when the table is absent or already clean —
-    including when 0025 has already run, since its unique constraint makes duplicates
-    impossible from then on.
+    Returns ``(doomed_ids, keeper_ids)``, both as strings, mirroring 0025's own
+    selection exactly: per ``(user_id, pmid)`` group with ``pmid IS NOT NULL``, order
+    by ``created_at ASC, id ASC`` and keep the first — see
+    ``alembic/versions/0025_publications_unique_user_pmid.py``. Empty lists when the
+    table is absent or already clean (including after 0025 has run, since its unique
+    constraint makes duplicates impossible from then on).
+
+    Naming the rows rather than counting them is what makes the postflight check sound.
+    A count cannot detect a concurrent deleter operating INSIDE a duplicate group,
+    because every row such a process removes reduces 0025's own delete count by exactly
+    one and the net shrinkage still lands on the prediction — demonstrated on a real
+    database: 5 group KEEPERS deleted mid-window, 0025 then deleted 218, total 223, and
+    a count-based check reported "exactly the duplicates 0025 was measured to delete"
+    while five rows of real data were gone. Identity closes that whole class.
     """
     if not await table_exists(conn, "publications"):
-        return 0
+        return ([], [])
     rows = await fetch_all(
         conn,
-        "SELECT count(*) AS n FROM publications WHERE pmid IS NOT NULL "
-        "GROUP BY user_id, pmid HAVING count(*) > 1",
+        """
+        SELECT id, user_id, pmid,
+               row_number() OVER (
+                   PARTITION BY user_id, pmid ORDER BY created_at ASC, id ASC
+               ) AS rn
+          FROM publications
+         WHERE pmid IS NOT NULL
+           AND (user_id, pmid) IN (
+                 SELECT user_id, pmid FROM publications
+                  WHERE pmid IS NOT NULL
+                  GROUP BY user_id, pmid
+                 HAVING count(*) > 1
+               )
+         ORDER BY user_id, pmid, rn
+        """,
     )
-    return sum(int(r["n"]) - 1 for r in rows)
+    doomed = [str(r["id"]) for r in rows if int(r["rn"]) > 1]
+    keepers = [str(r["id"]) for r in rows if int(r["rn"]) == 1]
+    return (doomed, keepers)
 
 
 async def check_publication_duplicates(conn):
@@ -1939,12 +1996,17 @@ def write_snapshot(
     counts: dict[str, int],
     rev: str | None,
     expected_deletions: dict[str, int] | None = None,
+    expected_deleted_ids: dict[str, list[str]] | None = None,
+    expected_kept_ids: dict[str, list[str]] | None = None,
 ):
     """Hand off to postflight. The snapshot is the only thing postflight cannot re-derive.
 
-    ``expected_deletions`` names the rows a revision in the pending chain removes on
-    purpose (0025's duplicate publications). Without it postflight reads that deletion as
-    row loss and fails the verification of a migration that did exactly what it should.
+    ``expected_deletions`` counts, and ``expected_deleted_ids`` / ``expected_kept_ids``
+    NAME, the rows a revision in the pending chain removes on purpose (0025's duplicate
+    publications). Without them postflight reads that deletion as row loss and fails the
+    verification of a migration that did exactly what it should; without the ids in
+    particular, a concurrent deleter inside a duplicate group is invisible (see
+    ``publication_duplicate_plan``).
     """
     payload = {
         "kind": "preflight-snapshot",
@@ -1954,6 +2016,8 @@ def write_snapshot(
         "target": args.target,
         "row_counts": counts,
         "expected_deletions": dict(expected_deletions or {}),
+        "expected_deleted_ids": {k: list(v) for k, v in (expected_deleted_ids or {}).items()},
+        "expected_kept_ids": {k: list(v) for k, v in (expected_kept_ids or {}).items()},
     }
     detail = (
         f"{len(counts)} tables, {sum(counts.values()):,} rows total (exact counts, not "

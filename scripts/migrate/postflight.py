@@ -589,7 +589,53 @@ async def check_index_validity(conn):
     return (title, PASS, "every index in public is valid, ready and live.", [], {})
 
 
-async def check_row_counts(conn, snapshot_path: str | None, allow_growth: bool):
+def _snapshot_binding_problems(payload: dict, conn_target: str | None, conn_url: str | None):
+    """Reasons this snapshot does not describe the run being verified.
+
+    Cheap identity checks on a file the row-count comparison otherwise trusts wholesale:
+    it is the only record of the pre-migration state, so a snapshot from another database
+    or another target is worse than none at all.
+    """
+    problems: list[str] = []
+    kind = payload.get("kind")
+    if kind != "preflight-snapshot":
+        problems.append(f"kind is {kind!r}, expected 'preflight-snapshot'")
+    snap_target = payload.get("target")
+    if conn_target and snap_target and str(snap_target) != str(conn_target):
+        problems.append(
+            f"snapshot targets {snap_target!r} but this run verifies {conn_target!r}"
+        )
+    snap_url = payload.get("database_url")
+    if conn_url and snap_url and _pf.redact_url(conn_url) != str(snap_url):
+        problems.append(
+            f"snapshot was taken against {snap_url!r}, this run is verifying "
+            f"{_pf.redact_url(conn_url)!r}"
+        )
+    return problems
+
+
+async def _count_ids_present(conn, table: str, ids: list[str]) -> int:
+    """How many of ``ids`` still exist in ``table``. Chunked: an IN list of every id in a
+    duplicate set is fine at production scale (446 uuids) but should not become a
+    pathological single statement if a future chain names far more rows."""
+    if not ids:
+        return 0
+    total = 0
+    for i in range(0, len(ids), 1000):
+        chunk = ids[i : i + 1000]
+        rows = await _pf.fetch_all(
+            conn,
+            f"SELECT count(*) AS n FROM {table} WHERE id = ANY(CAST(:ids AS uuid[]))",
+            ids=chunk,
+        )
+        total += int(rows[0]["n"]) if rows else 0
+    return total
+
+
+async def check_row_counts(
+    conn, snapshot_path: str | None, allow_growth: bool,
+    target: str | None = None, conn_url: str | None = None,
+):
     title = "Row counts match the preflight snapshot"
     counts = await _pf.snapshot_row_counts(conn)
     if not snapshot_path:
@@ -610,13 +656,57 @@ async def check_row_counts(conn, snapshot_path: str | None, allow_growth: bool):
     except (OSError, ValueError) as exc:
         return (title, FAIL, f"snapshot {snapshot_path} is unreadable: {exc}", [],
                 {"row_counts": counts})
+    # The snapshot must belong to THIS run. Nothing used to check, so a snapshot from a
+    # different database (or a different target) verified happily against whatever was in
+    # front of it — and it is the one file whose contents this check trusts completely.
+    binding = _snapshot_binding_problems(payload, conn_target=target, conn_url=conn_url)
+    if binding:
+        return (title, FAIL,
+                "\n".join([f"snapshot {snapshot_path} does not belong to this run:"]
+                          + [f"  {b}" for b in binding]),
+                ["Re-run preflight against THIS database and target, then pass the snapshot "
+                 "it writes. Verifying against another run's snapshot proves nothing about "
+                 "this one.",
+                 "If you are deliberately re-verifying an older run, say so out loud in the "
+                 "deploy log — this check will keep refusing it."],
+                {"row_counts": counts, "snapshot_binding": binding})
     before = {k: int(v) for k, v in (payload.get("row_counts") or {}).items()}
-    # Rows a pending revision removes on purpose, as counted by preflight (0025's
-    # duplicate publications). Absent from snapshots written before this existed, in
-    # which case any shrinkage stays a failure exactly as it always did.
+    # Rows a pending revision removes on purpose, as counted AND NAMED by preflight
+    # (0025's duplicate publications). Absent from snapshots written before this existed,
+    # in which case any shrinkage stays a failure exactly as it always did.
     expected_deletions = {
         k: int(v) for k, v in (payload.get("expected_deletions") or {}).items()
     }
+    expected_deleted_ids = {
+        k: [str(x) for x in v] for k, v in (payload.get("expected_deleted_ids") or {}).items()
+    }
+    expected_kept_ids = {
+        k: [str(x) for x in v] for k, v in (payload.get("expected_kept_ids") or {}).items()
+    }
+    # Identity, not arithmetic. A count cannot see a concurrent deleter working INSIDE a
+    # duplicate group: every row it removes reduces 0025's own delete count by one, so the
+    # net always lands on the prediction. Demonstrated on a real database — 5 group keepers
+    # deleted mid-window, 0025 then deleted 218, total 223, count check "PASS" with five
+    # rows of real data gone. So ask the database which rows are actually there.
+    identity_problems: list[str] = []
+    for table, doomed in sorted(expected_deleted_ids.items()):
+        if doomed:
+            survived = await _count_ids_present(conn, table, doomed)
+            if survived:
+                identity_problems.append(
+                    f"{table}: {survived:,} of the {len(doomed):,} rows 0025 was supposed to "
+                    "delete are still present"
+                )
+    for table, keepers in sorted(expected_kept_ids.items()):
+        if keepers:
+            present = await _count_ids_present(conn, table, keepers)
+            missing = len(keepers) - present
+            if missing:
+                identity_problems.append(
+                    f"{table}: {missing:,} of the {len(keepers):,} rows 0025 was supposed to "
+                    "KEEP are gone — those are the rows it merges each duplicate group into, "
+                    "so this is real data loss, not a dedup"
+                )
     ok, problems = compare_row_counts(
         before,
         counts,
@@ -624,16 +714,20 @@ async def check_row_counts(conn, snapshot_path: str | None, allow_growth: bool):
         expected_new=CHAIN_CREATED_TABLES,
         expected_deletions=expected_deletions,
     )
+    problems = identity_problems + problems
+    ok = ok and not identity_problems
     data = {
         "row_counts": counts,
         "snapshot_row_counts": before,
         "expected_deletions": expected_deletions,
+        "identity_checked": {k: len(v) for k, v in expected_deleted_ids.items()},
         "problems": problems,
     }
     if ok:
         planned = "".join(
-            f" {t} is {n:,} row(s) smaller, exactly the duplicates 0025 was measured to "
-            f"delete." for t, n in sorted(expected_deletions.items()) if n
+            f" {t} is {n:,} row(s) smaller, and those are exactly the {n:,} rows preflight "
+            f"named (verified by id, and every keeper it named is still present)."
+            for t, n in sorted(expected_deletions.items()) if n
         )
         return (title, PASS,
                 f"{len(before)} tables, {sum(before.values()):,} rows before."
@@ -824,7 +918,10 @@ async def run_postflight(args) -> Report:
         )
         await report.add_guarded(
             "Row counts match the preflight snapshot",
-            lambda: check_row_counts(conn, args.snapshot, args.allow_row_growth),
+            lambda: check_row_counts(
+                conn, args.snapshot, args.allow_row_growth,
+                target=args.target, conn_url=url,
+            ),
         )
     finally:
         await conn.close()

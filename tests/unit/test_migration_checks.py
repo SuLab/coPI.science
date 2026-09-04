@@ -1535,3 +1535,59 @@ def test_an_extra_table_the_models_do_not_declare_is_not_a_blocking_drift():
 
     assert "remove_table" not in post.DRIFT_FAIL_OPS
     assert "remove_table" in post.DRIFT_WARN_OPS
+
+
+# --------------------------------------------------------------------------- #
+# The snapshot must belong to the run being verified (audit I3), and an
+# expectation must only be recorded for a chain that will actually run 0025
+# (audit I2).
+# --------------------------------------------------------------------------- #
+
+
+def test_pending_revisions_reports_what_the_upgrade_will_run():
+    assert pf.pending_revisions("0024", "0028") == frozenset({"0025", "0026", "0027", "0028"})
+    assert pf.pending_revisions("0024", "0024") == frozenset()
+    assert "0025" not in pf.pending_revisions("0026", "0028")
+    assert "0025" in pf.pending_revisions("0018", "0028")
+
+
+def test_a_snapshot_from_another_database_is_refused():
+    import scripts.migrate.postflight as post
+
+    payload = {
+        "kind": "preflight-snapshot",
+        "target": "0028",
+        "database_url": "postgresql+asyncpg://copi:***@host-a:5432/copi",
+    }
+    problems = post._snapshot_binding_problems(
+        payload, conn_target="0028",
+        conn_url="postgresql+asyncpg://copi:secret@host-b:5432/copi",
+    )
+    assert problems and "host-a" in problems[0]
+
+
+def test_a_snapshot_for_another_target_is_refused():
+    import scripts.migrate.postflight as post
+
+    payload = {"kind": "preflight-snapshot", "target": "0024", "database_url": ""}
+    problems = post._snapshot_binding_problems(payload, conn_target="0028", conn_url=None)
+    assert problems and "0024" in problems[0]
+
+
+def test_a_file_that_is_not_a_preflight_snapshot_is_refused():
+    import scripts.migrate.postflight as post
+
+    problems = post._snapshot_binding_problems({"kind": "something-else"}, None, None)
+    assert problems and "preflight-snapshot" in problems[0]
+
+
+def test_the_matching_snapshot_binds_cleanly():
+    import scripts.migrate.postflight as post
+
+    url = "postgresql+asyncpg://copi:secret@host:5432/copi"
+    payload = {
+        "kind": "preflight-snapshot",
+        "target": "0028",
+        "database_url": pf.redact_url(url),
+    }
+    assert post._snapshot_binding_problems(payload, conn_target="0028", conn_url=url) == []
