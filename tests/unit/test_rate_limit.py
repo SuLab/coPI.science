@@ -1,9 +1,8 @@
 """Unit tests for the in-process rate limiter used on public write endpoints.
 
-Backs SEC-7 (proposal-vote throttle) and SEC-17 (waitlist throttle): the
-limiter must cut off a burst once the window fills, recover after the window
-elapses, key independently per caller, and read the real client IP from the
-nginx-set forwarding headers.
+Backs SEC-7 (proposal-vote throttle): the limiter must cut off a burst once
+the window fills, recover after the window elapses, key independently per
+caller, and read the real client IP from the nginx-set forwarding headers.
 """
 
 from types import SimpleNamespace

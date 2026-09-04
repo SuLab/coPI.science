@@ -1,9 +1,9 @@
 """Lightweight in-process rate limiting for public, unauthenticated endpoints.
 
 This is a best-effort, per-worker sliding-window limiter — a defense-in-depth
-layer that bounds abuse of anonymous write endpoints (proposal votes, waitlist
-signups) even when the nginx edge limits (see ``nginx.conf``) are bypassed
-(e.g. the app container reached directly at ``app:8000``).
+layer that bounds abuse of anonymous write endpoints (proposal votes) even
+when the nginx edge limits (see ``nginx.conf``) are bypassed (e.g. the app
+container reached directly at ``app:8000``).
 
 It is deliberately *not* a substitute for the edge limits: the window state is
 per-process and not shared across workers or restarts. It exists so a single

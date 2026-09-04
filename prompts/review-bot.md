@@ -14,7 +14,7 @@ transcript may say it is unavailable — treat that as a fact about the record, 
 something to work around.
 
 - **FEEDBACK** — one or more human reviewer notes about this specific assessment, as a
-  JSON list: a numeric `score` (1–5), a `mode` (always `learn` — rows a reviewer marked
+  JSON list: a numeric `score` (1–5), a `feedback_mode` (always `learn` — rows a reviewer marked
   `log_only` are never shown to you), and a free-text `comment`. **The score rates the
   PROPOSAL's own scientific and strategic merit on the same 1–5 scale the rubric uses —
   it does not grade the assessment or the verdict.** The `comment` is the reviewer's

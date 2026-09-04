@@ -606,3 +606,10 @@ async def test_admin_waitlist_route_is_gone(client, db_session):
     admin = await _admin(db_session, "no-waitlist@example.org")
     r = await client.get("/admin/waitlist", headers=auth_headers(admin.id), follow_redirects=False)
     assert r.status_code == 404
+    assert (await client.get("/admin/waitlist/export", headers=auth_headers(admin.id))).status_code == 404
+    assert (
+        await client.get(
+            "/admin/waitlist/00000000-0000-0000-0000-000000000000/mark-contacted",
+            headers=auth_headers(admin.id),
+        )
+    ).status_code == 404

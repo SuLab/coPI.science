@@ -1,4 +1,4 @@
-"""Public-facing routes: landing page, waitlist, access-pending."""
+"""Public-facing routes: root redirect, access-pending, and the proposal-vote/graph pages."""
 
 import asyncio
 import json

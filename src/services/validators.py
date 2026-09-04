@@ -10,7 +10,7 @@ _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 # RFC 5321 caps an email address at 254 characters. Enforcing this *before*
 # running the regex is essential, not cosmetic: the pattern backtracks
 # superlinearly on long dot-heavy input, so matching uncapped attacker input on
-# an unauthenticated field (waitlist / onboarding / profile) is a ReDoS vector
+# an unauthenticated field (onboarding / profile) is a ReDoS vector
 # (audit SEC-16).
 MAX_EMAIL_LENGTH = 254
 

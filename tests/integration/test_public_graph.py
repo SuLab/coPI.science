@@ -122,8 +122,8 @@ async def _get(client, path, **kwargs):
 
 
 def _ip_headers() -> dict:
-    """A unique client IP per call, so the module-global rate limiters in
-    public.py (30 votes/min, 10 waitlist signups/hour, per IP, per process) cannot
+    """A unique client IP per call, so the module-global rate limiter in
+    public.py (30 proposal votes/min, per IP, per process) cannot
     make one test's result depend on how many tests ran before it."""
     return {"X-Real-IP": f"198.51.100.{next(_seq) % 254 + 1}"}
 
