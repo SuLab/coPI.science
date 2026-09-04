@@ -17,6 +17,10 @@ revision (0029) carries both schema changes so the migration chain grows by one,
 **Tech Stack:** Python 3.11 (image) / 3.12 (`.venv-test`), FastAPI, SQLAlchemy 2 async + asyncpg,
 Alembic (head 0028), pytest + testcontainers, ruff, mypy, Docker Compose, `slack_sdk`.
 
+**Plan location note:** the writing-plans skill's default is `docs/superpowers/plans/`, but that
+path is gitignored in this repository (`.gitignore:87`), so this plan lives in `docs/plans/`
+alongside `2026-09-02-close-issues-20-27.md`, which is the tracked convention here.
+
 **Spec:** the eight GitHub issues, fetched live and hash-verified byte-identical to the copies the
 original plan was built from:
 `/tmp/claude-1000/-home-a-scripps-coPI-science/c8a1ec5c-25b0-4282-b6cd-c2567cafee26/scratchpad/liveissues/live_2{0..7}.md`
