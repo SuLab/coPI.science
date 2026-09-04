@@ -186,7 +186,13 @@ def test_lock_smoke_step_defaults_to_a_visible_skip():
     proc = subprocess.run(
         ["./scripts/ci.sh"],
         cwd=REPO_ROOT,
-        env={**os.environ, "CI_MIGRATION_DB": "none", "LOCKCHECK": "none", "MYPY_MAX": "0"},
+        # LOCK_SMOKE must be scrubbed, not merely left unset: this test asserts the
+        # DEFAULT behaviour, and inheriting an ambient LOCK_SMOKE=1 from the operator's
+        # own shell would make the step run for real and fail this assertion (which is
+        # exactly what happened on a `LOCK_SMOKE=1 ./scripts/ci.sh` gate run).
+        env={
+            k: v for k, v in os.environ.items() if k != "LOCK_SMOKE"
+        } | {"CI_MIGRATION_DB": "none", "LOCKCHECK": "none", "MYPY_MAX": "0"},
         capture_output=True,
         text=True,
         timeout=180,
