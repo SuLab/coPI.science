@@ -1,6 +1,8 @@
 """GrantBot's LLM selection step must never post unvetted opportunities on a parse failure
 (issue #23 COR-26a/COR-26b)."""
 
+import pytest
+
 from src.agent import grantbot
 
 
@@ -44,6 +46,20 @@ async def test_a_number_the_llm_invented_is_dropped_not_a_hard_fail(monkeypatch)
     monkeypatch.setattr("src.services.llm.generate_agent_response", fake_generate)
     opps = {"PAR-24-293": {"title": "T1"}}
     assert await grantbot._select_opportunities(opps) == ["PAR-24-293"]
+
+
+async def test_a_transport_failure_propagates_instead_of_hard_failing(monkeypatch):
+    """I2: a transient Anthropic 429/529/timeout must NOT be swallowed into the `[]` hard-fail —
+    that would silently cost GrantBot the whole day (the scheduler marks the day complete on any
+    normal return). It must propagate so the scheduler's `except` (which does NOT mark the day
+    complete) retries on its next 15-minute tick."""
+    async def fake_generate(**kwargs):
+        raise TimeoutError("upstream timed out")
+
+    monkeypatch.setattr("src.services.llm.generate_agent_response", fake_generate)
+    opps = {"PAR-24-293": {"title": "T1"}}
+    with pytest.raises(TimeoutError):
+        await grantbot._select_opportunities(opps)
 
 
 def test_dead_profile_search_helpers_are_removed():

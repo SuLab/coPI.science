@@ -231,16 +231,25 @@ Respond with ONLY a JSON array of FOA numbers:
 
     user_msg = f"""## Funding Opportunities\n\n{opp_list}"""
 
-    try:
-        settings = get_settings()
-        response = await generate_agent_response(
-            system_prompt=system_prompt,
-            messages=[{"role": "user", "content": user_msg}],
-            model=settings.llm_agent_model_sonnet,
-            max_tokens=1500,
-            log_meta={"agent_id": "grantbot", "phase": "select"},
-        )
+    # The LLM call itself is deliberately OUTSIDE the try/except below (issue #23 I2): a
+    # transport failure (429/529/timeout) here must propagate rather than hard-fail to `[]`,
+    # because `_run_grantbot_with_session` completing normally marks the day complete
+    # (`_mark_run_complete()`), and `_should_run_today()` is then False until tomorrow — one
+    # transient failure would otherwise cost GrantBot every funding post for the day. Production
+    # runs this via `scheduler`, whose `except Exception` logs and does NOT mark the day complete,
+    # so a propagated exception here is retried on the next 15-minute tick instead of crashing the
+    # container. The `[]` hard-fail below stays for the deterministic parse-failure class
+    # (json.JSONDecodeError / ValueError), which retrying would not fix.
+    settings = get_settings()
+    response = await generate_agent_response(
+        system_prompt=system_prompt,
+        messages=[{"role": "user", "content": user_msg}],
+        model=settings.llm_agent_model_sonnet,
+        max_tokens=1500,
+        log_meta={"agent_id": "grantbot", "phase": "select"},
+    )
 
+    try:
         cleaned = response.strip()
         if cleaned.startswith("```"):
             cleaned = cleaned.split("\n", 1)[1] if "\n" in cleaned else cleaned[3:]
@@ -272,11 +281,13 @@ Respond with ONLY a JSON array of FOA numbers:
         # means this run posts nothing AND (because run_grantbot returns
         # normally) the scheduler marks the day complete, so the next attempt is
         # tomorrow's run, not the next 15-minute tick. That is the accepted
-        # trade: a quiet day beats a day of FOAs nobody reviewed. To retry the
-        # same day instead, this would have to raise so `_mark_run_complete()`
-        # is skipped — deliberately not done, since the
-        # scheduler's `except` would then retry a deterministic parse bug ~64
-        # times a day.
+        # trade for THIS class of failure: a deterministic parse bug
+        # (json.JSONDecodeError / ValueError, from a malformed-but-returned
+        # response) would otherwise be retried ~64 times a day for no benefit —
+        # re-querying can't fix a bug in how we parse an already-received
+        # answer. A transport failure (LLM 429/529/timeout) is the opposite
+        # case and is handled above, outside this try, by letting the
+        # exception propagate instead of landing here (issue #23 I2).
         logger.error(
             "Selection failed (%s) — refusing to post unvetted opportunities this run",
             exc,
