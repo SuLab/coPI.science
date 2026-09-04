@@ -903,6 +903,35 @@ async def test_accepting_an_invitation_syncs_the_delegates_slack_id(
     assert agent.delegate_slack_ids == ["U-DELEGATE"]
 
 
+async def test_accepting_an_invitation_with_no_bot_token_skips_the_sync_and_logs(
+    client, db_session, world, slack, caplog,
+):
+    """V10b: a delegate invite must still succeed with no bot token configured. The old code
+    silently skipped the whole Slack-sync block (`if bot_token:` with no `else`), which hid an
+    unconfigured agent token indefinitely. `world.agent.slack_bot_token` is None by default and
+    "tstowner" has no `.env` fallback slug, so this is the fixture's default path — no stub
+    needed, and the `slack` recorder (autouse) fails the test if invite.py reaches for a client
+    anyway.
+    """
+    delegate = await factories.make_user(db_session, name="Dee Legate", email="dee@example.org")
+    await _invite(client, world, "dee@example.org")
+    token = await _token_for(db_session, world.agent, "dee@example.org")
+
+    with caplog.at_level("INFO"):
+        r = await client.post(f"/invite/{token}/accept", headers=_auth(delegate.id))
+    assert r.status_code == 302
+
+    agent = (await db_session.execute(
+        select(AgentRegistry).where(AgentRegistry.agent_id == OWNER_AGENT)
+    )).scalar_one()
+    assert agent.delegate_slack_ids is None
+    assert slack.calls == [], f"invite.py reached Slack with no usable token: {slack.calls}"
+    assert any(
+        "no slack bot token" in r.getMessage().lower() and OWNER_AGENT in r.getMessage()
+        for r in caplog.records
+    ), [r.getMessage() for r in caplog.records]
+
+
 async def test_removing_a_delegate_also_removes_their_slack_id(
     client, db_session, world, delegated, slack
 ):

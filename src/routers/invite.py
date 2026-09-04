@@ -241,6 +241,11 @@ async def _accept_invitation(
             bot_token = token_for_agent_row(agent)
             if bot_token:
                 sid = await lookup_user_by_email_async(bot_token, user.email)
+            else:
+                logger.info(
+                    "No Slack bot token for agent %s — skipping delegate Slack-ID sync for %s",
+                    agent_slug, user.email,
+                )
         except Exception as exc:
             # Best-effort by design (specs/web-delegates.md §Slack Linkage): a
             # delegate is useful without a Slack id. But LOG it — a bare `pass`
