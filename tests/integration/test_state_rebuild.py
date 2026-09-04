@@ -29,6 +29,7 @@ from src.agent.agent import Agent
 from src.agent.simulation import SimulationEngine
 from src.agent.transport import NullTransport
 from src.config import get_settings
+from src.models.agent_registry import ProposalReview
 from tests import factories
 
 pytestmark = pytest.mark.integration
@@ -440,3 +441,107 @@ async def test_a_second_rebuild_does_not_duplicate_call_times(db_session, monkey
         "a second rebuild duplicated the call_times ledger: "
         f"{list(su.state.call_times)}"
     )
+
+
+async def test_a_rebuild_seeds_the_reopen_dedup_set_and_does_not_re_reopen(db_session):
+    """COR-13's third *Fix:* clause: a thread already reopened in a PRIOR
+    process (``ThreadDecision.reopened_at`` set, its synthetic 'PI (via web)'
+    guidance row already a durable ``agent_messages`` row) must not be
+    reopened again by the next ``_sync_proposal_reviews_from_db`` tick after a
+    restart. Before this fix, ``_db_reopened_thread_ids`` always rebuilt empty
+    (it is in-memory only), so the tick re-entered the reopen block: it would
+    have skipped re-minting only because ``already_minted`` (a message-log
+    scan) happens to catch it, but it still overwrote both agents'
+    ``ThreadState`` with a fresh ``message_count_offset`` — the "fresh reply
+    budget each restart" half of the bug, which a reopened thread can never
+    survive across repeated restarts. See COR-13 / red-team B6."""
+    run = await factories.make_simulation_run(db_session)
+    pi = await factories.make_user(db_session)
+    root_ts = await _stored_thread(db_session, run, replies=2)
+    guidance = "please revisit the budget line"
+    pi_ts = f"{float(root_ts) + 100:.6f}"
+    await factories.make_agent_message(
+        db_session, run=run, agent_id=None,
+        channel_id="C1", channel_name="general",
+        message_ts=pi_ts, thread_ts=root_ts, posted_at=float(pi_ts),
+        content=guidance, sender_name="PI (via web)", is_bot=False,
+    )
+    td = await factories.make_thread_decision(
+        db_session, run=run, thread_id=root_ts, channel="general",
+        agent_a="su", agent_b="wiseman", outcome="proposal",
+        summary_text="a shared aim", reopened_at=datetime.now(UTC),
+    )
+    db_session.add(ProposalReview(
+        thread_decision_id=td.id, agent_id="su", user_id=pi.id,
+        rating=0, comment=guidance, submitted_via="web",
+    ))
+    await db_session.flush()
+
+    eng = _engine_for(db_session, run.id)
+    await eng._rebuild_state_from_db()
+    await eng._rebuild_agent_state()
+
+    assert root_ts in eng._db_reopened_thread_ids, (
+        "the reopen dedup set was not seeded from ThreadDecision.reopened_at"
+    )
+    offset_before = eng.agents["su"].state.active_threads[root_ts].message_count_offset
+    guidance_entries_before = [
+        e for e in eng.message_log._entries
+        if e.thread_ts == root_ts and e.sender_name == "PI (via web)"
+    ]
+    assert len(guidance_entries_before) == 1
+
+    await eng._sync_proposal_reviews_from_db()
+
+    guidance_entries_after = [
+        e for e in eng.message_log._entries
+        if e.thread_ts == root_ts and e.sender_name == "PI (via web)"
+    ]
+    assert len(guidance_entries_after) == 1, (
+        "a second synthetic PI-guidance row was appended after a simulated restart"
+    )
+    offset_after = eng.agents["su"].state.active_threads[root_ts].message_count_offset
+    assert offset_after == offset_before, (
+        "the reply budget was re-granted by the post-restart sync: "
+        f"{offset_before} -> {offset_after}"
+    )
+
+
+async def test_a_rebuild_does_not_seed_an_unreopened_threads_dedup_entry(db_session):
+    """Sanity control for the fix above: a thread with NO ``reopened_at`` yet
+    (never reopened) must not be pre-seeded into ``_db_reopened_thread_ids`` —
+    that would silently block its first, legitimate reopen. The very next
+    sync tick must still reopen it exactly once."""
+    run = await factories.make_simulation_run(db_session)
+    pi = await factories.make_user(db_session)
+    root_ts = await _stored_thread(db_session, run, replies=2)
+    guidance = "please revisit the budget line"
+    td = await factories.make_thread_decision(
+        db_session, run=run, thread_id=root_ts, channel="general",
+        agent_a="su", agent_b="wiseman", outcome="proposal",
+        summary_text="a shared aim",
+    )
+    db_session.add(ProposalReview(
+        thread_decision_id=td.id, agent_id="su", user_id=pi.id,
+        rating=0, comment=guidance, submitted_via="web",
+    ))
+    await db_session.flush()
+
+    eng = _engine_for(db_session, run.id)
+    await eng._rebuild_state_from_db()
+    await eng._rebuild_agent_state()
+
+    assert root_ts not in eng._db_reopened_thread_ids, (
+        "an unreopened thread must not be pre-seeded into the reopen dedup set"
+    )
+
+    await eng._sync_proposal_reviews_from_db()
+
+    guidance_entries = [
+        e for e in eng.message_log._entries
+        if e.thread_ts == root_ts and e.sender_name == "PI (via web)"
+    ]
+    assert len(guidance_entries) == 1, (
+        f"expected the thread to be reopened exactly once, got {len(guidance_entries)}"
+    )
+    assert root_ts in eng._db_reopened_thread_ids

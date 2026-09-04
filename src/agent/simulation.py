@@ -4876,6 +4876,19 @@ class SimulationEngine:
                         })
                     self._closed_thread_ids.update(closed_thread_ids)
                     self._prior_thread_accounted.update(closed_thread_ids | reopened_thread_ids)
+                    # COR-13 (closure blocker 1): _db_reopened_thread_ids is
+                    # in-memory only and always starts empty, so without this
+                    # seed a restart forgets every reopen and
+                    # _sync_proposal_reviews_from_db's per-tick reopen block
+                    # (keyed the same way, on thread_id — :6139/:6221) fires
+                    # again on the next tick: it re-grants
+                    # message_count_offset = len(history), a fresh reply
+                    # budget every restart, so a reopened thread could never
+                    # reach the 12-message timeout close across restarts.
+                    # already_minted (below) independently prevents a
+                    # duplicate persisted guidance row; this seed prevents the
+                    # budget regrant.
+                    self._db_reopened_thread_ids.update(reopened_thread_ids)
             except Exception as exc:
                 logger.warning("Failed to load thread decisions: %s", exc)
 
