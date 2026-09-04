@@ -864,10 +864,36 @@ async def _handle_instruction(
         )
         return False
 
+    # Second idempotency guard, on the migration itself (#21 COR-19.6). The review-row
+    # check above is not sufficient: if the OUTER process_inbound_email commit fails
+    # AFTER migrate_public_thread_to_private has committed its own rows (which it now
+    # does, as soon as its Slack side effects are irreversible), the ProposalReview add
+    # and the notification-status flip are rolled back while the private channel and
+    # `refined_in_channel` survive. The retry over the same S3 object then found
+    # notification.status still 'sent', no review row, and `origin_visibility` still
+    # 'public' — the migration never flips it — and migrated a SECOND time, minting
+    # another priv-… channel. `refined_in_channel` is the durable record that the
+    # migration already happened, so read it. Disproof of the previous theory and the
+    # trace are in tests/integration/test_email_inbound_reply_paths.py's retry test.
+    if td.refined_in_channel:
+        logger.info(
+            "Proposal %s was already migrated to %s on an earlier attempt — not "
+            "migrating again; the guidance is already in that channel",
+            td.thread_id, td.refined_in_channel,
+        )
+        already_migrated = True
+    else:
+        already_migrated = False
+
     settings = get_settings()
 
     try:
-        if settings.enable_private_refinement and td.origin_visibility == VISIBILITY_PUBLIC:
+        if already_migrated:
+            # Nothing to do on Slack: the first attempt's migration posted this same
+            # guidance into the private channel as part of its handover. Fall through so
+            # the caller still records the review row and retires the notification.
+            pass
+        elif settings.enable_private_refinement and td.origin_visibility == VISIBILITY_PUBLIC:
             # Migrate to a collab_private channel before any PI text touches
             # Slack — the guidance never lands in the public thread.
             from src.services.private_channels import migrate_public_thread_to_private

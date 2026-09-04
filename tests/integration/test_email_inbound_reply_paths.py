@@ -394,53 +394,30 @@ def slack_migration_stub(monkeypatch):
     return made
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "COR-19.6 residual, disproved (closure-21.md Blocker 2 / final-C-races-brief.md "
-        "commit 2): commit 34d3c15 made migrate_public_thread_to_private commit its own "
-        "AgentChannel/member/handover rows and thread_decisions.refined_in_channel "
-        "(private_channels.py:625) as soon as its Slack side effects are irreversible, on "
-        "the theory that this alone makes a retried inbound e-mail idempotent. It does "
-        "not: _handle_instruction's ONLY idempotency guard (email_inbound.py:853-865) "
-        "checks for a ProposalReview row -- it never reads refined_in_channel or "
-        "origin_visibility, and origin_visibility is never flipped away from 'public' by "
-        "the migration (agent_page.py:775's own comment: 'no rows have "
-        "origin_visibility=collab_private yet'). If the OUTER process_inbound_email "
-        "commit (email_inbound.py:446) fails AFTER the migration's own commit has already "
-        "landed, the ProposalReview add and the notification-status flip are lost, so a "
-        "genuine retry over the same S3 object finds notification.status still 'sent' and "
-        "no ProposalReview row -- and re-runs migrate_public_thread_to_private end to end, "
-        "asking Slack for a second real private channel and leaving TWO AgentChannel rows "
-        "(reproduced below: two rows, same channel_name, after exactly this sequence)."
-    ),
-)
 async def test_a_retried_inbound_email_does_not_create_a_second_private_channel(
     engine, monkeypatch, slack_migration_stub,
 ):
-    """COR-19.6 / closure-21.md Blocker 2: commit 34d3c15 made
-    migrate_public_thread_to_private commit its own AgentChannel/member/handover rows
-    and thread_decisions.refined_in_channel (private_channels.py:625) as soon as its
-    Slack side effects are irreversible -- the claim under test is that this alone
-    makes a retried inbound e-mail idempotent on the Slack side. Needs a REAL
-    committing session (not the rollback-on-teardown db_session fixture): the whole
-    point is what a fresh session sees after an earlier session's commit fails.
+    """COR-19.6: a retried inbound e-mail must not mint a second private channel.
 
-    Pass 1 simulates the exact hazard COR-19.6 describes: the migration's OWN
-    internal commit succeeds for real, but the caller's LATER commit
-    (email_inbound.py:446, which would have persisted the ProposalReview row and
-    flipped notification.status to "responded") is made to fail -- a Postgres hiccup
-    between the two. process_inbound_email must propagate that failure (so
-    poll_inbound_emails' except leaves the S3 object in place for a retry), and the
-    migration's own commit must have survived it.
+    Two guards are needed, and this pins both. `migrate_public_thread_to_private`
+    commits its own AgentChannel/member/handover rows and
+    `thread_decisions.refined_in_channel` as soon as its Slack side effects are
+    irreversible (private_channels.py, commit 34d3c15). That alone was NOT enough, and
+    this test is what disproved it: `_handle_instruction`'s original guard only looked
+    for a ProposalReview row, never at `refined_in_channel`, and the migration never
+    flips `origin_visibility` away from 'public'. So when the OUTER
+    `process_inbound_email` commit failed after the migration's own commit had landed,
+    the review row and the notification flip were rolled back; the retry over the same
+    S3 object found `notification.status` still 'sent' and no review row, and ran the
+    migration end to end again -- two AgentChannel rows with the same channel_name, and
+    a second real Slack channel requested.
 
-    Pass 2 drives process_inbound_email again over the "same S3 object" (a fresh
-    session, same raw e-mail/token, no induced failure) -- the actual retry. The claim
-    under test is that this must be a no-op on the Slack side. It is not -- see the
-    xfail reason above. This test therefore documents the disproof rather than a
-    passing regression pin; flip it back to a plain test (drop the xfail) once
-    COR-19.6's residual is actually fixed (e.g. _handle_instruction consulting
-    refined_in_channel/origin_visibility before re-migrating).
+    The second guard (email_inbound.py, "Second idempotency guard") reads
+    `refined_in_channel` and skips the migration when it is already set, letting the
+    retry go on to record the review row and retire the notification. The first
+    attempt's handover already put this guidance in the private channel, so nothing is
+    re-posted. This ran as a strict xfail while the claim was false; it is a plain
+    regression pin now that both guards are in place.
     """
     factory = async_sessionmaker(engine, expire_on_commit=False)
     token = "retrychannel" + "z" * 38
