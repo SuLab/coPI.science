@@ -673,6 +673,74 @@ def test_legacy_inventory_reports_both_buckets_separately():
 
 
 # --------------------------------------------------------------------------- #
+# Publication (user_id, pmid) duplicate inventory (#22 I3)
+# --------------------------------------------------------------------------- #
+
+
+def test_publication_duplicate_status_passes_with_no_groups():
+    status, note = pf.publication_duplicate_status(0, 0)
+    assert status == pf.PASS
+    assert "nothing to merge" in note
+
+
+def test_publication_duplicate_status_warns_with_group_and_row_counts():
+    status, note = pf.publication_duplicate_status(2, 5)
+    assert status == pf.WARN
+    assert "2 duplicate (user_id, pmid) pair(s)" in note
+    assert "5 row(s)" in note
+
+
+async def test_check_publication_duplicates_passes_when_the_table_does_not_exist(monkeypatch):
+    async def _table_exists(_conn, name: str) -> bool:
+        return False
+
+    monkeypatch.setattr(pf, "table_exists", _table_exists)
+    title, status, detail, rem, data = await pf.check_publication_duplicates(None)
+    assert title == "Publication (user_id, pmid) duplicates 0025 will merge and delete"
+    assert status == pf.PASS
+    assert "does not exist" in detail
+    assert rem == []
+    assert data == {}
+
+
+async def test_check_publication_duplicates_passes_when_there_are_none(monkeypatch):
+    async def _table_exists(_conn, name: str) -> bool:
+        return True
+
+    async def _fetch_all(_conn, sql, **params):
+        return []
+
+    monkeypatch.setattr(pf, "table_exists", _table_exists)
+    monkeypatch.setattr(pf, "fetch_all", _fetch_all)
+    _title, status, detail, rem, data = await pf.check_publication_duplicates(None)
+    assert status == pf.PASS
+    assert "nothing to merge" in detail
+    assert rem == []
+    assert data == {"duplicate_groups": 0, "duplicate_rows": 0}
+
+
+async def test_check_publication_duplicates_warns_and_names_the_pairs(monkeypatch):
+    async def _table_exists(_conn, name: str) -> bool:
+        return True
+
+    async def _fetch_all(_conn, sql, **params):
+        return [
+            {"user_id": "u1", "pmid": "111", "n": 2},
+            {"user_id": "u2", "pmid": "222", "n": 3},
+        ]
+
+    monkeypatch.setattr(pf, "table_exists", _table_exists)
+    monkeypatch.setattr(pf, "fetch_all", _fetch_all)
+    title, status, detail, rem, data = await pf.check_publication_duplicates(None)
+    assert title == "Publication (user_id, pmid) duplicates 0025 will merge and delete"
+    assert status == pf.WARN
+    assert "(u1, 111)" in detail
+    assert "(u2, 222)" in detail
+    assert data == {"duplicate_groups": 2, "duplicate_rows": 5}
+    assert any("\\copy" in r for r in rem)
+
+
+# --------------------------------------------------------------------------- #
 # Row-count comparison (the preflight -> postflight handoff)
 # --------------------------------------------------------------------------- #
 

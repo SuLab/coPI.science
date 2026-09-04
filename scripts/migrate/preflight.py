@@ -502,6 +502,17 @@ def legacy_inventory_status(recoverable: int, unrecoverable: int) -> tuple[str, 
     return WARN, "; ".join(parts) + "."
 
 
+def publication_duplicate_status(group_count: int, row_count: int) -> tuple[str, str]:
+    """(user_id, pmid) groups 0025's dedup will merge into one row each and delete."""
+    if group_count == 0:
+        return PASS, "no duplicate (user_id, pmid) pairs; 0025 has nothing to merge or delete."
+    return WARN, (
+        f"{group_count:,} duplicate (user_id, pmid) pair(s) covering {row_count:,} row(s) "
+        "total. 0025 will COALESCE-merge each group into its earliest-created row and "
+        "irreversibly delete the rest before adding uq_publications_user_pmid."
+    )
+
+
 #: An `active` session holding a transaction younger than this will release its locks on
 #: its own before it matters; older than this and it is indistinguishable from a stuck
 #: one. Idle-in-transaction is BLOCKed at any age, because nothing will end it.
@@ -1169,12 +1180,18 @@ async def run_preflight(args) -> Report:
             lambda: check_legacy_inventory(conn, rev),
         )
 
-        # --- 12. backup ----------------------------------------------------------
+        # --- 12. publication (user_id, pmid) duplicates 0025 will merge/delete ---
+        await report.add_guarded(
+            "Publication (user_id, pmid) duplicates 0025 will merge and delete",
+            lambda: check_publication_duplicates(conn),
+        )
+
+        # --- 13. backup ----------------------------------------------------------
         await report.add_guarded(
             "Recent, non-trivial backup exists", lambda: check_backup(args, rows)
         )
 
-        # --- 13. row-count snapshot for postflight -------------------------------
+        # --- 14. row-count snapshot for postflight -------------------------------
         report.extra["lock_timeout_ms"], report.extra["lock_timeout_source"] = (
             resolve_lock_timeout_ms(dict(os.environ), read_env_py())
         )
@@ -1794,6 +1811,48 @@ async def check_legacy_inventory(conn, rev: str | None):
             "do not exist; they will read as empty messages forever. Do not let anyone "
             "'fix' this by inventing content."
         )
+    return (title, status, detail, rem, data)
+
+
+async def check_publication_duplicates(conn):
+    """(user_id, pmid) duplicates 0025's dedup will merge into one row and delete.
+
+    Task 22.2's deploy note claimed check 11 (legacy-row inventory, above) already
+    surfaced this count before 0025 runs — it does not: that check is exclusively
+    about agent_messages.content, and check_sizing reports only a bare
+    ``count(*)`` on publications for lock-window sizing, not which rows are
+    duplicates. This is the actual pre-flight visibility for 0025's irreversible
+    DELETE (see #22 I3, I2).
+    """
+    title = "Publication (user_id, pmid) duplicates 0025 will merge and delete"
+    if not await table_exists(conn, "publications"):
+        return (title, PASS, "publications does not exist.", [], {})
+    rows = await fetch_all(
+        conn,
+        "SELECT user_id, pmid, count(*) AS n FROM publications "
+        "WHERE pmid IS NOT NULL GROUP BY user_id, pmid HAVING count(*) > 1 "
+        "ORDER BY user_id, pmid",
+    )
+    group_count = len(rows)
+    row_count = sum(int(r["n"]) for r in rows)
+    status, note = publication_duplicate_status(group_count, row_count)
+    data = {"duplicate_groups": group_count, "duplicate_rows": row_count}
+    if group_count == 0:
+        return (title, status, note, [], data)
+    shown = [f"({r['user_id']}, {r['pmid']})" for r in rows[:20]]
+    pairs = ", ".join(shown)
+    if group_count > len(shown):
+        pairs += f", … +{group_count - len(shown)} more"
+    detail = f"{note} Affected (user_id, pmid) pairs: {pairs}."
+    rem = [
+        "Dump the rows 0025 will merge/delete before --apply — downgrade() cannot "
+        "restore them, so this is the only out-of-band trace of what a given run "
+        "changed:",
+        "  \\copy (SELECT * FROM publications WHERE pmid IS NOT NULL AND "
+        "(user_id, pmid) IN (SELECT user_id, pmid FROM publications WHERE pmid IS "
+        "NOT NULL GROUP BY user_id, pmid HAVING count(*) > 1) ORDER BY user_id, "
+        "pmid, created_at) TO 'dup_publications.csv' WITH CSV HEADER;",
+    ]
     return (title, status, detail, rem, data)
 
 
