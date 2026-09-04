@@ -20,12 +20,13 @@ Python implementation of the CoPI researcher collaboration platform combined wit
 
 - Matching engine (pairwise proposal generation)
 - Swipe interface
-- Daily digest
 
 ## What Email Actually Does (in scope, built)
 
 `src/services/email.py`, `email_inbound.py`, `email_notifications.py` —
-proposal-review emails, reply intake, unsubscribe/settings.
+proposal-review emails, reply intake, unsubscribe/settings, and a periodic
+status-overview digest (`check_and_send_status_overviews`, wired daily in
+`src/worker/main.py`).
 
 ## Key Specs
 

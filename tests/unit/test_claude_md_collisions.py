@@ -11,6 +11,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CLAUDE_MD = (REPO_ROOT / "CLAUDE.md").read_text()
+README = (REPO_ROOT / "README.md").read_text()
 
 
 def test_last_name_collisions_documents_third_collision_suffix():
@@ -19,3 +20,12 @@ def test_last_name_collisions_documents_third_collision_suffix():
     )
     assert "pwu2" in collisions_line
     assert "PWu2Bot" in collisions_line
+
+
+def test_readme_adding_new_pis_also_documents_third_collision_suffix():
+    """issue #26 Minor 5: README's "Adding new PIs" step 2 documented only the
+    initial-prefix rule while CLAUDE.md also documents the third-collision
+    numeric suffix — the two runbooks disagreed in completeness."""
+    adding_new_pis = README.split("## Adding new PIs", 1)[1].split("##", 1)[0]
+    assert "pwu2" in adding_new_pis
+    assert "PWu2Bot" in adding_new_pis

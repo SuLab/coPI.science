@@ -732,10 +732,11 @@ container's own health/restart signal to notice.
 
 ### 10.8 UID 10001 precondition: `profiles/` and `data/`, never `prompts/`
 
-The image's runtime user is a fixed UID 10001 (Task 27.8), and `profiles/` and `data/` are
-bind-mounted from the host into every service that writes to them (`app`, `worker`, `agent`,
-`grantbot`). Before recreating any of those services on a host whose bind mounts are not
-already owned by 10001:
+The image's runtime user is a fixed UID 10001 (Task 27.8). `profiles/` is bind-mounted from
+the host into all four app-image services that write to it (`app`, `worker`, `agent`,
+`grantbot`); `data/` is bind-mounted only into `agent` and `grantbot` — `app`/`worker` never
+mount it (see `docker-compose.prod.yml`). Before recreating any of those services on a host
+whose bind mounts are not already owned by 10001:
 
 ```bash
 sudo mkdir -p data

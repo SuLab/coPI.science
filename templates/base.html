@@ -17,7 +17,7 @@
         posthog.init('{{ request.state.posthog_api_key }}', {api_host: window.location.protocol + '//' + window.location.host + '/ingest', ui_host: 'https://us.posthog.com', person_profiles: 'identified_only'})
     </script>
     {% if current_user %}
-    <script>posthog.identify('{{ current_user.id }}', {name: {{ current_user.name|tojson }}{% if current_user.email %}, email: {{ current_user.email|tojson }}{% endif %}});</script>
+    <script>posthog.identify({{ current_user.id|string|tojson }}, {name: {{ current_user.name|tojson }}{% if current_user.email %}, email: {{ current_user.email|tojson }}{% endif %}});</script>
     {% endif %}
     {% endif %}
 </head>

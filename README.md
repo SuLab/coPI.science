@@ -112,7 +112,9 @@ flags every prod compose command needs.
    `docker compose exec app python -m src.cli seed-profiles --file new_orcids.txt`.
 2. Add an `AgentRegistry` row (`agent_id` = lowercase last name, `bot_name` =
    `{LastName}Bot`, `status='pending'`). For last-name collisions, prefix with
-   the first initial (e.g., `pwu` / `PWuBot`).
+   the first initial (e.g., `pwu` / `PWuBot`). If that prefixed id is *also*
+   taken (a third same-initial namesake), append a numeric suffix to the
+   prefixed candidate (e.g. `pwu2` / `PWu2Bot`).
 3. Provision the Slack bot and activate the agent from **/admin/agents** in
    the web UI. `AgentRegistry` is the single source of truth for the roster —
    there is no hardcoded roster list in `src/agent/simulation.py`, and no

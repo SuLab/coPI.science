@@ -88,3 +88,18 @@ def test_posthog_identify_preserves_apostrophe_in_name_and_email(tmp_path):
     captured = json.loads(result.stdout)
     assert captured["name"] == "O'Brien", captured
     assert captured["email"] == "o'brien@example.org", captured
+
+
+def test_posthog_identify_renders_the_id_via_tojson_like_name_and_email():
+    """issue #26 Minor 8: current_user.id was still interpolated into a
+    single-quoted JS literal (HTML-autoescaped only) while name/email went
+    through |tojson — asymmetric hardening. Harmless today (User.id is a
+    UUID column) but the id should get the same treatment.
+    """
+    html = _render(email="a@b.org")
+    m = _SCRIPT_RE.search(html)
+    assert m, "posthog.identify <script> block not found in rendered base.html"
+    script = m.group(1)
+
+    assert "identify('1111-2222'" not in script, script
+    assert 'identify("1111-2222"' in script, script

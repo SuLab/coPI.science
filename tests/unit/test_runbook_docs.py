@@ -42,3 +42,11 @@ def test_claude_md_restart_step_mentions_migrate():
     idx = text.index("Before restarting")
     restart_section = text[idx : idx + 2000]
     assert "migrate" in restart_section
+
+
+def test_production_migration_doc_lists_0024_as_a_supported_starting_point():
+    """issue #26 Minor 10: A4's doc widening (Part M) added 0024 as a
+    supported starting point but no test pinned it."""
+    text = PROD_MIGRATION_DOC.read_text()
+    assert "**0024**" in text
+    assert "is also a supported starting point" in text
