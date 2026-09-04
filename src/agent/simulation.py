@@ -3947,6 +3947,7 @@ class SimulationEngine:
         can_mirror = thread_ts is None or slack_parent is not None
 
         result: dict | None = None
+        slack_refused = False
         if client and client.is_connected and not can_mirror:
             logger.warning(
                 "[%s] Not mirroring reply to #%s: thread %s has no Slack root "
@@ -3981,12 +3982,27 @@ class SimulationEngine:
                 # through to the shared mint-a-ts-and-persist logic below would
                 # count the turn and let the thread-outcome checks act on a
                 # message that does not exist on Slack. See COR-1b.
+                # ...but do not DROP the message either. The DB is the durable store
+                # (specs/local-db-conversations.md), and returning False here without
+                # persisting lost the text outright — pinned as data loss by
+                # test_slack_lifecycle_live.py::test_posting_to_an_archived_channel_does_not_crash,
+                # which passes at 18ba52c and failed once COR-1b landed. That live test
+                # is skipped unless the copi-test credentials are exported, which is why
+                # the regression reached this branch unnoticed.
+                #
+                # Record it the way the Slack-off path already does: a DB-only row with
+                # slack_ts=None and a locally-minted canonical id, so nothing claims a
+                # Slack identity the message does not have (`_slack_parent_ts` returns
+                # None for it and the mirror is correctly skipped). Then still report
+                # failure to the caller, so the turn is not counted and the two-strike
+                # post-failure backoff applies. That satisfies COR-1b's actual
+                # requirement — no phantom Slack row — without the data loss.
                 logger.error(
                     "[%s] Slack post to #%s failed (connected client, no result) "
-                    "— not recording a phantom message for it",
+                    "— recording it as a DB-only row and reporting the post as failed",
                     agent_id, channel,
                 )
-                return False
+                slack_refused = True
         else:
             logger.info("[%s] MOCK post to #%s: %s...", agent_id, channel, text[:60])
 
@@ -4056,7 +4072,9 @@ class SimulationEngine:
             # Persisted to agent_messages via the MessageLog append callback
             # (_enqueue_persist → _flush_persisted). The DB is the primary store.
             self.message_log.append(entry)
-        return True
+        # False when a connected client tried and Slack refused: the row above is a
+        # DB-only record of what the agent said, not evidence that it posted.
+        return not slack_refused
 
     @staticmethod
     def _mirrored_messages(

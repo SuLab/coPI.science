@@ -1248,9 +1248,23 @@ class TestPostMessageSuppressesEmptyText:
 # ---------------------------------------------------------------
 
 class TestPostMessageDistinguishesConnectedFailureFromMock:
-    """A connected client whose chat.postMessage genuinely fails must not be
-    treated like the disconnected/MOCK path — no ts minted, no LogEntry written,
-    `posted` must come back False so callers don't count the turn or close threads."""
+    """A connected client whose chat.postMessage genuinely fails must be signalled
+    distinctly from the disconnected/MOCK path: `posted` comes back False so callers
+    don't count the turn, close threads or mint proposals.
+
+    The message itself is still recorded, as a DB-only row (`slack_ts=None`, locally
+    minted canonical id) — the DB is the durable store. Issue #20's COR-1b names the
+    harm precisely: "_post_message mints a local id, persists the row and returns
+    **True**, so a connected client whose post failed is indistinguishable from the
+    Slack-off path: the turn counts, threads close and proposals mint for a message
+    absent from Slack", and its Fix is "signal the Slack failure distinctly from the
+    mock path". The return value is the defect; the row is not.
+
+    This class originally asserted that nothing was written at all, which went beyond
+    what the issue asked and silently deleted the agent's text on any Slack refusal.
+    tests/integration/test_slack_lifecycle_live.py::test_posting_to_an_archived_channel_does_not_crash
+    pinned that as data loss and passes at 18ba52c — but it only runs when the
+    copi-test credentials are exported, so the regression was invisible to the gate."""
 
     def _engine_with_failing_client(self, error_code="msg_too_long"):
         from unittest.mock import MagicMock
@@ -1267,13 +1281,21 @@ class TestPostMessageDistinguishesConnectedFailureFromMock:
         return engine
 
     @pytest.mark.asyncio
-    async def test_a_swallowed_non_thread_not_found_error_returns_false_and_writes_nothing(self):
+    async def test_a_swallowed_error_returns_false_and_keeps_the_text_as_a_db_only_row(self):
         engine = self._engine_with_failing_client("msg_too_long")
 
         posted = await engine._post_message("su", "general", "a real message")
 
+        # The failure is signalled distinctly from the mock path...
         assert posted is False
-        assert engine.message_log._entries == []
+        # ...and the text survives, without claiming a Slack identity it does not have.
+        assert len(engine.message_log._entries) == 1
+        entry = engine.message_log._entries[0]
+        assert entry.content == "a real message"
+        assert entry.slack_ts is None, (
+            "a refused post must not carry a Slack ts — that is the phantom row COR-1b "
+            "is about; the row itself is the durable record of what the agent said"
+        )
 
     @pytest.mark.asyncio
     async def test_connected_failure_is_not_confused_with_the_mock_path(self):
