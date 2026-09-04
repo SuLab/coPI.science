@@ -28,11 +28,16 @@ def test_dependencies_install_from_the_lockfile_before_source_is_copied():
 
 def test_two_stage_build_with_a_slim_runtime():
     text = _dockerfile()
-    from_lines = [line for line in text.splitlines() if line.startswith("FROM ")]
-    assert len(from_lines) == 2, "expected exactly a builder stage and a runtime stage"
+    lines = text.splitlines()
+    from_line_indices = [i for i, line in enumerate(lines) if line.startswith("FROM ")]
+    assert len(from_line_indices) == 2, "expected exactly a builder stage and a runtime stage"
+    assert "FROM python:3.11-slim" in text, (
+        "the --no-build-isolation step depends on the base image shipping "
+        "setuptools/wheel"
+    )
     assert "AS builder" in text
     assert "--from=builder" in text
-    runtime_section = text[text.rindex("FROM "):]
+    runtime_section = "\n".join(lines[from_line_indices[-1] :])
     assert "gcc" not in runtime_section
     assert "libpq-dev" not in runtime_section
     assert "libpq5" in runtime_section
@@ -69,8 +74,30 @@ def test_ownership_is_scoped_to_writable_dirs_not_the_whole_app_tree():
     )
     chown_lines = [line for line in text.splitlines() if "chown -R 10001:10001" in line]
     assert chown_lines, "expected a chown line granting the runtime user its writable dirs"
-    for target in ("profiles", "data", "logs", "static"):
+    for target in ("profiles", "data", "logs"):
         assert target in chown_lines[-1], f"{target} must be chowned to the runtime user"
+    assert "static" not in chown_lines[-1], (
+        "static/ is served read-only by StaticFiles and nothing in src/ writes "
+        "to it — chowning it to the runtime user is a needless stored-XSS "
+        "surface on browser-served assets"
+    )
+    mkdir_lines = [line for line in text.splitlines() if "mkdir -p" in line]
+    assert mkdir_lines, "expected an mkdir -p line provisioning the writable dirs"
+    assert "static" not in mkdir_lines[-1], "static/ must not be (re-)created/owned by the mkdir step either"
+
+
+def test_bytecode_is_compiled_before_dropping_root():
+    text = _dockerfile()
+    assert "compileall" in text, "bake the bytecode cache while root still owns src/"
+    assert "python -m compileall" in text
+    copy_idx = text.rindex("COPY . .")
+    compileall_idx = text.index("compileall")
+    user_idx = text.rindex("USER 10001")
+    assert copy_idx < compileall_idx, "compileall must run after the app tree is copied in"
+    assert compileall_idx < user_idx, (
+        "compileall must run BEFORE USER drops root — UID 10001 cannot write "
+        "__pycache__ under root-owned src/"
+    )
 
 
 def test_home_env_is_set_for_the_runtime_user():

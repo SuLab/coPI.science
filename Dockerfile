@@ -41,16 +41,25 @@ COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/pytho
 COPY --from=builder /usr/local/bin /usr/local/bin
 COPY . .
 
+# Bake the bytecode cache while root still owns src/ — UID 10001 (set below)
+# cannot write __pycache__ into root-owned src/, so without this every
+# process start pays a first-import compile cost (~0.9s, measured). Must run
+# AFTER src/ lands (COPY . . above) and BEFORE USER drops root.
+RUN python -m compileall -q src
+
 # Fixed UID so it matches whatever the prod host chowns the bind-mounted
 # profiles/data trees to (see this task's Deploy note) — a plain chown
 # target on the host, not a real host account. Ownership is scoped to the
-# directories the runtime user actually writes to (profiles/data/logs/static);
-# src/, templates/, alembic/ and scripts/ stay root-owned and read-only to
-# this user, so a compromised process cannot rewrite its own code (#27 I3).
+# directories the runtime user actually writes to (profiles/data/logs);
+# src/, templates/, alembic/, scripts/ and static/ stay root-owned and
+# read-only to this user, so a compromised process cannot rewrite its own
+# code (#27 I3). static/ is deliberately excluded: StaticFiles only ever
+# reads it, nothing under src/ writes to it, so a write grant there would be
+# a needless stored-XSS surface on assets served straight to the browser.
 RUN groupadd --gid 10001 copi \
     && useradd --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin copi \
-    && mkdir -p profiles/public profiles/private profiles/memory data logs static \
-    && chown -R 10001:10001 profiles data logs static
+    && mkdir -p profiles/public profiles/private profiles/memory data logs \
+    && chown -R 10001:10001 profiles data logs
 ENV HOME=/app
 
 USER 10001
