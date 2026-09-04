@@ -52,7 +52,6 @@ import httpx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from scripts.backfill_agents import _bot_name_for
 from src.config import get_settings
 from src.models import AgentRegistry, Publication, ResearcherProfile, User
 from src.services.llm import extract_json, get_anthropic_client
@@ -163,6 +162,29 @@ def _aff_match(input_aff: str, paper_aff: str) -> bool:
 def _slugify_agent_id(name: str) -> str:
     last = name.strip().split()[-1].lower()
     return "".join(c for c in last if c.isalpha()) or "lab"
+
+
+def _bot_name_for(agent_id: str, name: str) -> str:
+    """Digit-aware bot name, byte-identical to scripts/backfill_agents._bot_name_for.
+
+    Deliberately duplicated rather than imported: `scripts/` is not an importable
+    package (no `__init__.py`), and this file's documented invocation is
+    `python scripts/generate_sparsedata_user.py`, which puts `scripts/` — not the
+    repo root — on `sys.path`. A cross-script import therefore raises
+    ModuleNotFoundError for the operator while still passing under pytest.
+    `tests/unit/test_generate_sparsedata_user.py` pins the two copies to agree.
+
+    Issue #26 I1: the previous inline version used `agent_id[0]` literally, so a
+    third same-initial namesake ("pwu2") produced "PWuBot" — a duplicate of the
+    second Wu's bot name, with no unique constraint on `agents.bot_name` to catch it.
+    """
+    last = name.strip().split()[-1]
+    last_alpha = "".join(c for c in last if c.isalpha())
+    stem = "".join(c for c in agent_id if not c.isdigit())
+    suffix = agent_id[len(stem):]
+    if stem.lower() == last_alpha.lower():
+        return f"{last_alpha.capitalize()}{suffix}Bot"
+    return f"{agent_id[0].upper()}{last_alpha.capitalize()}{suffix}Bot"
 
 
 async def _resolve_agent_id(name: str, db: AsyncSession) -> str:

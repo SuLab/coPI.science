@@ -63,3 +63,53 @@ async def test_bot_name_matches_the_web_and_backfill_paths_on_the_fourth_collisi
     db = _FakeAgentRegistryDb(taken=["wu", "pwu", "pwu2"])
     agent_id = await _resolve_agent_id("Ping Wu", db)
     assert (agent_id, _bot_name_for(agent_id, "Ping Wu")) == ("pwu3", "PWu3Bot")
+
+
+def test_bot_name_derivation_is_byte_identical_to_the_backfill_copy():
+    """The two `scripts/` copies must agree on every shape.
+
+    `_bot_name_for` is duplicated in `scripts/generate_sparsedata_user.py` because
+    `scripts/` is not an importable package and that file is run directly (see
+    `test_the_script_can_be_run_the_way_its_docstring_documents`). This test is the
+    pin that keeps the duplicate honest.
+    """
+    from scripts.backfill_agents import _bot_name_for as backfill_copy
+    from scripts.generate_sparsedata_user import _bot_name_for as sparse_copy
+
+    cases = [
+        ("wu", "Chunlei Wu"),
+        ("pwu", "Peng Wu"),
+        ("pwu2", "Pei Wu"),
+        ("pwu3", "Ping Wu"),
+        ("pwu19", "Po Wu"),
+        ("mcdonald", "Ann McDonald"),
+        ("obrien", "Sean O'Brien"),
+        ("su", "Andrew Su"),
+    ]
+    assert [sparse_copy(a, n) for a, n in cases] == [backfill_copy(a, n) for a, n in cases]
+
+
+def test_the_script_can_be_run_the_way_its_docstring_documents():
+    """`python scripts/generate_sparsedata_user.py` must import cleanly.
+
+    The docstring's own usage line is
+    `docker compose exec app python scripts/generate_sparsedata_user.py ...`, which
+    puts `scripts/` on `sys.path`, not the repo root — so any `from scripts.… import`
+    in this file raises ModuleNotFoundError for the operator while still passing
+    under pytest (which inserts the repo root). Issue #26 I1's first fix did exactly
+    that; this test is the guard.
+    """
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    repo_root = Path(__file__).resolve().parents[2]
+    proc = subprocess.run(
+        [sys.executable, "scripts/generate_sparsedata_user.py", "--help"],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "ModuleNotFoundError" not in proc.stderr
