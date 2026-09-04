@@ -14,7 +14,6 @@ from src.agent.foa_pattern import FOA_NUMBER_RE as _FOA_NUMBER_RE
 from src.agent.mentions import BOT_TAG_RE
 from src.agent.message_log import LogEntry, MessageLog, is_funding_post
 
-
 # ---------------------------------------------------------------------------
 # Announcement-only detector (atomic spin-off rule)
 # ---------------------------------------------------------------------------

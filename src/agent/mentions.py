@@ -7,8 +7,8 @@ trailing "ot" (`@(\\w+[Bb]ot)\\b` matches "@SuBot" and "@subot" but not
 all — a real Slack user typing "@SuBot" gets autocompleted to `<@U12345>` by
 the Slack client before the text ever reaches this codebase, so a genuine
 in-Slack mention of a bot was invisible everywhere. See issue #20 COR-8 (this
-module) and issue #23 PR V8 (`funding_rules._TAG_RE` — land in sync with this
-one or keep both in step; that file is NOT edited here).
+module). `funding_rules.py` now imports `BOT_TAG_RE` from here instead of
+keeping its own copy (issue #23 COR-27/COR-28).
 """
 
 from __future__ import annotations

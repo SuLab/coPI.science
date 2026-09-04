@@ -15,6 +15,10 @@ import re
 #   - agency-coded:                          RFA-AI-27-019, NOT-OD-24-001
 #   - parent announcement (no agency code):  PA-24-293, PAR-24-293, PAS-24-293
 #   - DOE:                                   DE-FOA-0003456
+# The PA/PAR/PAS branch deliberately has no agency-code segment: the old cache
+# pattern's PAR-AI-24-293-style composites (agency code wedged into the parent-
+# announcement shape) no longer match here, because they are not a real NIH
+# numbering shape and no fixture in this repo uses them.
 # Years appear as 2 or 4 digits. IGNORECASE because Slack/LLM text is not guaranteed to preserve
 # NIH's all-caps convention.
 FOA_NUMBER_RE = re.compile(

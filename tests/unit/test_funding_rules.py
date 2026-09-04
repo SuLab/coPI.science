@@ -130,6 +130,18 @@ class TestAcknowledgmentOnly:
         # real logistics commitment, not a bare acknowledgment.
         assert is_acknowledgment_only_funding_reply(text) is False
 
+    def test_long_pure_pleasantry_is_an_accepted_false_negative(self):
+        # Accepted cost of the >= 10-word threshold (issue #23 COR-28b): a
+        # pleasantry with no substantive content still clears the word-count
+        # cutoff meant to rescue substantive replies, so it is (wrongly)
+        # treated as not-ack-only. Pinning this rather than "fixing" it keeps
+        # the fix from re-introducing the original bug (rejecting the
+        # 11-word "Agreed, we can send the plasmids and the mice next
+        # week." reply) — see the word-count threshold's own comment.
+        text = "Thanks so much for the tag, really looking forward to working together."
+        assert len(text.split()) >= 10
+        assert is_acknowledgment_only_funding_reply(text) is False
+
 
 # ---------------------------------------------------------------
 # Thread summarizer

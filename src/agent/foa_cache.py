@@ -10,9 +10,16 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from src.agent.foa_pattern import FOA_NUMBER_RE as FOA_PATTERN
+from src.agent.foa_pattern import FOA_NUMBER_RE
+from src.agent.foa_pattern import extract_foa_number as extract_foa_number
 
 logger = logging.getLogger(__name__)
+
+# Kept as a module attribute for backward compatibility (issue #23 COR-27):
+# foa_cache.FOA_PATTERN used to be this module's own compiled pattern; it is
+# now just the shared one, same object, so identity checks against
+# foa_pattern.FOA_NUMBER_RE still hold.
+FOA_PATTERN = FOA_NUMBER_RE
 
 CACHE_DIR = Path("data/foa_cache")
 
@@ -72,12 +79,6 @@ def format_foa_for_prompt(foa_number: str) -> str | None:
     if result.get("additional_info_url"):
         parts.append(f"\nMore info: {result['additional_info_url']}")
     return "\n".join(parts)
-
-
-def extract_foa_number(content: str) -> str | None:
-    """Extract an FOA number from post content, or None if not found."""
-    m = FOA_PATTERN.search(content)
-    return m.group(1) if m else None
 
 
 async def backfill_cache(posted_numbers: list[str]) -> int:
