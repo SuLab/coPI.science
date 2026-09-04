@@ -1443,3 +1443,95 @@ async def test_ambiguous_revision_distinguishes_all_three_signatures(monkeypatch
         assert status == pf.BLOCK
         seen.append(detail)
     assert len(set(seen)) == 3, "each of the three states must be diagnosed differently"
+
+
+# --------------------------------------------------------------------------- #
+# 0025 deletes rows on purpose: the row-count comparison has to know the
+# difference between "the migration removed exactly the duplicates preflight
+# counted" and "rows went missing". Found by running the real chain against a
+# copy of production, where 0025 legitimately deletes 223 publications and
+# postflight BLOCKed with "223 rows LOST ... Compare against the backup before
+# doing anything else" in the middle of the migration window.
+# --------------------------------------------------------------------------- #
+
+
+def test_the_exact_deletion_0025_predicted_is_not_row_loss():
+    ok, problems = pf.compare_row_counts(
+        {"publications": 4731},
+        {"publications": 4508},
+        expected_deletions={"publications": 223},
+    )
+    assert ok, problems
+    assert problems == []
+
+
+def test_deleting_more_than_predicted_still_fails():
+    ok, problems = pf.compare_row_counts(
+        {"publications": 4731},
+        {"publications": 4507},
+        expected_deletions={"publications": 223},
+    )
+    assert not ok
+    assert "224" in problems[0] and "223" in problems[0], problems
+
+
+def test_deleting_fewer_than_predicted_still_fails():
+    """A short delete means 0025 did not do what preflight measured — the constraint
+    it then adds would have failed, so this must not pass silently either."""
+    ok, problems = pf.compare_row_counts(
+        {"publications": 4731},
+        {"publications": 4600},
+        expected_deletions={"publications": 223},
+    )
+    assert not ok
+    assert "131" in problems[0] and "223" in problems[0], problems
+
+
+def test_an_expected_deletion_does_not_license_loss_in_other_tables():
+    ok, problems = pf.compare_row_counts(
+        {"publications": 4731, "users": 144},
+        {"publications": 4508, "users": 143},
+        expected_deletions={"publications": 223},
+    )
+    assert not ok
+    assert any("users" in p and "LOST" in p for p in problems), problems
+
+
+def test_a_snapshot_without_expected_deletions_keeps_the_strict_behaviour():
+    """Backward compatibility: an older snapshot file has no expected_deletions key,
+    and must still make any shrinkage a failure."""
+    ok, problems = pf.compare_row_counts({"publications": 4731}, {"publications": 4508})
+    assert not ok
+    assert "223 rows LOST" in problems[0]
+
+
+def test_write_snapshot_records_the_deletions_postflight_must_expect(tmp_path):
+    import json
+
+    class _Args:
+        target = "0028"
+
+        def __init__(self, path):
+            self.snapshot = str(path)
+
+    status, _, _ = pf.write_snapshot(
+        _Args(tmp_path / "snap.json"),
+        pf.Report("preflight"),
+        {"publications": 4731},
+        "0024",
+        expected_deletions={"publications": 223},
+    )
+    assert status == pf.PASS
+    payload = json.loads((tmp_path / "snap.json").read_text())
+    assert payload["expected_deletions"] == {"publications": 223}
+
+
+def test_an_extra_table_the_models_do_not_declare_is_not_a_blocking_drift():
+    """A real production database carries operator artefacts — copi's has
+    email_notifications_expired_bak_20260814 (40 rows) from the 2026-08-14 deploy.
+    The ORM is entirely unaffected by an extra table, so classifying remove_table as
+    a failure BLOCKed a perfectly good migration."""
+    import scripts.migrate.postflight as post
+
+    assert "remove_table" not in post.DRIFT_FAIL_OPS
+    assert "remove_table" in post.DRIFT_WARN_OPS

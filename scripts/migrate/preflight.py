@@ -666,12 +666,24 @@ def compare_row_counts(
     after: dict[str, int],
     allow_growth: bool = False,
     expected_new: tuple[str, ...] | frozenset[str] = (),
+    expected_deletions: dict[str, int] | None = None,
 ) -> tuple[bool, list[str]]:
     """Compare a preflight snapshot against a postflight count. Shared by both scripts.
 
-    Shrinkage is always a failure. Growth is a failure unless ``allow_growth``, because
-    the migration itself inserts no rows: if a count went up, a writer was live during
-    the migration and the lock-window analysis was wrong.
+    Growth is a failure unless ``allow_growth``, because the migration itself inserts no
+    rows: if a count went up, a writer was live during the migration and the lock-window
+    analysis was wrong.
+
+    Shrinkage is a failure UNLESS the table appears in ``expected_deletions`` with a count
+    that matches the delta exactly. Migration 0025 deletes duplicate ``(user_id, pmid)``
+    publications on purpose — 223 of them on the production database this was measured
+    against — and preflight records the number it counted, so the comparison can tell
+    "0025 removed exactly the duplicates preflight saw" from "rows went missing". An
+    inexact match fails in BOTH directions: deleting more than predicted means something
+    else deleted rows too, and deleting fewer means 0025 did not do what preflight
+    measured (in which case the unique constraint it then adds could not have been
+    created). A snapshot written before this key existed has no expectations and keeps
+    the original, strictly-no-shrinkage behaviour.
 
     ``expected_new`` names the tables the chain CREATES (0020's pi_dm_messages, 0022's
     three cohort tables). Those are absent from the preflight snapshot by construction,
@@ -680,6 +692,7 @@ def compare_row_counts(
     """
     problems: list[str] = []
     expected_new = frozenset(expected_new)
+    expected_deletions = dict(expected_deletions or {})
     for table in sorted(set(before) | set(after)):
         b = before.get(table)
         a = after.get(table)
@@ -692,7 +705,19 @@ def compare_row_counts(
             problems.append(f"{table}: existed before with {b:,} rows, now MISSING")
             continue
         if a < b:
-            problems.append(f"{table}: {b:,} rows before, {a:,} after — {b - a:,} rows LOST")
+            lost = b - a
+            expected = expected_deletions.get(table, 0)
+            if expected and lost == expected:
+                continue                      # exactly the rows preflight predicted
+            if expected:
+                problems.append(
+                    f"{table}: {b:,} rows before, {a:,} after — {lost:,} rows gone, but "
+                    f"preflight predicted exactly {expected:,}"
+                )
+            else:
+                problems.append(
+                    f"{table}: {b:,} rows before, {a:,} after — {lost:,} rows LOST"
+                )
         elif a > b and not allow_growth:
             problems.append(
                 f"{table}: {b:,} rows before, {a:,} after — grew by {a - b:,}; the "
@@ -1199,7 +1224,15 @@ async def run_preflight(args) -> Report:
         async def _snapshot_check():
             counts = await snapshot_row_counts(conn)
             report.extra["row_counts"] = counts
-            status_, detail_, rem_ = write_snapshot(args, report, counts, rev)
+            # 0025 deletes duplicate publications on purpose. Record how many, so
+            # postflight can distinguish that from row loss instead of failing the
+            # verification of a correct migration (measured: 223 rows on production).
+            surplus = await publication_duplicate_surplus(conn)
+            expected_deletions = {"publications": surplus} if surplus else {}
+            report.extra["expected_deletions"] = expected_deletions
+            status_, detail_, rem_ = write_snapshot(
+                args, report, counts, rev, expected_deletions=expected_deletions
+            )
             return (
                 "Row-count snapshot written for postflight",
                 status_,
@@ -1814,6 +1847,25 @@ async def check_legacy_inventory(conn, rev: str | None):
     return (title, status, detail, rem, data)
 
 
+async def publication_duplicate_surplus(conn) -> int:
+    """How many publication rows 0025 will DELETE: one per duplicate beyond the keeper.
+
+    The same GROUP BY the duplicate check reports, reduced to the single number
+    postflight needs to tell an intentional dedup from row loss (see write_snapshot
+    and compare_row_counts). Returns 0 when the table is absent or already clean —
+    including when 0025 has already run, since its unique constraint makes duplicates
+    impossible from then on.
+    """
+    if not await table_exists(conn, "publications"):
+        return 0
+    rows = await fetch_all(
+        conn,
+        "SELECT count(*) AS n FROM publications WHERE pmid IS NOT NULL "
+        "GROUP BY user_id, pmid HAVING count(*) > 1",
+    )
+    return sum(int(r["n"]) - 1 for r in rows)
+
+
 async def check_publication_duplicates(conn):
     """(user_id, pmid) duplicates 0025's dedup will merge into one row and delete.
 
@@ -1881,8 +1933,19 @@ def check_backup(args, live_rows: int):
     )
 
 
-def write_snapshot(args, report: Report, counts: dict[str, int], rev: str | None):
-    """Hand off to postflight. The snapshot is the only thing postflight cannot re-derive."""
+def write_snapshot(
+    args,
+    report: Report,
+    counts: dict[str, int],
+    rev: str | None,
+    expected_deletions: dict[str, int] | None = None,
+):
+    """Hand off to postflight. The snapshot is the only thing postflight cannot re-derive.
+
+    ``expected_deletions`` names the rows a revision in the pending chain removes on
+    purpose (0025's duplicate publications). Without it postflight reads that deletion as
+    row loss and fails the verification of a migration that did exactly what it should.
+    """
     payload = {
         "kind": "preflight-snapshot",
         "generated_at": time.time(),
@@ -1890,6 +1953,7 @@ def write_snapshot(args, report: Report, counts: dict[str, int], rev: str | None
         "current_revision": rev,
         "target": args.target,
         "row_counts": counts,
+        "expected_deletions": dict(expected_deletions or {}),
     }
     detail = (
         f"{len(counts)} tables, {sum(counts.values()):,} rows total (exact counts, not "

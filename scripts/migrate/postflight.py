@@ -245,9 +245,15 @@ DRIFT_FAIL_OPS = frozenset(
         "add_constraint",
         "modify_nullable",
         "modify_type",
-        "remove_table",
     }
 )
+#: Reported, never fatal. ``remove_table`` means the DATABASE has a table no model
+#: declares — an operator artefact, not something the ORM can trip over. Production
+#: carries exactly one (``email_notifications_expired_bak_20260814``, 40 rows, made
+#: during the 2026-08-14 deploy), and classifying it as fatal turned a correct
+#: migration into "VERIFICATION FAILED ... Restore" inside the migration window.
+#: postflight runs with warn_exit_code=0, so a WARN here still lets the deploy proceed.
+DRIFT_WARN_OPS = frozenset({"remove_table"})
 DRIFT_IGNORED_OPS = frozenset(
     {"remove_index", "remove_constraint", "add_table_comment", "remove_column"}
 )
@@ -605,19 +611,40 @@ async def check_row_counts(conn, snapshot_path: str | None, allow_growth: bool):
         return (title, FAIL, f"snapshot {snapshot_path} is unreadable: {exc}", [],
                 {"row_counts": counts})
     before = {k: int(v) for k, v in (payload.get("row_counts") or {}).items()}
+    # Rows a pending revision removes on purpose, as counted by preflight (0025's
+    # duplicate publications). Absent from snapshots written before this existed, in
+    # which case any shrinkage stays a failure exactly as it always did.
+    expected_deletions = {
+        k: int(v) for k, v in (payload.get("expected_deletions") or {}).items()
+    }
     ok, problems = compare_row_counts(
-        before, counts, allow_growth=allow_growth, expected_new=CHAIN_CREATED_TABLES
+        before,
+        counts,
+        allow_growth=allow_growth,
+        expected_new=CHAIN_CREATED_TABLES,
+        expected_deletions=expected_deletions,
     )
-    data = {"row_counts": counts, "snapshot_row_counts": before, "problems": problems}
+    data = {
+        "row_counts": counts,
+        "snapshot_row_counts": before,
+        "expected_deletions": expected_deletions,
+        "problems": problems,
+    }
     if ok:
+        planned = "".join(
+            f" {t} is {n:,} row(s) smaller, exactly the duplicates 0025 was measured to "
+            f"delete." for t, n in sorted(expected_deletions.items()) if n
+        )
         return (title, PASS,
-                f"{len(before)} tables, {sum(before.values()):,} rows, identical before and "
-                "after.", [], data)
+                f"{len(before)} tables, {sum(before.values()):,} rows before."
+                + (planned or " Counts identical before and after."), [], data)
     return (title, FAIL,
             "\n".join([f"{len(problems)} row-count problem(s):"] + [f"  {x}" for x in problems]),
-            ["Row loss is not something a migration in this chain can cause, so treat it as "
-             "either the wrong snapshot file or a concurrent writer/deleter. Compare against "
-             "the backup before doing anything else.",
+            ["Only 0025 deletes rows in this chain, and only the duplicate publications "
+             "preflight counted into the snapshot's expected_deletions. Any other loss is "
+             "the wrong snapshot file or a concurrent writer/deleter — compare against the "
+             "backup before doing anything else. A count that differs from the prediction "
+             "means 0025 did not do what preflight measured; re-read check 12's output.",
              "Growth alone (not loss) can be accepted with --allow-row-growth, but only if "
              "you know a writer was live."],
             data)
@@ -685,6 +712,7 @@ async def check_orm_drift(conn_url: str):
         await engine.dispose()
 
     failures: list[str] = []
+    warnings: list[str] = []
     ignored = 0
     unknown: list[str] = []
     for entry in raw:
@@ -693,11 +721,21 @@ async def check_orm_drift(conn_url: str):
             op = item[0] if isinstance(item, (tuple, list)) else str(item)
             if op in DRIFT_FAIL_OPS:
                 failures.append(f"{op}: {str(item)[:180]}")
+            elif op in DRIFT_WARN_OPS:
+                name = ""
+                if isinstance(item, (tuple, list)) and len(item) > 1:
+                    name = getattr(item[1], "name", "") or ""
+                warnings.append(f"{op}: {name or str(item)[:120]}")
             elif op in DRIFT_IGNORED_OPS:
                 ignored += 1
             else:
                 unknown.append(f"{op}: {str(item)[:180]}")
-    data = {"failures": failures, "ignored": ignored, "unclassified": unknown}
+    data = {
+        "failures": failures,
+        "warnings": warnings,
+        "ignored": ignored,
+        "unclassified": unknown,
+    }
     if failures:
         return (title, FAIL,
                 "\n".join([f"{len(failures)} drift finding(s) the models cannot tolerate:"]
@@ -713,6 +751,22 @@ async def check_orm_drift(conn_url: str):
     )
     if unknown:
         return (title, WARN, detail + f" {len(unknown)} unclassified op(s): {unknown}", [], data)
+    if warnings:
+        return (
+            title,
+            WARN,
+            detail
+            + f" {len(warnings)} table(s) present in the database that no model declares: "
+            + ", ".join(warnings)
+            + ".",
+            [
+                "An extra table is an operator artefact (a manual backup table, a leftover "
+                "scratch table), not something the ORM can trip over — it is reported so it "
+                "is not a surprise, and it does not fail this run. Drop it when you no "
+                "longer need it.",
+            ],
+            data,
+        )
     return (title, PASS, detail, [], data)
 
 
