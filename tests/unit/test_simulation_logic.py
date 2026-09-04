@@ -2336,6 +2336,189 @@ class TestPhase5ReplyChannelComesFromTheTargetPost:
 
 
 # ---------------------------------------------------------------
+# A permanently-failing Slack post must back off, not regenerate an LLM
+# reply every turn forever — #20 I1
+# ---------------------------------------------------------------
+
+class TestPhase4PostFailureBackoff:
+    """Mirrors tests/unit/test_authorship_emit_gate.py's
+    TestPhase4AuthorshipBackoff, but for a Slack-refused post
+    (_post_message returning False) instead of an authorship rejection.
+    Without this, a deterministic Slack refusal (is_archived, not_in_channel,
+    invalid_auth, recurring msg_too_long) costs one LLM call per turn per
+    affected thread forever, and the thread can never reach the 12-message
+    timeout close (has_pending_reply stays True, message_count never
+    advances past what a real reply would have counted)."""
+
+    def _thread_and_engine(self):
+        from src.agent.agent import Agent
+        from src.agent.state import ThreadState
+
+        agent = Agent("a", "ABot", "A PI")
+        engine = SimulationEngine(agents=[agent], slack_clients={})
+        thread = ThreadState(
+            thread_id="1700000000.000100", channel="general", other_agent_id="b",
+            has_pending_reply=True,
+        )
+        agent.state.active_threads[thread.thread_id] = thread
+        return agent, engine, thread
+
+    @pytest.mark.asyncio
+    async def test_two_consecutive_post_failures_back_off_the_thread(self, monkeypatch):
+        from unittest.mock import AsyncMock
+
+        agent, engine, thread = self._thread_and_engine()
+        monkeypatch.setattr(
+            "src.agent.simulation.generate_with_tools",
+            AsyncMock(return_value="<slack_message>hi</slack_message>"),
+        )
+        engine._post_message = AsyncMock(return_value=False)
+
+        await engine._reply_to_thread(agent, thread)
+        assert thread.post_failure_count == 1
+        assert thread.has_pending_reply is True  # retried next turn
+        assert len(engine.message_log) == 0
+
+        await engine._reply_to_thread(agent, thread)
+        assert thread.post_failure_count == 2
+        assert thread.has_pending_reply is False  # backed off
+        assert len(engine.message_log) == 0
+
+    @pytest.mark.asyncio
+    async def test_a_successful_post_in_between_resets_the_count(self, monkeypatch):
+        from unittest.mock import AsyncMock
+
+        agent, engine, thread = self._thread_and_engine()
+        monkeypatch.setattr(
+            "src.agent.simulation.generate_with_tools",
+            AsyncMock(return_value="<slack_message>hi</slack_message>"),
+        )
+        engine._post_message = AsyncMock(side_effect=[False, True, False])
+
+        await engine._reply_to_thread(agent, thread)  # failure 1
+        assert thread.post_failure_count == 1
+
+        thread.has_pending_reply = True  # a new turn's worth of state
+        await engine._reply_to_thread(agent, thread)  # success resets
+        assert thread.post_failure_count == 0
+        assert thread.has_pending_reply is False
+
+        thread.has_pending_reply = True
+        await engine._reply_to_thread(agent, thread)  # failure 1 again, not a cumulative 3rd
+        assert thread.post_failure_count == 1
+        assert thread.has_pending_reply is True  # not backed off yet
+
+
+class TestPhase5PostFailureBackoff:
+    """Phase 5's reply branches (private-channel flat reply and threaded
+    reply) have no ThreadState yet at the point a post can fail — one is
+    only ever created on a SUCCESSFUL threaded reply, and never for a
+    private-channel reply. Failures are tracked per target_post_id on the
+    engine instead (_phase5_post_failure_counts), with the same two-strike
+    shape: drop target_post_id from interesting_posts after the 2nd
+    consecutive failure. #20 I1."""
+
+    def _engine_with_interesting_post(self, monkeypatch, *, private=False):
+        from src.agent.agent import Agent
+        from src.agent.message_log import LogEntry
+        from src.agent.state import PostRef
+        from src.config import get_settings
+        from src.models.agent_activity import VISIBILITY_COLLAB_PRIVATE
+
+        monkeypatch.setattr(get_settings(), "phase5_skip_probability", 0.0)
+        a = Agent("a", "ABot", "A PI")
+        b = Agent("b", "BBot", "B PI")
+        engine = SimulationEngine(agents=[a, b], slack_clients={})
+        channel = "priv-chan" if private else "general"
+        if private:
+            engine._channel_visibility[channel] = VISIBILITY_COLLAB_PRIVATE
+        engine.message_log.append(LogEntry(
+            ts="100.0", channel=channel, sender_agent_id="b", sender_name="BBot",
+            content="original post", posted_at=100.0, is_bot=True,
+        ))
+        a.state.interesting_posts.append(PostRef(
+            post_id="100.0", channel=channel, sender_agent_id="b",
+            content_snippet="original post", posted_at=100.0,
+        ))
+        return engine, a, channel
+
+    def _stub_reply_response(self, channel):
+        return (
+            "```json\n"
+            f'{{"action": "reply", "channel": "{channel}", "target_post_id": "100.0"}}\n'
+            "```\n"
+            "<slack_message>\n"
+            "Sounds interesting, let's collaborate.\n"
+            "</slack_message>\n"
+        )
+
+    @pytest.mark.asyncio
+    async def test_two_consecutive_failures_drop_the_target_from_interesting_posts(
+        self, monkeypatch,
+    ):
+        from unittest.mock import AsyncMock
+
+        engine, a, channel = self._engine_with_interesting_post(monkeypatch)
+        monkeypatch.setattr(
+            "src.agent.simulation.generate_agent_response",
+            AsyncMock(return_value=self._stub_reply_response(channel)),
+        )
+        engine._post_message = AsyncMock(return_value=False)
+
+        await engine._phase5_new_post(a)
+        assert any(p.post_id == "100.0" for p in a.state.interesting_posts), (
+            "a single failure must not drop the target yet"
+        )
+
+        await engine._phase5_new_post(a)
+        assert not any(p.post_id == "100.0" for p in a.state.interesting_posts), (
+            "the second consecutive failure must drop the target"
+        )
+        assert "100.0" not in engine._phase5_post_failure_counts, (
+            "the counter must be cleared once it has done its job"
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_successful_reply_in_between_resets_the_count(self, monkeypatch):
+        from unittest.mock import AsyncMock
+
+        engine, a, channel = self._engine_with_interesting_post(monkeypatch)
+        monkeypatch.setattr(
+            "src.agent.simulation.generate_agent_response",
+            AsyncMock(return_value=self._stub_reply_response(channel)),
+        )
+        engine._post_message = AsyncMock(return_value=False)
+
+        await engine._phase5_new_post(a)
+        assert engine._phase5_post_failure_counts.get("100.0") == 1
+
+        engine._post_message = AsyncMock(return_value=True)
+        await engine._phase5_new_post(a)
+        assert "100.0" not in engine._phase5_post_failure_counts
+
+    @pytest.mark.asyncio
+    async def test_two_consecutive_failures_drop_the_target_in_a_private_channel(
+        self, monkeypatch,
+    ):
+        # The flat private-channel reply branch never creates a ThreadState
+        # even on success — this is the one Phase 5 reply shape where a
+        # per-post counter is the ONLY possible backoff mechanism.
+        from unittest.mock import AsyncMock
+
+        engine, a, channel = self._engine_with_interesting_post(monkeypatch, private=True)
+        monkeypatch.setattr(
+            "src.agent.simulation.generate_agent_response",
+            AsyncMock(return_value=self._stub_reply_response(channel)),
+        )
+        engine._post_message = AsyncMock(return_value=False)
+
+        await engine._phase5_new_post(a)
+        await engine._phase5_new_post(a)
+
+        assert not any(p.post_id == "100.0" for p in a.state.interesting_posts)
+
+
+# ---------------------------------------------------------------
 # LogEntry writers that must stamp visibility from the channel, not take
 # the dataclass default of 'public' (#20 COR-9a residual)
 # ---------------------------------------------------------------

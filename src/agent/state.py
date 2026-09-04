@@ -45,6 +45,14 @@ class ThreadState:
     # outrank gate-compliant work. Cleared if the partner becomes permitted again.
     # See .notes/cohort-system-v2.md §8.
     grandfathered: bool = False
+    # Consecutive Slack post refusals (client connected, result is None — a
+    # deterministic error like is_archived/not_in_channel/invalid_auth/
+    # recurring msg_too_long). Mirrors authorship_reject_count's two-strike
+    # backoff: without it a permanently-failing post regenerates an LLM reply
+    # every turn forever and the thread can never reach the 12-message
+    # timeout close. Not persisted/reconstructed on rebuild — it defaults to
+    # 0, so a restart gives a failing thread a fresh two strikes. See #20 I1.
+    post_failure_count: int = 0
 
 
 @dataclass

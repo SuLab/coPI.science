@@ -364,6 +364,17 @@ class SimulationEngine:
         # done"). See COR-13 / red-team B6.
         self._prior_thread_accounted: set[str] = set()
 
+        # #20 I1: consecutive Slack-post-failure count for a Phase 5 reply
+        # target, keyed by target_post_id. Phase 4's equivalent counter lives
+        # on ThreadState (post_failure_count) because a ThreadState always
+        # already exists there; Phase 5's two reply branches attempt to post
+        # to a target BEFORE any ThreadState exists for it (one is only ever
+        # created on a SUCCESSFUL threaded reply, and never for a flat
+        # private-channel reply), so there is nothing to hang a per-thread
+        # field on until a post actually lands. Popped on success or once
+        # the two-strike drop fires — never grows unbounded.
+        self._phase5_post_failure_counts: dict[str, int] = {}
+
         # Prior thread decisions per agent pair — for Phase 5 dedup context.
         # Key: tuple(sorted([agent_a, agent_b])), Value: list of dicts
         self._prior_threads: dict[tuple[str, str], list[dict]] = {}
@@ -1623,16 +1634,32 @@ class SimulationEngine:
                 thread_ts=thread.thread_id,
             )
             if not posted:
+                # #20 I1: a deterministic Slack refusal (is_archived,
+                # not_in_channel, invalid_auth, recurring msg_too_long) used
+                # to just log here forever — has_pending_reply stayed True
+                # and message_count never advanced, so the thread could never
+                # reach the 12-message timeout close and burned one LLM call
+                # per turn indefinitely. Mirrors authorship_reject_count's
+                # two-strike pattern.
+                thread.post_failure_count += 1
                 logger.info(
-                    "[%s] Suppressed post in #%s — not counted, nothing persisted",
-                    agent.agent_id, thread.channel,
+                    "[%s] Suppressed post in #%s — not counted, nothing persisted "
+                    "(post_failure_count=%d)",
+                    agent.agent_id, thread.channel, thread.post_failure_count,
                 )
+                if thread.post_failure_count >= 2:
+                    thread.has_pending_reply = False
+                    logger.info(
+                        "[%s] Phase 4: Backing off thread %s after %d post failures",
+                        agent.agent_id, thread.thread_id, thread.post_failure_count,
+                    )
             else:
                 agent.message_count += 1
                 thread.has_pending_reply = False
                 thread.funding_reject_count = 0
                 thread.authorship_reject_count = 0
                 thread.empty_response_count = 0
+                thread.post_failure_count = 0
 
                 # Check for thread outcome
                 await self._check_thread_outcome(agent, thread, response_text)
@@ -2262,6 +2289,33 @@ class SimulationEngine:
                 result[other] = visible
         return result
 
+    def _note_phase5_post_failure(self, agent: Agent, target_post_id: str) -> None:
+        """Two-strike backoff for a Slack-refused Phase 5 reply (#20 I1).
+
+        Mirrors ThreadState.post_failure_count's shape, tracked per
+        target_post_id on the engine instead — see
+        ``self._phase5_post_failure_counts``'s docstring for why. After the
+        second consecutive failure, drops ``target_post_id`` from
+        ``agent.state.interesting_posts`` so it stops being re-targeted (and
+        re-costing an LLM call) every turn.
+        """
+        count = self._phase5_post_failure_counts.get(target_post_id, 0) + 1
+        self._phase5_post_failure_counts[target_post_id] = count
+        logger.info(
+            "[%s] Suppressed reply to %s — not counted, nothing persisted "
+            "(post_failure_count=%d)",
+            agent.agent_id, target_post_id, count,
+        )
+        if count >= 2:
+            agent.state.interesting_posts = [
+                p for p in agent.state.interesting_posts if p.post_id != target_post_id
+            ]
+            self._phase5_post_failure_counts.pop(target_post_id, None)
+            logger.info(
+                "[%s] Phase 5: Backing off post %s after %d consecutive failures",
+                agent.agent_id, target_post_id, count,
+            )
+
     # ------------------------------------------------------------------
     # Phase 5: New Post (conditional)
     # ------------------------------------------------------------------
@@ -2675,11 +2729,9 @@ class SimulationEngine:
                 if is_private_channel:
                     posted = await self._post_message(agent.agent_id, channel, message_text)
                     if not posted:
-                        logger.info(
-                            "[%s] Suppressed post in #%s — not counted, nothing persisted",
-                            agent.agent_id, channel,
-                        )
+                        self._note_phase5_post_failure(agent, target_post_id)
                     else:
+                        self._phase5_post_failure_counts.pop(target_post_id, None)
                         agent.message_count += 1
                         # Consume the interesting post (we acted on it) but do not
                         # create an active_thread — private channels don't thread.
@@ -2698,11 +2750,9 @@ class SimulationEngine:
                         thread_ts=target_post_id,
                     )
                     if not posted:
-                        logger.info(
-                            "[%s] Suppressed post in #%s — not counted, nothing persisted",
-                            agent.agent_id, channel,
-                        )
+                        self._note_phase5_post_failure(agent, target_post_id)
                     else:
+                        self._phase5_post_failure_counts.pop(target_post_id, None)
                         agent.message_count += 1
 
                         # Move from interesting_posts to active_threads
@@ -2737,6 +2787,11 @@ class SimulationEngine:
                 # New top-level post
                 posted = await self._post_message(agent.agent_id, channel, message_text)
                 if not posted:
+                    # #20 I1: unlike the two reply branches above, there is no
+                    # target_post_id/PostRef and no ThreadState here — each
+                    # turn's "new post" is a fresh LLM decision with no
+                    # persistent object across turns to hang a two-strike
+                    # counter on, so there is nothing to drop or back off.
                     logger.info(
                         "[%s] Suppressed post in #%s — not counted, nothing persisted",
                         agent.agent_id, channel,
