@@ -15,23 +15,28 @@ from src.agent.retry_after import parse_retry_after
 
 @pytest.mark.parametrize("value,expected", [
     ("17", 17.0),
-    ("0", 0.0),
     ("2.5", 2.5),                    # a legal delta-seconds header some proxies emit as a float
-    ("-5", 0.0),                     # negative clamps to 0, never raises
     ("99999999", 30.0),              # huge value is capped
     ("garbage", 5.0),                # unparseable falls back to default
     (None, 5.0),                     # missing header falls back to default
+    ("0", 5.0),                      # zero is not a positive number -> default, not a hot retry
+    ("-5", 5.0),                     # negative falls back to default (#24 Minor 2), not 0.0
+    ("nan", 5.0),                    # NaN is not a finite number -> default
+    ("inf", 5.0),                    # +inf is not a *finite* number -> default (still ends up capped)
+    ("-inf", 5.0),                   # -inf falls back to default, not a hot retry
+    ("1e400", 5.0),                  # overflows to +inf -> default, same end result as before
 ])
 def test_parse_retry_after_table(value, expected):
     assert parse_retry_after(value, default=5.0, cap=30.0) == expected
 
 
-def test_an_http_date_in_the_past_clamps_to_zero_not_negative():
-    # RFC 7231 permits an HTTP-date; a date already in the past yields a
-    # negative delta, which must clamp to 0, not raise and not go negative.
+def test_an_http_date_in_the_past_falls_back_to_default_not_zero():
+    # RFC 7231 permits an HTTP-date; a date already in the past yields a negative
+    # delta. #24 Minor 2: that must fall back to `default` (not clamp to 0), or a
+    # rate-limited caller retries immediately against the API that just 429'd it.
     assert parse_retry_after(
         "Wed, 21 Oct 2015 07:28:00 GMT", default=5.0, cap=30.0
-    ) == 0.0
+    ) == 5.0
 
 
 def test_an_http_date_in_the_future_is_honoured_and_capped():
@@ -46,7 +51,18 @@ def test_an_http_date_in_the_future_is_honoured_and_capped():
     assert parse_retry_after(far, default=5.0, cap=30.0) == 30.0
 
 
+def test_a_list_or_dict_value_does_not_raise_and_falls_back_to_default():
+    # #24 Minor 1: float() raises TypeError for a list/dict, and the pre-fix
+    # fallback then called parsedate_to_datetime on the same non-str value,
+    # raising AttributeError -- uncaught, since only (TypeError, ValueError,
+    # IndexError) were handled. Coercing to str up front routes both through
+    # the ordinary "unparseable" -> default path instead.
+    assert parse_retry_after(["Retry-After"], default=5.0, cap=30.0) == 5.0
+    assert parse_retry_after({"seconds": 5}, default=5.0, cap=30.0) == 5.0
+
+
 def test_never_raises_for_any_of_these_inputs():
     for value in ("17", "-5", "99999999", "2.5", "garbage", None,
-                  "Wed, 21 Oct 2015 07:28:00 GMT", ""):
+                  "Wed, 21 Oct 2015 07:28:00 GMT", "", "nan", "-inf",
+                  ["Retry-After"], {"seconds": 5}):
         parse_retry_after(value, default=5.0, cap=30.0)  # must not raise

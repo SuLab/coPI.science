@@ -14,6 +14,7 @@ Slack client — that call site is left as-is (YAGNI; it already works).
 
 from __future__ import annotations
 
+import math
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 
@@ -23,22 +24,30 @@ def parse_retry_after(value: str | None, default: float, cap: float = 30.0) -> f
 
     ``value`` is the raw ``Retry-After`` header text (or ``None``). Tries, in order: a bare float (covers
     Slack's documented integer-seconds form and the float variant some proxies emit), then an RFC 7231
-    HTTP-date (delta from ``now``). Anything that parses as neither falls back to ``default``. The result
-    is always clamped into ``[0, cap]`` so a malformed or hostile header can never make a caller sleep
-    longer than ``cap``, and a negative or past-dated value can never reach ``time.sleep`` as a negative
-    number (which itself raises ``ValueError``).
+    HTTP-date (delta from ``now``). Anything that parses as neither falls back to ``default``. A parsed
+    value that is not a positive finite number (zero, negative, NaN, or +/-infinity -- e.g. a past-dated
+    header) also falls back to ``default`` rather than silently becoming an immediate hot retry. The
+    result is always clamped into ``[0, cap]`` so a malformed or hostile header can never make a caller
+    sleep longer than ``cap``.
     """
     if value is None:
         seconds = default
     else:
+        # Coerce up front: float() raises TypeError for a list/dict, and the HTTP-date
+        # fallback below requires a str -- parsedate_to_datetime raises AttributeError
+        # (not caught below) if handed a non-str, e.g. a list. Stringifying first routes
+        # every non-string input through the same ValueError fallback as "garbage".
+        text = str(value)
         try:
-            seconds = float(value)
+            seconds = float(text)
         except (TypeError, ValueError):
             try:
-                when = parsedate_to_datetime(value)
+                when = parsedate_to_datetime(text)
                 if when.tzinfo is None:
                     when = when.replace(tzinfo=UTC)
                 seconds = (when - datetime.now(UTC)).total_seconds()
             except (TypeError, ValueError, IndexError):
                 seconds = default
+        if not math.isfinite(seconds) or seconds <= 0:
+            seconds = default
     return max(0.0, min(seconds, cap))
