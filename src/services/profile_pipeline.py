@@ -23,7 +23,7 @@ from sqlalchemy import Update, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.models import Job, Publication, ResearcherProfile, User
+from src.models import Job, ProfileRevision, Publication, ResearcherProfile, User
 from src.services.llm import synthesize_private_profile, synthesize_profile
 from src.services.orcid import fetch_orcid_grants, fetch_orcid_profile, fetch_orcid_works
 from src.services.pubmed import (
@@ -533,10 +533,11 @@ async def run_profile_pipeline(
     # disk content into private_profile_md makes Step 9b's
     # `not profile.private_profile_md` condition false, so no seed is
     # generated, and the export call below simply re-writes the adopted
-    # content back unchanged. This cannot resurrect a deliberate clear:
-    # onboarding_complete only ever becomes True via save_private_profile,
-    # which passes remove_if_empty=True and so already deleted the file when
-    # the PI cleared it.
+    # content back unchanged. This cannot resurrect a deliberate clear: both
+    # clear routes delete the file as they null the columns —
+    # onboarding.py:save_private_profile via remove_if_empty=True, and
+    # agent_page.py:save_private_profile via profile_path.unlink — so there is
+    # nothing here to adopt for a PI who cleared.
     from src.services.profile_export import PRIVATE_PROFILES_DIR, export_private_profile
     private_seed_generated = False
     if not profile.private_profile_md and not profile.private_profile_seed and agent_id:
@@ -546,22 +547,41 @@ async def run_profile_pipeline(
                 disk_private_path.read_text(encoding="utf-8").strip() or None
             )
 
-    # Step 9b: Generate private profile seed, but ONLY for a PI who has never
-    # completed onboarding (issue #22 COR-23 fix round). `POST
-    # /onboarding/private-profile` always sets onboarding_complete=True and,
-    # when submitted blank, clears both private_profile_md and
-    # private_profile_seed (onboarding.py:save_private_profile) — that is a
-    # deliberate "no private instructions" choice, not an absence of one yet.
-    # Without this gate, the next pipeline run (regenerate, admin re-enqueue,
-    # monthly refresh) would re-enter this branch, synthesize a fresh seed, and
-    # (since the export below is unconditional) write model-authored private
-    # instructions to disk for an agent whose PI explicitly cleared them. An
-    # admin-seeded PI who never onboarded (onboarding_complete=False) is
-    # unaffected and still gets a seed generated and exported.
+    # Step 9b: Generate the private profile seed, but ONLY for a PI who has
+    # never recorded a private-instructions decision (issue #22 COR-23). The
+    # seed is model-authored and the export below writes it to the very file
+    # the agent reads, so regenerating one for a PI who deliberately turned
+    # private instructions off silently undoes that on the next run (a
+    # regenerate, an admin re-enqueue, a monthly refresh).
+    #
+    # There are exactly two clear routes, and each leaves a DIFFERENT record —
+    # keying this gate on either one alone misses the other (over-impl R1):
+    #   * `POST /onboarding/private-profile` submitted blank clears both
+    #     columns and sets onboarding_complete=True
+    #     (onboarding.py:save_private_profile), and records no revision at all
+    #     (`if agent_reg and content.strip()`), so the flag is its only trace.
+    #   * `POST /agent/{agent_id}/profile/save` submitted blank
+    #     (agent_page.py:save_private_profile, open to the PI *or* a delegate)
+    #     clears both columns, unlinks the file and records an EMPTY private
+    #     revision — and never touches onboarding_complete. Keyed on the flag
+    #     alone, this gate therefore missed every PI who never finished
+    #     onboarding: 36 of 53 active agents on the production copy (113 of 144
+    #     users), because every admin-seeded pilot lab is in that state. That is
+    #     the common case, not the corner.
+    # So the cleared state itself is consulted, with the flag kept only for the
+    # onboarding route that records nothing else.
+    #
+    # An admin-seeded PI who never onboarded and never cleared anything is
+    # unaffected and still gets a seed generated and exported — including one
+    # whose only private revision is a non-empty `backfill-profile-revisions`
+    # row (cli.py), which records that instructions once existed, not a clear.
     if (
         not profile.private_profile_md
         and not profile.private_profile_seed
         and not user.onboarding_complete
+        and not await _private_profile_was_cleared(
+            db, agent_reg.id if agent_reg else None
+        )
     ):
         update_progress("step9b", "Generating agent instructions seed...")
         try:
@@ -632,6 +652,47 @@ async def run_profile_pipeline(
 
     update_progress("complete", "Profile generation complete.")
     return profile
+
+
+# Whitespace a browser can actually submit in a textarea. Postgres `btrim` with no
+# second argument strips spaces ONLY, so the character set has to be spelled out or
+# a PI who left a newline behind reads as "never cleared".
+_SQL_WHITESPACE = " \t\n\r\f\v"
+
+
+async def _private_profile_was_cleared(
+    db: AsyncSession, agent_registry_id: uuid.UUID | None
+) -> bool:
+    """Has this agent's PI ever deliberately recorded "no private instructions"?
+
+    The DB records that choice as an EMPTY private ProfileRevision, and only a
+    real clear writes one: `POST /agent/{agent_id}/profile/save` records the raw
+    submitted body, so a blank or whitespace-only submission — the clear — lands
+    as a blank revision, while `copi backfill-profile-revisions` skips empty
+    files (cli.py) and every other writer of this profile_type has content.
+    Trimmed, because that route stores the body unstripped while it strips
+    before deciding to clear: a PI who left a space in the textarea did clear.
+
+    Existence rather than "the newest revision is empty", for two reasons.
+    `created_at` defaults to `now()`, which in Postgres is the TRANSACTION
+    timestamp, so revisions written in one transaction tie and "newest" is
+    arbitrary between them (see profile_versioning.latest_revision's own note
+    on ties). And existence is the right question anyway: a PI who wrote
+    instructions again after clearing has non-NULL private columns, which the
+    caller checks first.
+    """
+    if agent_registry_id is None:
+        return False
+    result = await db.execute(
+        select(ProfileRevision.id)
+        .where(
+            ProfileRevision.agent_registry_id == agent_registry_id,
+            ProfileRevision.profile_type == "private",
+            func.btrim(ProfileRevision.content, _SQL_WHITESPACE) == "",
+        )
+        .limit(1)
+    )
+    return result.first() is not None
 
 
 def _build_synthesis_context(

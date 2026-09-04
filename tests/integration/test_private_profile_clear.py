@@ -22,8 +22,10 @@ from itsdangerous import TimestampSigner
 from sqlalchemy import select
 
 from src.config import get_settings
-from src.models import ResearcherProfile
+from src.models import ProfileRevision, ResearcherProfile
+from src.services import profile_export, profile_pipeline
 from tests import factories
+from tests.fakes import FakeAnthropic
 
 pytestmark = pytest.mark.integration
 
@@ -225,3 +227,180 @@ async def test_onboarding_twin_also_rejects_an_omitted_content_field(
         select(ResearcherProfile).where(ResearcherProfile.user_id == pi.id)
     )).scalar_one()
     assert profile.private_profile_md == "Real onboarding instructions."
+
+
+# ---------------------------------------------------------------------------
+# The clear must survive the next profile_pipeline run (#22 COR-23, over-impl R1)
+# ---------------------------------------------------------------------------
+
+# A public synthesis that passes profile_pipeline._validate_profile (100-350 word
+# summary, 3+ techniques, 1+ disease area), so the run below stays on the happy
+# path and spends exactly ONE LLM call on the public profile. Anything the
+# pipeline asks for after that is the private-seed call this file is about.
+_VALID_SYNTHESIS = {
+    "research_summary": " ".join(["chemoproteomics"] * 120),
+    "techniques": ["mass spectrometry", "click chemistry", "activity-based probes"],
+    "experimental_models": ["cell lines"],
+    "disease_areas": ["cancer"],
+    "key_targets": ["serine hydrolases"],
+    "keywords": ["proteomics"],
+}
+
+
+def _install_pipeline_fakes(monkeypatch, profiles_dir):
+    """Neutralize every external boundary run_profile_pipeline reaches.
+
+    The ORCID stubs return nothing, so steps 3-5 make no PubMed/PMC calls at
+    all and the run takes the shortest path to step 9. The export directories
+    are repointed at the SAME tree the save route above writes to — otherwise
+    the pipeline's disk-adoption step would read a different (empty) directory
+    and the test would prove nothing about the file the PI just cleared.
+    """
+    async def _orcid_profile(orcid_id):
+        return {"name": "Clear PI", "orcid": orcid_id}
+
+    async def _nothing(*_args, **_kwargs):
+        return []
+
+    monkeypatch.setattr(profile_pipeline, "fetch_orcid_profile", _orcid_profile)
+    monkeypatch.setattr(profile_pipeline, "fetch_orcid_grants", _nothing)
+    monkeypatch.setattr(profile_pipeline, "fetch_orcid_works", _nothing)
+    monkeypatch.setattr(profile_export, "PROFILES_DIR", profiles_dir / "public")
+    monkeypatch.setattr(profile_export, "PRIVATE_PROFILES_DIR", profiles_dir / "private")
+
+    # Only the public synthesis is scripted. A second call (the private seed)
+    # falls through to FakeAnthropic's default_text, so a resurrected seed shows
+    # up as a stored "OK" rather than as an IndexError.
+    fake_llm = FakeAnthropic([json.dumps(_VALID_SYNTHESIS)])
+    monkeypatch.setattr("src.services.llm.get_anthropic_client", lambda: fake_llm)
+    return fake_llm
+
+
+@pytest.fixture
+async def never_onboarded_pi_and_agent(db_session):
+    """A PI who never completed onboarding — the common case, not the corner.
+
+    Measured on the disposable production copy (copi_verify, 2026-09-04):
+    36 of 53 active agents have ``onboarding_complete = false`` (113 of 144
+    users), because every admin-seeded pilot lab is in that state. The
+    onboarding flag is therefore no proxy at all for "this PI has made a
+    private-instructions decision".
+    """
+    pi = await factories.make_user(
+        db_session,
+        name="Never Onboarded PI",
+        email="neveronboarded@example.org",
+        onboarding_complete=False,
+    )
+    agent = await factories.make_agent(
+        db_session, user=pi, agent_id="tstnoonb", bot_name="NoOnbBot",
+        pi_name="Never Onboarded PI",
+    )
+    await factories.make_profile(
+        db_session, user=pi, private_profile_md=None, private_profile_seed=None,
+    )
+    await db_session.flush()
+    return pi, agent
+
+
+async def test_a_clear_through_the_agent_page_survives_the_next_pipeline_run(
+    client, db_session, profiles_dir, monkeypatch, never_onboarded_pi_and_agent
+):
+    """#22 COR-23 / over-impl R1: the seed-resurrection guard must key on the
+    cleared state, not on ``user.onboarding_complete``.
+
+    ``POST /agent/{agent_id}/profile/save`` is the other clear route (usable by
+    the PI *or* a delegate). It nulls both private columns, unlinks the exported
+    file and records an empty private revision — but it never touches
+    ``onboarding_complete``. For the 36-of-53 active agents whose PI never
+    finished onboarding, a guard keyed on that flag lets the very next pipeline
+    run (a regenerate, an admin re-enqueue, a monthly refresh) synthesize a
+    fresh model-authored seed and export it to disk, undoing the clear — which
+    is exactly what the guard exists to prevent.
+
+    Driven end to end: the real route clears real content, then the real
+    pipeline runs over the state the route left behind.
+    """
+    pi, agent = never_onboarded_pi_and_agent
+    path = profiles_dir / "private" / f"{agent.agent_id}.md"
+
+    # 1. Real private content, written through the real route (the positive
+    #    control: without this the clear below would be a no-op and the test
+    #    would pass for the wrong reason).
+    r = await client.post(
+        f"/agent/{agent.agent_id}/profile/save",
+        data={"content": "Never contact this lab on Fridays."},
+        headers=_auth(pi.id),
+    )
+    assert r.status_code == 302, r.text
+    assert path.exists()
+
+    # 2. The PI clears it.
+    r = await client.post(
+        f"/agent/{agent.agent_id}/profile/save",
+        data={"content": ""},
+        headers=_auth(pi.id),
+    )
+    assert r.status_code == 302, r.text
+    assert not path.exists()
+
+    profile = (await db_session.execute(
+        select(ResearcherProfile).where(ResearcherProfile.user_id == pi.id)
+    )).scalar_one()
+    assert profile.private_profile_md is None
+    assert profile.private_profile_seed is None
+    # The route leaves the DB-side record of the clear this fix keys on: an
+    # EMPTY private revision. Compared as a sorted set, not in created_at
+    # order — created_at defaults to now(), which in Postgres is the
+    # TRANSACTION timestamp, and the whole test runs inside one rolled-back
+    # transaction (tests/conftest.py), so both rows share it and "newest" is
+    # arbitrary between them. That tie is why the guard keys on the existence
+    # of an empty revision rather than on the latest one being empty.
+    revisions = (await db_session.execute(
+        select(ProfileRevision.content).where(
+            ProfileRevision.agent_registry_id == agent.id,
+            ProfileRevision.profile_type == "private",
+        )
+    )).scalars().all()
+    assert sorted(revisions) == ["", "Never contact this lab on Fridays."], revisions
+    assert pi.onboarding_complete is False, (
+        "the clear route must not have set the onboarding flag — if it did, this "
+        "test no longer covers the defect"
+    )
+
+    # 3. The next pipeline run must not put model-authored instructions back.
+    fake_llm = _install_pipeline_fakes(monkeypatch, profiles_dir)
+    profile = await profile_pipeline.run_profile_pipeline(pi.id, db_session)
+
+    assert profile.private_profile_seed is None, (
+        "the pipeline regenerated a private seed for a PI who cleared their "
+        "instructions through /agent/{id}/profile/save"
+    )
+    assert profile.private_profile_md is None
+    assert not path.exists(), "a regenerated seed was exported over the cleared file"
+    assert len(fake_llm.calls) == 1, (
+        "exactly one LLM call (the public synthesis) — a second call is the "
+        "private-seed synthesis this PI's clear must have suppressed"
+    )
+
+
+async def test_an_admin_seeded_pi_who_never_cleared_still_gets_a_seed(
+    db_session, profiles_dir, monkeypatch, never_onboarded_pi_and_agent
+):
+    """The control for the test above, in the same fixture state.
+
+    Same PI, same never-onboarded flag, same empty private columns — the only
+    difference is that nothing was ever cleared. An admin-seeded PI who has no
+    private instructions yet must still get a generated seed, exported to disk,
+    or this fix breaks onboarding for every new lab.
+    """
+    pi, agent = never_onboarded_pi_and_agent
+    path = profiles_dir / "private" / f"{agent.agent_id}.md"
+
+    fake_llm = _install_pipeline_fakes(monkeypatch, profiles_dir)
+    profile = await profile_pipeline.run_profile_pipeline(pi.id, db_session)
+
+    assert profile.private_profile_seed == "OK", profile.private_profile_seed
+    assert len(fake_llm.calls) == 2, "public synthesis + private seed"
+    assert path.exists(), "the generated seed must reach profiles/private/"
+    assert path.read_text(encoding="utf-8").strip() == "OK"

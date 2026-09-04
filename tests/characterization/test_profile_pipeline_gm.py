@@ -19,7 +19,7 @@ import json
 import pytest
 from sqlalchemy import select
 
-from src.models import Job, Publication, ResearcherProfile
+from src.models import Job, ProfileRevision, Publication, ResearcherProfile
 from src.services import profile_pipeline
 from tests import factories
 from tests.fakes import FakeAnthropic
@@ -1161,6 +1161,115 @@ async def test_pi_who_cleared_their_private_profile_does_not_get_a_new_seed(
     # response scripted into _install_fakes's FakeAnthropic was never reached.
     assert len(fake_llm.calls) == 1
     assert not (tmp_path / "private" / f"{agent.agent_id}.md").exists()
+
+
+async def test_a_never_onboarded_pi_who_cleared_does_not_get_a_new_seed(
+    db_session, monkeypatch, tmp_path
+):
+    """over-impl R1: the same clear, for the PI the onboarding flag cannot see.
+
+    ``POST /agent/{agent_id}/profile/save`` (agent_page.py:1415) is the other
+    clear route: it nulls both private columns, unlinks the exported file and
+    records an EMPTY private revision — and never touches
+    ``onboarding_complete``. On the disposable production copy 36 of 53 active
+    agents have ``onboarding_complete = false``, so keying the guard on that
+    flag left the common case unguarded. Here the state that route leaves
+    behind is reconstructed directly; the end-to-end version, driven through
+    the real route, is
+    tests/integration/test_private_profile_clear.py::
+    test_a_clear_through_the_agent_page_survives_the_next_pipeline_run.
+
+    The revision content is whitespace, not "", because the route records the
+    RAW submitted body (``create_revision(..., content=content)``) while it
+    strips before deciding to clear — so a PI who left a space in the textarea
+    clears the profile and records " ". The guard has to trim.
+    """
+    from src.services import profile_export
+
+    monkeypatch.setattr(profile_export, "PROFILES_DIR", tmp_path / "public")
+    monkeypatch.setattr(profile_export, "PRIVATE_PROFILES_DIR", tmp_path / "private")
+    fake_llm = _install_fakes(monkeypatch)
+
+    user = await factories.make_user(
+        db_session, name="Ada Lovelace", onboarding_complete=False
+    )
+    agent = await factories.make_agent(
+        db_session, user=user, agent_id="gmwiped", bot_name="GmWipedBot"
+    )
+    db_session.add(
+        ProfileRevision(
+            agent_registry_id=agent.id,
+            profile_type="private",
+            content="Never contact this lab on Fridays.",
+            mechanism="web",
+        )
+    )
+    db_session.add(
+        ProfileRevision(
+            agent_registry_id=agent.id,
+            profile_type="private",
+            content="  \n ",
+            mechanism="web",
+        )
+    )
+    await db_session.flush()
+
+    profile = await profile_pipeline.run_profile_pipeline(user.id, db_session)
+
+    assert profile.private_profile_md is None
+    assert profile.private_profile_seed is None, (
+        "a PI who cleared through /agent/{id}/profile/save had a fresh "
+        "model-authored seed synthesized on the next pipeline run"
+    )
+    # Only the public-profile synthesis call happened.
+    assert len(fake_llm.calls) == 1
+    assert not (tmp_path / "private" / f"{agent.agent_id}.md").exists()
+
+
+async def test_a_backfilled_private_revision_is_not_read_as_a_clear(
+    db_session, monkeypatch, tmp_path
+):
+    """The discriminating control: history of a private profile is not a clear.
+
+    ``copi backfill-profile-revisions`` (src/cli.py:288) writes a private
+    revision with ``mechanism="pipeline"`` for every non-empty file it finds on
+    disk, so a private revision existing proves only that the agent once had
+    instructions. Measured on the disposable production copy: 3 of the 9 active
+    never-onboarded agents with both private columns NULL have exactly such a
+    row (agents briney, cravatt, ken — all one backfill timestamp,
+    2026-04-04). Keying the guard on "any private revision exists" would deny
+    those admin-seeded labs a seed forever. Only a recorded EMPTY revision is a
+    clear.
+    """
+    from src.services import profile_export
+
+    monkeypatch.setattr(profile_export, "PROFILES_DIR", tmp_path / "public")
+    monkeypatch.setattr(profile_export, "PRIVATE_PROFILES_DIR", tmp_path / "private")
+    fake_llm = _install_fakes(monkeypatch)
+
+    user = await factories.make_user(
+        db_session, name="Ada Lovelace", onboarding_complete=False
+    )
+    agent = await factories.make_agent(
+        db_session, user=user, agent_id="gmbkfill", bot_name="GmBkfillBot"
+    )
+    db_session.add(
+        ProfileRevision(
+            agent_registry_id=agent.id,
+            profile_type="private",
+            content="# Private profile\n\nHand-authored, backfilled from disk.",
+            mechanism="pipeline",
+            change_summary="Initial backfill from existing file",
+        )
+    )
+    await db_session.flush()
+
+    profile = await profile_pipeline.run_profile_pipeline(user.id, db_session)
+
+    assert profile.private_profile_seed == _PRIVATE_SEED.strip()
+    assert len(fake_llm.calls) == 2, "public synthesis + private seed"
+    written = (tmp_path / "private" / f"{agent.agent_id}.md").read_text(encoding="utf-8")
+    assert written.strip() == _PRIVATE_SEED.strip()
 
 
 async def test_bump_profile_version_is_emitted_after_the_private_seed_synthesis_call(
