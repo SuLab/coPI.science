@@ -1993,7 +1993,20 @@ class SimulationEngine:
         on chat.postMessage). Without eviction the same dead thread gets
         re-polled and replied-to forever, producing noisy error logs and —
         worse — cascading top-level posts.
+
+        Defensive (#20 C1): refuse when the root is DB-only (``slack_ts`` is
+        ``None``) — Slack has never seen this thread, so a ``ThreadNotFound``
+        for it is a caller mistranslation, not proof the thread is dead.
+        Every current caller already translates via ``_slack_parent_ts``
+        before calling Slack, so this should be unreachable in practice; it
+        guards future call sites the same way.
         """
+        root = self.message_log.get_entry(thread_id)
+        if root is not None and root.slack_ts is None:
+            logger.warning(
+                "Refusing to evict DB-only thread %s (no Slack root)", thread_id,
+            )
+            return
         evicted_from = 0
         for ag in self.agents.values():
             removed = False
@@ -3689,8 +3702,18 @@ class SimulationEngine:
             cursor_key = f"proposal_thread:{thread_id}"
             oldest = self._poll_cursors.get(cursor_key, default_cursor)
 
+            # Translate before the Slack call, exactly as _post_message does
+            # (:3841). A DB-only root (slack_ts is None — minted while Slack
+            # was off) has never been seen by Slack: polling it with the
+            # canonical id gets a real thread_not_found, which downstream
+            # would misread as the thread being dead. Skip it instead. See
+            # #20 C1.
+            slack_ts = self._slack_parent_ts(thread_id)
+            if slack_ts is None:
+                continue
+
             try:
-                replies = client.get_thread_replies(ch_id, thread_id, oldest=oldest)
+                replies = client.get_thread_replies(ch_id, slack_ts, oldest=oldest)
             except ThreadNotFound:
                 self._evict_dead_thread(thread_id)
                 continue

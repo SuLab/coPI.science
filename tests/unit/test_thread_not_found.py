@@ -134,9 +134,14 @@ class TestEvictDeadThread:
 
     def test_evicts_from_all_agents(self, engine_with_agents):
         engine, dead_ts, a, b = engine_with_agents
+        # slack_ts=dead_ts: this thread WAS born on Slack (a legitimately
+        # dead thread — the parent was deleted), unlike the DB-only-root
+        # case covered by test_refuses_to_evict_a_db_only_thread below (#20
+        # C1). Eviction must still proceed for this one.
         engine.message_log.append(LogEntry(
             ts=dead_ts, channel="single-cell-omics", sender_agent_id="other",
             sender_name="OtherBot", content="dead root", posted_at=0.0, is_bot=True,
+            slack_ts=dead_ts,
         ))
         engine._evict_dead_thread(dead_ts)
 
@@ -178,3 +183,29 @@ class TestEvictDeadThread:
 
         assert dead_ts in engine._closed_thread_ids
         assert dead_ts in engine._dead_thread_ids
+
+    def test_refuses_to_evict_a_db_only_thread(self):
+        # #20 C1: a thread rooted while Slack was off (slack_ts is None) has
+        # never been seen by Slack, so a ThreadNotFound for it is a
+        # mistranslation upstream, not evidence the thread is dead. Evicting
+        # it purges the working log and permanently black-holes future PI
+        # messages in it (see the poller test below). _evict_dead_thread must
+        # refuse and leave every container untouched.
+        dead_ts = "1776900000.000300"
+        agent = Agent(agent_id="su", pi_name="Su", bot_name="SuBot")
+        agent.state.active_threads[dead_ts] = ThreadState(
+            thread_id=dead_ts, channel="single-cell-omics", other_agent_id="other",
+        )
+        engine = SimulationEngine(agents=[agent], slack_clients={})
+        engine.message_log.append(LogEntry(
+            ts=dead_ts, channel="single-cell-omics", sender_agent_id="su",
+            sender_name="SuBot", content="db-only root", posted_at=0.0,
+            is_bot=True, slack_ts=None,
+        ))
+
+        engine._evict_dead_thread(dead_ts)
+
+        assert dead_ts in agent.state.active_threads
+        assert engine.message_log.get_entry(dead_ts) is not None
+        assert dead_ts not in engine._closed_thread_ids
+        assert dead_ts not in engine._dead_thread_ids

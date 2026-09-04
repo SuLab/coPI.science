@@ -2420,6 +2420,97 @@ class TestRemainingLogEntryWritersStampVisibility:
 
 
 # ---------------------------------------------------------------
+# _poll_proposal_threads_for_pi must translate the canonical thread id to
+# the Slack ts before polling — #20 C1
+# ---------------------------------------------------------------
+
+class TestProposalThreadPollerTranslatesTs:
+    """Compare _post_message, which already translates via
+    _slack_parent_ts before any Slack call. The poller passed the canonical
+    proposal.thread_id straight to get_thread_replies with no translation,
+    so a DB-only root (slack_ts is None) got a real thread_not_found from
+    Slack, which _evict_dead_thread then treated as proof the thread was
+    dead — purging the log and permanently black-holing the PI's future
+    messages in it."""
+
+    @pytest.mark.asyncio
+    async def test_skips_the_poll_and_leaves_state_untouched_for_a_db_only_root(self):
+        from src.agent.agent import Agent
+        from src.agent.message_log import LogEntry
+        from src.agent.state import ProposalRef
+
+        calls = []
+
+        class _TrackingClient:
+            is_connected = True
+            def get_thread_replies(self, channel_id, thread_ts, oldest="0"):
+                calls.append(thread_ts)
+                return []
+            def resolve_user_name(self, user_id):
+                return "Some PI"
+
+        agent = Agent("a", "ABot", "A PI")
+        engine = SimulationEngine(agents=[agent], slack_clients={"a": _TrackingClient()})
+        engine._pi_slack_id_to_agent_ids = {"U_PI": ["a"]}
+        engine._channel_id_map["general"] = "C_GEN"
+        engine.message_log.append(LogEntry(
+            ts="100.0", channel="general", sender_agent_id="a", sender_name="ABot",
+            content="db-only root", posted_at=0.0, is_bot=True, slack_ts=None,
+        ))
+        agent.state.pending_proposals.append(ProposalRef(
+            thread_id="100.0", channel="general", other_agent_id="b",
+            summary_text="x", proposed_at=0.0,
+        ))
+
+        await engine._poll_proposal_threads_for_pi()
+
+        assert calls == []
+        assert engine.message_log.get_entry("100.0") is not None
+        assert "100.0" not in engine._dead_thread_ids
+        assert "100.0" not in engine._closed_thread_ids
+        assert len(agent.state.pending_proposals) == 1
+
+    @pytest.mark.asyncio
+    async def test_translated_happy_path_still_polls_with_the_slack_ts(self):
+        from src.agent.agent import Agent
+        from src.agent.message_log import LogEntry
+        from src.agent.state import ProposalRef
+
+        calls = []
+
+        class _RecordingClient:
+            is_connected = True
+            def __init__(self, replies):
+                self._replies = replies
+            def get_thread_replies(self, channel_id, thread_ts, oldest="0"):
+                calls.append(thread_ts)
+                return self._replies
+
+            def resolve_user_name(self, user_id):
+                return "Some PI"
+
+        agent = Agent("a", "ABot", "A PI")
+        stub_client = _RecordingClient(replies=[{"ts": "200.0", "user": "U_PI", "text": "looks good"}])
+        engine = SimulationEngine(agents=[agent], slack_clients={"a": stub_client})
+        engine._pi_slack_id_to_agent_ids = {"U_PI": ["a"]}
+        engine._channel_id_map["general"] = "C_GEN"
+        # Root born on Slack: slack_ts equals the canonical thread id.
+        engine.message_log.append(LogEntry(
+            ts="100.0", channel="general", sender_agent_id="a", sender_name="ABot",
+            content="root", posted_at=0.0, is_bot=True, slack_ts="100.0",
+        ))
+        agent.state.pending_proposals.append(ProposalRef(
+            thread_id="100.0", channel="general", other_agent_id="b",
+            summary_text="x", proposed_at=0.0,
+        ))
+
+        await engine._poll_proposal_threads_for_pi()
+
+        assert calls == ["100.0"]
+        assert engine.message_log.get_entry("200.0") is not None
+
+
+# ---------------------------------------------------------------
 # A mid-turn rate check before each Phase 4/5 LLM call — E6(1)
 # ---------------------------------------------------------------
 
