@@ -6,7 +6,6 @@ that's pip's job at install time (--require-hashes, wired in Task 27.6)."""
 
 import os
 import re
-import shutil
 import subprocess
 import tomllib
 from pathlib import Path
@@ -29,6 +28,35 @@ def test_version_sensitive_deps_have_upper_caps():
     }
     for name in ("fastapi", "sqlalchemy", "anthropic", "slack-sdk"):
         assert "<" in deps[name], f"{name} has no upper cap: {deps[name]!r}"
+    # #27 I4's second Fix clause: cap the PRE-1.0 packages too, where a minor bump is a
+    # breaking change by convention. These five sit on request-handling and database
+    # paths (serving, every outbound call, the DB driver, form parsing, the CLI entry).
+    for name in ("uvicorn", "httpx", "asyncpg", "python-multipart", "typer"):
+        assert "<" in deps[name], f"pre-1.0 dep {name} has no upper cap: {deps[name]!r}"
+
+
+def test_floors_clear_the_advisories_named_in_issue_27_i4():
+    """#27 I4's "raise floors past known CVEs". Checked against OSV on 2026-09-04:
+    jinja2 <3.1.6 carries 6 advisories, python-multipart <0.0.31 carries 16, authlib
+    <1.7.1 carries 22. The lock already resolved above all three, so these floors change
+    nothing today — they stop a future resolve walking back into them."""
+    from packaging.requirements import Requirement
+    from packaging.version import Version
+
+    deps = {
+        Requirement(d).name.lower().replace("_", "-"): Requirement(d)
+        for d in _pyproject()["project"]["dependencies"]
+    }
+    for name, first_safe in (("jinja2", "3.1.6"), ("python-multipart", "0.0.31"), ("authlib", "1.7.1")):
+        req = deps[name]
+        assert not req.specifier.contains(Version(first_safe).base_version + "a1", prereleases=True) or \
+            req.specifier.contains(Version(first_safe)), f"{name}: {req}"
+        # the floor must exclude everything below the first safe release
+        below = str(Version(first_safe).major) + "." + str(Version(first_safe).minor) + ".0"
+        if Version(below) < Version(first_safe):
+            assert not req.specifier.contains(Version(below)), (
+                f"{name} still allows {below}, which is below the first safe release {first_safe}"
+            )
 
 
 def test_plotly_is_a_scripts_extra_not_a_runtime_dependency():
@@ -71,18 +99,28 @@ def _ci_sh() -> str:
     return (REPO_ROOT / "scripts" / "ci.sh").read_text()
 
 
-def test_ci_sh_fails_the_gate_when_the_lockfile_is_stale():
+def test_ci_sh_runs_the_deterministic_lock_check_before_the_suite():
+    """The gate checks lock-vs-pyproject consistency, offline, not lock-vs-PyPI.
+
+    The original implementation diffed the committed lock against a fresh pip-compile,
+    which made the gate red whenever any of ~200 transitive packages published a
+    release — measured 2026-09-04, alembic 1.19.2 (published 17:10Z) turned it red with
+    no repository change, and two back-to-back resolves disagreed depending on HTTP
+    cache state. See the step's comment in scripts/ci.sh.
+    """
     text = _ci_sh()
-    assert "piptools compile" in text
-    assert "requirements.lock is stale" in text
-    assert text.index("piptools compile") < text.index("-m pytest")
+    assert "scripts/check_lockfile.py" in text
+    assert text.index("scripts/check_lockfile.py") < text.index("-m pytest")
+    # strict mode keeps the fresh-resolve comparison available, as a NOTE not a failure
+    assert "LOCKCHECK=strict" in text
+    assert "does not fail the gate" in text
 
 
 def test_ci_sh_lockcheck_has_a_documented_skip_valve():
-    # #27 I4-e amendment: requirements.lock was cut against a throwaway Python 3.11.14
-    # interpreter (Task 27.4), not $VENV_PY (3.12) — resolving with $VENV_PY here would
-    # show spurious drift on every run for everyone. So the check must resolve with a
-    # 3.11 interpreter and degrade to a SKIP (not a failure) when one isn't available.
+    # The default check is offline and needs no interpreter hunting, but strict mode
+    # still resolves against a 3.11 interpreter (the lock was cut against 3.11 to match
+    # the Dockerfile base, not $VENV_PY's 3.12) and must SKIP rather than fail when one
+    # is unavailable.
     text = _ci_sh()
     assert "LOCKCHECK" in text
     assert "LOCKCHECK=none" in text
@@ -122,10 +160,11 @@ def test_lockfile_comparison_ignores_pip_composes_own_header_but_not_real_pin_dr
 
 
 def test_ci_sh_fails_the_gate_on_real_lockfile_drift(tmp_path):
-    # Behavioural mutation check on ci.sh:376 (the stale-lock `exit 1`) — the static
-    # test above only pins the substring; this actually runs scripts/ci.sh (same
-    # shape test_run_migration_sh.py uses for bash) and proves it fails closed on a
-    # REAL pip-compile resolution that disagrees with the committed lock.
+    # Behavioural mutation check on the lock step's `exit 1` — the static test above
+    # only pins the substring; this actually runs scripts/ci.sh (same shape
+    # test_run_migration_sh.py uses for bash) and proves it fails closed when
+    # pyproject.toml declares a constraint the committed lock's pin does not satisfy.
+    # No network: the check reads the two files.
     #
     # A symlink farm mirrors every top-level entry of the real repo except
     # pyproject.toml, which is a real copy with one dependency's cap lowered enough
@@ -136,11 +175,6 @@ def test_ci_sh_fails_the_gate_on_real_lockfile_drift(tmp_path):
     # scripts/ci.sh makes REPO_ROOT resolve to tmp_path, and every relative
     # reference the script makes (alembic/, tests/, .venv-test/, requirements.lock,
     # pyproject.toml) resolves through the farm.
-    if not shutil.which("uv"):
-        import pytest
-
-        pytest.skip("uv not on PATH — same skip valve ci.sh itself uses for this step")
-
     for entry in os.listdir(REPO_ROOT):
         if entry in (".git", "pyproject.toml"):
             continue
@@ -160,7 +194,9 @@ def test_ci_sh_fails_the_gate_on_real_lockfile_drift(tmp_path):
         timeout=180,
     )
     assert proc.returncode != 0, proc.stdout + proc.stderr
-    assert "requirements.lock is stale" in proc.stdout + proc.stderr
+    combined = proc.stdout + proc.stderr
+    assert "requirements.lock does not match pyproject.toml" in combined
+    assert "anthropic" in combined, "the failure must name the package that drifted"
     assert "==> mypy" not in proc.stdout, "gate must stop at the lockfile check, not reach mypy"
 
 

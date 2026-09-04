@@ -838,10 +838,20 @@ async def admin_agents(
             )
         )
         proposal_counts[aid] = total_result.scalar() or 0
+        # Scope the reviewed count to the SAME rows proposal_counts counts (see the note
+        # in src/main.py's badge middleware): counting every ProposalReview with this
+        # agent_id also counted reviews of decisions whose outcome later moved off
+        # 'proposal', so total - reviewed went negative for 22 of 53 active agents on
+        # production data and the template then rendered a green "N reviewed" for agents
+        # whose own dashboards still listed outstanding proposals (issue #20 closure audit).
         rev_result = await db.execute(
-            select(func.count(ProposalReview.id)).where(
+            select(func.count(ProposalReview.id))
+            .join(ThreadDecision, ThreadDecision.id == ProposalReview.thread_decision_id)
+            .where(
                 ProposalReview.agent_id == aid,
                 ProposalReview.rating != -1,
+                ThreadDecision.outcome == "proposal",
+                (ThreadDecision.agent_a == aid) | (ThreadDecision.agent_b == aid),
             )
         )
         review_counts[aid] = rev_result.scalar() or 0

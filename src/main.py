@@ -136,9 +136,25 @@ class AgentBadgeMiddleware(BaseHTTPMiddleware):
                             )
                             total = total_result.scalar() or 0
                             reviewed_result = await db.execute(
-                                select(func.count(ProposalReview.id)).where(
+                                    # Scope the reviewed count to the SAME rows the total
+                                    # counts: proposals this agent participated in. Counting
+                                    # every ProposalReview bearing this agent_id also counted
+                                    # reviews of decisions whose outcome later moved off
+                                    # 'proposal', so `total - reviewed` went negative for 22 of
+                                    # 53 active agents on production data and the badge silently
+                                    # clamped real outstanding work to 0 (issue #20 closure audit;
+                                    # measured 166 outstanding roster-wide vs 98 reported).
+                                select(func.count(ProposalReview.id))
+                                .join(
+                                    ThreadDecision,
+                                    ThreadDecision.id == ProposalReview.thread_decision_id,
+                                )
+                                .where(
                                     ProposalReview.agent_id == aid,
                                     ProposalReview.rating != -1,
+                                    ThreadDecision.outcome == "proposal",
+                                    (ThreadDecision.agent_a == aid)
+                                    | (ThreadDecision.agent_b == aid),
                                 )
                             )
                             reviewed = reviewed_result.scalar() or 0

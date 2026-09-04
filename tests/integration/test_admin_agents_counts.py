@@ -103,3 +103,50 @@ async def test_explicit_review_counts_as_reviewed(client, db_session, admin):
 
     assert "1 reviewed" in row
     assert "1 to review" not in row
+
+
+async def test_a_review_of_a_non_proposal_decision_is_not_counted_as_reviewing_a_proposal(
+    client, db_session, admin
+):
+    """The reviewed count must be scoped to the rows the total counts.
+
+    `proposal_counts` counts decisions with `outcome='proposal'` that this agent
+    participated in; the reviewed count used to count every ProposalReview bearing the
+    agent's id, including reviews of decisions whose outcome later moved off 'proposal'.
+    `total - reviewed` then went negative — measured on production data: 22 of 53 active
+    agents, with the roster reporting 98 outstanding proposals against 166 actually
+    outstanding, and the template rendering a green "N reviewed" for agents whose own
+    dashboards still listed review forms (issue #20 closure audit).
+    """
+    pi = await factories.make_user(db_session, email="scope@example.org")
+    agent = await factories.make_agent(
+        session=db_session, user=pi, agent_id="scopey", bot_name="ScopeyBot", status="active"
+    )
+    # One real, unreviewed proposal.
+    await factories.make_thread_decision(
+        db_session, agent_a=agent.agent_id, agent_b="beta", outcome="proposal"
+    )
+    # ...and a review attached to a decision that is NOT a proposal. It must not be
+    # allowed to cancel out the proposal above.
+    other = await factories.make_thread_decision(
+        db_session, agent_a=agent.agent_id, agent_b="beta", outcome="no_proposal"
+    )
+    db_session.add(
+        ProposalReview(
+            thread_decision_id=other.id,
+            agent_id=agent.agent_id,
+            user_id=pi.id,
+            rating=3,
+            submitted_via="web",
+        )
+    )
+    await db_session.flush()
+
+    resp = await client.get("/admin/agents", headers=_auth(admin.id))
+    assert resp.status_code == 200
+    row_start = resp.text.index(agent.agent_id)
+    row = resp.text[row_start : row_start + 1500]
+
+    assert "1 to review" in row, "the unreviewed proposal must still be reported"
+    assert "(1 total)" in row
+    assert "1 reviewed" not in row
