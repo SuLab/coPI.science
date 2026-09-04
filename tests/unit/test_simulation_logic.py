@@ -2065,70 +2065,133 @@ class TestPollPiDmsGuardsPerAgent:
 
 class TestPollInboundFromDbGuardsTheHandler:
     """A raise inside _handle_pi_inbound_entry (e.g. handle_channel_tag's
-    Slack send failing) must not crash _poll_inbound_from_db — the row is
-    still appended to the log (conversation content is never lost) but the
-    PI-specific side effects for that one row are logged and skipped. See
-    COR-10(3)."""
+    Slack send failing) must not crash _poll_inbound_from_db. COR-10(3)
+    clause 2: the handler now runs BEFORE the log append and the cursor
+    advance, and those only happen once it returns successfully — so a
+    transient failure leaves the row exactly as it was (not yet in the log,
+    cursor not advanced) and the next poll's PI_INBOX_LOOKBACK re-scan
+    retries it, instead of the row's content landing in the log while its
+    PI-specific side effects (proposal-review clearing, reopen, pi_context,
+    @bot tag routing) are silently lost forever. This deliberately trades
+    at-most-once for at-least-once processing of that row: a handler retried
+    after a transient failure can repeat a non-idempotent side effect it
+    already ran (e.g. a DM), which is the trade issue #20's COR-10 Fix:
+    clause explicitly asks for."""
 
-    @pytest.mark.asyncio
-    async def test_a_raising_handler_does_not_stop_the_poll(self, monkeypatch):
-        from unittest.mock import AsyncMock
+    class _Row:
+        def __init__(self, created_at, message_ts="1.0"):
+            self.created_at = created_at
+            self.message_ts = message_ts
+            self.channel_name = "general"
+            self.agent_id = None
+            self.sender_name = "Some PI"
+            self.content = "hello"
+            self.thread_ts = None
+            self.posted_at = 1.0
+            self.is_bot = False
+            self.visibility = "public"
 
+    class _FakeDB:
+        def __init__(self, rows):
+            self._rows = rows
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def execute(self, *a, **kw):
+            class _R:
+                def __init__(self_inner, rows):
+                    self_inner._rows = rows
+
+                def scalars(self_inner):
+                    return self_inner
+
+                def all(self_inner):
+                    return self_inner._rows
+
+            return _R(self._rows)
+
+    def _engine(self, rows, handler):
         from src.agent.agent import Agent
 
         agent = Agent("su", "SuBot", "Andrew Su")
         engine = SimulationEngine(agents=[agent], slack_clients={})
-        engine._handle_pi_inbound_entry = AsyncMock(side_effect=ConnectionError("boom"))
-
-        class _Row:
-            created_at = None
-            message_ts = "1.0"
-            channel_name = "general"
-            agent_id = None
-            sender_name = "Some PI"
-            content = "hello"
-            thread_ts = None
-            posted_at = 1.0
-            is_bot = False
-            visibility = "public"
-
-        # Drive the per-row loop directly rather than mocking the DB query —
-        # this is the exact segment the item targets and needs no session.
-        # `_pi_inbox_cursor` keeps its default (EPOCH_UTC, a datetime —
-        # simulation.py:412); it is subtracted from a timedelta when building
-        # the WHERE clause, so overriding it with a float raises a TypeError
-        # that the surrounding try/except would swallow before this test's
-        # scenario is even reached.
-        rows = [_Row()]
-
-        # Monkeypatch the DB-fetch half so this stays a pure unit test; the
-        # per-row processing loop below it is real, unmodified code.
-        class _FakeDB:
-            async def __aenter__(self):
-                return self
-
-            async def __aexit__(self, *exc):
-                return False
-
-            async def execute(self, *a, **kw):
-                class _R:
-                    def scalars(self_inner):
-                        return self_inner
-
-                    def all(self_inner):
-                        return rows
-
-                return _R()
-
-        engine.session_factory = lambda: _FakeDB()
+        engine._handle_pi_inbound_entry = handler
+        engine.session_factory = lambda: self._FakeDB(rows)
         engine.simulation_run_id = "run-1"
+        return engine
+
+    @pytest.mark.asyncio
+    async def test_a_permanently_raising_handler_leaves_the_row_unadvanced_and_the_poll_alive(
+        self,
+    ):
+        from datetime import UTC, datetime
+        from unittest.mock import AsyncMock
+
+        row_created_at = datetime(2026, 1, 1, tzinfo=UTC)
+        rows = [self._Row(row_created_at)]
+        handler = AsyncMock(side_effect=ConnectionError("boom"))
+        engine = self._engine(rows, handler)
+        starting_cursor = engine._pi_inbox_cursor
 
         await engine._poll_inbound_from_db()  # must not raise
 
-        assert engine.message_log.get_entry("1.0") is not None, (
-            "the row's content must still be appended even though its "
-            "PI-specific side effects failed"
+        assert engine.message_log.get_entry("1.0") is None, (
+            "a permanently failing handler must not let the row land in the "
+            "log — the row must stay retryable on the next poll"
         )
+        assert engine._pi_inbox_cursor == starting_cursor, (
+            "the cursor must not advance past a row whose side effects never "
+            "ran, or the lookback re-scan would never retry it"
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_transiently_raising_handler_processes_the_row_exactly_once_overall(
+        self,
+    ):
+        from datetime import UTC, datetime
+        from unittest.mock import AsyncMock
+
+        row_created_at = datetime(2026, 1, 1, tzinfo=UTC)
+        # The mocked DB returns the SAME un-dedup'd row on both polls, exactly
+        # like the real lookback re-scan would for a row that never made it
+        # into the log.
+        rows = [self._Row(row_created_at)]
+        handler = AsyncMock(side_effect=[ConnectionError("boom"), None])
+        engine = self._engine(rows, handler)
+
+        await engine._poll_inbound_from_db()
+        assert engine.message_log.get_entry("1.0") is None
+        assert engine._pi_inbox_cursor < row_created_at
+
+        await engine._poll_inbound_from_db()
+
+        assert handler.await_count == 2, "the retry must re-run the handler"
+        entry = engine.message_log.get_entry("1.0")
+        assert entry is not None, "the row must be processed once the handler succeeds"
+        assert engine._pi_inbox_cursor == row_created_at
+        assert len([
+            e for e in engine.message_log._entries if e.ts == "1.0"
+        ]) == 1, "the row must be appended exactly once overall, not once per attempt"
+
+    @pytest.mark.asyncio
+    async def test_the_happy_path_still_appends_and_advances_the_cursor(self):
+        from datetime import UTC, datetime
+        from unittest.mock import AsyncMock
+
+        row_created_at = datetime(2026, 1, 1, tzinfo=UTC)
+        rows = [self._Row(row_created_at)]
+        handler = AsyncMock(return_value=None)
+        engine = self._engine(rows, handler)
+
+        await engine._poll_inbound_from_db()
+
+        assert engine.message_log.get_entry("1.0") is not None
+        assert engine._pi_inbox_cursor == row_created_at
+        handler.assert_awaited_once()
 
 
 # ---------------------------------------------------------------

@@ -3253,11 +3253,12 @@ class SimulationEngine:
             return
 
         for r in rows:
-            if r.created_at and r.created_at > self._pi_inbox_cursor:
-                self._pi_inbox_cursor = r.created_at
             if not r.message_ts or self.message_log.get_entry(r.message_ts):
                 # Already known (the engine itself appended and flushed it, or a
-                # prior poll ingested it) — skip re-processing.
+                # prior poll ingested it) — skip re-processing, but the cursor
+                # still advances: this row is fully accounted for.
+                if r.created_at and r.created_at > self._pi_inbox_cursor:
+                    self._pi_inbox_cursor = r.created_at
                 continue
             if r.message_ts in self._dead_thread_ids or (
                 r.thread_ts and r.thread_ts in self._dead_thread_ids
@@ -3268,7 +3269,10 @@ class SimulationEngine:
                 # lookback window. Re-appending it (and, for a PI row, running
                 # _handle_pi_inbound_entry) would re-hydrate and reopen a
                 # thread whose Slack parent is gone — a resurrection loop. See
-                # COR-1c fix round 1 (C1).
+                # COR-1c fix round 1 (C1). Nothing will ever process this row,
+                # so the cursor advances past it too.
+                if r.created_at and r.created_at > self._pi_inbox_cursor:
+                    self._pi_inbox_cursor = r.created_at
                 continue
             entry = LogEntry(
                 ts=r.message_ts,
@@ -3281,25 +3285,38 @@ class SimulationEngine:
                 is_bot=r.is_bot,
                 visibility=r.visibility,
             )
-            self.message_log.append(entry)
-            if r.is_bot:
-                logger.info("External bot message in #%s: %.60s", entry.channel, entry.content[:60])
-            else:
+            if not r.is_bot:
                 logger.info("PI (web) message in #%s: %.60s", entry.channel, entry.content[:60])
+                # COR-10(3) clause 2: run the side effects BEFORE the log
+                # append and the cursor advance, and only commit both once
+                # the handler returns successfully. Previously the append
+                # (and the cursor advance above) happened unconditionally
+                # first, so a raise here still left the row's content in the
+                # log while its PI-specific side effects (proposal-review
+                # clearing, reopen, pi_context, @bot tag routing) were logged
+                # and dropped forever — the lookback re-scan dedups on the
+                # now-present log entry, so there was never a second chance.
+                # This deliberately trades at-most-once for at-least-once:
+                # on a transient failure the row is left exactly as it was
+                # (not in the log, cursor unmoved) and the next poll's
+                # PI_INBOX_LOOKBACK re-scan retries it — which can re-run a
+                # non-idempotent side effect (e.g. a DM) that already
+                # happened once. That is the trade issue #20's COR-10 Fix:
+                # clause explicitly asks for, and it reverses Decision D25's
+                # "accept the single-loss" — see the closure audit / plan.
                 try:
                     await self._handle_pi_inbound_entry(entry)
                 except Exception as exc:
-                    # The row's content is already in the log above and stays
-                    # there — dropping it would make every future Phase
-                    # 2/3/4/5 scan blind to a message that really exists. What
-                    # is lost here is only this row's PI-specific side effects
-                    # (proposal-review clearing, reopen, pi_context, @bot tag
-                    # routing) — logged so it's visible, not silently eaten.
-                    # See COR-10(3).
                     logger.error(
                         "[%s] Failed to apply PI inbound side effects for %s: %s",
                         entry.channel, entry.thread_ts or entry.ts, exc,
                     )
+                    continue
+            else:
+                logger.info("External bot message in #%s: %.60s", entry.channel, entry.content[:60])
+            self.message_log.append(entry)
+            if r.created_at and r.created_at > self._pi_inbox_cursor:
+                self._pi_inbox_cursor = r.created_at
 
     async def _handle_pi_inbound_entry(self, entry: LogEntry) -> None:
         """Apply PI-message side effects, derived from the thread (no Slack map).
