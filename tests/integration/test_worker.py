@@ -501,10 +501,15 @@ async def test_a_retried_job_backs_off_instead_of_being_reclaimed_immediately(wk
     await worker_main.process_job(job2.id, job2.type, job2.attempts, job2.max_attempts, wk.factory)
     elapsed2 = time.monotonic() - start2
 
-    assert 0.4 <= elapsed2 < 0.8, (
-        f"process_job slept {elapsed2:.3f}s on the second retry — the exponential ladder "
-        "(base * 2**(attempts-1)) should have roughly doubled to ~0.4s, not stayed at the base "
-        "(a constant-backoff mutant) or grown some other way"
+    # Ratio-based, not absolute bounds (#21 V2): asserting elapsed2 against fixed wall-clock
+    # bounds like `0.4 <= elapsed2 < 0.8` is flaky under load — scheduler jitter on a busy CI
+    # box can push either sleep past a hardcoded edge with no ladder bug at all. Comparing
+    # elapsed2 to the first attempt's own elapsed sidesteps that: a constant-backoff mutant
+    # (elapsed2 ~= elapsed) is still caught, and it self-scales with however slow this run is.
+    assert elapsed2 > 1.5 * elapsed, (
+        f"process_job slept {elapsed2:.3f}s on the second retry vs {elapsed:.3f}s on the "
+        "first — the exponential ladder (base * 2**(attempts-1)) should have roughly doubled, "
+        "not stayed at the base (a constant-backoff mutant) or grown some other way"
     )
     assert (await wk.job_state(jid)).status == "pending"
 
@@ -517,7 +522,13 @@ async def test_a_retried_job_backs_off_instead_of_being_reclaimed_immediately(wk
         job3 = await worker_main.claim_job(db)
     assert job3.id == jid and job3.attempts == 3
     start3 = time.monotonic()
-    await worker_main.process_job(job3.id, job3.type, job3.attempts, job3.max_attempts, wk.factory)
+    # A dropped min(cap, ...) clamp would sleep the uncapped 100 * 2**2 == 400s value instead
+    # of the cap — wrapped in a 5s timeout so that mutant fails fast instead of hanging the
+    # suite for over six minutes.
+    await asyncio.wait_for(
+        worker_main.process_job(job3.id, job3.type, job3.attempts, job3.max_attempts, wk.factory),
+        timeout=5,
+    )
     elapsed3 = time.monotonic() - start3
 
     assert elapsed3 < 1.0, (
