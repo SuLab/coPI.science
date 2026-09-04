@@ -50,7 +50,7 @@ import boto3
 import pytest
 import slack_sdk
 from itsdangerous import TimestampSigner
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 
 from src.agent.agent import Agent
 from src.agent.message_log import LogEntry
@@ -68,6 +68,7 @@ from src.models import (
     ProposalReview,
     ThreadDecision,
 )
+from src.routers import agent_page
 from src.visibility import VISIBILITY_COLLAB_PRIVATE
 from tests import factories
 from tests.fakes import FakeSlackClient
@@ -615,6 +616,54 @@ async def test_a_review_cannot_be_filed_against_someone_elses_proposal(
     assert good.status_code == 302, (
         "the participant control was refused too, so the 403 above proves nothing"
     )
+
+
+async def test_review_proposal_recovery_with_no_winning_row_returns_a_clean_response(
+    db_session, lab, llm, proposal,
+):
+    """N2 (#24 closure audit; final-C-races-brief.md commit 3): review_proposal's
+    ``except IntegrityError`` arm re-selected the presumed race winner with
+    ``.scalar_one()`` -- correct when the IntegrityError really was the
+    review-uniqueness conflict, but ANY OTHER IntegrityError also lands in this same
+    except arm (e.g. an FK/NOT-NULL violation from a concurrently deleted User), and
+    ``.scalar_one()`` then finds no row and raises ``NoResultFound`` -- a 500 out of
+    the very handler that exists to avoid one. ``reopen_proposal``'s sibling recovery
+    already uses ``.scalar_one_or_none()`` (agent_page.py:942-969, logging and
+    continuing instead of crashing); this pins that ``review_proposal`` now matches.
+
+    Reproduced with a genuine, non-uniqueness IntegrityError, not a scripted fake:
+    a delegate reviews on "alpha"'s behalf while "alpha"'s PI (`lab.pi_a_id`) is
+    deleted out from under the request. ``agents.user_id -> users.id`` is
+    ``ON DELETE SET NULL``, so "alpha" survives with ``user_id=NULL`` -- a fresh
+    ``get_agent_with_access`` SELECT sees that NULL, so the delegate path (not PI
+    ownership) is what authorizes the request. ``review_proposal``'s happy-path INSERT
+    always writes ``user_id=agent.user_id`` ("Always the PI"), which is now NULL, and
+    ``proposal_reviews.user_id`` is NOT NULL -- so ``record_engagement``'s autoflush
+    raises a genuine ``IntegrityError`` that is NOT the review-uniqueness conflict.
+    """
+    delegate = await factories.make_user(db_session, name="Delegate Dee", email="dee@lab.test")
+    db_session.add(AgentDelegate(agent_registry_id=lab.reg_a_id, user_id=delegate.id))
+    # Release lab/proposal/delegate's setup as a savepoint boundary BEFORE the
+    # destructive delete, so review_proposal's own rollback() (triggered by the
+    # IntegrityError below) discards only the failed insert attempt, not the fixture.
+    await db_session.commit()
+    await db_session.execute(text("DELETE FROM users WHERE id = :u"), {"u": lab.pi_a_id})
+    await db_session.commit()
+
+    current_user = SimpleNamespace(id=delegate.id, name="Delegate Dee")
+    resp = await agent_page.review_proposal(
+        agent_id="alpha", thread_decision_id=proposal.id, request=SimpleNamespace(),
+        rating=3, comment="", db=db_session, current_user=current_user,
+    )
+
+    assert resp.status_code == 302, (
+        "a non-uniqueness IntegrityError must still return a clean response, not "
+        "raise NoResultFound out of the recovery path"
+    )
+    reviews = (await db_session.execute(
+        select(ProposalReview).where(ProposalReview.thread_decision_id == proposal.id)
+    )).scalars().all()
+    assert reviews == [], "the failed insert must not have left a partial row behind"
 
 
 # ---------------------------------------------------------------------------
