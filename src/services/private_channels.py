@@ -609,6 +609,21 @@ async def migrate_public_thread_to_private(
     # Record the refinement destination on the thread_decision
     thread_decision.refined_in_channel = new_channel_id
 
+    # Commit here, not at the caller's convenience. Everything above this line is
+    # irreversible: the Slack channel exists, both bots are in it, the handover is
+    # posted, and the other PI has been DM'd. Leaving these rows merely flushed made
+    # them hostage to whatever the caller did next — and a caller that rolled back
+    # (the web reopen route losing a race on uq_proposal_reviews_decision_agent, the
+    # e-mail handler's terminal-failure path) discarded the AgentChannel row while the
+    # Slack channel stayed. The engine discovers private channels ONLY from
+    # AgentChannel (src/agent/simulation.py:2113-2126), so the result was a real Slack
+    # channel that no bot would ever read, with thread_decisions.refined_in_channel
+    # pointing at it so no retry could repair it. Committing the DB record as soon as
+    # the external side effect is real keeps the two in step; a caller's later failure
+    # then costs only that caller's own rows (e.g. the review row), which is
+    # recoverable. Found by the issue #24 closure audit.
+    await db.commit()
+
     return MigrationResult(
         channel_id=new_channel_id,
         channel_name=new_channel_name,

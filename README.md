@@ -94,7 +94,7 @@ docker compose --profile agent run -d --name agent-run agent \
 
 **One-time repair:** if this workspace predates the DB-primary conversation model and
 has never run it, run
-`docker compose exec app python scripts/backfill_slack_ts.py --apply` once before your
+`docker compose exec -e PYTHONPATH=/app app python scripts/backfill_slack_ts.py --apply` once before your
 next restart — legacy `agent_messages` rows with `slack_ts IS NULL` otherwise keep
 Slack replies to their threads silently off Slack. See `docs/production-migration.md`
 §8 and the fuller note in `CLAUDE.md`.

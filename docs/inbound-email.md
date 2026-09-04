@@ -89,6 +89,28 @@ Then, in this order:
    only durable store). Landed as part of #21 V11 — if this line still says "not yet landed" when
    you read it, stop and land it first.
 
+   **Prerequisite (also land before this step):** the poller must survive a poison object and an
+   odd-but-legitimate reply, because every failure here happens to a real PI's mail and there is no
+   second copy. Four hardening items, all landed as part of #21 V3 — verify each is present before
+   you flip the flag:
+   - a malformed or unprocessable object is quarantined to `failed/` after
+     `MAX_S3_PROCESS_ATTEMPTS` (3) consecutive failures (`src/services/email_inbound.py:33-34`)
+     instead of being retried on every poll forever;
+   - an unknown MIME charset (`charset=unknown-8bit` and friends) falls back instead of raising
+     `LookupError` out of the decode (`_decode_part`, `:490-499`) — otherwise that PI's reply is
+     quarantined and lost rather than read;
+   - the LLM's `rating` is coerced to `int` and `bool` is rejected (`_coerce_rating`, `:563`), so a
+     string rating cannot raise `TypeError` past the range guard;
+   - the S3 listing is paginated with a bounded page count (`:193-195`, cap 20 pages = 1,000
+     objects per poll), so a backlog cannot starve the tail of the bucket behind the first 50 keys.
+
+   Two behaviours to expect once it is on, neither of which is a bug: a review or instruction is
+   committed **before** the SES confirmation is sent, so a send failure never rolls back work the
+   PI already did; and a failure *inside* the private-channel migration is terminal — the PI is
+   e-mailed and told to use the dashboard rather than the object being retried. See deploy note 21
+   in `docs/plans/2026-09-02-close-issues-20-27.md` for the one case that still retries (a full
+   Postgres outage) and how to spot the orphan `priv-…` channels it can leave.
+
    Set `ENABLE_INBOUND_EMAIL=true` in the prod `.env` and recreate BOTH the
    worker (polling + proposal/reminder emails) and the app (the welcome email
    reads the same flag for its reply-vs-dashboard copy — recreating only the

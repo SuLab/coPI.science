@@ -12,7 +12,14 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
-_WRAPPED_COMMAND = "docker compose exec app python scripts/backfill_slack_ts.py --apply"
+# -e PYTHONPATH=/app is part of the command, not decoration: sys.path[0] is the script's
+# own directory, so `import src` would otherwise resolve to the copy baked into
+# site-packages rather than /app. docs/production-migration.md §8 Step 8 and §11,
+# run_migration.sh's step-8 text and Part R.6b all say so; the runbook paragraphs used to
+# omit it (issue #26 closure audit, blocker 4).
+_WRAPPED_COMMAND = (
+    "docker compose exec -e PYTHONPATH=/app app python scripts/backfill_slack_ts.py --apply"
+)
 
 
 def test_claude_md_mentions_the_repair_script():
