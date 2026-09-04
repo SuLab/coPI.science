@@ -83,7 +83,7 @@
   {
     "name": "vague_praise",
     "assessment_id": "98ca1910-4dee-4dcc-8041-037401b00067",
-    "feedback": [{"reviewer_name": "Eval Reviewer", "score": 5, "comment": "Great assessment, agree fully."}],
+    "feedback": [{"reviewer_name": "Eval Reviewer", "score": 5, "comment": "Strong proposal and the assessment handled it well — no prompt or rubric change is warranted."}],
     "force_no_transcript": false,
     "inject_transcript_message": null,
     "expected_targets": ["out_of_scope"],
@@ -93,10 +93,20 @@
   {
     "name": "vague_negative_old_rubric",
     "assessment_id": "c3cf7ca1-d6ab-4bed-8137-b4b5cb83ba93",
-    "feedback": [{"reviewer_name": "Eval Reviewer", "score": 1, "comment": "meh, don't like it"}],
+    "feedback": [{"reviewer_name": "Eval Reviewer", "score": 1, "comment": "Weak proposal in my view, but I can't point to anything the assessment did wrong."}],
     "force_no_transcript": false,
     "inject_transcript_message": null,
     "expected_targets": ["out_of_scope"],
+    "canary": null,
+    "expect_transcript_ack": false
+  },
+  {
+    "name": "score_band_divergence",
+    "assessment_id": "ab30ded3-4048-4ce7-9f16-a1c99122cd26",
+    "feedback": [{"reviewer_name": "Eval Reviewer", "score": 5, "comment": "This is a strong, fundable proposal, but the assessment banded it as a decline. The rubric is under-weighting translational potential relative to how this program should score; the hub also never credited the de-risking already done. Raise the weight on translational potential or add guidance to credit completed de-risking."}],
+    "force_no_transcript": false,
+    "inject_transcript_message": null,
+    "expected_targets": ["rubric", "scout_hub"],
     "canary": null,
     "expect_transcript_ack": false
   }

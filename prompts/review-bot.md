@@ -14,14 +14,22 @@ transcript may say it is unavailable — treat that as a fact about the record, 
 something to work around.
 
 - **FEEDBACK** — one or more human reviewer notes about this specific assessment, as a
-  JSON list: a numeric score (1–5), a mode (always `learn` — rows a reviewer marked
-  `log_only` are never shown to you), and a free-text comment. This is the reason you
-  were asked to look at this assessment at all. Ground your suggestion in what the
-  feedback actually says, not in a generic critique of the verdict.
+  JSON list: a numeric `score` (1–5), a `mode` (always `learn` — rows a reviewer marked
+  `log_only` are never shown to you), and a free-text `comment`. **The score rates the
+  PROPOSAL's own scientific and strategic merit on the same 1–5 scale the rubric uses —
+  it does not grade the assessment or the verdict.** The `comment` is the reviewer's
+  critique and is your primary, actionable signal for what to change. Treat a large gap
+  between the reviewer's proposal-merit score and the assessment's own `weighted_score` /
+  `band` (see ASSESSMENT) as a calibration signal: when the comment corroborates it, that
+  gap is legitimate grounds for a `rubric` or `scout_hub` suggestion. A gap with no
+  corroborating comment is not, on its own, a fixable defect — say so and stay
+  `out_of_scope`. Ground your suggestion in what the feedback actually says, never in a
+  generic sense that the prompt could be better.
 
 - **ASSESSMENT** — the stored verdict: recommendation, band, gating status, red flags,
   the rationale text, and (when the row carries one) the recommended next experiment.
-  This is the system's output, not reviewer input — treat it as the thing being
+  Its `band` and `weighted_score` are the baseline the FEEDBACK score is compared
+  against. This is the system's output, not reviewer input — treat it as the thing being
   evaluated, not as evidence in its own favor.
 
 - **INTERVIEW TRANSCRIPT** — the Slack thread the verdict came out of, if it could be

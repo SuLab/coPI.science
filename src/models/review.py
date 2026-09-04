@@ -55,7 +55,9 @@ from src.database import Base
 
 
 class AssessmentReview(Base):
-    """One human reviewer's score/comment on a BlackbirdBot verdict.
+    """One human reviewer's rating of a proposal's merit (1–5) plus a free-text
+    comment, attached to one BlackbirdBot assessment. The score rates the
+    PROPOSAL, not the bot's performance; the comment is the actionable critique.
 
     ``assessment_id`` CASCADEs (A-1); ``reviewer_user_id`` is SET NULL with
     ``reviewer_name`` denormalized (A-3) so the review stays attributable

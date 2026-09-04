@@ -61,3 +61,13 @@ def test_prompt_describes_the_real_feedback_mode_and_transcript_prefix():
     assert "`learn`" in PROMPT
     assert "agree/disagree" not in PROMPT
     assert "`> `" in PROMPT
+
+
+def test_feedback_bullet_defines_score_as_proposal_merit():
+    given = PROMPT.split("## What you will be given", 1)[1]
+    feedback = given.split("- **FEEDBACK**", 1)[1].split("- **ASSESSMENT**", 1)[0]
+    low = feedback.lower()
+    assert "proposal" in low and "merit" in low
+    # It must NOT tell the model the score grades the assessment/verdict.
+    assert "grade of the assessment" not in low
+    assert "quality of the verdict" not in low

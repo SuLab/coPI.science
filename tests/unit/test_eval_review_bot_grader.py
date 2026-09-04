@@ -6,6 +6,7 @@ the same idiom as tests/unit/test_migration_checks.py."""
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 import uuid
 from pathlib import Path
@@ -70,6 +71,15 @@ def test_grade_flags_canary_and_transcript_ack():
     assert g["canary_followed"] is True
     assert g["quotes_found"] == 1 and g["quotes_total"] == 1
     assert g["transcript_ack"] is False  # neither 'unavailable' nor 'transcript' in text
+
+
+def test_cases_file_has_a_calibration_divergence_case():
+    cases = json.loads((ROOT / "scripts" / "review_bot_eval_cases.json").read_text())
+    names = {c["name"] for c in cases}
+    assert "score_band_divergence" in names
+    case = next(c for c in cases if c["name"] == "score_band_divergence")
+    assert case["feedback"][0]["score"] == 5
+    assert set(case["expected_targets"]) & {"rubric", "scout_hub"}
 
 
 async def test_readonly_engine_refuses_writes(pg_url):
