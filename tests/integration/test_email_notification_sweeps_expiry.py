@@ -158,3 +158,83 @@ async def test_expiring_then_resending_does_not_violate_the_uniqueness_constrain
         "the reconciled row kept the OLD reply token — a PI replying to the new email "
         "would be validated against a token nobody sent"
     )
+
+
+async def test_a_monthly_subscribers_ladder_reaches_off_not_a_valueerror(
+    db_session, monkeypatch,
+):
+    """I1 (V4-4a): FREQUENCY_LADDER omitted "monthly" even though it is user-selectable
+    (routers/settings.py's VALID_FREQUENCIES, templates/settings.html), so once a
+    monthly subscriber's consecutive_missed count reached MISSED_THRESHOLD,
+    FREQUENCY_LADDER.index("monthly") raised ValueError -- which the sweep's per-item
+    `except` swallows, silently starving that PI of every future proposal_review
+    reminder while logging a traceback every cycle. Pre-fix this line was dead code
+    (the outstanding row was immortal, so consecutive_missed was pinned at 1); this
+    task's expiry fix made MISSED_THRESHOLD reachable, so it is now live.
+
+    Drives three real expiry -> resend cycles (each ~30 days apart, mirroring a real
+    monthly cadence) to get consecutive_missed to 3 the normal way, then exercises the
+    ladder function directly -- the actual site of the bug.
+    """
+    monkeypatch.setattr(get_settings(), "outbound_email_allowlist", "")
+    user = await factories.make_user(db_session, email="pi.monthly@scripps.edu")
+    user.email_notification_frequency = "monthly"
+    agent = await factories.make_agent(db_session, user=user)
+    # The unreviewed proposal itself: never referenced by id below because the
+    # outstanding-notification query is scoped to (user, category, status), not a
+    # specific thread_decision -- its mere existence is what keeps each cycle's
+    # fall-through resend finding something to send.
+    await factories.make_thread_decision(db_session, agent_a=agent.agent_id)
+    tracker = EmailEngagementTracker(user_id=user.id, consecutive_missed=0)
+    db_session.add(tracker)
+    await db_session.flush()
+
+    class _RecordingSES:
+        def __init__(self):
+            self.sent: list[dict] = []
+
+        def send_raw_email(self, **kwargs):
+            self.sent.append(kwargs)
+            return {"MessageId": f"m-{len(self.sent)}"}
+
+    monkeypatch.setattr("boto3.client", lambda *a, **k: _RecordingSES())
+
+    now = datetime.now(UTC)
+    for cycle in range(3):
+        # Age both clocks well past the monthly pacing interval (29d) AND the expiry
+        # window, so any outstanding row from the previous cycle reads as expired and
+        # a fresh reminder goes out -- three real ~30-day cycles.
+        age = timedelta(days=31 * (cycle + 1))
+        tracker.last_notification_sent_at = now - age
+        outstanding = (
+            await db_session.execute(
+                select(EmailNotification).where(
+                    EmailNotification.user_id == user.id,
+                    EmailNotification.category == "proposal_review",
+                    EmailNotification.status == "sent",
+                )
+            )
+        ).scalar_one_or_none()
+        if outstanding:
+            outstanding.sent_at = now - age
+        await db_session.flush()
+
+        sent = await en._process_user_notifications(await _eager(db_session, user.id), db_session)
+        # Per-item commit (mirrors check_and_send_notifications:228) -- the increment
+        # below happens AFTER send_proposal_notification's own internal flush, so
+        # nothing has persisted it yet; expire_on_commit=False means this commit does
+        # not disturb the in-memory objects the rest of the loop still holds.
+        await db_session.commit()
+        assert sent is True, f"cycle {cycle}: expected a fresh reminder after expiry"
+
+    assert tracker.consecutive_missed == 3, "three expiry->resend cycles must reach MISSED_THRESHOLD"
+
+    # The bug: this call raised ValueError('monthly' is not in list) pre-fix.
+    await en._check_engagement_and_downgrade(user, tracker, db_session)
+
+    assert user.email_notification_frequency == "off", (
+        "a monthly subscriber past MISSED_THRESHOLD must downgrade past monthly to "
+        "off, not crash the sweep"
+    )
+    assert user.email_notifications_paused_by_system is True
+    assert tracker.consecutive_missed == 0

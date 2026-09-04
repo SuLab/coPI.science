@@ -24,8 +24,12 @@ from src.models import (
 
 logger = logging.getLogger(__name__)
 
-# Frequency ladder for auto-downgrade (ordered from most to least frequent)
-FREQUENCY_LADDER = ["daily", "twice_weekly", "weekly", "biweekly", "off"]
+# Frequency ladder for auto-downgrade (ordered from most to least frequent).
+# "monthly" is user-selectable (routers/settings.py's VALID_FREQUENCIES,
+# templates/settings.html) and FREQUENCY_INTERVALS already carries it (below) --
+# omitting it here made FREQUENCY_LADDER.index() raise ValueError for a monthly
+# subscriber once MISSED_THRESHOLD became reachable (#21 I1 / V4-4a).
+FREQUENCY_LADDER = ["daily", "twice_weekly", "weekly", "biweekly", "monthly", "off"]
 
 # How often each frequency should send (minimum interval in hours)
 FREQUENCY_INTERVALS = {
