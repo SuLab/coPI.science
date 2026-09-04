@@ -49,12 +49,8 @@ class TestAnnouncementOnly:
         "Thread wrapped. Moving to the dedicated thread.",
         "Posting it now — look for my post shortly.",
         "Confirmed — I'll post a new :moneybag: thread tagging you.",
-        # COR-28a: curly (U+2019) and modifier-letter (U+02BC) apostrophes must
-        # be caught exactly like the ASCII form — LLM output and Slack's own
-        # smart-quote autocorrect routinely produce the curly form.
-        "I’ll spin up a dedicated thread.",
-        "Iʼll spin up a dedicated thread.",
-        "I’m going to start a new thread.",
+        # COR-28a's apostrophe spellings are covered exhaustively, one row per
+        # code point, in TestApostropheClass below.
     ])
     def test_positive_cases(self, text):
         assert is_announcement_only_funding_reply(text) is True
@@ -76,6 +72,11 @@ class TestAnnouncementOnly:
     def test_negative_cases(self, text):
         assert is_announcement_only_funding_reply(text) is False
 
+    def test_no_apostrophe_at_all_still_matches(self):
+        # The class is optional, so the unpunctuated spelling matches too. Pinned
+        # so widening the class cannot accidentally make the apostrophe required.
+        assert is_announcement_only_funding_reply("Ill spin up a dedicated thread.") is True
+
     def test_mixed_announcement_with_substance_allowed(self):
         # Has announcement phrase but also substantive content → allowed.
         text = (
@@ -84,6 +85,45 @@ class TestAnnouncementOnly:
             "validation."
         )
         assert is_announcement_only_funding_reply(text) is False
+
+
+# ---------------------------------------------------------------
+# Apostrophe class (COR-28a) — one row per code point
+# ---------------------------------------------------------------
+
+# The announcement detector classifies PI-authored and LLM-authored text, where
+# the contraction apostrophe arrives as any of these. U+0027/U+2019/U+02BC were
+# already handled; U+2018, U+00B4 and U+FF07 are the declared widening past the
+# issue's own wording (COR-28a names only the curly U+2019).
+APOSTROPHE_CODE_POINTS = [
+    ("U+0027-apostrophe", "'"),
+    ("U+2019-right-single-quote", "’"),
+    ("U+02BC-modifier-letter", "ʼ"),
+    ("U+2018-left-single-quote", "‘"),
+    ("U+00B4-acute-accent", "´"),
+    ("U+FF07-fullwidth", "＇"),
+]
+
+
+class TestApostropheClass:
+    """COR-28a: an announcement-only reply must be classified the same whichever apostrophe the
+    author (or the model, or Slack's smart-quote autocorrect) used. A partial class is the same
+    defect the issue filed — the U+2019-only class shipped earlier still let four spellings through
+    the atomic-spin-off rule."""
+
+    @pytest.mark.parametrize(
+        "template",
+        ["I{apos}ll spin up a dedicated thread.", "I{apos}m going to start a new thread."],
+        ids=["ill-contraction", "im-contraction"],
+    )
+    @pytest.mark.parametrize(
+        "apos",
+        [c for _, c in APOSTROPHE_CODE_POINTS],
+        ids=[name for name, _ in APOSTROPHE_CODE_POINTS],
+    )
+    def test_every_apostrophe_spelling_is_classified(self, apos, template):
+        text = template.format(apos=apos)
+        assert is_announcement_only_funding_reply(text) is True, repr(text)
 
 
 # ---------------------------------------------------------------
@@ -203,6 +243,37 @@ class TestSummarizer:
         summary = summarize_funding_thread(log_with_funding_thread, "100")
         assert len(summary.spinoffs) == 1
         assert summary.spinoffs[0][0] == "200"
+
+    @pytest.mark.parametrize("root_spelling,spinoff_spelling", [
+        ("PAR-25-297", "par-25-297"),
+        ("par-25-297", "PAR-25-297"),
+        ("PAR-25-297", "Par-25-297"),
+        ("PAR-25-297", "PAR-25-297"),  # control: matching casing already worked
+    ])
+    def test_spinoff_detection_is_case_insensitive(self, root_spelling, spinoff_spelling):
+        """COR-27's sharper half: the root's number was extracted case-insensitively and then
+        compared case-*sensitively* against every candidate spin-off body, so a spin-off that
+        spelled the number any other way was invisible to the summary — and an agent that cannot
+        see the existing spin-off posts a duplicate. NIH's own permalink lower-cases the number,
+        so the mismatched spelling occurs naturally (one such body is in the production copy's
+        `agent_messages`)."""
+        ml = MessageLog()
+        ml.set_bot_name_map({"wisemanbot": "wiseman"})
+        ml.append(_entry(
+            "100", None, "GrantBot",
+            f":moneybag: *Funding Opportunity*\n{root_spelling} Alzheimer's Drug-Development Program",
+        ))
+        ml.append(_entry(
+            "101", "wiseman", "WisemanBot",
+            f":moneybag: {root_spelling} — our ISR/HRI activators align with the FOA.",
+            thread_ts="100",
+        ))
+        ml.append(_entry(
+            "200", "wiseman", "WisemanBot",
+            f":moneybag: {spinoff_spelling} — Wiseman/Petrascheck joint aims draft.",
+        ))
+        summary = summarize_funding_thread(ml, "100")
+        assert [ts for ts, _ in summary.spinoffs] == ["200"]
 
     def test_empty_thread(self):
         ml = MessageLog()

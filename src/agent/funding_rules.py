@@ -11,6 +11,7 @@ import re
 from dataclasses import dataclass
 
 from src.agent.foa_pattern import FOA_NUMBER_RE as _FOA_NUMBER_RE
+from src.agent.foa_pattern import extract_foa_number
 from src.agent.mentions import BOT_TAG_RE
 from src.agent.message_log import LogEntry, MessageLog, is_funding_post
 
@@ -20,10 +21,20 @@ from src.agent.message_log import LogEntry, MessageLog, is_funding_post
 
 # Intent + future-post phrases that indicate the agent is merely announcing
 # a forthcoming spin-off post instead of creating it.
+#
+# The apostrophe class in the two contraction phrases covers every code point
+# this text can carry it in (issue #23 COR-28a): U+0027 apostrophe, U+2019 right
+# single quotation mark (Slack's smart-quote autocorrect and most LLM output),
+# U+02BC modifier letter apostrophe, U+2018 left single quotation mark (an LLM
+# that opens a quote and never closes it), U+00B4 acute accent (a common
+# keyboard-layout substitution) and U+FF07 fullwidth apostrophe (CJK input
+# methods). The classes in the two phrases must stay identical — every code
+# point is pinned against both in tests/unit/test_funding_rules.py's
+# TestApostropheClass, which fails if one class drifts from the other.
 _ANNOUNCEMENT_PHRASES = [
-    r"\bi['’ʼ]?ll (start|post|create|put up|open|spin ?up|spin ?off|draft|kick off)\b",
+    r"\bi['’ʼ‘´＇]?ll (start|post|create|put up|open|spin ?up|spin ?off|draft|kick off)\b",
     r"\bi will (start|post|create|put up|open|spin ?up|spin ?off|draft|kick off)\b",
-    r"\bi['’ʼ]?m (going|about) to (start|post|create|put up|open|spin ?up|spin ?off)\b",
+    r"\bi['’ʼ‘´＇]?m (going|about) to (start|post|create|put up|open|spin ?up|spin ?off)\b",
     r"\bgoing up now\b",
     r"\bposting (it |the )?(now|shortly|next)\b",
     r"\blook (out )?for (my|the|it)\b",
@@ -198,10 +209,10 @@ def summarize_funding_thread(
     root = history[0]
     replies = history[1:]
 
-    foa_number = None
-    m = _FOA_NUMBER_RE.search(root.content)
-    if m:
-        foa_number = m.group(0)
+    # Canonical (upper-case) form — see extract_foa_number. The scan below
+    # compares against upper-cased bodies, so the two spellings of one FOA
+    # number cannot hide a spin-off from each other (issue #23 COR-27).
+    foa_number = extract_foa_number(root.content)
 
     alignments: list[tuple[str, str]] = []
     pairings: list[tuple[str, str]] = []
@@ -227,7 +238,12 @@ def summarize_funding_thread(
                 continue
             if not is_funding_post(entry.content):
                 continue
-            if foa_number not in entry.content:
+            # Case-insensitive: the number was extracted with an IGNORECASE
+            # pattern, so a case-sensitive compare here silently dropped
+            # spin-offs whose casing differs from the root's — NIH's own
+            # permalink lower-cases the number — and an agent that cannot see
+            # the existing spin-off posts a duplicate (issue #23 COR-27).
+            if foa_number not in entry.content.upper():
                 continue
             spinoffs.append((entry.ts, _first_meaningful_line(entry.content)))
 
