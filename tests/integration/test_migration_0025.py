@@ -135,3 +135,144 @@ async def test_0025_dedups_existing_rows_then_adds_unique_constraint(scratch_db)
                     )
     finally:
         await engine.dispose()
+
+
+async def _insert_user(conn, user_id) -> None:
+    await conn.execute(
+        text(
+            "INSERT INTO users (id, name, orcid, access_status, is_admin, "
+            "email_notifications_enabled, onboarding_complete) "
+            "VALUES (:id, 'Dup User', :orcid, 'allowed', false, true, true)"
+        ),
+        {"id": user_id, "orcid": f"0000-0000-0000-{uuid.uuid4().hex[:4]}"},
+    )
+
+
+async def test_0025_keeps_the_earliest_created_row_not_the_lowest_uuid(scratch_db):
+    """#22 I2 reproduction: Publication.id is uuid4, uncorrelated with insertion
+    order, so ``p.id > p2.id`` can delete the richer, earlier row and keep a
+    title-only row created later. Use a UUID pair whose ordering is the REVERSE of
+    created_at ordering to prove the keeper is chosen by created_at, not id.
+    """
+    _run_alembic(scratch_db, "0024")
+
+    engine = create_async_engine(scratch_db, poolclass=NullPool)
+    user_id = uuid.uuid4()
+    rich_id = uuid.UUID("ffffffff-ffff-ffff-ffff-ffffffffffff")  # numerically HIGH
+    bare_id = uuid.UUID("00000000-0000-0000-0000-000000000000")  # numerically LOW
+    try:
+        async with engine.begin() as conn:
+            await _insert_user(conn, user_id)
+            await conn.execute(
+                text(
+                    "INSERT INTO publications (id, user_id, pmid, title, abstract, "
+                    "methods_text, doi, pmcid, journal, year, author_position, created_at) "
+                    "VALUES (:id, :user_id, '222', 'Rich title', 'An abstract', "
+                    "'Methods text', '10.1000/rich', 'PMC1', 'Nature', 2020, 'first', "
+                    "now() - interval '10 days')"
+                ),
+                {"id": rich_id, "user_id": user_id},
+            )
+            await conn.execute(
+                text(
+                    "INSERT INTO publications (id, user_id, pmid, title, created_at) "
+                    "VALUES (:id, :user_id, '222', 'Bare title', now())"
+                ),
+                {"id": bare_id, "user_id": user_id},
+            )
+    finally:
+        await engine.dispose()
+
+    _run_alembic(scratch_db, "head")
+
+    engine = create_async_engine(scratch_db, poolclass=NullPool)
+    try:
+        async with engine.connect() as conn:
+            rows = (
+                await conn.execute(
+                    text(
+                        "SELECT id, title, abstract, methods_text, doi, pmcid, journal, "
+                        "year, author_position FROM publications "
+                        "WHERE user_id = :u AND pmid = '222'"
+                    ),
+                    {"u": user_id},
+                )
+            ).all()
+            assert len(rows) == 1, "duplicate must be collapsed to one row"
+            survivor = rows[0]
+            assert survivor.id == rich_id, (
+                "the EARLIEST-created row must survive, not the numerically lowest uuid"
+            )
+            assert survivor.title == "Rich title"
+            assert survivor.abstract == "An abstract"
+            assert survivor.methods_text == "Methods text"
+            assert survivor.doi == "10.1000/rich"
+            assert survivor.pmcid == "PMC1"
+            assert survivor.journal == "Nature"
+            assert survivor.year == 2020
+            assert survivor.author_position == "first"
+    finally:
+        await engine.dispose()
+
+
+async def test_0025_merges_doomed_richer_row_into_an_earlier_sparse_keeper(scratch_db):
+    """The keeper (earliest created_at) is kept by IDENTITY even when it is the
+    sparser row; its nullable data columns must be COALESCE-filled from the doomed
+    (later, richer) row before that row is deleted, so no data is lost either way.
+    """
+    _run_alembic(scratch_db, "0024")
+
+    engine = create_async_engine(scratch_db, poolclass=NullPool)
+    user_id = uuid.uuid4()
+    sparse_id = uuid.uuid4()
+    rich_id = uuid.uuid4()
+    try:
+        async with engine.begin() as conn:
+            await _insert_user(conn, user_id)
+            await conn.execute(
+                text(
+                    "INSERT INTO publications (id, user_id, pmid, title, created_at) "
+                    "VALUES (:id, :user_id, '333', 'Sparse title', now() - interval '10 days')"
+                ),
+                {"id": sparse_id, "user_id": user_id},
+            )
+            await conn.execute(
+                text(
+                    "INSERT INTO publications (id, user_id, pmid, title, abstract, "
+                    "methods_text, doi, pmcid, journal, year, author_position, created_at) "
+                    "VALUES (:id, :user_id, '333', 'Rich title', 'An abstract', "
+                    "'Methods text', '10.1000/rich2', 'PMC2', 'Cell', 2021, 'last', now())"
+                ),
+                {"id": rich_id, "user_id": user_id},
+            )
+    finally:
+        await engine.dispose()
+
+    _run_alembic(scratch_db, "head")
+
+    engine = create_async_engine(scratch_db, poolclass=NullPool)
+    try:
+        async with engine.connect() as conn:
+            rows = (
+                await conn.execute(
+                    text(
+                        "SELECT id, title, abstract, methods_text, doi, pmcid, journal, "
+                        "year, author_position FROM publications "
+                        "WHERE user_id = :u AND pmid = '333'"
+                    ),
+                    {"u": user_id},
+                )
+            ).all()
+            assert len(rows) == 1, "duplicate must be collapsed to one row"
+            survivor = rows[0]
+            assert survivor.id == sparse_id, "identity must stay the earliest-created row"
+            assert survivor.title == "Sparse title", "title is NOT NULL and must not be overwritten"
+            assert survivor.abstract == "An abstract"
+            assert survivor.methods_text == "Methods text"
+            assert survivor.doi == "10.1000/rich2"
+            assert survivor.pmcid == "PMC2"
+            assert survivor.journal == "Cell"
+            assert survivor.year == 2021
+            assert survivor.author_position == "last"
+    finally:
+        await engine.dispose()
