@@ -26,10 +26,24 @@ explicit name, so Postgres assigned the default `<table>_<column>_fkey`)
 so the two directions of this migration are exact inverses and no other
 tooling needs to learn a new constraint name.
 
+#25 I1: the constraint to drop is no longer assumed to be named `_FK` — a
+`Base.metadata.create_all` bootstrap, a pg_dump/restore that renamed it, or a
+hand-edit could leave prod's actual name different, and a hard-coded
+`op.drop_constraint` with no `if_exists` would abort `alembic upgrade` mid
+stop-the-world window with `constraint "..." does not exist`. Both upgrade()
+and downgrade() resolve the real name from `pg_constraint` first (the single
+foreign key on `private_channel_members.user_id`) and only fall back to `_FK`
+as the expected-default label in the error message / when downgrade finds none
+(if_exists-safe no-op). Either direction always recreates the FK under the
+canonical `_FK` name, so the two directions stay exact inverses regardless of
+what name upgrade() found on the way in.
+
 Downgrade is idempotent (if_exists) per the branch convention (0022+).
 """
 
 from typing import Sequence, Union
+
+import sqlalchemy as sa
 
 from alembic import op
 
@@ -41,15 +55,45 @@ depends_on: Union[str, Sequence[str], None] = None
 _FK = "private_channel_members_user_id_fkey"
 
 
+def _resolve_user_id_fk(conn) -> str | None:
+    """The actual name of the (single-column) FK on private_channel_members.user_id,
+    or None if there isn't one."""
+    return conn.execute(
+        sa.text(
+            """
+            SELECT con.conname
+              FROM pg_constraint con
+              JOIN pg_attribute att
+                ON att.attrelid = con.conrelid AND att.attnum = ANY(con.conkey)
+             WHERE con.conrelid = 'private_channel_members'::regclass
+               AND con.contype = 'f'
+               AND att.attname = 'user_id'
+               AND cardinality(con.conkey) = 1
+            """
+        )
+    ).scalar_one_or_none()
+
+
 def upgrade() -> None:
-    op.drop_constraint(_FK, "private_channel_members", type_="foreignkey")
+    conn = op.get_bind()
+    fk_name = _resolve_user_id_fk(conn)
+    if fk_name is None:
+        raise RuntimeError(
+            "No single-column foreign key found on private_channel_members.user_id "
+            f"(expected {_FK!r} by default). Cannot add the CASCADE behaviour without "
+            "knowing which constraint to drop and recreate — verify the column's "
+            "actual FK name on this database before re-running this migration."
+        )
+    op.drop_constraint(fk_name, "private_channel_members", type_="foreignkey")
     op.create_foreign_key(
         _FK, "private_channel_members", "users", ["user_id"], ["id"], ondelete="CASCADE"
     )
 
 
 def downgrade() -> None:
-    op.drop_constraint(_FK, "private_channel_members", type_="foreignkey", if_exists=True)
+    conn = op.get_bind()
+    fk_name = _resolve_user_id_fk(conn) or _FK
+    op.drop_constraint(fk_name, "private_channel_members", type_="foreignkey", if_exists=True)
     op.create_foreign_key(
         _FK, "private_channel_members", "users", ["user_id"], ["id"], ondelete="SET NULL"
     )

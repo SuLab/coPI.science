@@ -133,3 +133,52 @@ async def test_check_publication_duplicates_warns_with_a_seeded_duplicate(scratc
     finally:
         await engine.dispose()
 
+
+# --------------------------------------------------------------------------- #
+# 0026 resolves the PCM user_id FK name from the catalog (#25 I1)
+# --------------------------------------------------------------------------- #
+
+
+async def test_0026_resolves_a_renamed_fk_and_round_trips(scratch_db):
+    """A differently-named constraint (create_all bootstrap, dump/restore rename,
+    hand edit) must not abort `alembic upgrade` mid-window, and the downgrade must
+    restore the original ondelete behaviour under the canonical name either way."""
+    _run_alembic(scratch_db, "0025")
+
+    engine = create_async_engine(scratch_db, poolclass=NullPool)
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    "ALTER TABLE private_channel_members "
+                    "RENAME CONSTRAINT private_channel_members_user_id_fkey "
+                    "TO pcm_user_fkey_renamed"
+                )
+            )
+    finally:
+        await engine.dispose()
+
+    _run_alembic(scratch_db, "head")  # must not abort even though the FK was renamed
+
+    fk_def_sql = (
+        "SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint "
+        "WHERE conrelid = 'private_channel_members'::regclass AND contype = 'f' "
+        "AND conname = 'private_channel_members_user_id_fkey'"
+    )
+    engine = create_async_engine(scratch_db, poolclass=NullPool)
+    try:
+        async with engine.connect() as conn:
+            row = (await conn.execute(text(fk_def_sql))).mappings().one()
+            assert "ON DELETE CASCADE" in row["def"]
+    finally:
+        await engine.dispose()
+
+    _run_alembic(scratch_db, "0025", cmd="downgrade")  # round-trip back past 0026
+
+    engine = create_async_engine(scratch_db, poolclass=NullPool)
+    try:
+        async with engine.connect() as conn:
+            row = (await conn.execute(text(fk_def_sql))).mappings().one()
+            assert "ON DELETE SET NULL" in row["def"]
+    finally:
+        await engine.dispose()
