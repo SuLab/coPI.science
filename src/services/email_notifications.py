@@ -368,7 +368,24 @@ async def send_proposal_notification(
         )
         return False
 
-    reply_token = secrets.token_urlsafe(48)  # 64-char base64
+    # I2 (#21 fix round B): look up any existing row for this (user, proposal,
+    # category) BEFORE minting a reply_token, and reuse its token when one exists.
+    # uq_email_notification_user_thread_category means a re-send (e.g. after this
+    # task's expiry fix) reconciles this SAME row rather than inserting a new one;
+    # minting a fresh token on that reconcile rotated the earlier e-mail's
+    # reply+<token>@... address out from under it, so a PI answering the FIRST
+    # reminder after a second one had already gone out hit "No notification found
+    # for token" and silently lost their rating/instruction. Reusing the old token
+    # is safe precisely because the new e-mail carries that same token.
+    result = await db.execute(
+        select(EmailNotification).where(
+            EmailNotification.user_id == user.id,
+            EmailNotification.thread_decision_id == thread_decision.id,
+            EmailNotification.category == "proposal_review",
+        )
+    )
+    notification = result.scalar_one_or_none()
+    reply_token = notification.reply_token if notification else secrets.token_urlsafe(48)  # 64-char base64
 
     # Build email. Soliciting a reply is only honest when the inbound pipeline
     # is actually on — otherwise PIs answer a dead reply domain and get
@@ -526,15 +543,10 @@ async def send_proposal_notification(
         # row for this (user, proposal, 'proposal_review') — e.g. one Task 21.12's expiry
         # sweep just marked 'expired', or one an earlier _handle_instruction failure
         # already marked 'responded' for a still-unreviewed proposal (M1) — makes a plain
-        # INSERT fail. Reconcile that row instead of blindly inserting.
-        result = await db.execute(
-            select(EmailNotification).where(
-                EmailNotification.user_id == user.id,
-                EmailNotification.thread_decision_id == thread_decision.id,
-                EmailNotification.category == "proposal_review",
-            )
-        )
-        notification = result.scalar_one_or_none()
+        # INSERT fail. Reconcile that row instead of blindly inserting. `notification`
+        # was already looked up above (before minting reply_token, I2) — reuse it rather
+        # than re-querying, and leave its reply_token alone on the reconcile branch: the
+        # e-mail that was just sent carries that SAME (reused) token.
         if notification is None:
             db.add(EmailNotification(
                 user_id=user.id,
@@ -545,7 +557,6 @@ async def send_proposal_notification(
                 status="sent",
             ))
         else:
-            notification.reply_token = reply_token
             notification.agent_registry_id = agent.id
             notification.status = "sent"
             notification.response_type = None
@@ -1086,7 +1097,20 @@ async def _send_new_proposal_email(
 ) -> bool:
     """Compose and send a single new-proposal email; logs an EmailNotification."""
     settings = get_settings()
-    reply_token = secrets.token_urlsafe(48)
+
+    # I2 (#21 fix round B): same shape as send_proposal_notification above — look up
+    # any existing row for this (user, proposal, category) BEFORE minting a
+    # reply_token, and reuse its token when one exists, so a re-send does not rotate
+    # a still-answerable reply address out from under an earlier e-mail.
+    result = await db.execute(
+        select(EmailNotification).where(
+            EmailNotification.user_id == user.id,
+            EmailNotification.thread_decision_id == td.id,
+            EmailNotification.category == "new_proposal",
+        )
+    )
+    notification = result.scalar_one_or_none()
+    reply_token = notification.reply_token if notification else secrets.token_urlsafe(48)
 
     summary = td.summary_text or "(No summary available)"
     channel = td.channel or "unknown"
@@ -1157,15 +1181,10 @@ async def _send_new_proposal_email(
         # OWN allowlist check runs before this point, so a suppressed recipient never gets a
         # phantom row that would block a resend once the allowlist is widened. Same
         # reconcile-not-insert shape as send_proposal_notification, and for the same reason
-        # (uq_email_notification_user_thread_category, B3/M1).
-        result = await db.execute(
-            select(EmailNotification).where(
-                EmailNotification.user_id == user.id,
-                EmailNotification.thread_decision_id == td.id,
-                EmailNotification.category == "new_proposal",
-            )
-        )
-        notification = result.scalar_one_or_none()
+        # (uq_email_notification_user_thread_category, B3/M1). `notification` was already
+        # looked up above (before minting reply_token, I2) — reuse it rather than
+        # re-querying, and leave its reply_token alone on the reconcile branch: the
+        # e-mail that was just sent carries that SAME (reused) token.
         if notification is None:
             db.add(EmailNotification(
                 user_id=user.id,
@@ -1176,7 +1195,6 @@ async def _send_new_proposal_email(
                 status="sent",
             ))
         else:
-            notification.reply_token = reply_token
             notification.agent_registry_id = agent.id
             notification.status = "sent"
             notification.response_type = None

@@ -11,9 +11,11 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
+import src.services.email_inbound as inbound
 import src.services.email_notifications as en
 from src.config import get_settings
 from src.models import EmailEngagementTracker, EmailNotification, ProposalReview, User
+from src.services.email_inbound import process_inbound_email
 from tests import factories
 
 pytestmark = pytest.mark.integration
@@ -154,9 +156,71 @@ async def test_expiring_then_resending_does_not_violate_the_uniqueness_constrain
         f"found {len(rows)} row(s) for this (user, proposal, category): {[r.status for r in rows]}"
     )
     assert rows[0].status == "sent"
-    assert rows[0].reply_token != old_token, (
-        "the reconciled row kept the OLD reply token — a PI replying to the new email "
-        "would be validated against a token nobody sent"
+    assert rows[0].reply_token == old_token, (
+        "I2 (#21 fix round B): the reconciled row rotated to a NEW reply token — a PI "
+        "who replies to the EARLIER (still-inboxed) e-mail is validated against a token "
+        "nobody sent, hits 'No notification found for token', and silently loses their "
+        "rating/instruction. Reusing the old token is safe precisely because the new "
+        "e-mail carries that same token."
+    )
+
+
+async def test_a_reply_to_the_superseded_email_still_files_after_a_resend(
+    db_session, monkeypatch,
+):
+    """I2 (#21 fix round B), the inbound half: a PI who never saw the SECOND (re-sent)
+    reminder and instead replies to the FIRST one must still have that reply resolve --
+    the token is reused across the resend precisely so this works."""
+    monkeypatch.setattr(get_settings(), "outbound_email_allowlist", "")
+    monkeypatch.setattr(inbound, "_send_simple_email", lambda *a, **k: True)
+
+    async def _classify(body, proposal_summary):
+        return {"category": "review", "rating": 3, "comment": "great", "instruction": ""}
+
+    monkeypatch.setattr(inbound, "classify_reply", _classify)
+
+    user = await factories.make_user(db_session, email="pi.oldtoken@scripps.edu")
+    agent = await factories.make_agent(db_session, user=user)
+    td = await factories.make_thread_decision(db_session, agent_a=agent.agent_id)
+    old_token = f"tok-{uuid.uuid4().hex}"
+    old_sent_at = datetime.now(UTC) - timedelta(
+        days=get_settings().email_notification_expiry_days + 1
+    )
+    notification = EmailNotification(
+        user_id=user.id, thread_decision_id=td.id, agent_registry_id=agent.id,
+        reply_token=old_token, category="proposal_review",
+        status="sent", sent_at=old_sent_at,
+    )
+    db_session.add(notification)
+    db_session.add(EmailEngagementTracker(user_id=user.id, consecutive_missed=1))
+    await db_session.flush()
+
+    class _RecordingSES:
+        def send_raw_email(self, **kwargs):
+            return {"MessageId": "m-1"}
+
+    monkeypatch.setattr("boto3.client", lambda *a, **k: _RecordingSES())
+
+    sent = await en._process_user_notifications(await _eager(db_session, user.id), db_session)
+    assert sent is True, "the fall-through re-send did not happen after expiry"
+
+    raw = (
+        factories.SES_PASS_HEADER
+        + f"From: {user.email}\n"
+        + f"To: review+{old_token}@reply.copi.science\n"
+        + 'Content-Type: text/plain; charset="UTF-8"\n'
+        + "\n3 great idea\n"
+    ).encode()
+    await process_inbound_email(raw, db_session)
+
+    row = (
+        await db_session.execute(
+            select(EmailNotification).where(EmailNotification.reply_token == old_token)
+        )
+    ).scalar_one()
+    assert row.status == "responded", (
+        "a reply quoting the token from the SUPERSEDED (pre-resend) e-mail must still "
+        "resolve, because the resend reuses that same token"
     )
 
 
